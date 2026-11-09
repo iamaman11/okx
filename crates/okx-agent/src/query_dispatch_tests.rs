@@ -316,3 +316,157 @@ async fn overview_without_reference_rejects_unavailable_source_instead_of_empty_
     );
     fixture.finish().await;
 }
+
+fn two_position_scenario() -> okx_protocol::trading::PortfolioScenarioRequest {
+    use okx_protocol::trading::{
+        PortfolioScenarioRequest, PositionSide, ScenarioCorrelation, ScenarioPosition,
+    };
+    PortfolioScenarioRequest {
+        equity_usd: "100".into(),
+        positions: vec![
+            ScenarioPosition {
+                instrument: "BTC-USDT-SWAP".into(),
+                side: PositionSide::Long,
+                notional_usd: "100".into(),
+                margin_usd: "10".into(),
+                price_shock_bps: -1000,
+                volatility_bps: 300,
+                liquidity_cost_bps: 100,
+            },
+            ScenarioPosition {
+                instrument: "ETH-USDT-SWAP".into(),
+                side: PositionSide::Short,
+                notional_usd: "200".into(),
+                margin_usd: "20".into(),
+                price_shock_bps: 500,
+                volatility_bps: 200,
+                liquidity_cost_bps: 50,
+            },
+        ],
+        correlations: vec![ScenarioCorrelation {
+            left: 0,
+            right: 1,
+            rho: 0.0,
+        }],
+    }
+}
+
+// Compare existing files and their bytes as well as absence of new artifacts.
+fn fixture_artifacts(root: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn collect(root: &std::path::Path, dir: &std::path::Path, rows: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(root, &path, rows);
+            } else {
+                rows.push((
+                    path.strip_prefix(root).unwrap().to_owned(),
+                    std::fs::read(&path).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    collect(root, root, &mut rows);
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+#[tokio::test]
+async fn portfolio_scenario_public_dispatch_returns_independent_virtual_risk_values() {
+    let fixture = Fixture::new(empty_reference()).await;
+    let before = fixture_artifacts(&fixture.root);
+    let response = fixture
+        .request(
+            AgentOperation::PortfolioScenario {
+                request: two_position_scenario(),
+            },
+            None,
+        )
+        .await;
+    assert_eq!(response.request_id, "query-dispatch-request-001");
+    assert_eq!(response.status, AgentResponseStatus::Completed);
+    assert_eq!(response.quality, DataQuality::Fresh);
+    assert!(response.failure.is_none());
+    let data = response.result.unwrap();
+    assert_eq!(data["schema"], "okx.portfolio.scenario/v1");
+    assert_eq!(data["quality"], "assumed");
+    assert_eq!(data["execution"], "virtual_read_only");
+    assert_eq!(data["provenance"], "caller_supplied");
+    assert_eq!(data["exchange_post"], false);
+    assert_eq!(data["venue_margin_verified"], false);
+    assert_eq!(data["gross_notional_usd"], "300");
+    assert_eq!(data["margin_usd"], "30");
+    assert_eq!(data["gross_leverage_ratio"], "3");
+    assert_eq!(data["stress_price_pnl_usd"], "-20");
+    assert_eq!(data["liquidity_loss_usd"], "2");
+    assert_eq!(data["net_stress_pnl_usd"], "-22");
+    assert_eq!(data["stressed_equity_usd"], "78");
+    assert_eq!(data["drawdown_ratio"], "0.22");
+    // Independent 3-4-5 case: uncorrelated dollar volatilities 3 and 4
+    // have variance 25 and standard deviation 5. No VaR is exposed by this DTO.
+    assert_eq!(data["correlated_volatility_usd"], 5.0);
+    assert_eq!(data["correlation_basis"], "caller_supplied_psd");
+    assert_eq!(
+        data["positions"],
+        json!([
+            {"instrument":"BTC-USDT-SWAP","side":"long","price_pnl_usd":"-10","liquidity_loss_usd":"1","source":"caller_supplied"},
+            {"instrument":"ETH-USDT-SWAP","side":"short","price_pnl_usd":"-10","liquidity_loss_usd":"1","source":"caller_supplied"}
+        ])
+    );
+    assert_eq!(fixture_artifacts(&fixture.root), before);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn portfolio_scenario_public_dispatch_rejects_non_psd_and_invalid_parameters() {
+    use okx_protocol::trading::ScenarioCorrelation;
+    let fixture = Fixture::new(empty_reference()).await;
+    let before = fixture_artifacts(&fixture.root);
+    let mut non_psd = two_position_scenario();
+    non_psd.positions.push(non_psd.positions[0].clone());
+    // Pairwise-valid correlations cannot all coexist: the first two perfect
+    // positive relationships require the third relationship to be positive.
+    non_psd.correlations = vec![
+        ScenarioCorrelation {
+            left: 0,
+            right: 1,
+            rho: 1.0,
+        },
+        ScenarioCorrelation {
+            left: 0,
+            right: 2,
+            rho: 1.0,
+        },
+        ScenarioCorrelation {
+            left: 1,
+            right: 2,
+            rho: -1.0,
+        },
+    ];
+    assert!(non_psd.valid());
+    rejection(
+        fixture
+            .request(AgentOperation::PortfolioScenario { request: non_psd }, None)
+            .await,
+        "CORRELATION_NOT_PSD",
+    );
+    let mut invalid = two_position_scenario();
+    invalid.positions[0].price_shock_bps = -10001;
+    rejection(
+        fixture
+            .request(AgentOperation::PortfolioScenario { request: invalid }, None)
+            .await,
+        "INVALID_COMMAND",
+    );
+    let mut invalid = two_position_scenario();
+    invalid.correlations[0].rho = 1.01;
+    rejection(
+        fixture
+            .request(AgentOperation::PortfolioScenario { request: invalid }, None)
+            .await,
+        "INVALID_COMMAND",
+    );
+    assert_eq!(fixture_artifacts(&fixture.root), before);
+    fixture.finish().await;
+}
