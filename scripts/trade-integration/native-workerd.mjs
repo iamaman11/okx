@@ -61,7 +61,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     process.env.OKX_T10_12_NATIVE_RESERVE_CRASH === "1" ? "t10-12-reserve" : "no-t10-12-reserve",
     // Every crash repetition must start new OS processes and independent
     // stores. A cached transcript is not another process termination.
-    ["F2","F4","F8"].includes(process.env.OKX_T10_11_NATIVE_CRASH) ? `t10-11-f2:${randomUUID()}` : "no-t10-11-f2",
+    ["F2","F3","F4","F8"].includes(process.env.OKX_T10_11_NATIVE_CRASH) ? `t10-11-f2:${randomUUID()}` : "no-t10-11-f2",
   ].join(":");
   const reused = memo.has(key);
   if (!reused) {
@@ -199,7 +199,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
         ":" + evidence.phase + ":" + evidence.first_visible_error.slice(0, 70));
     });
     const reserveCrash = process.env.OKX_T10_12_NATIVE_RESERVE_CRASH === "1";
-    const nativeUnsentCrash = ["F2","F4","F8"].includes(process.env.OKX_T10_11_NATIVE_CRASH);
+    const nativeUnsentCrash = ["F2","F3","F4","F8"].includes(process.env.OKX_T10_11_NATIVE_CRASH);
     if(!singleCampaignT10&&!reserveCrash&&!nativeUnsentCrash)
       assert.match(stdout, /t09_public_trade_execute_open_ack_and_idempotency PASS: posts=1/);
     if(!reserveCrash&&!nativeUnsentCrash)

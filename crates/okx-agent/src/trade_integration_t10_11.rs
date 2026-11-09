@@ -6,6 +6,7 @@
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum T10_11UnsentPhase {
     F2,
+    F3,
     F4,
     F8,
 }
@@ -13,6 +14,7 @@ impl T10_11UnsentPhase {
     fn selected() -> Self {
         match std::env::var("OKX_T10_11_NATIVE_CRASH").unwrap().as_str() {
             "F2" => Self::F2,
+            "F3" => Self::F3,
             "F4" => Self::F4,
             "F8" => Self::F8,
             _ => panic!("unsupported unsent crash phase"),
@@ -21,6 +23,7 @@ impl T10_11UnsentPhase {
     fn name(self) -> &'static str {
         match self {
             Self::F2 => "F2",
+            Self::F3 => "F3",
             Self::F4 => "F4",
             Self::F8 => "F8",
         }
@@ -54,6 +57,12 @@ pub(super) async fn t10_11_hold_unsent_reply(
                     intent_id == &p.intent_id
                 }
                 (
+                    T10_11UnsentPhase::F3,
+                    RiskCommandAction::Inspect {
+                        reservation_key, ..
+                    },
+                )
+                | (
                     T10_11UnsentPhase::F4,
                     RiskCommandAction::BeginPost {
                         reservation_key, ..
@@ -73,6 +82,7 @@ pub(super) async fn t10_11_hold_unsent_reply(
     let sql = t10_12_reserve_sql_snapshot(&ctx.accounts, &probe.intent_id).await;
     let (status, state) = match probe.phase {
         T10_11UnsentPhase::F2 => (RiskDecisionStatus::Held, "PREPARED"),
+        T10_11UnsentPhase::F3 => (RiskDecisionStatus::Observed, "RESERVED"),
         T10_11UnsentPhase::F4 => (RiskDecisionStatus::PostAuthorized, "RESERVED"),
         T10_11UnsentPhase::F8 => (RiskDecisionStatus::Updated, "REJECTED"),
     };
@@ -82,6 +92,12 @@ pub(super) async fn t10_11_hold_unsent_reply(
         result.reason
     );
     assert_eq!(sql["state"], state);
+    if probe.phase == T10_11UnsentPhase::F3 {
+        assert_eq!(
+            result.reservation_state,
+            Some(okx_protocol::risk_authority::RiskReservationState::Held)
+        );
+    }
     assert_eq!(
         sql["central_receipt"].is_null(),
         probe.phase == T10_11UnsentPhase::F2
@@ -316,6 +332,22 @@ async fn native_crash_unsent_boundary() {
         )
         .await
         .unwrap();
+    if phase == T10_11UnsentPhase::F3 {
+        // SQL has the authentic HELD receipt; no BEGIN_POST was requested.
+        // INSPECT only proves the original Worker reserve still exists.
+        let inspect = RiskCommand {
+            schema: RISK_COMMAND_SCHEMA_V1.into(),
+            command_id: "inspect_t11_f3_before_fence".into(),
+            installation_id: "installation_test".into(),
+            action: RiskCommandAction::Inspect {
+                reservation_key: key,
+                plan_sha256: saved.plan_hash,
+            },
+        };
+        *T10_11_UNSENT_PROBE.lock().unwrap() = Some(probe);
+        let result = t10_12_await_recovery(&mut session, risk.request(inspect)).await;
+        panic!("F3 child must be OS-killed after local RESERVED and before fence: {result:?}");
+    }
     if phase == T10_11UnsentPhase::F4 {
         // Explicit boundary inputs, not a claim that the fixture performed a
         // full observer/final-quote admission. Worker validates the real CAS.
@@ -402,6 +434,7 @@ async fn native_crash_unsent_recover() {
     let mut read = summary("summary_t11_f2_reopened");
     read.installation_id = "installation_test".into();
     let worker_before = risk.request(read).await.unwrap();
+    let mut old_fence_denial = None;
     if phase == T10_11UnsentPhase::F4 {
         let mut old_fence: RiskCommand =
             serde_json::from_value(original["command"].clone()).unwrap();
@@ -420,6 +453,7 @@ async fn native_crash_unsent_recover() {
             worker_before.risk_book_sequence
         );
         assert_eq!(unchanged.budget, worker_before.budget);
+        old_fence_denial = Some(denied);
     }
     let owner = ctx.accounts.resolve("fixture-a").await.unwrap();
     let cancel = okx_protocol::trading::TradeRequest::Cancel {
@@ -481,6 +515,7 @@ async fn native_crash_unsent_recover() {
             "schema":"okx.t10-11-native-unsent-recovery/v1","phase":phase.name(),
             "pid":std::process::id(),"root":root,"account_key":account_key,
             "before":before,"after":after,"worker_after":final_result,
+            "worker_before":worker_before,"old_fence_denial":old_fence_denial,
             "venue_posts":posts,"original_sql_reopened":true,
             "public_cancel_replayed":true,
         })

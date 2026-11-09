@@ -24,7 +24,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
   // 60 isolated component kills as 90 complete cross-owner proofs.
   try {
     const roots=new Set();
-    for(const phase of ["F2","F4","F8"]){
+    for(const phase of ["F2","F3","F4","F8"]){
     process.env.OKX_T10_11_NATIVE_CRASH=phase;
     const repetitions=[];
     for(let repetition=1;repetition<=10;repetition++){
@@ -117,7 +117,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
       exact_test:exactTest,
       proof,
       native_component_phases:nativePhases,
-      native_component_missing_phases:["F2","F4","F8"],
+      native_component_missing_phases:["F2","F3","F4","F8"],
       required_repetitions_per_phase:10,
       limitations:["F0 barrier precedes prepare invocation; no in-transaction kill claimed",
         "F3 uses production SQL no-send transition; central release remains pending",

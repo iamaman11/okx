@@ -13,18 +13,19 @@ const boundary=()=>({schema:"okx.t10-11-native-unsent-kill-boundary/v1",phase:"F
 
 function laterBoundary(phase){
   const value=boundary();value.phase=phase;
-  value.sql.state=phase==="F4"?"RESERVED":"REJECTED";
+  value.sql.state=phase==="F8"?"REJECTED":"RESERVED";
   value.sql.central_receipt={reservation_key:"original-key",intent_id:"original",plan_hash:"plan"};
-  value.command.action={action:phase==="F4"?"BEGIN_POST":"RELEASE_UNSENT",
+  value.command.action={action:{F3:"INSPECT",F4:"BEGIN_POST",F8:"RELEASE_UNSENT"}[phase],
     reservation_key:"original-key",plan_sha256:"plan"};
-  value.worker_result.status=phase==="F4"?"POST_AUTHORIZED":"UPDATED";
+  value.worker_result.status={F3:"OBSERVED",F4:"POST_AUTHORIZED",F8:"UPDATED"}[phase];
+  if(phase==="F3")value.worker_result.reservation_state="HELD";
   if(phase==="F8"){
     value.sql.terminal_receipt={kind:"REJECTED_UNSENT"};
     value.command.action.proof={reservation_key:"original-key",intent_id:"original",plan_hash:"plan"};
   }
   return value;
 }
-for(const phase of ["F4","F8"]){
+for(const phase of ["F3","F4","F8"]){
   test(`${phase} requires its committed Worker result and original unclaimed SQL`,()=>{
     const value=laterBoundary(phase);
     assert.equal(validateUnsentKillBoundary(value),value);
@@ -37,6 +38,12 @@ for(const phase of ["F4","F8"]){
     }
   });
 }
+test("F3 requires HELD rather than an already authorized or released reservation",()=>{
+  for(const state of ["POSTED","RELEASED",null]){
+    const value=laterBoundary("F3");value.worker_result.reservation_state=state;
+    assert.throws(()=>validateUnsentKillBoundary(value));
+  }
+});
 test("F8 cannot replace durable no-send with a terminal or foreign proof",()=>{
   for(const change of [x=>x.sql.terminal_receipt.kind="FILLED",
     x=>x.command.action.proof.intent_id="other",x=>x.command.action.proof.plan_hash="other"]){
