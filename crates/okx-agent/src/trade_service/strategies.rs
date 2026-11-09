@@ -1,5 +1,8 @@
 use super::*;
 use okx_protocol::trading::{CapitalDirection, StrategyConfigurationV1, StrategyParametersV1};
+#[cfg(test)]
+#[path = "strategy_contract_tests.rs"]
+mod strategy_contract_tests;
 impl TradeService {
     pub async fn strategies(
         &self,

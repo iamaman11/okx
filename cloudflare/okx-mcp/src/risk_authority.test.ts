@@ -217,6 +217,69 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
      plan_sha256:"a".repeat(64),expected_risk_book_sequence:seq,
      cumulative_entry_usd:amount,settlement_revision:revision,source_digest:digest}
  });
+ // Synthetic authenticated-native source inputs exercise the real Worker
+ // handler and RiskBook storage. They do not prove live native source reads.
+ // Reuse the actual RESERVE/BEGIN_POST state, then independently commit money
+ // and terminal release before serializing and reopening the stored values.
+ {
+   const terminal=new Store();terminal.map=structuredClone(t.map);
+   const booked=await handleNativeRiskCommand(terminal,session,
+     sett(5,1,"0.5",sourceDigest),now+3);
+   check(booked.status==="UPDATED"&&booked.risk_book_sequence===6,
+     "terminal INSPECT fixture first commits the real typed entry settlement");
+   const released=await handleNativeRiskCommand(terminal,session,{
+     schema:"okx.risk-command/v1",command_id:"terminal_release_inspect_001",
+     installation_id:initial.installation_id,
+     action:{action:"RESOLVE",reservation_key:admitted[0].reservation_key,
+       plan_sha256:externalHuman.action.plan_sha256,
+       expected_risk_book_sequence:6,next_state:"RELEASED",
+       source_proof_sha256:proof,
+       terminal_census:{...census,generated_at_ms:now+4,source_read_floor_ms:now+4},
+       terminal_ledger:{account_uid:sameUid,run_id:externalHuman.action.run_id,
+         intent_id:externalHuman.action.intent_id,state:"FILLED",record_digest:proof,
+         cumulative_loss_usd:"0",remaining_exposure_usdt:"0",
+         cumulative_entry_usd:"0.5",entry_settlement_revision:1,
+         entry_settlement_digest:sourceDigest}}},now+5);
+   check(released.status==="UPDATED"&&released.risk_book_sequence===7,
+     "terminal INSPECT fixture commits source-bound release through the real handler");
+   const persisted=JSON.stringify([...terminal.map]);
+   const reopened=new Store();reopened.map=new Map(JSON.parse(persisted));
+   await reopened.put("account_access_v1",{...governance,revision:2,accounts:[
+     {...governance.accounts[0],policy_revision:2,explicit_pause:true}]});
+   const inspectTerminal={schema:"okx.risk-command/v1",
+     command_id:"inspect_terminal_reopened",installation_id:initial.installation_id,
+     action:{action:"INSPECT",reservation_key:admitted[0].reservation_key,
+       plan_sha256:externalHuman.action.plan_sha256}};
+   const before=JSON.stringify([...reopened.map]),writes=reopened.writes;
+   for(let repeat=0;repeat<2;repeat++){
+     const observed=await handleNativeRiskCommand(reopened,session,inspectTerminal,now+6);
+     check(observed.status==="OBSERVED"&&observed.reservation_state==="RELEASED"&&
+       observed.reservation_key===admitted[0].reservation_key&&
+       observed.policy_revision===1&&observed.risk_book_sequence===7,
+       "reopened terminal INSPECT retains original reservation policy after governance rotation");
+   }
+   for(const action of [
+     {...inspectTerminal.action,plan_sha256:"f".repeat(64)},
+     {...inspectTerminal.action,reservation_key:"missing_terminal_reservation"},
+   ]){
+     const denied=await handleNativeRiskCommand(reopened,session,
+       {...inspectTerminal,action},now+6);
+     check(denied.status==="DENIED"&&denied.reason==="RISK_RESERVATION_NOT_FOUND"&&
+       denied.reservation_state===null&&denied.reservation_key===null,
+       "terminal INSPECT never substitutes a wrong-plan or missing reservation");
+   }
+   const budget=await handleNativeRiskCommand(reopened,session,{
+     schema:"okx.risk-command/v1",command_id:"summary_terminal_reopened",
+     installation_id:initial.installation_id,action:{action:"SUMMARY"}},now+6);
+   check(budget.budget?.entry_budget?.consumed_usd==="0.5"&&
+     budget.budget.entry_budget.reserved_usd==="4"&&budget.risk_book_sequence===7,
+     "terminal INSPECT preserves committed spend and other reservations without advancing CAS");
+   check(reopened.writes===writes&&JSON.stringify([...reopened.map])===before,
+     "repeated terminal INSPECT and identity denials perform zero writes after reopen");
+   check(JSON.stringify([...terminal.map])===persisted,
+     "reopened Worker storage owns independently serialized values");
+   console.log("terminal_released_inspect_reopen_read_only PASS");
+ }
  check((await handleNativeRiskCommand(settlements,{...session,runtime_profile:"demo_acceptance"},
    sett(5,1,"0.5",sourceDigest),now+3)).status==="DENIED",
    "demo/public socket never inherits native money settlement authority");
