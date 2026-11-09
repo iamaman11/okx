@@ -1,6 +1,55 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { summarizeNativeWorkerdFailure, summarizeRustPanics } from "./native-failure.mjs";
+import { nativeDriverPrimaryCode, nativeDriverTeardownFailure, summarizeNativeWorkerdFailure, summarizeRustPanics } from "./native-failure.mjs";
+
+const teardownFixture = () => ({schema:"okx.native-driver-teardown-failure/v1",
+  primary_code:"LIFECYCLE_PROBE_PRIMARY_ERROR",
+  failures:[{owner:"second",code:"LIFECYCLE_PROBE_POST_DISPOSE_INJECTED_ERROR"}],
+  owners_closed:true,root_retained:false});
+const teardownWire = value => "NATIVE_DRIVER_TEARDOWN_FAILURE_V1:"+JSON.stringify(value)+"\n";
+test("Native teardown marker preserves only typed primary and cleanup facts", () => {
+  const value=nativeDriverTeardownFailure({stderr:teardownWire(teardownFixture())});
+  assert.equal(value.parse_state,"VALID");
+  assert.equal(value.reason_code,"NATIVE_DRIVER_TEARDOWN_FAILED");
+  assert.equal(value.primary_code,"LIFECYCLE_PROBE_PRIMARY_ERROR");
+  assert.deepEqual(value.failures,[{owner:"second",code:"LIFECYCLE_PROBE_POST_DISPOSE_INJECTED_ERROR"}]);
+  assert.equal(value.owners_closed,true);
+  assert.equal(value.root_retained,false);
+  const unjoined={...teardownFixture(),primary_code:null,owners_closed:false,root_retained:true,
+    failures:[{owner:"native",code:"CHILD_JOIN_TIMEOUT"}]};
+  assert.equal(nativeDriverTeardownFailure({stdout:teardownWire(unjoined)}).parse_state,"VALID");
+  assert.equal(nativeDriverTeardownFailure({stderr:"ordinary scenario assertion"}),null);
+  assert.equal(nativeDriverPrimaryCode(Error("WORKER_FRAME_TIMEOUT")),"WORKER_FRAME_TIMEOUT");
+  assert.equal(nativeDriverPrimaryCode(Error("PRIVATE_SENTINEL_87654321")),"DRIVER_ASSERTION_OR_IO_FAILURE");
+});
+test("malformed duplicate oversized and untyped Native teardown markers fail closed privately", () => {
+  const sentinel="PRIVATE_SENTINEL_87654321";
+  const cases=[
+    "NATIVE_DRIVER_TEARDOWN_FAILURE_V1:{invalid="+sentinel,
+    teardownWire(teardownFixture()).repeat(2),
+    "NATIVE_DRIVER_TEARDOWN_FAILURE_V1:"+"x".repeat(4096)+sentinel,
+    teardownWire({...teardownFixture(),primary_code:sentinel}),
+    teardownWire({...teardownFixture(),schema:sentinel}),
+    teardownWire({...teardownFixture(),raw_body:{token:sentinel}}),
+    teardownWire({...teardownFixture(),owners_closed:false,root_retained:false}),
+    teardownWire({...teardownFixture(),failures:[]}),
+    teardownWire({...teardownFixture(),failures:Array(6).fill({owner:"native",code:"CHILD_JOIN_TIMEOUT"})}),
+    teardownWire({...teardownFixture(),failures:[{owner:sentinel,code:"CHILD_JOIN_TIMEOUT"}]}),
+    teardownWire({...teardownFixture(),failures:[{owner:"second",code:sentinel}]}),
+    teardownWire({...teardownFixture(),failures:[{owner:"second",code:"DRIVER_OWNER_CLOSE_FAILED",path:sentinel}]}),
+    teardownWire({...teardownFixture(),failures:Array(2).fill({owner:"native",code:"CHILD_JOIN_TIMEOUT"})}),
+  ];
+  for(const stderr of cases){
+    const result=nativeDriverTeardownFailure({stderr});
+    assert.equal(result.parse_state,"INVALID");
+    assert.equal(result.reason_code,"NATIVE_DRIVER_TEARDOWN_MARKER_INVALID");
+    assert.equal(result.owners_closed,false);
+    assert.equal(result.root_retained,true);
+    assert.deepEqual(result.failures,[]);
+    assert.ok(!JSON.stringify(result).includes(sentinel));
+    assert.ok(!JSON.stringify(result).includes("raw_body"));
+  }
+});
 
 test("a recovery-task panic survives the later public Status timeout", () => {
   const result = summarizeRustPanics({stderr:

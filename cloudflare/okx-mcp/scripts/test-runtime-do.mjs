@@ -6,10 +6,10 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { Miniflare } from "miniflare";
@@ -17,7 +17,90 @@ import { assertBudgetEconomicsUnchanged } from "../../../scripts/trade-integrati
 import { settleBeforeWorkerCrash, recoverWorkerCrash } from "./t10-12-worker-crash.mjs";
 import { nativeWorkerCrashHost } from "./t10-12-native-worker.mjs";
 import { killAndRecoverUnsentNative } from "./t10-11-native-crash.mjs";
-import { summarizeRustPanics } from "../../../scripts/trade-integration/native-failure.mjs";
+import { nativeDriverPrimaryCode, summarizeRustPanics } from "../../../scripts/trade-integration/native-failure.mjs";
+import { execOwnedChild, runScenario } from "../../../scripts/trade-integration/scenario-lifecycle.mjs";
+
+// One opt-in lifecycle contract, sharing the actual Native/Worker fixture.
+// It changes no trading inputs, economic assertions or production deadlines.
+const probeArgs = process.argv.slice(2);
+let lifecycleProbe = null;
+let lifecyclePrimary = null;
+const lifecycleCleanupErrors = [];
+if (probeArgs.length) {
+  if (probeArgs.length !== 2 || probeArgs[0] !== "--lifecycle-probe")
+    throw Error("INVALID_LIFECYCLE_PROBE_OPTION");
+  lifecycleProbe = JSON.parse(probeArgs[1]);
+  if (!lifecycleProbe || Object.keys(lifecycleProbe).sort().join(",") !== "outcome,receipt_path" ||
+      !["success", "error", "timeout", "error_teardown"].includes(lifecycleProbe.outcome) ||
+      typeof lifecycleProbe.receipt_path !== "string" || !isAbsolute(lifecycleProbe.receipt_path) ||
+      process.env.OKX_NATIVE_WORKER_INTEGRATION !== "1")
+    throw Error("INVALID_LIFECYCLE_PROBE_OPTION");
+}
+async function lifecycleReceipt(stage, facts = {}) {
+  if (!lifecycleProbe) return;
+  await appendFile(lifecycleProbe.receipt_path, JSON.stringify({
+    schema:"okx.native-worker-lifecycle/v1", stage, driver_pid:process.pid, ...facts,
+  }) + "\n", {mode:0o600});
+}
+function lifecycleError(error) {
+  const message = String(error?.message ?? "UNKNOWN_FAILURE");
+  return /^[A-Z][A-Z0-9_]{0,95}$/.test(message) ? message : "DRIVER_ASSERTION_OR_IO_FAILURE";
+}
+async function ownedDescendants(pid) {
+  // Observe ownership only. Do not inspect command lines, environments or
+  // terminate processes by executable name.
+  const invoke = promisify(execFile);
+  let rows;
+  if (process.platform === "win32") {
+    const {stdout} = await invoke("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,@{Name='created';Expression={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')} else {$null}}} | ConvertTo-Json -Compress"],
+    {windowsHide:true, timeout:10000, maxBuffer:1024*1024});
+    rows = JSON.parse(stdout);
+    rows = (Array.isArray(rows) ? rows : [rows]).map(row => ({
+      pid:row.ProcessId, parent_pid:row.ParentProcessId, name:row.Name, created:row.created,
+    }));
+  } else {
+    const {stdout} = await invoke("ps", ["-eo", "pid=,ppid=,lstart=,comm="],
+      {timeout:10000, maxBuffer:1024*1024});
+    rows = stdout.trim().split(/\r?\n/).map(line => {
+      const [child, parent, ...fields] = line.trim().split(/\s+/);
+      return {pid:Number(child), parent_pid:Number(parent),
+        created:fields.slice(0,5).join(" "), name:fields.slice(5).join(" ")};
+    });
+  }
+  const owned = new Set([pid]);
+  const result = [];
+  for (let round=0; round<16; round++) {
+    const next = rows.filter(row => owned.has(row.parent_pid) && !owned.has(row.pid));
+    if (!next.length) return result;
+    for (const row of next) {
+      if (!row.created) throw Error("LIFECYCLE_PROCESS_IDENTITY_UNAVAILABLE");
+      owned.add(row.pid); result.push(row);
+    }
+    if (result.length > 64) throw Error("LIFECYCLE_OWNERSHIP_LIMIT");
+  }
+  throw Error("LIFECYCLE_OWNERSHIP_DEPTH_LIMIT");
+}
+async function lifecycleBoundary(handoffPath) {
+  if (!lifecycleProbe) return;
+  const native = JSON.parse(await readFile(handoffPath + ".native-ready", "utf8"));
+  assert.equal(native.schema, "okx.native-owner-ready/v1");
+  assert.ok(Number.isSafeInteger(native.native_pid) && native.native_pid > 0);
+  assert.equal(native.accounts.length, 2);
+  const descendants = await ownedDescendants(process.pid);
+  assert.ok(descendants.some(row => row.pid === native.native_pid), "Native must belong to this driver");
+  assert.ok(descendants.some(row => /workerd(?:\.exe)?$/i.test(row.name)), "actual workerd PID required");
+  await lifecycleReceipt("worker_and_native_ready", {
+    runtime_root:root, native, owned_descendants:descendants,
+  });
+  if (["error", "error_teardown"].includes(lifecycleProbe.outcome))
+    throw Error("LIFECYCLE_PROBE_PRIMARY_ERROR");
+  if (lifecycleProbe.outcome === "timeout") {
+    await runScenario(signal => new Promise(resolve =>
+      signal.addEventListener("abort", resolve, {once:true})),
+    {deadline:25, timeoutCode:"LIFECYCLE_PROBE_PRIMARY_TIMEOUT"});
+  }
+}
 
 const crashChild=process.env.OKX_T10_12_WORKER_CRASH_CHILD==="1";
 const crashRecovery=process.env.OKX_T10_12_WORKER_CRASH_RECOVERY==="1";
@@ -31,6 +114,9 @@ if(crashRecovery&&(!recoveryRoot||
   throw Error("T10_12_REQUIRES_PRIOR_PERSISTED_STORAGE");
 const root=crashRecovery ? resolve(recoveryRoot)
   :await mkdtemp(join(tmpdir(),"okx-workerd-risk-"));
+if (lifecycleProbe && (resolve(lifecycleProbe.receipt_path) === resolve(root) ||
+    resolve(lifecycleProbe.receipt_path).startsWith(resolve(root) + sep)))
+  throw Error("LIFECYCLE_RECEIPT_MUST_OUTLIVE_RUNTIME_ROOT");
 const outfile = join(root, "runtime-test.mjs");
 const handoffPath = join(root, "native-handoff.json");
 // Only a uniquely emitted production Rust receipt can certify terminal
@@ -257,6 +343,11 @@ function fixtureOpening(campaignStartedAt, asOf, accountKeys) {
 }
 let first, second, nativeCrashHost, nativeCrashWitness;
 async function runRuntimeFixture(){
+let nativeProcess = null;
+let nativeClose = null;
+let nativeSettled = false;
+let primaryError = null;
+const nativeStop = new AbortController();
 try {
   await build({
     entryPoints: [fileURLToPath(new URL(crashChild
@@ -269,9 +360,11 @@ try {
   // Native must initialize the REAL account SQL owners before the actual
   // Worker campaign is created. A fixture origin before initialized_at
   // would correctly fail with BASELINE_RECONCILIATION_REQUIRED.
-  let nativeProcess = null;
   if (process.env.OKX_NATIVE_WORKER_INTEGRATION === "1") {
-    nativeProcess = promisify(execFile)(
+    // Keep Cargo in the outer driver's inherited POSIX process group. A new
+    // detached subgroup would escape the existing ancestor-group hard kill.
+    const launchNative = process.platform === "win32" ? execOwnedChild : promisify(execFile);
+    const originalNative = launchNative(
       "cargo",
       [
         "test", "--locked", "-p", "okx-agent", "--lib",
@@ -294,8 +387,18 @@ try {
         },
         maxBuffer: 8 * 1024 * 1024,
         timeout: process.env.OKX_T09_6_CLOSE_PROBE === "1" ? 220_000 : 180_000,
+        ...(process.platform === "win32" ? {signal:nativeStop.signal} : {}),
       },
     );
+    if (process.platform !== "win32") {
+      // execFile's callback/rejected promise is not the child's close event.
+      // Register this join witness immediately on the original child handle.
+      nativeClose = new Promise(resolve => originalNative.child.once("close", resolve));
+    }
+    nativeProcess = originalNative.then(value => { nativeSettled=true; return value; }, error => {
+      nativeSettled=true;
+      throw error;
+    });
     nativeProcess.catch(() => {});
     const bootstrapReady = async () => {
       const deadline = Date.now() + 120_000;
@@ -853,6 +956,7 @@ try {
       url=new URL(nativeCrashHost.ws_url);
     }
     assert.equal(url.hostname,"127.0.0.1","CI worker must be loopback-only");
+    await lifecycleBoundary(handoffPath);
     const wsUrl = new URL("/runtime",url);
     wsUrl.protocol = "ws:";
     // Publish only a COMPLETE handoff. The Rust test waits for path
@@ -974,6 +1078,11 @@ try {
     let stdout, stderr;
     try {
       ({stdout,stderr} = await nativeProcess);
+      if (lifecycleProbe) {
+        await lifecycleReceipt("native_completed", {
+          native_teardown:receipt(stdout,"NATIVE_OWNERS_CLOSED_V1"),
+        });
+      }
       const rotated = await policyCas;
       if (!rotated.ok) throw rotated.error;
       if (rotated.value) console.log("S2_05_WORKER_POLICY_CAS_V1:" +
@@ -1788,11 +1897,110 @@ try {
     reserved_entry_usd:sharedCapMode ? "8" : "2",
     risk_monetary_post_count:0,
   }));
+} catch (error) {
+  primaryError = error;
+  lifecyclePrimary = lifecycleError(error);
+  await lifecycleReceipt("primary_failure", {reason_code:lifecycleError(error)});
+  throw error;
 } finally {
-  if(nativeCrashHost)await nativeCrashHost.close();
-  if (first) await first.dispose();
-  if (second) await second.dispose();
-  await rm(root, {recursive: true, force: true});
+  // Close every acquired owner even if a preceding close/report failed.
+  // Forced Native process closure is not a graceful Rust task/SQL receipt.
+  const closed = {
+    native:!nativeProcess, native_crash_host:!nativeCrashHost,
+    first:!first, second:!second,
+  };
+  const failures = [];
+  const allowedCodes = new Set([
+    "CHILD_TEARDOWN_TIMEOUT", "CHILD_JOIN_TIMEOUT", "CHILD_TREE_TERMINATION_FAILED",
+    "DRIVER_OWNER_CLOSE_TIMEOUT", "LIFECYCLE_PROBE_POST_DISPOSE_INJECTED_ERROR",
+  ]);
+  const attempt = async (owner, close) => {
+    let timer;
+    try {
+      await Promise.race([Promise.resolve().then(close), new Promise((_, reject) => {
+        timer=setTimeout(() => reject(Error("DRIVER_OWNER_CLOSE_TIMEOUT")), 10000);
+      })]);
+    } catch (error) {
+      const code=allowedCodes.has(error?.message) ? error.message : "DRIVER_OWNER_CLOSE_FAILED";
+      failures.push({owner, code, error});
+      lifecycleCleanupErrors.push(code);
+    } finally { clearTimeout(timer); }
+  };
+  if (nativeProcess) await attempt("native", async () => {
+    const forced = process.platform === "win32" && !nativeSettled;
+    if (forced) nativeStop.abort();
+    let failure;
+    try { await nativeProcess; } catch (error) { failure=error; }
+    if (failure?.teardownFailure ||
+        /^CHILD_(TEARDOWN_TIMEOUT|JOIN_TIMEOUT|TREE_TERMINATION_FAILED)$/.test(failure?.message ?? ""))
+      throw failure;
+    if (nativeClose) await nativeClose;
+    // Windows joins the owned child/tree. POSIX keeps the original inherited
+    // group and joins its original child.close; an unfinished cleanup exceeds
+    // the bounded attempt and leaves ownership NOT_PROVEN/root retained.
+    closed.native=true;
+    await lifecycleReceipt("native_owner_closed", {
+      closure:forced ? "FORCED_OS_PROCESS_TREE_TERMINATION" : "PROCESS_EXIT_OBSERVED",
+      graceful_task_sql_join_receipt:false,
+    });
+  });
+  if (nativeCrashHost) await attempt("native_crash_host", async () => {
+    await nativeCrashHost.close();
+    closed.native_crash_host=true;
+  });
+  if (first) await attempt("first", async () => {
+    await first.dispose();
+    closed.first=true;
+    await lifecycleReceipt("miniflare_disposed", {owner:"first"});
+  });
+  if (second) await attempt("second", async () => {
+    await second.dispose();
+    closed.second=true;
+    await lifecycleReceipt("miniflare_disposed", {owner:"second"});
+    if (lifecycleProbe?.outcome === "error_teardown") {
+      // The real owner is already closed. Report failure must still preserve
+      // the primary error and permit safe cleanup of its temporary files.
+      await lifecycleReceipt("cleanup_fault", {
+        owner:"second", reason_code:"LIFECYCLE_PROBE_POST_DISPOSE_INJECTED_ERROR",
+        second_dispose_completed:true,
+      });
+      throw Error("LIFECYCLE_PROBE_POST_DISPOSE_INJECTED_ERROR");
+    }
+  });
+  const ownersClosed = Object.values(closed).every(Boolean);
+  let rootRemoved = false;
+  if (ownersClosed) await attempt("runtime_root", async () => {
+    await rm(root, {recursive:true, force:true});
+    rootRemoved=true;
+    await lifecycleReceipt("runtime_root_removed", {runtime_root:root});
+  });
+  else await lifecycleReceipt("runtime_root_retained", {runtime_root:root, owners_closed:false});
+  if (failures.length) {
+    const safe = {
+      schema:"okx.native-driver-teardown-failure/v1",
+      primary_code:primaryError ? nativeDriverPrimaryCode(primaryError) : null,
+      failures:failures.map(({owner, code}) => ({owner, code})),
+      owners_closed:ownersClosed, root_retained:!rootRemoved,
+    };
+    process.stderr.write("NATIVE_DRIVER_TEARDOWN_FAILURE_V1:"+JSON.stringify(safe)+"\n");
+    const primary=primaryError ?? failures[0].error;
+    const failure=new AggregateError([
+      ...(primaryError ? [primaryError] : []), ...failures.map(value => value.error),
+    ], primary.message, {cause:primary});
+    failure.teardownFailure=true;
+    failure.teardownReason="NATIVE_DRIVER_TEARDOWN_FAILED";
+    throw failure;
+  }
 }
 }
-await runRuntimeFixture();
+try {
+  await runRuntimeFixture();
+  await lifecycleReceipt("driver_result", {outcome:"success", primary_error:null, teardown_errors:[]});
+} catch (error) {
+  const reported = lifecycleError(error);
+  await lifecycleReceipt("driver_result", {
+    outcome:"error", reported_error:reported, primary_error:lifecyclePrimary,
+    teardown_errors:lifecycleCleanupErrors,
+  });
+  throw error;
+}

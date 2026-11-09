@@ -5,6 +5,49 @@ import { createHash } from "node:crypto";
 const secretIndicator = /authorization|bearer|api[_-]?key|passphrase|secret|signature|credential|access[_-]?key|\btoken\b|signed[_ -]?header|raw[_ -]?(?:body|response)|set-cookie|private[_ -]?key/i;
 const ansi = /\x1b\[[0-9;]*m/g;
 const managedAddMarker = "T09_4_MANAGED_ADD_MISSING_INTENT_V1";
+const nativeTeardownMarker = "NATIVE_DRIVER_TEARDOWN_FAILURE_V1:";
+const nativeTeardownOwners = new Set(["native", "native_crash_host", "first", "second", "runtime_root"]);
+const nativeTeardownCodes = new Set([
+  "CHILD_TEARDOWN_TIMEOUT", "CHILD_JOIN_TIMEOUT", "CHILD_TREE_TERMINATION_FAILED",
+  "DRIVER_OWNER_CLOSE_TIMEOUT", "DRIVER_OWNER_CLOSE_FAILED",
+  "LIFECYCLE_PROBE_POST_DISPOSE_INJECTED_ERROR",
+]);
+const nativePrimaryCodes = new Set([
+  "LIFECYCLE_PROBE_PRIMARY_ERROR", "LIFECYCLE_PROBE_PRIMARY_TIMEOUT",
+  "NATIVE_SQL_BOOTSTRAP_DEADLINE", "NATIVE_EXITED_BEFORE_WORKER_CAMPAIGN",
+  "WORKER_FRAME_TIMEOUT", "DRIVER_ASSERTION_OR_IO_FAILURE",
+]);
+export function nativeDriverPrimaryCode(error) {
+  return nativePrimaryCodes.has(error?.message) ? error.message : "DRIVER_ASSERTION_OR_IO_FAILURE";
+}
+// A present malformed marker is fatal too. No payload text survives rejection.
+export function nativeDriverTeardownFailure(error) {
+  const lines = [error?.stderr, error?.stdout].flatMap(stream =>
+    String(stream ?? "").split(/\r?\n/).filter(line => line.startsWith(nativeTeardownMarker)));
+  if (!lines.length) return null;
+  const invalid = () => ({schema:"okx.native-driver-teardown-failure/v1", parse_state:"INVALID",
+    reason_code:"NATIVE_DRIVER_TEARDOWN_MARKER_INVALID", primary_code:null,
+    failures:[], owners_closed:false, root_retained:true});
+  if (lines.length !== 1 || lines[0].length > 4096) return invalid();
+  let value;
+  try { value=JSON.parse(lines[0].slice(nativeTeardownMarker.length)); }
+  catch { return invalid(); }
+  if (!value || Object.keys(value).sort().join(",") !==
+      "failures,owners_closed,primary_code,root_retained,schema" ||
+      value.schema !== "okx.native-driver-teardown-failure/v1" ||
+      !(value.primary_code === null || nativePrimaryCodes.has(value.primary_code)) ||
+      typeof value.owners_closed !== "boolean" || typeof value.root_retained !== "boolean" ||
+      (!value.owners_closed && !value.root_retained) ||
+      !Array.isArray(value.failures) || value.failures.length < 1 || value.failures.length > 5 ||
+      value.failures.some(failure => !failure || Object.keys(failure).sort().join(",") !== "code,owner" ||
+        !nativeTeardownOwners.has(failure.owner) || !nativeTeardownCodes.has(failure.code)) ||
+      new Set(value.failures.map(failure => failure.owner)).size !== value.failures.length)
+    return invalid();
+  return {schema:value.schema, parse_state:"VALID", reason_code:"NATIVE_DRIVER_TEARDOWN_FAILED",
+    primary_code:value.primary_code,
+    failures:value.failures.map(({owner, code}) => ({owner, code})),
+    owners_closed:value.owners_closed, root_retained:value.root_retained};
+}
 const fixedState = value => typeof value === "string" &&
   /^(?:completed|accepted|rejected|pending|unknown|failed|queued|running|PREPARED|RESERVED|POSTING|ACKED|OPEN|FILLED|CANCELLED|REJECTED|UNKNOWN|PENDING)$/.test(value)
   ? value : null;

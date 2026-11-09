@@ -1478,8 +1478,32 @@ mod raw_native_session_tests {
         let (mut ctx, root, risk, mut risk_rx, recorded_http, rate_budget) =
             test_dispatch_for("installation_test").await;
         let accounts = ctx.accounts.clone();
-        std::fs::write(format!("{handoff_path}.native-ready"), b"SQL_OWNERS_OPEN")
-            .expect("test bootstrap marker must be written after SQL initialization");
+        let mut owned_accounts = Vec::new();
+        for alias in ["fixture-a", "fixture-b"] {
+            let account = accounts
+                .resolve(alias)
+                .await
+                .expect("bootstrapped SQL owner");
+            owned_accounts.push(serde_json::json!({
+                "account_key": account.configuration.account_key.wire(),
+                "sql_path": root.join("accounts")
+                    .join(crate::accounts::key_hash(&account.configuration.account_key))
+                    .join("account.sqlite"),
+            }));
+        }
+        // Ownership evidence only. Existing consumers still use this file as
+        // a readiness barrier; it contains no handoff token or trading facts.
+        std::fs::write(
+            format!("{handoff_path}.native-ready"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "okx.native-owner-ready/v1",
+                "native_pid": std::process::id(),
+                "native_root": root,
+                "accounts": owned_accounts,
+            }))
+            .unwrap(),
+        )
+        .expect("test bootstrap marker must be written after SQL initialization");
         // The Node driver creates the actual workerd/SQLite campaign only
         // after observing the marker, then supplies its local WSS address.
         // This file is a transport barrier, never a source of trading facts.
@@ -6912,6 +6936,17 @@ mod raw_native_session_tests {
             .await
             .expect("SQL owner still active");
         }
+        println!(
+            "NATIVE_OWNERS_CLOSED_V1:{}",
+            serde_json::json!({
+                "schema": "okx.native-owners-closed/v1",
+                "native_pid": std::process::id(),
+                "native_wss_joined": true,
+                "public_ws_joined": true,
+                "account_sources_shutdown_complete": true,
+                "sql_owners_terminated": stopped.len(),
+            })
+        );
         if let Some(account) = restart_account {
             // Reopen the SAME verified Native AccountStore through its normal
             // SQLite owner constructor after the old worker has terminated.
