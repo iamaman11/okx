@@ -4652,6 +4652,129 @@ mod tests {
         assert_eq!(gateway.posts.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]
+    async fn lost_http_ack_reopens_original_sql_without_second_send() {
+        use crate::accounts::recorded_support::{RecordedAccountHttp, RecordedGet, RecordedPost};
+        use okx_api::{
+            Credentials, MutationTiming, OkxEnvironment, OkxRestClient, RateBudget, Region,
+            TradeApi,
+        };
+        let (store, intent, root) = reserved("http_lost_ack", true, false, false).await;
+        let make_trade = |feed: Arc<RecordedAccountHttp>| {
+            TradeApi::new(
+                OkxRestClient::with_http_transport(
+                    OkxEnvironment::new(Region::Global, false),
+                    Credentials::new(
+                        "fixture-executor-a".into(),
+                        "executor-secret".into(),
+                        "pass".into(),
+                    )
+                    .unwrap(),
+                    RateBudget::new(),
+                    feed,
+                )
+                .unwrap(),
+            )
+        };
+        let feed = Arc::new(RecordedAccountHttp::default());
+        let trade = make_trade(feed.clone());
+        let request = PlaceOrderRequest {
+            instrument_id: intent.instrument_id.clone(),
+            trade_mode: ApiTradeMode::Cross,
+            client_order_id: intent.client_order_id.clone(),
+            side: ApiOrderSide::Buy,
+            position_side: ApiPositionSide::Long,
+            reduce_only: None,
+            order_type: ApiOrderType::Limit,
+            size: "1".into(),
+            price: "100".into(),
+            attached_algo_orders: vec![],
+        };
+        let mut expected = serde_json::to_value(&request).unwrap();
+        expected["clOrdId"] = "__REQUEST_CL_ORD_ID__".into();
+        feed.expect_post(RecordedPost {
+            access_key: "fixture-executor-a".into(), path: "/api/v5/trade/order".into(),
+            expected_body: expected,
+            raw_response: br#"{"code":"0","msg":"","data":[{"ordId":"123456","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
+        });
+        feed.arm_lost_next_create_ack();
+        let timing = MutationTiming::from_exchange_time_ms(now() as u64, 2000).unwrap();
+        let outcome = post_once(&store, &intent, deadline(), || async {
+            trade.place_order(&request, &timing).await.map_err(err)
+        })
+        .await
+        .unwrap();
+        assert!(outcome.is_none());
+        assert!(feed.lost_create_ack_was_consumed());
+        assert_eq!(feed.outbound_posts.lock().unwrap().len(), 1);
+        assert_eq!(feed.unconsumed_posts(), 0);
+        let mut ended = store.termination_signal();
+        drop(store);
+        tokio::time::timeout(Duration::from_secs(3), ended.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
+        let reopened = AccountStoreHandle::open_existing(
+            root.join("account.db"),
+            format!("okx:real:{}", "a".repeat(64)),
+            "installation_test".into(),
+        )
+        .await
+        .unwrap();
+        let restored = reopened
+            .call(deadline(), |s| {
+                assert!(s.unsent_release_receipt("intent_fixture")?.is_none());
+                Ok(s.intent("intent_fixture")?.unwrap())
+            })
+            .await
+            .unwrap();
+        assert_eq!(restored.state, IntentState::Unknown);
+        // New transport has no volatile ACK association from the send above.
+        let fresh_feed = Arc::new(RecordedAccountHttp::default());
+        let fresh_trade = make_trade(fresh_feed.clone());
+        for _ in 0..2 {
+            assert!(
+                post_once(&reopened, &restored, deadline(), || async {
+                    fresh_trade
+                        .place_order(&request, &timing)
+                        .await
+                        .map_err(err)
+                })
+                .await
+                .unwrap()
+                .is_none()
+            );
+        }
+        assert!(fresh_feed.outbound_posts.lock().unwrap().is_empty());
+        // Independent immutable GET bytes, not a response synthesized from ACK.
+        fresh_feed.expect_get(RecordedGet {
+            access_key: "fixture-executor-a".into(),
+            path: "/api/v5/trade/order".into(),
+            required_query: vec![
+                ("instId".into(), "BTC-USDT-SWAP".into()),
+                ("clOrdId".into(), "b".repeat(32)),
+            ],
+            raw_response: serde_json::to_vec(&json!({"code":"0","msg":"","data":[{
+                "instId":"BTC-USDT-SWAP","ordId":"123456","clOrdId":"b".repeat(32),
+                "state":"filled","side":"buy","sz":"1","accFillSz":"1"
+            }]}))
+            .unwrap(),
+        });
+        let observed = fresh_trade
+            .order_by_client_id(&restored.instrument_id, &restored.client_order_id)
+            .await
+            .unwrap();
+        assert_eq!(observed.order_id, "123456");
+        assert_eq!(
+            super::super::reconcile::verified_order_readback(&restored, &observed).unwrap(),
+            Decimal::ONE
+        );
+        assert_eq!(fresh_feed.unconsumed_reads(), 0);
+        assert!(fresh_feed.outbound_posts.lock().unwrap().is_empty());
+        // This component test does not claim OS-kill, financial projection or
+        // connected Worker acceptance; full F6 still needs those witnesses.
+    }
+
+    #[tokio::test]
     async fn duplicate_execute_one_post() {
         let (store, intent, _root) = reserved("duplicate", true, false, false).await;
         let gateway = FixtureGateway {

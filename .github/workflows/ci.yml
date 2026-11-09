@@ -578,6 +578,13 @@ jobs:
           if (($output -join "`n") -notmatch 'test result: ok\.\s+1 passed;') {
             throw 'INDEPENDENT_ORDER_SOURCE_TEST_NOT_EXECUTED'
           }
+          $output = & cargo test --locked -p okx-agent --lib trade_service::execute::tests::lost_http_ack_reopens_original_sql_without_second_send -- --exact --nocapture 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\.\s+1 passed;') {
+            throw 'HTTP_LOST_ACK_SQL_REOPEN_TEST_NOT_EXECUTED'
+          }
 
       - name: Install locked workerd test dependencies
         if: inputs.target_case != 'UnsentRelease'
