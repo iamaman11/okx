@@ -484,7 +484,8 @@ for (const caseId of cli.selected) {
     const controller = new AbortController();
     // Managed close + native OS process and persisted DO restart are the
     // same bounded full financial replay, not a short isolated unit case.
-    const deadline = ["T10-05", "T10-07", "T10-10", "T10-11", "T10-12"].includes(caseId) ? 300_000
+    // 80 connected kills measured 274s; include the ninth phase and bounded startup margin.
+    const deadline = caseId === "T10-11" ? 420_000 : ["T10-05", "T10-07", "T10-10", "T10-11", "T10-12"].includes(caseId) ? 300_000
       : ["T09.6", "T09.7", "T09.8"].includes(caseId) ? 260_000 : 120_000;
     let timer;
     try {

@@ -12,6 +12,7 @@ enum T10_11UnsentPhase {
     F4,
     F5,
     F6,
+    F7,
     F8,
 }
 impl T10_11UnsentPhase {
@@ -24,6 +25,7 @@ impl T10_11UnsentPhase {
             "F4" => Self::F4,
             "F5" => Self::F5,
             "F6" => Self::F6,
+            "F7" => Self::F7,
             "F8" => Self::F8,
             _ => panic!("unsupported unsent crash phase"),
         }
@@ -37,6 +39,7 @@ impl T10_11UnsentPhase {
             Self::F4 => "F4",
             Self::F5 => "F5",
             Self::F6 => "F6",
+            Self::F7 => "F7",
             Self::F8 => "F8",
         }
     }
@@ -63,6 +66,155 @@ struct T10_11UnsentProbe {
 }
 static T10_11_UNSENT_PROBE: std::sync::Mutex<Option<T10_11UnsentProbe>> =
     std::sync::Mutex::new(None);
+
+// Independent read-only witness. No copied DB or synthetic projection receipt.
+fn t10_11_projection_snapshot(path: &std::path::Path) -> serde_json::Value {
+    let reader =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let counts: [i64; 4] = reader.query_row(
+        "SELECT (SELECT count(*) FROM fills), (SELECT count(*) FROM fill_projection_pending), (SELECT count(*) FROM position_lots), (SELECT count(*) FROM finance_entries WHERE component='FEE')",
+        [], |r| Ok([r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?]),
+    ).unwrap();
+    let fee: String = reader
+        .query_row(
+            "SELECT amount FROM finance_totals WHERE currency='USDT' AND component='FEE'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let facts = |query: &str| {
+        reader
+            .prepare(query)
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    serde_json::json!({"counts":counts,"fee":fee,
+        "fills":facts("SELECT fill_id||':'||trade_id||':'||exchange_order_id||':'||qty||':'||fee||':'||intent_id FROM fills ORDER BY fill_id"),
+        "bills":facts("SELECT bill_id||':'||amount||':'||currency||':'||economic_event_key FROM bills ORDER BY bill_id"),
+        "fees":facts("SELECT entry_id||':'||economic_event_key||':'||amount FROM finance_entries WHERE component='FEE' ORDER BY entry_id"),
+        "lots":facts("SELECT lot_id||':'||fill_id||':'||remaining_qty FROM position_lots ORDER BY lot_id")})
+}
+
+async fn t10_11_f7_capture_boundary(
+    ctx: &DispatchContext,
+    owner: &Arc<crate::accounts::AccountResources>,
+    feed: &Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+    saved: &okx_execution::StoredIntent,
+    risk: &NativeRiskClient,
+    inspect: RiskCommand,
+    session: &mut tokio::task::JoinHandle<AgentResult<()>>,
+) {
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let status = owner.private_ws.status().await;
+            if status.logged_in
+                && status.subscriptions_complete
+                && status.account_data_seen
+                && status.positions_data_seen
+                && owner.source_identity_ready().await
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("F7 authenticated source must be ready before capture");
+    let _capture = owner.recorded_capture_gate.write().await;
+    t10_11_publish_fill_sources(feed, 1);
+    let id = saved.intent_id.clone();
+    let claimed = owner
+        .execution
+        .store
+        .call(
+            std::time::Instant::now() + Duration::from_secs(3),
+            move |s| s.intent(&id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let (filled, _) = ctx
+        .trade
+        .observe_intent_order(owner, claimed)
+        .await
+        .unwrap();
+    assert_eq!(filled.state, okx_execution::IntentState::Filled);
+    let ready = Arc::new(tokio::sync::Notify::new());
+    let capture = crate::source_capture::TEST_AFTER_HISTORY.scope(
+        ready.clone(),
+        crate::source_capture::capture_account_sources(
+            &owner.observer,
+            &owner.private_ws,
+            &owner.execution,
+        ),
+    );
+    tokio::pin!(capture);
+    tokio::select! {
+        result = &mut capture => panic!("F7 source capture exited before durable boundary: {result:?}"),
+        () = ready.notified() => {},
+    }
+    // Capture is still alive, holding its ordinary per-account source permit.
+    // The Worker read emits the committed SQL witness, then the parent kills us.
+    let result = t10_12_await_recovery(session, risk.request(inspect)).await;
+    panic!("F7 must be OS-killed while projection is pending: {result:?}");
+}
+
+async fn t10_11_f7_project_original(
+    root: &std::path::Path,
+    original: &serde_json::Value,
+) -> serde_json::Value {
+    use rust_decimal::Decimal;
+    let path = std::path::PathBuf::from(original["sql_path"].as_str().unwrap());
+    assert!(path.starts_with(root.join("accounts")));
+    assert_eq!(path.file_name().unwrap(), "account.sqlite");
+    let before = t10_11_projection_snapshot(&path);
+    assert_eq!(before, original["projection_boundary"]);
+    assert_eq!(before["counts"], serde_json::json!([1, 1, 0, 1]));
+    let store = okx_execution::AccountStoreHandle::open_existing(
+        path.clone(),
+        original["account_key"].as_str().unwrap().into(),
+        "installation_test".into(),
+    )
+    .await
+    .unwrap();
+    let mut proofs = Vec::new();
+    for expected in [1, 0] {
+        let id = original["sql"]["intent_id"].as_str().unwrap().to_owned();
+        let proof = store.call(std::time::Instant::now()+Duration::from_secs(3), move |s| {
+            let projected = s.project_pending_fills(1000)?;
+            assert_eq!(projected, expected);
+            let lots = s.active_lots("BTC-USDT-SWAP")?;
+            assert_eq!(lots.len(), 1);
+            assert_eq!(lots[0].remaining_qty, Decimal::new(1,1));
+            assert_eq!(lots[0].intent_id.as_deref(), Some(id.as_str()));
+            assert!(!s.begin_post(&id, 2, chrono::Utc::now().timestamp_millis())?);
+            assert!(s.unsent_release_receipt(&id)?.is_none());
+            assert_eq!(s.finance_totals(0,i64::MAX,None)?.get(&("USDT".into(),"FEE".into())), Some(&Decimal::new(-5,4)));
+            Ok(serde_json::json!({"projected":projected,"finance_revision":s.finance_revision()?,
+                "lot_quantity":lots[0].remaining_qty.normalize().to_string()}))
+        }).await.unwrap();
+        proofs.push(proof);
+    }
+    let after = t10_11_projection_snapshot(&path);
+    assert_eq!(after["counts"], serde_json::json!([1, 0, 1, 1]));
+    for field in ["fills", "bills", "fees", "fee"] {
+        assert_eq!(before[field], after[field]);
+    }
+    assert_eq!(before["bills"].as_array().unwrap().len(), 1);
+    assert_eq!(proofs[0]["finance_revision"], proofs[1]["finance_revision"]);
+    let mut terminated = store.termination_signal();
+    drop(store);
+    tokio::time::timeout(Duration::from_secs(3), terminated.wait_for(|done| *done))
+        .await
+        .unwrap()
+        .unwrap();
+    serde_json::json!({"before":before,"after":after,"projections":proofs,
+        "original_sql_owner_closed_before_reconnect":true})
+}
 
 #[tokio::test]
 async fn original_order_observation_uses_production_sql_and_identity_checks() {
@@ -234,35 +386,12 @@ fn t10_11_f6_request() -> okx_api::PlaceOrderRequest {
     }
 }
 
-// F6 uses the same production operations as Execute/Status. SQL writes below
-// only belong to those operations and source capture, never to this fixture.
-async fn t10_11_f6_observe_and_capture(
-    ctx: &DispatchContext,
-    owner: &Arc<crate::accounts::AccountResources>,
+fn t10_11_publish_fill_sources(
     feed: &Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
-    original: &serde_json::Value,
-) -> serde_json::Value {
+    turns: usize,
+) -> String {
     use crate::accounts::recorded_support::RecordedGet;
-    use rust_decimal::Decimal;
     use serde_json::json;
-    let id = original["sql"]["intent_id"].as_str().unwrap().to_owned();
-    let identity = id.clone();
-    let mut intent = owner
-        .execution
-        .store
-        .call(
-            std::time::Instant::now() + Duration::from_secs(3),
-            move |s| {
-                assert!(s.unsent_release_receipt(&identity)?.is_none());
-                Ok(s.intent(&identity)?.unwrap())
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(intent.state, okx_execution::IntentState::Unknown);
-    // The venue accepted the order before the crash; this explicit later fill
-    // arrives after reconnect. Publish its timestamp once, while capture is
-    // serialized. Never replay an old row outside the next cursor window.
     let at = chrono::Utc::now().timestamp_millis().to_string();
     let raw = |data: serde_json::Value| {
         serde_json::to_vec(&json!({"code":"0","msg":"","data":data})).unwrap()
@@ -291,7 +420,7 @@ async fn t10_11_f6_observe_and_capture(
             "availEq":"98.9995","availBal":"98.9995","eqUsd":"99.9995","uTime":at}]}]));
     // Exactly two consumers of each source: initial recovery and replay.
     // Literal venue identities remain independent of the dead process ACK map.
-    for turn in 0..2 {
+    for turn in 0..turns {
         feed.expect_get(RecordedGet {
             access_key: "fixture-executor-a".into(),
             path: "/api/v5/trade/order".into(),
@@ -334,6 +463,38 @@ async fn t10_11_f6_observe_and_capture(
             });
         }
     }
+    at
+}
+
+// F6 uses the same production operations as Execute/Status. SQL writes below
+// only belong to those operations and source capture, never to this fixture.
+async fn t10_11_f6_observe_and_capture(
+    ctx: &DispatchContext,
+    owner: &Arc<crate::accounts::AccountResources>,
+    feed: &Arc<crate::accounts::recorded_support::RecordedAccountHttp>,
+    original: &serde_json::Value,
+) -> serde_json::Value {
+    use rust_decimal::Decimal;
+    use serde_json::json;
+    let id = original["sql"]["intent_id"].as_str().unwrap().to_owned();
+    let identity = id.clone();
+    let mut intent = owner
+        .execution
+        .store
+        .call(
+            std::time::Instant::now() + Duration::from_secs(3),
+            move |s| {
+                assert!(s.unsent_release_receipt(&identity)?.is_none());
+                Ok(s.intent(&identity)?.unwrap())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(intent.state, okx_execution::IntentState::Unknown);
+    // The venue accepted the order before the crash; this explicit later fill
+    // arrives after reconnect. Publish its timestamp once, while capture is
+    // serialized. Never replay an old row outside the next cursor window.
+    let at = t10_11_publish_fill_sources(feed, 2);
     let mut economics = Vec::new();
     for _ in 0..2 {
         let request = t10_11_f6_request();
@@ -489,7 +650,10 @@ pub(super) async fn t10_11_hold_unsent_reply(
                     },
                 )
                 | (
-                    T10_11UnsentPhase::F3 | T10_11UnsentPhase::F5 | T10_11UnsentPhase::F6,
+                    T10_11UnsentPhase::F3
+                    | T10_11UnsentPhase::F5
+                    | T10_11UnsentPhase::F6
+                    | T10_11UnsentPhase::F7,
                     RiskCommandAction::Inspect {
                         reservation_key, ..
                     },
@@ -521,6 +685,7 @@ pub(super) async fn t10_11_hold_unsent_reply(
         T10_11UnsentPhase::F5 | T10_11UnsentPhase::F6 => {
             (RiskDecisionStatus::Observed, Some("POSTING"))
         }
+        T10_11UnsentPhase::F7 => (RiskDecisionStatus::Observed, Some("FILLED")),
         T10_11UnsentPhase::F8 => (RiskDecisionStatus::Updated, Some("REJECTED")),
     };
     assert_eq!(
@@ -553,7 +718,14 @@ pub(super) async fn t10_11_hold_unsent_reply(
     if probe.phase == T10_11UnsentPhase::F8 {
         assert_eq!(sql["terminal_receipt"]["kind"], "REJECTED_UNSENT");
     }
-    assert_eq!(sql["exchange_order_id"], serde_json::Value::Null);
+    assert_eq!(
+        sql["exchange_order_id"],
+        if probe.phase == T10_11UnsentPhase::F7 {
+            serde_json::json!("123456")
+        } else {
+            serde_json::Value::Null
+        }
+    );
     if probe.phase.before_reserve() {
         assert_eq!(result.reason.as_deref(), Some("RISK_RESERVATION_NOT_FOUND"));
         assert!(result.reservation_key.is_none());
@@ -566,11 +738,37 @@ pub(super) async fn t10_11_hold_unsent_reply(
         );
     }
     let posts = probe.feed.outbound_posts.lock().unwrap().len();
-    assert_eq!(posts, usize::from(probe.phase == T10_11UnsentPhase::F6));
+    assert_eq!(
+        posts,
+        usize::from(matches!(
+            probe.phase,
+            T10_11UnsentPhase::F6 | T10_11UnsentPhase::F7
+        ))
+    );
     if probe.phase == T10_11UnsentPhase::F6 {
         assert!(probe.feed.lost_create_ack_was_consumed());
         assert_eq!(probe.feed.unconsumed_posts(), 0);
     }
+    let owner = ctx.accounts.resolve("fixture-a").await.unwrap();
+    let sql_path = probe
+        .root
+        .join("accounts")
+        .join(crate::accounts::key_hash(&owner.configuration.account_key))
+        .join("account.sqlite");
+    let projection_boundary = if probe.phase == T10_11UnsentPhase::F7 {
+        assert_eq!(
+            result.reservation_state,
+            Some(okx_protocol::risk_authority::RiskReservationState::Posted)
+        );
+        assert_eq!(sql["terminal_receipt"]["kind"], "TERMINAL");
+        assert_eq!(probe.feed.unconsumed_reads(), 0);
+        let facts = t10_11_projection_snapshot(&sql_path);
+        assert_eq!(facts["counts"], serde_json::json!([1, 1, 0, 1]));
+        assert_eq!(facts["fee"], "-0.0005");
+        Some(facts)
+    } else {
+        None
+    };
     let handoff = std::env::var("OKX_INTEGRATION_HANDOFF_PATH").unwrap();
     t10_12_publish(
         &format!("{handoff}.t11-native-kill-ready"),
@@ -583,7 +781,8 @@ pub(super) async fn t10_11_hold_unsent_reply(
             "claimed_budget":probe.claimed_budget,
             "candidate_reservation_key":probe.reservation_key,
             "source_floor_ms":probe.source_floor_ms,
-            "venue_posts":posts,
+            "venue_posts":posts,"projection_boundary":projection_boundary,
+            "sql_path":sql_path,"account_key":owner.configuration.account_key.wire(),
             "venue_ack_lost":probe.feed.lost_create_ack_was_consumed(),
         }),
     );
@@ -658,7 +857,8 @@ async fn native_crash_unsent_boundary() {
                         // Execute binds manual decisions to the same owner as
                         // the plan. Source capture and pending-fill projection
                         // must agree on that canonical financial owner in F6.
-                        instance_id: (phase == T10_11UnsentPhase::F6).then(|| "manual".into()),
+                        instance_id: matches!(phase, T10_11UnsentPhase::F6 | T10_11UnsentPhase::F7)
+                            .then(|| "manual".into()),
                         decision_at: if phase == T10_11UnsentPhase::F1 {
                             now - 2
                         } else {
@@ -823,7 +1023,8 @@ async fn native_crash_unsent_boundary() {
         reservation_key: key.clone(),
         account_key: owner.configuration.account_key.wire(),
         installation_id: "installation_test".into(),
-        instance_id: (phase == T10_11UnsentPhase::F6).then(|| "manual".into()),
+        instance_id: matches!(phase, T10_11UnsentPhase::F6 | T10_11UnsentPhase::F7)
+            .then(|| "manual".into()),
         intent_id: saved.intent_id.clone(),
         plan_hash: saved.plan_hash.clone(),
         policy_revision: 2,
@@ -864,7 +1065,10 @@ async fn native_crash_unsent_boundary() {
     }
     if matches!(
         phase,
-        T10_11UnsentPhase::F4 | T10_11UnsentPhase::F5 | T10_11UnsentPhase::F6
+        T10_11UnsentPhase::F4
+            | T10_11UnsentPhase::F5
+            | T10_11UnsentPhase::F6
+            | T10_11UnsentPhase::F7
     ) {
         // Explicit boundary inputs, not a claim that the fixture performed a
         // full observer/final-quote admission. Worker validates the real CAS.
@@ -974,7 +1178,7 @@ async fn native_crash_unsent_boundary() {
                 plan_sha256: saved.plan_hash.clone(),
             },
         };
-        if phase == T10_11UnsentPhase::F6 {
+        if matches!(phase, T10_11UnsentPhase::F6 | T10_11UnsentPhase::F7) {
             use crate::accounts::recorded_support::RecordedPost;
             let request = t10_11_f6_request();
             sent_feed.expect_post(RecordedPost {
@@ -986,12 +1190,43 @@ async fn native_crash_unsent_boundary() {
                 }]}))
                 .unwrap(),
             });
-            sent_feed.arm_lost_next_create_ack();
+            if phase == T10_11UnsentPhase::F6 {
+                sent_feed.arm_lost_next_create_ack();
+            }
             let timing = okx_api::MutationTiming::from_exchange_time_ms(
                 chrono::Utc::now().timestamp_millis() as u64,
                 2000,
             )
             .unwrap();
+            if phase == T10_11UnsentPhase::F7 {
+                crate::trade_service::post_once(
+                    &owner.execution.store,
+                    &saved,
+                    std::time::Instant::now() + Duration::from_secs(3),
+                    || async {
+                        owner
+                            .execution
+                            .trade
+                            .place_order(&request, &timing)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                )
+                .await
+                .unwrap()
+                .expect("F7 genuine send must be claimed");
+                t10_11_f7_capture_boundary(
+                    &ctx,
+                    &owner,
+                    &sent_feed,
+                    &saved,
+                    &risk,
+                    inspect,
+                    &mut session,
+                )
+                .await;
+                panic!("F7 must be killed before projection");
+            }
             let result = crate::trade_service::post_once(
                 &owner.execution.store,
                 &saved,
@@ -1044,6 +1279,11 @@ async fn native_crash_unsent_recover() {
             .to_string_lossy()
             .starts_with("okx-raw-native-session-")
     );
+    let projection_recovery = if phase == T10_11UnsentPhase::F7 {
+        Some(t10_11_f7_project_original(&root, &original).await)
+    } else {
+        None
+    };
     let (ctx, reopened_root, risk, risk_rx, feed, _) =
         test_dispatch_with_root("installation_test", Some(root.clone())).await;
     assert_eq!(root, reopened_root);
@@ -1066,6 +1306,49 @@ async fn native_crash_unsent_recover() {
     let mut read = summary("summary_t11_f2_reopened");
     read.installation_id = "installation_test".into();
     let worker_before = risk.request(read).await.unwrap();
+    if phase == T10_11UnsentPhase::F7 {
+        let after = t10_11_sql_snapshot(&ctx.accounts, id).await;
+        assert_eq!(before, after);
+        let mut read = summary("summary_t11_f7_replayed");
+        read.installation_id = "installation_test".into();
+        let worker_after = risk.request(read).await.unwrap();
+        assert_eq!(worker_after.budget, worker_before.budget);
+        assert_eq!(
+            worker_after.risk_book_sequence,
+            worker_before.risk_book_sequence
+        );
+        assert_eq!(
+            serde_json::to_value(&worker_after.budget).unwrap(),
+            original["claimed_budget"]
+        );
+        assert!(
+            feed.as_ref()
+                .unwrap()
+                .outbound_posts
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), session)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        ctx.accounts.shutdown().await;
+        println!(
+            "T10_11_NATIVE_UNSENT_RECOVERY_V1:{}",
+            serde_json::json!({
+                "schema":"okx.t10-11-native-unsent-recovery/v1","phase":"F7",
+                "pid":std::process::id(),"root":root,"before":before,"after":after,
+                "worker_before":worker_before,"worker_after":worker_after,
+                "venue_posts":0,"original_sql_reopened":true,"production_recovery_replayed":true,
+                "recovered":projection_recovery,
+                "scope":"production SQL pending-fill projection before consumers restart; no fresh NAV or risk release claimed"
+            })
+        );
+        return;
+    }
     if phase == T10_11UnsentPhase::F6 {
         let owner = ctx.accounts.resolve("fixture-a").await.unwrap();
         let feed = feed.unwrap();

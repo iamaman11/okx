@@ -19,6 +19,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+// A test can stop its own capture after durable raw facts, before projection.
+// Task-local scope cannot pause another account or a background capture.
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_AFTER_HISTORY: Arc<tokio::sync::Notify>;
+}
+
 fn invalid(reason: &str) -> AgentError {
     AgentError::FinancialCaptureTask(reason.into())
 }
@@ -510,6 +517,11 @@ pub(crate) async fn capture_account_sources_traced(
         );
     }
     let (spot, margin, swap, futures, options, bills) = history_result?;
+    #[cfg(test)]
+    if let Ok(ready) = TEST_AFTER_HISTORY.try_with(Arc::clone) {
+        ready.notify_one();
+        std::future::pending::<()>().await;
+    }
     let history_and_ingest_ms = phase_elapsed_ms(history_started);
     if private_ws.status().await.connection_generation != initial.connection_generation {
         return Err(invalid("SOURCE_GENERATION_CHANGED"));

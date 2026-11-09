@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import {actualNativeWorker} from "../native-workerd.mjs";
+import {actualNativeWorker,hash} from "../native-workerd.mjs";
 const exec = promisify(execFile);
 const marker = "T10_11_NATIVE_WINDOWS_OS_KILLS_V2:";
 const recordMarker = "T10_11_NATIVE_WINDOWS_OS_KILL_RECORD_V2:";
@@ -22,9 +22,10 @@ export async function run({caseId,root,signal,artifactsDir}) {
   const {stdout:sha}=await exec("git",["rev-parse","HEAD"],{cwd:root,signal,windowsHide:true});
   // Connected Native/Worker boundaries. Do not count the following
   // 60 isolated component kills as 90 complete cross-owner proofs.
+  const connectedRecords=[];
   try {
     const roots=new Set();
-    for(const phase of ["F6","F5","F0","F1","F2","F3","F4","F8"]){
+    for(const phase of ["F7","F6","F5","F0","F1","F2","F3","F4","F8"]){
     process.env.OKX_T10_11_NATIVE_CRASH=phase;
     const repetitions=[];
     for(let repetition=1;repetition<=10;repetition++){
@@ -36,7 +37,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
       if(["F0","F1"].includes(phase)){
         assert.equal(connected.nativeUnsent.persisted_worker.inspected.reason,"RISK_RESERVATION_NOT_FOUND");
       }else{
-        assert.equal(connected.nativeUnsent.persisted_worker.inspected.reservation_state,["F5","F6"].includes(phase)?"POSTED":"RELEASED");
+        assert.equal(connected.nativeUnsent.persisted_worker.inspected.reservation_state,["F5","F6","F7"].includes(phase)?"POSTED":"RELEASED");
       }
       const original=connected.nativeUnsent.boundary.root;
       assert.ok(!roots.has(original),"each repetition must create its own original SQL");
@@ -44,6 +45,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
       const record={source_sha:sha.trim(),phase,repetition,
         elapsed_ms:performance.now()-started,...connected};
       repetitions.push(record);
+      connectedRecords.push(record);
       // Preserve each completed real crash even if a later repetition fails.
       await writeFile(resolve(dir,`native-worker-${phase.toLowerCase()}-process-crash-${repetition}.json`),
         JSON.stringify(record,null,2)+"\n");
@@ -131,5 +133,28 @@ export async function run({caseId,root,signal,artifactsDir}) {
         "zero_duplicate_finance_and_order_on_all_phases",
         "90_actual_os_process_kills_on_one_exact_sha"],
     },null,2)+"\n");
-  throw Error("T10_11_ALL_NINE_NATIVE_WORKER_PHASES_TEN_TIMES_NOT_YET_PROVEN");
+  assert.equal(connectedRecords.length,90);
+  const phases=["F0","F1","F2","F3","F4","F5","F6","F7","F8"];
+  for(const phase of phases)assert.equal(connectedRecords.filter(x=>x.phase===phase).length,10);
+  const nativeProofs=connectedRecords.map(x=>x.nativeUnsent);
+  const projected=nativeProofs.filter(x=>x.phase==="F7");
+  const summary={source_sha:sha.trim(),native_os_kills:90,phases,
+    records:connectedRecords.map(x=>({phase:x.phase,repetition:x.repetition,
+      digest:hash(x),transcript_sha256:x.transcript_sha256})),mandatory_case_pass:true};
+  await writeFile(resolve(dir,"connected-90-crashes.json"),JSON.stringify(summary,null,2)+"\n");
+  return {case_id:caseId,status:"PASS",
+    provenance:{schema:"okx.native-workerd-transcript/v1",sha256:hash(summary)},
+    assertions:[{id:"connected_os_kills",expected:"90",actual:String(nativeProofs.reduce((n,x)=>n+x.native_os_kills,0))},
+      {id:"recovery_venue_posts",expected:"0",actual:String(nativeProofs.reduce((n,x)=>n+x.native.venue_posts,0))},
+      {id:"f7_projection_first",expected:"10",actual:String(projected.reduce((n,x)=>n+x.native.recovered.projections[0].projected,0))},
+      {id:"f7_projection_replay",expected:"0",actual:String(projected.reduce((n,x)=>n+x.native.recovered.projections[1].projected,0))}],
+    events:["native_crash_f0_through_f8_repeated","native_process_restarts_verified",
+      "durable_sql_worker_readbacks","no_duplicate_post_or_finance","unresolved_outcome_not_fabricated"]
+      .map(stage=>({stage,owner:"NativeAccountSQL+RuntimeSessionSQLiteDO",source_digest:hash(summary)})),
+    readbacks:{sql:projected.map(x=>({revision:x.native.recovered.projections[1].finance_revision,digest:hash(x.native.recovered)})),
+      risk_book:nativeProofs.map(x=>({revision:x.persisted_worker.summary.risk_book_sequence,digest:hash(x.persisted_worker)}))},
+    outbound_sends:nativeProofs.map(x=>({account:x.boundary.account_key,
+      intent:x.boundary.root+":"+x.boundary.sql.intent_id,operation_kind:"create",count:x.boundary.venue_posts+x.native.venue_posts})),
+    limitations:["Recorded venue responses; explicit prepare/admission fixture inputs",
+      "F7 projects durable facts through the production SQL owner before reconnect; no fresh NAV or risk release is claimed"]};
 }

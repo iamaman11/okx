@@ -115,6 +115,31 @@ test("F8 cannot replace durable no-send with a terminal or foreign proof",()=>{
     assert.throws(()=>validateUnsentKillBoundary(value));
   }
 });
+
+test("F7 requires persisted raw facts and a pending projection, not an already projected lot",()=>{
+  function pending(){
+    const value=laterBoundary("F3");value.phase="F7";
+    value.sql.state="FILLED";value.sql.exchange_order_id="123456";value.sql.post_fence=null;
+    value.sql.terminal_receipt={kind:"TERMINAL",result_ref:"authenticated-order-readback"};
+    value.worker_result.reservation_state="POSTED";
+    value.claimed_budget={entry_budget:{reserved_usd:"3.0005"}};
+    value.venue_posts=1;value.venue_ack_lost=false;
+    value.sql_path=join(value.root,"accounts","original","account.sqlite");
+    value.projection_boundary={counts:[1,1,0,1],fee:"-0.0005",fills:["fill"],bills:["bill"],fees:["fee"],lots:[]};
+    return value;
+  }
+  const value=pending();assert.equal(validateUnsentKillBoundary(value),value);
+  for(const change of [x=>x.projection_boundary.counts=[1,0,1,1],
+    x=>x.projection_boundary.counts=[0,0,0,0],x=>x.projection_boundary.fee="0",
+    x=>x.projection_boundary.bills=[],x=>x.projection_boundary.fees=["fee","duplicate"],
+    x=>x.projection_boundary.lots=["already-projected"],x=>x.venue_posts=0,x=>x.venue_posts=2,
+    x=>x.venue_ack_lost=true,x=>x.sql.central_release={},x=>x.sql.exchange_order_id=null,
+    x=>x.sql.state="UNKNOWN",x=>x.worker_result.reservation_state="RELEASED",
+    x=>x.sql_path=join(tmpdir(),"unrelated","account.sqlite"),
+    x=>x.sql.terminal_receipt.result_ref="invented"]){
+    const invalid=pending();change(invalid);assert.throws(()=>validateUnsentKillBoundary(invalid));
+  }
+});
 test("F2 kill boundary binds the unacknowledged SQL intent to actual Worker HELD",()=>{
   const value=boundary();assert.equal(validateUnsentKillBoundary(value),value);
 });

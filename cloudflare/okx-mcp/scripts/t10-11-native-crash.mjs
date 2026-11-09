@@ -31,15 +31,15 @@ export function awaitCommitBoundary(ready,nativeProcess,onFailure=failNative){
 
 export function validateUnsentKillBoundary(value){
   assert.equal(value.schema,"okx.t10-11-native-unsent-kill-boundary/v1");
-  assert.ok(["F0","F1","F2","F3","F4","F5","F6","F8"].includes(value.phase));
+  assert.ok(["F0","F1","F2","F3","F4","F5","F6","F7","F8"].includes(value.phase));
   assert.ok(Number.isSafeInteger(value.pid)&&value.pid>0&&value.pid!==process.pid);
   const root=resolve(value.root),within=relative(resolve(tmpdir()),root);
   assert.ok(within&&!within.startsWith("..")&&!isAbsolute(within));
   assert.match(basename(root),/^okx-raw-native-session-[a-f0-9]{32}$/);
   const action=value.command.action;
-  assert.equal(value.venue_posts,value.phase==="F6"?1:0);
+  assert.equal(value.venue_posts,["F6","F7"].includes(value.phase)?1:0);
   if(value.phase==="F6")assert.equal(value.venue_ack_lost,true);
-  assert.equal(value.sql.exchange_order_id,null);
+  assert.equal(value.sql.exchange_order_id,value.phase==="F7"?"123456":null);
   assert.equal(value.sql.central_release,null);
   assert.ok(Number.isSafeInteger(value.source_floor_ms)&&value.source_floor_ms>0);
   if(["F0","F1"].includes(value.phase)){
@@ -66,6 +66,7 @@ export function validateUnsentKillBoundary(value){
     F4:["BEGIN_POST","POST_AUTHORIZED","RESERVED"],
     F5:["INSPECT","OBSERVED","POSTING"],
     F6:["INSPECT","OBSERVED","POSTING"],
+    F7:["INSPECT","OBSERVED","FILLED"],
     F8:["RELEASE_UNSENT","UPDATED","REJECTED"]}[value.phase];
   assert.equal(action.action,expected[0]);
   assert.equal(value.worker_result.status,expected[1]);
@@ -88,16 +89,31 @@ export function validateUnsentKillBoundary(value){
     assert.equal(value.sql.central_receipt.intent_id,value.sql.intent_id);
     assert.equal(value.sql.central_receipt.plan_hash,value.sql.plan_hash);
   }
+  if(value.phase==="F7"){
+    assert.equal(value.worker_result.reservation_state,"POSTED");
+    assert.equal(value.sql.terminal_receipt.kind,"TERMINAL");
+    assert.equal(value.sql.terminal_receipt.result_ref,"authenticated-order-readback");
+    assert.equal(value.sql.post_fence,null);
+    assert.equal(value.venue_ack_lost,false);
+    assert.ok(value.claimed_budget?.entry_budget);
+    assert.deepEqual(value.projection_boundary.counts,[1,1,0,1]);
+    assert.equal(value.projection_boundary.fee,"-0.0005");
+    for(const key of ["fills","bills","fees"])assert.equal(value.projection_boundary[key].length,1);
+    assert.deepEqual(value.projection_boundary.lots,[]);
+    const sql=relative(resolve(value.root,"accounts"),resolve(value.sql_path));
+    assert.ok(sql&&!sql.startsWith("..")&&!isAbsolute(sql));
+    assert.equal(basename(value.sql_path),"account.sqlite");
+  }
   if(value.phase==="F8"){
     assert.equal(value.sql.terminal_receipt.kind,"REJECTED_UNSENT");
     assert.equal(action.proof.intent_id,value.sql.intent_id);
     assert.equal(action.proof.reservation_key,value.sql.reservation_key);
     assert.equal(action.proof.plan_hash,value.sql.plan_hash);
   }
-  assert.equal(value.sql.exchange_order_id,null);
+  assert.equal(value.sql.exchange_order_id,value.phase==="F7"?"123456":null);
   assert.equal(value.sql.plan_hash,action.plan_sha256);
   assert.equal(value.sql.reservation_key,value.worker_result.reservation_key);
-  assert.equal(value.venue_posts,value.phase==="F6"?1:0);
+  assert.equal(value.venue_posts,["F6","F7"].includes(value.phase)?1:0);
   assert.ok(Number.isSafeInteger(value.source_floor_ms)&&value.source_floor_ms>0);
   return value;
 }
@@ -144,7 +160,7 @@ export async function killAndRecoverUnsentNative({nativeProcess,handoffPath,cwd}
   assert.deepEqual(native.before,["F5","F6"].includes(boundary.phase)
     ?{...boundary.sql,state:"UNKNOWN",post_fence:null}:boundary.sql);
   assert.equal(native.original_sql_reopened,true);
-  assert.equal(boundary.phase==="F6"?native.production_recovery_replayed:native.public_recovery_replayed,true);
+  assert.equal(["F6","F7"].includes(boundary.phase)?native.production_recovery_replayed:native.public_recovery_replayed,true);
   assert.equal(native.after.reservation_key,boundary.sql.reservation_key);
   if(["F0","F1"].includes(boundary.phase)){
     assert.equal(native.after.central_release,null);
@@ -196,18 +212,30 @@ export async function killAndRecoverUnsentNative({nativeProcess,handoffPath,cwd}
     assert.equal(economics[0].lot_quantity,"0.1");
     assert.deepEqual(economics[0].totals.filter(x=>x.currency==="USDT"&&x.component==="FEE"),
       [{currency:"USDT",component:"FEE",amount:"-0.0005"}]);
+  }else if(boundary.phase==="F7"){
+    assert.deepEqual(native.after,native.before);
+    assert.equal(native.after.state,"FILLED");
+    assert.equal(native.after.central_release,null);
+    const p=native.recovered;
+    assert.deepEqual(p.before,boundary.projection_boundary);
+    assert.deepEqual(p.after.counts,[1,0,1,1]);
+    for(const key of ["fills","bills","fees","fee"])assert.deepEqual(p.before[key],p.after[key]);
+    assert.deepEqual(p.projections.map(x=>x.projected),[1,0]);
+    assert.ok(p.projections.every(x=>x.lot_quantity==="0.1"));
+    assert.equal(p.projections[0].finance_revision,p.projections[1].finance_revision);
+    assert.equal(p.original_sql_owner_closed_before_reconnect,true);
   }else assert.equal(native.after.central_release.kind,"CENTRAL_RELEASE");
   assert.equal(native.venue_posts,0);
-  assert.deepEqual(native.worker_after.budget,{...(["F5","F6"].includes(boundary.phase)?boundary.claimed_budget:boundary.before_budget),
+  assert.deepEqual(native.worker_after.budget,{...(["F5","F6","F7"].includes(boundary.phase)?boundary.claimed_budget:boundary.before_budget),
     source_as_of_ms:boundary.source_floor_ms});
   if(boundary.phase==="F4")assert.equal(native.old_fence_denial.status,"DENIED");
-  if(["F5","F6","F8"].includes(boundary.phase)){
+  if(["F5","F6","F7","F8"].includes(boundary.phase)){
     assert.equal(native.worker_after.risk_book_sequence,boundary.worker_result.risk_book_sequence);
     assert.equal(native.worker_before.risk_book_sequence,native.worker_after.risk_book_sequence);
     assert.deepEqual(native.worker_before.budget,native.worker_after.budget);
   }
   return {schema:"okx.t10-11-native-unsent-process-crash/v1",
     phase:boundary.phase,native_os_kills:1,boundary,termination,native,
-    input_scope:"direct SQL prepare/reserve and explicit census/causal fixture inputs; actual Native WSS and Worker; public Cancel/Status for unsent; production submission/order observation/source capture for F6",
+    input_scope:"direct SQL prepare/reserve and explicit census/causal fixture inputs; actual Native WSS and Worker; public Cancel/Status for unsent; production submission/order observation/source capture for F6/F7, pending-fill projection through the original SQL owner for F7",
     full_t10_11_pass:false};
 }
