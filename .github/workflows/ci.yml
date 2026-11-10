@@ -364,6 +364,68 @@ jobs:
           if ($code -ne 0) { exit $code }
           if (($output -join "`n") -notmatch '# pass 8\b') { throw 'SCENARIO_LIFECYCLE_TEST_COUNT_INVALID' }
 
+      - name: Build deployable Windows binaries
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          $env:OKX_BUILD_SOURCE_TREE = (git rev-parse "HEAD^{tree}").Trim()
+          cargo build --locked --release -p okx-agent -p okx-host-control -p okx-host-launcher
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+
+          Copy-Item "target\release\okx-agent.exe" (Join-Path $dist "okx-agent.exe")
+          Copy-Item "target\release\okx-host-control.exe" (Join-Path $dist "okx-host-control.exe")
+          Copy-Item "target\release\okx-host-launcher.exe" (Join-Path $dist "okx-host-launcher.exe")
+          Copy-Item "Cargo.lock" (Join-Path $dist "Cargo.lock")
+
+          $sourceHead = (git rev-parse HEAD).Trim()
+          $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
+          $agentHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-agent.exe")).Hash.ToLowerInvariant()
+          $controllerHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-host-control.exe")).Hash.ToLowerInvariant()
+          $launcherHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-host-launcher.exe")).Hash.ToLowerInvariant()
+          $rustVersion = (rustc --version).Trim()
+
+          $manifest = [ordered]@{
+            schema = "okx.windows.bundle/v1"
+            repository_id = 1388071566
+            source_head_sha = $sourceHead
+            source_tree = $sourceTree
+            rust_version = $rustVersion
+            files = [ordered]@{
+              "okx-agent.exe" = [ordered]@{ sha256 = $agentHash }
+              "okx-host-control.exe" = [ordered]@{ sha256 = $controllerHash }
+              "okx-host-launcher.exe" = [ordered]@{ sha256 = $launcherHash }
+            }
+          }
+
+          $manifest |
+            ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath (Join-Path $dist "manifest.json") -Encoding utf8NoBOM
+
+      - name: CI-CLEAN real Windows Agent bootstrap and dirty-root rejection
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
+          ./scripts/test-ci-clean-install.ps1 `
+            -AgentPath "target\\release\\okx-agent.exe" `
+            -ControlPath "target\\release\\okx-host-control.exe" `
+            -LauncherPath "target\\release\\okx-host-launcher.exe" `
+            -ManifestPath (Join-Path $env:RUNNER_TEMP "okx-windows-bundle\\manifest.json") `
+            -SourceTree $sourceTree
+
+      - name: Upload deployable Windows bundle
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}\okx-windows-bundle
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 14
+
       - name: Test native Windows crates
         run: cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution
 
@@ -435,68 +497,6 @@ jobs:
           name: k9-native-two-heavy-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}\k9-native-evidence.json
           if-no-files-found: error
-          retention-days: 14
-
-      - name: Build deployable Windows binaries
-        if: github.event_name == 'pull_request'
-        shell: pwsh
-        run: |
-          $env:OKX_BUILD_SOURCE_TREE = (git rev-parse "HEAD^{tree}").Trim()
-          cargo build --locked --release -p okx-agent -p okx-host-control -p okx-host-launcher
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
-          New-Item -ItemType Directory -Path $dist -Force | Out-Null
-
-          Copy-Item "target\release\okx-agent.exe" (Join-Path $dist "okx-agent.exe")
-          Copy-Item "target\release\okx-host-control.exe" (Join-Path $dist "okx-host-control.exe")
-          Copy-Item "target\release\okx-host-launcher.exe" (Join-Path $dist "okx-host-launcher.exe")
-          Copy-Item "Cargo.lock" (Join-Path $dist "Cargo.lock")
-
-          $sourceHead = (git rev-parse HEAD).Trim()
-          $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
-          $agentHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-agent.exe")).Hash.ToLowerInvariant()
-          $controllerHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-host-control.exe")).Hash.ToLowerInvariant()
-          $launcherHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-host-launcher.exe")).Hash.ToLowerInvariant()
-          $rustVersion = (rustc --version).Trim()
-
-          $manifest = [ordered]@{
-            schema = "okx.windows.bundle/v1"
-            repository_id = 1388071566
-            source_head_sha = $sourceHead
-            source_tree = $sourceTree
-            rust_version = $rustVersion
-            files = [ordered]@{
-              "okx-agent.exe" = [ordered]@{ sha256 = $agentHash }
-              "okx-host-control.exe" = [ordered]@{ sha256 = $controllerHash }
-              "okx-host-launcher.exe" = [ordered]@{ sha256 = $launcherHash }
-            }
-          }
-
-          $manifest |
-            ConvertTo-Json -Depth 8 |
-            Set-Content -LiteralPath (Join-Path $dist "manifest.json") -Encoding utf8NoBOM
-
-      - name: CI-CLEAN real Windows Agent bootstrap and dirty-root rejection
-        if: github.event_name == 'pull_request'
-        shell: pwsh
-        run: |
-          $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
-          ./scripts/test-ci-clean-install.ps1 `
-            -AgentPath "target\\release\\okx-agent.exe" `
-            -ControlPath "target\\release\\okx-host-control.exe" `
-            -LauncherPath "target\\release\\okx-host-launcher.exe" `
-            -ManifestPath (Join-Path $env:RUNNER_TEMP "okx-windows-bundle\\manifest.json") `
-            -SourceTree $sourceTree
-
-      - name: Upload deployable Windows bundle
-        if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}\okx-windows-bundle
-          if-no-files-found: error
-          compression-level: 9
           retention-days: 14
 
   # Manually dispatched from the existing CI workflow on the selected PR
