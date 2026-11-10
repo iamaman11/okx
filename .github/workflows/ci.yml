@@ -308,7 +308,7 @@ jobs:
       - name: Parse Windows bootstrap scripts before expensive compilation
         shell: pwsh
         run: |
-          foreach ($script in @('scripts/test-ci-clean-install.ps1', 'scripts/test-ci-native-entrypoint-bootstrap.ps1')) {
+          foreach ($script in @('scripts/test-ci-clean-install.ps1', 'scripts/test-ci-native-entrypoint-bootstrap.ps1', 'scripts/windows-bootstrap-release.ps1')) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile(
