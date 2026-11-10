@@ -76,6 +76,43 @@ The migration receipt proves the bytes moved; it does not prove a successful
 installation, OAuth login, connected Engine, restored account identity or trading.
 Those need separate readbacks after the accepted GitHub release is installed.
 
+## One-time recovery when CONTROL cannot answer
+
+Use the existing GitHub CONTROL for normal upgrades. If its entrypoint is
+missing and Scheduler targets a missing EXE, ChatGPT cannot repair that host
+remotely. Perform one bounded local bootstrap, not another permanent service.
+
+1. Review and run scripts/windows-install-preflight.ps1 in PowerShell 7.
+   The output shows only root/EXE/Scheduler/process presence; it never reads
+   SQL contents or secrets, and it changes nothing.
+2. If legacy roots remain, run scripts/windows-unify-root.ps1 first in plan
+   mode. Use -Apply only after stopping the installed processes and verifying
+   the physical inventory and journal. Preserve existing SQL/WAL/SHM; do not
+   initialize another account over it or delete conflicting state.
+3. After protected merge to main, and a matching published production recovery
+   release from the accepted tree, execute from the reviewed source checkout:
+
+       pwsh -NoProfile -File .\scripts\windows-bootstrap-release.ps1 -MainSha <accepted-40-character-main-sha>
+
+   The script checks the canonical current main, release tag/assets, archive
+   SHA-256, bundle manifest, all three binaries and tested source tree. It
+   refuses legacy roots, running processes, existing entrypoint, active
+   Launcher state and enabled Scheduler. It uses only the existing native
+   controller install operation and returns
+   CONTROLLER_ENTRYPOINT_RESTORED_NOT_RUNNING.
+4. Start C:\okx\control\okx-host-control.exe run as a temporary foreground
+   operation on the workstation. Once it responds, use existing typed GitHub
+   CONTROL to install the verified launcher/Agent, enable one canonical
+   Scheduler task and read back the live PID, hashes and release identity.
+5. Deploy the same accepted main tree using the existing main-only
+   cloudflare-mcp-deploy.yml and verify OAuth, MCP tools/list, WSS, Windows
+   read-only account and research workflows. CI or /health alone is not
+   installed/physical acceptance.
+
+These scripts do not authorize exchange POST, reset RiskBook, clear old
+campaign spending, or prove REAL readiness. There is no destructive fallback
+for unknown or inconsistent host state.
+
 ## Acceptance
 
 - `scripts/test-windows-unify-root.ps1`: exact byte/empty-directory preservation,
