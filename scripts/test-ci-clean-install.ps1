@@ -90,3 +90,6 @@ try {
     # Only this isolated test-owned directory; never installed C:\okx data.
     if (Test-Path -LiteralPath $fixture) { [IO.Directory]::Delete($fixture, $true) }
 }
+# Expected negative native invocations leave LASTEXITCODE=1. All contracts above
+# passed; return success explicitly rather than leaking that intentional failure.
+exit 0
