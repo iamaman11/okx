@@ -67,6 +67,27 @@ fn write_new(path: &Path, bytes: &[u8]) -> AgentResult<()> {
     File::open(parent)?.sync_all()?;
     Ok(())
 }
+// A clean epoch must never be initialized alongside unknown financial state.
+// Only files belonging to the verified binary bootstrap and the engine lease
+// may precede the first account catalog. A retry may also contain its own
+// durable operation receipt. Existing SQL, WAL, backups and legacy metadata
+// are *not* evidence of a clean installation.
+fn require_clean_installation_root(root: &Path, retry: bool) -> AgentResult<()> {
+    for item in fs::read_dir(root)? {
+        let item = item?;
+        let kind = item.file_type()?;
+        let allowed = match item.file_name().to_str() {
+            Some("engine.lock" | "okx-agent.exe" | "installed-agent.json") => kind.is_file(),
+            Some("installation-operation.json") if retry => kind.is_file(),
+            _ => false,
+        };
+        if !allowed {
+            return Err(error("INSTALLATION_ROOT_NOT_CLEAN"));
+        }
+    }
+    Ok(())
+}
+
 fn installation(root: &Path) -> AgentResult<String> {
     Ok(account_catalog_proto::load(root)?.installation_id)
 }
@@ -140,6 +161,7 @@ pub async fn initialize_installation(
                 return Err(error("INSTALLATION_MISMATCH"));
             }
         } else {
+            require_clean_installation_root(root, true)?;
             crate::accounts::initialize_installation(root, installation_id)?;
         }
         return Ok(reply(installation_id, operation_id, None, json!({})));
@@ -147,6 +169,9 @@ pub async fn initialize_installation(
     if root.join(account_catalog_proto::CATALOG_FILE).exists() {
         return Err(error("INSTALLATION_ALREADY_EXISTS"));
     }
+    // Refuse before publishing any operation state: a missing catalog does
+    // not make an existing runtime or financial database a clean root.
+    require_clean_installation_root(root, false)?;
     write_new(&op_path, &serde_json::to_vec(&expected)?)?;
     crate::accounts::initialize_installation(root, installation_id)?;
     Ok(reply(installation_id, operation_id, None, json!({})))
@@ -342,6 +367,41 @@ mod tests {
             hash(&target).unwrap(),
             format!("{:x}", Sha256::digest(b"committed"))
         );
+    }
+    #[test]
+    fn clean_installation_guard_rejects_financial_residue_without_writing() {
+        let root = root();
+        let sql = root.join("accounts").join("previous").join("account.sqlite");
+        fs::create_dir_all(sql.parent().unwrap()).unwrap();
+        fs::write(&sql, b"original-sql-content").unwrap();
+        let err = require_clean_installation_root(&root, false).unwrap_err();
+        assert!(err.to_string().contains("INSTALLATION_ROOT_NOT_CLEAN"));
+        assert_eq!(fs::read(&sql).unwrap(), b"original-sql-content");
+        assert!(!root.join("installation-operation.json").exists());
+        assert!(!root.join(account_catalog_proto::CATALOG_FILE).exists());
+    }
+    #[test]
+    fn clean_installation_guard_distinguishes_new_epoch_and_retry() {
+        let root = root();
+        fs::write(root.join("engine.lock"), b"").unwrap();
+        fs::write(root.join("okx-agent.exe"), b"verified-agent-by-owner").unwrap();
+        fs::write(root.join("installed-agent.json"), b"verified-release-provenance").unwrap();
+        assert!(require_clean_installation_root(&root, false).is_ok());
+
+        fs::write(root.join("installation-operation.json"), b"durable-operation").unwrap();
+        assert!(require_clean_installation_root(&root, true).is_ok());
+        assert!(require_clean_installation_root(&root, false).is_err());
+
+        // A legacy identity marker is an explicit conflict even on retry.
+        fs::write(root.join("installation.json"), b"old-installation").unwrap();
+        assert!(require_clean_installation_root(&root, true).is_err());
+    }
+    #[test]
+    fn clean_installation_guard_rejects_unknown_files_and_links() {
+        let root = root();
+        fs::write(root.join("unexpected-backup"), b"do-not-touch").unwrap();
+        assert!(require_clean_installation_root(&root, false).is_err());
+        assert_eq!(fs::read(root.join("unexpected-backup")).unwrap(), b"do-not-touch");
     }
     #[test]
     fn storage_keys_cannot_select_arbitrary_paths() {
