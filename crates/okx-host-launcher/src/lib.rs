@@ -14,16 +14,19 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const REPOSITORY_ID: u64 = 1_388_071_566;
-pub const CONTROL_ROOT: &str = r"C:\okx-control";
-pub const LAUNCHER_PATH: &str = r"C:\okx-control\okx-host-launcher.exe";
-pub const ENTRYPOINT_PATH: &str = r"C:\okx-control\okx-host-control.exe";
-pub const VERSIONS_ROOT: &str = r"C:\okx-control\versions";
-pub const ACTIVE_PATH: &str = r"C:\okx-control\active-controller.json";
-pub const STAGED_PATH: &str = r"C:\okx-control\staged-controller.json";
-pub const PENDING_PATH: &str = r"C:\okx-control\activation\pending.json";
-pub const READY_PATH: &str = r"C:\okx-control\activation\ready.json";
-pub const LAST_RESULT_PATH: &str = r"C:\okx-control\activation\last-result.json";
-pub const FAIL_NEXT_PATH: &str = r"C:\okx-control\activation\fail-next.json";
+pub const PRODUCT_ROOT: &str = r"C:\okx";
+pub const CONTROL_ROOT: &str = r"C:\okx\control";
+pub const RUNTIME_ROOT: &str = r"C:\okx\runtime";
+pub const WORKSPACE_ROOT: &str = r"C:\okx\workspace";
+pub const LAUNCHER_PATH: &str = r"C:\okx\control\okx-host-launcher.exe";
+pub const ENTRYPOINT_PATH: &str = r"C:\okx\control\okx-host-control.exe";
+pub const VERSIONS_ROOT: &str = r"C:\okx\control\versions";
+pub const ACTIVE_PATH: &str = r"C:\okx\control\active-controller.json";
+pub const STAGED_PATH: &str = r"C:\okx\control\staged-controller.json";
+pub const PENDING_PATH: &str = r"C:\okx\control\activation\pending.json";
+pub const READY_PATH: &str = r"C:\okx\control\activation\ready.json";
+pub const LAST_RESULT_PATH: &str = r"C:\okx\control\activation\last-result.json";
+pub const FAIL_NEXT_PATH: &str = r"C:\okx\control\activation\fail-next.json";
 
 const ACTIVE_SCHEMA_V1: &str = "okx.host-launcher.active/v1";
 const STAGED_SCHEMA_V1: &str = "okx.host-launcher.staged/v1";
@@ -1388,7 +1391,12 @@ mod tests {
                 .join("c".repeat(64))
                 .join("okx-host-control.exe")
         );
-        assert!(!value.binary_path().expect("path").starts_with(r"C:\okx\"));
+        assert!(
+            !value
+                .binary_path()
+                .expect("path")
+                .starts_with(WORKSPACE_ROOT)
+        );
     }
 
     #[test]
@@ -1440,8 +1448,20 @@ mod tests {
             LAST_RESULT_PATH,
             FAIL_NEXT_PATH,
         ] {
-            assert!(!Path::new(path).starts_with(r"C:\okx\"));
+            assert!(path == CONTROL_ROOT || path.starts_with(&format!("{CONTROL_ROOT}\\")));
+            assert!(!Path::new(path).starts_with(WORKSPACE_ROOT));
+            assert!(!Path::new(path).starts_with(RUNTIME_ROOT));
         }
+    }
+
+    #[test]
+    fn installed_roots_share_one_product_root_and_keep_workspace_separate() {
+        assert_eq!(CONTROL_ROOT, format!("{PRODUCT_ROOT}\\control"));
+        assert_eq!(RUNTIME_ROOT, format!("{PRODUCT_ROOT}\\runtime"));
+        assert_eq!(WORKSPACE_ROOT, format!("{PRODUCT_ROOT}\\workspace"));
+        assert_ne!(CONTROL_ROOT, RUNTIME_ROOT);
+        assert_ne!(CONTROL_ROOT, WORKSPACE_ROOT);
+        assert_ne!(RUNTIME_ROOT, WORKSPACE_ROOT);
     }
 
     #[test]

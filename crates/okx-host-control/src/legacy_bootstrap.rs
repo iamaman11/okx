@@ -15,10 +15,10 @@ use crate::{
     single_instance::SingleInstanceGuard,
 };
 
-const CONTROLLER_PATH: &str = r"C:\okx-control\okx-host-control.exe";
-const STAGED_CONTROLLER_PATH: &str = r"C:\okx-control\update\okx-host-control.exe.staged";
-const PENDING_PATH: &str = r"C:\okx-control\update\pending-controller-update.json";
-const INSTALLED_PROVENANCE_PATH: &str = r"C:\okx-control\installed-controller.json";
+const CONTROLLER_PATH: &str = okx_host_launcher::ENTRYPOINT_PATH;
+const STAGED_CONTROLLER_PATH: &str = r"C:\okx\control\update\okx-host-control.exe.staged";
+const PENDING_PATH: &str = r"C:\okx\control\update\pending-controller-update.json";
+const INSTALLED_PROVENANCE_PATH: &str = r"C:\okx\control\installed-controller.json";
 const PENDING_SCHEMA_V1: &str = "okx.host-control.controller-update/v1";
 const INSTALLED_SCHEMA_V1: &str = "okx.host-control.installed-controller/v1";
 

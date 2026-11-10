@@ -15,7 +15,7 @@ use crate::{
     control_ack::{AckOperation, matches_durable_ack},
 };
 
-const ROOT_MIGRATION_PATH: &str = r"C:\okx-control\root-migration.json";
+const ROOT_MIGRATION_PATH: &str = r"C:\okx\control\root-migration.json";
 const ROOT_MIGRATION_SCHEMA_V1: &str = "okx.host-control.root-migration/v1";
 #[cfg(windows)]
 const ROOT_MIGRATION_MUTEX: &str = r"Local\iamaman11-okx-root-migration";
@@ -147,7 +147,7 @@ pub fn spawn_migrator() -> HostControlResult<Value> {
         return Err(HostControlError::ControllerUpdateTerminalAckMissing);
     }
 
-    let root = Path::new(r"C:\okx-control");
+    let root = Path::new(okx_host_launcher::CONTROL_ROOT);
     let stdout = OpenOptions::new()
         .create(true)
         .append(true)
@@ -445,8 +445,8 @@ mod tests {
 
     #[test]
     fn migration_state_is_fixed_outside_workspace() {
-        assert!(Path::new(ROOT_MIGRATION_PATH).starts_with(r"C:\okx-control"));
-        assert!(!Path::new(ROOT_MIGRATION_PATH).starts_with(r"C:\okx\"));
+        assert!(ROOT_MIGRATION_PATH.starts_with(&format!("{}\\", okx_host_launcher::CONTROL_ROOT)));
+        assert!(!Path::new(ROOT_MIGRATION_PATH).starts_with(okx_host_launcher::WORKSPACE_ROOT));
     }
 
     #[test]

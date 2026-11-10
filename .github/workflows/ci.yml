@@ -314,6 +314,10 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Windows installation root migration contracts
+        shell: pwsh
+        run: ./scripts/test-windows-unify-root.ps1
+
       - name: Fast entry settlement production-boundary tests (#495)
         shell: pwsh
         run: |

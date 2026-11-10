@@ -55,8 +55,7 @@ pub async fn deploy_agent(
     artifact_id: u64,
     expected_source_tree: &str,
 ) -> HostControlResult<Value> {
-    let bundle =
-        verified_bundle(github, executor, run_id, artifact_id, expected_source_tree).await?;
+    let bundle = verified_bundle(github, run_id, artifact_id, expected_source_tree).await?;
 
     let declared_agent_hash = declared_hash(&bundle.manifest, "okx-agent.exe")?;
     let actual_agent_hash = sha256_hex(&bundle.agent_bytes);
@@ -90,14 +89,13 @@ pub async fn deploy_agent(
 
 pub async fn install_launcher_root(
     github: &GitHubClient,
-    executor: &HostExecutor,
+    _executor: &HostExecutor,
     request_id: &str,
     run_id: u64,
     artifact_id: u64,
     expected_source_tree: &str,
 ) -> HostControlResult<Value> {
-    let bundle =
-        verified_bundle(github, executor, run_id, artifact_id, expected_source_tree).await?;
+    let bundle = verified_bundle(github, run_id, artifact_id, expected_source_tree).await?;
 
     let launcher_bytes =
         bundle
@@ -153,14 +151,13 @@ pub async fn install_launcher_root(
 
 pub async fn upgrade_launcher_root(
     github: &GitHubClient,
-    executor: &HostExecutor,
+    _executor: &HostExecutor,
     run_id: u64,
     artifact_id: u64,
     expected_source_tree: &str,
     expected_current_launcher_sha256: &str,
 ) -> HostControlResult<Value> {
-    let bundle =
-        verified_bundle(github, executor, run_id, artifact_id, expected_source_tree).await?;
+    let bundle = verified_bundle(github, run_id, artifact_id, expected_source_tree).await?;
 
     let launcher_bytes =
         bundle
@@ -205,13 +202,12 @@ pub async fn upgrade_launcher_root(
 
 pub async fn stage_controller_update(
     github: &GitHubClient,
-    executor: &HostExecutor,
+    _executor: &HostExecutor,
     run_id: u64,
     artifact_id: u64,
     expected_source_tree: &str,
 ) -> HostControlResult<Value> {
-    let bundle =
-        verified_bundle(github, executor, run_id, artifact_id, expected_source_tree).await?;
+    let bundle = verified_bundle(github, run_id, artifact_id, expected_source_tree).await?;
 
     let declared_controller_hash = declared_hash(&bundle.manifest, "okx-host-control.exe")?;
     let actual_controller_hash = sha256_hex(&bundle.controller_bytes);
@@ -234,7 +230,6 @@ pub async fn stage_controller_update(
 
 async fn verified_bundle(
     github: &GitHubClient,
-    executor: &HostExecutor,
     run_id: u64,
     artifact_id: u64,
     expected_source_tree: &str,
@@ -277,8 +272,11 @@ async fn verified_bundle(
         ));
     }
 
-    let origin_main_tree = executor.fetch_origin_main_tree()?;
-    if origin_main_tree != bundle.manifest.source_tree {
+    // Keep the accepted-main policy, but resolve immutable source identity
+    // through GitHub instead of requiring Git/source on the installed host.
+    let tested_tree = github.repository_commit_tree(&run.head_sha).await?;
+    let main_tree = github.repository_commit_tree("main").await?;
+    if tested_tree != bundle.manifest.source_tree || main_tree != bundle.manifest.source_tree {
         return Err(HostControlError::ArtifactSourceTreeMismatch);
     }
 

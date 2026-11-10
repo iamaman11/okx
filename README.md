@@ -1,5 +1,8 @@
 # OKX — one Engine, one installed Windows runtime
 
+Windows uses one product root, `C:\okx`, with separate `control` and `runtime`
+directories. See [installation, migration and verified GitHub updates](docs/windows-installation.md).
+
 **Normative specification:** [#448](https://github.com/iamaman11/okx/issues/448) (P0 → P1 → P2; M/T/A; K1–K12; C01–C20).
 **Single implementation cursor:** [#449](https://github.com/iamaman11/okx/issues/449).
 Issue #398 records historical **read-only** acceptance; it is not a competing roadmap or proof of Real execution.
