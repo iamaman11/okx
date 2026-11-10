@@ -526,7 +526,10 @@ jobs:
   windows-entrypoint-bootstrap:
     name: windows-entrypoint-bootstrap
     needs: [classify, windows-agent]
-    if: github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true' && needs.windows-agent.result == 'success'
+    # Installation evidence depends on the built artifact, not unrelated
+    # Native/Worker lifecycle suites in windows-native. If the producer
+    # failed before uploading, download-artifact fails explicitly.
+    if: always() && github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true' && (needs.windows-agent.result == 'success' || needs.windows-agent.result == 'failure')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
