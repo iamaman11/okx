@@ -305,19 +305,21 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - name: Parse CI-CLEAN PowerShell before expensive Windows compilation
+      - name: Parse Windows bootstrap scripts before expensive compilation
         shell: pwsh
         run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Join-Path $PWD 'scripts/test-ci-clean-install.ps1'),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -ne 0) {
-            $errors | ForEach-Object { Write-Error $_.ToString() }
-            throw 'CI_CLEAN_POWERSHELL_SYNTAX_INVALID'
+          foreach ($script in @('scripts/test-ci-clean-install.ps1', 'scripts/test-ci-native-entrypoint-bootstrap.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD $script),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -ne 0) {
+              $errors | ForEach-Object { Write-Error "$script : $($_.ToString())" }
+              throw 'CI_BOOTSTRAP_POWERSHELL_SYNTAX_INVALID'
+            }
           }
 
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
@@ -517,6 +519,38 @@ jobs:
   # Manually dispatched from the existing CI workflow on the selected PR
   # branch. No deployment, no exchange network and no relaxation of the
   # mandatory 26-case pull_request gate.
+
+  # Separate clean Windows VM: download the exact bundle produced above and
+  # invoke the production native CONTROL bootstrap, not a Copy-Item mock.
+  # This deliberately does NOT start Launcher, Agent, Scheduler or venue calls.
+  windows-entrypoint-bootstrap:
+    name: windows-entrypoint-bootstrap
+    needs: [classify, windows-agent]
+    if: github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true' && needs.windows-agent.result == 'success'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/okx-bootstrap-bundle
+
+      - name: Native CONTROL install, idempotency, hash and risk-fence contracts
+        shell: pwsh
+        run: |
+          $head = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          if ($head -cne '${{ github.event.pull_request.head.sha }}') {
+            throw 'CI_BOOTSTRAP_CHECKOUT_HEAD_MISMATCH'
+          }
+          ./scripts/test-ci-native-entrypoint-bootstrap.ps1 `
+            -BundleDirectory (Join-Path $env:RUNNER_TEMP 'okx-bootstrap-bundle') `
+            -ExpectedHead $head `
+            -ExpectedTree $tree
+
   windows-t09-preflight:
     name: windows-t09-b1-s2-targeted
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/work/t10-07-one-campaign-native-20261105')
