@@ -477,6 +477,13 @@ jobs:
             ConvertTo-Json -Depth 8 |
             Set-Content -LiteralPath (Join-Path $dist "manifest.json") -Encoding utf8NoBOM
 
+      - name: CI-CLEAN real Windows Agent bootstrap and dirty-root rejection
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
+          ./scripts/test-ci-clean-install.ps1 -AgentPath "target\\release\\okx-agent.exe" -SourceTree $sourceTree
+
       - name: Upload deployable Windows bundle
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
