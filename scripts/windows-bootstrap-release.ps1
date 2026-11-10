@@ -135,17 +135,36 @@ try {
         (Test-Path -LiteralPath 'C:\okx-control') -or (Test-Path -LiteralPath 'C:\okx-runtime')) {
         throw 'Main or local installation state changed; refusing install.'
     }
+    # The installed offline inspector requires the same independently
+    # verified manifest. Preserve it; never overwrite a conflicting manifest.
+    # It is local provenance evidence, not a second remote trust authority.
+    $installedManifest = 'C:\okx\control\manifest.json'
+    $manifestHash = Get-ExpectedChecksum $checksums 'manifest.json'
+    if (Test-Path -LiteralPath $installedManifest) {
+        $existingManifest = Get-Item -LiteralPath $installedManifest -Force
+        if ($existingManifest.PSIsContainer -or
+            $existingManifest.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Existing release manifest is not a plain file.'
+        }
+        Assert-Sha256 $installedManifest $manifestHash
+    } else {
+        [IO.File]::Copy((Join-Path $extract 'manifest.json'), $installedManifest, $false)
+        Assert-Sha256 $installedManifest $manifestHash
+    }
+
     $native = Join-Path $extract 'okx-host-control.exe'
     & $native install
     if ($LASTEXITCODE -ne 0) { throw 'Existing native install failed.' }
     $controllerHash = [string]$manifest.files.PSObject.Properties['okx-host-control.exe'].Value.sha256
     Assert-Sha256 $entrypoint $controllerHash
+    Assert-Sha256 $installedManifest $manifestHash
     [ordered]@{
         schema = 'okx.windows.bootstrap-result/v1'
         state = 'CONTROLLER_ENTRYPOINT_RESTORED_NOT_RUNNING'
         main_sha = $MainSha
         source_tree = $sourceTree
         controller_sha256 = $controllerHash
+        manifest_sha256 = $manifestHash
         next = 'Use native CONTROL to install the launcher/autostart/Agent; then verify MCP.'
         financial_state = 'NOT_TOUCHED_OR_VERIFIED'
         cloudflare = 'NOT_DEPLOYED_OR_VERIFIED'
