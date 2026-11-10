@@ -1651,8 +1651,8 @@ mod tests {
 
         let created = install_current_executable(&entrypoint).expect("first native install");
         assert_eq!(created["disposition"], "CREATED");
-        let expected_hash = okx_host_launcher::sha256_file(&std::env::current_exe().unwrap())
-            .expect("source SHA");
+        let expected_hash =
+            okx_host_launcher::sha256_file(&std::env::current_exe().unwrap()).expect("source SHA");
         assert_eq!(
             okx_host_launcher::sha256_file(&entrypoint).unwrap(),
             expected_hash
