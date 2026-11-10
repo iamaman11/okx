@@ -78,10 +78,24 @@ try {
         throw 'CLEAN_INSPECT_TAMPERED_AGENT_NOT_BLOCKED'
     }
 
-    # Fresh installation and repeat of the exact durable operation.
-    $clean = Join-Path $fixture 'clean'
-    New-Item -ItemType Directory -Path $clean | Out-Null
+    # Run initialisation in the SAME runtime that received the release
+    # Agent binary, not a second synthetic empty root. Restore only our
+    # deliberately tampered fixture binary first and recheck its exact hash.
+    Copy-Item -LiteralPath $AgentPath -Destination (Join-Path $runtime 'okx-agent.exe') -Force
+    $agentDeclared = [string]$manifest.files.PSObject.Properties['okx-agent.exe'].Value.sha256
+    if ((Get-FileHash -LiteralPath (Join-Path $runtime 'okx-agent.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $agentDeclared) {
+        throw 'CLEAN_INSTALL_AGENT_RESTORE_HASH_MISMATCH'
+    }
+    $clean = $runtime
     Invoke-CleanInitialize -Root $clean -Operation $operation -ShouldPass $true
+    $afterIdentity = & $ControlPath inspect --control-root $control --runtime-root $clean | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or
+        $afterIdentity.account_catalog_present -ne $true -or
+        $afterIdentity.state -cne 'BLOCKED_AGENT_PROVENANCE' -or
+        $afterIdentity.central_risk -cne 'UNKNOWN' -or
+        $afterIdentity.trading_permission -cne 'NEW_RISK_BLOCKED') {
+        throw 'CLEAN_INSTALL_GENESIS_SAME_RELEASE_ROOT_NOT_RISK_BLOCKED'
+    }
     $catalog = Join-Path $clean 'account-catalog.pb'
     $op = Join-Path $clean 'installation-operation.json'
     if (!(Test-Path -LiteralPath $catalog) -or !(Test-Path -LiteralPath $op)) {
@@ -123,6 +137,7 @@ try {
         schema = 'okx.ci-clean-install/v1'
         source_tree = $SourceTree
         clean_creation_and_exact_retry = 'PASS'
+        release_binary_and_genesis_same_root = 'PASS'
         legacy_sql_rejected_without_mutation = 'PASS'
         interrupted_dirty_retry_rejected = 'PASS'
         control_inspect_incomplete_release = 'PASS'
