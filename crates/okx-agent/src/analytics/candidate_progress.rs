@@ -468,6 +468,9 @@ mod tests {
     async fn candidate_progress_actual_submitted_grid_aggregates_two_instruments_64_variants() {
         use okx_protocol::analytics::*;
         let (root, service) = super::super::artifact_job_fixtures::service();
+        // Completed is a durable SQL state, not proof that the detached task
+        // has dropped its last Windows SQLite file handle.
+        let background_owner = Arc::downgrade(&service.heavy);
         for symbol in ["BTC-USDT", "ETH-USDT"] {
             let (bars, _, _) = fixture();
             service
@@ -546,6 +549,13 @@ mod tests {
             128
         );
         drop(reopened);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while background_owner.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("research job owner did not terminate after persisted completion");
         std::fs::remove_dir_all(root).unwrap();
     }
 
