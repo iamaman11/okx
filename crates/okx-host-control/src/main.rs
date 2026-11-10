@@ -27,6 +27,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Inspect local installation presence without starting services or reading secrets.
+    Inspect,
+
     /// Copy this trusted binary outside the optional C:\okx\workspace worktree.
     Install,
 
@@ -67,6 +70,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(cli: Cli) -> HostControlResult<()> {
     match cli.command {
+        Command::Inspect => {
+            let receipt = inspect_installation_paths(
+                Path::new(okx_host_launcher::CONTROL_ROOT),
+                Path::new(okx_host_launcher::RUNTIME_ROOT),
+            );
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+        }
         Command::Install => {
             if Path::new(okx_host_launcher::ACTIVE_PATH).exists() {
                 return Err(okx_host_control::HostControlError::LegacyBootstrapDisabled);
@@ -158,4 +168,100 @@ fn read_stdin() -> HostControlResult<String> {
     let mut payload = String::new();
     io::stdin().read_to_string(&mut payload)?;
     Ok(payload)
+}
+
+// Deliberately a local inspection, not an Engine health or RiskBook assertion.
+// In particular it never runs HostExecutor, polls Issue #12, or mutates state.
+fn inspect_installation_paths(control: &Path, runtime: &Path) -> serde_json::Value {
+    let controller = control.join("okx-host-control.exe").is_file();
+    let launcher = control.join("okx-host-launcher.exe").is_file();
+    let agent = runtime.join("okx-agent.exe").is_file();
+    let provenance = runtime.join("installed-agent.json").is_file();
+    let catalog = runtime.join("account-catalog.pb").is_file();
+    let existing_financial_state = runtime.join("accounts").exists()
+        || runtime.join("installation.json").exists()
+        || runtime.join("account-catalog").exists();
+    let state = if !catalog && existing_financial_state {
+        "BLOCKED_EXISTING_STATE_WITHOUT_CATALOG"
+    } else if !catalog {
+        "UNINITIALIZED_LOCAL_IDENTITY"
+    } else {
+        "IDENTITY_FILE_PRESENT_NOT_VERIFIED"
+    };
+    let next = match state {
+        "BLOCKED_EXISTING_STATE_WITHOUT_CATALOG" => {
+            "ISOLATE_OR_VERIFY_EXISTING_STATE_BEFORE_ANY_CLEAN_INITIALIZE"
+        }
+        "UNINITIALIZED_LOCAL_IDENTITY" => "VERIFY_CLEAN_ROOT_AND_RELEASE_BEFORE_INITIALIZE",
+        _ => "VERIFY_ACCOUNT_SQL_AND_CENTRAL_RISK_BEFORE_START",
+    };
+    serde_json::json!({
+        "schema": "okx.windows.local-inspection/v1",
+        "state": state,
+        "controller_present": controller,
+        "launcher_present": launcher,
+        "agent_present": agent,
+        "agent_provenance_present": provenance,
+        "account_catalog_present": catalog,
+        "existing_financial_or_legacy_identity_present": existing_financial_state,
+        "verification": "PRESENCE_ONLY",
+        "trading_permission": "NOT_VERIFIED",
+        "next": next
+    })
+}
+
+#[cfg(test)]
+mod inspection_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn local_inspection_is_read_only_and_blocks_legacy_financial_state() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-inspect-{}-legacy", std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let control = root.join("control");
+        let runtime = root.join("runtime");
+        fs::create_dir_all(runtime.join("accounts").join("existing")).unwrap();
+        let db = runtime.join("accounts").join("existing").join("account.sqlite");
+        fs::write(&db, b"original").unwrap();
+
+        let receipt = inspect_installation_paths(&control, &runtime);
+        assert_eq!(receipt["state"], "BLOCKED_EXISTING_STATE_WITHOUT_CATALOG");
+        assert_eq!(receipt["verification"], "PRESENCE_ONLY");
+        assert_eq!(receipt["trading_permission"], "NOT_VERIFIED");
+        assert_eq!(fs::read(db).unwrap(), b"original");
+        assert!(!runtime.join("account-catalog.pb").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_inspection_never_equates_file_presence_with_account_or_risk_proof() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-inspect-{}-new", std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let control = root.join("control");
+        let runtime = root.join("runtime");
+        fs::create_dir_all(&control).unwrap();
+        fs::create_dir_all(&runtime).unwrap();
+        let empty = inspect_installation_paths(&control, &runtime);
+        assert_eq!(empty["state"], "UNINITIALIZED_LOCAL_IDENTITY");
+
+        for p in [
+            control.join("okx-host-control.exe"),
+            control.join("okx-host-launcher.exe"),
+            runtime.join("okx-agent.exe"),
+            runtime.join("installed-agent.json"),
+            runtime.join("account-catalog.pb"),
+        ] {
+            fs::write(p, b"synthetic-test-only").unwrap();
+        }
+        let present = inspect_installation_paths(&control, &runtime);
+        assert_eq!(present["state"], "IDENTITY_FILE_PRESENT_NOT_VERIFIED");
+        assert_eq!(present["trading_permission"], "NOT_VERIFIED");
+        assert_eq!(present["launcher_present"], true);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
