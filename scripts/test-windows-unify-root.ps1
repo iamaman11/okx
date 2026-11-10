@@ -63,7 +63,7 @@ foreach ($scriptName in @('windows-install-preflight.ps1', 'windows-bootstrap-re
         [ref]$tokens, [ref]$parseErrors
     ) | Out-Null
     if ($null -ne $parseErrors -and $parseErrors.Count -gt 0) {
-        throw "PowerShell parse failed for $scriptName: $($parseErrors -join '; ')"
+        throw "PowerShell parse failed for $($scriptName): $($parseErrors -join '; ')"
     }
 }
 
