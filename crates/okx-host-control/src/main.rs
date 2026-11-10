@@ -217,14 +217,15 @@ mod inspection_tests {
 
     #[test]
     fn local_inspection_is_read_only_and_blocks_legacy_financial_state() {
-        let root = std::env::temp_dir().join(format!(
-            "okx-inspect-{}-legacy", std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("okx-inspect-{}-legacy", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let control = root.join("control");
         let runtime = root.join("runtime");
         fs::create_dir_all(runtime.join("accounts").join("existing")).unwrap();
-        let db = runtime.join("accounts").join("existing").join("account.sqlite");
+        let db = runtime
+            .join("accounts")
+            .join("existing")
+            .join("account.sqlite");
         fs::write(&db, b"original").unwrap();
 
         let receipt = inspect_installation_paths(&control, &runtime);
@@ -238,9 +239,7 @@ mod inspection_tests {
 
     #[test]
     fn local_inspection_never_equates_file_presence_with_account_or_risk_proof() {
-        let root = std::env::temp_dir().join(format!(
-            "okx-inspect-{}-new", std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("okx-inspect-{}-new", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let control = root.join("control");
         let runtime = root.join("runtime");
