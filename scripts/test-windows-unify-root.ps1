@@ -54,15 +54,17 @@ if ($IsWindows) {
 }
 
 
-# Keep the one-shot OPS-0 inventory tool parseable without executing it on CI hosts.
-$tokens = $null
-$parseErrors = $null
-[System.Management.Automation.Language.Parser]::ParseFile(
-    (Join-Path $PSScriptRoot 'windows-install-preflight.ps1'),
-    [ref]$tokens, [ref]$parseErrors
-) | Out-Null
-if ($null -ne $parseErrors -and $parseErrors.Count -gt 0) {
-    throw "Windows install preflight parse failed: $($parseErrors -join '; ')"
+# Parse-check recovery-only PowerShell scripts without executing host mutations in CI.
+foreach ($scriptName in @('windows-install-preflight.ps1', 'windows-bootstrap-release.ps1')) {
+    $tokens = $null
+    $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $PSScriptRoot $scriptName),
+        [ref]$tokens, [ref]$parseErrors
+    ) | Out-Null
+    if ($null -ne $parseErrors -and $parseErrors.Count -gt 0) {
+        throw "PowerShell parse failed for $scriptName: $($parseErrors -join '; ')"
+    }
 }
 
 Write-Output "PASS root migration: exact SQL/WAL/backup/hidden bytes, empty directories, conflict/tamper rejection, resume, path/link guards. Fixture: $fixture"
