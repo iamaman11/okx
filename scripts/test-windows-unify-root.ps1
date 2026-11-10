@@ -61,7 +61,7 @@ $parseErrors = $null
     (Join-Path $PSScriptRoot 'windows-install-preflight.ps1'),
     [ref]$tokens, [ref]$parseErrors
 ) | Out-Null
-if (@($parseErrors).Count -gt 0) {
+if ($null -ne $parseErrors -and $parseErrors.Count -gt 0) {
     throw "Windows install preflight parse failed: $($parseErrors -join '; ')"
 }
 
