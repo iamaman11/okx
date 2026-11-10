@@ -371,7 +371,10 @@ mod tests {
     #[test]
     fn clean_installation_guard_rejects_financial_residue_without_writing() {
         let root = root();
-        let sql = root.join("accounts").join("previous").join("account.sqlite");
+        let sql = root
+            .join("accounts")
+            .join("previous")
+            .join("account.sqlite");
         fs::create_dir_all(sql.parent().unwrap()).unwrap();
         fs::write(&sql, b"original-sql-content").unwrap();
         let err = require_clean_installation_root(&root, false).unwrap_err();
@@ -385,10 +388,18 @@ mod tests {
         let root = root();
         fs::write(root.join("engine.lock"), b"").unwrap();
         fs::write(root.join("okx-agent.exe"), b"verified-agent-by-owner").unwrap();
-        fs::write(root.join("installed-agent.json"), b"verified-release-provenance").unwrap();
+        fs::write(
+            root.join("installed-agent.json"),
+            b"verified-release-provenance",
+        )
+        .unwrap();
         assert!(require_clean_installation_root(&root, false).is_ok());
 
-        fs::write(root.join("installation-operation.json"), b"durable-operation").unwrap();
+        fs::write(
+            root.join("installation-operation.json"),
+            b"durable-operation",
+        )
+        .unwrap();
         assert!(require_clean_installation_root(&root, true).is_ok());
         assert!(require_clean_installation_root(&root, false).is_err());
 
@@ -401,7 +412,10 @@ mod tests {
         let root = root();
         fs::write(root.join("unexpected-backup"), b"do-not-touch").unwrap();
         assert!(require_clean_installation_root(&root, false).is_err());
-        assert_eq!(fs::read(root.join("unexpected-backup")).unwrap(), b"do-not-touch");
+        assert_eq!(
+            fs::read(root.join("unexpected-backup")).unwrap(),
+            b"do-not-touch"
+        );
     }
     #[test]
     fn storage_keys_cannot_select_arbitrary_paths() {
