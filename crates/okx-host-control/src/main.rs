@@ -15,7 +15,7 @@ use okx_host_control::{
 };
 use zeroize::Zeroize;
 
-const INSTALL_PATH: &str = r"C:\okx-control\okx-host-control.exe";
+const INSTALL_PATH: &str = okx_host_launcher::ENTRYPOINT_PATH;
 
 #[derive(Debug, Parser)]
 #[command(name = "okx-host-control")]
@@ -27,7 +27,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Copy this trusted binary outside the mutable C:\okx worktree.
+    /// Copy this trusted binary outside the optional C:\okx\workspace worktree.
     Install,
 
     /// Store the GitHub control token from stdin in Windows Credential Manager.

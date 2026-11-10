@@ -1,0 +1,158 @@
+name: All26 single-slice targeted Windows checks (WIP only)
+on:
+  push:
+    branches:
+      - work/all26-one-slice-20261104
+      - work/b-seven-causal-consolidation-20261105
+      - work/b-first-source-diagnostics-20261105
+      - work/b-readonly-source-admission-20261105
+      - work/b-t09-protection-causal-20261105
+      - work/b-seven-readback-consolidation-20261105
+      - work/b-source-owner-causal-fixes-20261105
+      - work/b-replay-source-isolation-20261105
+      - work/deterministic-recorded-source-phases-20261105
+      - work/recorded-capture-scheduler-20261105
+      - work/recorded-event-source-controller-20261105
+      - work/b-census-sql-owner-batch-20261105
+
+permissions:
+  contents: read
+
+concurrency:
+  group: all26-targeted-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-targeted:
+    name: all26-${{ matrix.cohort }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cohort: t09-core
+            ids: 'T09.0 T09.1 T09.2 T09.3 T09.4 T09.5 T09.6 T09.7 T09.8'
+          - cohort: t09-multi-and-t10-entry
+            ids: 'T09-MA T09-SPEC T10-01 T10-02 T10-03 T10-04 T10-05'
+          - cohort: t10-concurrent-and-finance
+            ids: 'T10-06 T10-07 T10-08 T10-09 T10-10'
+          - cohort: t10-durability-and-control
+            ids: 'T10-11 T10-12 T10-13 T10-14 T10-15'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          cache-on-failure: true
+      - name: Report repository formatting debt (required CI still enforces format)
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+      - name: Validate unchanged 26 mandatory IDs and evidence oracle
+        shell: pwsh
+        run: |
+          node scripts/run-trade-integration.mjs --list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/run-trade-integration.mjs --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify stage B case adapters parse
+        shell: pwsh
+        run: |
+          foreach ($id in @('T09.8','T09-MA','T09-SPEC','T10-01','T10-02','T10-07','T10-14','T10-15')) {
+            node --check "scripts/trade-integration/cases/$id.mjs"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Install locked persisted Worker runtime
+        shell: pwsh
+        run: |
+          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile Native integration binary once before bounded child deadlines
+        shell: pwsh
+        timeout-minutes: 12
+        run: |
+          cargo test --locked -p okx-agent --lib --no-run
+          if ($LASTEXITCODE -ne 0) { throw 'B_STAGE_NATIVE_PRECOMPILE_FAILED' }
+      - name: Prove deterministic immutable signed-source phase isolation
+        shell: pwsh
+        run: |
+          cargo test --locked -p okx-agent --lib immutable_signed_ -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'SIGNED_SOURCE_PHASE_UNIT_PROOF_FAILED' }
+      - name: Verify identical, late-bound and foreign Worker reply identities
+        if: matrix.cohort == 't10-concurrent-and-finance'
+        shell: pwsh
+        run: |
+          $joined = cargo test --locked -p okx-agent --lib identical_inflight_risk_commands_get_one_worker_call_and_two_bound_replies -- --nocapture 2>&1
+          $joined | Out-String | Write-Output
+          if ($LASTEXITCODE -ne 0 -or (($joined | Out-String) -notmatch '1 passed')) {
+            throw 'RISK_IDENTICAL_WORKER_COMMAND_FANOUT_FAILED'
+          }
+          $conflict = cargo test --locked -p okx-agent --lib same_risk_command_id_with_different_payload_never_inherits_worker_result -- --nocapture 2>&1
+          $conflict | Out-String | Write-Output
+          if ($LASTEXITCODE -ne 0 -or (($conflict | Out-String) -notmatch '1 passed')) {
+            throw 'RISK_IDENTICAL_ID_DIFFERENT_PAYLOAD_REJECTION_FAILED'
+          }
+          cargo test --locked -p okx-agent --lib late_bound_risk_reply_after_cancelled_native_wait_does_not_close_session -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'RISK_KNOWN_LATE_REPLY_UNIT_PROOF_FAILED' }
+          cargo test --locked -p okx-agent --lib foreign_risk_reply_command_never_authorizes_pending_reserve -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'RISK_FOREIGN_REPLY_UNIT_PROOF_FAILED' }
+      - name: Mandatory 26-case partition — per-case Native and Worker evidence on exact SHA
+        shell: pwsh
+        timeout-minutes: 52
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP ('all26-' + '${{ matrix.cohort }}')
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          # Every one of the 26 mandatory IDs belongs to exactly one matrix
+          # partition. Parallel independent Windows workers use the same
+          # immutable github.sha and retain individual SQL/Worker readbacks.
+          # No historical case PASS and no Worker-only component count.
+          $ids = '${{ matrix.ids }}' -split ' '
+          if (@($ids).Count -eq 0) { throw 'ALL26_EMPTY_PARTITION' }
+          $env:OKX_B_CENSUS_CAUSE_PROBE = '1'
+          $env:OKX_T09_4_SOURCE_COHERENCE_PROBE = '1'
+          $env:OKX_T10_01_MAINT_SHUTDOWN_PROBE = '1'
+          $rows = @()
+          $attempt = 0
+          foreach ($id in $ids) {
+            $attempt++
+            $out = Join-Path $dir "$id-$attempt"
+            Write-Output "B_STAGE_START:${id}:attempt=$attempt"
+            node scripts/run-trade-integration.mjs --case "$id" --artifacts "$out"
+            $code = $LASTEXITCODE
+            $file = Join-Path $out 'summary.json'
+            if (Test-Path -LiteralPath $file) {
+              $report = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+              $ok = $code -eq 0 -and
+                $report.exact_commit -eq $env:GITHUB_SHA -and
+                $report.spec_revision -eq '#449-r9' -and
+                $report.required.Count -eq 26 -and
+                $report.selected.Count -eq 1 -and
+                $report.selected[0] -eq $id -and
+                $report.executed_pass -eq 1 -and
+                $report.executed_failures.Count -eq 0 -and
+                $report.gate -eq 'PASS'
+              $reason = if ($ok) { 'PASS' } elseif ($report.outcomes.Count -gt 0) {
+                [string]$report.outcomes[0].reason
+              } else { 'INVALID_RUNNER_SUMMARY' }
+            } else {
+              $ok = $false
+              $reason = 'SUMMARY_MISSING'
+            }
+            $rows += [pscustomobject]@{id=$id;status= $(if($ok){'PASS'}else{'FAIL'});reason=$reason;exit_code=$code;sha=$env:GITHUB_SHA}
+            Write-Output "B_STAGE_RESULT:${id}:attempt=${attempt}:${reason}"
+          }
+          $rows | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $dir 'b-stage-results.json') -Encoding utf8NoBOM
+          $passed = @($rows | Where-Object status -eq 'PASS').Count
+          Write-Output "ALL26_PARTITION_RESULT:${{ matrix.cohort }}:$passed/$($ids.Count):$env:GITHUB_SHA"
+          if ($passed -ne $ids.Count) { throw 'ALL26_PARTITION_ACCEPTANCE_NOT_COMPLETE' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: all26-${{ matrix.cohort }}-${{ github.sha }}
+          path: ${{ runner.temp }}\\all26-${{ matrix.cohort }}
+          if-no-files-found: warn
+          retention-days: 14

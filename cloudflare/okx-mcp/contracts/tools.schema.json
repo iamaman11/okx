@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "accounts",
-      "description": "Manage accounts and limits.",
+      "description": "Accounts and limits.",
       "inputSchema": {
         "oneOf": [
           {
@@ -24,9 +24,7 @@
                 "const": "status"
               },
               "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               }
             },
             "required": [
@@ -42,25 +40,16 @@
                 "const": "connect"
               },
               "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
+                "$ref": "#/$defs/k"
               },
               "credential_ref": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "alias": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
+                "$ref": "#/$defs/s"
               },
               "label": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "limits": {
                 "type": "object",
@@ -105,8 +94,8 @@
                     "anyOf": [
                       {
                         "type": "string",
-                        "pattern": "^(?:0(?:\\.[0-9]{1,9})?|1(?:\\.0{1,9})?)$",
-                        "maxLength": 11
+                        "pattern": "^(?:0(?:\\.[0-9]{1,27})?|1(?:\\.0{1,27})?)$",
+                        "maxLength": 29
                       },
                       {
                         "type": "null"
@@ -116,9 +105,7 @@
                   "allowed_instruments": {
                     "type": "array",
                     "items": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 64
+                      "$ref": "#/$defs/s"
                     },
                     "maxItems": 32,
                     "uniqueItems": true
@@ -159,20 +146,13 @@
                 ]
               },
               "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
+                "$ref": "#/$defs/k"
               },
               "expected_revision": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 9007199254740991
+                "$ref": "#/$defs/i"
               }
             },
             "required": [
@@ -190,20 +170,13 @@
                 "const": "set_limits"
               },
               "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
+                "$ref": "#/$defs/k"
               },
               "expected_revision": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 9007199254740991
+                "$ref": "#/$defs/i"
               },
               "limits": {
                 "type": "object",
@@ -248,8 +221,8 @@
                     "anyOf": [
                       {
                         "type": "string",
-                        "pattern": "^(?:0(?:\\.[0-9]{1,9})?|1(?:\\.0{1,9})?)$",
-                        "maxLength": 11
+                        "pattern": "^(?:0(?:\\.[0-9]{1,27})?|1(?:\\.0{1,27})?)$",
+                        "maxLength": 29
                       },
                       {
                         "type": "null"
@@ -259,9 +232,7 @@
                   "allowed_instruments": {
                     "type": "array",
                     "items": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 64
+                      "$ref": "#/$defs/s"
                     },
                     "maxItems": 32,
                     "uniqueItems": true
@@ -295,7 +266,29 @@
         "$defs": {
           "positiveDecimal": {
             "type": "string",
-            "pattern": "^(?!0+(\\.0+)?$)(0|[1-9]\\d{0,14})(\\.\\d{1,9})?$"
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "maxLength": 29
+          },
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "s": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "k": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "i": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           }
         }
       },
@@ -307,7 +300,7 @@
     },
     {
       "name": "strategies",
-      "description": "Manage strategies; may trade.",
+      "description": "Strategies; may trade.",
       "inputSchema": {
         "oneOf": [
           {
@@ -317,9 +310,7 @@
                 "const": "list"
               },
               "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               }
             },
             "required": [
@@ -335,14 +326,10 @@
                 "const": "status"
               },
               "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "instance_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
+                "$ref": "#/$defs/s"
               }
             },
             "required": [
@@ -359,25 +346,16 @@
                 "const": "create"
               },
               "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
+                "$ref": "#/$defs/k"
               },
               "instance_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
+                "$ref": "#/$defs/s"
               },
               "definition_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
+                "$ref": "#/$defs/s"
               },
               "version": {
                 "type": "integer",
@@ -407,9 +385,7 @@
               "instruments": {
                 "type": "array",
                 "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
+                  "$ref": "#/$defs/s"
                 },
                 "maxItems": 32,
                 "uniqueItems": true
@@ -444,20 +420,13 @@
                 "const": "update"
               },
               "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
+                "$ref": "#/$defs/k"
               },
               "instance_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
+                "$ref": "#/$defs/s"
               },
               "expected_revision": {
                 "type": "integer",
@@ -509,20 +478,13 @@
                 ]
               },
               "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
+                "$ref": "#/$defs/k"
               },
               "instance_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
+                "$ref": "#/$defs/s"
               }
             },
             "required": [
@@ -540,20 +502,13 @@
                 "const": "capital_assign"
               },
               "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
+                "$ref": "#/$defs/k"
               },
               "instance_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
+                "$ref": "#/$defs/s"
               },
               "direction": {
                 "enum": [
@@ -585,7 +540,24 @@
         "$defs": {
           "positiveDecimal": {
             "type": "string",
-            "pattern": "^(?!0+(\\.0+)?$)(0|[1-9]\\d{0,14})(\\.\\d{1,9})?$"
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "maxLength": 29
+          },
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "s": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "k": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
           }
         }
       },
@@ -597,7 +569,7 @@
     },
     {
       "name": "market",
-      "description": "Read market data.",
+      "description": "Market data.",
       "inputSchema": {
         "oneOf": [
           {
@@ -612,9 +584,7 @@
               "instruments": {
                 "type": "array",
                 "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
+                  "$ref": "#/$defs/s"
                 },
                 "maxItems": 100,
                 "uniqueItems": true
@@ -625,14 +595,10 @@
                 "maximum": 2678400000
               },
               "start_ms": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
+                "$ref": "#/$defs/n"
               },
               "end_ms": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
+                "$ref": "#/$defs/n"
               },
               "universe": {
                 "type": "object",
@@ -650,9 +616,7 @@
                     "maxLength": 16
                   },
                   "after_instrument": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64
+                    "$ref": "#/$defs/s"
                   },
                   "reference_generation": {
                     "type": "string",
@@ -676,9 +640,7 @@
               "fields": {
                 "type": "array",
                 "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
+                  "$ref": "#/$defs/s"
                 },
                 "maxItems": 32,
                 "uniqueItems": true,
@@ -742,9 +704,7 @@
                   "type": "object",
                   "properties": {
                     "field": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 64
+                      "$ref": "#/$defs/s"
                     },
                     "min": {
                       "type": "number",
@@ -769,9 +729,7 @@
                 "type": "object",
                 "properties": {
                   "field": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64
+                    "$ref": "#/$defs/s"
                   },
                   "descending": {
                     "type": "boolean"
@@ -864,9 +822,7 @@
                 "const": "snapshot"
               },
               "instrument": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
+                "$ref": "#/$defs/s"
               }
             },
             "required": [
@@ -882,13 +838,12 @@
                 "const": "microstructure"
               },
               "instrument": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
+                "$ref": "#/$defs/s"
               },
               "size_contracts": {
                 "type": "string",
-                "pattern": "^(?!0+(\\.0+)?$)(0|[1-9]\\d{0,14})(\\.\\d{1,9})?$"
+                "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+                "maxLength": 29
               }
             },
             "required": [
@@ -909,7 +864,19 @@
             ],
             "additionalProperties": false
           }
-        ]
+        ],
+        "$defs": {
+          "s": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "n": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": true,
@@ -919,9 +886,80 @@
     },
     {
       "name": "research",
-      "description": "Manage research.",
+      "description": "Research.",
       "inputSchema": {
         "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "record_decision"
+              },
+              "job_id": {
+                "$ref": "#/$defs/j"
+              },
+              "result_id": {
+                "$ref": "#/$defs/a"
+              },
+              "expected_decision_id": {
+                "$ref": "#/$defs/a"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "\\S"
+              },
+              "hypothesis": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "\\S"
+              },
+              "status": {
+                "enum": [
+                  "accepted",
+                  "rejected",
+                  "deferred"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048,
+                "pattern": "\\S"
+              }
+            },
+            "required": [
+              "action",
+              "job_id",
+              "result_id",
+              "name",
+              "hypothesis",
+              "status",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "decision"
+              },
+              "job_id": {
+                "$ref": "#/$defs/j"
+              },
+              "decision_id": {
+                "$ref": "#/$defs/a"
+              }
+            },
+            "required": [
+              "action",
+              "job_id"
+            ],
+            "additionalProperties": false
+          },
           {
             "type": "object",
             "properties": {
@@ -932,17 +970,12 @@
                 ]
               },
               "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
+                "$ref": "#/$defs/k"
               },
               "instruments": {
                 "type": "array",
                 "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
+                  "$ref": "#/$defs/s"
                 },
                 "maxItems": 8,
                 "uniqueItems": true,
@@ -954,19 +987,13 @@
                 "maximum": 2678400000
               },
               "start_ms": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
+                "$ref": "#/$defs/n"
               },
               "end_ms": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
+                "$ref": "#/$defs/n"
               },
               "strategy_id": {
-                "enum": [
-                  "ema_cross_v1"
-                ]
+                "$ref": "#/$defs/r"
               },
               "costs": {
                 "type": "object",
@@ -1018,12 +1045,12 @@
                   "fast": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 10000
+                    "maximum": 999
                   },
                   "slow": {
                     "type": "integer",
                     "minimum": 2,
-                    "maximum": 10000
+                    "maximum": 1000
                   }
                 },
                 "required": [
@@ -1040,12 +1067,12 @@
                     "fast": {
                       "type": "integer",
                       "minimum": 1,
-                      "maximum": 10000
+                      "maximum": 999
                     },
                     "slow": {
                       "type": "integer",
                       "minimum": 2,
-                      "maximum": 10000
+                      "maximum": 1000
                     }
                   },
                   "required": [
@@ -1122,10 +1149,7 @@
                 "const": "benchmark"
               },
               "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
+                "$ref": "#/$defs/k"
               }
             },
             "required": [
@@ -1141,9 +1165,7 @@
                 "const": "status"
               },
               "job_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               }
             },
             "required": [
@@ -1159,15 +1181,10 @@
                 "const": "cancel"
               },
               "job_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "idempotency_key": {
-                "type": "string",
-                "minLength": 8,
-                "maxLength": 128,
-                "pattern": "^[A-Za-z0-9_-]+$"
+                "$ref": "#/$defs/k"
               }
             },
             "required": [
@@ -1184,9 +1201,7 @@
                 "const": "result"
               },
               "job_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "cursor": {
                 "type": "string",
@@ -1236,9 +1251,7 @@
               "instruments": {
                 "type": "array",
                 "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
+                  "$ref": "#/$defs/s"
                 },
                 "maxItems": 8,
                 "uniqueItems": true,
@@ -1250,14 +1263,10 @@
                 "maximum": 2678400000
               },
               "start_ms": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
+                "$ref": "#/$defs/n"
               },
               "end_ms": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
+                "$ref": "#/$defs/n"
               },
               "range_mode": {
                 "enum": [
@@ -1266,9 +1275,7 @@
                 ]
               },
               "strategy_id": {
-                "enum": [
-                  "ema_cross_v1"
-                ]
+                "$ref": "#/$defs/r"
               },
               "parameters": {
                 "type": "object",
@@ -1276,12 +1283,12 @@
                   "fast": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 10000
+                    "maximum": 999
                   },
                   "slow": {
                     "type": "integer",
                     "minimum": 2,
-                    "maximum": 10000
+                    "maximum": 1000
                   }
                 },
                 "required": [
@@ -1343,7 +1350,44 @@
             ],
             "additionalProperties": false
           }
-        ]
+        ],
+        "$defs": {
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "s": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "a": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "j": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "k": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "n": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "r": {
+            "enum": [
+              "ema_cross_v1",
+              "ema_momentum_confirm_v1"
+            ]
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": false,
@@ -1353,7 +1397,7 @@
     },
     {
       "name": "portfolio",
-      "description": "Portfolio scenarios.",
+      "description": "Portfolio.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1368,9 +1412,7 @@
               "accounts": {
                 "type": "array",
                 "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128
+                  "$ref": "#/$defs/t"
                 },
                 "maxItems": 32,
                 "uniqueItems": true
@@ -1388,9 +1430,7 @@
               "strategies": {
                 "type": "array",
                 "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128
+                  "$ref": "#/$defs/t"
                 },
                 "maxItems": 32,
                 "uniqueItems": true
@@ -1530,7 +1570,13 @@
         "$defs": {
           "positiveDecimal": {
             "type": "string",
-            "pattern": "^(?!0+(\\.0+)?$)(0|[1-9]\\d{0,14})(\\.\\d{1,9})?$"
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "maxLength": 29
+          },
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
           }
         }
       },
@@ -1542,7 +1588,7 @@
     },
     {
       "name": "diagnostics",
-      "description": "Runtime diagnostics.",
+      "description": "Diagnostics.",
       "inputSchema": {
         "oneOf": [
           {
@@ -1552,18 +1598,17 @@
                 "const": "explain"
               },
               "reference": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "account": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "view": {
                 "enum": [
-                  "finance"
+                  "finance",
+                  "operation",
+                  "research",
+                  "storage"
                 ]
               },
               "cycle_id": {
@@ -1610,7 +1655,14 @@
             ],
             "additionalProperties": false
           }
-        ]
+        ],
+        "$defs": {
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": true,
@@ -1620,14 +1672,12 @@
     },
     {
       "name": "trade.preview",
-      "description": "Preview a trade; no order.",
+      "description": "Preview; no order.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "account": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
+            "$ref": "#/$defs/t"
           },
           "operation": {
             "enum": [
@@ -1639,14 +1689,10 @@
             ]
           },
           "strategy_instance": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64
+            "$ref": "#/$defs/s"
           },
           "instrument": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64
+            "$ref": "#/$defs/s"
           },
           "side": {
             "enum": [
@@ -1710,9 +1756,7 @@
                 "$ref": "#/$defs/positiveDecimal"
               },
               "reference": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "max_entry_usd": {
                 "$ref": "#/$defs/positiveDecimal"
@@ -1793,7 +1837,18 @@
         "$defs": {
           "positiveDecimal": {
             "type": "string",
-            "pattern": "^(?!0+(\\.0+)?$)(0|[1-9]\\d{0,14})(\\.\\d{1,9})?$"
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "maxLength": 29
+          },
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "s": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
           }
         }
       },
@@ -1810,9 +1865,7 @@
         "type": "object",
         "properties": {
           "account": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
+            "$ref": "#/$defs/t"
           },
           "idempotency_key": {
             "type": "string",
@@ -1830,14 +1883,10 @@
             ]
           },
           "strategy_instance": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64
+            "$ref": "#/$defs/s"
           },
           "instrument": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64
+            "$ref": "#/$defs/s"
           },
           "side": {
             "enum": [
@@ -1901,9 +1950,7 @@
                 "$ref": "#/$defs/positiveDecimal"
               },
               "reference": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
+                "$ref": "#/$defs/t"
               },
               "max_entry_usd": {
                 "$ref": "#/$defs/positiveDecimal"
@@ -1991,7 +2038,18 @@
         "$defs": {
           "positiveDecimal": {
             "type": "string",
-            "pattern": "^(?!0+(\\.0+)?$)(0|[1-9]\\d{0,14})(\\.\\d{1,9})?$"
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "maxLength": 29
+          },
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "s": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
           }
         }
       },
@@ -2003,26 +2061,29 @@
     },
     {
       "name": "trade.status",
-      "description": "Read trade status.",
+      "description": "Trade status.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "account": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
+            "$ref": "#/$defs/t"
           },
           "reference": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
+            "$ref": "#/$defs/t"
           }
         },
         "required": [
           "account",
           "reference"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "$defs": {
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": true,
@@ -2032,14 +2093,12 @@
     },
     {
       "name": "trade.cancel",
-      "description": "Cancel an exchange order.",
+      "description": "Cancel venue order.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "account": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
+            "$ref": "#/$defs/t"
           },
           "idempotency_key": {
             "type": "string",
@@ -2048,9 +2107,7 @@
             "pattern": "^[A-Za-z0-9_-]+$"
           },
           "reference": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
+            "$ref": "#/$defs/t"
           }
         },
         "required": [
@@ -2058,7 +2115,14 @@
           "idempotency_key",
           "reference"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "$defs": {
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": false,
@@ -2068,14 +2132,12 @@
     },
     {
       "name": "trade.close",
-      "description": "Close a position by real exchange order.",
+      "description": "Close via real exchange order.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "account": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
+            "$ref": "#/$defs/t"
           },
           "idempotency_key": {
             "type": "string",
@@ -2084,9 +2146,7 @@
             "pattern": "^[A-Za-z0-9_-]+$"
           },
           "reference": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
+            "$ref": "#/$defs/t"
           },
           "expires_in_ms": {
             "type": "integer",
@@ -2100,7 +2160,14 @@
           "reference",
           "expires_in_ms"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "$defs": {
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": false,
@@ -2110,7 +2177,7 @@
     },
     {
       "name": "trade.capabilities",
-      "description": "Read trade permissions.",
+      "description": "Trade permissions.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2133,7 +2200,7 @@
     },
     {
       "name": "trade.preflight",
-      "description": "Check readiness; no order.",
+      "description": "Readiness; no order.",
       "inputSchema": {
         "type": "object",
         "properties": {

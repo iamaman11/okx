@@ -3,6 +3,7 @@ pub mod artifact;
 pub mod auth;
 pub mod autostart;
 pub mod background_process;
+mod control_ack;
 pub mod controller_update;
 pub mod desired;
 pub mod executor;
@@ -47,7 +48,7 @@ pub enum HostControlError {
     #[error("poll interval must be between 1 and 60 seconds")]
     InvalidPollInterval,
 
-    #[error("canonical repository C:\\okx was not found")]
+    #[error("optional development repository C:\\okx\\workspace was not found")]
     RepositoryMissing,
 
     #[error("origin does not identify iamaman11/okx")]

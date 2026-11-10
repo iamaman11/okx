@@ -1,5 +1,6 @@
 import {governanceRequest,lowerCampaignLimit,enrollObservedAccount,setAccountPause,stopNewRealRisk,initializeGovernance,GOVERNANCE_STORAGE_KEY} from "./account_governance_store.js";
 import {FRAME_SCHEMA} from "./shared.js";
+import {installCampaignEntryProof,openingDigest,readRiskBook,type CampaignEntryOpeningSource} from "./risk_book.js";
 import {initial,limits} from "./account_governance.test.js";
 function ok(v:boolean,label:string){if(!v)throw Error(label);}
 class Storage{
@@ -38,6 +39,67 @@ const lowered=await lowerCampaignLimit(s,{expected_revision:revision,campaign_lo
 ok(lowered.status===200&&lowered.body.campaign_loss_limit_usd==="8","owner may only lower campaign ceiling");
 ok((await lowerCampaignLimit(s,{expected_revision:revision+1,campaign_loss_limit_usd:"10",idempotency_key:"raise_campaign_01"})).status===409,"campaign ceiling cannot increase");
 ok(JSON.stringify(await lowerCampaignLimit(s,{expected_revision:revision,campaign_loss_limit_usd:"8",idempotency_key:"lower_campaign_01"}))===JSON.stringify(lowered),"campaign lowering is body-bound idempotent");
+// Once the native finance owner has verified opening consumption, lowering
+// the centrally configured cap must update the same RiskBook transaction.
+{
+ const budgetStore=new Storage();
+ ok((await initializeGovernance(budgetStore,initial)).status===200,
+   "campaign cap transaction starts with legitimate installation");
+ ok((await enrollObservedAccount(budgetStore,{
+   ...observation,idempotency_key:"budget_real_enrollment"
+ })).status===200,"opening requires registered real cohort");
+ const budgetPolicy=(await governanceRequest(budgetStore,"GET")).body;
+ const origin=(await readRiskBook(budgetStore))!.campaign_origin!;
+ ok(origin.campaign_id===initial.campaign_id&&origin.started_at_ms>0,
+   "governance creates immutable campaign inception in same transaction");
+ const openingFrom=origin.started_at_ms,openingAt=openingFrom+100000;
+ const manifest:CampaignEntryOpeningSource={
+   campaign_id:initial.campaign_id,limit_usd:"10",consumed_usd:"7",
+   source_digest:"f".repeat(64),as_of_ms:openingAt,
+   campaign_started_at_ms:openingFrom,
+   accounts:(budgetPolicy.accounts as any[])
+    .filter(a=>a.environment==="real")
+    .map(a=>({account_key:a.account_key,history_from_ms:openingFrom,
+      history_through_ms:openingAt,consumed_entry_usd:"7",
+      order_history_complete:true as const,fill_history_complete:true as const,
+      bill_history_complete:true as const,finance_provenance_sealed:true as const,
+      source_digest:"e".repeat(64)}))
+    .sort((a,b)=>a.account_key.localeCompare(b.account_key))
+ };
+ manifest.source_digest=await openingDigest(manifest);
+ ok(await installCampaignEntryProof(budgetStore,manifest),
+   "synthetic full-cohort finance opening exists before budget mutation");
+ const change={expected_revision:budgetPolicy.revision,max_total_modelled_loss_usdt:budgetPolicy.max_total_modelled_loss_usdt,
+   accounts:budgetPolicy.accounts};
+ const beforeBook=await readRiskBook(budgetStore);
+ const denied=await governanceRequest(budgetStore,"POST",{
+   ...change,campaign_entry_limit_usd:"6",idempotency_key:"lower_entry_below_booked"
+ });
+ ok(denied.status===409&&denied.body.reason==="ENTRY_LIMIT_BELOW_CONSUMED_OR_RESERVED",
+   "cannot lower entry cap beneath already consumed source-proven money");
+ ok((await readRiskBook(budgetStore))?.sequence===beforeBook?.sequence&&
+   (await governanceRequest(budgetStore,"GET")).body.revision===budgetPolicy.revision,
+   "denied cap change leaves policy and RiskBook untouched");
+ const accepted=await governanceRequest(budgetStore,"POST",{
+   ...change,campaign_entry_limit_usd:"8",idempotency_key:"lower_entry_atomic_001"
+ });
+ const afterBook=await readRiskBook(budgetStore);
+ ok(accepted.status===200&&accepted.body.campaign_entry_limit_usd==="8"&&
+   afterBook?.entry_budget?.limit_usd==="8"&&
+   afterBook?.entry_budget?.consumed_usd==="7"&&
+   afterBook?.sequence===beforeBook!.sequence+1,
+   "cap and booked amount updated atomically without reset");
+ ok((await governanceRequest(budgetStore,"POST",{
+   ...change,campaign_entry_limit_usd:"8",idempotency_key:"lower_entry_atomic_001"
+ })).status===200,"replayed cap CAS cannot charge or change twice");
+ ok((await readRiskBook(budgetStore))?.sequence===afterBook?.sequence,
+   "idempotent replay does not increment RiskBook sequence");
+ const reboot=new Storage();reboot.map=structuredClone(budgetStore.map);
+ ok((await readRiskBook(reboot))?.entry_budget?.consumed_usd==="7"&&
+   (await governanceRequest(reboot,"GET")).body.campaign_entry_limit_usd==="8",
+   "entry budget survives restart with exact consumed money");
+}
+console.log("entry_cap_governance_and_riskbook_atomic PASS");
 console.log("account_governance_lower_campaign_limit_monotonic PASS");
 const restarted=new Storage();restarted.map=structuredClone(s.map);
 ok(((await governanceRequest(restarted,"GET")).body.accounts as any[])[0].enabled,"access_survives_restart");
@@ -54,6 +116,25 @@ const concurrent=await Promise.all([governanceRequest(s,"POST",{...update,idempo
  governanceRequest(s,"POST",{...update,idempotency_key:"limits_change_002"})]);
 ok(concurrent.filter(r=>r.status===200).length===1&&concurrent.filter(r=>r.status===409).length===1,"concurrent CAS one winner");
 ok((await governanceRequest(s,"POST",update)).status===400,"all mutations require idempotency key");
+const current=(await governanceRequest(s,"GET")).body;
+const currentRevision=current.revision as number;
+const entryRequest={expected_revision:current.revision,
+ max_total_modelled_loss_usdt:current.max_total_modelled_loss_usdt,
+ accounts:current.accounts,campaign_entry_limit_usd:"8",
+ idempotency_key:"entry_campaign_001"};
+const changedEntry=await governanceRequest(s,"POST",entryRequest);
+ok(changedEntry.status===200&&changedEntry.body.campaign_entry_limit_usd==="8",
+ "authenticated existing CAS publishes independent entry ceiling");
+ok(JSON.stringify(await governanceRequest(s,"POST",entryRequest))===JSON.stringify(changedEntry),
+ "lost entry cap CAS reply is idempotent");
+ok((await governanceRequest(s,"POST",{
+ ...entryRequest,expected_revision:currentRevision+1,campaign_entry_limit_usd:"10",
+ idempotency_key:"entry_campaign_raise_001"
+})).status===409,"global entry limit cannot be raised by routine CAS");
+ok((await governanceRequest(s,"POST",{
+ ...entryRequest,expected_revision:currentRevision+1,campaign_entry_limit_usd:"0",
+ idempotency_key:"entry_campaign_zero_001"
+})).status===409,"cannot set entry cap zero to credit consumption");
 ok((await stopNewRealRisk(s,"stop_real_test_01")).status===200,"emergency stop persisted");
 const stopped=(await governanceRequest(s,"GET")).body;
 ok((stopped.accounts as any[]).every(a=>a.enabled&&a.explicit_pause),"STOP does not revoke access or remove cohort");

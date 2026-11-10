@@ -75,6 +75,20 @@ const queuedJob:any=projectNativeResponse({schema:'okx.agent.response/v1',reques
 if(queuedJob.status!=='accepted'||queuedJob.job_id!=='job_398'||queuedJob.data.state!=='queued')throw Error('queued job must remain accepted with an id');
 console.log("mcp_queued_job_remains_accepted PASS");
 
+// Candidate counters are native job facts. MCP preserves them without
+// upgrading running/interrupted jobs or recalculating their progress.
+const candidateProgress={phase:'evaluating_candidates',completed_candidates:1,
+ total_candidates:64,completed_work_units:66,total_work_units:193};
+for(const [state,status,progress] of [['running','accepted',33],['interrupted','failed',33],['completed','completed',100]] as const){
+ const projected:any=projectNativeResponse({schema:'okx.agent.response/v1',
+  request_id:'req_candidate_progress',status:'completed',quality:'FRESH',warnings:[],
+  result:{id:'a'.repeat(64),state,progress,candidate_progress:candidateProgress}});
+ if(projected.status!==status||projected.job_id!=='a'.repeat(64)||
+    projected.data.progress!==progress||JSON.stringify(projected.data.candidate_progress)!==JSON.stringify(candidateProgress))
+  throw Error('MCP lost or reinterpreted native candidate progress');
+}
+console.log('mcp_native_candidate_progress_preserved PASS');
+
 const partial:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_native_partial',status:'completed',quality:'DEGRADED',warnings:[],result:{rows:[],quality:'partial'}});
 if(partial.status!=='partial'||partial.quality!=='partial')throw Error('partial native quality must remain partial');
 

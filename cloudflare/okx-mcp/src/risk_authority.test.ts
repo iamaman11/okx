@@ -1,11 +1,12 @@
-import {initializeRiskBook} from "./risk_book.js";
+import {initializeRiskBook,installCampaignEntryProof,openingDigest,type CampaignEntryOpeningSource} from "./risk_book.js";
 import {handleNativeRiskCommand} from "./risk_authority.js";
 import {initial,account} from "./account_governance.test.js";
 function check(v:boolean,n:string){if(!v)throw Error(n);}
 class Store{
   map=new Map<string,unknown>();
+  writes=0;
   async get(k:string){return this.map.get(k);}
-  async put(k:string,v:unknown){this.map.set(k,v);}
+  async put(k:string,v:unknown){this.writes++;this.map.set(k,v);}
   private tail=Promise.resolve();
   async transaction<T>(fn:(tx:Store)=>Promise<T>):Promise<T>{
     const last=this.tail;let release!:()=>void;
@@ -19,7 +20,7 @@ await s.put("generation",99);
 await s.put("account_access_v1",initial);
 const base={schema:"okx.risk-command/v1",command_id:"risk_command_00001",installation_id:initial.installation_id,
  action:{action:"RESERVE",venue:"okx",account_uid:uid,run_id:"run_12345678",
- intent_id:"intent_12345678",strategy_id:"momentum_A",instrument_id:"BTC-USDT-SWAP",plan_sha256:hash,requested_loss_usdt:"1",
+ intent_id:"intent_12345678",strategy_id:"momentum_A",instrument_id:"BTC-USDT-SWAP",plan_sha256:hash,requested_loss_usdt:"1",entry_upper_usd:"1",entry_proof_digest:hash,
  policy_revision:1,census:{complete:true,source_digest:hash,
  content_digest:hash,source_read_floor_ms:now,generated_at_ms:now,
  account_keys:["okx:real:"+uid],occupied:[{account_key:"okx:real:"+uid,occupied_usdt:"0",cumulative_loss_usd:"0"}],
@@ -42,7 +43,9 @@ check((await s.get("risk_book_v1"))===undefined,"denials make no reservation");
 
 await initializeRiskBook(s,initial.installation_id);
 const summary=await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",command_id:"summary_12345",installation_id:initial.installation_id,action:{action:"SUMMARY"}},now);
-check(summary.status==="OBSERVED"&&summary.budget?.remaining_loss_usd==="10"&&summary.budget.source_as_of_ms===null,"global summary comes from central owner with explicit source quality");
+check(summary.status==="OBSERVED"&&summary.budget?.remaining_loss_usd==="10"&&summary.budget.source_as_of_ms===null&&
+ summary.budget.entry_budget===null,
+ "unproven campaign entry opening is explicitly null rather than zero");
 const own=account.account_key,other="okx:real:"+"b".repeat(64);
 await s.put("account_access_v1",{...initial,revision:1,accounts:[account,{...account,id:"secondary",account_key:other,uid_fingerprint:"b".repeat(64)}]});
 const meta:any=await s.get("risk_meta_v2");
@@ -64,14 +67,54 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
  const t=new Store(),sameUid=account.uid_fingerprint;
  const sourceDigest="d".repeat(64),freshDigest="e".repeat(64),proof="f".repeat(64);
  const governance={...initial,revision:1,max_total_modelled_loss_usdt:"3",accounts:[{
-   ...account,limits:{...account.limits,max_modelled_loss_usdt:"3",max_order_loss_usdt:"1"},
+   ...account,limits:{...account.limits,max_modelled_loss_usdt:"3",max_order_loss_usdt:"1",max_entry_usd:"10"},
    strategies:[{id:"native_alpha",enabled:true,allocated_capital_usdt:"1",
      max_modelled_loss_usdt:"1",max_daily_realized_loss_usdt:"2",
      max_drawdown_ratio:"0.1"}]
  }]};
  await t.put("generation",session.connection_generation);
  await t.put("account_access_v1",governance);
- await initializeRiskBook(t,initial.installation_id);
+ const campaignStart=now-100000;
+ await initializeRiskBook(t,initial.installation_id,{
+   installation_id:initial.installation_id,
+   campaign_id:governance.campaign_id,
+   started_at_ms:campaignStart
+ });
+ const nativeOpening:CampaignEntryOpeningSource={
+   campaign_id:governance.campaign_id,limit_usd:"10",consumed_usd:"0",
+   source_digest:sourceDigest,as_of_ms:now,campaign_started_at_ms:campaignStart,
+   accounts:[{account_key:account.account_key,history_from_ms:campaignStart,
+     history_through_ms:now,consumed_entry_usd:"0",
+     order_history_complete:true,fill_history_complete:true,
+     bill_history_complete:true,finance_provenance_sealed:true,
+     source_digest:"a".repeat(64)}]
+ };
+ nativeOpening.source_digest=await openingDigest(nativeOpening);
+ const install=(source:CampaignEntryOpeningSource)=>({
+   schema:"okx.risk-command/v1",command_id:"native_opening_001",
+   installation_id:initial.installation_id,
+   action:{action:"INSTALL_ENTRY_OPENING",source}});
+ check((await handleNativeRiskCommand(t,{...session,hello:false},
+   install(nativeOpening),now)).reason==="NATIVE_PRODUCTION_SESSION_REQUIRED",
+   "unauthenticated channel cannot install campaign opening");
+ check((await handleNativeRiskCommand(t,{...session,connection_generation:98},
+   install(nativeOpening),now)).reason==="STALE_NATIVE_INSPECTION_SESSION",
+   "stale native channel cannot install campaign opening");
+ check((await handleNativeRiskCommand(t,session,install(nativeOpening),now+60_001))
+   .reason==="ENTRY_OPENING_SOURCE_STALE",
+   "stale historical cut-off cannot initialize a live campaign");
+ check((await handleNativeRiskCommand(t,session,
+   install({...nativeOpening,source_digest:"f".repeat(64)}),now))
+   .reason==="ENTRY_OPENING_SOURCE_NOT_PROVEN",
+   "syntactically valid but mismatched hash is not an opening proof");
+ const opened=await handleNativeRiskCommand(t,session,install(nativeOpening),now);
+ check(opened.status==="OBSERVED"&&
+   opened.budget?.entry_budget?.opening_source_digest===nativeOpening.source_digest&&
+   opened.budget.entry_budget.consumed_usd==="0",
+   "full native opening is atomically installed and read back");
+ check((await handleNativeRiskCommand(t,session,install(nativeOpening),now))
+   .reason==="ENTRY_OPENING_SOURCE_NOT_PROVEN",
+   "repeated opening cannot reset consumed funds");
  const census={complete:true,source_digest:sourceDigest,content_digest:hash,
    generated_at_ms:now,source_read_floor_ms:now,
    account_keys:[account.account_key],
@@ -84,25 +127,58 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
    action:{action:"RESERVE",venue:"okx",account_uid:sameUid,
      run_id:"run_three_sources_001",intent_id:"intent_"+origin+"_0001",
      strategy_id:strategy,instrument_id:"BTC-USDT-SWAP",
-     plan_sha256:plan,requested_loss_usdt:"1",requested_loss_usd:"1",
+     plan_sha256:plan,requested_loss_usdt:"1",requested_loss_usd:"1",entry_upper_usd:"2",entry_proof_digest:sourceDigest,
      usd_conversion:{usd_per_usdt:"1",source_digest:sourceDigest,observed_at_ms:now},
      policy_revision:1,census}
  });
  const externalHuman=reserve("human","manual","a".repeat(64));
  const externalChat=reserve("chat","manual","b".repeat(64));
  const autonomous=reserve("native","native_alpha","c".repeat(64));
+ // A census floor is the oldest source in that observation, not an operation
+ // watermark. A later valid census may include an older (still fresh) source.
+ const floors=new Store();floors.map=structuredClone(t.map);
+ for(const [command,age] of [[externalHuman,50],[externalChat,100]] as const){
+   const result=await handleNativeRiskCommand(floors,session,{
+     ...command,action:{...command.action,census:{...census,
+       source_read_floor_ms:now-age}}},now);
+   check(result.status==="HELD","both fresh census floors must be admitted");
+   const observed=await handleNativeRiskCommand(floors,session,{
+     schema:"okx.risk-command/v1",command_id:"summary_census_floor",
+     installation_id:initial.installation_id,action:{action:"SUMMARY"}},now);
+   check(observed.budget?.source_as_of_ms===now-age,
+     "summary must preserve the actual census floor, never manufacture a newer timestamp");
+ }
  const admitted=await Promise.all([externalHuman,externalChat,autonomous]
    .map(command=>handleNativeRiskCommand(t,session,command,now)));
  check(admitted.every(r=>r.status==="HELD"&&!!r.reservation_key),
    "all three source labels must use the same central RiskBook transaction owner");
  check(new Set(admitted.map(r=>r.reservation_key)).size===3,
    "three different intents require three independent central reservations");
+ // INSPECT owns no financial transition. Compare its actual storage boundary,
+ // not two SUMMARY replies with a concurrent RELEASE_UNSENT between them.
+ const inspectChat={schema:"okx.risk-command/v1",command_id:"inspect_chat_contract",
+   installation_id:initial.installation_id,
+   action:{action:"INSPECT",reservation_key:admitted[1].reservation_key,
+     plan_sha256:"b".repeat(64)}};
+ async function readOnlyInspect(expectedState:string){
+   const before=JSON.stringify([...t.map]),writes=t.writes;
+   const result=await handleNativeRiskCommand(t,session,inspectChat,now+5);
+   check(result.status==="OBSERVED"&&result.reservation_state===expectedState,
+     "INSPECT returns the addressed durable reservation state");
+   check(t.writes===writes&&JSON.stringify([...t.map])===before,
+     "INSPECT must perform zero writes and preserve every stored value");
+ }
+ await readOnlyInspect("HELD");
  const summary=await handleNativeRiskCommand(t,session,{
    schema:"okx.risk-command/v1",command_id:"summary_three_001",
    installation_id:initial.installation_id,action:{action:"SUMMARY"}},now);
  check(summary.status==="OBSERVED"&&summary.budget?.reserved_loss_usd==="3"&&
-   summary.budget?.remaining_loss_usd==="7",
-   "three distinct sources consume the same campaign, not three separate budgets");
+   summary.budget?.remaining_loss_usd==="7"&&
+   summary.budget?.entry_budget?.reserved_usd==="6"&&
+   summary.budget.entry_budget.remaining_usd==="4"&&
+   summary.budget.entry_budget.consumed_usd==="0"&&
+   summary.budget.entry_budget.opening_source_digest===nativeOpening.source_digest,
+   "central readback separates modelled loss and entry spend for every source");
  const replay=await handleNativeRiskCommand(t,session,externalHuman,now);
  check(replay.status==="HELD"&&replay.reservation_key===admitted[0].reservation_key,
    "identical external retry returns the same central reservation");
@@ -127,9 +203,141 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
          source_read_id:"b".repeat(64),content_digest:hash,
          started_after_held_ms:5,completed_after_held_ms:20}]}}
  });
- const first=await handleNativeRiskCommand(t,session,post("human",0,"a".repeat(64),3),now+2);
- check(first.status==="POST_AUTHORIZED"&&first.risk_book_sequence===4,
+ const first=await handleNativeRiskCommand(t,session,post("human",0,"a".repeat(64),4),now+2);
+ check(first.status==="POST_AUTHORIZED"&&first.risk_book_sequence===5,
    "fresh verified all-account census permits one exact central post fence");
+ // This is an authenticated native-only settlement command, not an MCP
+ // trading request. Use an isolated copy so revocation/late-no-send tests
+ // continue to exercise their original risk-book sequence.
+ const settlements=new Store();settlements.map=structuredClone(t.map);
+ const sett=(seq:number,revision:number,amount:string,digest:string)=>({
+   schema:"okx.risk-command/v1",command_id:"settle_native_0001",
+   installation_id:initial.installation_id,
+   action:{action:"SETTLE_ENTRY",reservation_key:admitted[0].reservation_key,
+     plan_sha256:"a".repeat(64),expected_risk_book_sequence:seq,
+     cumulative_entry_usd:amount,settlement_revision:revision,source_digest:digest}
+ });
+ // Synthetic authenticated-native source inputs exercise the real Worker
+ // handler and RiskBook storage. They do not prove live native source reads.
+ // Reuse the actual RESERVE/BEGIN_POST state, then independently commit money
+ // and terminal release before serializing and reopening the stored values.
+ {
+   const terminal=new Store();terminal.map=structuredClone(t.map);
+   const booked=await handleNativeRiskCommand(terminal,session,
+     sett(5,1,"0.5",sourceDigest),now+3);
+   check(booked.status==="UPDATED"&&booked.risk_book_sequence===6,
+     "terminal INSPECT fixture first commits the real typed entry settlement");
+   const released=await handleNativeRiskCommand(terminal,session,{
+     schema:"okx.risk-command/v1",command_id:"terminal_release_inspect_001",
+     installation_id:initial.installation_id,
+     action:{action:"RESOLVE",reservation_key:admitted[0].reservation_key,
+       plan_sha256:externalHuman.action.plan_sha256,
+       expected_risk_book_sequence:6,next_state:"RELEASED",
+       source_proof_sha256:proof,
+       terminal_census:{...census,generated_at_ms:now+4,source_read_floor_ms:now+4},
+       terminal_ledger:{account_uid:sameUid,run_id:externalHuman.action.run_id,
+         intent_id:externalHuman.action.intent_id,state:"FILLED",record_digest:proof,
+         cumulative_loss_usd:"0",remaining_exposure_usdt:"0",
+         cumulative_entry_usd:"0.5",entry_settlement_revision:1,
+         entry_settlement_digest:sourceDigest}}},now+5);
+   check(released.status==="UPDATED"&&released.risk_book_sequence===7,
+     "terminal INSPECT fixture commits source-bound release through the real handler");
+   const persisted=JSON.stringify([...terminal.map]);
+   const reopened=new Store();reopened.map=new Map(JSON.parse(persisted));
+   await reopened.put("account_access_v1",{...governance,revision:2,accounts:[
+     {...governance.accounts[0],policy_revision:2,explicit_pause:true}]});
+   const inspectTerminal={schema:"okx.risk-command/v1",
+     command_id:"inspect_terminal_reopened",installation_id:initial.installation_id,
+     action:{action:"INSPECT",reservation_key:admitted[0].reservation_key,
+       plan_sha256:externalHuman.action.plan_sha256}};
+   const before=JSON.stringify([...reopened.map]),writes=reopened.writes;
+   for(let repeat=0;repeat<2;repeat++){
+     const observed=await handleNativeRiskCommand(reopened,session,inspectTerminal,now+6);
+     check(observed.status==="OBSERVED"&&observed.reservation_state==="RELEASED"&&
+       observed.reservation_key===admitted[0].reservation_key&&
+       observed.policy_revision===1&&observed.risk_book_sequence===7,
+       "reopened terminal INSPECT retains original reservation policy after governance rotation");
+   }
+   for(const action of [
+     {...inspectTerminal.action,plan_sha256:"f".repeat(64)},
+     {...inspectTerminal.action,reservation_key:"missing_terminal_reservation"},
+   ]){
+     const denied=await handleNativeRiskCommand(reopened,session,
+       {...inspectTerminal,action},now+6);
+     check(denied.status==="DENIED"&&denied.reason==="RISK_RESERVATION_NOT_FOUND"&&
+       denied.reservation_state===null&&denied.reservation_key===null,
+       "terminal INSPECT never substitutes a wrong-plan or missing reservation");
+   }
+   const budget=await handleNativeRiskCommand(reopened,session,{
+     schema:"okx.risk-command/v1",command_id:"summary_terminal_reopened",
+     installation_id:initial.installation_id,action:{action:"SUMMARY"}},now+6);
+   check(budget.budget?.entry_budget?.consumed_usd==="0.5"&&
+     budget.budget.entry_budget.reserved_usd==="4"&&budget.risk_book_sequence===7,
+     "terminal INSPECT preserves committed spend and other reservations without advancing CAS");
+   check(reopened.writes===writes&&JSON.stringify([...reopened.map])===before,
+     "repeated terminal INSPECT and identity denials perform zero writes after reopen");
+   check(JSON.stringify([...terminal.map])===persisted,
+     "reopened Worker storage owns independently serialized values");
+   console.log("terminal_released_inspect_reopen_read_only PASS");
+ }
+ check((await handleNativeRiskCommand(settlements,{...session,runtime_profile:"demo_acceptance"},
+   sett(5,1,"0.5",sourceDigest),now+3)).status==="DENIED",
+   "demo/public socket never inherits native money settlement authority");
+ const heldCommand=sett(5,1,"0.5",sourceDigest);
+ heldCommand.action.reservation_key=admitted[1].reservation_key!;
+ heldCommand.action.plan_sha256="b".repeat(64);
+ const heldCannotSettle=await handleNativeRiskCommand(t,session,
+   heldCommand,now+2);
+ check(heldCannotSettle.status==="DENIED"&&
+   heldCannotSettle.reason==="ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN",
+   "money cannot settle before the only authorized exchange POST");
+ const partial=await handleNativeRiskCommand(settlements,session,
+   sett(5,1,"0.5",sourceDigest),now+3);
+ check(partial.status==="UPDATED"&&partial.risk_book_sequence===6,
+   "native WSS settlement moves exactly one proved cumulative increment");
+ const settlementReplay=await handleNativeRiskCommand(settlements,session,
+   sett(6,1,"0.5",sourceDigest),now+4);
+ check(settlementReplay.status==="UPDATED"&&settlementReplay.risk_book_sequence===6,
+   "lost settlement receipt can be replayed without charging twice");
+ const staleReplay=await handleNativeRiskCommand(settlements,session,
+   sett(5,1,"0.5",sourceDigest),now+4);
+ check(staleReplay.status==="UPDATED"&&staleReplay.risk_book_sequence===6,
+   "native WSS lost ACK replays with the ORIGINAL CAS without a second charge");
+ const staleIncrease=await handleNativeRiskCommand(settlements,session,
+   sett(5,2,"0.75",sourceDigest),now+4);
+ check(staleIncrease.status==="DENIED"&&staleIncrease.reason===
+   "ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN",
+   "WSS may acknowledge an identical old settlement, never new spend on stale CAS");
+ check((await handleNativeRiskCommand(settlements,session,
+   sett(6,1,"0.6",sourceDigest),now+5)).reason===
+     "ENTRY_SETTLEMENT_REVISION_CONFLICT",
+   "same source revision cannot replace settled amount");
+ check((await handleNativeRiskCommand(settlements,session,
+   sett(6,1,"0.5",hash),now+5)).reason===
+     "ENTRY_SETTLEMENT_REVISION_CONFLICT",
+   "same revision cannot substitute a different source digest");
+ const lateFee=await handleNativeRiskCommand(settlements,session,
+   sett(6,2,"3",freshDigest),now+6);
+ check(lateFee.status==="UPDATED"&&lateFee.reason==="BUDGET_BOUND_BREACH",
+   "venue late fee above the entry upper must be booked, not discarded");
+ const lateReplay=await handleNativeRiskCommand(settlements,session,
+   sett(6,2,"3",freshDigest),now+6);
+ check(lateReplay.status==="UPDATED",
+   "lost native WSS ACK for an over-bound debit remains idempotent");
+ check((await handleNativeRiskCommand(settlements,session,
+   sett(7,2,"3.01",sourceDigest),now+6)).reason===
+     "ENTRY_SETTLEMENT_REVISION_CONFLICT",
+   "a duplicate bound-breach revision cannot increase the expense");
+ const settledSummary=await handleNativeRiskCommand(settlements,session,{
+   schema:"okx.risk-command/v1",command_id:"summary_settled_001",
+   installation_id:initial.installation_id,action:{action:"SUMMARY"}},now+7);
+ check(settledSummary.budget?.entry_budget?.consumed_usd==="3"&&
+   settledSummary.budget.entry_budget.reserved_usd==="4"&&
+   settledSummary.budget.entry_budget.bound_breach_usd==="1"&&
+   settledSummary.budget.entry_budget.remaining_usd==="3",
+   "full actual debit booked; other accounts retain four USD of held budget");
+ console.log("native_e1_wss_entry_settlement_cas PASS");
+
  check((await handleNativeRiskCommand(t,session,
    post("human_retry",0,"a".repeat(64),4),now+3)).status==="DENIED",
    "central RiskBook must never authorize the same POST twice");
@@ -145,13 +353,14 @@ check((await handleNativeRiskCommand(s,session,{schema:"okx.risk-command/v1",com
    schema:"okx.risk-command/v1",command_id:"unsent_chat_00001",
    installation_id:initial.installation_id,
    action:{action:"RELEASE_UNSENT",reservation_key:admitted[1].reservation_key,
-     plan_sha256:"b".repeat(64),expected_risk_book_sequence:4,
+     plan_sha256:"b".repeat(64),expected_risk_book_sequence:5,
      proof:{reservation_key:admitted[1].reservation_key,
        account_key:account.account_key,intent_id:"intent_chat_0001",
        plan_hash:"b".repeat(64),request_hash:"e".repeat(64),
        reason:"POLICY_CHANGED",record_digest:"f".repeat(64)}}
  },now+4);
  check(unsent.status==="UPDATED","native signed no-send frees held reserve despite governance pause");
+ await readOnlyInspect("RELEASED");
  const inspect=await handleNativeRiskCommand(t,session,{
    schema:"okx.risk-command/v1",command_id:"inspect_chat_0001",
    installation_id:initial.installation_id,

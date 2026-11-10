@@ -1,4 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+#[path = "job_diagnostics.rs"]
+mod job_diagnostics;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -54,7 +56,11 @@ pub struct Job {
     pub cancel_keys: BTreeSet<String>,
     pub state: State,
     pub progress: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_progress: Option<super::candidate_progress::CandidateProgress>,
     pub artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_artifact: Option<String>,
     pub error: Option<String>,
     pub created_ms: u64,
     pub pinned: bool,
@@ -64,11 +70,13 @@ pub struct Job {
 }
 
 /// The SQLite connection is the sole metadata owner. The in-memory map contains
-/// only cancellers for currently running requests, never historical jobs.
+/// only cancellers for currently running requests. The diagnostic projection
+/// retains bounded, non-authoritative observations, never the complete catalog.
 #[derive(Clone)]
 pub struct Jobs {
     db: Arc<Mutex<Connection>>,
     cancel: Arc<Mutex<BTreeMap<String, Arc<AtomicBool>>>>,
+    diagnostic: Arc<job_diagnostics::Projection>,
 }
 impl Jobs {
     pub fn open(path: PathBuf) -> Result<Self, String> {
@@ -80,7 +88,7 @@ impl Jobs {
         {
             return Err("RESEARCH_SQLITE_PATH_REQUIRED".into());
         }
-        let connection = Connection::open(path).map_err(|e| e.to_string())?;
+        let mut connection = Connection::open(path).map_err(|e| e.to_string())?;
         connection
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
@@ -119,9 +127,52 @@ impl Jobs {
                     WHERE state IN('queued','running');",
             )
             .map_err(|e| e.to_string())?;
+        // Existing catalogs gain only a metadata reference; immutable result roots stay unchanged.
+        let migration = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let has_decision = migration
+            .prepare("PRAGMA table_info(research_jobs)")
+            .map_err(|e| e.to_string())?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|column| column == "decision_artifact");
+        if !has_decision {
+            migration
+                .execute(
+                    "ALTER TABLE research_jobs ADD COLUMN decision_artifact TEXT",
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        migration.execute("CREATE INDEX IF NOT EXISTS idx_research_jobs_decision_artifact ON research_jobs(decision_artifact) WHERE decision_artifact IS NOT NULL", []).map_err(|e| e.to_string())?;
+        let has_progress = migration
+            .prepare("PRAGMA table_info(research_jobs)")
+            .map_err(|e| e.to_string())?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|column| column == "candidate_progress");
+        if !has_progress {
+            migration
+                .execute(
+                    "ALTER TABLE research_jobs ADD COLUMN candidate_progress TEXT",
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        migration.commit().map_err(|e| e.to_string())?;
+        let diagnostic = Arc::new(job_diagnostics::Projection::default());
+        diagnostic.restore(&connection);
         Ok(Self {
             db: Arc::new(Mutex::new(connection)),
             cancel: Default::default(),
+            diagnostic,
         })
     }
     fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
@@ -145,7 +196,22 @@ impl Jobs {
             cancel_keys: BTreeSet::new(),
             state,
             progress: u8::try_from(progress).map_err(|_| rusqlite::Error::InvalidQuery)?,
+            candidate_progress: row
+                .get::<_, Option<String>>(10)?
+                .map(|value| {
+                    serde_json::from_str::<super::candidate_progress::CandidateProgress>(&value)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)
+                        .and_then(|value| {
+                            if value.valid() {
+                                Ok(value)
+                            } else {
+                                Err(rusqlite::Error::InvalidQuery)
+                            }
+                        })
+                })
+                .transpose()?,
             artifact,
+            decision_artifact: row.get(9)?,
             error: row.get(6)?,
             created_ms,
             pinned,
@@ -155,7 +221,7 @@ impl Jobs {
     fn read(connection: &Connection, id: &str) -> Result<Option<Job>, String> {
         let mut job = connection
             .query_row(
-                "SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned
+                "SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned,decision_artifact,candidate_progress
                  FROM research_jobs WHERE id=?1",
                 [id],
                 Self::row,
@@ -222,7 +288,7 @@ impl Jobs {
         let is_new = if let Some(job) = &existing {
             if job.state == State::Failed && is_transient_rate_defer(job.error.as_deref()) {
                 tx.execute(
-                    "UPDATE research_jobs SET state='queued',progress=0,artifact=NULL,error=NULL WHERE id=?1",
+                    "UPDATE research_jobs SET state='queued',progress=0,candidate_progress=NULL,artifact=NULL,error=NULL WHERE id=?1",
                     [&hash],
                 )
                 .map_err(|e| e.to_string())?;
@@ -242,6 +308,7 @@ impl Jobs {
         };
         tx.commit().map_err(|e| e.to_string())?;
         let job = Self::read(&db, &hash)?.ok_or("JOB_NOT_FOUND")?;
+        self.diagnostic.publish_id(&db, &hash);
         drop(db);
         let mut running = self.cancel.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let token = if is_new {
@@ -255,6 +322,49 @@ impl Jobs {
     }
     /// Persisted per-catalog cursor authenticator. Distinct installations
     /// cannot replay each other's page selectors. Never exported or logged.
+    /// Commit a prepublished immutable reference in a short SQL transaction.
+    /// Artifact verification and file I/O happen before acquiring this owner.
+    pub(super) fn commit_decision(
+        &self,
+        id: &str,
+        result: &str,
+        observed_head: Option<&str>,
+        next: &str,
+    ) -> Result<(), String> {
+        let mut db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let job = Self::read(&tx, id)?.ok_or("JOB_NOT_FOUND")?;
+        Self::require_decision_result(&job)?;
+        if job.artifact.as_deref() != Some(result) {
+            return Err("DECISION_RESULT_MISMATCH".into());
+        }
+        if job.decision_artifact.as_deref() != observed_head {
+            return Err("DECISION_REVISION_CONFLICT".into());
+        }
+        let changed = tx.execute(
+            "UPDATE research_jobs SET decision_artifact=?2 WHERE id=?1 AND artifact=?3 AND decision_artifact IS ?4 AND state='completed'",
+            params![id, next, result, observed_head],
+        ).map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("DECISION_REVISION_CONFLICT".into());
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    pub(super) fn require_decision_result(job: &Job) -> Result<(), String> {
+        let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        if job.error.as_deref() == Some("RESULT_EXPIRED_BY_7_DAY_RETENTION")
+            || job.expires_at_ms.is_some_and(|expiry| expiry <= now)
+        {
+            return Err("RESULT_EXPIRED".into());
+        }
+        if job.state != State::Completed || job.artifact.is_none() {
+            return Err("RESULT_NOT_READY".into());
+        }
+        Ok(())
+    }
     pub fn cursor_signing_key(&self) -> Result<Vec<u8>, String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         db.query_row(
@@ -268,6 +378,10 @@ impl Jobs {
     pub fn get(&self, id: &str) -> Result<Job, String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         Self::read(&db, id)?.ok_or("JOB_NOT_FOUND".into())
+    }
+    /// Bounded read-only observation; does not acquire the catalog/SQL mutex.
+    pub fn diagnostic_readback(&self, id: &str) -> serde_json::Value {
+        self.diagnostic.read(id)
     }
     pub fn update(
         &self,
@@ -283,7 +397,7 @@ impl Jobs {
         let updated = db
             .execute(
                 "UPDATE research_jobs SET state=?2,
-                    progress=CASE WHEN ?2='completed' THEN 100 WHEN ?2='running' THEN 10 ELSE progress END,
+                    progress=CASE WHEN ?2='completed' THEN 100 WHEN ?2='running' AND candidate_progress IS NULL THEN 10 ELSE progress END,
                     artifact=?3,error=?4
                  WHERE id=?1 AND state IN ('queued','running')",
                 params![id, state.wire(), artifact, error],
@@ -296,6 +410,7 @@ impl Jobs {
                 _ => return Err("RESEARCH_TERMINAL_IMMUTABLE".into()),
             }
         }
+        self.diagnostic.publish_id(&db, id);
         drop(db);
         if !matches!(state, State::Queued | State::Running) {
             self.cancel
@@ -303,6 +418,50 @@ impl Jobs {
                 .map_err(|_| "CATALOG_LOCK_POISONED")?
                 .remove(id);
         }
+        Ok(())
+    }
+    /// Same catalog owner and terminal fence as job transitions. Late CPU
+    /// observations may never mutate cancellation or terminal snapshots.
+    pub(super) fn update_candidate_progress(
+        &self,
+        id: &str,
+        progress: super::candidate_progress::CandidateProgress,
+    ) -> Result<(), String> {
+        if !progress.valid() {
+            return Err("INVALID_CANDIDATE_PROGRESS".into());
+        }
+        let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
+        let percent = progress
+            .completed_work_units
+            .saturating_mul(99)
+            .checked_div(progress.total_work_units)
+            .unwrap_or(0)
+            .min(99);
+        let sql_counter = |value| i64::try_from(value).map_err(|_| "INVALID_CANDIDATE_PROGRESS");
+        let percent = sql_counter(percent)?;
+        let total_candidates = sql_counter(progress.total_candidates)?;
+        let total_work_units = sql_counter(progress.total_work_units)?;
+        let completed_candidates = sql_counter(progress.completed_candidates)?;
+        let completed_work_units = sql_counter(progress.completed_work_units)?;
+        db.execute(
+            "UPDATE research_jobs SET candidate_progress=?2,progress=?3
+            WHERE id=?1 AND state IN ('queued','running') AND (candidate_progress IS NULL OR (
+                json_extract(candidate_progress,'$.total_candidates')=?4 AND
+                json_extract(candidate_progress,'$.total_work_units')=?5 AND
+                json_extract(candidate_progress,'$.completed_candidates')<=?6 AND
+                json_extract(candidate_progress,'$.completed_work_units')<=?7))",
+            params![
+                id,
+                serde_json::to_string(&progress).map_err(|e| e.to_string())?,
+                percent,
+                total_candidates,
+                total_work_units,
+                completed_candidates,
+                completed_work_units
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        self.diagnostic.publish_id(&db, id);
         Ok(())
     }
     pub fn cancel(&self, id: &str, key: &str) -> Result<Job, String> {
@@ -338,6 +497,7 @@ impl Jobs {
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         let job = Self::read(&db, id)?.ok_or("JOB_NOT_FOUND")?;
+        self.diagnostic.publish_id(&db, id);
         drop(db);
         if job.state == State::Cancelled
             && let Some(token) = self
@@ -391,7 +551,7 @@ impl Jobs {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let changed = db
             .execute(
-                "UPDATE research_jobs SET artifact=NULL,error='RESULT_EXPIRED_BY_7_DAY_RETENTION'
+                "UPDATE research_jobs SET artifact=NULL,decision_artifact=NULL,error='RESULT_EXPIRED_BY_7_DAY_RETENTION'
              WHERE id=?1 AND artifact=?2 AND pinned=0
              AND state NOT IN ('queued','running')",
                 params![id, artifact],
@@ -400,6 +560,7 @@ impl Jobs {
         if changed != 1 {
             return Err("RESEARCH_RETENTION_CONFLICT".into());
         }
+        self.diagnostic.publish_id(&db, id);
         Ok(())
     }
     pub fn artifact_roots_page(
@@ -413,8 +574,10 @@ impl Jobs {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let mut stmt = db
             .prepare(
-                "SELECT DISTINCT artifact FROM research_jobs
+                "SELECT artifact FROM research_jobs
              WHERE artifact IS NOT NULL AND (?1 IS NULL OR artifact>?1)
+             UNION SELECT decision_artifact AS artifact FROM research_jobs
+             WHERE decision_artifact IS NOT NULL AND (?1 IS NULL OR decision_artifact>?1)
              ORDER BY artifact LIMIT ?2",
             )
             .map_err(|e| e.to_string())?;
@@ -426,7 +589,7 @@ impl Jobs {
     pub fn artifact_reference_count(&self, artifact: &str) -> Result<u64, String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         db.query_row(
-            "SELECT COUNT(*) FROM research_jobs WHERE artifact=?1",
+            "SELECT COUNT(*) FROM research_jobs WHERE artifact=?1 OR decision_artifact=?1",
             [artifact],
             |row| row.get::<_, i64>(0),
         )
@@ -456,6 +619,7 @@ impl Jobs {
         {
             return Err("JOB_NOT_FOUND".into());
         }
+        self.diagnostic.publish_id(&db, id);
         Ok(())
     }
 }
@@ -949,7 +1113,7 @@ mod tests {
         }
         let connection = s.db.lock().unwrap();
         let mut stmt = connection.prepare(
-            "EXPLAIN QUERY PLAN SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned
+            "EXPLAIN QUERY PLAN SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned,decision_artifact
              FROM research_jobs WHERE id=?1",
         ).unwrap();
         let plan = stmt

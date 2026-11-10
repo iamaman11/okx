@@ -11,6 +11,7 @@ pub mod market_data;
 pub mod public_data;
 pub mod rate;
 pub mod trade;
+pub mod transport;
 
 pub use account::{
     AccountApi, AccountCapabilities, AccountConfig, AccountPositionRiskBalance,
@@ -29,7 +30,9 @@ pub use config::{Credentials, OkxEnvironment, Region, WsLoginMaterial};
 pub use error::OkxError;
 pub use instrument::InstrumentType;
 pub use ledger::{
-    AccountBill, AccountHistoryApi, BoundedHistory, FillHistory, HistoricalOrder, PositionHistory,
+    AccountBill, AccountHistoryApi, BoundedHistory, CompleteCampaignAccountHistory,
+    CompleteCampaignMoneyHistory, CompleteCampaignOrderHistory, FillHistory, HistoricalOrder,
+    PositionHistory,
 };
 pub use market_data::{
     MarketDataApi, PublicCandle, PublicFundingHistory, PublicFundingRate, PublicIndexTicker,
@@ -45,6 +48,10 @@ pub use rate::{
     RATE_THROTTLE_SCHEMA_V1, RateBudget, RateBudgetSnapshot, RateDecision, RateDomainEvidence,
     RateDomainKind, RateOperationClass, RateRequestPlan, RateThrottleEvidence, RateThrottleSource,
     SUBACCOUNT_RATE_LIMIT_CODE,
+};
+
+pub use transport::{
+    HttpRequest, HttpSend, HttpStatusCode, HttpTransport, RawHttpResponse, ReqwestHttpTransport,
 };
 
 pub use trade::{

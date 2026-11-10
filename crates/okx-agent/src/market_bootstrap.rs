@@ -308,7 +308,7 @@ impl MarketBootstrapper {
         };
 
         let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        Ok(MarketSnapshot::from_bootstrap(
+        Ok(okx_observation::market::market_snapshot_from_bootstrap(
             reference,
             instrument_id,
             source_received_at,
@@ -354,7 +354,7 @@ impl MarketBootstrapper {
             .open_interest_history(instrument_id, period, limit)
             .await?;
         let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        Ok(OpenInterestHistorySnapshot::from_public(
+        Ok(okx_observation::history::open_interest_history_from_public(
             reference,
             instrument_id,
             period,
@@ -379,7 +379,7 @@ impl MarketBootstrapper {
 
         let rows = self.api.trades(instrument_id, limit).await?;
         let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        Ok(MarketTradesSnapshot::from_public(
+        Ok(okx_observation::history::market_trades_from_public(
             reference,
             instrument_id,
             limit,
@@ -406,7 +406,7 @@ impl MarketBootstrapper {
 
         let rows = self.api.funding_rate_history(instrument_id, limit).await?;
         let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        Ok(FundingHistorySnapshot::from_public(
+        Ok(okx_observation::history::funding_history_from_public(
             reference,
             instrument_id,
             limit,
@@ -431,7 +431,7 @@ impl MarketBootstrapper {
 
         let rows = self.api.history_candles(instrument_id, bar, limit).await?;
         let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        Ok(MarketHistorySnapshot::from_public(
+        Ok(okx_observation::history::market_history_from_public(
             reference,
             instrument_id,
             bar,

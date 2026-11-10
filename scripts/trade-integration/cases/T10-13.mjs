@@ -1,0 +1,76 @@
+// T10-13: persisted Worker STOP after a real filled position must reject new
+// claims, preserve the existing risk and permit the actual production Close.
+import assert from "node:assert/strict";
+import {actualNativeWorker,hash} from "../native-workerd.mjs";
+export async function run({caseId,root,signal}){
+  process.env.OKX_T10_13_STOP_PROBE="1";
+  const t=await actualNativeWorker(root,signal,{statusProbe:true});
+  const n=t.nativeT10Stop,w=t.workerT10Stop;
+  const terminal=t.nativeTerminal;
+  const close=t.nativeClose;
+  assert.ok(n&&w&&terminal&&close,
+    "T10-13 requires STOP and real source-linked native Close witnesses");
+  assert.equal(n.schema,"okx.t10-13-native-stop-after-fill/v1");
+  assert.equal(w.schema,"okx.t10-13-worker-stop/v1");
+  assert.equal(n.new_claim_denial,"ACCOUNT_NEW_RISK_PAUSED");
+  assert.equal(n.stop_governance_revision,w.stop_revision);
+  assert.equal(n.native_sql_policy_matches,true);
+  assert.equal(w.explicit_pause,true);
+  assert.equal(w.persisted_worker_durable_object,true);
+  assert.equal(w.stop_revision,w.before_revision+1);
+  assert.ok(n.source_fault_reads>0);
+  assert.notEqual(n.stale_reduce_blocker,"ACCOUNT_NEW_RISK_PAUSED");
+  assert.match(n.source_recovered_digest,/^[0-9a-f]{64}$/);
+  assert.equal(n.posts_before,1);
+  assert.equal(n.posts_after_denied_reduce,1);
+  assert.equal(close.created_posts,2);
+  assert.equal(terminal.created_posts,3);
+  assert.equal(terminal.close_status.data.central_release.state,"verified");
+  assert.equal(terminal.opening_status.data.central_release.state,"verified");
+  // This cohort deliberately holds an independent 2 USD component
+  // reservation before the public opening order. STOP and Close must
+  // release ONLY the filled Native intent's 0.102 USD modelled loss; freeing the
+  // unrelated reservation would be a serious cross-owner money bug.
+  assert.equal(n.worker_budget_before_close.reserved_loss_usd,"2.102");
+  assert.equal(terminal.worker_budget.reserved_loss_usd,"2");
+  const events=[
+    ["fill_ingested","NativeAccountSQL",terminal.opening_intent_id],
+    ["stop_after_fill_applied","RuntimeSession/SQLiteDO",
+      [w.stop_revision,n.worker_budget_before_close]],
+    ["post_stop_new_claims_denied","TradeService+NativeAccountSQL",n.new_claim_denial],
+    ["stale_reduction_blocker_verified","RecordedAuthenticatedHTTP",
+      [n.stale_reduce_blocker,n.source_fault_reads]],
+    ["safe_reduce_or_cancel_attempted","TradeService+RecordedAuthenticatedHTTP",close],
+  ].map(([stage,owner,source])=>({stage,owner,source_digest:hash(source)}));
+  return {
+    case_id:caseId,status:"PASS",
+    provenance:{schema:"okx.native-workerd-transcript/v1",sha256:t.transcript_sha256},
+    assertions:[
+      {id:"no_claim_after_stop",expected:"ACCOUNT_NEW_RISK_PAUSED",
+        actual:n.new_claim_denial},
+      {id:"policy_cas_persisted",expected:"true",
+        actual:String(w.persisted_worker_durable_object)},
+      {id:"no_bad_reduce_post",expected:"1",
+        actual:String(n.posts_after_denied_reduce)},
+      {id:"real_close_post_follows_fresh_source",expected:"2",
+        actual:String(close.created_posts)},
+      {id:"only_filled_intent_risk_released_after_close",expected:"2",
+        actual:terminal.worker_budget.reserved_loss_usd},
+      {id:"prior_held_includes_filled_and_independent_reservation",expected:"2.102",
+        actual:n.worker_budget_before_close.reserved_loss_usd},
+    ],events,
+    readbacks:{
+      sql:[{revision:n.opening_sql_revision,
+        digest:hash([n.intent_id,n.new_claim_denial])}],
+      risk_book:[{revision:terminal.worker_risk_book_sequence,
+        digest:hash(terminal.worker_budget)}],
+    },
+    outbound_sends:[
+      {account:n.account_uid,intent:n.intent_id,operation_kind:"create",count:1},
+      {account:n.account_uid,intent:terminal.close_intent_id,
+        operation_kind:"create",count:1},
+      {account:n.account_uid,intent:terminal.close_intent_id,
+        operation_kind:"cancel",count:1}
+    ],
+  };
+}

@@ -1,11 +1,11 @@
-use okx_github::{GitHubClient, OWNER_USER_ID};
+use okx_github::GitHubClient;
 use okx_host_launcher::{ControllerVersion, LauncherError};
-use okx_protocol::{
-    HostControlOperation, HostControlResult as ProtocolControlResult, HostControlStatus,
-};
 use serde_json::Value;
 
-use crate::HostControlResult;
+use crate::{
+    HostControlResult,
+    control_ack::{AckOperation, matches_durable_ack},
+};
 
 #[derive(Debug, Clone)]
 pub struct ControllerUpdateCandidate {
@@ -55,10 +55,14 @@ pub async fn recover_terminal_ack(github: &GitHubClient) -> HostControlResult<bo
     }
 
     let comments = github.issue_comments(12).await?;
-    if comments
-        .iter()
-        .any(|comment| durable_ack_body(comment.user_id, &comment.body, &pending.request_id))
-    {
+    if comments.iter().any(|comment| {
+        matches_durable_ack(
+            comment.user_id,
+            &comment.body,
+            &pending.request_id,
+            AckOperation::HandoffControllerUpdate,
+        )
+    }) {
         okx_host_launcher::mark_terminal_ack(&pending.request_id)?;
         return Ok(true);
     }
@@ -71,19 +75,6 @@ pub fn abort() -> HostControlResult<Value> {
 
 pub fn status_value() -> Value {
     okx_host_launcher::status_value()
-}
-
-fn durable_ack_body(user_id: u64, body: &str, request_id: &str) -> bool {
-    if user_id != OWNER_USER_ID {
-        return false;
-    }
-    let Ok(result) = serde_json::from_str::<ProtocolControlResult>(body) else {
-        return false;
-    };
-    result.request_id == request_id
-        && result.status == HostControlStatus::Pass
-        && result.operation == HostControlOperation::HandoffControllerUpdate
-        && result.validate().is_ok()
 }
 
 pub fn launcher_error_code(error: &LauncherError) -> &'static str {
@@ -107,6 +98,10 @@ pub fn launcher_error_code(error: &LauncherError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use okx_github::OWNER_USER_ID;
+    use okx_protocol::{
+        HostControlOperation, HostControlResult as ProtocolControlResult, HostControlStatus,
+    };
 
     #[test]
     fn durable_ack_requires_owner_pass_and_exact_handoff_operation() {
@@ -121,18 +116,38 @@ mod tests {
             failure: None,
         };
         let pass_json = serde_json::to_string(&pass).expect("serialize");
-        assert!(durable_ack_body(OWNER_USER_ID, &pass_json, request_id));
-        assert!(!durable_ack_body(OWNER_USER_ID + 1, &pass_json, request_id));
+        assert!(matches_durable_ack(
+            OWNER_USER_ID,
+            &pass_json,
+            request_id,
+            AckOperation::HandoffControllerUpdate
+        ));
+        assert!(!matches_durable_ack(
+            OWNER_USER_ID + 1,
+            &pass_json,
+            request_id,
+            AckOperation::HandoffControllerUpdate
+        ));
 
         let mut wrong_operation = pass.clone();
         wrong_operation.operation = HostControlOperation::Status;
         let wrong_json = serde_json::to_string(&wrong_operation).expect("serialize");
-        assert!(!durable_ack_body(OWNER_USER_ID, &wrong_json, request_id));
+        assert!(!matches_durable_ack(
+            OWNER_USER_ID,
+            &wrong_json,
+            request_id,
+            AckOperation::HandoffControllerUpdate
+        ));
 
         let mut failed = pass;
         failed.status = HostControlStatus::Fail;
         let failed_json = serde_json::to_string(&failed).expect("serialize");
-        assert!(!durable_ack_body(OWNER_USER_ID, &failed_json, request_id));
+        assert!(!matches_durable_ack(
+            OWNER_USER_ID,
+            &failed_json,
+            request_id,
+            AckOperation::HandoffControllerUpdate
+        ));
     }
 
     #[test]

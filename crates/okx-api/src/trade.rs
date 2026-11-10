@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
 
 use crate::{
     DEFAULT_SUBACCOUNT_ORDER_LIMIT_PER_2S, MutationTiming, OkxRestClient, RateOperationClass,
@@ -53,6 +56,7 @@ pub enum ApiOrderSide {
 pub enum ApiPositionSide {
     Long,
     Short,
+    Net,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +107,9 @@ pub struct PlaceOrderRequest {
     pub side: ApiOrderSide,
     #[serde(rename = "posSide")]
     pub position_side: ApiPositionSide,
+    /// Required for a net-mode reduction, never sent for hedge-mode orders.
+    #[serde(rename = "reduceOnly", skip_serializing_if = "Option::is_none")]
+    pub reduce_only: Option<bool>,
     #[serde(rename = "ordType")]
     pub order_type: ApiOrderType,
     #[serde(rename = "sz")]
@@ -442,15 +449,17 @@ async fn read_derivative_scope(
     client: OkxRestClient,
     kind: String,
     order_type: String,
+    admission_deadline: Instant,
 ) -> Result<ReceiptedDerivativeScope, OkxError> {
     let rows: Vec<PendingAlgoOrderDetails> = client
-        .private_get(
+        .private_get_wait(
             ALGO_PENDING_PATH,
             &[
                 ("ordType", order_type.clone()),
                 ("instType", kind.clone()),
                 ("limit", PROTECTIVE_ALGO_PAGE_LIMIT.to_string()),
             ],
+            admission_deadline.saturating_duration_since(Instant::now()),
         )
         .await?;
     Ok((
@@ -642,6 +651,20 @@ impl TradeApi {
     pub async fn pending_derivative_risk_algos(
         &self,
     ) -> Result<PendingDerivativeAlgoRiskInventory, OkxError> {
+        // Ordinary callers retain the existing five-second bounded inventory.
+        self.pending_derivative_risk_algos_until(Instant::now() + Duration::from_millis(5_000))
+            .await
+    }
+
+    /// Source-backed admission shares the trade owner's ORIGINAL deadline
+    /// across all 16 authenticated scopes. Do not replace it with an
+    /// internal five-second window: LOCAL/no-send rate admission can otherwise
+    /// reject a fully authorized census before its caller's deadline.
+    /// This grants no venue POST and never retries a sent HTTP request.
+    pub async fn pending_derivative_risk_algos_until(
+        &self,
+        admission_deadline: Instant,
+    ) -> Result<PendingDerivativeAlgoRiskInventory, OkxError> {
         use futures_util::{StreamExt, TryStreamExt, stream};
         let scopes = ["SWAP", "FUTURES"]
             .into_iter()
@@ -651,10 +674,20 @@ impl TradeApi {
                     .map(move |order_type| (kind, *order_type))
             })
             .collect::<Vec<_>>();
+        // One total admission budget for the entire risk inventory, not
+        // another 2.5 seconds for every parallel scope. The same signed
+        // GETs and parser are used: only local no-send defers can wait.
+        // After HELD, the central causal fence still independently limits
+        // this read and rejects it if too slow.
         let calls = scopes
             .into_iter()
             .map(|(kind, order_type)| {
-                read_derivative_scope(self.client.clone(), kind.to_owned(), order_type.to_owned())
+                read_derivative_scope(
+                    self.client.clone(),
+                    kind.to_owned(),
+                    order_type.to_owned(),
+                    admission_deadline,
+                )
             })
             .collect::<Vec<_>>();
         let responses = stream::iter(calls)
@@ -959,19 +992,49 @@ impl TradeApi {
         instrument_id: &str,
         client_order_id: &str,
     ) -> Result<TradeOrderDetails, OkxError> {
+        self.order_by_client_id_with_deadline(instrument_id, client_order_id, None)
+            .await
+    }
+
+    /// Status/reconciliation is read-only. It may wait for a LOCAL no-send
+    /// GET quota, but never resends an order, retries a sent HTTP response,
+    /// uses cached venue state or extends the caller's monotonic deadline.
+    pub async fn order_by_client_id_until(
+        &self,
+        instrument_id: &str,
+        client_order_id: &str,
+        until: Instant,
+    ) -> Result<TradeOrderDetails, OkxError> {
+        self.order_by_client_id_with_deadline(instrument_id, client_order_id, Some(until))
+            .await
+    }
+
+    async fn order_by_client_id_with_deadline(
+        &self,
+        instrument_id: &str,
+        client_order_id: &str,
+        until: Option<Instant>,
+    ) -> Result<TradeOrderDetails, OkxError> {
         validate_instrument_id(instrument_id)?;
         validate_client_id("clOrdId", client_order_id)?;
-
-        let mut orders: Vec<TradeOrderDetails> = self
-            .client
-            .private_get(
-                ORDER_DETAILS_PATH,
-                &[
-                    ("instId", instrument_id.to_owned()),
-                    ("clOrdId", client_order_id.to_owned()),
-                ],
+        let params = [
+            ("instId", instrument_id.to_owned()),
+            ("clOrdId", client_order_id.to_owned()),
+        ];
+        let mut orders: Vec<TradeOrderDetails> = if let Some(until) = until {
+            tokio::time::timeout_at(
+                until.into(),
+                self.client.private_get_wait(
+                    ORDER_DETAILS_PATH,
+                    &params,
+                    until.saturating_duration_since(Instant::now()),
+                ),
             )
-            .await?;
+            .await
+            .map_err(|_| OkxError::Response("ORDER_READBACK_DEADLINE_EXCEEDED".into()))??
+        } else {
+            self.client.private_get(ORDER_DETAILS_PATH, &params).await?
+        };
 
         if orders.len() != 1 {
             return Err(OkxError::Response(format!(
@@ -1112,6 +1175,13 @@ fn validate_place(request: &PlaceOrderRequest) -> Result<(), OkxError> {
     validate_client_id("clOrdId", &request.client_order_id)?;
     validate_nonempty("sz", &request.size)?;
     validate_nonempty("px", &request.price)?;
+    if request.reduce_only.is_some()
+        && (request.position_side != ApiPositionSide::Net || request.reduce_only != Some(true))
+    {
+        return Err(OkxError::Config(
+            "reduceOnly requires confirmed net-mode reduction".to_owned(),
+        ));
+    }
     for attached in &request.attached_algo_orders {
         validate_client_id("attachAlgoClOrdId", &attached.client_order_id)?;
         if !attached.take_profit_trigger_price.is_empty()
@@ -1409,6 +1479,7 @@ mod tests {
             client_order_id: "okx01234567890123456789012345678".to_owned(),
             side: ApiOrderSide::Buy,
             position_side: ApiPositionSide::Long,
+            reduce_only: None,
             order_type: ApiOrderType::Limit,
             size: "1.25".to_owned(),
             price: "0.10000".to_owned(),
@@ -1427,6 +1498,24 @@ mod tests {
         assert_eq!(encoded["sz"], "1.25");
         assert_eq!(encoded["px"], "0.10000");
         assert!(encoded.get("reduceOnly").is_none());
+    }
+
+    #[test]
+    fn net_mode_open_and_reduce_only_payloads_are_unambiguous() {
+        let mut opening = place();
+        opening.position_side = ApiPositionSide::Net;
+        let encoded = serde_json::to_value(&opening).unwrap();
+        assert_eq!(encoded["posSide"], "net");
+        assert!(encoded.get("reduceOnly").is_none());
+        opening.reduce_only = Some(true);
+        let encoded = serde_json::to_value(&opening).unwrap();
+        assert_eq!(encoded["reduceOnly"], true);
+        validate_place(&opening).unwrap();
+        opening.position_side = ApiPositionSide::Long;
+        assert!(
+            validate_place(&opening).is_err(),
+            "hedge order may not misstate reduceOnly"
+        );
     }
 
     #[test]

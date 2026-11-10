@@ -29,12 +29,18 @@ pub enum AccountBootstrapError {
 
     #[error("account normalization error: {0}")]
     Normalize(#[from] AccountError),
+
+    #[error("ACCOUNT_SOURCE_DEADLINE_EXCEEDED")]
+    SourceDeadline,
 }
 
 #[derive(Debug, Error)]
 pub enum AccountLedgerBootstrapError {
     #[error("OKX observer API key is not strictly read-only")]
     PermissionRejected,
+
+    #[error("ACCOUNT_LEDGER_SOURCE_DEADLINE_EXCEEDED")]
+    SourceDeadline,
 
     #[error("OKX private API error: {0}")]
     Api(#[from] OkxError),
@@ -192,10 +198,33 @@ impl AccountBootstrapper {
         self.config_cache.read(|| self.api.config()).await
     }
 
-    async fn fresh_observer_config(
+    async fn observer_config_until(
         &self,
+        until: Instant,
     ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError> {
-        self.config_cache.read_fresh(|| self.api.config()).await
+        self.config_cache
+            .read(|| async {
+                self.api
+                    .config_wait(until.saturating_duration_since(Instant::now()))
+                    .await
+            })
+            .await
+    }
+
+    async fn fresh_observer_config_until(
+        &self,
+        until: Instant,
+    ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError> {
+        // K4: still forces a *new* after-HELD signed config observation.
+        // Waiting here admits only a LOCAL no-send private GET in the
+        // existing native rate domain. No exchange/POST retry or stale cache.
+        self.config_cache
+            .read_fresh(|| async {
+                self.api
+                    .config_wait(until.saturating_duration_since(Instant::now()))
+                    .await
+            })
+            .await
     }
 
     pub async fn fee_schedule(
@@ -205,12 +234,27 @@ impl AccountBootstrapper {
         let (config, _) = self.observer_config().await?;
         strict_read_only_permissions(&config.perm)
             .map_err(|_| FeeScheduleBootstrapError::PermissionRejected)?;
-        self.fee_schedule_authorized(rules).await
+        self.fee_schedule_authorized(rules, None).await
+    }
+
+    /// An after-HELD tariff source cannot be refreshed through an invented
+    /// cache timestamp. Local no-send GET capacity may be awaited only inside
+    /// the original command deadline; the fee bytes still come from OKX.
+    pub async fn fee_schedule_until(
+        &self,
+        rules: &InstrumentRulesSnapshot,
+        until: Instant,
+    ) -> Result<FeeScheduleSnapshot, FeeScheduleBootstrapError> {
+        let (config, _) = self.observer_config_until(until).await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| FeeScheduleBootstrapError::PermissionRejected)?;
+        self.fee_schedule_authorized(rules, Some(until)).await
     }
 
     async fn fee_schedule_authorized(
         &self,
         rules: &InstrumentRulesSnapshot,
+        until: Option<Instant>,
     ) -> Result<FeeScheduleSnapshot, FeeScheduleBootstrapError> {
         let instrument = &rules.instrument;
         let family = instrument
@@ -224,10 +268,22 @@ impl AccountBootstrapper {
             .filter(|value| !value.trim().is_empty())
             .ok_or(FeeScheduleBootstrapError::ReferenceIncomplete("groupId"))?;
 
-        let rows = self
-            .api
-            .fee_rates_for_family(instrument.instrument_type, family)
-            .await?;
+        // Both paths use the identical signed fee-family GET. The bounded
+        // variant only waits for LOCAL, NOT-SENT read admission in the same
+        // original command deadline; it does not refresh a sent request.
+        let rows = if let Some(until) = until {
+            self.api
+                .fee_rates_for_family_wait(
+                    instrument.instrument_type,
+                    family,
+                    until.saturating_duration_since(Instant::now()),
+                )
+                .await?
+        } else {
+            self.api
+                .fee_rates_for_family(instrument.instrument_type, family)
+                .await?
+        };
         let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
         normalize_fee_schedule(
             &instrument.instrument_id,
@@ -272,7 +328,7 @@ impl AccountBootstrapper {
                     }
                 };
 
-                let fee = self.fee_schedule_authorized(rules).await?;
+                let fee = self.fee_schedule_authorized(rules, None).await?;
                 (
                     true,
                     non_empty_owned(instrument.lever),
@@ -315,6 +371,36 @@ impl AccountBootstrapper {
             .map_err(|_| ConfiguredLeverageBootstrapError::PermissionRejected)?;
 
         let rows = self.api.leverage(instrument_id, margin_mode).await?;
+        select_configured_leverage(
+            &rows,
+            instrument_id,
+            &margin_mode.to_string(),
+            position_side,
+        )
+    }
+
+    /// Deadline-owned source check used by the original Native Execute,
+    /// before any venue POST. Rejects ambiguous/absent/mismatched leverage
+    /// exactly as configured_leverage does.
+    pub async fn configured_leverage_until(
+        &self,
+        instrument_id: &str,
+        margin_mode: MarginMode,
+        position_side: &str,
+        until: Instant,
+    ) -> Result<String, ConfiguredLeverageBootstrapError> {
+        let (config, _) = self.observer_config_until(until).await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| ConfiguredLeverageBootstrapError::PermissionRejected)?;
+
+        let rows = self
+            .api
+            .leverage_wait(
+                instrument_id,
+                margin_mode,
+                until.saturating_duration_since(Instant::now()),
+            )
+            .await?;
         select_configured_leverage(
             &rows,
             instrument_id,
@@ -384,6 +470,29 @@ impl AccountBootstrapper {
         Ok(self.trade.pending_derivative_risk_algos().await?)
     }
 
+    /// A managed-position protection read must never treat a LOCAL/NO-SEND
+    /// private config rate defer as proof that a live stop is missing. Only
+    /// the authenticated read can proceed, within the caller's finite
+    /// deadline. No cached algo coverage or substitute risk authority.
+    pub async fn pending_derivative_risk_algos_until(
+        &self,
+        until: Instant,
+    ) -> Result<PendingDerivativeAlgoRiskInventory, AccountLedgerBootstrapError> {
+        if Instant::now() >= until {
+            return Err(AccountLedgerBootstrapError::SourceDeadline);
+        }
+        let (config, _) = self.observer_config_until(until).await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
+        tokio::time::timeout_at(
+            until.into(),
+            self.trade.pending_derivative_risk_algos_until(until),
+        )
+        .await
+        .map_err(|_| AccountLedgerBootstrapError::SourceDeadline)?
+        .map_err(AccountLedgerBootstrapError::from)
+    }
+
     pub async fn ledger_facts(
         &self,
         snapshot: &AccountSnapshot,
@@ -436,39 +545,84 @@ impl AccountBootstrapper {
 
     pub async fn snapshot(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
         let (config, config_received_at) = self.observer_config().await?;
-        self.snapshot_from_config(config, config_received_at).await
+        self.snapshot_from_config(config, config_received_at, None)
+            .await
+    }
+
+    /// Reduction-only assessment: preserve the same authenticated REST facts
+    /// but permit a bounded wait for local no-send read capacity. The caller's
+    /// monotonic deadline covers config, every paginated read and normalization.
+    /// No stale-cache fallback, exchange retry, or trading POST occurs here.
+    pub async fn snapshot_until(
+        &self,
+        until: Instant,
+    ) -> Result<AccountSnapshot, AccountBootstrapError> {
+        if Instant::now() >= until {
+            return Err(AccountBootstrapError::SourceDeadline);
+        }
+        tokio::time::timeout_at(until.into(), async {
+            let (config, config_received_at) = self.observer_config_until(until).await?;
+            self.snapshot_from_config(config, config_received_at, Some(until))
+                .await
+        })
+        .await
+        .map_err(|_| AccountBootstrapError::SourceDeadline)?
     }
 
     /// Used only after HELD: a fresh OKX config call, followed by fresh
     /// balance/positions/orders; any failure blocks BEGIN_POST.
-    pub async fn snapshot_after_held(&self) -> Result<AccountSnapshot, AccountBootstrapError> {
-        let (config, config_received_at) = self.fresh_observer_config().await?;
-        self.snapshot_from_config(config, config_received_at).await
+    pub async fn snapshot_after_held_until(
+        &self,
+        until: Instant,
+    ) -> Result<AccountSnapshot, AccountBootstrapError> {
+        if Instant::now() >= until {
+            return Err(AccountBootstrapError::SourceDeadline);
+        }
+        tokio::time::timeout_at(until.into(), async {
+            let (config, config_received_at) = self.fresh_observer_config_until(until).await?;
+            self.snapshot_from_config(config, config_received_at, Some(until))
+                .await
+        })
+        .await
+        .map_err(|_| AccountBootstrapError::SourceDeadline)?
     }
 
     async fn snapshot_from_config(
         &self,
         config: AccountConfig,
         config_received_at: chrono::DateTime<Utc>,
+        until: Option<Instant>,
     ) -> Result<AccountSnapshot, AccountBootstrapError> {
         // Use the authenticated config observation time, not a cache-hit time.
         // Balance/positions/orders are read afterward; no falsely fresh source receipt.
         let source_received_at = config_received_at.to_rfc3339_opts(SecondsFormat::Millis, true);
         let permissions = strict_read_only_permissions(&config.perm)?;
 
-        let (balance, positions, pending_orders) = tokio::try_join!(
-            self.api.balance(),
-            self.api.positions(),
-            self.api.pending_orders(),
-        )?;
-        Ok(AccountSnapshot::from_rest_bootstrap(
-            source_received_at,
-            config,
-            balance,
-            positions,
-            pending_orders,
-            permissions,
-        )?)
+        let (balance, positions, pending_orders) = if let Some(until) = until {
+            tokio::try_join!(
+                self.api
+                    .balance_wait(until.saturating_duration_since(Instant::now())),
+                self.api
+                    .positions_wait(until.saturating_duration_since(Instant::now())),
+                self.api.pending_orders_until(until),
+            )?
+        } else {
+            tokio::try_join!(
+                self.api.balance(),
+                self.api.positions(),
+                self.api.pending_orders(),
+            )?
+        };
+        Ok(
+            okx_observation::account::account_snapshot_from_rest_bootstrap(
+                source_received_at,
+                config,
+                balance,
+                positions,
+                pending_orders,
+                permissions,
+            )?,
+        )
     }
 }
 

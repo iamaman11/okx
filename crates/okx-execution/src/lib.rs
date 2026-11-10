@@ -2,6 +2,6 @@
 pub mod account_store;
 pub use account_store::*;
 pub mod account_worker;
-pub use account_worker::AccountStoreHandle;
+pub use account_worker::{AccountStorageReadback, AccountStoreHandle};
 pub mod finance;
 pub mod risk;

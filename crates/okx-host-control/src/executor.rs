@@ -27,8 +27,8 @@ use crate::{
     provenance::InstalledAgentProvenanceStore,
 };
 
-const CANONICAL_ROOT: &str = r"C:\okx";
-const RUNTIME_ROOT: &str = r"C:\okx-runtime";
+const CANONICAL_ROOT: &str = okx_host_launcher::WORKSPACE_ROOT;
+const RUNTIME_ROOT: &str = okx_host_launcher::RUNTIME_ROOT;
 const AGENT_MAILBOX_ISSUE: &str = "10";
 const AGENT_CLOUDFLARE_WS_URL: &str = "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime";
 const AGENT_CLOUDFLARE_RUNTIME_ID: &str = "windows-primary";
@@ -501,7 +501,8 @@ impl HostExecutor {
         self.require_agent_binary()?;
         let token = load_native_github_token()?;
 
-        let mut child = hidden_command(self.agent_binary())
+        let mut child = self
+            .agent_command()
             .arg("set-github-token")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -543,7 +544,8 @@ impl HostExecutor {
         }
 
         let token_sha256 = format!("{:x}", Sha256::digest(token.as_bytes()));
-        let mut child = match hidden_command(self.agent_binary())
+        let mut child = match self
+            .agent_command()
             .arg("set-cloudflare-token")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -637,7 +639,7 @@ impl HostExecutor {
         if let Some(key) = account {
             AccountCatalogStore::canonical().require_account(key, installation)?;
         }
-        let mut command = hidden_command(self.agent_binary());
+        let mut command = self.agent_command();
         command
             .arg("--root")
             .arg(RUNTIME_ROOT)
@@ -706,7 +708,7 @@ impl HostExecutor {
         if let Some(r) = release {
             self.require_release(r)?;
         }
-        let mut command = hidden_command(self.agent_binary());
+        let mut command = self.agent_command();
         command
             .arg("--root")
             .arg(RUNTIME_ROOT)
@@ -790,11 +792,14 @@ impl HostExecutor {
         Ok(serde_json::from_slice(&output.stdout)?)
     }
 
+    fn agent_command(&self) -> Command {
+        let mut command = hidden_command(self.agent_binary());
+        command.current_dir(self.runtime_dir());
+        command
+    }
+
     fn agent_output(&self, args: &[&str]) -> HostControlResult<std::process::Output> {
-        let output = hidden_command(self.agent_binary())
-            .args(args)
-            .current_dir(&self.repo_root)
-            .output()?;
+        let output = self.agent_command().args(args).output()?;
 
         if !output.status.success() {
             return Err(HostControlError::CommandFailed("okx-agent"));
@@ -881,11 +886,11 @@ impl HostExecutor {
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>()
         );
-        let mut child = hidden_command(self.agent_binary())
+        let mut child = self
+            .agent_command()
             .args(args)
             .arg("--native-child-control-stdio")
             .env("OKX_CONTROL_AGENT_INCAR", &incarnation)
-            .current_dir(&self.repo_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1593,7 +1598,7 @@ mod tests {
     #[test]
     fn git_commands_ignore_shell_proxy_and_global_git_configuration() {
         let command = direct_git_command(
-            Path::new(r"C:\okx"),
+            Path::new(okx_host_launcher::WORKSPACE_ROOT),
             &["fetch", "--prune", "origin", "main"],
         );
         let arguments = command
@@ -1651,7 +1656,28 @@ mod tests {
     #[test]
     fn canonical_root_is_fixed() {
         let executor = HostExecutor::canonical().expect("executor");
-        assert_eq!(executor.repo_root, PathBuf::from(r"C:\okx"));
+        assert_eq!(
+            executor.repo_root,
+            PathBuf::from(okx_host_launcher::WORKSPACE_ROOT)
+        );
+    }
+    #[test]
+    fn installed_agent_command_needs_runtime_not_optional_workspace() {
+        let executor = HostExecutor::canonical().expect("executor");
+        let command = executor.agent_command();
+        assert_eq!(command.get_program(), executor.agent_binary().as_os_str());
+        assert_eq!(
+            command.get_current_dir(),
+            Some(executor.runtime_dir().as_path())
+        );
+        assert_ne!(
+            command.get_current_dir(),
+            Some(executor.repo_root.as_path())
+        );
+        assert_eq!(
+            DesiredStateStore::canonical().path(),
+            Path::new(okx_host_launcher::CONTROL_ROOT).join("engine-state.pb")
+        );
     }
     #[test]
     fn remote_allowlist_is_narrow() {

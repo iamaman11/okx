@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 use crate::auth::timestamp_now;
 
@@ -51,8 +54,9 @@ pub struct AccountConfig {
     pub account_type: String,
     #[serde(rename = "acctStpMode", default)]
     pub account_stp_mode: String,
+    /// Missing source field means unknown, never verified disabled borrowing.
     #[serde(rename = "autoLoan", default)]
-    pub auto_loan: bool,
+    pub auto_loan: Option<bool>,
     #[serde(rename = "greeksType", default)]
     pub greeks_type: String,
     #[serde(rename = "feeType", default)]
@@ -430,7 +434,7 @@ pub struct AccountCapabilities {
     pub account_uid_fingerprint: String,
     pub account_type: String,
     pub account_stp_mode: String,
-    pub auto_loan: bool,
+    pub auto_loan: Option<bool>,
     pub greeks_type: String,
     pub fee_type: String,
     pub api_key_label: String,
@@ -461,6 +465,15 @@ impl AccountApi {
     pub async fn config(&self) -> Result<AccountConfig, OkxError> {
         self.client
             .private_get::<AccountConfig>("/api/v5/account/config", &[])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| OkxError::Config("OKX returned no account configuration".to_owned()))
+    }
+
+    pub async fn config_wait(&self, max_wait: Duration) -> Result<AccountConfig, OkxError> {
+        self.client
+            .private_get_wait::<AccountConfig>("/api/v5/account/config", &[], max_wait)
             .await?
             .into_iter()
             .next()
@@ -545,6 +558,26 @@ impl AccountApi {
             .await
     }
 
+    /// Deadline-owned authenticated leverage GET. Only LOCAL rate admission
+    /// may wait before the HTTP request; there is no retry of sent reads or POST.
+    pub async fn leverage_wait(
+        &self,
+        instrument_id: &str,
+        margin_mode: MarginMode,
+        max_wait: Duration,
+    ) -> Result<Vec<LeverageInfo>, OkxError> {
+        self.client
+            .private_get_wait(
+                "/api/v5/account/leverage-info",
+                &[
+                    ("instId", instrument_id.to_owned()),
+                    ("mgnMode", margin_mode.to_string()),
+                ],
+                max_wait,
+            )
+            .await
+    }
+
     /// A non-order configuration write. Caller must hold the single native
     /// execution-owner mutex and independently verify both long/short sides.
     /// Never replay a possibly-sent request after an uncertain outcome.
@@ -609,6 +642,26 @@ impl AccountApi {
             .await
     }
 
+    /// Deadline-owned authenticated fee GET, same exact family scope as
+    /// fee_rates_for_family. Only local no-send read admission may wait.
+    pub async fn fee_rates_for_family_wait(
+        &self,
+        instrument_type: InstrumentType,
+        instrument_family: &str,
+        max_wait: Duration,
+    ) -> Result<Vec<FeeRate>, OkxError> {
+        self.client
+            .private_get_wait(
+                "/api/v5/account/trade-fee",
+                &[
+                    ("instType", instrument_type.to_string()),
+                    ("instFamily", instrument_family.to_owned()),
+                ],
+                max_wait,
+            )
+            .await
+    }
+
     pub async fn balance(&self) -> Result<BalanceSnapshot, OkxError> {
         self.client
             .private_get::<BalanceSnapshot>("/api/v5/account/balance", &[])
@@ -618,9 +671,26 @@ impl AccountApi {
             .ok_or_else(|| OkxError::Config("OKX returned no account balance snapshot".to_owned()))
     }
 
+    /// An opt-in bounded read for a deadline-owned trade assessment.
+    /// Only local rate admission waits; neither sent HTTP nor exchange errors retry.
+    pub async fn balance_wait(&self, max_wait: Duration) -> Result<BalanceSnapshot, OkxError> {
+        self.client
+            .private_get_wait::<BalanceSnapshot>("/api/v5/account/balance", &[], max_wait)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| OkxError::Config("OKX returned no account balance snapshot".to_owned()))
+    }
+
     pub async fn positions(&self) -> Result<Vec<Position>, OkxError> {
         self.client
             .private_get("/api/v5/account/positions", &[])
+            .await
+    }
+
+    pub async fn positions_wait(&self, max_wait: Duration) -> Result<Vec<Position>, OkxError> {
+        self.client
+            .private_get_wait("/api/v5/account/positions", &[], max_wait)
             .await
     }
 
@@ -656,6 +726,21 @@ impl AccountApi {
     }
 
     pub async fn pending_orders(&self) -> Result<Vec<PendingOrder>, OkxError> {
+        self.pending_orders_inner(None).await
+    }
+
+    /// Every page shares the caller's monotonic deadline, not a fresh retry window.
+    pub async fn pending_orders_until(
+        &self,
+        until: Instant,
+    ) -> Result<Vec<PendingOrder>, OkxError> {
+        self.pending_orders_inner(Some(until)).await
+    }
+
+    async fn pending_orders_inner(
+        &self,
+        until: Option<Instant>,
+    ) -> Result<Vec<PendingOrder>, OkxError> {
         const PAGE_LIMIT: usize = 100;
         const MAX_PAGES: usize = 10;
 
@@ -668,10 +753,19 @@ impl AccountApi {
                 params.push(("after", after.clone()));
             }
 
-            let page: Vec<PendingOrder> = self
-                .client
-                .private_get("/api/v5/trade/orders-pending", &params)
-                .await?;
+            let page: Vec<PendingOrder> = if let Some(until) = until {
+                self.client
+                    .private_get_wait(
+                        "/api/v5/trade/orders-pending",
+                        &params,
+                        until.saturating_duration_since(Instant::now()),
+                    )
+                    .await?
+            } else {
+                self.client
+                    .private_get("/api/v5/trade/orders-pending", &params)
+                    .await?
+            };
             let page_len = page.len();
 
             if page_len == 0 {

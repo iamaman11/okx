@@ -18,6 +18,9 @@ pub struct DispatchContext {
     pub trade: Arc<TradeService>,
     pub market: crate::market_bootstrap::MarketBootstrapper,
 }
+#[cfg(test)]
+#[path = "query_dispatch_tests.rs"]
+mod public_dispatch_tests;
 pub async fn dispatch(ctx: &DispatchContext, r: &AgentRequest) -> AgentResponse {
     dispatch_with_governance(ctx, r, None).await
 }
@@ -56,6 +59,24 @@ fn compact_ws_overview(snapshot: okx_observation::LiveMarketSnapshot) -> Value {
         "generation": snapshot.generation,
         "book_sequence": snapshot.order_book.seq_id,
         "book_exchange_timestamp_ms": snapshot.order_book.exchange_timestamp_ms
+    })
+}
+
+fn find_instruments_response(
+    reference: &okx_observation::ReferenceRegistry,
+    asset: &str,
+    settle_currency: Option<&str>,
+    instrument_type: Option<okx_protocol::InstrumentTypeFilter>,
+) -> Value {
+    let instrument_type = instrument_type.map(|kind| match kind {
+        okx_protocol::InstrumentTypeFilter::Swap => okx_observation::InstrumentType::Swap,
+        okx_protocol::InstrumentTypeFilter::Futures => okx_observation::InstrumentType::Futures,
+    });
+    let mut search = reference.find_instruments(asset, settle_currency, instrument_type);
+    search.instruments.truncate(50);
+    json!({
+        "instruments": search.instruments,
+        "reference_generation": search.reference_generation
     })
 }
 
@@ -121,148 +142,33 @@ async fn execute(
             serde_json::to_value(c).map_err(|_| "SERIALIZATION_FAILED".into())
         }
         AgentOperation::Market { request } => {
-            let mut universe_page = None;
-            let mut resolved_instruments = None;
-            if let Some(universe) = &request.universe {
-                let reference = ctx.public_ws.reference_snapshot().await;
-                if universe
-                    .reference_generation
-                    .as_deref()
-                    .is_some_and(|expected| expected != reference.generation().as_str())
-                {
-                    return Err("UNIVERSE_REFERENCE_GENERATION_CHANGED".into());
-                }
-                let mut names = reference
-                    .iter()
-                    .filter(|spec| spec.state == "live")
-                    .filter(|spec| {
-                        format!("{:?}", spec.instrument_type).to_uppercase()
-                            == universe.instrument_type
-                    })
-                    .filter(|spec| {
-                        universe
-                            .settle_currency
-                            .as_ref()
-                            .is_none_or(|settle| spec.settle_currency.as_ref() == Some(settle))
-                    })
-                    .map(|spec| spec.instrument_id.clone())
-                    .collect::<Vec<_>>();
-                names.sort_unstable();
-                names.dedup();
-                let universe_size = names.len();
-                if universe.rank_globally && names.len() > 512 {
-                    return Err("GLOBAL_RANK_UNIVERSE_LIMIT:512".into());
-                }
-                if !universe.rank_globally {
-                    if let Some(after) = &universe.after_instrument {
-                        names.retain(|name| name > after);
-                    }
-                    names.truncate(usize::from(universe.limit).saturating_add(1));
-                }
-                let has_more = if universe.rank_globally {
-                    names.len() > usize::from(request.limit)
-                } else {
-                    names.len() > usize::from(universe.limit)
-                };
-                if !universe.rank_globally {
-                    names.truncate(usize::from(universe.limit));
-                }
-                if names.is_empty() {
-                    return Err("UNIVERSE_PAGE_EMPTY".into());
-                }
-                universe_page = Some(json!({
-                    "schema":"okx.market.universe-page/v1",
-                    "source":"venue_reference_registry",
-                    "reference_generation":reference.generation().as_str(),
-                    "reference_received_at":reference.source_received_at(),
-                    "global_ranking":universe.rank_globally,
-                    "scope":if universe.rank_globally {"complete_venue_universe"} else {"bounded_market_page"},
-                    "has_more":has_more,
-                    "next_after_instrument":if has_more && !universe.rank_globally {names.last().cloned()}else{None},
-                    "universe_size":universe_size,
-                    "page_count":if universe.rank_globally {names.len().min(usize::from(request.limit))}else{names.len()}
-                }));
-                resolved_instruments = Some(names);
-            }
-            ctx.analytics
-                .market(request.clone(), universe_page, resolved_instruments)
-                .await
+            execute_market(&ctx.public_ws, &ctx.analytics, request).await
         }
         AgentOperation::MarketCapabilities => Ok(ctx.analytics.market_capabilities()),
         AgentOperation::MarketMicrostructure {
             instrument,
             size_contracts,
         } => {
-            ctx.public_ws
-                .demand_instrument(instrument)
+            execute_market_microstructure(&ctx.public_ws, instrument, size_contracts.as_deref())
                 .await
-                .map_err(|_| "MARKET_CAPACITY")?;
-            // Fail closed on any stale or sequence-discontinuous order book: no REST fallback.
-            let snap = ctx
-                .public_ws
-                .risk_fresh_snapshot(
-                    instrument,
-                    Utc::now().timestamp_millis().max(0) as u64,
-                    crate::config::QUOTE_MAX_AGE_MS,
-                    crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
-                    Utc::now().to_rfc3339(),
-                )
-                .await
-                .map_err(|_| "MICROSTRUCTURE_FRESH_BOOK_REQUIRED")?;
-            let asks = snap
-                .order_book
-                .asks
-                .iter()
-                .take(10)
-                .cloned()
-                .collect::<Vec<_>>();
-            let bids = snap
-                .order_book
-                .bids
-                .iter()
-                .take(10)
-                .cloned()
-                .collect::<Vec<_>>();
-            let best_ask = asks
-                .first()
-                .ok_or("BOOK_ASK_EMPTY")?
-                .price
-                .parse::<rust_decimal::Decimal>()
-                .map_err(|_| "BOOK_PRICE_INVALID")?;
-            let best_bid = bids
-                .first()
-                .ok_or("BOOK_BID_EMPTY")?
-                .price
-                .parse::<rust_decimal::Decimal>()
-                .map_err(|_| "BOOK_PRICE_INVALID")?;
-            if best_bid <= rust_decimal::Decimal::ZERO || best_ask <= best_bid {
-                return Err("BOOK_SPREAD_INVALID".into());
-            }
-            let spread = (best_ask - best_bid) * rust_decimal::Decimal::new(20_000, 0)
-                / (best_ask + best_bid);
-            let sweep=size_contracts.as_ref().map(|n|{
-                let qty=n.parse::<rust_decimal::Decimal>().map_err(|_|"SIZE_INVALID")?;
-                let buy=book_sweep_vwap(&asks,qty)?;
-                let sell=book_sweep_vwap(&bids,qty)?;
-                Ok::<_,String>(json!({"size_contracts":n,"buy_vwap":buy.normalize().to_string(),
-                    "sell_vwap":sell.normalize().to_string(),
-                    "buy_impact_bps":((buy-best_ask)*rust_decimal::Decimal::new(10_000,0)/best_ask).normalize().to_string(),
-                    "sell_impact_bps":((best_bid-sell)*rust_decimal::Decimal::new(10_000,0)/best_bid).normalize().to_string()}))
-            }).transpose()?;
-            Ok(json!({"schema":"okx.market.microstructure/v1",
-                "instrument":instrument,"quality":"complete",
-                "reference_generation":snap.market.reference_generation,
-                "generation":snap.generation,"book_sequence":snap.order_book.seq_id,
-                "book_exchange_timestamp_ms":snap.order_book.exchange_timestamp_ms,
-                "spread_bps":spread.normalize().to_string(),"asks":asks,"bids":bids,
-                "sweep":sweep,"mark_price":snap.market.mark_price,
-                "index_price":snap.market.index_price,
-                "funding":snap.market.funding,"open_interest":snap.market.open_interest}))
         }
         AgentOperation::Research { request } => ctx.analytics.research(request.clone()).await,
         AgentOperation::Trade { request } => {
             ctx.trade
-                .trade(account.unwrap_or_default(), request, g)
+                .trade_with_invocation(
+                    account.unwrap_or_default(),
+                    request,
+                    g,
+                    match request {
+                        okx_protocol::trading::TradeRequest::Status { .. } => {
+                            Some(crate::diagnostics::ProtectionCleanupInvocation {
+                                request_id: &r.request_id,
+                                origin: "agent_request.trade.status",
+                            })
+                        }
+                        _ => None,
+                    },
+                )
                 .await
         }
         AgentOperation::Strategies { request } => {
@@ -303,23 +209,15 @@ async fn execute(
         AgentOperation::FindInstruments {
             asset,
             settle_currency,
-            instrument_type: _,
+            instrument_type,
         } => {
             let refs = ctx.public_ws.reference_snapshot().await;
-            let rows = refs
-                .iter()
-                .filter(|x| {
-                    x.base_currency.as_deref() == Some(asset)
-                        || x.contract_value_currency.as_deref() == Some(asset)
-                })
-                .filter(|x| {
-                    settle_currency
-                        .as_ref()
-                        .is_none_or(|c| x.settle_currency.as_ref() == Some(c))
-                })
-                .take(50)
-                .collect::<Vec<_>>();
-            Ok(json!({"instruments":rows,"reference_generation":refs.generation().as_str()}))
+            Ok(find_instruments_response(
+                &refs,
+                asset,
+                settle_currency.as_deref(),
+                *instrument_type,
+            ))
         }
         AgentOperation::MarketOverview { instrument } => {
             ctx.public_ws
@@ -379,6 +277,178 @@ async fn execute(
     }
 }
 
+/// Resolve an optional bounded instrument universe, then delegate market work
+/// to AnalyticsService. Kept outside the command dispatcher so routing stays
+/// visible and this market-specific boundary can be reviewed independently.
+async fn execute_market(
+    public_ws: &PublicWsHandle,
+    analytics: &AnalyticsService,
+    request: &okx_protocol::analytics::MarketRequest,
+) -> Result<Value, String> {
+    let mut universe_page = None;
+    let mut resolved_instruments = None;
+    if let Some(universe) = &request.universe {
+        let reference = public_ws.reference_snapshot().await;
+        if universe
+            .reference_generation
+            .as_deref()
+            .is_some_and(|expected| expected != reference.generation().as_str())
+        {
+            return Err("UNIVERSE_REFERENCE_GENERATION_CHANGED".into());
+        }
+        let mut names = reference
+            .iter()
+            .filter(|spec| spec.state == "live")
+            .filter(|spec| {
+                format!("{:?}", spec.instrument_type).to_uppercase() == universe.instrument_type
+            })
+            .filter(|spec| {
+                universe
+                    .settle_currency
+                    .as_ref()
+                    .is_none_or(|settle| spec.settle_currency.as_ref() == Some(settle))
+            })
+            .map(|spec| spec.instrument_id.clone())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        let universe_size = names.len();
+        if universe.rank_globally && names.len() > 512 {
+            return Err("GLOBAL_RANK_UNIVERSE_LIMIT:512".into());
+        }
+        if !universe.rank_globally {
+            if let Some(after) = &universe.after_instrument {
+                names.retain(|name| name > after);
+            }
+            names.truncate(usize::from(universe.limit).saturating_add(1));
+        }
+        let has_more = if universe.rank_globally {
+            names.len() > usize::from(request.limit)
+        } else {
+            names.len() > usize::from(universe.limit)
+        };
+        if !universe.rank_globally {
+            names.truncate(usize::from(universe.limit));
+        }
+        if names.is_empty() {
+            return Err("UNIVERSE_PAGE_EMPTY".into());
+        }
+        universe_page = Some(json!({
+            "schema":"okx.market.universe-page/v1",
+            "source":"venue_reference_registry",
+            "reference_generation":reference.generation().as_str(),
+            "reference_received_at":reference.source_received_at(),
+            "global_ranking":universe.rank_globally,
+            "scope":if universe.rank_globally {"complete_venue_universe"} else {"bounded_market_page"},
+            "has_more":has_more,
+            "next_after_instrument":if has_more && !universe.rank_globally {names.last().cloned()}else{None},
+            "universe_size":universe_size,
+            "page_count":if universe.rank_globally {names.len().min(usize::from(request.limit))}else{names.len()}
+        }));
+        resolved_instruments = Some(names);
+    }
+    analytics
+        .market(request.clone(), universe_page, resolved_instruments)
+        .await
+}
+
+/// Read a fresh contiguous public WS book and calculate its bounded
+/// microstructure summary. No REST fallback can certify a trading book.
+async fn execute_market_microstructure(
+    public_ws: &PublicWsHandle,
+    instrument: &str,
+    size_contracts: Option<&str>,
+) -> Result<Value, String> {
+    public_ws
+        .demand_instrument(instrument)
+        .await
+        .map_err(|_| "MARKET_CAPACITY")?;
+    let snap = public_ws
+        .risk_fresh_snapshot(
+            instrument,
+            Utc::now().timestamp_millis().max(0) as u64,
+            crate::config::QUOTE_MAX_AGE_MS,
+            crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
+            Utc::now().to_rfc3339(),
+        )
+        .await
+        .map_err(|_| "MICROSTRUCTURE_FRESH_BOOK_REQUIRED")?;
+    microstructure_summary(snap, instrument, size_contracts)
+}
+
+/// Pure response calculation after the WS owner has admitted the snapshot.
+/// It cannot fetch data, access accounts or send an order.
+fn microstructure_summary(
+    snap: okx_observation::LiveMarketSnapshot,
+    instrument: &str,
+    size_contracts: Option<&str>,
+) -> Result<Value, String> {
+    let asks = snap
+        .order_book
+        .asks
+        .iter()
+        .take(10)
+        .cloned()
+        .collect::<Vec<_>>();
+    let bids = snap
+        .order_book
+        .bids
+        .iter()
+        .take(10)
+        .cloned()
+        .collect::<Vec<_>>();
+    let best_ask = asks
+        .first()
+        .ok_or("BOOK_ASK_EMPTY")?
+        .price
+        .parse::<rust_decimal::Decimal>()
+        .map_err(|_| "BOOK_PRICE_INVALID")?;
+    let best_bid = bids
+        .first()
+        .ok_or("BOOK_BID_EMPTY")?
+        .price
+        .parse::<rust_decimal::Decimal>()
+        .map_err(|_| "BOOK_PRICE_INVALID")?;
+    if best_bid <= rust_decimal::Decimal::ZERO || best_ask <= best_bid {
+        return Err("BOOK_SPREAD_INVALID".into());
+    }
+    let spread =
+        (best_ask - best_bid) * rust_decimal::Decimal::new(20_000, 0) / (best_ask + best_bid);
+    let sweep = size_contracts
+        .map(|n| {
+            let qty = n
+                .parse::<rust_decimal::Decimal>()
+                .map_err(|_| "SIZE_INVALID")?;
+            let buy = book_sweep_vwap(&asks, qty)?;
+            let sell = book_sweep_vwap(&bids, qty)?;
+            Ok::<_, String>(json!({
+                "size_contracts":n,
+                "buy_vwap":buy.normalize().to_string(),
+                "sell_vwap":sell.normalize().to_string(),
+                "buy_impact_bps":((buy-best_ask)*rust_decimal::Decimal::new(10_000,0)/best_ask).normalize().to_string(),
+                "sell_impact_bps":((best_bid-sell)*rust_decimal::Decimal::new(10_000,0)/best_bid).normalize().to_string()
+            }))
+        })
+        .transpose()?;
+    Ok(json!({
+        "schema":"okx.market.microstructure/v1",
+        "instrument":instrument,
+        "quality":"complete",
+        "reference_generation":snap.market.reference_generation,
+        "generation":snap.generation,
+        "book_sequence":snap.order_book.seq_id,
+        "book_exchange_timestamp_ms":snap.order_book.exchange_timestamp_ms,
+        "spread_bps":spread.normalize().to_string(),
+        "asks":asks,
+        "bids":bids,
+        "sweep":sweep,
+        "mark_price":snap.market.mark_price,
+        "index_price":snap.market.index_price,
+        "funding":snap.market.funding,
+        "open_interest":snap.market.open_interest
+    }))
+}
+
 fn book_sweep_vwap(
     levels: &[okx_observation::BookLevel],
     requested: rust_decimal::Decimal,
@@ -413,11 +483,89 @@ fn book_sweep_vwap(
     Err("INSUFFICIENT_BOOK_DEPTH".into())
 }
 #[cfg(test)]
+mod instrument_search_tests {
+    use super::*;
+    use okx_protocol::InstrumentTypeFilter;
+
+    fn instrument(id: &str, kind: &str, asset: &str, currency: &str) -> okx_api::PublicInstrument {
+        serde_json::from_value(json!({
+            "instId": id,
+            "instType": kind,
+            "state": "live",
+            "baseCcy": if kind == "SWAP" { asset } else { "" },
+            "ctValCcy": asset,
+            "settleCcy": currency,
+            "tickSz": "0.1",
+            "lotSz": "1",
+            "minSz": "1"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn find_instruments_filters_type_currency_and_asset_before_public_limit() {
+        // All sixty swaps sort before the requested futures, so filtering only
+        // after the public row limit would return no matching instruments.
+        let mut instruments = (0..60)
+            .map(|i| instrument(&format!("A-{i:02}"), "SWAP", "BTC", "USDT"))
+            .collect::<Vec<_>>();
+        instruments.push(instrument("B-USDC", "FUTURES", "BTC", "USDC"));
+        instruments.push(instrument("C-ETH", "FUTURES", "ETH", "USDT"));
+        instruments
+            .extend((0..55).map(|i| instrument(&format!("Z-{i:02}"), "FUTURES", "BTC", "USDT")));
+        let reference =
+            okx_observation::ReferenceRegistry::from_public("fixture", instruments).unwrap();
+
+        let futures = find_instruments_response(
+            &reference,
+            "BTC",
+            Some("USDT"),
+            Some(InstrumentTypeFilter::Futures),
+        );
+        let rows = futures["instruments"].as_array().unwrap();
+        assert_eq!(rows.len(), 50);
+        assert_eq!(rows[0]["instrument_id"], "Z-00");
+        assert_eq!(rows[49]["instrument_id"], "Z-49");
+        assert!(rows.iter().all(|row| row["instrument_type"] == "FUTURES"
+            && row["settle_currency"] == "USDT"
+            && row["contract_value_currency"] == "BTC"));
+        assert_eq!(futures.as_object().unwrap().len(), 2);
+        assert_eq!(
+            futures["reference_generation"],
+            reference.generation().as_str()
+        );
+
+        let swaps = find_instruments_response(
+            &reference,
+            "BTC",
+            Some("USDT"),
+            Some(InstrumentTypeFilter::Swap),
+        );
+        assert_eq!(swaps["instruments"].as_array().unwrap().len(), 50);
+        assert_eq!(swaps["instruments"][0]["instrument_id"], "A-00");
+        assert!(
+            swaps["instruments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["instrument_type"] == "SWAP")
+        );
+
+        for (asset, currency, expected) in [("BTC", "USDC", "B-USDC"), ("ETH", "USDT", "C-ETH")] {
+            let result = find_instruments_response(&reference, asset, Some(currency), None);
+            assert_eq!(result["instruments"].as_array().unwrap().len(), 1);
+            assert_eq!(result["instruments"][0]["instrument_id"], expected);
+        }
+        let unfiltered = find_instruments_response(&reference, "BTC", None, None);
+        assert_eq!(unfiltered["instruments"].as_array().unwrap().len(), 50);
+    }
+}
+
+#[cfg(test)]
 mod microstructure_test {
     use super::*;
 
-    #[test]
-    fn healthy_ws_overview_omits_unbounded_depth_and_fits_mcp_envelope() {
+    fn market_snapshot() -> okx_observation::LiveMarketSnapshot {
         let market = okx_observation::MarketSnapshot {
             schema: "okx.market-snapshot/v1".into(),
             instrument_id: "BTC-USDT-SWAP".into(),
@@ -462,7 +610,7 @@ mod microstructure_test {
             size: "1".into(),
             order_count: None,
         };
-        let snapshot = okx_observation::LiveMarketSnapshot {
+        okx_observation::LiveMarketSnapshot {
             generation: 7,
             market,
             order_book: okx_observation::OrderBookSnapshot {
@@ -473,13 +621,47 @@ mod microstructure_test {
                 asks: vec![depth.clone(); 2000],
                 bids: vec![depth; 2000],
             },
-        };
-        let projected = compact_ws_overview(snapshot);
+        }
+    }
+
+    #[test]
+    fn healthy_ws_overview_omits_unbounded_depth_and_fits_mcp_envelope() {
+        let projected = compact_ws_overview(market_snapshot());
         assert_eq!(projected["source_mode"], "websocket");
         assert_eq!(projected["market"]["ticker"]["best_bid"], "100");
         assert_eq!(projected["book_sequence"], 123);
         assert!(projected.get("order_book").is_none());
         assert!(serde_json::to_vec(&projected).unwrap().len() < 12_288);
+    }
+
+    #[test]
+    fn microstructure_projects_exact_spread_and_sweep_without_io() {
+        let mut snapshot = market_snapshot();
+        snapshot.order_book.asks = vec![okx_observation::BookLevel {
+            price: "102".into(),
+            size: "2".into(),
+            order_count: None,
+        }];
+        snapshot.order_book.bids = vec![okx_observation::BookLevel {
+            price: "98".into(),
+            size: "2".into(),
+            order_count: None,
+        }];
+        let result = microstructure_summary(snapshot, "BTC-USDT-SWAP", Some("1")).unwrap();
+        assert_eq!(result["spread_bps"], "400");
+        assert_eq!(result["sweep"]["buy_vwap"], "102");
+        assert_eq!(result["sweep"]["sell_vwap"], "98");
+        assert_eq!(result["sweep"]["buy_impact_bps"], "0");
+        assert_eq!(result["book_sequence"], 123);
+    }
+
+    #[test]
+    fn microstructure_rejects_crossed_book_before_sizing() {
+        assert_eq!(
+            microstructure_summary(market_snapshot(), "BTC-USDT-SWAP", Some("invalid"))
+                .unwrap_err(),
+            "BOOK_SPREAD_INVALID"
+        );
     }
 
     #[test]

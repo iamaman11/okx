@@ -29,7 +29,7 @@ impl AgentConfig {
 
 pub fn default_root() -> PathBuf {
     if cfg!(windows) {
-        PathBuf::from(r"C:\okx-runtime")
+        PathBuf::from(r"C:\okx\runtime")
     } else {
         PathBuf::from(".okx-agent")
     }
@@ -52,7 +52,9 @@ mod tests {
     #[test]
     fn windows_default_root_is_runtime_not_mutable_workspace() {
         if cfg!(windows) {
-            assert_eq!(default_root(), PathBuf::from(r"C:\okx-runtime"));
+            assert_eq!(default_root(), PathBuf::from(r"C:\okx\runtime"));
+            assert!(!default_root().starts_with(r"C:\okx\workspace"));
+            assert!(!default_root().starts_with(r"C:\okx\control"));
         }
     }
 

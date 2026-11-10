@@ -129,13 +129,19 @@ pub(crate) struct FinanceTrace {
 #[derive(Serialize)]
 pub(crate) struct Readback {
     pub schema: &'static str,
+    pub state: &'static str,
+    pub reason_code: Option<&'static str>,
+    pub history_complete: &'static str,
     pub process_incarnation: &'static str,
     pub memory_budget_bytes: usize,
     pub active: Option<Cycle>,
     pub recent: Vec<Brief>,
     pub problem_ids: Vec<u64>,
     pub selected: Option<Cycle>,
+    pub selected_summary: Option<Brief>,
+    pub selected_details_unavailable: bool,
     pub selected_not_found: bool,
+    pub eviction_counts_known: bool,
     pub evicted_recent: u64,
     pub evicted_detailed: u64,
 }
@@ -313,34 +319,309 @@ impl FinanceTrace {
             }
         });
     }
-    /// Copy bounded data under lock; JSON serialization happens later.
+    /// Never queue a diagnostic behind an observer. Absence while busy is
+    /// unevaluated, not proof that a cycle is missing or financial work failed.
     pub fn readback(&self, id: Option<u64>, limit: usize) -> Readback {
-        self.state(|s| {
-            let selected = id.and_then(|key| {
-                s.active
-                    .iter()
-                    .chain(s.detailed.iter())
-                    .find(|c| c.id == key)
-                    .cloned()
-            });
-            Readback {
+        let lock = self.state.try_lock();
+        let failure = match &lock {
+            Err(std::sync::TryLockError::WouldBlock) => Some("FINANCE_TRACE_BUSY"),
+            Err(std::sync::TryLockError::Poisoned(_)) => Some("FINANCE_TRACE_UNAVAILABLE"),
+            Ok(_) => None,
+        };
+        if let Some(reason) = failure {
+            return Readback {
                 schema: "okx.finance-cycle-trace/v1",
+                state: "NOT_EVALUATED",
+                reason_code: Some(reason),
+                history_complete: "UNKNOWN",
                 process_incarnation: incarnation(),
                 memory_budget_bytes: ACCOUNT_TRACE_BUDGET_BYTES,
-                active: s.active.clone(),
-                recent: s.recent.iter().rev().take(limit).cloned().collect(),
-                problem_ids: s.detailed.iter().rev().take(3).map(|c| c.id).collect(),
-                selected_not_found: id.is_some() && selected.is_none(),
-                selected,
-                evicted_recent: s.evicted_recent,
-                evicted_detailed: s.evicted_detailed,
-            }
-        })
+                active: None,
+                recent: vec![],
+                problem_ids: vec![],
+                selected: None,
+                selected_summary: None,
+                selected_details_unavailable: false,
+                selected_not_found: false,
+                eviction_counts_known: false,
+                evicted_recent: 0,
+                evicted_detailed: 0,
+            };
+        }
+        let s = lock.expect("trace lock checked above");
+        let selected = id.and_then(|key| {
+            s.active
+                .iter()
+                .chain(s.detailed.iter())
+                .find(|c| c.id == key)
+                .cloned()
+        });
+        let selected_summary =
+            id.and_then(|key| s.recent.iter().find(|cycle| cycle.id == key).cloned());
+        Readback {
+            schema: "okx.finance-cycle-trace/v1",
+            state: if s.active.is_none() && s.recent.is_empty() {
+                "NOT_OBSERVED"
+            } else {
+                "OBSERVED"
+            },
+            reason_code: if s.active.is_none() && s.recent.is_empty() {
+                Some("VOLATILE_PROJECTION_UNAVAILABLE")
+            } else {
+                None
+            },
+            history_complete: "UNKNOWN",
+            process_incarnation: incarnation(),
+            memory_budget_bytes: ACCOUNT_TRACE_BUDGET_BYTES,
+            active: s.active.clone(),
+            recent: s.recent.iter().rev().take(limit.min(4)).cloned().collect(),
+            problem_ids: s.detailed.iter().rev().take(3).map(|c| c.id).collect(),
+            selected_not_found: id.is_some() && selected.is_none() && selected_summary.is_none(),
+            selected_details_unavailable: selected.is_none() && selected_summary.is_some(),
+            selected,
+            selected_summary,
+            eviction_counts_known: true,
+            evicted_recent: s.evicted_recent,
+            evicted_detailed: s.evicted_detailed,
+        }
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn public_finance_diagnostic_does_not_queue_behind_sql_or_trace() {
+        use crate::{accounts, analytics::AnalyticsService, query, trade_service::TradeService};
+        use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
+        use okx_protocol::{
+            AgentOperation, AgentRequest, DataQuality,
+            trading::{DiagnosticsRequest, DiagnosticsView},
+        };
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).unwrap();
+        let root =
+            std::env::temp_dir().join(format!("okx-explain-{:032x}", u128::from_le_bytes(nonce)));
+        accounts::initialize_installation(&root, "installation-diagnostic-test").unwrap();
+        let budget = RateBudget::new();
+        let registry = Arc::new(
+            accounts::AccountRuntimeRegistry::open(&root, budget.clone())
+                .await
+                .unwrap(),
+        );
+        let feed = Arc::new(accounts::recorded_support::RecordedAccountHttp::default());
+        let (config, clients) =
+            accounts::recorded_support::prepared("a", feed.clone(), budget.clone());
+        registry.connect_prepared(config, clients).await.unwrap();
+        // Complete normal source teardown first: the subsequent counters concern
+        // the diagnostic alone, rather than concurrent background capture.
+        registry.shutdown().await;
+        let resources = registry.resolve("fixture-a").await.unwrap();
+        let env = OkxEnvironment::new(Region::Global, false);
+        let market = crate::market_bootstrap::MarketBootstrapper::new(
+            OkxPublicClient::with_rate_budget(env, budget.clone()).unwrap(),
+        );
+        let reference =
+            okx_observation::ReferenceRegistry::from_public("2026-10-31T00:00:00Z", vec![])
+                .unwrap();
+        let (_public, public_ws) =
+            okx_runtime::PublicWsCoordinator::new_with_rate_budget(env, reference, budget);
+        let analytics = AnalyticsService::new(root.join("analytics"), market.clone()).unwrap();
+        let (risk_tx, mut risk_rx) = tokio::sync::mpsc::channel(4);
+        let trade = Arc::new(TradeService::new(
+            registry.clone(),
+            public_ws.clone(),
+            crate::risk_bridge::NativeRiskClient::new(risk_tx),
+        ));
+        let ctx = query::DispatchContext {
+            accounts: registry.clone(),
+            analytics,
+            public_ws,
+            trade,
+            market,
+        };
+        resources.finance_trace.begin(99, 100, 1);
+        let request = AgentRequest {
+            schema: okx_protocol::AGENT_REQUEST_SCHEMA_V1.into(),
+            request_id: "finance-explain-001".into(),
+            account: Some("fixture-a".into()),
+            operation: AgentOperation::Diagnostics {
+                request: DiagnosticsRequest {
+                    account: Some("fixture-a".into()),
+                    reference: None,
+                    view: Some(DiagnosticsView::Finance),
+                    cycle_id: Some(99),
+                    limit: Some(4),
+                },
+            },
+        };
+        request.validate().unwrap();
+        let healthy = query::dispatch(&ctx, &request).await.result.unwrap();
+        assert_eq!(healthy["state"], "OBSERVED");
+        assert_eq!(healthy["trace"]["selected"]["id"], 99);
+        let storage_request = AgentRequest {
+            operation: AgentOperation::Diagnostics {
+                request: DiagnosticsRequest {
+                    account: Some("fixture-a".into()),
+                    reference: None,
+                    view: Some(DiagnosticsView::Storage),
+                    cycle_id: None,
+                    limit: None,
+                },
+            },
+            ..request.clone()
+        };
+        storage_request.validate().unwrap();
+        resources
+            .execution
+            .store
+            .call(Instant::now() + Duration::from_secs(3), |store| {
+                store.apply_authority_policy(
+                    1,
+                    true,
+                    "diagnostic-test-campaign",
+                    rust_decimal::Decimal::from(10),
+                )
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while resources
+                .execution
+                .store
+                .diagnostic_storage_snapshot()
+                .snapshot
+                .as_ref()
+                .is_none_or(|s| s.policy.revision != 1)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let store = resources.execution.store.clone();
+        let blocked_sql = tokio::spawn(async move {
+            store
+                .call(Instant::now() + Duration::from_secs(5), move |_| {
+                    let _ = entered_tx.send(());
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let (unlock_tx, unlock_rx) = std::sync::mpsc::channel();
+        let holder_resources = resources.clone();
+        let holder = std::thread::spawn(move || {
+            let _held = holder_resources.finance_trace.state.lock().unwrap();
+            let _ = held_tx.send(());
+            unlock_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        });
+        held_rx.await.unwrap();
+        let sql_before = resources.execution.store.sql_timing().observed_jobs;
+        let http_before = feed.requests.lock().unwrap().len();
+        let busy =
+            tokio::time::timeout(Duration::from_millis(100), query::dispatch(&ctx, &request))
+                .await
+                .unwrap();
+        assert_eq!(busy.quality, DataQuality::Degraded);
+        let busy = busy.result.unwrap();
+        assert_eq!(busy["state"], "NOT_EVALUATED");
+        assert_eq!(busy["trace"]["reason_code"], "FINANCE_TRACE_BUSY");
+        assert_eq!(busy["trace"]["selected_not_found"], false);
+        // A useful storage image survives an occupied SQL owner. Source locks
+        // are held too: the reader reports those gaps rather than waiting.
+        let source_lock = resources.latest_snapshot.write().await;
+        let health_lock = resources.source_capture_health.write().await;
+        let mut samples_ns = Vec::with_capacity(1000);
+        for _ in 0..1000 {
+            let started = Instant::now();
+            let response = query::dispatch(&ctx, &storage_request).await;
+            let serialized = serde_json::to_vec(&response).unwrap();
+            samples_ns.push(started.elapsed().as_nanos());
+            let value = response.result.unwrap();
+            assert_eq!(value["state"], "OBSERVED");
+            assert_eq!(
+                value["storage"]["snapshot"]["policy"]["campaign_limit_usd"],
+                "10"
+            );
+            assert_eq!(value["sources"]["reason_code"], "SOURCE_SNAPSHOT_BUSY");
+            assert_eq!(value["source_capture"]["reason_code"], "HEALTH_BUSY");
+            assert!(!serialized.is_empty());
+        }
+        let mut sorted = samples_ns.clone();
+        sorted.sort_unstable();
+        println!(
+            "STORAGE_PUBLIC_DIAGNOSTIC_BENCHMARK={}",
+            serde_json::json!({
+                "scope":"native_dispatch_with_blocked_sql_and_source_locks", "samples_ns":samples_ns,
+                "p95_ns":sorted[949], "build":if cfg!(debug_assertions){"debug"}else{"release"},
+                "external_calls":0,"sql_jobs":0,"not_a_full_k9_measurement":true
+            })
+        );
+        assert!(sorted[949] <= 100_000_000);
+        drop(health_lock);
+        drop(source_lock);
+        assert_eq!(
+            resources.execution.store.sql_timing().observed_jobs,
+            sql_before
+        );
+        assert_eq!(feed.requests.lock().unwrap().len(), http_before);
+        assert!(risk_rx.try_recv().is_err());
+        unlock_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let restored = query::dispatch(&ctx, &request).await.result.unwrap();
+        assert_eq!(restored["trace"]["selected"]["id"], 99);
+        release_tx.send(()).unwrap();
+        blocked_sql.await.unwrap().unwrap();
+        let mut termination = resources.execution.store.termination_signal();
+        drop(resources);
+        drop(ctx);
+        drop(registry);
+        drop(_public);
+        tokio::time::timeout(Duration::from_secs(5), termination.wait_for(|done| *done))
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn contended_readback_never_waits_or_claims_a_missing_cycle() {
+        let trace = FinanceTrace::default();
+        trace.begin(1, 100, 7);
+        let held = trace.state.lock().unwrap();
+        let start = std::time::Instant::now();
+        let busy = trace.readback(Some(1), usize::MAX);
+        assert!(start.elapsed() < std::time::Duration::from_millis(100));
+        assert_eq!(busy.state, "NOT_EVALUATED");
+        assert_eq!(busy.reason_code, Some("FINANCE_TRACE_BUSY"));
+        assert_eq!(busy.history_complete, "UNKNOWN");
+        assert!(!busy.selected_not_found);
+        assert!(!busy.eviction_counts_known);
+        drop(held);
+        assert!(trace.readback(Some(1), 4).selected.is_some());
+        let restarted = FinanceTrace::default().readback(Some(1), 4);
+        assert_eq!(restarted.history_complete, "UNKNOWN");
+        assert!(restarted.selected_not_found);
+    }
+
+    #[test]
+    fn healthy_cycle_summary_is_observed_even_when_detail_was_not_retained() {
+        let trace = FinanceTrace::default();
+        trace.begin(1, 100, 7);
+        trace.finish(1, 110, 10, None);
+        let retained = trace.readback(Some(1), usize::MAX);
+        assert!(retained.selected.is_none());
+        assert_eq!(retained.selected_summary.unwrap().id, 1);
+        assert!(retained.selected_details_unavailable);
+        assert!(!retained.selected_not_found);
+        assert_eq!(retained.state, "OBSERVED");
+        assert!(retained.eviction_counts_known);
+    }
     #[test]
     fn failed_phase_remains_visible() {
         let t = FinanceTrace::default();

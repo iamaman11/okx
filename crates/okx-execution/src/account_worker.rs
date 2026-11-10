@@ -12,8 +12,11 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 type Job = Box<dyn FnOnce(&mut AccountStore) + Send + 'static>;
+mod storage_projection;
+pub use storage_projection::AccountStorageReadback;
+use storage_projection::StorageProjection;
 
 // A WAL file can stay above the checkpoint byte threshold even after a
 // successful PASSIVE checkpoint. Rechecking it after every SQL job causes
@@ -144,11 +147,39 @@ struct WorkerOwner {
     sender: SyncSender<Job>,
     timings: Arc<SqlTimingCounters>,
     maintenance: Arc<Mutex<MaintenanceHistory>>,
+    storage_projection: Arc<StorageProjection>,
+    /// Observability only; it never owns a second SQL writer.
+    terminated: watch::Receiver<bool>,
 }
 
 struct PendingBackup {
     handle: std::thread::JoinHandle<StoreResult<()>>,
     started: Instant,
+}
+
+/// Called only after the account FIFO is disconnected. A backup reader still
+/// owns SQLite/filesystem handles until its thread returns, including failures.
+/// Never publish the completion witness while that owned work is detached.
+fn finish_owner(
+    store: AccountStore,
+    pending_backup: Option<PendingBackup>,
+    terminated: watch::Sender<bool>,
+) {
+    if let Some(backup) = pending_backup {
+        let outcome = match backup.handle.join() {
+            Ok(Ok(())) => "ok",
+            Ok(Err(_)) => "error",
+            Err(_) => "panic",
+        };
+        eprintln!(
+            "ACCOUNT_SQL_BACKUP_SHUTDOWN_V1 elapsed_ms={} outcome={outcome}",
+            backup.started.elapsed().as_millis()
+        );
+    }
+    // Completion means owned resources closed, not a successful backup. A caller
+    // may time out waiting, but must then keep shutdown explicitly unproven.
+    drop(store);
+    let _ = terminated.send(true);
 }
 #[derive(Clone)]
 pub struct AccountStoreHandle {
@@ -181,7 +212,10 @@ impl AccountStoreHandle {
         let timings = Arc::new(SqlTimingCounters::default());
         let maintenance = Arc::new(Mutex::new(MaintenanceHistory::default()));
         let worker_maintenance = Arc::clone(&maintenance);
+        let storage_projection = Arc::new(StorageProjection::default());
+        let worker_projection = Arc::clone(&storage_projection);
         let (ready_tx, ready_rx) = oneshot::channel();
+        let (terminated_tx, terminated_rx) = watch::channel(false);
         std::thread::Builder::new()
             .name("okx-account-sql".into())
             .spawn(move || {
@@ -196,6 +230,9 @@ impl AccountStoreHandle {
                     }
                 };
                 let mut last_backup = Instant::now();
+                // Best effort after ready: this cannot reject a valid SQL open.
+                let mut diagnostic_refresh = storage_projection::RefreshCadence::default();
+                diagnostic_refresh.observe(&mut store, &worker_projection);
                 let mut backup_ever_succeeded = false;
                 let mut pending_backup: Option<PendingBackup> = None;
                 let mut maintenance_cadence = MaintenanceCadence::new(Instant::now());
@@ -205,6 +242,7 @@ impl AccountStoreHandle {
                         Err(RecvTimeoutError::Disconnected) => break,
                         Err(RecvTimeoutError::Timeout) => {}
                     }
+                    diagnostic_refresh.observe(&mut store, &worker_projection);
                     // The immutable recovery snapshot uses a short-lived
                     // read-only source connection. Do not join it while it
                     // runs: the owner's FIFO must stay available for NAV.
@@ -294,6 +332,7 @@ impl AccountStoreHandle {
                         }
                     }
                 }
+                finish_owner(store, pending_backup, terminated_tx);
             })?;
         ready_rx
             .await
@@ -303,9 +342,28 @@ impl AccountStoreHandle {
                 sender,
                 timings,
                 maintenance,
+                storage_projection,
+                terminated: terminated_rx,
             }),
         })
     }
+    /// A read-only completion witness, usable after all AccountStoreHandle
+    /// clones are dropped. It cannot stop work or mutate account storage.
+    pub fn termination_signal(&self) -> watch::Receiver<bool> {
+        self.owner.terminated.clone()
+    }
+
+    /// Last owner-published copy, never a queued SQL job or trading permission.
+    pub fn diagnostic_storage_snapshot(&self) -> AccountStorageReadback {
+        let mut readback = self.owner.storage_projection.readback();
+        if *self.owner.terminated.borrow() {
+            readback.owner_terminated = true;
+            readback.refresh_pending = true;
+            readback.reason_code = Some("ACCOUNT_WORKER_STOPPED".into());
+        }
+        readback
+    }
+
     /// Reads bounded history without entering the account SQL owner's FIFO.
     pub fn maintenance_timing(&self) -> AccountMaintenanceTimingV1 {
         match self.owner.maintenance.try_lock() {
@@ -549,11 +607,118 @@ mod maintenance_history_tests {
                 sender: sync_channel(1).0,
                 timings: Arc::new(SqlTimingCounters::default()),
                 maintenance: Arc::clone(&history),
+                storage_projection: Arc::new(StorageProjection::default()),
+                terminated: watch::channel(false).1,
             }),
         };
         let _guard = history.lock().unwrap();
         let readback = handle.maintenance_timing();
         assert_eq!(readback.state, "NOT_EVALUATED");
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    fn backup_completion(mode: &'static str) {
+        let root = std::env::temp_dir().join(format!(
+            "okx-backup-shutdown-{mode}-{}-{}",
+            std::process::id(),
+            wall_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("account.db");
+        let meta = AccountMeta {
+            account_key: format!("okx:real:shutdown-{mode}"),
+            installation_id: "shutdown-test".into(),
+            initialized_at: 1,
+            opening_source: "flat-fixture".into(),
+            initialize_operation_id: "initialize".into(),
+            release_id: "fixture-release".into(),
+        };
+        let store = AccountStore::initialize_flat(
+            &path,
+            meta.clone(),
+            &OpeningSnapshot {
+                source_ref: "flat-fixture".into(),
+                observed_at: 1,
+                opening_equity_usd: Decimal::from(100),
+                positions: 0,
+                orders: 0,
+                conditional_orders: 0,
+                liabilities: Decimal::ZERO,
+                balances: vec![("USD".into(), Decimal::from(100))],
+            },
+        )
+        .unwrap();
+        let (reader_entered_tx, reader_entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let backup_path = path.clone();
+        let backup_meta = meta.clone();
+        let backup = std::thread::spawn(move || {
+            let reader = std::fs::File::open(&backup_path).unwrap();
+            reader_entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            drop(reader);
+            match mode {
+                "success" => AccountStore::periodic_backup_from_reader(backup_path, backup_meta),
+                "error" => Err(StoreError::Invalid("BACKUP_TEST_ERROR")),
+                "panic" => panic!("intentional backup thread failure"),
+                _ => unreachable!(),
+            }
+        });
+        reader_entered_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+        let (terminated_tx, terminated_rx) = watch::channel(false);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            finish_owner(
+                store,
+                Some(PendingBackup {
+                    handle: backup,
+                    started: Instant::now(),
+                }),
+                terminated_tx,
+            );
+            done_tx.send(()).unwrap();
+        });
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(30)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(
+            !*terminated_rx.borrow(),
+            "a live owned backup must not report closed resources"
+        );
+        assert!(
+            AccountStore::open_existing(&path, &meta.account_key, &meta.installation_id).is_err(),
+            "writer lease must stay held until its owned reader joins"
+        );
+        release_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        shutdown.join().unwrap();
+        assert!(*terminated_rx.borrow());
+        let reopened =
+            AccountStore::open_existing(&path, &meta.account_key, &meta.installation_id).unwrap();
+        assert_eq!(reopened.policy().unwrap().0, 0);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shutdown_joins_successful_backup_before_closing_sql() {
+        backup_completion("success");
+    }
+    #[test]
+    fn shutdown_joins_failed_backup_before_closing_sql() {
+        backup_completion("error");
+    }
+    #[test]
+    fn shutdown_joins_panicked_backup_before_closing_sql() {
+        backup_completion("panic");
     }
 }
 

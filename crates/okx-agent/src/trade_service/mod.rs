@@ -25,11 +25,36 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock};
 mod entry_budget;
+mod entry_settlement;
 mod execute;
 mod plan;
+mod protection_cleanup;
+mod protection_resize;
 mod reconcile;
 mod recovery;
 mod strategies;
+mod submission;
+mod terminal_release;
+mod terminal_release_trace;
+pub(crate) use terminal_release_trace::TerminalReleaseTrace;
+mod unsent_release;
+pub(crate) use submission::post_once;
+
+// Test-only causal boundary AFTER the genuine Worker HELD receipt has been
+// verified and committed as a central reservation in the original Native SQL
+// account owner. A separate third public Execute may now census this durable
+// RESERVED intent without declaring an unresolved network RESERVE attempt.
+// This hook never writes SQL/Worker money, returns risk, or authorizes POST.
+#[cfg(test)]
+pub(crate) static T10_07_HOLD_SQL_RESERVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static T10_07_SQL_RESERVE_PERSISTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static T10_07_RELEASE_SQL_RESERVE_HOLD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub struct TradeService {
     accounts: Arc<AccountRuntimeRegistry>,
     public_ws: PublicWsHandle,
@@ -170,6 +195,19 @@ fn dec(v: &str) -> Result<Decimal, String> {
 fn exact(v: Decimal) -> String {
     v.normalize().to_string()
 }
+/// Shared RiskCommand construction; never clone authentication/fencing rules.
+pub(super) fn build_risk_command(
+    state: &CentralGovernanceSnapshot,
+    id: String,
+    action: RiskCommandAction,
+) -> RiskCommand {
+    RiskCommand {
+        schema: RISK_COMMAND_SCHEMA_V1.into(),
+        command_id: id,
+        installation_id: state.state.installation_id.clone(),
+        action,
+    }
+}
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(10)
 }
@@ -248,7 +286,18 @@ impl TradeService {
     }
     pub async fn diagnostic_access(&self, key: &str) -> Value {
         let latest = self.governance.read().await;
-        let Some(snapshot) = latest.as_ref() else {
+        Self::diagnostic_access_snapshot(latest.as_ref(), key)
+    }
+    pub(crate) fn diagnostic_access_now(&self, key: &str) -> Value {
+        match self.governance.try_read() {
+            Ok(latest) => Self::diagnostic_access_snapshot(latest.as_ref(), key),
+            Err(_) => {
+                json!({"state":"not_evaluated","reason_code":"AUTHORITY_SNAPSHOT_BUSY","quality":"partial"})
+            }
+        }
+    }
+    fn diagnostic_access_snapshot(latest: Option<&CentralGovernanceSnapshot>, key: &str) -> Value {
+        let Some(snapshot) = latest else {
             return json!({"state":"not_evaluated","reason_code":"AUTHORITY_UNAVAILABLE"});
         };
         match snapshot
@@ -396,85 +445,109 @@ impl TradeService {
         })
     }
 
-    pub async fn trade(
-        &self,
-        account: &str,
-        request: &TradeRequest,
-        governance: Option<&CentralGovernanceSnapshot>,
-    ) -> Result<Value, String> {
-        if !request.valid() {
-            return Err("INVALID_TRADE_REQUEST".into());
-        }
-        let r = self.resources(account).await?;
-        match request {
-            TradeRequest::Capabilities {} => {
-                let access = self
-                    .diagnostic_access(&r.configuration.account_key.wire())
-                    .await;
-                let snapshot = r.latest_snapshot.read().await.clone();
-                let fresh = snapshot
-                    .as_ref()
-                    .and_then(|v| chrono::DateTime::parse_from_rfc3339(&v.source_received_at).ok())
-                    .is_some_and(|t| {
-                        crate::config::evidence_fresh(
-                            t.timestamp_millis(),
-                            now(),
-                            crate::config::ACCOUNT_MAX_AGE_MS,
-                        )
-                    });
-                // A live capabilities readback is independently sourced from
-                // the native account-local SQLite owner. It proves the current
-                // governance revision was physically applied; the cached Worker
-                // snapshot alone is insufficient evidence.
-                let sql = r
-                    .execution
-                    .store
-                    .call(deadline(), |store| store.policy())
-                    .await;
-                let governance = self.governance.read().await;
-                let sql_receipt = match sql {
-                    Ok(policy) => Self::sql_policy_receipt(
-                        &policy,
-                        governance.as_ref(),
-                        &r.configuration.account_key.wire(),
-                    ),
-                    Err(_) => json!({
-                        "schema":"okx.native-policy-sql-receipt/v1",
-                        "source":"account_sql",
-                        "state":"unavailable",
-                        "reason_code":"NATIVE_SQL_POLICY_UNAVAILABLE",
-                        "matches_governance":false
-                    }),
-                };
-                let policy_applied = sql_receipt["matches_governance"] == true;
-                drop(governance);
-                // Query the actual Executor key, not the Observer-only account snapshot.
-                // Never return key material, passphrase, or exchange UID.
-                let executor = match r.execution.account.config().await {
-                    Ok(config) => {
-                        let permissions = config
-                            .perm
-                            .split(',')
-                            .map(str::trim)
-                            .filter(|p| !p.is_empty())
-                            .collect::<Vec<_>>();
-                        let read = permissions.contains(&"read_only");
-                        let trade = permissions.contains(&"trade");
-                        let withdraw = permissions.contains(&"withdraw");
-                        let uid_match = okx_api::account_uid_fingerprint(&config.uid)
-                            == r.configuration.account_key.verified_uid;
-                        json!({"state":if permissions.len()==2 && read && trade && !withdraw && uid_match
+    pub fn trade<'a>(
+        &'a self,
+        account: &'a str,
+        request: &'a TradeRequest,
+        governance: Option<&'a CentralGovernanceSnapshot>,
+    ) -> impl std::future::Future<Output = Result<Value, String>> + Send + 'a {
+        // Return the same future directly. An extra async wrapper embeds another
+        // large trade state machine in callers without providing any behavior.
+        self.trade_with_invocation(account, request, governance, None)
+    }
+
+    /// Dispatcher entry preserving the public request identity for diagnostics.
+    /// The identity is observational only; it does not alter trade idempotency.
+    pub(crate) fn trade_with_invocation<'a>(
+        &'a self,
+        account: &'a str,
+        request: &'a TradeRequest,
+        governance: Option<&'a CentralGovernanceSnapshot>,
+        invocation: Option<crate::diagnostics::ProtectionCleanupInvocation<'a>>,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+    {
+        // Bound the state embedded in callers. Otherwise every composed caller
+        // inherits the largest trade branch's future layout; even an unpolled
+        // campaign can overflow a standard Windows thread stack. One allocation
+        // at the command boundary isolates that layout without changing effects.
+        Box::pin(async move {
+            if !request.valid() {
+                return Err("INVALID_TRADE_REQUEST".into());
+            }
+            let r = self.resources(account).await?;
+            match request {
+                TradeRequest::Capabilities {} => {
+                    let access = self
+                        .diagnostic_access(&r.configuration.account_key.wire())
+                        .await;
+                    let snapshot = r.latest_snapshot.read().await.clone();
+                    let fresh = snapshot
+                        .as_ref()
+                        .and_then(|v| {
+                            chrono::DateTime::parse_from_rfc3339(&v.source_received_at).ok()
+                        })
+                        .is_some_and(|t| {
+                            crate::config::evidence_fresh(
+                                t.timestamp_millis(),
+                                now(),
+                                crate::config::ACCOUNT_MAX_AGE_MS,
+                            )
+                        });
+                    // A live capabilities readback is independently sourced from
+                    // the native account-local SQLite owner. It proves the current
+                    // governance revision was physically applied; the cached Worker
+                    // snapshot alone is insufficient evidence.
+                    let sql = r
+                        .execution
+                        .store
+                        .call(deadline(), |store| store.policy())
+                        .await;
+                    let governance = self.governance.read().await;
+                    let sql_receipt = match sql {
+                        Ok(policy) => Self::sql_policy_receipt(
+                            &policy,
+                            governance.as_ref(),
+                            &r.configuration.account_key.wire(),
+                        ),
+                        Err(_) => json!({
+                            "schema":"okx.native-policy-sql-receipt/v1",
+                            "source":"account_sql",
+                            "state":"unavailable",
+                            "reason_code":"NATIVE_SQL_POLICY_UNAVAILABLE",
+                            "matches_governance":false
+                        }),
+                    };
+                    let policy_applied = sql_receipt["matches_governance"] == true;
+                    drop(governance);
+                    // Query the actual Executor key, not the Observer-only account snapshot.
+                    // Never return key material, passphrase, or exchange UID.
+                    let executor = match r.execution.account.config().await {
+                        Ok(config) => {
+                            let permissions = config
+                                .perm
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|p| !p.is_empty())
+                                .collect::<Vec<_>>();
+                            let read = permissions.contains(&"read_only");
+                            let trade = permissions.contains(&"trade");
+                            let withdraw = permissions.contains(&"withdraw");
+                            let uid_match = okx_api::account_uid_fingerprint(&config.uid)
+                                == r.configuration.account_key.verified_uid;
+                            json!({"state":if permissions.len()==2 && read && trade && !withdraw && uid_match
                                   {"verified"}else{"blocked"},
                                "source":"executor_okx_account_config","as_of_ms":now(),
                                "read":read,"trade":trade,"withdraw":withdraw,
                                "uid_match":uid_match})
-                    }
-                    Err(_) => json!({"state":"unavailable","source":"executor_okx_account_config",
-                                     "reason_code":"EXECUTOR_CONFIG_UNAVAILABLE"}),
-                };
-                let executor_verified = executor["state"] == "verified";
-                Ok(
-                    json!({"schema":"okx.trade.capabilities/v1","account":r.configuration.account_key.wire(),
+                        }
+                        Err(_) => {
+                            json!({"state":"unavailable","source":"executor_okx_account_config",
+                                     "reason_code":"EXECUTOR_CONFIG_UNAVAILABLE"})
+                        }
+                    };
+                    let executor_verified = executor["state"] == "verified";
+                    Ok(
+                        json!({"schema":"okx.trade.capabilities/v1","account":r.configuration.account_key.wire(),
                     "order_types":["limit","market","post_only","ioc","fok"],
                     "operations":["open","add","reduce","close","replace"],
                     "protection":["stop_price","stop_distance_bps"],
@@ -494,53 +567,55 @@ impl TradeService {
                     "reason_code":if !policy_applied {"NATIVE_SQL_POLICY_NOT_APPLIED"}
                       else if !executor_verified {"EXECUTOR_PERMISSION_NOT_VERIFIED"}
                       else {"VENUE_PER_INSTRUMENT_ADMISSION_REQUIRES_TRADE_PLAN"}}),
-                )
-            }
-            TradeRequest::Preflight {} => {
-                let access = self
-                    .diagnostic_access(&r.configuration.account_key.wire())
-                    .await;
-                let identity = r.source_identity_ready().await;
-                let snapshot = r.latest_snapshot.read().await.clone();
-                let fresh = snapshot
-                    .as_ref()
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s.source_received_at).ok())
-                    .is_some_and(|t| {
-                        crate::config::evidence_fresh(
-                            t.timestamp_millis(),
-                            now(),
-                            crate::config::ACCOUNT_MAX_AGE_MS,
-                        )
-                    });
-                let (financial, stops) = r
-                    .execution
-                    .store
-                    .call(deadline(), |s| {
-                        Ok((s.financial_risk(now(), None)?, s.stops()?.len()))
-                    })
-                    .await
-                    .map_err(err)?;
-                let budget = self.risk_summary().await;
-                let mut blockers = Vec::new();
-                if access["state"] != "configured"
-                    || access["enabled"] != true
-                    || access["explicit_pause"] == true
-                {
-                    blockers.push("ACCOUNT_ACCESS_UNAVAILABLE");
+                    )
                 }
-                if !identity || !fresh {
-                    blockers.push("WAITING_ACCOUNT_EVIDENCE");
-                }
-                if !financial.nav_complete {
-                    blockers.push("NAV_SOURCE_INCOMPLETE");
-                }
-                if stops > 0 {
-                    blockers.push("ACCOUNT_STOP");
-                }
-                if budget.is_err() {
-                    blockers.push("CENTRAL_BUDGET_UNAVAILABLE");
-                }
-                Ok(json!({"schema":"okx.trade.preflight/v1",
+                TradeRequest::Preflight {} => {
+                    let access = self
+                        .diagnostic_access(&r.configuration.account_key.wire())
+                        .await;
+                    let identity = r.source_identity_ready().await;
+                    let snapshot = r.latest_snapshot.read().await.clone();
+                    let fresh = snapshot
+                        .as_ref()
+                        .and_then(|s| {
+                            chrono::DateTime::parse_from_rfc3339(&s.source_received_at).ok()
+                        })
+                        .is_some_and(|t| {
+                            crate::config::evidence_fresh(
+                                t.timestamp_millis(),
+                                now(),
+                                crate::config::ACCOUNT_MAX_AGE_MS,
+                            )
+                        });
+                    let (financial, stops) = r
+                        .execution
+                        .store
+                        .call(deadline(), |s| {
+                            Ok((s.financial_risk(now(), None)?, s.stops()?.len()))
+                        })
+                        .await
+                        .map_err(err)?;
+                    let budget = self.risk_summary().await;
+                    let mut blockers = Vec::new();
+                    if access["state"] != "configured"
+                        || access["enabled"] != true
+                        || access["explicit_pause"] == true
+                    {
+                        blockers.push("ACCOUNT_ACCESS_UNAVAILABLE");
+                    }
+                    if !identity || !fresh {
+                        blockers.push("WAITING_ACCOUNT_EVIDENCE");
+                    }
+                    if !financial.nav_complete {
+                        blockers.push("NAV_SOURCE_INCOMPLETE");
+                    }
+                    if stops > 0 {
+                        blockers.push("ACCOUNT_STOP");
+                    }
+                    if budget.is_err() {
+                        blockers.push("CENTRAL_BUDGET_UNAVAILABLE");
+                    }
+                    Ok(json!({"schema":"okx.trade.preflight/v1",
                     "account":r.configuration.account_key.wire(),
                     "state":if blockers.is_empty(){"not_evaluated"}else{"blocked"},
                     "ready_for_new_risk":false,
@@ -549,191 +624,285 @@ impl TradeService {
                     "identity_verified":identity,"financial_risk":financial,
                     "stops":stops,"central_budget":budget.ok(),
                     "side_effects":"none","quality":"partial"}))
-            }
-            TradeRequest::Status { reference } => self.status_intent(&r, reference).await,
-            TradeRequest::Cancel {
-                idempotency_key,
-                reference,
-            } => self.cancel(&r, idempotency_key, reference, request).await,
-            TradeRequest::Close {
-                idempotency_key,
-                reference,
-                expires_in_ms,
-            } => {
-                self.close(&r, idempotency_key, reference, *expires_in_ms, governance)
-                    .await
-            }
-            TradeRequest::Preview {
-                operation,
-                strategy_instance,
-                instrument,
-                side,
-                sizing,
-                order,
-                protection,
-            } => {
-                let (a, c) = self.preview_authority(&r, governance).await?;
-                let plan = self
-                    .plan(
-                        &r,
-                        &c,
-                        *operation,
-                        strategy_instance,
-                        instrument,
-                        *side,
-                        sizing,
-                        order,
-                        protection.as_ref(),
-                        Instant::now() + Duration::from_secs(10),
-                        false,
-                    )
-                    .await?;
-                // A manual trade uses account capital. For a separately funded
-                // strategy, a preview exposes missing capital without granting
-                // permission to post. Neither path is an execution admission.
-                let independent_capital =
-                    plan::requires_independent_strategy_nav(strategy_instance);
-                let binding = strategy_instance.clone();
-                let instance_nav_complete = if independent_capital {
-                    r.execution
-                        .store
-                        .call(deadline(), move |store| {
-                            if store.instances()?.iter().any(|i| i.instance_id == binding) {
-                                Ok(Some(
-                                    store.financial_risk(now(), Some(&binding))?.nav_complete,
-                                ))
-                            } else {
-                                Ok(None)
-                            }
-                        })
+                }
+                TradeRequest::Status { reference } => {
+                    self.status_intent(&r, reference, invocation).await
+                }
+                TradeRequest::Cancel {
+                    idempotency_key,
+                    reference,
+                } => self.cancel(&r, idempotency_key, reference, request).await,
+                TradeRequest::Close {
+                    idempotency_key,
+                    reference,
+                    expires_in_ms,
+                } => {
+                    self.close(&r, idempotency_key, reference, *expires_in_ms, governance)
                         .await
-                        .map_err(err)?
-                } else {
-                    None
-                };
-                let instance_nav_blocked = instance_nav_complete == Some(false);
-                // Preview uses the same price-bounded, fee-inclusive cost model as
-                // native admission; do not silently suppress missing fee evidence.
-                let costs = if matches!(
+                }
+                TradeRequest::Preview {
                     operation,
-                    TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace
-                ) {
-                    let rules = self
-                        .public_ws
-                        .instrument_rules(instrument)
-                        .await
-                        .ok_or("INSTRUMENT_RULES_UNAVAILABLE")?;
-                    let fees = r.observer.fee_schedule(&rules).await.map_err(err)?;
-                    if !fees.exact_for_instrument
-                        || fees.reference_generation != rules.reference_generation
-                    {
-                        return Err("FEE_SOURCE_GENERATION_MISMATCH".into());
-                    }
-                    let fee_rate = dec(&fees.taker_rate)?
-                        .abs()
-                        .max(dec(&fees.maker_rate)?.abs());
-                    let source = r.observer.snapshot().await.map_err(err)?;
-                    let conversion = Self::usd_conversion(&source)?;
-                    let fx = dec(&conversion.usd_per_usdt)?;
-                    let entry = entry_budget::quote(
-                        plan.quantity,
-                        plan.contract_value,
-                        plan.limit_price,
-                        fee_rate,
-                        fx,
-                    )?;
-                    let entry_ceiling = entry_budget::enforced_entry_ceiling(
-                        true,
-                        c.environment == okx_protocol::account_governance::AccountEnvironment::Real,
-                        c.limits.max_entry_usd.as_deref().map(dec).transpose()?,
-                        order.max_entry_usd.as_deref().map(dec).transpose()?,
-                    )?;
-                    // Known entry fee/price is NOT an all-in cost proof. Report
-                    // exact remaining capacity for still-unproven immediate
-                    // costs, rather than treating them as zero.
-                    let unproven_headroom =
-                        entry_budget::unproven_entry_cost_headroom(entry.total_usd, entry_ceiling)?;
-                    json!({"price_bound_usdt":exact(plan.limit_price),
+                    strategy_instance,
+                    instrument,
+                    side,
+                    sizing,
+                    order,
+                    protection,
+                } => {
+                    let (a, c) = self.preview_authority(&r, governance).await?;
+                    let preview_until = Instant::now() + Duration::from_secs(10);
+                    let plan = self
+                        .plan(
+                            &r,
+                            &c,
+                            *operation,
+                            strategy_instance,
+                            instrument,
+                            *side,
+                            sizing,
+                            order,
+                            protection.as_ref(),
+                            preview_until,
+                            false,
+                        )
+                        .await?;
+                    // A manual trade uses account capital. For a separately funded
+                    // strategy, a preview exposes missing capital without granting
+                    // permission to post. Neither path is an execution admission.
+                    let independent_capital =
+                        plan::requires_independent_strategy_nav(strategy_instance);
+                    let binding = strategy_instance.clone();
+                    let instance_nav_complete = if independent_capital {
+                        r.execution
+                            .store
+                            .call(deadline(), move |store| {
+                                if store.instances()?.iter().any(|i| i.instance_id == binding) {
+                                    Ok(Some(
+                                        store.financial_risk(now(), Some(&binding))?.nav_complete,
+                                    ))
+                                } else {
+                                    Ok(None)
+                                }
+                            })
+                            .await
+                            .map_err(err)?
+                    } else {
+                        None
+                    };
+                    let instance_nav_blocked = instance_nav_complete == Some(false);
+                    // Preview uses the same price-bounded, fee-inclusive cost model as
+                    // native admission; do not silently suppress missing fee evidence.
+                    // The read-only quote and its partial exposure display use
+                    // the same authenticated observer snapshot. A second GET
+                    // after the independent census did not authorize any trade:
+                    // freshness is still checked at the time exposure is shown.
+                    // Execute and its pre-/post-HELD sources remain independent.
+                    let mut quote_snapshot = None;
+                    let costs = if matches!(
+                        operation,
+                        TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace
+                    ) {
+                        let rules = self
+                            .public_ws
+                            .instrument_rules(instrument)
+                            .await
+                            .ok_or("INSTRUMENT_RULES_UNAVAILABLE")?;
+                        let source = r
+                            .observer
+                            .snapshot_until(preview_until)
+                            .await
+                            .map_err(err)?;
+                        let conversion = Self::usd_conversion(&source)?;
+                        let account = r
+                            .execution
+                            .account
+                            .config_wait(preview_until.saturating_duration_since(Instant::now()))
+                            .await
+                            .map_err(err)?;
+                        let leverage = dec(&r
+                            .observer
+                            .configured_leverage_until(
+                                instrument,
+                                okx_api::MarginMode::Cross,
+                                if plan.position_side == "long" {
+                                    "long"
+                                } else {
+                                    "short"
+                                },
+                                preview_until,
+                            )
+                            .await
+                            .map_err(err)?)?;
+                        // Fetch the independent signed tariff after slower
+                        // snapshot/config/leverage reads. Its original exchange
+                        // timestamp freshness bound is enforced by assess_order.
+                        // Preview remains read-only and grants no POST permission.
+                        let fees = r
+                            .observer
+                            .fee_schedule_until(&rules, preview_until)
+                            .await
+                            .map_err(err)?;
+                        let (proof, fee_rate) = entry_budget::assess_order(
+                            &plan,
+                            entry_budget::EntryAssessmentSources {
+                                instrument,
+                                order_type: &order.order_type,
+                                rules: &rules,
+                                fees: &fees,
+                                account: &account,
+                                snapshot: &source,
+                                conversion: &conversion,
+                                leverage,
+                                verified_uid: &r.configuration.account_key.verified_uid,
+                                observed_at_ms: now(),
+                            },
+                        )?;
+                        let entry = proof.quote.clone();
+                        let fx = dec(&conversion.usd_per_usdt)?;
+                        let entry_ceiling = entry_budget::enforced_entry_ceiling(
+                            true,
+                            c.environment
+                                == okx_protocol::account_governance::AccountEnvironment::Real,
+                            c.limits.max_entry_usd.as_deref().map(dec).transpose()?,
+                            order.max_entry_usd.as_deref().map(dec).transpose()?,
+                        )?;
+                        // Known entry fee/price is NOT an all-in cost proof. Report
+                        // exact remaining capacity for still-unproven immediate
+                        // costs, rather than treating them as zero.
+                        let unproven_headroom = entry_budget::unproven_entry_cost_headroom(
+                            entry.total_usd,
+                            entry_ceiling,
+                        )?;
+                        let all_in_upper = proof.proven_upper_usd()?;
+                        let missing = proof.missing_reasons();
+                        quote_snapshot = Some(source);
+                        json!({"price_bound_usdt":exact(plan.limit_price),
                            "notional_usdt":exact(entry.notional_usdt),
                            "entry_fee_usdt":exact(entry.fee_usdt),
                            "entry_total_usdt":exact(entry.total_usdt),
                            "entry_total_usd":exact(entry.total_usd),
                            "usd_per_usdt":exact(fx),
+                           "admission_fx_snapshot_state":if all_in_upper.is_some() {"SOURCE_CLASSIFIED_CANDIDATE"} else {"PENDING_INDEPENDENT_COST_SOURCES"},
+                           "entry_total_usd_basis":"QUOTED_FX_PREVIEW_NOT_FROZEN_ADMISSION",
                            "fee_rate":exact(fee_rate),
-                           "fee_currency":"USDT",
+                           "fee_model_currency":"USDT",
+                           "actual_fee_settlement_currency":null,
+                           "actual_fee_settlement_currency_state":"UNPROVEN",
                            "fee_rounding":"CEIL_0.000001",
                            "entry_cap_usd":entry_ceiling.map(exact),
                            "account_entry_cap_usd":c.limits.max_entry_usd,
                            "price_enforcement":"VENUE_LIMIT_OR_IOC_FOK",
                            "remaining_cap_for_unproven_costs_usd":unproven_headroom.map(exact),
-                           "all_in_entry_cost_proven":false,
-                           "other_costs":"UNAVAILABLE_NOT_INCLUDED"})
-                } else {
-                    json!(null)
-                };
-                // This is a fresh exchange-side census, not a reservation or
-                // authorization to POST. Any gap is reported, never guessed flat.
-                let census = if r.configuration.account_key.environment
-                    == okx_protocol::accounts::Environment::Real
-                {
-                    match self.census(&a).await {
-                        Ok(proof) => json!({"state":"verified","source":"native_risk_census",
+                           "all_in_entry_cost_proven":all_in_upper.is_some(),
+                           "entry_budget_upper_reporting":all_in_upper.map(exact),
+                           "entry_cost_proof_schema":"okx.entry-cost-proof/v1",
+                           "entry_cost_reason_codes":missing,
+                           "other_costs":if all_in_upper.is_some() {"CLASSIFIED"} else {"UNAVAILABLE_NOT_INCLUDED"}})
+                    } else {
+                        json!(null)
+                    };
+                    // This is a fresh exchange-side census, not a reservation or
+                    // authorization to POST. Any gap is reported, never guessed flat.
+                    let census = if r.configuration.account_key.environment
+                        == okx_protocol::accounts::Environment::Real
+                    {
+                        match self.census(&a).await {
+                            Ok(proof) => json!({"state":"verified","source":"native_risk_census",
                                             "generated_at_ms":proof.generated_at_ms,
                                             "complete":proof.complete}),
-                        Err(reason) => json!({"state":"blocked","reason_code":reason}),
-                    }
-                } else {
-                    json!({"state":"not_evaluated"})
-                };
-                // The Observer's ordinary positions/orders are distinct from
-                // pending algos, open UNKNOWN intents and central reservations.
-                // Never equate zero ordinary rows with a proved flat account.
-                let exposure = r.observer.snapshot().await.map_err(err)?;
-                let exposure_fresh =
-                    chrono::DateTime::parse_from_rfc3339(&exposure.source_received_at)
-                        .ok()
-                        .is_some_and(|t| {
-                            crate::config::evidence_fresh(
-                                t.timestamp_millis(),
-                                now(),
-                                crate::config::ACCOUNT_MAX_AGE_MS,
-                            )
-                        })
-                        && exposure.account_uid_fingerprint
-                            == r.configuration.account_key.verified_uid;
-                let visible_positions = plan::visible_nonzero_position_count(
-                    exposure.positions.iter().map(|p| p.position.as_str()),
-                )?;
-                let account_exposure = json!({
-                    "source":"observer_account_snapshot",
-                    "state":if exposure_fresh {"partial"} else {"stale"},
-                    "source_received_at":exposure.source_received_at,
-                    "nonzero_positions":visible_positions,
-                    "pending_ordinary_orders":exposure.pending_orders.len(),
-                    "pending_algo_orders":null,
-                    "unknown_intents":null,
-                    "flat_verified":false,
-                    "reason_code":"ALGO_INTENTS_AND_RESERVATIONS_REQUIRE_INDEPENDENT_READBACK"
-                });
-                Ok(completed(
-                    json!({"plan":plan,"entry_costs":costs,"access":c.access_enabled(),"policy_revision":a.state.revision,
-                    "admission":"preview_only","side_effects":"none","census":census,
-                    "account_exposure":account_exposure,
-                    "financial_admission":{
-                        "state":if instance_nav_blocked {"blocked"} else {"not_evaluated"},
-                        "reason_code":if instance_nav_blocked {Some("INSTANCE_NAV_INCOMPLETE")} else {None},
-                        "ready_for_post":false,
-                        "instance_nav_complete":instance_nav_complete,
-                        "capital_scope":if independent_capital {"strategy"} else {"account"}
-                    }}),
-                ))
+                            Err(reason) => json!({"state":"blocked","reason_code":reason}),
+                        }
+                    } else {
+                        json!({"state":"not_evaluated"})
+                    };
+                    // The Observer's ordinary positions/orders are distinct from
+                    // pending algos, open UNKNOWN intents and central reservations.
+                    // Never equate zero ordinary rows with a proved flat account.
+                    let exposure = if let Some(source) = quote_snapshot {
+                        source
+                    } else {
+                        // Close/reduce previews have no entry-cost quote source.
+                        r.observer
+                            .snapshot_until(preview_until)
+                            .await
+                            .map_err(err)?
+                    };
+                    let exposure_fresh =
+                        chrono::DateTime::parse_from_rfc3339(&exposure.source_received_at)
+                            .ok()
+                            .is_some_and(|t| {
+                                crate::config::evidence_fresh(
+                                    t.timestamp_millis(),
+                                    now(),
+                                    crate::config::ACCOUNT_MAX_AGE_MS,
+                                )
+                            })
+                            && exposure.account_uid_fingerprint
+                                == r.configuration.account_key.verified_uid;
+                    let visible_positions = plan::visible_nonzero_position_count(
+                        exposure.positions.iter().map(|p| p.position.as_str()),
+                    )?;
+                    let account_exposure = json!({
+                        "source":"observer_account_snapshot",
+                        "state":if exposure_fresh {"partial"} else {"stale"},
+                        "source_received_at":exposure.source_received_at,
+                        "nonzero_positions":visible_positions,
+                        "pending_ordinary_orders":exposure.pending_orders.len(),
+                        "pending_algo_orders":null,
+                        "unknown_intents":null,
+                        "flat_verified":false,
+                        "reason_code":"ALGO_INTENTS_AND_RESERVATIONS_REQUIRE_INDEPENDENT_READBACK"
+                    });
+                    Ok(completed(
+                        json!({"plan":plan,"entry_costs":costs,"access":c.access_enabled(),"policy_revision":a.state.revision,
+                        "admission":"preview_only","side_effects":"none","census":census,
+                        "account_exposure":account_exposure,
+                        "financial_admission":{
+                            "state":if instance_nav_blocked {"blocked"} else {"not_evaluated"},
+                            "reason_code":if instance_nav_blocked {Some("INSTANCE_NAV_INCOMPLETE")} else {None},
+                            "ready_for_post":false,
+                            "instance_nav_complete":instance_nav_complete,
+                            "capital_scope":if independent_capital {"strategy"} else {"account"}
+                        }}),
+                    ))
+                }
+                TradeRequest::Execute {
+                    operation: TradeOperation::Replace,
+                    ..
+                } => self.replace(&r, request, governance).await,
+                TradeRequest::Execute { .. } => self.execute(&r, request, governance).await,
             }
-            TradeRequest::Execute {
-                operation: TradeOperation::Replace,
-                ..
-            } => self.replace(&r, request, governance).await,
-            TradeRequest::Execute { .. } => self.execute(&r, request, governance).await,
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+mod command_future_layout_tests {
+    use super::*;
+
+    fn future_bytes<'a, F: std::future::Future>(
+        _builder: impl FnOnce(&'a TradeService, &'a TradeRequest) -> F,
+    ) -> usize {
+        // Infer the real production future type without running a trade,
+        // constructing account fixtures or dereferencing a fabricated service.
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn trade_callers_store_a_handle_not_the_full_execution_state_machine() {
+        let public = future_bytes(|service, request| service.trade("account", request, None));
+        let dispatch = future_bytes(|service, request| {
+            service.trade_with_invocation("account", request, None, None)
+        });
+        let handle_budget = 2 * std::mem::size_of::<usize>();
+        assert!(
+            public <= handle_budget,
+            "public trade future: {public} bytes"
+        );
+        assert!(
+            dispatch <= handle_budget,
+            "dispatch trade future: {dispatch} bytes"
+        );
     }
 }
 

@@ -35,7 +35,7 @@ const LOCAL_RECONCILE_SECONDS: u64 = 1;
 const MAX_CONTROL_BODY_BYTES: usize = 4096;
 const MAX_CONTROL_RESULT_BYTES: usize = 16 * 1024;
 const CONTROL_RESPONSE_TOO_LARGE_CODE: &str = "CONTROL_RESPONSE_TOO_LARGE";
-const CONTROL_CURSOR_PATH: &str = r"C:\okx-control\github-control-issue-12-cursor.json";
+const CONTROL_CURSOR_PATH: &str = r"C:\okx\control\github-control-issue-12-cursor.json";
 
 #[derive(Debug)]
 enum NetworkWait<T> {

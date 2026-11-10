@@ -1,3 +1,21 @@
+//! Venue normalization adapters and compatibility exports for canonical facts.
+//!
+//! Shared facts now live in `okx-kernel`; their types, field order and serde
+//! representation remain available through this crate's existing exports.
+//! API-dependent constructors moved to free functions in the adapter modules.
+//! This changes the Rust source API; callers should migrate as follows:
+//!
+//! | Previous call | Adapter function |
+//! | --- | --- |
+//! | `AccountSnapshot::from_rest_bootstrap(...)` | [`account::account_snapshot_from_rest_bootstrap`] |
+//! | `snapshot.converge_private_ws(...)` | [`account::converge_account_private_ws`] with `snapshot` as the first argument |
+//! | `MarketSnapshot::from_bootstrap(...)` | [`market::market_snapshot_from_bootstrap`] |
+//! | `MarketHistorySnapshot::from_public(...)` | [`history::market_history_from_public`] |
+//! | `MarketTradesSnapshot::from_public(...)` | [`history::market_trades_from_public`] |
+//! | `FundingHistorySnapshot::from_public(...)` | [`history::funding_history_from_public`] |
+//! | `OpenInterestHistorySnapshot::from_public(...)` | [`history::open_interest_history_from_public`] |
+//! | `InstrumentSpec::try_from(public_instrument)` | [`reference::instrument_spec_from_public`] |
+
 pub use okx_api::InstrumentType;
 
 pub mod account;

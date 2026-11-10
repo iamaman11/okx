@@ -1,5 +1,8 @@
 use super::*;
 use okx_protocol::trading::{CapitalDirection, StrategyConfigurationV1, StrategyParametersV1};
+#[cfg(test)]
+#[path = "strategy_contract_tests.rs"]
+mod strategy_contract_tests;
 impl TradeService {
     pub async fn strategies(
         &self,
@@ -286,19 +289,100 @@ impl TradeService {
     pub async fn run(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let mut timer = tokio::time::interval(Duration::from_secs(1));
         loop {
-            tokio::select! {_ = shutdown.changed()=>{if *shutdown.borrow(){break;}},_ = timer.tick()=>{
-            let turn=self.maintenance_turn();tokio::pin!(turn);tokio::select!{_ = &mut turn=>{},_ = shutdown.changed()=>{if *shutdown.borrow(){let _=tokio::time::timeout(Duration::from_secs(10),&mut turn).await;break;}}}
-            }}
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = timer.tick() => {
+                    let turn = self.maintenance_turn();
+                    tokio::pin!(turn);
+                    tokio::select! {
+                        _ = &mut turn => {}
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() {
+                                // Only test-local attribution. The 10-second
+                                // maintenance drain and production shutdown
+                                // behavior are intentionally unchanged.
+                                #[cfg(test)]
+                                let shutdown_started = Instant::now();
+                                #[cfg(test)]
+                                if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
+                                    eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=WAIT_ACTIVE_TURN");
+                                }
+                                let drained = tokio::time::timeout(
+                                    Duration::from_secs(10), &mut turn
+                                ).await;
+                                #[cfg(test)]
+                                if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
+                                    eprintln!(
+                                        "T10_01_OWNER_SHUTDOWN_V1:phase=DRAIN_RETURNED completed={} elapsed_ms={}",
+                                        drained.is_ok(),shutdown_started.elapsed().as_millis()
+                                    );
+                                }
+                                #[cfg(not(test))]
+                                let _ = drained;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     async fn maintenance_turn(&self) {
+        // One existing maintenance owner. The recovery scheduler provides
+        // bounded retry spacing for the campaign, while independent account
+        // capture keeps advancing cursors every two seconds. No archive
+        // history is downloaded from trade.execute or from a new daemon.
+        if let Some(authority) = self.governance.read().await.clone()
+            && authority.state.campaign_entry_limit_usd.is_some()
+        {
+            let due = self.recovery_schedule.lock().await.due(
+                "campaign-opening",
+                &authority.state.campaign_id,
+                Instant::now(),
+            );
+            if due {
+                let until = Instant::now() + Duration::from_secs(4);
+                let result = tokio::time::timeout(
+                    Duration::from_secs(4),
+                    self.install_captured_empty_campaign_opening(&authority, until),
+                )
+                .await;
+                match result {
+                    Ok(Ok(())) => {
+                        // A successfully reconciled source needs a fresh
+                        // cheap readiness read on the next maintenance turn.
+                        // Do not back off into 30s windows of stale admission.
+                        self.recovery_schedule
+                            .lock()
+                            .await
+                            .finish("campaign-opening", &authority.state.campaign_id);
+                    }
+                    Ok(Err(reason)) => {
+                        eprintln!("OKX_ENTRY_BASELINE_V1 state=PENDING reason={reason}");
+                    }
+                    Err(_) => {
+                        eprintln!("OKX_ENTRY_BASELINE_V1 state=PENDING reason=TIMEOUT");
+                    }
+                }
+            }
+        }
         use futures_util::{StreamExt, stream};
         stream::iter(self.accounts.list().await)
             .for_each_concurrent(4, |config| async move {
+                #[cfg(test)]
+                if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
+                    eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=ACCOUNT_START alias={}",config.alias);
+                }
                 let Some(r) = self.accounts.resolve(&config.alias).await else {
                     return;
                 };
                 let _ = self.reconcile_restored(&r).await;
+                #[cfg(test)]
+                if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
+                    eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=RESTORE_DONE alias={}",config.alias);
+                }
                 let reconcile = async {
                     let account = config.account_key.wire();
                     let mut offset = self.recovery_schedule.lock().await.page(&account);
@@ -340,7 +424,15 @@ impl TradeService {
                                         if !scheduled {
                                             return;
                                         }
-                                        let result = self.status_intent(r, &intent.intent_id).await;
+                                        #[cfg(test)]
+                                        if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
+                                            eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=STATUS_START");
+                                        }
+                                        let result = self.status_intent(r, &intent.intent_id, None).await;
+                                        #[cfg(test)]
+                                        if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
+                                            eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=STATUS_DONE ok={}",result.is_ok());
+                                        }
                                         let settled = result.as_ref().is_ok_and(|value| {
                                             value["data"]["central_release"]["state"] == "verified"
                                                 || value["data"]["central_release"]["state"]
@@ -399,6 +491,10 @@ impl TradeService {
                     }
                 };
                 tokio::join!(reconcile, decisions);
+                #[cfg(test)]
+                if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
+                    eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=ACCOUNT_DONE alias={}",config.alias);
+                }
             })
             .await;
     }

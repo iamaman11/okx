@@ -1,7 +1,9 @@
 mod benchmark;
 mod budget;
 pub mod cache;
+pub mod candidate_progress;
 mod cursor;
+mod decision;
 pub mod executor;
 pub mod jobs;
 mod market;
@@ -38,6 +40,10 @@ pub struct AnalyticsService {
     research_memory: Arc<tokio::sync::Semaphore>,
 }
 impl AnalyticsService {
+    /// Local metadata projection only: never enters the catalog SQL owner.
+    pub(crate) fn diagnostic_job(&self, id: &str) -> Value {
+        self.jobs.diagnostic_readback(id)
+    }
     pub fn new(
         root: PathBuf,
         bootstrapper: crate::market_bootstrap::MarketBootstrapper,
@@ -64,6 +70,15 @@ impl AnalyticsService {
             return Err("INVALID_RESEARCH_REQUEST".into());
         }
         match request {
+            request @ (ResearchRequest::RecordDecision { .. }
+            | ResearchRequest::Decision { .. }) => {
+                let service = self.clone();
+                self.cpu
+                    .run(Default::default(), move |_| {
+                        service.research_decision(request)
+                    })
+                    .await
+            }
             ResearchRequest::Capabilities {} => Ok(research_capabilities()),
             ResearchRequest::Validate {
                 data_mode,
@@ -204,6 +219,25 @@ impl AnalyticsService {
         }
         let this = self.clone();
         tokio::spawn(async move {
+            let progress = match &request {
+                ResearchRequest::Grid {
+                    instruments,
+                    variants,
+                    ..
+                } => Some(Arc::new(candidate_progress::Tracker::new(
+                    instruments.len(),
+                    variants.len(),
+                ))),
+                _ => None,
+            };
+            if let Some(progress) = &progress {
+                let _ = candidate_progress::publish(
+                    this.jobs.clone(),
+                    hash.clone(),
+                    progress.snapshot(),
+                )
+                .await;
+            }
             let outcome = async {
                 // Bounded SQL admission happens at submit. Accepted queued
                 // jobs wait for an existing heavy permit instead of becoming
@@ -223,22 +257,65 @@ impl AnalyticsService {
                     _ = executor::cancelled(cancel.clone()) =>
                         return Err("CANCELLED".into()),
                 };
-                this.jobs.update_async(hash.clone(), jobs::State::Running, None, None).await?;
+                this.jobs
+                    .update_async(hash.clone(), jobs::State::Running, None, None)
+                    .await?;
                 if matches!(request, ResearchRequest::Benchmark { .. }) {
-                    return benchmark::run(this.cpu.clone(), this.artifacts.clone(), cancel.clone()).await;
+                    return benchmark::run(
+                        this.cpu.clone(),
+                        this.artifacts.clone(),
+                        cancel.clone(),
+                    )
+                    .await;
                 }
-                let instruments = match &request { ResearchRequest::Backtest{instruments,..}|ResearchRequest::Grid{instruments,..}=>instruments.clone(),_=>unreachable!() };
-                if instruments.len()==1 { return this.execute_one(request,cancel.clone()).await; }
-                let mut work=stream::iter(instruments.into_iter().enumerate().map(|(index,instrument)|{
-                    let service=this.clone();let mut single=request.clone();let token=cancel.clone();
-                    match &mut single {ResearchRequest::Backtest{instruments,..}|ResearchRequest::Grid{instruments,..}=>*instruments=vec![instrument.clone()],_=>unreachable!()};
-                    async move {(index,instrument,service.execute_one(single,token).await)}
-                })).buffer_unordered(4);
-                let mut rows=Vec::new();let mut artifacts=Vec::new();
-                while let Some((index,instrument,outcome))=work.next().await {
-                    if cancel.load(Ordering::Acquire){return Err("CANCELLED".into())}
-                    let store=this.artifacts.clone();
-                    let previous_rows=rows;let previous_artifacts=artifacts;
+                let instruments = match &request {
+                    ResearchRequest::Backtest { instruments, .. }
+                    | ResearchRequest::Grid { instruments, .. } => instruments.clone(),
+                    _ => unreachable!(),
+                };
+                if instruments.len() == 1 {
+                    return this
+                        .execute_one_observed(
+                            request,
+                            cancel.clone(),
+                            progress.clone().map(|p| (p, 0)),
+                        )
+                        .await;
+                }
+                let mut work = stream::iter(instruments.into_iter().enumerate().map(
+                    |(index, instrument)| {
+                        let service = this.clone();
+                        let mut single = request.clone();
+                        let token = cancel.clone();
+                        let observation = progress.clone().map(|p| (p, index));
+                        match &mut single {
+                            ResearchRequest::Backtest { instruments, .. }
+                            | ResearchRequest::Grid { instruments, .. } => {
+                                *instruments = vec![instrument.clone()]
+                            }
+                            _ => unreachable!(),
+                        };
+                        async move {
+                            (
+                                index,
+                                instrument,
+                                service
+                                    .execute_one_observed(single, token, observation)
+                                    .await,
+                            )
+                        }
+                    },
+                ))
+                .buffer_unordered(4);
+                let mut rows = Vec::new();
+                let mut artifacts = Vec::new();
+                while let Some((index, instrument, outcome)) = work.next().await {
+                    if cancel.load(Ordering::Acquire) {
+                        return Err("CANCELLED".into());
+                    }
+                    let store = this.artifacts.clone();
+                    let previous_rows = rows;
+                    let previous_artifacts = artifacts;
                     let (next_rows,next_artifacts,manifest)=this.cpu.run(cancel.clone(),move |_|{
                         let mut rows=previous_rows;let mut artifacts=previous_artifacts;
                     let row=match outcome {Ok(artifact)=>{let result:Value=store.read_evidence_json(&artifact).map_err(|e|e.to_string())?;artifacts.push(artifact.clone());json!({"index":index,"instrument":instrument,"state":"completed","artifact":artifact,"summary":result["summary"],"dataset_hash":result["dataset_hash"],"grid":result["grid"],"trades_cursor":format!("instrument:{index}:0")})},Err(error)=>json!({"index":index,"instrument":instrument,"state":"failed","reason_code":error})};
@@ -248,12 +325,43 @@ impl AnalyticsService {
 
                         Ok((rows,artifacts,manifest))
                     }).await?;
-                    rows=next_rows;artifacts=next_artifacts;
-                    this.jobs.update_async(hash.clone(),jobs::State::Running,Some(manifest),None).await?;
+                    rows = next_rows;
+                    artifacts = next_artifacts;
+                    this.jobs
+                        .update_async(hash.clone(), jobs::State::Running, Some(manifest), None)
+                        .await?;
                 }
-                this.jobs.get_async(hash.clone()).await?.artifact.ok_or_else(||"EMPTY_BATCH".into())
+                this.jobs
+                    .get_async(hash.clone())
+                    .await?
+                    .artifact
+                    .ok_or_else(|| "EMPTY_BATCH".into())
+            };
+            // Poll observations alongside the existing job future. One bounded
+            // snapshot per tick; no detached consumer survives any exit path.
+            tokio::pin!(outcome);
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut committed = None;
+            let outcome = loop {
+                tokio::select! {
+                    result = &mut outcome => break result,
+                    _ = tick.tick(), if progress.is_some() => {
+                        let value = progress.as_ref().unwrap().snapshot();
+                        if committed.as_ref() != Some(&value) && candidate_progress::publish(this.jobs.clone(), hash.clone(), value.clone()).await.is_ok() {
+                            committed = Some(value);
+                        }
+                    }
+                }
+            };
+            if let Some(progress) = &progress {
+                let _ = candidate_progress::publish(
+                    this.jobs.clone(),
+                    hash.clone(),
+                    progress.snapshot(),
+                )
+                .await;
             }
-            .await;
             match outcome {
                 Ok(a) => {
                     let _ = this
@@ -282,10 +390,19 @@ impl AnalyticsService {
         });
         Ok(json!(job))
     }
+    #[cfg(test)]
     async fn execute_one(
         &self,
         request: ResearchRequest,
         cancel: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<String, String> {
+        self.execute_one_observed(request, cancel, None).await
+    }
+    async fn execute_one_observed(
+        &self,
+        request: ResearchRequest,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+        observation: Option<(Arc<candidate_progress::Tracker>, usize)>,
     ) -> Result<String, String> {
         let (instruments, ms, start, end, strategy, variants, costs, mode, seed, is_grid) =
             match request {
@@ -342,7 +459,11 @@ impl AnalyticsService {
         }
         if !matches!(
             strategy.as_str(),
-            "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
+            "ema_cross_v1"
+                | "ema_momentum_confirm_v1"
+                | "no_trade"
+                | "close_momentum"
+                | "two_bar_momentum"
         ) {
             return Err("UNSUPPORTED_STRATEGY".into());
         }
@@ -460,8 +581,22 @@ impl AnalyticsService {
                     let cancelled=||c.load(Ordering::Acquire);
                     let mut chunks=Vec::new();for chunk in bars.chunks(4096){if cancelled(){return Err("CANCELLED".into())}chunks.push(store.publish_evidence(&chunk).map_err(|e|e.to_string())?.0);}
                     let dataset=store.publish_evidence(&json!({"schema":"okx.research.dataset/398.1","instrument":instruments[0],"timeframe_ms":ms,"start_ms":start,"end_ms":end,"chunks":chunks})).map_err(|e|e.to_string())?.0;
-                    let(result,grid)=if is_grid{let g=replay::grid(&bars,&spec,&variants,&cancelled)?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":spec.seed,"strategy_id":spec.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.slow,bars.len(),&cancelled)?,None)};
-                    publish_replay(&store,&result,&dataset,grid,&cancelled)
+                    // Persist the exact inputs and selection policy before any
+                    // replay. This is immutable artifact metadata, not another
+                    // job catalog, and its ID comes from the existing store.
+                    let policy = if is_grid { Some(replay::grid_policy(bars.len(), &variants)?) } else { None };
+                    let experiment = store.publish_evidence(&json!({
+                        "schema":"okx.research.experiment-inputs/v1",
+                        "dataset_artifact":dataset,"instrument":instruments[0],
+                        "requested_range":{"start_ms":start,"end_ms":end},
+                        "effective_range":{"start_ms":bars.first().map(|b|b.time),"end_ms":bars.last().map(|b|b.time+ms)},
+                        "bar_count":bars.len(),"timeframe_ms":ms,
+                        "code_version":replay::CAUSAL_REPLAY_VERSION,"spec":spec,
+                        "variants":variants,"selection_policy":policy,
+                        "result_role":"counterfactual_research_only"
+                    })).map_err(|e|e.to_string())?.0;
+                    let(result,grid)=if is_grid{let g=replay::grid_with_observer(&bars,&spec,&variants,&cancelled,&|value|{if let Some((tracker,index))=&observation {tracker.observe(*index,value)}})?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":spec.seed,"strategy_id":spec.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.slow,bars.len(),&cancelled)?,None)};
+                    publish_replay(&store,&result,&dataset,grid,Some(&experiment),&cancelled)
                 }).await?;
         Ok::<_, String>(artifact)
     }
@@ -472,6 +607,7 @@ fn publish_replay(
     result: &replay::ReplayResult,
     dataset: &str,
     grid: Option<Value>,
+    experiment: Option<&str>,
     cancel: &impl Fn() -> bool,
 ) -> Result<String, String> {
     let mut trade_pages = Vec::new();
@@ -488,7 +624,7 @@ fn publish_replay(
         }
         curve_pages.push(store.publish_evidence(&chunk).map_err(|e| e.to_string())?.0);
     }
-    let manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
+    let manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"experiment_artifact":experiment,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
     Ok(store
         .publish_evidence(&manifest)
         .map_err(|e| e.to_string())?
@@ -509,7 +645,11 @@ impl AnalyticsService {
         }
         let expired_roots = expired
             .iter()
-            .filter_map(|j| j.artifact.clone())
+            .flat_map(|j| {
+                [j.artifact.clone(), j.decision_artifact.clone()]
+                    .into_iter()
+                    .flatten()
+            })
             .collect::<std::collections::BTreeSet<_>>();
         // The candidates alone define a bounded garbage set. Scan current
         // reference roots in small indexed pages; never materialize every job
@@ -527,7 +667,10 @@ impl AnalyticsService {
             for root in &roots {
                 let retiring_refs = expired
                     .iter()
-                    .filter(|job| job.artifact.as_deref() == Some(root))
+                    .filter(|job| {
+                        job.artifact.as_deref() == Some(root)
+                            || job.decision_artifact.as_deref() == Some(root)
+                    })
                     .count() as u64;
                 // The same content-addressed artifact can be owned by
                 // multiple jobs. Retiring one must not delete a live twin.
@@ -581,7 +724,12 @@ impl AnalyticsService {
                 }
             }
         }
-        for key in ["dataset_artifact", "result_artifact"] {
+        for key in [
+            "dataset_artifact",
+            "result_artifact",
+            "experiment_artifact",
+            "previous_decision_artifact",
+        ] {
             if let Some(child) = value.get(key).and_then(Value::as_str) {
                 self.artifact_graph(child, seen)?;
             }
@@ -678,8 +826,15 @@ mod tests {
         let grid = json!({"selected":{"fast":3,"slow":8},"train":summary,
             "split_index":70,"selection_warning":"Counterfactual only",
             "variants":[{"parameters":{"fast":3,"slow":8},"train":summary}]});
-        let manifest =
-            publish_replay(&service.artifacts, &result, &dataset, Some(grid), &|| false).unwrap();
+        let manifest = publish_replay(
+            &service.artifacts,
+            &result,
+            &dataset,
+            Some(grid),
+            None,
+            &|| false,
+        )
+        .unwrap();
         let id = "c".repeat(64);
         service
             .jobs
@@ -1009,6 +1164,25 @@ mod artifact_job_fixtures {
             .await
             .unwrap();
         assert_eq!(trades["returned_rows"], 1);
+        let experiment_id = trades["metadata"]["experiment_artifact"].as_str().unwrap();
+        let experiment: Value = s.artifacts.read_evidence_json(experiment_id).unwrap();
+        assert_eq!(experiment["schema"], "okx.research.experiment-inputs/v1");
+        assert_eq!(experiment["code_version"], replay::CAUSAL_REPLAY_VERSION);
+        assert_eq!(experiment["spec"]["seed"], 7);
+        assert_eq!(experiment["spec"]["costs"]["taker_fee_bps"], 1.0);
+        assert_eq!(
+            experiment["variants"],
+            json!([{"fast":2,"slow":5},{"fast":3,"slow":8}])
+        );
+        assert_eq!(
+            experiment["selection_policy"]["selection_metric"],
+            "train_sharpe_descending"
+        );
+        let artifact = s.jobs.get(&id).unwrap().artifact.unwrap();
+        let mut graph = std::collections::BTreeSet::new();
+        s.artifact_graph(&artifact, &mut graph).unwrap();
+        assert!(graph.contains(experiment_id));
+        assert!(graph.contains(experiment["dataset_artifact"].as_str().unwrap()));
         assert!(
             s.research(ResearchRequest::Result {
                 job_id: id,
@@ -1082,6 +1256,46 @@ mod artifact_job_fixtures {
     }
 
     #[test]
+    fn c17_export_rejects_corrupt_or_mismatched_experiment_provenance() {
+        let (root, service) = service();
+        let input = json!({
+            "schema":"okx.research.experiment-inputs/v1",
+            "dataset_artifact":"a".repeat(64),
+            "code_version":replay::CAUSAL_REPLAY_VERSION
+        });
+        let experiment = service.artifacts.publish_evidence(&input).unwrap().0;
+        let mut manifest = json!({
+            "trade_pages":[],"total_trades":0,
+            "dataset_artifact":"a".repeat(64),
+            "code_version":replay::CAUSAL_REPLAY_VERSION,
+            "experiment_artifact":experiment
+        });
+        let export = verify_export_manifest(&service.artifacts, &manifest).unwrap();
+        assert_eq!(export["experiment"]["checksum_verified"], true);
+        assert_eq!(export["experiment"]["references_match"], true);
+        manifest["dataset_artifact"] = json!("b".repeat(64));
+        assert_eq!(
+            verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+            "EXPERIMENT_PROVENANCE_MISMATCH"
+        );
+        manifest["dataset_artifact"] = json!("a".repeat(64));
+        service.artifacts.remove_evidence(&experiment).unwrap();
+        assert_eq!(
+            verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+            "ARTIFACT_CORRUPT"
+        );
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("experiment_artifact");
+        assert!(
+            verify_export_manifest(&service.artifacts, &manifest).unwrap()["experiment"].is_null()
+        );
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn c17_export_does_not_claim_complete_on_count_mismatch() {
         let (root, service) = super::artifact_job_fixtures::service();
         let page = service
@@ -1106,10 +1320,18 @@ mod artifact_job_fixtures {
             .publish_evidence(&vec![json!({"row":1})])
             .unwrap()
             .0;
+        let experiment = service
+            .artifacts
+            .publish_evidence(&json!({
+                "schema":"okx.research.experiment-inputs/v1",
+                "selection_policy":{"selection_metric":"train_sharpe_descending"}
+            }))
+            .unwrap()
+            .0;
         let manifest = service
             .artifacts
             .publish_evidence(&json!({
-                "trade_pages":[page.clone()],"total_trades":1
+                "trade_pages":[page.clone()],"total_trades":1,"experiment_artifact":experiment
             }))
             .unwrap()
             .0;
@@ -1136,10 +1358,12 @@ mod artifact_job_fixtures {
             .unwrap();
         assert_eq!(still_live["rows"][0]["row"], 1);
         assert!(service.artifacts.read_evidence(&page).is_ok());
+        assert!(service.artifacts.read_evidence(&experiment).is_ok());
         service.pin_job(&second, false).unwrap();
         assert_eq!(service.apply_retention(future).unwrap(), 1);
         assert!(service.artifacts.read_evidence(&page).is_err());
         assert!(service.artifacts.read_evidence(&manifest).is_err());
+        assert!(service.artifacts.read_evidence(&experiment).is_err());
         drop(service);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1314,7 +1538,7 @@ mod artifact_job_fixtures {
                 })
                 .collect(),
         };
-        let artifact = publish_replay(&s.artifacts, &result, &data, None, &|| false).unwrap();
+        let artifact = publish_replay(&s.artifacts, &result, &data, None, None, &|| false).unwrap();
         let id = "a".repeat(64);
         s.jobs
             .enqueue("fixture-request".into(), id.clone())
@@ -1610,7 +1834,8 @@ fn research_capabilities() -> Value {
     json!({
         "schema":"okx.research.capabilities/v1",
         "quality":"fresh",
-        "strategy_ids":["ema_cross_v1"],
+        "strategy_ids":["ema_cross_v1","ema_momentum_confirm_v1"],
+        "strategy_compositions":{"ema_momentum_confirm_v1":{"version":1,"kernels":["ema_cross_v1","close_momentum"],"parameters":"ema_fast_slow","warmup":"slow_closed_bars","disagreement":"flat","execution":"next_open_counterfactual"}},
         "supported_data_modes":["counterfactual"],
         "unavailable_data_modes":[{"mode":"historical_observed",
             "reason_code":"HISTORICAL_RULES_AND_FEES_UNAVAILABLE"}],
@@ -1618,6 +1843,7 @@ fn research_capabilities() -> Value {
         "limits":{"max_instruments":8,"max_bars_total":1000000,"max_grid_variants":64,"research_memory_total_mib":budget::MEMORY_TOTAL_MIB,"memory_admission":"conservative_pre_source_shared",
             "max_result_page_rows":50,"max_heavy_concurrent_jobs":2},
         "result_views":["summary","trades","variants","equity","export"],
+        "decisions":{"statuses":["accepted","rejected","deferred"],"single_experiment_only":true,"max_revisions":256,"max_annotation_json_bytes":6144,"trading_authority":false},
         "oos":{"grid_train_test_split":true,"selected_variant_from_train_only":true},
         "source_evidence":{"closed_candles_only":true,"no_forward_fill":true}
     })

@@ -1,4 +1,9 @@
 //! Read-only diagnostics project actual owners; they never change access or replay an intent.
+mod protection_trace;
+pub(crate) use protection_trace::{
+    ProtectionCleanupInvocation, ProtectionOperationTrace, ProtectionTraceEvent,
+};
+
 use crate::{accounts::AccountResources, query::DispatchContext};
 use chrono::Utc;
 use futures_util::{StreamExt, stream};
@@ -12,6 +17,78 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+async fn operation_diagnostics(
+    ctx: &DispatchContext,
+    request: &DiagnosticsRequest,
+    route: Option<&str>,
+) -> Result<Value, String> {
+    if request.limit.is_some() || request.cycle_id.is_some() {
+        return Err("INVALID_DIAGNOSTICS_VIEW".into());
+    }
+    let reference = request
+        .reference
+        .as_deref()
+        .ok_or("OPERATION_REFERENCE_REQUIRED")?;
+    let requested = request
+        .account
+        .as_deref()
+        .or(route)
+        .ok_or("ACCOUNT_REQUIRED")?;
+    let account = ctx
+        .accounts
+        .resolve(requested)
+        .await
+        .ok_or("ACCOUNT_UNAVAILABLE")?;
+    if let Some(route) = route {
+        let selected = ctx
+            .accounts
+            .resolve(route)
+            .await
+            .ok_or("ACCOUNT_UNAVAILABLE")?;
+        if selected.configuration.account_key != account.configuration.account_key {
+            return Err("ACCOUNT_ROUTE_MISMATCH".into());
+        }
+    }
+    if let Some(intent) = reference.strip_prefix("terminal_release:") {
+        let state = account.terminal_release_trace.read(intent);
+        return Ok(json!({
+            "schema":"okx.operation-diagnostics/v1",
+            "account":account.configuration.account_key.wire(),
+            "reference":reference,"family":"terminal_release",
+            "state":state["state"],"operation":state,"quality":"partial",
+            "read_only":true,"central_budget":{"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"}
+        }));
+    }
+    match account.protection_operation_trace.read(reference) {
+        Ok(state) if state["state"] == "NOT_OBSERVED" => Ok(json!({
+            "schema":"okx.operation-diagnostics/v1",
+            "account":account.configuration.account_key.wire(),
+            "reference":reference,"state":"NOT_OBSERVED",
+            "reason_code":"VOLATILE_PROJECTION_UNAVAILABLE",
+            "quality":"partial",
+            "send_and_ack_history":"UNKNOWN_AFTER_RESTART_OR_EVICTION",
+            "trace_health":state["trace_health"],
+            "next_action":"trade.status","read_only":true
+        })),
+        Ok(state) => Ok(json!({
+            "schema":"okx.operation-diagnostics/v1",
+            "account":account.configuration.account_key.wire(),
+            "reference":reference,"state":"OBSERVED","operation":state,
+            "quality":"partial",
+            "read_only":true,"central_budget":{"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"}
+        })),
+        Err(code) => Ok(json!({
+            "schema":"okx.operation-diagnostics/v1",
+            "account":account.configuration.account_key.wire(),
+            "reference":reference,"state":"NOT_EVALUATED",
+            "reason_code":code,"next_action":"retry_read_only_diagnostic","read_only":true,
+            "trace_health":account.protection_operation_trace.health_report(),
+            "quality":"partial"
+        })),
+    }
+}
+
 fn report(
     stage: &str,
     reason: &str,
@@ -51,20 +128,59 @@ fn lookup(store: &AccountStore, reference: &str) -> StoreResult<Option<StoredInt
     }
     store.by_exchange_order_id(reference)
 }
-async fn budget(ctx: &DispatchContext) -> Value {
-    match tokio::time::timeout(Duration::from_secs(3), ctx.trade.risk_summary()).await {
-        Ok(Ok(v)) => json!({"state":"observed","value":v}),
-        Ok(Err(e)) => {
-            json!({"state":"unavailable","reason_code":safe_code(&e,"CENTRAL_BUDGET_UNAVAILABLE")})
-        }
-        Err(_) => json!({"state":"unavailable","reason_code":"CENTRAL_BUDGET_DEADLINE"}),
-    }
+fn central_budget_not_evaluated() -> Value {
+    json!({
+        "state":"NOT_EVALUATED",
+        "reason_code":"NO_LOCAL_RISKBOOK_SNAPSHOT",
+        "quality":"partial",
+        "source":"none",
+        "external_calls":false
+    })
 }
 pub async fn diagnostics(
     ctx: &DispatchContext,
     request: &DiagnosticsRequest,
     account: Option<&str>,
 ) -> Result<Value, String> {
+    if request.view == Some(DiagnosticsView::Storage) {
+        return storage_diagnostics(ctx, request, account).await;
+    }
+    if request.view == Some(DiagnosticsView::Research) {
+        if request.cycle_id.is_some() || request.limit.is_some() {
+            return Err("INVALID_DIAGNOSTICS_VIEW".into());
+        }
+        let id = request
+            .reference
+            .as_deref()
+            .ok_or("JOB_REFERENCE_REQUIRED")?;
+        if id.len() != 64
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("INVALID_JOB_REFERENCE".into());
+        }
+        // Research jobs belong to the authenticated installation, not a
+        // financial account. Explicit account routing is inapplicable here.
+        if request.account.is_some() || account.is_some() {
+            return Err("RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE".into());
+        }
+        return Ok(ctx.analytics.diagnostic_job(id));
+    }
+    if request.view == Some(DiagnosticsView::Operation) {
+        return Ok(operation_diagnostics(ctx, request, account)
+            .await
+            .unwrap_or_else(|reason| {
+                report(
+                    "operation",
+                    &safe_code(&reason, "DIAGNOSTICS_UNAVAILABLE"),
+                    request.account.as_deref().or(account).unwrap_or("engine"),
+                    vec![safe_code(&reason, "DIAGNOSTICS_UNAVAILABLE")],
+                    false,
+                    "supply an authorized account and operation reference",
+                )
+            }));
+    }
     // Finance evidence must be readable without SQL-owner or central RiskBook.
     if request.view == Some(DiagnosticsView::Finance) {
         return Ok(finance_diagnostics(ctx, request, account)
@@ -90,8 +206,10 @@ pub async fn diagnostics(
             "use view=finance",
         ));
     }
-    let (result, central) = tokio::join!(diagnostics_inner(ctx, request, account), budget(ctx));
-    let mut out = match result {
+    // Diagnostics are read-only and bounded. In particular, do not send a
+    // RiskCommandAction::Summary over WSS here: the Engine has no local cached
+    // RiskBook projection, so central risk remains explicitly unevaluated.
+    let mut out = match diagnostics_inner(ctx, request, account).await {
         Ok(value) => value,
         Err(code) => report(
             "routing",
@@ -102,9 +220,77 @@ pub async fn diagnostics(
             "supply an explicit valid account and reference",
         ),
     };
-    out["central_budget"] = central;
+    out["central_budget"] = central_budget_not_evaluated();
     Ok(out)
 }
+/// Explicit snapshot semantics preserve the existing default detailed SQL view.
+/// The snapshot is never used as authority for an operation or account access.
+async fn storage_diagnostics(
+    ctx: &DispatchContext,
+    request: &DiagnosticsRequest,
+    route: Option<&str>,
+) -> Result<Value, String> {
+    if request.reference.is_some() || request.cycle_id.is_some() || request.limit.is_some() {
+        return Err("INVALID_DIAGNOSTICS_VIEW".into());
+    }
+    let requested = request
+        .account
+        .as_deref()
+        .or(route)
+        .ok_or("ACCOUNT_REQUIRED")?;
+    // Registry locks only: no credential lookup, SQL job or source refresh.
+    let resources =
+        tokio::time::timeout(Duration::from_millis(20), ctx.accounts.resolve(requested))
+            .await
+            .map_err(|_| "ACCOUNT_ROUTING_BUSY")?
+            .ok_or("ACCOUNT_UNAVAILABLE")?;
+    if let Some(route) = route {
+        let selected = tokio::time::timeout(Duration::from_millis(20), ctx.accounts.resolve(route))
+            .await
+            .map_err(|_| "ACCOUNT_ROUTING_BUSY")?
+            .ok_or("ACCOUNT_UNAVAILABLE")?;
+        if selected.configuration.account_key != resources.configuration.account_key {
+            return Err("ACCOUNT_ROUTE_MISMATCH".into());
+        }
+    }
+    let observed = resources.execution.store.diagnostic_storage_snapshot();
+    let now = Utc::now().timestamp_millis();
+    let state = resources.private_ws.state();
+    let private = state.try_read().ok().map(|s| {
+        let status = s.status();
+        json!({"connection_state":status.connection_state,"connection_generation":status.connection_generation,
+            "logged_in":status.logged_in,"subscriptions_complete":status.subscriptions_complete,
+            "last_inbound_ms":status.last_inbound_ms,"last_error_present":status.last_error.is_some()})
+    });
+    let source = resources.latest_snapshot.try_read().ok().map(|s| {
+        let time = s
+            .as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s.source_received_at).ok())
+            .map(|t| t.timestamp_millis());
+        json!({"account_as_of_ms":time,"account_fresh":account_snapshot_fresh_at(time,now)})
+    });
+    let health = resources
+        .source_capture_health
+        .try_read()
+        .ok()
+        .map(|h| json!(&*h));
+    let age = observed
+        .snapshot
+        .as_ref()
+        .map(|s| now.saturating_sub(s.observed_at_ms).max(0));
+    Ok(
+        json!({"schema":"okx.storage-diagnostics/v1","owner":"account_sql","account":resources.configuration.account_key.wire(),
+        "state":observed.state,"quality":"partial","read_only":true,"history":"UNKNOWN",
+        "storage":observed,"snapshot_age_ms":age,"snapshot_semantics":"last_owner_publication_not_current_sql_read",
+        "source_identity_verified":resources.diagnostic_source_identity(),
+        "private_ws":private.unwrap_or_else(||json!({"state":"NOT_EVALUATED","reason_code":"PRIVATE_STATE_BUSY"})),
+        "sources":source.unwrap_or_else(||json!({"state":"NOT_EVALUATED","reason_code":"SOURCE_SNAPSHOT_BUSY"})),
+        "source_capture":health.unwrap_or_else(||json!({"state":"NOT_EVALUATED","reason_code":"HEALTH_BUSY"})),
+        "access":ctx.trade.diagnostic_access_now(&resources.configuration.account_key.wire()),
+        "central_budget":central_budget_not_evaluated(),"next_action":"inspect_snapshot_age_and_refresh_pending"}),
+    )
+}
+
 async fn finance_diagnostics(
     ctx: &DispatchContext,
     request: &DiagnosticsRequest,
@@ -140,7 +326,9 @@ async fn finance_diagnostics(
     let trace = resources
         .finance_trace
         .readback(request.cycle_id, usize::from(limit));
-    let state = if trace.selected_not_found || (trace.active.is_none() && trace.recent.is_empty()) {
+    let state = if trace.state == "NOT_EVALUATED" {
+        "NOT_EVALUATED"
+    } else if trace.selected_not_found || (trace.active.is_none() && trace.recent.is_empty()) {
         "NOT_PROVEN"
     } else {
         "OBSERVED"
@@ -172,8 +360,14 @@ async fn finance_diagnostics(
         .unwrap_or_default();
     // Correlate across full bounded 10-minute history, then serialize only four events.
     maintenance.events.truncate(4);
+    let partial = trace.state != "OBSERVED"
+        || trace.selected_not_found
+        || trace.selected_details_unavailable
+        || window.is_none()
+        || maintenance.state != "OBSERVED";
     Ok(json!({
         "schema": "okx.finance-diagnostics/v1",
+        "quality": if partial { "partial" } else { "complete" },
         "account": resources.configuration.account_key.wire(),
         "state": state,
         "trace": trace,
@@ -199,8 +393,12 @@ async fn finance_diagnostics(
         },
         "current_readiness": {"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"},
         "central_budget": {"state":"NOT_EVALUATED","reason_code":"DIAGNOSTICS_ONLY"},
-        "next_action": if trace.selected_not_found {
-            "cycle expired; reproduce with retained trace"
+        "next_action": if trace.state == "NOT_EVALUATED" {
+            "retry read-only diagnostic; finance trace is busy"
+        } else if trace.selected_not_found {
+            "cycle not observed; prior process or evicted history remains unknown"
+        } else if trace.selected_details_unavailable {
+            "inspect retained cycle summary; detailed phases are unavailable"
         } else {
             "inspect measured cycle and failing phase"
         }
@@ -551,6 +749,461 @@ async fn account_diagnostics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        accounts,
+        analytics::AnalyticsService,
+        query::{self, DispatchContext},
+        trade_service::TradeService,
+    };
+    use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
+    use okx_protocol::{
+        AgentOperation, AgentRequest,
+        trading::{DiagnosticsRequest, DiagnosticsView},
+    };
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn public_operation_diagnostic_survives_busy_owners_and_unknown_history() {
+        use std::time::{Duration, Instant};
+
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "okx-operation-explain-{:032x}",
+            u128::from_le_bytes(nonce)
+        ));
+        accounts::initialize_installation(&root, "installation-operation-diagnostic-test").unwrap();
+        let budget = RateBudget::new();
+        let registry = Arc::new(
+            accounts::AccountRuntimeRegistry::open(&root, budget.clone())
+                .await
+                .unwrap(),
+        );
+        let feed_a = Arc::new(accounts::recorded_support::RecordedAccountHttp::default());
+        let feed_b = Arc::new(accounts::recorded_support::RecordedAccountHttp::default());
+        let (config_a, clients_a) =
+            accounts::recorded_support::prepared("a", feed_a.clone(), budget.clone());
+        let (config_b, clients_b) =
+            accounts::recorded_support::prepared("b", feed_b.clone(), budget.clone());
+        registry
+            .connect_prepared(config_a, clients_a)
+            .await
+            .unwrap();
+        registry
+            .connect_prepared(config_b, clients_b)
+            .await
+            .unwrap();
+        registry.shutdown().await;
+
+        let account = registry.resolve("fixture-a").await.unwrap();
+        let account_b = registry.resolve("fixture-b").await.unwrap();
+        account.protection_operation_trace.record_with_invocation(
+            "cleanup_diagnostic_001",
+            "intent-diagnostic-001",
+            "client-diagnostic-001",
+            Some(ProtectionCleanupInvocation {
+                request_id: "status-diagnostic-001",
+                origin: "agent_request.trade.status",
+            }),
+            ProtectionTraceEvent::Begin,
+        );
+        account.protection_operation_trace.record(
+            "cleanup_diagnostic_001",
+            "intent-diagnostic-001",
+            "client-diagnostic-001",
+            ProtectionTraceEvent::AdapterInvoked,
+        );
+        account.protection_operation_trace.record(
+            "cleanup_diagnostic_001",
+            "intent-diagnostic-001",
+            "client-diagnostic-001",
+            ProtectionTraceEvent::Ack,
+        );
+        account.protection_operation_trace.record(
+            "cleanup_diagnostic_001",
+            "intent-diagnostic-001",
+            "client-diagnostic-001",
+            ProtectionTraceEvent::Sources {
+                inventory_at_ms: 1_800_000_000_001,
+                position_at_ms: 1_800_000_000_002,
+            },
+        );
+        account.protection_operation_trace.record(
+            "cleanup_diagnostic_001",
+            "intent-diagnostic-001",
+            "client-diagnostic-001",
+            ProtectionTraceEvent::Unproven("PROTECTION_CANCEL_READBACK_STALE".into()),
+        );
+
+        let environment = OkxEnvironment::new(Region::Global, false);
+        let market = crate::market_bootstrap::MarketBootstrapper::new(
+            OkxPublicClient::with_http_transport(environment, budget.clone(), feed_a.clone())
+                .unwrap(),
+        );
+        let reference =
+            okx_observation::ReferenceRegistry::from_public("2026-10-31T00:00:00Z", vec![])
+                .unwrap();
+        let (_public, public_ws) = okx_runtime::PublicWsCoordinator::new_with_connector(
+            environment,
+            reference,
+            budget,
+            Arc::new(accounts::recorded_support::OfflineSocket),
+        );
+        let analytics = AnalyticsService::new(root.join("analytics"), market.clone()).unwrap();
+        let (risk_tx, mut risk_rx) = tokio::sync::mpsc::channel(4);
+        let trade = Arc::new(TradeService::new(
+            registry.clone(),
+            public_ws.clone(),
+            crate::risk_bridge::NativeRiskClient::new(risk_tx),
+        ));
+        let ctx = DispatchContext {
+            accounts: registry.clone(),
+            analytics,
+            public_ws,
+            trade,
+            market,
+        };
+        let make_request = |request_id: &str, body_account: &str, reference: &str| AgentRequest {
+            schema: okx_protocol::AGENT_REQUEST_SCHEMA_V1.into(),
+            request_id: request_id.into(),
+            account: Some("fixture-a".into()),
+            operation: AgentOperation::Diagnostics {
+                request: DiagnosticsRequest {
+                    account: Some(body_account.into()),
+                    reference: Some(reference.into()),
+                    view: Some(DiagnosticsView::Operation),
+                    cycle_id: None,
+                    limit: None,
+                },
+            },
+        };
+
+        // Hold the actual SQL owner and source locks. Operation diagnostics
+        // must read its bounded local projection without queuing on either.
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let store = account.execution.store.clone();
+        let blocked_sql = tokio::spawn(async move {
+            store
+                .call(Instant::now() + Duration::from_secs(5), move |_| {
+                    let _ = entered_tx.send(());
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        let _source_snapshot = account.latest_snapshot.write().await;
+        let _source_health = account.source_capture_health.write().await;
+        let sql_before = account.execution.store.sql_timing().observed_jobs;
+        let http_a_before = (
+            feed_a.requests.lock().unwrap().clone(),
+            feed_a.outbound_posts.lock().unwrap().clone(),
+            feed_a.denied_routes.lock().unwrap().clone(),
+        );
+        let http_b_before = (
+            feed_b.requests.lock().unwrap().clone(),
+            feed_b.outbound_posts.lock().unwrap().clone(),
+            feed_b.denied_routes.lock().unwrap().clone(),
+        );
+
+        let request = make_request(
+            "operation-explain-001",
+            "fixture-a",
+            "intent-diagnostic-001",
+        );
+        request.validate().unwrap();
+        let response =
+            tokio::time::timeout(Duration::from_millis(100), query::dispatch(&ctx, &request))
+                .await
+                .expect("public operation diagnostic must not wait for busy owners");
+        let result = response.result.unwrap();
+        assert_eq!(result["state"], "OBSERVED");
+        assert_eq!(result["account"], account.configuration.account_key.wire());
+        assert_eq!(result["reference"], "intent-diagnostic-001");
+        assert_eq!(
+            result["operation"]["snapshot"]["operation_id"],
+            "cleanup_diagnostic_001"
+        );
+        assert_eq!(
+            result["operation"]["snapshot"]["intent_id"],
+            "intent-diagnostic-001"
+        );
+        assert_eq!(
+            result["operation"]["snapshot"]["client_order_id"],
+            "client-diagnostic-001"
+        );
+        assert_eq!(
+            result["operation"]["snapshot"]["parent_invocation"],
+            "status-diagnostic-001"
+        );
+        assert_eq!(
+            result["operation"]["snapshot"]["stage"],
+            "OUTCOME_OR_READBACK_UNPROVEN"
+        );
+        assert_eq!(result["operation"]["snapshot"]["venue_ack"], "OBSERVED");
+        assert_eq!(
+            result["operation"]["snapshot"]["reason_code"],
+            "PROTECTION_CANCEL_READBACK_STALE"
+        );
+        assert_eq!(
+            result["operation"]["snapshot"]["inventory_received_at_ms"],
+            1_800_000_000_001u64
+        );
+        assert_eq!(
+            result["operation"]["snapshot"]["position_received_at_ms"],
+            1_800_000_000_002i64
+        );
+        assert_eq!(
+            result["operation"]["snapshot"]["first_unproven_boundary"],
+            "POST_ACK_READBACK"
+        );
+        assert_eq!(result["operation"]["trading_side_effects"], false);
+        assert_eq!(result["read_only"], true);
+        assert_eq!(result["central_budget"]["state"], "NOT_EVALUATED");
+
+        let mismatch = make_request(
+            "operation-explain-mismatch-001",
+            "fixture-b",
+            "intent-diagnostic-001",
+        );
+        let mismatch = query::dispatch(&ctx, &mismatch).await;
+        assert_eq!(
+            mismatch.result.unwrap()["reason_code"],
+            "ACCOUNT_ROUTE_MISMATCH"
+        );
+
+        let cold = make_request(
+            "operation-explain-cold-001",
+            "fixture-a",
+            "unknown-after-restart",
+        );
+        let cold = query::dispatch(&ctx, &cold).await.result.unwrap();
+        assert_eq!(cold["state"], "NOT_OBSERVED");
+        assert_eq!(
+            cold["send_and_ack_history"],
+            "UNKNOWN_AFTER_RESTART_OR_EVICTION"
+        );
+        assert_eq!(cold["trace_health"]["history_complete"], "UNKNOWN");
+
+        assert_eq!(feed_a.requests.lock().unwrap().clone(), http_a_before.0);
+        assert_eq!(
+            feed_a.outbound_posts.lock().unwrap().clone(),
+            http_a_before.1
+        );
+        assert_eq!(
+            feed_a.denied_routes.lock().unwrap().clone(),
+            http_a_before.2
+        );
+        assert_eq!(feed_b.requests.lock().unwrap().clone(), http_b_before.0);
+        assert_eq!(
+            feed_b.outbound_posts.lock().unwrap().clone(),
+            http_b_before.1
+        );
+        assert_eq!(
+            feed_b.denied_routes.lock().unwrap().clone(),
+            http_b_before.2
+        );
+        assert!(matches!(
+            risk_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        drop(_source_health);
+        drop(_source_snapshot);
+        let _ = release_tx.send(());
+        blocked_sql.await.unwrap().unwrap();
+        account
+            .execution
+            .store
+            .call(Instant::now() + Duration::from_secs(5), |_| Ok(()))
+            .await
+            .unwrap();
+        // The blocked owner job and this FIFO fence account for the only two
+        // accepted SQL jobs after the baseline. Any diagnostics SQL enqueue
+        // ahead of the fence changes this count.
+        assert_eq!(
+            account.execution.store.sql_timing().observed_jobs,
+            sql_before + 2
+        );
+        let mut terminated_a = account.execution.store.termination_signal();
+        let mut terminated_b = account_b.execution.store.termination_signal();
+        registry.shutdown().await;
+        drop(account_b);
+        drop(account);
+        drop(ctx);
+        drop(registry);
+        drop(_public);
+        tokio::time::timeout(Duration::from_secs(5), terminated_a.wait_for(|done| *done))
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), terminated_b.wait_for(|done| *done))
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_diagnostics_never_claims_a_remote_risk_summary() {
+        let budget = central_budget_not_evaluated();
+        assert_eq!(budget["state"], "NOT_EVALUATED");
+        assert_eq!(budget["reason_code"], "NO_LOCAL_RISKBOOK_SNAPSHOT");
+        assert_eq!(budget["source"], "none");
+        assert_eq!(budget["external_calls"], false);
+        let response = crate::query::response(
+            "local-diagnostic",
+            Ok(json!({"quality":"complete", "central_budget":budget})),
+        );
+        assert_eq!(response.quality, okx_protocol::DataQuality::Degraded);
+    }
+
+    #[test]
+    fn operation_projection_reads_are_local_bounded_and_isolated() {
+        let a = ProtectionOperationTrace::default();
+        let b = ProtectionOperationTrace::default();
+        a.record(
+            "cleanup_a",
+            "intent-a",
+            "client-a",
+            ProtectionTraceEvent::Begin,
+        );
+        a.record(
+            "cleanup_a",
+            "intent-a",
+            "client-a",
+            ProtectionTraceEvent::AdapterInvoked,
+        );
+        a.record(
+            "cleanup_a",
+            "intent-a",
+            "client-a",
+            ProtectionTraceEvent::Unproven("PROTECTION_CANCEL_OUTCOME_UNKNOWN".into()),
+        );
+        let unproven = a.read("intent-a").unwrap();
+        assert_eq!(unproven["snapshot"]["durable_state"], "POSTING");
+        assert_eq!(
+            unproven["snapshot"]["adapter_attempt"],
+            "INVOKED_OUTBOUND_UNPROVEN"
+        );
+        assert_eq!(unproven["snapshot"]["venue_ack"], "NOT_OBSERVED");
+        let absent = b.read("intent-a").unwrap();
+        assert_eq!(absent["state"], "NOT_OBSERVED");
+        assert_eq!(absent["trace_health"]["history_complete"], "UNKNOWN");
+        a.record(
+            "cleanup_a",
+            "intent-a",
+            "client-a",
+            ProtectionTraceEvent::Verified,
+        );
+        let verified = a.read("cleanup_a").unwrap();
+        assert_eq!(verified["snapshot"]["durable_state"], "VERIFIED_CANCELED");
+        assert!(verified["snapshot"]["missing_evidence"].is_null());
+        let mut samples = Vec::new();
+        for _ in 0..1_000 {
+            let start = Instant::now();
+            assert_eq!(a.read("intent-a").unwrap()["state"], "OBSERVED");
+            samples.push(start.elapsed());
+        }
+        let raw_sample_ns = samples
+            .iter()
+            .map(|sample| sample.as_nanos())
+            .collect::<Vec<_>>();
+        samples.sort();
+        println!(
+            "PROTECTION_PROJECTION_BENCHMARK={}",
+            json!({
+                "scope": "local_projection_read_only_not_public_dispatch",
+                "samples_ns": raw_sample_ns,
+                "p95_ns": samples[949].as_nanos(),
+                "build": if cfg!(debug_assertions) { "debug" } else { "release" },
+                "arch": std::env::consts::ARCH,
+                "os": std::env::consts::OS,
+                "external_calls": 0,
+                "mutations": 0
+            })
+        );
+        assert!(
+            samples[949] <= Duration::from_millis(100),
+            "1,000 warm local reads must have P95 <=100ms"
+        );
+    }
+    #[test]
+    fn repeated_inspect_retains_locally_observed_ack_and_precise_missing_proof() {
+        let trace = ProtectionOperationTrace::default();
+        trace.record(
+            "cleanup_a",
+            "intent-a",
+            "client-a",
+            ProtectionTraceEvent::Begin,
+        );
+        trace.record(
+            "cleanup_a",
+            "intent-a",
+            "client-a",
+            ProtectionTraceEvent::AdapterInvoked,
+        );
+        trace.record(
+            "cleanup_a",
+            "intent-a",
+            "client-a",
+            ProtectionTraceEvent::Ack,
+        );
+        trace.record(
+            "cleanup_a",
+            "intent-a",
+            "client-a",
+            ProtectionTraceEvent::Unproven("PROTECTION_CANCEL_READBACK_STALE".into()),
+        );
+        let before = trace.read("cleanup_a").unwrap();
+        assert_eq!(before["snapshot"]["venue_ack"], "OBSERVED");
+        assert_eq!(
+            before["snapshot"]["first_unproven_boundary"],
+            "POST_ACK_READBACK"
+        );
+        trace.record(
+            "cleanup_a",
+            "intent-a",
+            "client-a",
+            ProtectionTraceEvent::Inspect,
+        );
+        let after = trace.read("cleanup_a").unwrap();
+        assert_eq!(after["snapshot"]["venue_ack"], "OBSERVED");
+        assert_eq!(
+            after["snapshot"]["adapter_attempt"],
+            "INVOKED_OUTBOUND_UNPROVEN"
+        );
+        assert_eq!(
+            after["snapshot"]["first_unproven_boundary"],
+            "POST_BEGIN_READBACK"
+        );
+        assert_eq!(
+            after["snapshot"]["missing_evidence"],
+            "SIGNED_EMPTY_ALGO_AND_FLAT_POSITION"
+        );
+        assert_eq!(after["trading_side_effects"], false);
+
+        // Without this process' own ACK event, even a persisted BEGIN may
+        // have reached the venue: never invent an ACK from the SQL receipt.
+        let restarted = ProtectionOperationTrace::default();
+        restarted.record(
+            "cleanup_a",
+            "intent-a",
+            "client-a",
+            ProtectionTraceEvent::Inspect,
+        );
+        let unknown = restarted.read("cleanup_a").unwrap();
+        assert_eq!(unknown["snapshot"]["venue_ack"], "UNKNOWN_PRIOR_CALL");
+        assert_eq!(unknown["snapshot"]["adapter_attempt"], "UNKNOWN_PRIOR_CALL");
+    }
+
+    #[test]
+    fn diagnostics_operation_variant_roundtrip() {
+        let v: DiagnosticsView = serde_json::from_str(r#""operation""#).unwrap();
+        assert_eq!(v, DiagnosticsView::Operation);
+        assert_eq!(serde_json::to_string(&v).unwrap(), r#""operation""#);
+    }
+
     #[test]
     fn diagnostic_freshness_is_evaluated_at_response_not_before_sql_wait() {
         let sampled_at = 1_000_000_i64;

@@ -344,7 +344,7 @@ mod tests {
             main_uid: main_uid.to_owned(),
             account_type: "1".to_owned(),
             account_stp_mode: "cancel_maker".to_owned(),
-            auto_loan: false,
+            auto_loan: Some(false),
             greeks_type: "PA".to_owned(),
             fee_type: "0".to_owned(),
             label: String::new(),

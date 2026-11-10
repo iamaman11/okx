@@ -1,13 +1,15 @@
 //! Incremental post-T0 exchange facts. The account worker commits each page with its cursor.
 use crate::{
-    AgentError, AgentResult, account_bootstrap::AccountBootstrapper,
+    AgentError, AgentResult,
+    account_bootstrap::{AccountBootstrapError, AccountBootstrapper},
     execution_runtime::ExecutionRuntime,
 };
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
-    AccountSqlStatementStat, Bill, CashFlow, Fill, FinanceEntry, FundingEvent, IngestPage,
-    NavPoint, SourceCursor, StoreError, StoreResult, StrategyValuationEvidence,
-    UsdConversionEvidence, ValuationPosition, VenueMark,
+    AccountSqlStatementStat, Bill, BillOrderSource, CashFlow, EntryOrderFeeLink, Fill,
+    FinanceEntry, FundingEvent, IngestPage, NavPoint, SourceCursor, StoreError, StoreResult,
+    StrategyValuationEvidence, SwapFillSource, UsdConversionEvidence, ValuationPosition, VenueMark,
+    swap_fill_direction,
 };
 use okx_runtime::PrivateWsHandle;
 use rust_decimal::Decimal;
@@ -18,8 +20,24 @@ use std::{
     time::{Duration, Instant},
 };
 
+// A test can stop its own capture after durable raw facts, before projection.
+// Task-local scope cannot pause another account or a background capture.
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_AFTER_HISTORY: Arc<tokio::sync::Notify>;
+}
+
 fn invalid(reason: &str) -> AgentError {
     AgentError::FinancialCaptureTask(reason.into())
+}
+
+pub(crate) fn snapshot_failure_code(error: &AccountBootstrapError) -> &'static str {
+    match error {
+        AccountBootstrapError::PermissionRejected => "ACCOUNT_PERMISSION_REJECTED",
+        AccountBootstrapError::Api(_) => "ACCOUNT_API_UNAVAILABLE",
+        AccountBootstrapError::Normalize(_) => "ACCOUNT_SNAPSHOT_NORMALIZATION_FAILED",
+        AccountBootstrapError::SourceDeadline => "ACCOUNT_SOURCE_DEADLINE_EXCEEDED",
+    }
 }
 fn d(s: &str) -> StoreResult<Decimal> {
     Decimal::from_str(s).map_err(|_| StoreError::Invalid("SOURCE_DECIMAL_INVALID"))
@@ -94,6 +112,7 @@ pub struct CaptureCompleted {
 
 struct CaptureCursors {
     spot: Option<SourceCursor>,
+    margin: Option<SourceCursor>,
     swap: Option<SourceCursor>,
     futures: Option<SourceCursor>,
     options: Option<SourceCursor>,
@@ -195,6 +214,29 @@ fn strategy_cursor_refresh_needed(
         || previous.is_none_or(|c| c.generation != generation || !c.coverage_gaps.is_empty())
 }
 
+/// The ordinary OKX fills-history and bills-archive endpoints are limited
+/// to the last three calendar months. Do not silently certify empty history
+/// when a first capture or a resumed page starts outside that venue window.
+/// A one-day safety margin avoids claiming the ambiguous boundary as proven.
+/// Older campaign history requires an independently verified archival source.
+fn verify_history_retrieval_window(begin: i64, now: i64) -> AgentResult<()> {
+    let current = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now)
+        .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
+    let retention_floor = current
+        .checked_sub_months(chrono::Months::new(3))
+        .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?
+        .timestamp_millis()
+        .checked_add(86_400_000)
+        .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
+    if begin <= 0 || begin > now {
+        return Err(invalid("HISTORY_WINDOW_TIME_INVALID"));
+    }
+    if begin < retention_floor {
+        return Err(invalid("HISTORY_OUTSIDE_EXCHANGE_RETENTION_NOT_PROVEN"));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct Window {
     completed_through: i64,
@@ -263,6 +305,28 @@ impl Window {
         })
     }
 }
+/// One fixed capture turn. The same authenticated source window, generation
+/// and monotonic no-send deadline must be used by all six monetary streams.
+#[derive(Clone, Copy)]
+struct CaptureTurn {
+    t0: i64,
+    now: i64,
+    generation: i64,
+    until: Instant,
+}
+
+// An account-local permit may span I/O to preserve monotonic cursor
+// ownership. Queue admission consumes the original financial source budget.
+async fn capture_source_permit_until(
+    serial: &tokio::sync::Semaphore,
+    until: Instant,
+) -> AgentResult<tokio::sync::SemaphorePermit<'_>> {
+    tokio::time::timeout_at(until.into(), serial.acquire())
+        .await
+        .map_err(|_| invalid("ACCOUNT_SOURCE_CAPTURE_ADMISSION_DEADLINE"))?
+        .map_err(|_| invalid("ACCOUNT_SOURCE_CAPTURE_OWNER_CLOSED"))
+}
+
 /// Stable account-snapshot contract also used by trade recovery.
 pub async fn capture_account_sources(
     observer: &AccountBootstrapper,
@@ -287,6 +351,12 @@ pub(crate) async fn capture_account_sources_traced(
     execution: &ExecutionRuntime,
     trace: Option<(Arc<crate::finance_trace::FinanceTrace>, u64)>,
 ) -> AgentResult<CaptureCompleted> {
+    // The periodic financial cycle, TradeService Status and recovery use this
+    // same account-local capture admission; only one owns a cursor window.
+    // The original ten-second source window includes owner queue admission.
+    let capture_until = Instant::now() + Duration::from_secs(10);
+    let _capture_owner =
+        capture_source_permit_until(&execution.source_capture_serial, capture_until).await?;
     let initial = private_ws.status().await;
     if !initial.logged_in || initial.connection_generation == 0 {
         return Err(invalid("PRIVATE_SOURCE_NOT_READY"));
@@ -295,16 +365,21 @@ pub(crate) async fn capture_account_sources_traced(
     if let Some((store, id)) = trace.as_ref() {
         store.phase_started(*id, "observer_and_cursors");
     }
-    // Read all five history cursors and the opening time in ONE existing
+    // Read all six monetary history cursors and the opening time in ONE existing
     // AccountStore job, concurrently with the authenticated venue snapshot.
     // No cursor is advanced here; the individual page ingests still own
     // the durable source coverage and failure/replay semantics.
     let observer_result = tokio::try_join!(
         async {
+            // The financial source owner must not treat a LOCAL no-send
+            // RateBudget defer as missing account data. Use the same fresh
+            // authenticated REST snapshot with finite per-cycle admission;
+            // never retry a sent request, fall back to stale state, or change
+            // financial SQL/cursor ownership.
             observer
-                .snapshot()
+                .snapshot_until(capture_until)
                 .await
-                .map_err(|_| invalid("ACCOUNT_SOURCE_UNAVAILABLE"))
+                .map_err(|error| invalid(snapshot_failure_code(&error)))
         },
         async {
             execution
@@ -314,6 +389,7 @@ pub(crate) async fn capture_account_sources_traced(
                         s.meta().initialized_at,
                         CaptureCursors {
                             spot: s.cursor("fills", "SPOT")?,
+                            margin: s.cursor("fills", "MARGIN")?,
                             swap: s.cursor("fills", "SWAP")?,
                             futures: s.cursor("fills", "FUTURES")?,
                             options: s.cursor("fills", "OPTION")?,
@@ -337,7 +413,11 @@ pub(crate) async fn capture_account_sources_traced(
     let observer_and_cursors_ms = phase_elapsed_ms(observer_and_cursors_started);
     if snapshot.account_uid_fingerprint != execution.uid()
         || !execution
-            .verified_uid_matches(&snapshot.account_uid_fingerprint)
+            .verified_uid_matches_until(
+                &snapshot.account_uid_fingerprint,
+                initial.connection_generation,
+                capture_until,
+            )
             .await?
     {
         return Err(invalid("ACCOUNT_IDENTITY_MISMATCH"));
@@ -370,64 +450,73 @@ pub(crate) async fn capture_account_sources_traced(
     if let Some((store, id)) = trace.as_ref() {
         store.phase_started(*id, "history_and_ingest");
     }
+    let turn = CaptureTurn {
+        t0,
+        now,
+        generation,
+        until: capture_until,
+    };
+    // Each production stream runs on the same Tokio runtime, but its large
+    // finance/SQL async frame lives on the heap. Six inlined frames previously
+    // bloated the parent TradeService task and overflowed Rust's test stack.
     let history_result = tokio::try_join!(
-        capture_fills(
+        Box::pin(capture_fills(
             execution,
             private_ws,
             FillHistorySource {
                 partition: "SPOT",
                 cursor: cursors.spot,
             },
-            t0,
-            now,
-            generation,
-            &fx
-        ),
-        capture_fills(
+            turn,
+            &fx,
+        )),
+        Box::pin(capture_fills(
+            execution,
+            private_ws,
+            FillHistorySource {
+                partition: "MARGIN",
+                cursor: cursors.margin,
+            },
+            turn,
+            &fx,
+        )),
+        Box::pin(capture_fills(
             execution,
             private_ws,
             FillHistorySource {
                 partition: "SWAP",
                 cursor: cursors.swap,
             },
-            t0,
-            now,
-            generation,
-            &fx
-        ),
-        capture_fills(
+            turn,
+            &fx,
+        )),
+        Box::pin(capture_fills(
             execution,
             private_ws,
             FillHistorySource {
                 partition: "FUTURES",
                 cursor: cursors.futures,
             },
-            t0,
-            now,
-            generation,
-            &fx
-        ),
-        capture_fills(
+            turn,
+            &fx,
+        )),
+        Box::pin(capture_fills(
             execution,
             private_ws,
             FillHistorySource {
                 partition: "OPTION",
                 cursor: cursors.options,
             },
-            t0,
-            now,
-            generation,
-            &fx
-        ),
-        capture_bills(
+            turn,
+            &fx,
+        )),
+        Box::pin(capture_bills(
             execution,
             private_ws,
             cursors.bills,
-            t0,
-            now,
-            generation,
-            &fx
-        )
+            turn,
+            &fx,
+        ))
     );
     if let Some((store, id)) = trace.as_ref() {
         store.phase_finished(
@@ -437,12 +526,17 @@ pub(crate) async fn capture_account_sources_traced(
             history_result.is_ok(),
         );
     }
-    let (spot, swap, futures, options, bills) = history_result?;
+    let (spot, margin, swap, futures, options, bills) = history_result?;
+    #[cfg(test)]
+    if let Ok(ready) = TEST_AFTER_HISTORY.try_with(Arc::clone) {
+        ready.notify_one();
+        std::future::pending::<()>().await;
+    }
     let history_and_ingest_ms = phase_elapsed_ms(history_started);
     if private_ws.status().await.connection_generation != initial.connection_generation {
         return Err(invalid("SOURCE_GENERATION_CHANGED"));
     }
-    let complete = spot && swap && futures && options && bills;
+    let complete = spot && margin && swap && futures && options && bills;
     let balances = snapshot.balance.details.clone();
     let usd_equity = d(&snapshot.balance.total_equity_usd)?;
     // Validate all supplied marks even though no unproven strategy capital
@@ -692,17 +786,22 @@ async fn capture_fills(
     execution: &ExecutionRuntime,
     ws: &PrivateWsHandle,
     source: FillHistorySource,
-    t0: i64,
-    now: i64,
-    generation: i64,
+    turn: CaptureTurn,
     fx: &UsdConversionEvidence,
 ) -> AgentResult<bool> {
+    let CaptureTurn {
+        t0,
+        now,
+        generation,
+        until,
+    } = turn;
     let fx = fx.clone();
     let partition = source.partition;
     let window = Window::resume(source.cursor.as_ref(), t0, now)?;
+    verify_history_retrieval_window(window.begin, now)?;
     let rows: Vec<FillHistory> = execution
         .history
-        .fills_history_page(
+        .fills_history_page_until(
             partition,
             window.begin,
             window.end,
@@ -711,11 +810,13 @@ async fn capture_fills(
             } else {
                 Some(&window.after)
             },
+            until,
         )
         .await
         .map_err(|_| {
             invalid(match partition {
                 "SPOT" => "SPOT_FILLS_SOURCE_UNAVAILABLE",
+                "MARGIN" => "MARGIN_FILLS_SOURCE_UNAVAILABLE",
                 "SWAP" => "SWAP_FILLS_SOURCE_UNAVAILABLE",
                 "FUTURES" => "FUTURES_FILLS_SOURCE_UNAVAILABLE",
                 "OPTION" => "OPTION_FILLS_SOURCE_UNAVAILABLE",
@@ -758,7 +859,9 @@ async fn capture_fills(
                     format!("bill:{}", r.bill_id)
                 };
                 let id = format!("{}:{}:{}", r.instrument_id, r.trade_id, r.order_id);
-                if fee != Decimal::ZERO {
+                // The raw fill retains the fee, but without billId there
+                // is no final canonical fee event for a SWAP yet.
+                if fee != Decimal::ZERO && !(partition == "SWAP" && r.bill_id.is_empty()) {
                     page.finance.push(FinanceEntry {
                         entry_id: format!("{key}:fee"),
                         economic_event_key: key,
@@ -770,6 +873,19 @@ async fn capture_fills(
                         source_ref: format!("fill:{id}"),
                         time,
                         reverses_entry_id: None,
+                    });
+                }
+                if partition == "SWAP" {
+                    if r.instrument_type != "SWAP" {
+                        return Err(StoreError::Invalid("SWAP_FILL_SOURCE_TYPE_MISMATCH"));
+                    }
+                    let direction = swap_fill_direction(&r.sub_type, &r.side, &r.position_side)?;
+                    page.swap_fill_sources.push(SwapFillSource {
+                        fill_id: id.clone(),
+                        bill_id: r.bill_id.clone(),
+                        sub_type: r.sub_type.clone(),
+                        position_side: r.position_side.clone(),
+                        direction: direction.into(),
                     });
                 }
                 page.fills.push(Fill {
@@ -799,16 +915,21 @@ async fn capture_bills(
     execution: &ExecutionRuntime,
     ws: &PrivateWsHandle,
     cursor: Option<SourceCursor>,
-    t0: i64,
-    now: i64,
-    generation: i64,
+    turn: CaptureTurn,
     fx: &UsdConversionEvidence,
 ) -> AgentResult<bool> {
+    let CaptureTurn {
+        t0,
+        now,
+        generation,
+        until,
+    } = turn;
     let fx = fx.clone();
     let window = Window::resume(cursor.as_ref(), t0, now)?;
+    verify_history_retrieval_window(window.begin, now)?;
     let rows: Vec<AccountBill> = execution
         .history
-        .bills_history_page(
+        .bills_history_page_until(
             window.begin,
             window.end,
             if window.after.is_empty() {
@@ -816,6 +937,7 @@ async fn capture_bills(
             } else {
                 Some(&window.after)
             },
+            until,
         )
         .await
         .map_err(|_| invalid("BILLS_SOURCE_UNAVAILABLE"))?;
@@ -843,9 +965,35 @@ async fn capture_bills(
                     continue;
                 }
                 let key = format!("bill:{}", b.bill_id);
+                if !b.order_id.is_empty() && b.order_id != "0" && !b.instrument_id.is_empty() {
+                    page.bill_order_sources.push(BillOrderSource {
+                        bill_id: b.bill_id.clone(),
+                        instrument_id: b.instrument_id.clone(),
+                        exchange_order_id: b.order_id.clone(),
+                        trade_id: b.trade_id.clone(),
+                    });
+                }
                 let owner = s
                     .by_client_order_id(&b.client_order_id)?
                     .or(s.by_exchange_order_id(&b.order_id)?);
+                let fee = optional_d(&b.fee)?;
+                if fee < Decimal::ZERO
+                    && let Some(i) = owner.as_ref().filter(|i| i.risk_increase)
+                    && i.exchange_order_id.as_deref() == Some(b.order_id.as_str())
+                    && i.instrument_id == b.instrument_id
+                {
+                    if b.ccy != "USDT" {
+                        return Err(StoreError::Invalid("ENTRY_FEE_CURRENCY_UNPROVEN"));
+                    }
+                    page.entry_order_fee_links.push(EntryOrderFeeLink {
+                        bill_id: b.bill_id.clone(),
+                        intent_id: i.intent_id.clone(),
+                        exchange_order_id: b.order_id.clone(),
+                        instrument_id: b.instrument_id.clone(),
+                        bill_at: time,
+                        fee_usdt: fee,
+                    });
+                }
                 let instance = owner.map(|i| i.plan.strategy_instance);
                 let amount = optional_d(&b.balance_change)?;
                 let residual_component = residual_bill_component(&b.bill_type, &b.pnl, &b.fee)?;
@@ -941,6 +1089,18 @@ async fn capture_bills(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_snapshot_failures_keep_their_stage_code_at_capture_boundary() {
+        assert_eq!(
+            snapshot_failure_code(&AccountBootstrapError::SourceDeadline),
+            "ACCOUNT_SOURCE_DEADLINE_EXCEEDED"
+        );
+        assert_eq!(
+            snapshot_failure_code(&AccountBootstrapError::PermissionRejected),
+            "ACCOUNT_PERMISSION_REJECTED"
+        );
+    }
     #[test]
     fn source_window_retry_preserves_range_and_overlap() {
         let w = Window {
@@ -980,6 +1140,7 @@ mod tests {
         .unwrap();
         let cursors = CaptureCursors {
             spot: None,
+            margin: None,
             swap: None,
             futures: Some(future_page),
             options: None,
@@ -1007,6 +1168,40 @@ mod tests {
             coverage_gaps: "BACKFILL_PENDING".into(),
         };
         assert!(Window::resume(Some(&corrupt), 1, 200).is_err());
+    }
+
+    #[test]
+    fn campaign_history_cannot_be_inferred_from_expired_okx_fills_or_bills_window() {
+        // A calendar boundary, not an arbitrary 90-day threshold, protects
+        // E1.1 when data retention differs across months/leap years.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let now_dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now).unwrap();
+        let three_months_ago = now_dt
+            .checked_sub_months(chrono::Months::new(3))
+            .unwrap()
+            .timestamp_millis();
+        assert!(verify_history_retrieval_window(now - 86_400_000, now).is_ok());
+        assert!(verify_history_retrieval_window(three_months_ago + 86_400_000, now).is_ok());
+        assert!(verify_history_retrieval_window(three_months_ago, now).is_err());
+        assert!(verify_history_retrieval_window(three_months_ago - 1, now).is_err());
+        assert!(verify_history_retrieval_window(now + 1, now).is_err());
+        assert!(verify_history_retrieval_window(0, now).is_err());
+
+        // A seemingly gap-free but still uncompleted history page is NOT
+        // safe merely because the cursor is well-formed.
+        let old = SourceCursor {
+            source: "fills".into(),
+            stream_partition: "SWAP".into(),
+            cursor: format!("{}|{}|cursor-id", three_months_ago, now),
+            watermark: three_months_ago,
+            generation: 1,
+            coverage_gaps: "BACKFILL_PENDING".into(),
+        };
+        let resumed = Window::resume(Some(&old), three_months_ago, now).unwrap();
+        assert_eq!(resumed.begin, three_months_ago);
+        assert!(verify_history_retrieval_window(resumed.begin, now).is_err());
     }
 
     #[test]
@@ -1097,5 +1292,50 @@ mod tests {
         // A transfer or non-funding bill may legitimately omit PnL.
         assert_eq!(bill_pnl("11", "").unwrap(), Decimal::ZERO);
         assert_eq!(bill_pnl("12", "").unwrap(), Decimal::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod bounded_source_owner_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn occupied_a_expires_b_proceeds_and_a_recovers() {
+        let a = tokio::sync::Semaphore::new(1);
+        let b = tokio::sync::Semaphore::new(1);
+        let held = capture_source_permit_until(&a, Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(
+            capture_source_permit_until(&a, Instant::now() + Duration::from_millis(80),)
+                .await
+                .is_err()
+        );
+        let b_owner = capture_source_permit_until(&b, Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
+        drop(b_owner);
+        drop(held);
+        let recovered = capture_source_permit_until(&a, Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
+        drop(recovered);
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_cannot_hold_capture_permit() {
+        let owner = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let held = owner.acquire().await.unwrap();
+        let waiting = std::sync::Arc::clone(&owner);
+        let task = tokio::spawn(async move {
+            capture_source_permit_until(&waiting, Instant::now() + Duration::from_secs(5))
+                .await
+                .is_ok()
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        drop(held);
+        assert_eq!(owner.available_permits(), 1);
     }
 }

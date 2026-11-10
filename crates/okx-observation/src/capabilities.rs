@@ -261,7 +261,7 @@ mod tests {
             main_uid: "main-uid".to_owned(),
             account_type: "1".to_owned(),
             account_stp_mode: "cancel_maker".to_owned(),
-            auto_loan: false,
+            auto_loan: Some(false),
             greeks_type: String::new(),
             fee_type: String::new(),
             label: "observer".to_owned(),

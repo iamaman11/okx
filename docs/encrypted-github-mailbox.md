@@ -7,7 +7,7 @@ response payloads are encrypted end-to-end.
 
 ## Roles
 
-- **Agent**: native Windows `okx-agent.exe`, installed under `C:\okx-runtime`.
+- **Agent**: native Windows Agent, installed in the unified runtime directory; see [Windows installation](windows-installation.md).
 - **Client**: ChatGPT computation environment for one interactive request.
 - **Mailbox**: public `iamaman11/okx` GitHub issues/comments.
 

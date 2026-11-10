@@ -66,7 +66,7 @@ pub struct InstalledAgentProvenanceStore {
 
 impl InstalledAgentProvenanceStore {
     pub fn canonical() -> Self {
-        Self::at(PathBuf::from(r"C:\okx-runtime\installed-agent.json"))
+        Self::at(PathBuf::from(okx_host_launcher::RUNTIME_ROOT).join("installed-agent.json"))
     }
 
     pub fn at(path: impl Into<PathBuf>) -> Self {

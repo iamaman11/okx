@@ -1,7 +1,8 @@
+pub use okx_kernel::observation_model::{BookLevel, OrderBookSnapshot, OrderBookStatus};
+
 use std::{collections::BTreeMap, str::FromStr};
 
 use rust_decimal::Decimal;
-use serde::Serialize;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,31 +19,6 @@ pub struct OrderBookMessage {
     pub exchange_timestamp_ms: String,
     pub seq_id: i64,
     pub prev_seq_id: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BookLevel {
-    pub price: String,
-    pub size: String,
-    pub order_count: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum OrderBookStatus {
-    WaitingSnapshot,
-    Contiguous,
-    Invalid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct OrderBookSnapshot {
-    pub generation: u64,
-    pub status: OrderBookStatus,
-    pub seq_id: Option<i64>,
-    pub exchange_timestamp_ms: Option<String>,
-    pub asks: Vec<BookLevel>,
-    pub bids: Vec<BookLevel>,
 }
 
 #[derive(Debug)]

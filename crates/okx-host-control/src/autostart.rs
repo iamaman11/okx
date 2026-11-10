@@ -7,10 +7,10 @@ use crate::{HostControlError, HostControlResult, background_process::hidden_comm
 
 const TASK_NAME: &str = r"\iamaman11-okx-host-control";
 const ENTRYPOINT_PATH: &str = okx_host_launcher::ENTRYPOINT_PATH;
-const TASK_XML_PATH: &str = r"C:\okx-control\okx-host-control-task.xml";
+const TASK_XML_PATH: &str = r"C:\okx\control\okx-host-control-task.xml";
 
 pub fn install() -> HostControlResult<Value> {
-    install_action(ENTRYPOINT_PATH, "run", r"C:\okx-control")?;
+    install_action(ENTRYPOINT_PATH, "run", okx_host_launcher::CONTROL_ROOT)?;
     status_value()
 }
 
@@ -161,8 +161,10 @@ fn exported_policy_valid(xml: &str, command: &str) -> bool {
 }
 
 fn exported_policy_shape_valid(xml: &str) -> bool {
-    xml.contains("<WorkingDirectory>C:\\okx-control</WorkingDirectory>")
-        && xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>")
+    xml.contains(&format!(
+        "<WorkingDirectory>{}</WorkingDirectory>",
+        okx_host_launcher::CONTROL_ROOT
+    )) && xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>")
         && xml.matches("<TimeTrigger>").count() == 1
         && xml.contains("<StartBoundary>")
         && xml.contains("<Repetition>")
@@ -278,13 +280,33 @@ mod tests {
             TEST_START,
             ENTRYPOINT_PATH,
             "run",
-            r"C:\okx-control",
+            okx_host_launcher::CONTROL_ROOT,
         );
         assert!(exported_policy_valid(&xml, ENTRYPOINT_PATH));
         assert_eq!(xml.matches("<TimeTrigger>").count(), 1);
         assert!(xml.contains("<Interval>PT1M</Interval>"));
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
         assert!(!xml.contains("<RestartOnFailure>"));
+    }
+
+    #[test]
+    fn scheduler_rejects_old_root_and_optional_workspace() {
+        for root in [
+            r"C:\okx-control",
+            okx_host_launcher::WORKSPACE_ROOT,
+            okx_host_launcher::RUNTIME_ROOT,
+        ] {
+            let xml = task_xml(r"HOST\User", TEST_START, ENTRYPOINT_PATH, "run", root);
+            assert!(!exported_policy_valid(&xml, ENTRYPOINT_PATH));
+        }
+        let old_entrypoint = task_xml(
+            r"HOST\User",
+            TEST_START,
+            r"C:\okx-control\okx-host-control.exe",
+            "run",
+            okx_host_launcher::CONTROL_ROOT,
+        );
+        assert!(!exported_policy_valid(&old_entrypoint, ENTRYPOINT_PATH));
     }
 
     #[test]

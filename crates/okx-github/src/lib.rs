@@ -512,6 +512,47 @@ impl GitHubClient {
         Ok(())
     }
 
+    /// Resolve the accepted tree directly from the pinned GitHub repository.
+    /// Installed products do not need a Git checkout or a Git executable.
+    pub async fn repository_commit_tree(&self, reference: &str) -> Result<String, GitHubError> {
+        if reference != "main" && !is_commit_sha(reference) {
+            return Err(GitHubError::UntrustedWorkflowRun);
+        }
+        // The commits REST endpoint includes file patches. Resolve refs first,
+        // then read the small Git commit object even for a large product merge.
+        let sha = if reference == "main" {
+            let url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/git/ref/heads/main");
+            let response = self
+                .send_checked(
+                    self.http
+                        .get(url)
+                        .bearer_auth(self.token.as_str())
+                        .header("Accept", "application/vnd.github+json"),
+                )
+                .await?;
+            let reference: RepositoryReference =
+                decode_workflow_json(response, "repository_main_ref").await?;
+            if reference.object.kind != "commit" || !is_commit_sha(&reference.object.sha) {
+                return Err(GitHubError::UntrustedWorkflowRun);
+            }
+            reference.object.sha
+        } else {
+            reference.to_owned()
+        };
+        let url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/git/commits/{sha}");
+        let response = self
+            .send_checked(
+                self.http
+                    .get(url)
+                    .bearer_auth(self.token.as_str())
+                    .header("Accept", "application/vnd.github+json"),
+            )
+            .await?;
+        let commit: RepositoryCommit =
+            decode_workflow_json(response, "repository_commit_tree").await?;
+        validated_commit_tree(&sha, commit)
+    }
+
     pub async fn issue_comments(
         &self,
         issue_number: u64,
@@ -1146,6 +1187,43 @@ struct RepositoryIdentity {
     owner: RepositoryOwner,
 }
 
+#[derive(Deserialize)]
+struct RepositoryCommit {
+    sha: String,
+    tree: RepositoryCommitTree,
+}
+
+#[derive(Deserialize)]
+struct RepositoryReference {
+    object: RepositoryReferenceObject,
+}
+
+#[derive(Deserialize)]
+struct RepositoryReferenceObject {
+    #[serde(rename = "type")]
+    kind: String,
+    sha: String,
+}
+
+#[derive(Deserialize)]
+struct RepositoryCommitTree {
+    sha: String,
+}
+
+fn is_commit_sha(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validated_commit_tree(reference: &str, commit: RepositoryCommit) -> Result<String, GitHubError> {
+    if !is_commit_sha(&commit.sha) || !is_commit_sha(&commit.tree.sha) || reference != commit.sha {
+        return Err(GitHubError::UntrustedWorkflowRun);
+    }
+    Ok(commit.tree.sha)
+}
+
 #[derive(Debug, Deserialize)]
 struct RepositoryOwner {
     id: u64,
@@ -1211,6 +1289,26 @@ mod tests {
         net::TcpListener,
         thread,
     };
+
+    #[test]
+    fn repository_tree_requires_exact_commit_identity_and_valid_tree() {
+        let head = "a".repeat(40);
+        let tree = "b".repeat(40);
+        let parse = |sha: &str, tree: &str| -> RepositoryCommit {
+            serde_json::from_value(serde_json::json!({
+                "sha": sha, "tree": {"sha": tree}
+            }))
+            .expect("commit response")
+        };
+        assert_eq!(
+            validated_commit_tree(&head, parse(&head, &tree)).unwrap(),
+            tree
+        );
+        assert!(validated_commit_tree("main", parse(&head, &tree)).is_err());
+        assert!(validated_commit_tree(&head, parse(&tree, &tree)).is_err());
+        assert!(validated_commit_tree(&head, parse(&head, "invalid")).is_err());
+        assert!(!is_commit_sha("main/../../other-repository"));
+    }
 
     /// One local HTTP response, no credentials/network dependencies or daemon.
     /// The spawned server owns a single connection and always exits.

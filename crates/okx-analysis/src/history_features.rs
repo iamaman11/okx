@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use okx_observation::{
+use okx_kernel::observation_model::{
     FundingHistorySnapshot, MarketTradeSide, MarketTradesSnapshot, OpenInterestHistorySnapshot,
 };
 use rust_decimal::Decimal;
@@ -283,7 +283,7 @@ pub fn analyze_funding_regime(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_observation::{
+    use okx_kernel::observation_model::{
         FundingHistoryEvent, FundingHistorySnapshot, MarketTrade, MarketTradeSide,
         MarketTradesSnapshot, OpenInterestHistoryPoint, OpenInterestHistorySnapshot,
     };

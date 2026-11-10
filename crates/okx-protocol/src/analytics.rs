@@ -131,9 +131,32 @@ pub enum ResearchResultView {
     Equity,
     Export,
 }
+/// A research annotation carries no trading authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchDecisionStatus {
+    Accepted,
+    Rejected,
+    Deferred,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResearchRequest {
+    RecordDecision {
+        job_id: String,
+        result_id: String,
+        #[serde(default)]
+        expected_decision_id: Option<String>,
+        name: String,
+        hypothesis: String,
+        status: ResearchDecisionStatus,
+        reason: String,
+    },
+    Decision {
+        job_id: String,
+        #[serde(default)]
+        decision_id: Option<String>,
+    },
     Capabilities {},
     /// Read-only, opt-in K9 acceptance performed by this same running Agent.
     Benchmark {
@@ -326,7 +349,11 @@ impl ResearchRequest {
                         <= 1_000_000
                     && matches!(
                         strategy_id.as_str(),
-                        "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
+                        "ema_cross_v1"
+                            | "ema_momentum_confirm_v1"
+                            | "no_trade"
+                            | "close_momentum"
+                            | "two_bar_momentum"
                     )
                     && parameters.valid()
                     && costs.valid()
@@ -357,13 +384,39 @@ impl ResearchRequest {
                         <= 1_000_000
                     && matches!(
                         strategy_id.as_str(),
-                        "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
+                        "ema_cross_v1"
+                            | "ema_momentum_confirm_v1"
+                            | "no_trade"
+                            | "close_momentum"
+                            | "two_bar_momentum"
                     )
                     && !variants.is_empty()
                     && variants.len() <= 64
                     && variants.iter().all(EmaParameters::valid)
                     && costs.valid()
             }
+            Self::RecordDecision {
+                job_id,
+                result_id,
+                expected_decision_id,
+                name,
+                hypothesis,
+                reason,
+                ..
+            } => {
+                valid_job(job_id)
+                    && valid_artifact(result_id)
+                    && expected_decision_id.as_deref().is_none_or(valid_artifact)
+                    && valid_annotation(name, 128)
+                    && valid_annotation(hypothesis, 4096)
+                    && valid_annotation(reason, 2048)
+                    && serde_json::to_vec(&(name, hypothesis, reason))
+                        .is_ok_and(|bytes| bytes.len() <= 6144)
+            }
+            Self::Decision {
+                job_id,
+                decision_id,
+            } => valid_job(job_id) && decision_id.as_deref().is_none_or(valid_artifact),
             Self::Status { job_id } => valid_job(job_id),
             Self::Cancel {
                 job_id,
@@ -372,6 +425,12 @@ impl ResearchRequest {
             Self::Result { job_id, limit, .. } => valid_job(job_id) && *limit > 0 && *limit <= 50,
         }
     }
+}
+fn valid_artifact(id: &str) -> bool {
+    id.strip_prefix("sha256:").is_some_and(valid_job)
+}
+fn valid_annotation(value: &str, max: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max
 }
 fn valid_job(id: &str) -> bool {
     id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
@@ -567,5 +626,110 @@ mod batch_tests {
             *instruments = (0..9).map(|i| format!("ASSET{i}-USDT")).collect()
         }
         assert!(!invalid.valid());
+    }
+}
+
+#[cfg(test)]
+mod research_decision_contract_tests {
+    use super::*;
+    fn request() -> ResearchRequest {
+        ResearchRequest::RecordDecision {
+            job_id: "a".repeat(64),
+            result_id: format!("sha256:{}", "b".repeat(64)),
+            expected_decision_id: None,
+            name: "Experiment".into(),
+            hypothesis: "A testable hypothesis".into(),
+            status: ResearchDecisionStatus::Deferred,
+            reason: "Await evidence".into(),
+        }
+    }
+    #[test]
+    fn decision_payload_is_typed_bounded_and_json_escape_budgeted() {
+        let request = request();
+        assert!(request.valid());
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ResearchRequest>(value.clone()).unwrap(),
+            request
+        );
+        for (key, bad) in [
+            ("name", serde_json::json!(" ")),
+            ("hypothesis", serde_json::json!("x".repeat(4097))),
+            ("reason", serde_json::json!("я".repeat(1025))),
+            ("status", serde_json::json!("approved_to_trade")),
+            ("result_id", serde_json::json!("b".repeat(64))),
+            ("expected_decision_id", serde_json::json!("foreign")),
+        ] {
+            let mut bad_value = value.clone();
+            bad_value[key] = bad;
+            assert!(
+                !serde_json::from_value::<ResearchRequest>(bad_value).is_ok_and(|r| r.valid()),
+                "{key}"
+            );
+        }
+        for text in ["\0".repeat(2000), "\"".repeat(4096), "\\".repeat(4096)] {
+            let mut escaped = value.clone();
+            escaped["hypothesis"] = serde_json::json!(text);
+            assert!(
+                !serde_json::from_value::<ResearchRequest>(escaped)
+                    .unwrap()
+                    .valid()
+            );
+        }
+        let mut maximum = value.clone();
+        maximum["hypothesis"] = serde_json::json!("я".repeat(2048));
+        maximum["reason"] = serde_json::json!("r".repeat(1900));
+        assert!(
+            serde_json::from_value::<ResearchRequest>(maximum)
+                .unwrap()
+                .valid()
+        );
+        let mut foreign = value;
+        foreign["account"] = serde_json::json!("a");
+        assert!(serde_json::from_value::<ResearchRequest>(foreign).is_err());
+    }
+}
+
+#[cfg(test)]
+mod composition_contract_tests {
+    use super::*;
+    #[test]
+    fn registered_composition_uses_existing_typed_parameters_without_arbitrary_code() {
+        let wire = serde_json::json!({"action":"backtest","idempotency_key":"composition-contract",
+            "instruments":["BTC-USDT"],"timeframe_ms":60000,"start_ms":0,"end_ms":1200000,
+            "strategy_id":"ema_momentum_confirm_v1","parameters":{"fast":1,"slow":2},
+            "costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,"funding_mode":"zero_assumption"},"data_mode":"counterfactual","seed":7});
+        assert!(
+            serde_json::from_value::<ResearchRequest>(wire.clone())
+                .unwrap()
+                .valid()
+        );
+        let mut maximum = wire.clone();
+        maximum["parameters"] = serde_json::json!({"fast":999,"slow":1000});
+        assert!(
+            serde_json::from_value::<ResearchRequest>(maximum.clone())
+                .unwrap()
+                .valid()
+        );
+        maximum["parameters"]["slow"] = serde_json::json!(1001);
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(maximum)
+                .unwrap()
+                .valid()
+        );
+        let mut unknown = wire.clone();
+        unknown["strategy_id"] = serde_json::json!("unregistered_source_code");
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(unknown)
+                .unwrap()
+                .valid()
+        );
+        let mut invalid = wire;
+        invalid["parameters"] = serde_json::json!({"fast":2,"slow":2});
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(invalid)
+                .unwrap()
+                .valid()
+        );
     }
 }

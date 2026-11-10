@@ -12,7 +12,7 @@ pub struct AccountCatalogStore {
 impl AccountCatalogStore {
     pub fn canonical() -> Self {
         Self {
-            root: PathBuf::from(r"C:\okx-runtime"),
+            root: PathBuf::from(okx_host_launcher::RUNTIME_ROOT),
         }
     }
     pub fn load(&self) -> HostControlResult<AccountCatalog> {

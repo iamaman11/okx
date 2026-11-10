@@ -43,6 +43,12 @@ pub struct TerminalRiskLedgerProof {
     pub record_digest: String,
     pub cumulative_loss_usd: String,
     pub remaining_exposure_usdt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cumulative_entry_usd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_settlement_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_settlement_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +219,64 @@ pub enum RiskReservationState {
     Open,
     Released,
 }
+/** The only opening import transport is the authenticated native Risk WS.
+ * The financial source is still independently verified in the native SQL
+ * owner; serializing a source hash alone does not create this witness.
+ */
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CampaignOpeningAccount {
+    pub account_key: String,
+    pub history_from_ms: u64,
+    pub history_through_ms: u64,
+    pub consumed_entry_usd: String,
+    pub order_history_complete: bool,
+    pub fill_history_complete: bool,
+    pub bill_history_complete: bool,
+    pub finance_provenance_sealed: bool,
+    pub source_digest: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CampaignOpeningSource {
+    pub campaign_id: String,
+    pub limit_usd: String,
+    pub consumed_usd: String,
+    pub source_digest: String,
+    pub as_of_ms: u64,
+    pub campaign_started_at_ms: u64,
+    pub accounts: Vec<CampaignOpeningAccount>,
+}
+impl CampaignOpeningSource {
+    pub fn valid(&self) -> bool {
+        self.campaign_id.starts_with("sha256:")
+            && hash(&self.campaign_id[7..])
+            && positive(&self.limit_usd)
+            && (self.consumed_usd == "0" || positive(&self.consumed_usd))
+            && hash(&self.source_digest)
+            && self.as_of_ms >= self.campaign_started_at_ms
+            && self.campaign_started_at_ms > 0
+            && !self.accounts.is_empty()
+            && self.accounts.len() <= 32
+            && self
+                .accounts
+                .windows(2)
+                .all(|pair| pair[0].account_key < pair[1].account_key)
+            && self.accounts.iter().all(|row| {
+                row.account_key.starts_with("okx:real:")
+                    && row.account_key.len() == 73
+                    && hash(&row.account_key[9..])
+                    && row.history_from_ms == self.campaign_started_at_ms
+                    && row.history_through_ms == self.as_of_ms
+                    && (row.consumed_entry_usd == "0" || positive(&row.consumed_entry_usd))
+                    && row.order_history_complete
+                    && row.fill_history_complete
+                    && row.bill_history_complete
+                    && row.finance_provenance_sealed
+                    && hash(&row.source_digest)
+            })
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "action",
@@ -221,6 +285,9 @@ pub enum RiskReservationState {
 )]
 pub enum RiskCommandAction {
     Summary {},
+    InstallEntryOpening {
+        source: CampaignOpeningSource,
+    },
     AccountSummary {
         account_key: String,
     },
@@ -238,9 +305,26 @@ pub enum RiskCommandAction {
         plan_sha256: String,
         requested_loss_usdt: String,
         requested_loss_usd: String,
+        /** Incomplete until venue spec/fee/FX/economic cost are proven.
+         * None is NOT zero and Worker must reject its reservation. */
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry_upper_usd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry_proof_digest: Option<String>,
         usd_conversion: UsdConversion,
         policy_revision: u64,
         census: NativeRiskCensus,
+    },
+    /// E1: native SQL-authoritative cumulative entry costs, never an MCP
+    /// user-supplied debit. No sender is registered until a complete
+    /// fills/bills/FX source binding is proven.
+    SettleEntry {
+        reservation_key: String,
+        plan_sha256: String,
+        expected_risk_book_sequence: u64,
+        cumulative_entry_usd: String,
+        settlement_revision: u64,
+        source_digest: String,
     },
     ReleaseUnsent {
         reservation_key: String,
@@ -285,6 +369,7 @@ impl RiskCommand {
         }
         match &self.action {
             RiskCommandAction::Summary {} => true,
+            RiskCommandAction::InstallEntryOpening { source } => source.valid(),
             RiskCommandAction::AccountSummary { account_key } => {
                 account_key.starts_with("okx:real:")
                     && account_key.len() == 73
@@ -304,6 +389,8 @@ impl RiskCommand {
                 plan_sha256,
                 requested_loss_usdt,
                 requested_loss_usd,
+                entry_upper_usd,
+                entry_proof_digest,
                 usd_conversion,
                 policy_revision,
                 census,
@@ -327,9 +414,27 @@ impl RiskCommand {
                     && hash(plan_sha256)
                     && positive(requested_loss_usdt)
                     && positive(requested_loss_usd)
+                    && matches!((entry_upper_usd.as_deref(), entry_proof_digest.as_deref()),
+                        (Some(value), Some(digest)) if positive(value) && hash(digest))
                     && usd_conversion.valid()
                     && *policy_revision > 0
                     && census.valid()
+            }
+            RiskCommandAction::SettleEntry {
+                reservation_key,
+                plan_sha256,
+                expected_risk_book_sequence,
+                cumulative_entry_usd,
+                settlement_revision,
+                source_digest,
+            } => {
+                !reservation_key.is_empty()
+                    && reservation_key.len() <= 512
+                    && hash(plan_sha256)
+                    && *expected_risk_book_sequence > 0
+                    && *settlement_revision > 0
+                    && (cumulative_entry_usd == "0" || positive(cumulative_entry_usd))
+                    && hash(source_digest)
             }
             RiskCommandAction::ReleaseUnsent {
                 reservation_key,
@@ -409,6 +514,72 @@ pub enum RiskDecisionStatus {
     Updated,
     Observed,
 }
+fn zero_reporting_amount() -> String {
+    "0".into()
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RiskEntryBudgetSnapshot {
+    pub campaign_id: String,
+    pub limit_usd: String,
+    pub consumed_usd: String,
+    pub reserved_usd: String,
+    pub remaining_usd: String,
+    #[serde(default = "zero_reporting_amount")]
+    pub bound_breach_usd: String,
+    pub opening_source_digest: String,
+    pub opening_as_of_ms: u64,
+}
+impl RiskEntryBudgetSnapshot {
+    pub fn valid(&self) -> bool {
+        fn exact_units(value: &str) -> Option<u128> {
+            if value != "0" && !positive(value) {
+                return None;
+            }
+            let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+            whole
+                .parse::<u128>()
+                .ok()?
+                .checked_mul(1_000_000_000)?
+                .checked_add(
+                    fraction.parse::<u128>().ok().unwrap_or(0)
+                        * 10u128.pow(9 - fraction.len() as u32),
+                )
+        }
+        let (Some(limit), Some(consumed), Some(reserved), Some(remaining), Some(breach)) = (
+            exact_units(&self.limit_usd),
+            exact_units(&self.consumed_usd),
+            exact_units(&self.reserved_usd),
+            exact_units(&self.remaining_usd),
+            exact_units(&self.bound_breach_usd),
+        ) else {
+            return false;
+        };
+        self.campaign_id.starts_with("sha256:")
+            && hash(&self.campaign_id[7..])
+            && limit > 0
+            && consumed.checked_add(reserved).is_some_and(|held| {
+                held <= limit.saturating_add(breach) && remaining == limit.saturating_sub(held)
+            })
+            && hash(&self.opening_source_digest)
+            && self.opening_as_of_ms > 0
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RiskCampaignOrigin {
+    pub campaign_id: String,
+    pub installation_id: String,
+    pub started_at_ms: u64,
+}
+impl RiskCampaignOrigin {
+    pub fn valid(&self) -> bool {
+        self.campaign_id.starts_with("sha256:")
+            && hash(&self.campaign_id[7..])
+            && token(&self.installation_id)
+            && self.started_at_ms > 0
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RiskBudgetSnapshot {
@@ -418,6 +589,13 @@ pub struct RiskBudgetSnapshot {
     pub remaining_loss_usd: String,
     pub occupied_modelled_loss_usdt: String,
     pub source_as_of_ms: Option<u64>,
+    /// Existing RiskBook installation is the only owner of inception.
+    /// Missing for old installations is NOT a zero-spend proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub campaign_origin: Option<RiskCampaignOrigin>,
+    /// Only present after authenticated opening finance spend reconciliation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_budget: Option<RiskEntryBudgetSnapshot>,
 }
 impl RiskBudgetSnapshot {
     pub fn valid(&self) -> bool {
@@ -430,6 +608,20 @@ impl RiskBudgetSnapshot {
             ]
             .iter()
             .all(|v| v.as_str() == "0" || positive(v))
+            && self
+                .campaign_origin
+                .as_ref()
+                .is_none_or(RiskCampaignOrigin::valid)
+            && self
+                .entry_budget
+                .as_ref()
+                .is_none_or(RiskEntryBudgetSnapshot::valid)
+            && self.entry_budget.as_ref().is_none_or(|opened| {
+                self.campaign_origin.as_ref().is_some_and(|origin| {
+                    origin.campaign_id == opened.campaign_id
+                        && origin.started_at_ms <= opened.opening_as_of_ms
+                })
+            })
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -513,7 +705,159 @@ impl RiskResult {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn campaign_opening_requires_full_cohort_and_serializes_to_native_ws() {
+        let row = CampaignOpeningAccount {
+            account_key: format!("okx:real:{}", "b".repeat(64)),
+            history_from_ms: 1_000,
+            history_through_ms: 2_000,
+            consumed_entry_usd: "0".into(),
+            order_history_complete: true,
+            fill_history_complete: true,
+            bill_history_complete: true,
+            finance_provenance_sealed: true,
+            source_digest: "a".repeat(64),
+        };
+        let source = CampaignOpeningSource {
+            campaign_id: format!("sha256:{}", "c".repeat(64)),
+            limit_usd: "10".into(),
+            consumed_usd: "0".into(),
+            source_digest: "d".repeat(64),
+            as_of_ms: 2_000,
+            campaign_started_at_ms: 1_000,
+            accounts: vec![row.clone()],
+        };
+        let command = RiskCommand {
+            schema: RISK_COMMAND_SCHEMA_V1.into(),
+            command_id: "opening_test_001".into(),
+            installation_id: "test_install".into(),
+            action: RiskCommandAction::InstallEntryOpening {
+                source: source.clone(),
+            },
+        };
+        assert!(command.valid());
+        let wire = serde_json::to_value(&command).unwrap();
+        assert_eq!(wire["action"]["action"], "INSTALL_ENTRY_OPENING");
+        assert_eq!(
+            serde_json::from_value::<RiskCommand>(wire).unwrap(),
+            command
+        );
+        let mut invalid = source.clone();
+        invalid.accounts[0].bill_history_complete = false;
+        assert!(!invalid.valid());
+        invalid = source.clone();
+        invalid.accounts[0].history_from_ms += 1;
+        assert!(!invalid.valid());
+        invalid = source.clone();
+        invalid.accounts.push(row);
+        assert!(!invalid.valid());
+        invalid = source;
+        invalid.consumed_usd = "-1".into();
+        assert!(!invalid.valid());
+    }
+
     use super::*;
+    #[test]
+    fn e1_entry_settlement_requires_exact_plan_bound_native_revision() {
+        let action = RiskCommandAction::SettleEntry {
+            reservation_key: "central:existing-reserve".into(),
+            plan_sha256: "a".repeat(64),
+            expected_risk_book_sequence: 4,
+            cumulative_entry_usd: "1.25".into(),
+            settlement_revision: 2,
+            source_digest: "b".repeat(64),
+        };
+        let mut command = RiskCommand {
+            schema: RISK_COMMAND_SCHEMA_V1.into(),
+            command_id: "settle_entry_00001".into(),
+            installation_id: "installation_test".into(),
+            action: action.clone(),
+        };
+        assert!(command.valid());
+        let encoded = serde_json::to_value(&command).unwrap();
+        assert_eq!(encoded["action"]["action"], "SETTLE_ENTRY");
+        assert!(
+            serde_json::from_value::<RiskCommand>(encoded)
+                .unwrap()
+                .valid()
+        );
+        if let RiskCommandAction::SettleEntry {
+            cumulative_entry_usd,
+            ..
+        } = &mut command.action
+        {
+            *cumulative_entry_usd = "-0.01".into();
+        }
+        assert!(
+            !command.valid(),
+            "negative settlement cannot credit campaign spend"
+        );
+        let mut missing_source = action;
+        if let RiskCommandAction::SettleEntry { source_digest, .. } = &mut missing_source {
+            *source_digest = "not_source_evidence".into();
+        }
+        assert!(
+            !RiskCommand {
+                action: missing_source,
+                ..command
+            }
+            .valid()
+        );
+    }
+    #[test]
+    fn entry_budget_readback_never_invents_unproved_history() {
+        let plain: RiskBudgetSnapshot = serde_json::from_value(serde_json::json!({
+            "campaign_limit_usd": "10",
+            "consumed_loss_usd": "0",
+            "reserved_loss_usd": "0",
+            "remaining_loss_usd": "10",
+            "occupied_modelled_loss_usdt": "0",
+            "source_as_of_ms": null,
+            "entry_budget": null
+        }))
+        .unwrap();
+        assert!(plain.valid() && plain.entry_budget.is_none());
+        let ready: RiskBudgetSnapshot = serde_json::from_value(serde_json::json!({
+            "campaign_limit_usd": "10",
+            "consumed_loss_usd": "0",
+            "reserved_loss_usd": "0",
+            "remaining_loss_usd": "10",
+            "occupied_modelled_loss_usdt": "0",
+            "source_as_of_ms": null,
+            "campaign_origin": {
+                "campaign_id": format!("sha256:{}", "c".repeat(64)),
+                "installation_id": "installation_test",
+                "started_at_ms": 500
+            },
+            "entry_budget": {
+                "campaign_id": format!("sha256:{}", "c".repeat(64)),
+                "limit_usd": "10",
+                "consumed_usd": "1",
+                "reserved_usd": "3",
+                "remaining_usd": "6",
+                "opening_source_digest": "d".repeat(64),
+                "opening_as_of_ms": 1000
+            }
+        }))
+        .unwrap();
+        assert!(ready.valid());
+        let mut originless = ready.clone();
+        originless.campaign_origin = None;
+        assert!(
+            !originless.valid(),
+            "opened campaign must retain its immutable inception authority"
+        );
+        let mut wrong_sum = ready.clone();
+        wrong_sum.entry_budget.as_mut().unwrap().remaining_usd = "5".into();
+        assert!(
+            !wrong_sum.valid(),
+            "budget is an exact conservation readback"
+        );
+        let mut tampered = serde_json::to_value(&ready).unwrap();
+        tampered["entry_budget"]["untrusted_field"] = true.into();
+        assert!(serde_json::from_value::<RiskBudgetSnapshot>(tampered).is_err());
+    }
+
     #[test]
     fn exact_contract_denies_partial_native_risk_proof() {
         let uid = "a".repeat(64);
@@ -532,6 +876,8 @@ mod tests {
                 plan_sha256: "c".repeat(64),
                 requested_loss_usdt: "1".to_owned(),
                 requested_loss_usd: "1".into(),
+                entry_upper_usd: Some("2".into()),
+                entry_proof_digest: Some("b".repeat(64)),
                 usd_conversion: UsdConversion {
                     usd_per_usdt: "1".into(),
                     source_digest: "a".repeat(64),
@@ -562,6 +908,17 @@ mod tests {
             census.complete = true;
         }
         assert!(ready.valid());
+        let mut missing_entry = ready.clone();
+        if let RiskCommandAction::Reserve {
+            entry_upper_usd, ..
+        } = &mut missing_entry.action
+        {
+            *entry_upper_usd = None;
+        }
+        assert!(
+            !missing_entry.valid(),
+            "no entry debit is not zero entry debit"
+        );
         let json = serde_json::to_string(&ready).unwrap();
         assert_eq!(serde_json::from_str::<RiskCommand>(&json).unwrap(), ready);
         if let RiskCommandAction::Reserve {
@@ -622,6 +979,9 @@ mod tests {
                 record_digest: "f".repeat(64),
                 cumulative_loss_usd: "0".into(),
                 remaining_exposure_usdt: "0".into(),
+                cumulative_entry_usd: None,
+                entry_settlement_revision: None,
+                entry_settlement_digest: None,
             });
         }
         assert!(release.valid());
@@ -632,6 +992,72 @@ mod tests {
             terminal_ledger.as_mut().unwrap().state = "UNKNOWN".to_owned();
         }
         assert!(!release.valid());
+    }
+
+    #[test]
+    fn r4_bound_breach_is_explicit_budget_truth_not_reusable_headroom() {
+        let mut budget: RiskEntryBudgetSnapshot = serde_json::from_value(serde_json::json!({
+            "campaign_id": format!("sha256:{}", "c".repeat(64)),
+            "limit_usd": "10",
+            "consumed_usd": "10.04",
+            "reserved_usd": "0",
+            "remaining_usd": "0",
+            "bound_breach_usd": "0.04",
+            "opening_source_digest": "a".repeat(64),
+            "opening_as_of_ms": 1
+        }))
+        .unwrap();
+        assert!(budget.valid(), "confirmed over-reserve debit remains valid");
+        budget.bound_breach_usd = "0.03".into();
+        assert!(!budget.valid(), "a lower forged breach cannot validate");
+        budget.bound_breach_usd = "0.04".into();
+        budget.remaining_usd = "1".into();
+        assert!(!budget.valid(), "negative remaining is represented as zero");
+    }
+
+    #[test]
+    fn entry_budget_requires_original_installation_owned_campaign_inception() {
+        let campaign = format!("sha256:{}", "a".repeat(64));
+        let origin = RiskCampaignOrigin {
+            campaign_id: campaign.clone(),
+            installation_id: "installation_test".into(),
+            started_at_ms: 1_790_000_000_000,
+        };
+        let entry = RiskEntryBudgetSnapshot {
+            campaign_id: campaign.clone(),
+            limit_usd: "10".into(),
+            consumed_usd: "0".into(),
+            reserved_usd: "0".into(),
+            remaining_usd: "10".into(),
+            bound_breach_usd: "0".into(),
+            opening_source_digest: "b".repeat(64),
+            opening_as_of_ms: 1_790_000_000_100,
+        };
+        let mut view = RiskBudgetSnapshot {
+            campaign_limit_usd: "10".into(),
+            consumed_loss_usd: "0".into(),
+            reserved_loss_usd: "0".into(),
+            remaining_loss_usd: "10".into(),
+            occupied_modelled_loss_usdt: "0".into(),
+            source_as_of_ms: None,
+            campaign_origin: Some(origin),
+            entry_budget: Some(entry),
+        };
+        assert!(view.valid());
+        view.campaign_origin = None;
+        assert!(
+            !view.valid(),
+            "a previous Worker must not mint an opening timestamp"
+        );
+        view.campaign_origin = Some(RiskCampaignOrigin {
+            campaign_id: format!("sha256:{}", "c".repeat(64)),
+            installation_id: "installation_test".into(),
+            started_at_ms: 1_790_000_000_000,
+        });
+        assert!(
+            !view.valid(),
+            "another campaign's inception is not a source"
+        );
     }
 
     #[test]

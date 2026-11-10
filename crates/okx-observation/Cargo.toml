@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+okx-kernel = { path = "../okx-kernel" }
 okx-api = { path = "../okx-api" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

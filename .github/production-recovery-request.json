@@ -1,5 +1,5 @@
 {
   "schema": "okx.production-recovery.request/v1",
   "promote": true,
-  "purpose": "Issue #398 physical acceptance correction: compare initial financial values independently of exchange update timestamps. Preserve installation, access and cumulative campaign budget."
+  "purpose": "PR #499 accepted Windows bundle promotion for canonical C:\\okx CONTROL recovery after independent migration inventory PASS (18 files, 10 directories). Publish exact accepted main release only; installed Windows, Agent provenance, RiskBook, Cloudflare MCP and live trading remain separately gated."
 }

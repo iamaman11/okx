@@ -36,7 +36,7 @@ pub struct DesiredStateStore {
 impl DesiredStateStore {
     pub fn canonical() -> Self {
         Self {
-            path: PathBuf::from(r"C:\okx-control\engine-state.pb"),
+            path: PathBuf::from(okx_host_launcher::CONTROL_ROOT).join("engine-state.pb"),
         }
     }
     pub fn load(&self) -> HostControlResult<AgentDesiredState> {

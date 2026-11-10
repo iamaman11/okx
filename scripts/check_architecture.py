@@ -7,13 +7,13 @@ import subprocess
 import sys
 
 ALLOWED = {
-    "okx-api": set(),
+    "okx-api": {"okx-kernel"},
     "okx-ws": {"okx-api"},
-    "okx-observation": {"okx-api"},
+    "okx-observation": {"okx-api", "okx-kernel"},
     "okx-runtime": {"okx-api", "okx-observation", "okx-ws"},
     "okx-kernel": set(),
-    "okx-analysis": {"okx-kernel", "okx-observation"},
-    "okx-research": {"okx-analysis", "okx-observation"},
+    "okx-analysis": {"okx-kernel"},
+    "okx-research": {"okx-analysis"},
     "okx-execution": {"okx-api", "okx-analysis", "okx-observation"},
     "okx-protocol": set(),
     "okx-github": set(),
@@ -74,12 +74,10 @@ def load_graph() -> dict[str, set[str]]:
     }
 
 
-# K10 target pure crates must be free of network/storage/runtime dependencies
-# even through workspace-local transitive edges. Report separately while existing
-# K10 migration is unfinished; the ordinary CI DAG check must stay honest.
+# K10 pure crates must be free of network/storage/runtime dependencies through
+# the complete resolved production graph, including external package edges.
 K10_TARGET_PURE = ("okx-kernel", "okx-analysis", "okx-research")
-# Newly extracted kernel is enforced separately; K10 overall still has adapters.
-K10_ENFORCED_PURE = ("okx-kernel",)
+K10_ENFORCED_PURE = K10_TARGET_PURE
 K10_FORBIDDEN = {
     "okx-api", "okx-ws", "okx-runtime", "okx-github",
     "reqwest", "tokio", "rusqlite", "hyper", "axum", "tonic", "sqlx",
@@ -89,23 +87,27 @@ K10_FORBIDDEN = {
 def pure_dependency_violations(
     graph: dict[str, set[str]],
     targets: tuple[str, ...] = K10_TARGET_PURE,
+    package_names: dict[str, str] | None = None,
 ) -> list[str]:
     """Find the shortest actual dependency path to forbidden adapters/runtime."""
     from collections import deque
 
+    names = package_names or {package: package for package in graph}
     errors = []
     for target in targets:
-        if target not in graph:
+        roots = [package for package in graph if names.get(package, package) == target]
+        if not roots:
             errors.append(f"K10 missing pure crate: {target}")
             continue
-        visited = {target}
-        queue = deque([(target, [target])])
+        visited = set(roots)
+        queue = deque((root, [root]) for root in roots)
         while queue:
             owner, path = queue.popleft()
             for dep in sorted(graph.get(owner, ())):
                 next_path = path + [dep]
-                if dep in K10_FORBIDDEN:
-                    errors.append(f"K10 forbidden transitive dependency: {' -> '.join(next_path)}")
+                if names.get(dep, dep) in K10_FORBIDDEN:
+                    readable_path = " -> ".join(names.get(node, node) for node in next_path)
+                    errors.append(f"K10 forbidden transitive dependency: {readable_path}")
                     continue
                 if dep in graph and dep not in visited:
                     visited.add(dep)
@@ -113,20 +115,25 @@ def pure_dependency_violations(
     return errors
 
 
-def load_complete_workspace_graph() -> dict[str, set[str]]:
-    # --no-deps still includes every workspace manifest's direct external
-    # requirements. Follow workspace edges recursively to catch adapter leaks.
+def load_complete_workspace_graph() -> tuple[dict[str, set[str]], dict[str, str]]:
+    # Exact package IDs keep different versions/features distinct. Only normal
+    # dependencies enter the shipped graph; build tools and test-only helpers
+    # do not turn unrelated workspace test infrastructure into runtime edges.
     raw = subprocess.check_output(
-        ["cargo", "metadata", "--no-deps", "--locked", "--format-version", "1"],
+        ["cargo", "metadata", "--locked", "--format-version", "1"],
         text=True,
     )
     metadata = json.loads(raw)
-    workspace_ids = set(metadata["workspace_members"])
-    return {
-        package["name"]: {dep["name"] for dep in package["dependencies"]}
-        for package in metadata["packages"]
-        if package["id"] in workspace_ids
+    names = {package["id"]: package["name"] for package in metadata["packages"]}
+    graph = {
+        node["id"]: {
+            dependency["pkg"]
+            for dependency in node["deps"]
+            if any(kind["kind"] is None for kind in dependency["dep_kinds"])
+        }
+        for node in metadata["resolve"]["nodes"]
     }
+    return graph, names
 
 
 def self_test() -> int:
@@ -167,8 +174,16 @@ def self_test() -> int:
         return 1
 
     dirty_kernel = {"okx-kernel": {"okx-api"}, "okx-api": {"reqwest"}}
-    if not pure_dependency_violations(dirty_kernel, K10_ENFORCED_PURE):
+    if not pure_dependency_violations(dirty_kernel, ("okx-kernel",)):
         print("self-test failed: new kernel network violation went unnoticed", file=sys.stderr)
+        return 1
+
+    # An external helper may hide a runtime dependency. Preserve exact IDs so
+    # an unrelated version of that helper cannot overwrite the leaking path.
+    external = {"kernel-id": {"helper-v1"}, "helper-v1": {"tokio-id"}, "helper-v2": set(), "tokio-id": set()}
+    external_names = {"kernel-id": "okx-kernel", "helper-v1": "helper", "helper-v2": "helper", "tokio-id": "tokio"}
+    if not pure_dependency_violations(external, ("okx-kernel",), external_names):
+        print("self-test failed: external package runtime leak passed", file=sys.stderr)
         return 1
 
     print("ARCHITECTURE_SELF_TEST=PASS")
@@ -178,14 +193,15 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--k10-purity", action="store_true", help="strict transitive pure-crate acceptance; currently a blocking target")
+    parser.add_argument("--k10-purity", action="store_true", help="check the complete resolved production graph for pure crates")
     args = parser.parse_args()
 
     if args.self_test:
         return self_test()
 
     if args.k10_purity:
-        errors = pure_dependency_violations(load_complete_workspace_graph())
+        graph, names = load_complete_workspace_graph()
+        errors = pure_dependency_violations(graph, package_names=names)
         if errors:
             for error in errors:
                 print(error, file=sys.stderr)
@@ -194,7 +210,8 @@ def main() -> int:
         return 0
 
     errors = validate(load_graph())
-    errors.extend(pure_dependency_violations(load_complete_workspace_graph(), K10_ENFORCED_PURE))
+    graph, names = load_complete_workspace_graph()
+    errors.extend(pure_dependency_violations(graph, K10_ENFORCED_PURE, names))
     if errors:
         for error in errors:
             print(error, file=sys.stderr)

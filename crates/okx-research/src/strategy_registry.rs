@@ -325,6 +325,77 @@ pub struct GridCandidate {
     /// Stable train-only replay evidence; changes to the holdout cannot
     /// modify this hash or the candidate's selection score.
     pub train_result_hash: String,
+    /// Report-only holdout evidence; never used by selection or row ordering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<CandidateEvaluation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_fees_x2: Option<CandidateEvaluation>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandidateEvaluation {
+    pub summary: Summary,
+    /// Fractional return on the replay's initial 10,000, minus the existing
+    /// Summary::benchmark buy-and-hold return (not a USD amount).
+    pub baseline_delta_return: f64,
+    pub baseline_delta_unit: String,
+    pub no_trades_reason: Option<String>,
+    pub quality: String,
+}
+impl CandidateEvaluation {
+    fn new(summary: Summary, bars: usize) -> Self {
+        let no_trades = summary.trades == 0;
+        Self {
+            baseline_delta_return: summary.pnl / 10000.0 - summary.benchmark,
+            baseline_delta_unit: "fraction_of_initial_capital".into(),
+            summary,
+            no_trades_reason: no_trades.then(|| "NO_EXECUTED_TRADES".into()),
+            quality: if no_trades || bars < 2 {
+                "partial"
+            } else {
+                "observed"
+            }
+            .into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GridPolicy {
+    pub split_index: usize,
+    pub train_score_start_index: usize,
+    pub selection_metric: String,
+    pub tie_break: Vec<String>,
+    pub baseline: String,
+    pub sensitivity: String,
+}
+/// Shared preparation contract, persisted by the adapter before computation.
+pub fn grid_policy(bar_count: usize, variants: &[EmaParameters]) -> Result<GridPolicy, String> {
+    if variants.is_empty() || variants.len() > 100 {
+        return Err("LIMIT_VARIANTS:1..100".into());
+    }
+    if bar_count > 1_000_000 {
+        return Err("LIMIT_BARS:1000000".into());
+    }
+    for p in variants {
+        p.validate()?;
+    }
+    let split_index = bar_count * 7 / 10;
+    let train_score_start_index = variants.iter().map(|p| p.slow).max().ok_or("EMPTY_GRID")?;
+    if train_score_start_index >= split_index {
+        return Err("INSUFFICIENT_TRAIN_BARS".into());
+    }
+    Ok(GridPolicy {
+        split_index,
+        train_score_start_index,
+        selection_metric: "train_sharpe_descending".into(),
+        tie_break: vec![
+            "train_turnover_ascending".into(),
+            "fast_ascending".into(),
+            "slow_ascending".into(),
+        ],
+        baseline: "buy_and_hold_return:summary.benchmark;initial_capital=10000".into(),
+        sensitivity: "maker_and_taker_fees_x2;slippage_and_funding_unchanged;report_only".into(),
+    })
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridResult {
@@ -343,19 +414,34 @@ pub fn grid(
     variants: &[EmaParameters],
     cancel: &impl Fn() -> bool,
 ) -> Result<GridResult, String> {
-    if variants.is_empty() || variants.len() > 100 {
-        return Err("LIMIT_VARIANTS:1..100".into());
-    }
-    if bars.len() > 1_000_000 {
-        return Err("LIMIT_BARS:1000000".into());
-    }
-    let split = bars.len() * 7 / 10;
+    grid_with_observer(bars, spec, variants, cancel, &|_| {})
+}
+
+/// Successful replay units only: N train, N holdout, N fee sensitivity,
+/// then the selected replay. A candidate completes after its sensitivity run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridProgress {
+    pub completed_work_units: u64,
+    pub completed_candidates: u64,
+}
+
+/// Observation does not participate in identities, selection, or result data.
+pub fn grid_with_observer(
+    bars: &[Bar],
+    spec: &ReplaySpec,
+    variants: &[EmaParameters],
+    cancel: &impl Fn() -> bool,
+    observe: &impl Fn(GridProgress),
+) -> Result<GridResult, String> {
+    let mut progress = GridProgress {
+        completed_work_units: 0,
+        completed_candidates: 0,
+    };
+    let policy = grid_policy(bars.len(), variants)?;
+    let split = policy.split_index;
     // All candidate scores use the same reporting window. Different EMA
     // warmups are loaded before it, never counted as reporting returns.
-    let train_score_start = variants.iter().map(|p| p.slow).max().ok_or("EMPTY_GRID")?;
-    if train_score_start >= split {
-        return Err("INSUFFICIENT_TRAIN_BARS".into());
-    }
+    let train_score_start = policy.train_score_start_index;
     // Never feed holdout observations into training identities or scores.
     let train_dataset_hash = hash_chunks(&bars[..split], cancel)?;
     let dataset_hash = hash_chunks(bars, cancel)?;
@@ -375,10 +461,14 @@ pub fn grid(
             cancel,
             Some(&train_dataset_hash),
         )?;
+        progress.completed_work_units += 1;
+        observe(progress);
         candidates.push(GridCandidate {
             parameters: *p,
             train: r.summary.clone(),
             train_result_hash: r.hash.clone(),
+            test: None,
+            test_fees_x2: None,
         });
         // Stable tie-break independent of the user's variant iteration order.
         if best.as_ref().is_none_or(|(prior, b)| {
@@ -392,9 +482,52 @@ pub fn grid(
         }
     }
     let (p, train) = best.unwrap();
+    // Freeze the winner before any holdout replay. Reporting preserves input
+    // candidate order and cannot affect train-only selection or tie-breaking.
+    for candidate in &mut candidates {
+        if cancel() {
+            return Err("CANCELLED".into());
+        }
+        let mut report_spec = spec.clone();
+        report_spec.parameters = candidate.parameters;
+        // Retain only the summary for non-selected variants. Drop their full
+        // equity/trade vectors before starting sensitivity replay.
+        let report_summary = replay_with_hash(
+            bars,
+            &report_spec,
+            split,
+            bars.len(),
+            cancel,
+            Some(&dataset_hash),
+        )?
+        .summary;
+        progress.completed_work_units += 1;
+        observe(progress);
+        candidate.test = Some(CandidateEvaluation::new(report_summary, bars.len() - split));
+        report_spec.costs.maker_fee_bps *= 2.0;
+        report_spec.costs.taker_fee_bps *= 2.0;
+        let sensitivity_summary = replay_with_hash(
+            bars,
+            &report_spec,
+            split,
+            bars.len(),
+            cancel,
+            Some(&dataset_hash),
+        )?
+        .summary;
+        candidate.test_fees_x2 = Some(CandidateEvaluation::new(
+            sensitivity_summary,
+            bars.len() - split,
+        ));
+        progress.completed_work_units += 1;
+        progress.completed_candidates += 1;
+        observe(progress);
+    }
     let mut s = spec.clone();
     s.parameters = p;
     let test = replay_with_hash(bars, &s, split, bars.len(), cancel, Some(&dataset_hash))?;
+    progress.completed_work_units += 1;
+    observe(progress);
     Ok(GridResult {
         variants: candidates,
         selected: p,
@@ -510,6 +643,20 @@ mod tests {
         }
     }
     #[test]
+    fn legacy_grid_candidates_remain_readable_without_holdout_reports() {
+        let result = replay(&bars(), &spec(), 3, 100, &|| false).unwrap();
+        let legacy = serde_json::json!({
+            "parameters": { "fast": 2, "slow": 3 },
+            "train": result.summary,
+            "train_result_hash": result.hash
+        });
+        let restored: GridCandidate = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(restored.test.is_none());
+        assert!(restored.test_fees_x2.is_none());
+        assert_eq!(serde_json::to_value(restored).unwrap(), legacy);
+    }
+
+    #[test]
     fn ema_cross_next_bar_no_lookahead() {
         let b = bars();
         let r = replay(&b, &spec(), 3, 100, &|| false).unwrap();
@@ -599,6 +746,78 @@ mod tests {
     }
 
     #[test]
+    fn c20_registered_composition_replays_literal_next_open_money_oracle() {
+        let opens: [f64; 6] = [100., 100., 103., 102., 101., 100.];
+        let closes: [f64; 6] = [100., 102., 101., 101.05, 100., 101.];
+        let bars = (0..6)
+            .map(|index| Bar {
+                time: index as u64 * 60000,
+                open: opens[index],
+                close: closes[index],
+                high: opens[index].max(closes[index]) + 1.,
+                low: opens[index].min(closes[index]) - 1.,
+                volume: 1.,
+                funding_rate: None,
+            })
+            .collect::<Vec<_>>();
+        let mut parameters = spec();
+        parameters.strategy_id = "ema_momentum_confirm_v1".into();
+        parameters.parameters = EmaParameters { fast: 1, slow: 2 };
+        parameters.timeframe_ms = 60000;
+        parameters.mechanics = Mechanics::Linear {
+            contract_multiplier: 1.,
+        };
+        parameters.costs = Costs {
+            maker_fee_bps: 0.,
+            taker_fee_bps: 0.,
+            slippage_bps: 0.,
+            observed_funding: false,
+        };
+        let result = replay(&bars, &parameters, 2, 6, &|| false).unwrap();
+        assert_eq!(
+            result
+                .trades
+                .iter()
+                .map(|trade| (trade.time / 60000, trade.side, trade.quantity, trade.price))
+                .collect::<Vec<_>>(),
+            vec![
+                (2, 1, 1., 103.),
+                (3, -1, 2., 102.),
+                (4, 1, 1., 101.),
+                (5, -1, 1., 100.)
+            ]
+        );
+        assert_eq!(result.summary.pnl_exact, "-1");
+        assert_eq!(result.summary.fees_exact, "0");
+        assert_eq!(result.summary.funding_exact, "0");
+        assert_eq!(result.equity.last().unwrap().1, 9999.);
+        // Last positive signal has no next open; a future bar executes it,
+        // preserving all earlier trades and scored equity.
+        let mut future = bars.clone();
+        future.push(Bar {
+            time: 360000,
+            open: 105.,
+            high: 110.,
+            low: 100.,
+            close: 109.,
+            volume: 1.,
+            funding_rate: None,
+        });
+        let extended = replay(&future, &parameters, 2, 7, &|| false).unwrap();
+        assert_eq!(
+            serde_json::to_value(&extended.trades[..4]).unwrap(),
+            serde_json::to_value(&result.trades).unwrap()
+        );
+        assert_eq!(extended.trades[4].time, 360000);
+        assert_eq!(extended.trades[4].side, 1);
+        assert_eq!(extended.trades[4].quantity, 2.);
+        assert_eq!(extended.trades[4].price, 105.);
+        let rescored = replay(&future, &parameters, 2, 6, &|| false).unwrap();
+        assert_eq!(rescored.equity, result.equity);
+        assert_eq!(rescored.summary.pnl_exact, result.summary.pnl_exact);
+    }
+
+    #[test]
     fn c15_identical_seed_and_inputs_repeat_exact_financial_hashes() {
         let input = bars();
         let parameters = spec();
@@ -651,12 +870,69 @@ mod tests {
         for (left, right) in first.variants.iter().zip(&changed_result.variants) {
             assert_eq!(left.train_result_hash, right.train_result_hash);
             assert_eq!(left.train.pnl_exact, right.train.pnl_exact);
+            assert_ne!(
+                left.test.as_ref().unwrap().baseline_delta_return,
+                right.test.as_ref().unwrap().baseline_delta_return
+            );
+            assert_eq!(
+                left.test.as_ref().unwrap().no_trades_reason.as_deref(),
+                Some("NO_EXECUTED_TRADES")
+            );
         }
         assert_ne!(first.test.dataset_hash, changed_result.test.dataset_hash);
         assert_eq!(first.selected, EmaParameters { fast: 2, slow: 3 });
         let reversed = [variants[1], variants[0]];
         let inverted = grid(&changed, &s, &reversed, &|| false).unwrap();
         assert_eq!(first.selected, inverted.selected);
+        assert_eq!(inverted.variants[0].parameters, reversed[0]);
+    }
+
+    #[test]
+    fn grid_oos_and_fee_sensitivity_match_independent_one_trade_oracle() {
+        let input = (0..10)
+            .map(|i| Bar {
+                time: i * 60_000,
+                open: 100.0 + i as f64,
+                close: 100.0 + i as f64,
+                high: 101.0 + i as f64,
+                low: 99.0 + i as f64,
+                volume: 1.0,
+                funding_rate: None,
+            })
+            .collect::<Vec<_>>();
+        let mut s = spec();
+        s.strategy_id = "close_momentum".into();
+        s.mechanics = Mechanics::Spot;
+        s.timeframe_ms = 60_000;
+        s.costs = Costs {
+            maker_fee_bps: 0.0,
+            taker_fee_bps: 10.0,
+            slippage_bps: 0.0,
+            observed_funding: false,
+        };
+        let variants = [
+            EmaParameters { fast: 1, slow: 2 },
+            EmaParameters { fast: 2, slow: 3 },
+        ];
+        let result = grid(&input, &s, &variants, &|| false).unwrap();
+        for candidate in result.variants {
+            let report = candidate.test.unwrap();
+            let sensitivity = candidate.test_fees_x2.unwrap();
+            // Split is7. A close6 signal buys one unit at open7=107,
+            // marked at close9=109. Fees107*10/10000=.107; doubled=.214.
+            assert_eq!(report.summary.trades, 1);
+            assert_eq!(report.summary.pnl_exact, "1.893");
+            assert_eq!(report.summary.fees_exact, "0.107");
+            assert_eq!(sensitivity.summary.pnl_exact, "1.786");
+            assert_eq!(sensitivity.summary.fees_exact, "0.214");
+            assert_eq!(report.no_trades_reason, None);
+            assert_eq!(report.quality, "observed");
+            assert_eq!(report.baseline_delta_unit, "fraction_of_initial_capital");
+            assert!(
+                (report.baseline_delta_return - (1.893 / 10000.0 - (109.0 / 107.0 - 1.0))).abs()
+                    < 1e-12
+            );
+        }
     }
 
     #[test]
