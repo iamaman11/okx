@@ -68,14 +68,27 @@ async function ownedDescendants(pid) {
         created:fields.slice(0,5).join(" "), name:fields.slice(5).join(" ")};
     });
   }
-  const owned = new Set([pid]);
+  const rootOwner = rows.find(row => row.pid === pid);
+  if (!rootOwner?.created || !Number.isFinite(Date.parse(rootOwner.created)))
+    throw Error("LIFECYCLE_PROCESS_IDENTITY_UNAVAILABLE");
+  const owners = new Map([[pid, rootOwner]]);
   const result = [];
   for (let round=0; round<16; round++) {
-    const next = rows.filter(row => owned.has(row.parent_pid) && !owned.has(row.pid));
+    const next = rows.filter(row => {
+      const parent = owners.get(row.parent_pid);
+      if (!parent || owners.has(row.pid)) return false;
+      const childStart = Date.parse(row.created);
+      const parentStart = Date.parse(parent.created);
+      if (!Number.isFinite(childStart) || !Number.isFinite(parentStart))
+        throw Error("LIFECYCLE_PROCESS_IDENTITY_UNAVAILABLE");
+      // Windows reuses PIDs. A pre-existing unrelated process can retain a
+      // numeric parent PID later reused by one of our Native/workerd children.
+      // A child created BEFORE its alleged parent cannot be owned by it.
+      return childStart >= parentStart;
+    });
     if (!next.length) return result;
     for (const row of next) {
-      if (!row.created) throw Error("LIFECYCLE_PROCESS_IDENTITY_UNAVAILABLE");
-      owned.add(row.pid); result.push(row);
+      owners.set(row.pid, row); result.push(row);
     }
     if (result.length > 64) throw Error("LIFECYCLE_OWNERSHIP_LIMIT");
   }
