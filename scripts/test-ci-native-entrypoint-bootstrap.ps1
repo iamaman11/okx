@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:CI -cne 'true') {
     throw 'CI_BOOTSTRAP_REQUIRES_DISPOSABLE_WINDOWS_ACTIONS_RUNNER'
 }
-$root = Join-Path $env:SystemDrive 'okx'
+$root = $env:SystemDrive + '\okx'
 if (Test-Path -LiteralPath $root) {
     throw 'CI_BOOTSTRAP_TARGET_NOT_EMPTY_OR_UNKNOWN'
 }
