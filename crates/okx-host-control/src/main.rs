@@ -79,8 +79,10 @@ async fn run(cli: Cli) -> HostControlResult<()> {
             control_root,
             runtime_root,
         } => {
-            let control = control_root.unwrap_or_else(|| PathBuf::from(okx_host_launcher::CONTROL_ROOT));
-            let runtime = runtime_root.unwrap_or_else(|| PathBuf::from(okx_host_launcher::RUNTIME_ROOT));
+            let control =
+                control_root.unwrap_or_else(|| PathBuf::from(okx_host_launcher::CONTROL_ROOT));
+            let runtime =
+                runtime_root.unwrap_or_else(|| PathBuf::from(okx_host_launcher::RUNTIME_ROOT));
             let receipt = inspect_installation_paths(&control, &runtime);
             println!("{}", serde_json::to_string_pretty(&receipt)?);
         }
@@ -203,7 +205,10 @@ fn local_release_integrity(control: &Path, runtime: &Path) -> &'static str {
     }
     for (name, file) in [
         ("okx-agent.exe", runtime.join("okx-agent.exe")),
-        ("okx-host-launcher.exe", control.join("okx-host-launcher.exe")),
+        (
+            "okx-host-launcher.exe",
+            control.join("okx-host-launcher.exe"),
+        ),
     ] {
         let declared = manifest["files"][name]["sha256"].as_str();
         if !lower_hex(declared, 64)
@@ -297,16 +302,11 @@ fn inspect_installation_paths(control: &Path, runtime: &Path) -> serde_json::Val
 #[cfg(test)]
 mod inspection_tests {
     use super::*;
+    use okx_host_control::provenance::{InstalledAgentProvenance, InstalledAgentProvenanceStore};
     use std::fs;
-    use okx_host_control::provenance::{
-        InstalledAgentProvenance, InstalledAgentProvenanceStore,
-    };
 
     fn test_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "okx-inspect-{}-{name}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("okx-inspect-{}-{name}", std::process::id()))
     }
 
     #[test]
@@ -355,8 +355,10 @@ mod inspection_tests {
         assert_eq!(no_manifest["trading_permission"], "NEW_RISK_BLOCKED");
 
         let hash = okx_host_launcher::sha256_file(&runtime.join("okx-agent.exe")).unwrap();
-        let controller_hash = okx_host_launcher::sha256_file(&control.join("okx-host-control.exe")).unwrap();
-        let launcher_hash = okx_host_launcher::sha256_file(&control.join("okx-host-launcher.exe")).unwrap();
+        let controller_hash =
+            okx_host_launcher::sha256_file(&control.join("okx-host-control.exe")).unwrap();
+        let launcher_hash =
+            okx_host_launcher::sha256_file(&control.join("okx-host-launcher.exe")).unwrap();
         fs::write(
             control.join("manifest.json"),
             serde_json::to_vec(&serde_json::json!({
@@ -369,19 +371,29 @@ mod inspection_tests {
                     "okx-host-control.exe": { "sha256": controller_hash },
                     "okx-host-launcher.exe": { "sha256": launcher_hash }
                 }
-            })).unwrap(),
-        ).unwrap();
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let without_provenance = inspect_installation_paths(&control, &runtime);
         assert_eq!(without_provenance["state"], "BLOCKED_AGENT_PROVENANCE");
         let provenance = InstalledAgentProvenance::verified(
-            1, 1, "b".repeat(40), "a".repeat(40), "test-rust".into(), hash,
+            1,
+            1,
+            "b".repeat(40),
+            "a".repeat(40),
+            "test-rust".into(),
+            hash,
         );
         InstalledAgentProvenanceStore::at(runtime.join("installed-agent.json"))
             .save(&provenance)
             .unwrap();
         let present = inspect_installation_paths(&control, &runtime);
         assert_eq!(present["state"], "IDENTITY_FILE_PRESENT_NOT_VERIFIED");
-        assert_eq!(present["local_release_integrity"], "LOCAL_HASHES_MATCH_NOT_REMOTE_ATTESTED");
+        assert_eq!(
+            present["local_release_integrity"],
+            "LOCAL_HASHES_MATCH_NOT_REMOTE_ATTESTED"
+        );
         assert_eq!(present["central_risk"], "UNKNOWN");
         fs::write(runtime.join("okx-agent.exe"), b"tampered").unwrap();
         let bad = inspect_installation_paths(&control, &runtime);
