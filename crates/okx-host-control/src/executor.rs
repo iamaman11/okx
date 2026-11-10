@@ -1536,18 +1536,58 @@ pub fn install_current_executable(destination: &Path) -> HostControlResult<Value
     if !source.is_file() {
         return Err(HostControlError::InvalidInstallSource);
     }
+    let expected_hash = okx_host_launcher::sha256_file(&source)?;
+
+    // An already installed bootstrap entrypoint is immutable. Never truncate
+    // or replace it just because a second install was requested.
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(HostControlError::ArtifactVerification(
+                    "bootstrap destination is not a plain file",
+                ));
+            }
+            if okx_host_launcher::sha256_file(destination)? != expected_hash {
+                return Err(HostControlError::ArtifactVerification(
+                    "bootstrap destination conflicts with the selected release",
+                ));
+            }
+            return Ok(json!({
+                "installed": true,
+                "disposition": "EXISTING",
+                "destination": destination,
+                "sha256": expected_hash
+            }));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
 
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    if source != destination {
-        fs::copy(&source, destination)?;
+    // create_new fails rather than overwriting an entrypoint created by
+    // another process between the initial check and the write.
+    let mut target = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let mut input = File::open(&source)?;
+    std::io::copy(&mut input, &mut target)?;
+    target.sync_all()?;
+    drop(target);
+    if okx_host_launcher::sha256_file(destination)? != expected_hash {
+        return Err(HostControlError::ArtifactVerification(
+            "bootstrap copied executable failed SHA-256 validation",
+        ));
     }
 
     Ok(json!({
         "installed": true,
-        "destination": destination
+        "disposition": "CREATED",
+        "destination": destination,
+        "sha256": expected_hash
     }))
 }
 
