@@ -73,6 +73,8 @@ $assets = @($zipName, 'SHA256SUMS.txt')
 foreach ($name in $assets) {
     $hits = @($release.assets | Where-Object { $_.name -ceq $name })
     if ($hits.Count -ne 1) { throw "Missing/duplicate release asset: $name" }
+    $limit = if ($name -ceq $zipName) { 268435456 } else { 16384 }
+    if ([long]$hits[0].size -le 0 -or [long]$hits[0].size -gt $limit) { throw 'Release asset size is invalid.' }
     $expectedUrl = "https://github.com/iamaman11/okx/releases/download/$tag/$name"
     if ($hits[0].browser_download_url -cne $expectedUrl) { throw 'Unexpected asset URL.' }
 }
@@ -121,6 +123,13 @@ try {
 
     # Recheck state; then call the existing native install COPY, not another updater.
     $freshMain = Get-GitHubJson 'branches/main'
+    Assert-PlainDirectory 'C:\okx'
+    Assert-PlainDirectory 'C:\okx\control'
+    foreach ($name in @('okx-agent', 'okx-host-control', 'okx-host-launcher')) {
+        if (@(Get-Process -Name $name -ErrorAction SilentlyContinue).Count -ne 0) { throw "Running OKX process: $name" }
+    }
+    $task = Get-ScheduledTask -TaskName 'iamaman11-okx-host-control' -ErrorAction SilentlyContinue
+    if ($null -ne $task -and [string]$task.State -ne 'Disabled') { throw 'Scheduler state changed during verification.' }
     if ($freshMain.commit.sha -cne $MainSha -or (Test-Path -LiteralPath $entrypoint) -or
         (Test-Path -LiteralPath 'C:\okx\control\active-controller.json') -or
         (Test-Path -LiteralPath 'C:\okx-control') -or (Test-Path -LiteralPath 'C:\okx-runtime')) {
