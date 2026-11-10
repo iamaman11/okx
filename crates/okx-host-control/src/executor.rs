@@ -1635,6 +1635,41 @@ fn direct_git_command(repo_root: &Path, args: &[&str]) -> std::process::Command 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_bootstrap_install_is_idempotent_and_never_overwrites_a_conflict() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("monotonic wall clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "okx-control-bootstrap-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("private fixture");
+        let entrypoint = root.join("okx-host-control.exe");
+
+        let created = install_current_executable(&entrypoint).expect("first native install");
+        assert_eq!(created["disposition"], "CREATED");
+        let expected_hash = okx_host_launcher::sha256_file(&std::env::current_exe().unwrap())
+            .expect("source SHA");
+        assert_eq!(
+            okx_host_launcher::sha256_file(&entrypoint).unwrap(),
+            expected_hash
+        );
+
+        let retry = install_current_executable(&entrypoint).expect("exact retry");
+        assert_eq!(retry["disposition"], "EXISTING");
+        fs::write(&entrypoint, b"corrupted installed controller").expect("tamper");
+        assert!(install_current_executable(&entrypoint).is_err());
+        assert_eq!(
+            fs::read(&entrypoint).unwrap(),
+            b"corrupted installed controller"
+        );
+
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
     #[test]
     fn git_commands_ignore_shell_proxy_and_global_git_configuration() {
         let command = direct_git_command(
