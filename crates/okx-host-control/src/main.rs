@@ -240,6 +240,17 @@ fn lower_hex(value: Option<&str>, len: usize) -> bool {
     })
 }
 
+fn provenance_matches_manifest(control: &Path, agent_status: &serde_json::Value) -> bool {
+    let Ok(bytes) = std::fs::read(control.join("manifest.json")) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    agent_status["provenance"]["source_tree"] == manifest["source_tree"]
+        && agent_status["provenance"]["source_head_sha"] == manifest["source_head_sha"]
+}
+
 fn inspect_installation_paths(control: &Path, runtime: &Path) -> serde_json::Value {
     let controller = control.join("okx-host-control.exe").is_file();
     let launcher = control.join("okx-host-launcher.exe").is_file();
@@ -262,7 +273,9 @@ fn inspect_installation_paths(control: &Path, runtime: &Path) -> serde_json::Val
         "BLOCKED_RELEASE_FILES_MISSING"
     } else if release_integrity != "LOCAL_HASHES_MATCH_NOT_REMOTE_ATTESTED" {
         "BLOCKED_RELEASE_NOT_VERIFIED"
-    } else if agent_provenance_state != "VERIFIED" {
+    } else if agent_provenance_state != "VERIFIED"
+        || !provenance_matches_manifest(control, &agent_status)
+    {
         "BLOCKED_AGENT_PROVENANCE"
     } else if !catalog {
         "UNINITIALIZED_LOCAL_IDENTITY"
@@ -395,6 +408,19 @@ mod inspection_tests {
             "LOCAL_HASHES_MATCH_NOT_REMOTE_ATTESTED"
         );
         assert_eq!(present["central_risk"], "UNKNOWN");
+        let wrong_release = InstalledAgentProvenance::verified(
+            1,
+            1,
+            "c".repeat(40),
+            "a".repeat(40),
+            "test-rust".into(),
+            okx_host_launcher::sha256_file(&runtime.join("okx-agent.exe")).unwrap(),
+        );
+        InstalledAgentProvenanceStore::at(runtime.join("installed-agent.json"))
+            .save(&wrong_release)
+            .unwrap();
+        let wrong_identity = inspect_installation_paths(&control, &runtime);
+        assert_eq!(wrong_identity["state"], "BLOCKED_AGENT_PROVENANCE");
         fs::write(runtime.join("okx-agent.exe"), b"tampered").unwrap();
         let bad = inspect_installation_paths(&control, &runtime);
         assert_eq!(bad["state"], "BLOCKED_RELEASE_NOT_VERIFIED");
