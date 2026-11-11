@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, Read},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use clap::{Parser, Subcommand};
@@ -28,17 +28,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Inspect local installation without starting services, reading SQL or contacting GitHub.
-    Inspect {
-        #[arg(long)]
-        control_root: Option<PathBuf>,
-        #[arg(long)]
-        runtime_root: Option<PathBuf>,
-    },
-
     /// Copy this trusted binary outside the optional C:\okx\workspace worktree.
     Install {
-        /// SHA-256 of a stopped legacy CONTROL, for accepted-main recovery only.
+        /// Exact old SHA-256 for a one-time stopped legacy CONTROL recovery.
         #[arg(long)]
         recover_existing_sha256: Option<String>,
     },
@@ -80,21 +72,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(cli: Cli) -> HostControlResult<()> {
     match cli.command {
-        Command::Inspect {
-            control_root,
-            runtime_root,
-        } => {
-            let control =
-                control_root.unwrap_or_else(|| PathBuf::from(okx_host_launcher::CONTROL_ROOT));
-            let runtime =
-                runtime_root.unwrap_or_else(|| PathBuf::from(okx_host_launcher::RUNTIME_ROOT));
-            let receipt = inspect_installation_paths(&control, &runtime);
-            println!("{}", serde_json::to_string_pretty(&receipt)?);
-        }
         Command::Install {
             recover_existing_sha256,
         } => {
-            // Even a dangling reparse point is an occupied launcher root.
             for path in [
                 okx_host_launcher::ACTIVE_PATH,
                 okx_host_launcher::LAUNCHER_PATH,
@@ -200,253 +180,4 @@ fn read_stdin() -> HostControlResult<String> {
     let mut payload = String::new();
     io::stdin().read_to_string(&mut payload)?;
     Ok(payload)
-}
-
-// Offline consistency only. The manifest is not a trust anchor by itself:
-// the release bootstrap must independently verify the GitHub release before
-// placing it here. No SQL, credentials, GitHub requests or process starts.
-fn local_release_integrity(control: &Path, runtime: &Path) -> &'static str {
-    let manifest_path = control.join("manifest.json");
-    if !manifest_path.is_file() {
-        return "MANIFEST_MISSING";
-    }
-    let Ok(bytes) = std::fs::read(&manifest_path) else {
-        return "MANIFEST_UNREADABLE";
-    };
-    if bytes.len() > 64 * 1024 {
-        return "MANIFEST_INVALID";
-    }
-    let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return "MANIFEST_INVALID";
-    };
-    if manifest["schema"] != "okx.windows.bundle/v1"
-        || manifest["repository_id"] != okx_host_launcher::REPOSITORY_ID
-        || !lower_hex(manifest["source_tree"].as_str(), 40)
-        || !lower_hex(manifest["source_head_sha"].as_str(), 40)
-    {
-        return "MANIFEST_INVALID";
-    }
-    for (name, file) in [
-        ("okx-agent.exe", runtime.join("okx-agent.exe")),
-        (
-            "okx-host-launcher.exe",
-            control.join("okx-host-launcher.exe"),
-        ),
-    ] {
-        let declared = manifest["files"][name]["sha256"].as_str();
-        if !lower_hex(declared, 64)
-            || okx_host_launcher::sha256_file(&file).ok().as_deref() != declared
-        {
-            return "BINARY_HASH_MISMATCH";
-        }
-    }
-    let controller = manifest["files"]["okx-host-control.exe"]["sha256"].as_str();
-    let launcher = manifest["files"]["okx-host-launcher.exe"]["sha256"].as_str();
-    let entrypoint_hash = okx_host_launcher::sha256_file(&control.join("okx-host-control.exe"));
-    if !lower_hex(controller, 64)
-        || !matches!(
-            entrypoint_hash.ok().as_deref(),
-            Some(hash) if Some(hash) == controller || Some(hash) == launcher
-        )
-    {
-        return "BINARY_HASH_MISMATCH";
-    }
-    "LOCAL_HASHES_MATCH_NOT_REMOTE_ATTESTED"
-}
-
-fn lower_hex(value: Option<&str>, len: usize) -> bool {
-    value.is_some_and(|value| {
-        value.len() == len
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    })
-}
-
-fn provenance_matches_manifest(control: &Path, agent_status: &serde_json::Value) -> bool {
-    let Ok(bytes) = std::fs::read(control.join("manifest.json")) else {
-        return false;
-    };
-    let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return false;
-    };
-    agent_status["provenance"]["source_tree"] == manifest["source_tree"]
-        && agent_status["provenance"]["source_head_sha"] == manifest["source_head_sha"]
-}
-
-fn inspect_installation_paths(control: &Path, runtime: &Path) -> serde_json::Value {
-    let controller = control.join("okx-host-control.exe").is_file();
-    let launcher = control.join("okx-host-launcher.exe").is_file();
-    let agent_path = runtime.join("okx-agent.exe");
-    let agent = agent_path.is_file();
-    let provenance = runtime.join("installed-agent.json").is_file();
-    let catalog = runtime.join("account-catalog.pb").is_file();
-    let existing_financial_state = runtime.join("accounts").exists()
-        || runtime.join("installation.json").exists()
-        || runtime.join("account-catalog").exists();
-    let release_integrity = local_release_integrity(control, runtime);
-    let agent_status = okx_host_control::provenance::InstalledAgentProvenanceStore::at(
-        runtime.join("installed-agent.json"),
-    )
-    .status_value(&agent_path);
-    let agent_provenance_state = agent_status["state"].as_str().unwrap_or("UNKNOWN");
-    let state = if !catalog && existing_financial_state {
-        "BLOCKED_EXISTING_STATE_WITHOUT_CATALOG"
-    } else if !controller || !launcher || !agent {
-        "BLOCKED_RELEASE_FILES_MISSING"
-    } else if release_integrity != "LOCAL_HASHES_MATCH_NOT_REMOTE_ATTESTED" {
-        "BLOCKED_RELEASE_NOT_VERIFIED"
-    } else if agent_provenance_state != "VERIFIED"
-        || !provenance_matches_manifest(control, &agent_status)
-    {
-        "BLOCKED_AGENT_PROVENANCE"
-    } else if !catalog {
-        "UNINITIALIZED_LOCAL_IDENTITY"
-    } else {
-        "IDENTITY_FILE_PRESENT_NOT_VERIFIED"
-    };
-    let next = match state {
-        "BLOCKED_EXISTING_STATE_WITHOUT_CATALOG" => {
-            "ISOLATE_OR_VERIFY_EXISTING_STATE_BEFORE_ANY_CLEAN_INITIALIZE"
-        }
-        "BLOCKED_RELEASE_FILES_MISSING" | "BLOCKED_RELEASE_NOT_VERIFIED" => {
-            "INSTALL_EXACT_VERIFIED_RELEASE_BEFORE_INITIALIZE"
-        }
-        "BLOCKED_AGENT_PROVENANCE" => "RECONCILE_ACCEPTED_RELEASE_PROVENANCE",
-        "UNINITIALIZED_LOCAL_IDENTITY" => "VERIFY_CLEAN_ROOT_AND_RELEASE_BEFORE_INITIALIZE",
-        _ => "VERIFY_ACCOUNT_SQL_AND_CENTRAL_RISK_BEFORE_START",
-    };
-    serde_json::json!({
-        "schema": "okx.windows.local-inspection/v1",
-        "state": state,
-        "controller_present": controller,
-        "launcher_present": launcher,
-        "agent_present": agent,
-        "agent_provenance_present": provenance,
-        "agent_provenance_state": agent_provenance_state,
-        "local_release_integrity": release_integrity,
-        "account_catalog_present": catalog,
-        "existing_financial_or_legacy_identity_present": existing_financial_state,
-        "verification": "LOCAL_FILES_ONLY_NO_REMOTE_RISK_OR_SQL",
-        "safe_start": "READ_ONLY_INSPECTION_ONLY",
-        "trading_permission": "NEW_RISK_BLOCKED",
-        "central_risk": "UNKNOWN",
-        "next": next
-    })
-}
-
-#[cfg(test)]
-mod inspection_tests {
-    use super::*;
-    use okx_host_control::provenance::{InstalledAgentProvenance, InstalledAgentProvenanceStore};
-    use std::fs;
-
-    fn test_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("okx-inspect-{}-{name}", std::process::id()))
-    }
-
-    #[test]
-    fn local_inspection_is_read_only_and_blocks_legacy_financial_state() {
-        let root = test_root("legacy");
-        let _ = fs::remove_dir_all(&root);
-        let control = root.join("control");
-        let runtime = root.join("runtime");
-        fs::create_dir_all(runtime.join("accounts").join("existing")).unwrap();
-        let db = runtime
-            .join("accounts")
-            .join("existing")
-            .join("account.sqlite");
-        fs::write(&db, b"original").unwrap();
-
-        let receipt = inspect_installation_paths(&control, &runtime);
-        assert_eq!(receipt["state"], "BLOCKED_EXISTING_STATE_WITHOUT_CATALOG");
-        assert_eq!(receipt["safe_start"], "READ_ONLY_INSPECTION_ONLY");
-        assert_eq!(receipt["trading_permission"], "NEW_RISK_BLOCKED");
-        assert_eq!(fs::read(db).unwrap(), b"original");
-        assert!(!runtime.join("account-catalog.pb").exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn local_inspection_requires_manifest_hashes_and_provenance_before_identity() {
-        let root = test_root("new");
-        let _ = fs::remove_dir_all(&root);
-        let control = root.join("control");
-        let runtime = root.join("runtime");
-        fs::create_dir_all(&control).unwrap();
-        fs::create_dir_all(&runtime).unwrap();
-        let empty = inspect_installation_paths(&control, &runtime);
-        assert_eq!(empty["state"], "BLOCKED_RELEASE_FILES_MISSING");
-
-        for p in [
-            control.join("okx-host-control.exe"),
-            control.join("okx-host-launcher.exe"),
-            runtime.join("okx-agent.exe"),
-            runtime.join("account-catalog.pb"),
-        ] {
-            fs::write(p, b"synthetic-test-only").unwrap();
-        }
-        let no_manifest = inspect_installation_paths(&control, &runtime);
-        assert_eq!(no_manifest["state"], "BLOCKED_RELEASE_NOT_VERIFIED");
-        assert_eq!(no_manifest["trading_permission"], "NEW_RISK_BLOCKED");
-
-        let hash = okx_host_launcher::sha256_file(&runtime.join("okx-agent.exe")).unwrap();
-        let controller_hash =
-            okx_host_launcher::sha256_file(&control.join("okx-host-control.exe")).unwrap();
-        let launcher_hash =
-            okx_host_launcher::sha256_file(&control.join("okx-host-launcher.exe")).unwrap();
-        fs::write(
-            control.join("manifest.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "schema": "okx.windows.bundle/v1",
-                "repository_id": okx_host_launcher::REPOSITORY_ID,
-                "source_tree": "a".repeat(40),
-                "source_head_sha": "b".repeat(40),
-                "files": {
-                    "okx-agent.exe": { "sha256": hash },
-                    "okx-host-control.exe": { "sha256": controller_hash },
-                    "okx-host-launcher.exe": { "sha256": launcher_hash }
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let without_provenance = inspect_installation_paths(&control, &runtime);
-        assert_eq!(without_provenance["state"], "BLOCKED_AGENT_PROVENANCE");
-        let provenance = InstalledAgentProvenance::verified(
-            1,
-            1,
-            "b".repeat(40),
-            "a".repeat(40),
-            "test-rust".into(),
-            hash,
-        );
-        InstalledAgentProvenanceStore::at(runtime.join("installed-agent.json"))
-            .save(&provenance)
-            .unwrap();
-        let present = inspect_installation_paths(&control, &runtime);
-        assert_eq!(present["state"], "IDENTITY_FILE_PRESENT_NOT_VERIFIED");
-        assert_eq!(
-            present["local_release_integrity"],
-            "LOCAL_HASHES_MATCH_NOT_REMOTE_ATTESTED"
-        );
-        assert_eq!(present["central_risk"], "UNKNOWN");
-        let wrong_release = InstalledAgentProvenance::verified(
-            1,
-            1,
-            "c".repeat(40),
-            "a".repeat(40),
-            "test-rust".into(),
-            okx_host_launcher::sha256_file(&runtime.join("okx-agent.exe")).unwrap(),
-        );
-        InstalledAgentProvenanceStore::at(runtime.join("installed-agent.json"))
-            .save(&wrong_release)
-            .unwrap();
-        let wrong_identity = inspect_installation_paths(&control, &runtime);
-        assert_eq!(wrong_identity["state"], "BLOCKED_AGENT_PROVENANCE");
-        fs::write(runtime.join("okx-agent.exe"), b"tampered").unwrap();
-        let bad = inspect_installation_paths(&control, &runtime);
-        assert_eq!(bad["state"], "BLOCKED_RELEASE_NOT_VERIFIED");
-        fs::remove_dir_all(root).unwrap();
-    }
 }
