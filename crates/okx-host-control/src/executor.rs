@@ -1614,6 +1614,158 @@ pub fn install_current_executable(destination: &Path) -> HostControlResult<Value
     }))
 }
 
+
+fn write_verified_recovery_copy(
+    source: &Path,
+    target: &Path,
+    expected_sha256: &str,
+) -> HostControlResult<()> {
+    match fs::symlink_metadata(target) {
+        Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() => {
+            return Err(HostControlError::InvalidExecutionPath);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // A crash may leave an incomplete file at this dedicated staging path.
+    // Rewriting this file cannot mutate installed controller or account data.
+    let mut output = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(target)?;
+    let mut input = File::open(source)?;
+    std::io::copy(&mut input, &mut output)?;
+    output.sync_all()?;
+    drop(output);
+    if okx_host_launcher::sha256_file(target)? != expected_sha256 {
+        return Err(HostControlError::ControllerUpdateHashMismatch);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_recovery_entrypoint(staged: &Path, installed: &Path) -> HostControlResult<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<u16>>()
+    };
+    let source = wide(staged);
+    let destination = wide(installed);
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_recovery_entrypoint(staged: &Path, installed: &Path) -> HostControlResult<()> {
+    fs::rename(staged, installed)?;
+    Ok(())
+}
+
+/// Recover an existing stopped, launcher-less CONTROL with the existing
+/// native installer. The caller must attest the source against accepted main.
+/// The exact old SHA is mandatory; previous bytes are kept for rollback.
+pub fn recover_existing_controller(
+    destination: &Path,
+    expected_old_sha256: &str,
+) -> HostControlResult<Value> {
+    if expected_old_sha256.len() != 64
+        || !expected_old_sha256
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(HostControlError::ControllerUpdateStateInvalid);
+    }
+    let source = std::env::current_exe()?;
+    let new_sha = okx_host_launcher::sha256_file(&source)?;
+    if new_sha == expected_old_sha256 {
+        return Err(HostControlError::ControllerUpdateStateInvalid);
+    }
+    let parent = destination
+        .parent()
+        .ok_or(HostControlError::InvalidExecutionPath)?;
+    let parent_meta = fs::symlink_metadata(parent)?;
+    if !parent_meta.is_dir() || parent_meta.file_type().is_symlink() {
+        return Err(HostControlError::InvalidExecutionPath);
+    }
+    let meta = fs::symlink_metadata(destination)?;
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err(HostControlError::InvalidExecutionPath);
+    }
+    let installed_sha = okx_host_launcher::sha256_file(destination)?;
+    let previous = PathBuf::from(format!("{}.previous", destination.display()));
+    let candidate = PathBuf::from(format!("{}.recovery-new", destination.display()));
+    let backup_stage = PathBuf::from(format!("{}.previous.recovery-new", destination.display()));
+
+    // A previous backup from a different release must never be overwritten.
+    match fs::symlink_metadata(&previous) {
+        Ok(meta) => {
+            if !meta.is_file()
+                || meta.file_type().is_symlink()
+                || okx_host_launcher::sha256_file(&previous)? != expected_old_sha256
+            {
+                return Err(HostControlError::ControllerUpdateConflict);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if installed_sha == new_sha {
+        if !previous.is_file() {
+            return Err(HostControlError::ControllerUpdateStateInvalid);
+        }
+        return Ok(json!({
+            "installed": true,
+            "disposition": "EXISTING_RECOVERED",
+            "destination": destination,
+            "sha256": new_sha,
+            "previous_sha256": expected_old_sha256
+        }));
+    }
+    if installed_sha != expected_old_sha256 {
+        return Err(HostControlError::ControllerUpdateHashMismatch);
+    }
+
+    // Backup must be durable before the single atomic installed-file switch.
+    if !previous.exists() {
+        write_verified_recovery_copy(destination, &backup_stage, expected_old_sha256)?;
+        fs::rename(&backup_stage, &previous)?;
+    }
+    write_verified_recovery_copy(&source, &candidate, &new_sha)?;
+    if okx_host_launcher::sha256_file(destination)? != expected_old_sha256 {
+        return Err(HostControlError::ControllerUpdateHashMismatch);
+    }
+    replace_recovery_entrypoint(&candidate, destination)?;
+    if okx_host_launcher::sha256_file(destination)? != new_sha {
+        return Err(HostControlError::ControllerUpdateHashMismatch);
+    }
+    Ok(json!({
+        "installed": true,
+        "disposition": "RECOVERED_LEGACY_CONTROLLER",
+        "destination": destination,
+        "sha256": new_sha,
+        "previous_sha256": expected_old_sha256,
+        "scheduler_changed": false,
+        "agent_started": false
+    }))
+}
+
 /// Git is a verification tool, not a separate transport authority. Its origin/main
 /// HTTPS reads must stay direct even when the Windows operator shell is proxied.
 /// Keep the override process-local; never modify user or system Git configuration.

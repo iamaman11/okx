@@ -8,7 +8,7 @@ use okx_github::GitHubClient;
 use okx_host_control::{
     HostControlResult,
     auth::{load_native_github_token, store_native_github_token},
-    executor::{HostExecutor, install_current_executable},
+    executor::{HostExecutor, install_current_executable, recover_existing_controller},
     legacy_bootstrap, root_migration,
     runtime::{DEFAULT_CONTROL_POLL_SECONDS, process_pending, run_until_shutdown},
     single_instance::SingleInstanceGuard,
@@ -36,7 +36,11 @@ enum Command {
     },
 
     /// Copy this trusted binary outside the optional C:\okx\workspace worktree.
-    Install,
+    Install {
+        /// SHA-256 of a stopped legacy CONTROL, for accepted-main recovery only.
+        #[arg(long)]
+        recover_existing_sha256: Option<String>,
+    },
 
     /// Store the GitHub control token from stdin in Windows Credential Manager.
     SetGithubToken,
@@ -86,11 +90,21 @@ async fn run(cli: Cli) -> HostControlResult<()> {
             let receipt = inspect_installation_paths(&control, &runtime);
             println!("{}", serde_json::to_string_pretty(&receipt)?);
         }
-        Command::Install => {
-            if Path::new(okx_host_launcher::ACTIVE_PATH).exists() {
+        Command::Install {
+            recover_existing_sha256,
+        } => {
+            if Path::new(okx_host_launcher::ACTIVE_PATH).exists()
+                || Path::new(okx_host_launcher::LAUNCHER_PATH).exists()
+            {
                 return Err(okx_host_control::HostControlError::LegacyBootstrapDisabled);
             }
-            let result = install_current_executable(&PathBuf::from(INSTALL_PATH))?;
+            let destination = PathBuf::from(INSTALL_PATH);
+            let result = if let Some(previous) = recover_existing_sha256.as_deref() {
+                let _guard = SingleInstanceGuard::acquire()?;
+                recover_existing_controller(&destination, previous)?
+            } else {
+                install_current_executable(&destination)?
+            };
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::SetGithubToken => {
