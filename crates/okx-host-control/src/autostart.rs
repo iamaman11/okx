@@ -318,11 +318,7 @@ mod tests {
             okx_host_launcher::CONTROL_ROOT,
         );
         assert!(task_settings_enabled(&xml));
-        let disabled = xml.replacen(
-            "<Settings>\n    <MultipleInstancesPolicy>",
-            "<Settings>\n    <MultipleInstancesPolicy>",
-            1,
-        ).replace(
+        let disabled = xml.replace(
             "    <Enabled>true</Enabled>\n    <Hidden>false</Hidden>",
             "    <Enabled>false</Enabled>\n    <Hidden>false</Hidden>",
         );

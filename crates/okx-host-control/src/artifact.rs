@@ -550,6 +550,55 @@ mod tests {
             controller_sha256: controller_hash.clone(),
         };
 
+        // Simulate the existing older CONTROL without modifying the fixture:
+        // a mismatched installed entrypoint must be rejected before any write.
+        assert!(require_current_entrypoint(&"0".repeat(64)).is_err());
+        assert_eq!(
+            okx_host_launcher::sha256_file(&entrypoint).unwrap(),
+            controller_hash
+        );
+        assert!(!Path::new(okx_host_launcher::LAUNCHER_PATH).exists());
+
+        // A conflicting persisted manifest is a pre-write rejection.
+        let manifest_path = control_root.join("manifest.json");
+        fs::write(&manifest_path, b"{}").expect("fixture conflicting manifest");
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        assert!(preflight_verified_manifest(&manifest).is_err());
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+        assert!(!Path::new(okx_host_launcher::LAUNCHER_PATH).exists());
+        fs::remove_file(&manifest_path).expect("remove only CI fixture manifest");
+        preflight_verified_manifest(&manifest).expect("clean root is compatible");
+
+        // A conflicting active-controller pointer must not cause the Launcher
+        // binary or version files to be written before refusal.
+        let mut alternate = active.clone();
+        alternate.controller_sha256 = "0".repeat(64);
+        let active_path = Path::new(okx_host_launcher::ACTIVE_PATH);
+        fs::write(
+            active_path,
+            serde_json::to_vec(&json!({
+                "schema": "okx.host-launcher.active/v1",
+                "repository_id": REPOSITORY_ID,
+                "active": alternate,
+                "previous": null
+            }))
+            .unwrap(),
+        )
+        .expect("fixture conflicting active pointer");
+        let active_before = fs::read(active_path).unwrap();
+        assert!(
+            okx_host_launcher::install_root(
+                &launcher_bytes,
+                &launcher_hash,
+                active.clone(),
+                &control_bytes
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(active_path).unwrap(), active_before);
+        assert!(!Path::new(okx_host_launcher::LAUNCHER_PATH).exists());
+        fs::remove_file(active_path).expect("remove only CI fixture pointer");
+
         let mut corrupt_launcher = launcher_bytes.clone();
         corrupt_launcher[0] ^= 1;
         assert!(
