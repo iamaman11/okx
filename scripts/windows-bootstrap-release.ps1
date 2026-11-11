@@ -1,11 +1,14 @@
 # Recover a missing or stopped legacy CONTROL via one accepted main ReleaseSet.
 # PowerShell 7. No Agent start, SQL access, credential read or trading.
-# Usage: pwsh -NoProfile -File .\scripts\windows-bootstrap-release.ps1 -MainSha <accepted-full-main-sha>
+# Usage: pwsh -NoProfile -File .\scripts\windows-bootstrap-release.ps1 -MainSha <accepted-full-main-sha> [-ExpectedLegacyControlSha256 <independently-verified-old-sha>]
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [ValidatePattern('^[0-9a-f]{40}$')]
-    [string]$MainSha
+    [string]$MainSha,
+
+    [ValidatePattern('^[0-9a-f]{64}$')]
+    [string]$ExpectedLegacyControlSha256
 )
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'Windows only.' }
@@ -167,6 +170,11 @@ try {
         Assert-Sha256 $previousManifest $existingHash
     }
     $controllerHash = [string]$manifest.files.PSObject.Properties['okx-host-control.exe'].Value.sha256
+    # Explicit old-SHA authorization prevents adopting an unknown executable.
+    if ($entrypointExists -and $previousEntrypointHash -cne $controllerHash -and
+        $previousEntrypointHash -cne $ExpectedLegacyControlSha256) {
+        throw 'Legacy CONTROL SHA is not independently authorized for recovery.'
+    }
     $native = Join-Path $extract 'okx-host-control.exe'
     if ($entrypointExists) {
         $freshHash = (Get-FileHash -LiteralPath $entrypoint -Algorithm SHA256).Hash.ToLowerInvariant()
