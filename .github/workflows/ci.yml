@@ -285,7 +285,7 @@ jobs:
   linux:
     name: linux-core
     needs: [classify, architecture, linux-rust, cloudflare-mcp]
-    if: always() && github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/work/t10-07-one-campaign-native-20261105'
+    if: always() && github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/work/t10-07-one-campaign-native-20261105' && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate required Linux, architecture and Cloudflare gates
