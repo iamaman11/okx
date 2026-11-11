@@ -415,4 +415,215 @@ mod tests {
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
     }
+    // Run ONLY on a brand-new GitHub-hosted Windows runner after the real
+    // CONTROL bootstrap and exact bundle download. This exercises existing
+    // production owners; it is not a GitHub accepted-main attestation and
+    // cannot run against a user's installed Windows host.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "CI-only destructive fixture rooted at pristine C:\\okx"]
+    fn ci_native_release_install_uses_real_agent_and_launcher_owners() {
+        use std::{path::PathBuf, process::Command};
+
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        assert_eq!(std::env::var("CI").as_deref(), Ok("true"));
+        let bundle_root = PathBuf::from(
+            std::env::var("OKX_CI_BUNDLE_ROOT").expect("explicit CI bundle root"),
+        );
+        let head = std::env::var("OKX_CI_EXPECTED_HEAD").expect("CI source head");
+        let tree = std::env::var("OKX_CI_EXPECTED_TREE").expect("CI source tree");
+        let run_id: u64 = std::env::var("GITHUB_RUN_ID")
+            .expect("GitHub workflow run")
+            .parse()
+            .expect("numeric workflow run");
+        let artifact_id: u64 = std::env::var("OKX_CI_ARTIFACT_ID")
+            .expect("real uploaded bundle artifact ID")
+            .parse()
+            .expect("numeric artifact ID");
+        assert!(run_id > 0 && artifact_id > 0);
+        let manifest_bytes = fs::read(bundle_root.join("manifest.json")).expect("manifest");
+        let manifest: BundleManifest =
+            serde_json::from_slice(&manifest_bytes).expect("typed bundle manifest");
+        assert_eq!(manifest.schema, BUNDLE_SCHEMA_V1);
+        assert_eq!(manifest.repository_id, REPOSITORY_ID);
+        assert_eq!(manifest.source_head_sha, head);
+        assert_eq!(manifest.source_tree, tree);
+
+        let agent_bytes = fs::read(bundle_root.join("okx-agent.exe")).expect("Agent");
+        let control_bytes =
+            fs::read(bundle_root.join("okx-host-control.exe")).expect("CONTROL");
+        let launcher_bytes =
+            fs::read(bundle_root.join("okx-host-launcher.exe")).expect("Launcher");
+        for (name, binary) in [
+            ("okx-agent.exe", &agent_bytes),
+            ("okx-host-control.exe", &control_bytes),
+            ("okx-host-launcher.exe", &launcher_bytes),
+        ] {
+            assert_eq!(
+                sha256_hex(binary),
+                declared_hash(&manifest, name).expect("declared hash"),
+                "{name} must match this exact CI bundle"
+            );
+        }
+
+        let control_root = Path::new(okx_host_launcher::CONTROL_ROOT);
+        let runtime_root = Path::new(okx_host_launcher::RUNTIME_ROOT);
+        let entrypoint = control_root.join("okx-host-control.exe");
+        assert!(control_root.is_dir(), "preceding native CONTROL install required");
+        assert!(!runtime_root.exists(), "never adopt an unknown runtime");
+        assert_eq!(
+            okx_host_launcher::sha256_file(&entrypoint).expect("native entrypoint"),
+            sha256_hex(&control_bytes)
+        );
+        let control_entries = fs::read_dir(control_root)
+            .expect("control root")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            control_entries,
+            vec![std::ffi::OsString::from("okx-host-control.exe")],
+            "only the native CONTROL bootstrap may precede this test"
+        );
+
+        let controller_hash = sha256_hex(&control_bytes);
+        let launcher_hash = sha256_hex(&launcher_bytes);
+        let active = ControllerVersion {
+            repository_id: REPOSITORY_ID,
+            run_id,
+            artifact_id,
+            source_head_sha: head.clone(),
+            source_tree: tree.clone(),
+            rust_version: manifest.rust_version.clone(),
+            controller_sha256: controller_hash.clone(),
+        };
+
+        let mut corrupt_launcher = launcher_bytes.clone();
+        corrupt_launcher[0] ^= 1;
+        assert!(
+            okx_host_launcher::install_root(
+                &corrupt_launcher,
+                &launcher_hash,
+                active.clone(),
+                &control_bytes
+            )
+            .is_err(),
+            "invalid launcher must fail before creating the root"
+        );
+
+        let installed = okx_host_launcher::install_root(
+            &launcher_bytes,
+            &launcher_hash,
+            active.clone(),
+            &control_bytes,
+        )
+        .expect("real Launcher root installation");
+        assert_eq!(installed["installed"], true);
+        let retried = okx_host_launcher::install_root(
+            &launcher_bytes,
+            &launcher_hash,
+            active,
+            &control_bytes,
+        )
+        .expect("exact Launcher root retry");
+        assert_eq!(retried["installed"], true);
+        let migrated =
+            okx_host_launcher::install_launcher_entrypoint(&launcher_hash, &controller_hash)
+                .expect("native launcher entrypoint");
+        assert_eq!(migrated["installed"], true);
+        let entrypoint_retry =
+            okx_host_launcher::install_launcher_entrypoint(&launcher_hash, &controller_hash)
+                .expect("exact entrypoint retry");
+        assert_eq!(entrypoint_retry["disposition"], "EXISTING");
+        let launcher_status = okx_host_launcher::status_value();
+        assert_eq!(launcher_status["active"]["state"], "READY");
+        assert_eq!(launcher_status["active"]["value"]["active"]["source_tree"], tree);
+        assert_eq!(launcher_status["entrypoint_is_launcher"], true);
+
+        let mut executor = HostExecutor::canonical().expect("existing native owner");
+        executor
+            .install_verified_agent(&agent_bytes)
+            .expect("real Agent deployment owner");
+        let agent_path = runtime_root.join("okx-agent.exe");
+        assert_eq!(
+            okx_host_launcher::sha256_file(&agent_path).expect("installed Agent hash"),
+            sha256_hex(&agent_bytes)
+        );
+        InstalledAgentProvenanceStore::canonical()
+            .save(&InstalledAgentProvenance::verified(
+                run_id,
+                artifact_id,
+                head,
+                tree.clone(),
+                manifest.rust_version.clone(),
+                sha256_hex(&agent_bytes),
+            ))
+            .expect("persist actual CI identity, NOT accepted-main attestation");
+        persist_verified_manifest(&manifest).expect("matching local release manifest");
+        persist_verified_manifest(&manifest).expect("exact manifest retry");
+
+        let inspect = || {
+            let output = Command::new(bundle_root.join("okx-host-control.exe"))
+                .arg("inspect")
+                .output()
+                .expect("offline CONTROL inspect");
+            assert!(output.status.success(), "inspect must stay offline");
+            serde_json::from_slice::<Value>(&output.stdout).expect("typed inspection")
+        };
+        let before = inspect();
+        assert_eq!(before["state"], "UNINITIALIZED_LOCAL_IDENTITY");
+        assert_eq!(before["local_release_integrity"], "LOCAL_HASHES_MATCH_NOT_REMOTE_ATTESTED");
+        assert_eq!(before["central_risk"], "UNKNOWN");
+        assert_eq!(before["trading_permission"], "NEW_RISK_BLOCKED");
+
+        let initialize = || {
+            let output = Command::new(&agent_path)
+                .args([
+                    "--root",
+                    okx_host_launcher::RUNTIME_ROOT,
+                    "initialize-installation",
+                    "--installation-id",
+                    "ci-clean-installation-01",
+                    "--expected-release",
+                    tree.as_str(),
+                    "--operation-id",
+                    "ci-clean-install-operation-01",
+                ])
+                .output()
+                .expect("native Agent initialization");
+            assert!(
+                output.status.success(),
+                "native Agent refused fixture genesis: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice::<Value>(&output.stdout).expect("native Agent receipt")
+        };
+        let genesis = initialize();
+        assert_eq!(genesis["status"], "completed");
+        assert_eq!(genesis["release"], tree);
+        let catalog = runtime_root.join("account-catalog.pb");
+        let catalog_before = fs::read(&catalog).expect("durable catalog");
+        assert_eq!(initialize(), genesis, "genesis exact retry");
+        assert_eq!(fs::read(catalog).unwrap(), catalog_before);
+        let after = inspect();
+        assert_eq!(after["state"], "IDENTITY_FILE_PRESENT_NOT_VERIFIED");
+        assert_eq!(after["central_risk"], "UNKNOWN");
+        assert_eq!(after["trading_permission"], "NEW_RISK_BLOCKED");
+        assert_eq!(after["safe_start"], "READ_ONLY_INSPECTION_ONLY");
+
+        println!(
+            "CI_NATIVE_RELEASE_INSTALL_V1:{}",
+            serde_json::json!({
+                "source_tree": tree,
+                "agent": "INSTALLED_NATIVE_OWNER",
+                "launcher": "INSTALLED_NATIVE_OWNER",
+                "controller_entrypoint": "IMMUTABLE_LAUNCHER",
+                "exact_retry": "PASS",
+                "identity_genesis": "PASS",
+                "risk": "UNKNOWN_BLOCKED",
+                "trading": "NOT_STARTED",
+                "trust": "CI_ARTIFACT_ONLY_NOT_ACCEPTED_MAIN"
+            })
+        );
+    }
 }
+
