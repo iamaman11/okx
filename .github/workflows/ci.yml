@@ -300,6 +300,8 @@ jobs:
     needs: classify
     if: needs.classify.outputs.build_required == 'true'
     runs-on: windows-latest
+    outputs:
+      bundle_artifact_id: ${{ steps.published_bundle.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -434,6 +436,7 @@ jobs:
             -SourceTree $sourceTree
 
       - name: Upload deployable Windows bundle
+        id: published_bundle
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -531,10 +534,17 @@ jobs:
     # failed before uploading, download-artifact fails explicitly.
     if: always() && github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true' && (needs.windows-agent.result == 'success' || needs.windows-agent.result == 'failure')
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.95.0
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
 
       - uses: actions/download-artifact@v4
         with:
@@ -553,6 +563,27 @@ jobs:
             -BundleDirectory (Join-Path $env:RUNNER_TEMP 'okx-bootstrap-bundle') `
             -ExpectedHead $head `
             -ExpectedTree $tree
+
+      # CI-only Rust entrypoint calls the existing production installation
+      # owners. A PR artifact does NOT replace accepted-main verification.
+      - name: Native Agent and Launcher install, exact retry and blocked risk
+        shell: pwsh
+        env:
+          OKX_CI_BUNDLE_ROOT: ${{ runner.temp }}/okx-bootstrap-bundle
+          OKX_CI_ARTIFACT_ID: ${{ needs.windows-agent.outputs.bundle_artifact_id }}
+          OKX_CI_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if ($env:OKX_CI_ARTIFACT_ID -notmatch '^[1-9][0-9]*$') {
+            throw 'CI_NATIVE_RELEASE_ARTIFACT_ID_MISSING'
+          }
+          $env:OKX_CI_EXPECTED_TREE = (git rev-parse 'HEAD^{tree}').Trim()
+          $output = & cargo test --locked -p okx-host-control --lib artifact::tests::ci_native_release_install_uses_real_agent_and_launcher_owners -- --ignored --exact --nocapture 2>&1
+          $exitCode = $LASTEXITCODE
+          $output | Out-Host
+          if ($exitCode -ne 0) { throw 'CI_NATIVE_RELEASE_INSTALL_FAILED' }
+          if (($output -join "`n") -notmatch 'CI_NATIVE_RELEASE_INSTALL_V1:') {
+            throw 'CI_NATIVE_RELEASE_INSTALL_EVIDENCE_MISSING'
+          }
 
   windows-t09-preflight:
     name: windows-t09-b1-s2-targeted
