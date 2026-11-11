@@ -815,6 +815,15 @@ impl HostExecutor {
     }
 
     pub fn install_verified_agent(&mut self, bytes: &[u8]) -> HostControlResult<()> {
+        let current = self.agent_binary();
+        let expected_hash = okx_host_launcher::sha256_bytes(bytes);
+
+        // Exact retry must not interrupt an already running Agent, replace
+        // its durable backup, or publish a new partially staged executable.
+        if current.is_file() && okx_host_launcher::sha256_file(&current)? == expected_hash {
+            return Ok(());
+        }
+
         let should_restore = self.desired_agent == AgentDesired::Running;
         let running = self.agent_is_running()?;
         if running {
@@ -823,16 +832,26 @@ impl HostExecutor {
 
         fs::create_dir_all(self.runtime_dir())?;
 
-        let current = self.agent_binary();
         let staging = self.runtime_dir().join("okx-agent.exe.new");
         let backup = self.runtime_dir().join("okx-agent.exe.previous");
 
-        fs::write(&staging, bytes)?;
-
-        if backup.exists() {
-            fs::remove_file(&backup)?;
+        // Persist and verify the candidate BEFORE changing any last-known
+        // executable. This is still the existing production install owner.
+        let mut staged = File::create(&staging)?;
+        staged.write_all(bytes)?;
+        staged.sync_all()?;
+        drop(staged);
+        if okx_host_launcher::sha256_file(&staging)? != expected_hash {
+            return Err(HostControlError::ArtifactHashMismatch);
         }
+
         if current.exists() {
+            // Only discard an older backup while a known current binary still
+            // exists. If a crash has already moved current -> backup, that
+            // backup is the sole recoverable executable and must survive.
+            if backup.exists() {
+                fs::remove_file(&backup)?;
+            }
             fs::rename(&current, &backup)?;
         }
 
@@ -841,6 +860,10 @@ impl HostExecutor {
                 let _ = fs::rename(&backup, &current);
             }
             return Err(error.into());
+        }
+
+        if okx_host_launcher::sha256_file(&current)? != expected_hash {
+            return Err(HostControlError::ArtifactHashMismatch);
         }
 
         if should_restore && let Err(error) = self.start_agent_process() {
