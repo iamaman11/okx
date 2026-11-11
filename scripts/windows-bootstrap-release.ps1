@@ -149,7 +149,7 @@ try {
     }
     # Check both conflicting provenance files BEFORE altering the binary.
     $installedManifest = 'C:\okx\control\manifest.json'
-    $previousManifest = 'C:\okx\control\manifest.json.previous'
+    $previousManifest = 'C:\okx\control\manifest.json.recovery-previous'
     $manifestHash = Get-ExpectedChecksum $checksums 'manifest.json'
     $existingHash = $null
     if (Test-Path -LiteralPath $installedManifest) {

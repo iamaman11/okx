@@ -1708,11 +1708,12 @@ pub fn recover_existing_controller(
         return Err(HostControlError::InvalidExecutionPath);
     }
     let installed_sha = okx_host_launcher::sha256_file(destination)?;
-    let previous = PathBuf::from(format!("{}.previous", destination.display()));
+    let previous = PathBuf::from(format!("{}.recovery-previous", destination.display()));
     let candidate = PathBuf::from(format!("{}.recovery-new", destination.display()));
-    let backup_stage = PathBuf::from(format!("{}.previous.recovery-new", destination.display()));
+    let backup_stage = PathBuf::from(format!("{}.recovery-previous.staging", destination.display()));
 
-    // A previous backup from a different release must never be overwritten.
+    // This dedicated recovery backup must never overwrite any existing
+    // .previous file used by the normal Controller update/rollback owner.
     match fs::symlink_metadata(&previous) {
         Ok(meta) => {
             if !meta.is_file()
@@ -1862,7 +1863,7 @@ mod tests {
         assert!(recover_existing_controller(&entrypoint, &"0".repeat(64)).is_err());
         assert_eq!(fs::read(&entrypoint).unwrap(), old_bytes);
 
-        let previous = PathBuf::from(format!("{}.previous", entrypoint.display()));
+        let previous = PathBuf::from(format!("{}.recovery-previous", entrypoint.display()));
         fs::write(&previous, b"unrelated previous release").unwrap();
         assert!(recover_existing_controller(&entrypoint, &old_hash).is_err());
         assert_eq!(fs::read(&entrypoint).unwrap(), old_bytes);
@@ -1870,7 +1871,7 @@ mod tests {
 
         fs::write(format!("{}.recovery-new", entrypoint.display()), b"partial").unwrap();
         fs::write(
-            format!("{}.previous.recovery-new", entrypoint.display()),
+            format!("{}.recovery-previous.staging", entrypoint.display()),
             b"partial",
         )
         .unwrap();

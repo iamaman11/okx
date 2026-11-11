@@ -92,7 +92,7 @@ if ($LASTEXITCODE -eq 0 -or
 }
 # Interrupted staging must not damage installed bytes or defeat safe retry.
 [IO.File]::WriteAllBytes("$entrypoint.recovery-new", [byte[]](1..16))
-[IO.File]::WriteAllBytes("$entrypoint.previous.recovery-new", [byte[]](1..16))
+[IO.File]::WriteAllBytes("$entrypoint.recovery-previous.staging", [byte[]](1..16))
 $restored = & $controller install --recover-existing-sha256 $oldHash | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $restored.disposition -cne 'RECOVERED_LEGACY_CONTROLLER') {
     throw 'CI_BOOTSTRAP_NATIVE_LEGACY_RECOVERY_FAILED'
@@ -100,7 +100,7 @@ if ($LASTEXITCODE -ne 0 -or $restored.disposition -cne 'RECOVERED_LEGACY_CONTROL
 if ((Get-FileHash -LiteralPath $entrypoint -Algorithm SHA256).Hash.ToLowerInvariant() -cne $controllerHash) {
     throw 'CI_BOOTSTRAP_RECOVERED_HASH_MISMATCH'
 }
-$previous = "$entrypoint.previous"
+$previous = "$entrypoint.recovery-previous"
 if ((Get-FileHash -LiteralPath $previous -Algorithm SHA256).Hash.ToLowerInvariant() -cne $oldHash) {
     throw 'CI_BOOTSTRAP_LEGACY_BACKUP_MISSING'
 }
