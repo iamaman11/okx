@@ -293,7 +293,9 @@ async fn fetch_pending_control(github: &GitHubClient) -> LocalResult<PendingCont
             .issue_comments_after(CONTROL_ISSUE_NUMBER, checkpoint.cursor.as_ref())
             .await?
     } else {
-        let history = github.issue_comments(CONTROL_ISSUE_NUMBER).await?;
+        let history = github
+            .issue_comments_for_bootstrap(CONTROL_ISSUE_NUMBER)
+            .await?;
         checkpoint
             .terminal_request_ids
             .extend(control_terminal_request_ids(&history));
