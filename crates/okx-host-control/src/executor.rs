@@ -1614,7 +1614,6 @@ pub fn install_current_executable(destination: &Path) -> HostControlResult<Value
     }))
 }
 
-
 fn write_verified_recovery_copy(
     source: &Path,
     target: &Path,
@@ -1843,6 +1842,51 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn legacy_controller_recovery_preserves_backup_and_retries_after_staging_crash() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "okx-control-recovery-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("private fixture");
+        let entrypoint = root.join("okx-host-control.exe");
+        let old_bytes = b"stopped historical controller fixture";
+        fs::write(&entrypoint, old_bytes).expect("old fixture");
+        let old_hash = okx_host_launcher::sha256_file(&entrypoint).unwrap();
+        assert!(recover_existing_controller(&entrypoint, &"0".repeat(64)).is_err());
+        assert_eq!(fs::read(&entrypoint).unwrap(), old_bytes);
+
+        let previous = PathBuf::from(format!("{}.previous", entrypoint.display()));
+        fs::write(&previous, b"unrelated previous release").unwrap();
+        assert!(recover_existing_controller(&entrypoint, &old_hash).is_err());
+        assert_eq!(fs::read(&entrypoint).unwrap(), old_bytes);
+        fs::remove_file(&previous).unwrap();
+
+        fs::write(format!("{}.recovery-new", entrypoint.display()), b"partial").unwrap();
+        fs::write(
+            format!("{}.previous.recovery-new", entrypoint.display()),
+            b"partial",
+        )
+        .unwrap();
+        let repaired = recover_existing_controller(&entrypoint, &old_hash).unwrap();
+        assert_eq!(repaired["disposition"], "RECOVERED_LEGACY_CONTROLLER");
+        assert_eq!(fs::read(&previous).unwrap(), old_bytes);
+        let current_hash =
+            okx_host_launcher::sha256_file(&std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(
+            okx_host_launcher::sha256_file(&entrypoint).unwrap(),
+            current_hash
+        );
+        let repeated = recover_existing_controller(&entrypoint, &old_hash).unwrap();
+        assert_eq!(repeated["disposition"], "EXISTING_RECOVERED");
+        assert_eq!(fs::read(&previous).unwrap(), old_bytes);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
