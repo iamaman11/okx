@@ -1,4 +1,4 @@
-# One-time recovery of a missing CONTROL entrypoint from an accepted main release.
+# Recover a missing or stopped legacy CONTROL via one accepted main ReleaseSet.
 # PowerShell 7. No Agent start, SQL access, credential read or trading.
 # Usage: pwsh -NoProfile -File .\scripts\windows-bootstrap-release.ps1 -MainSha <accepted-full-main-sha>
 [CmdletBinding()]
@@ -43,7 +43,15 @@ Assert-PlainDirectory 'C:\okx'
 Assert-PlainDirectory 'C:\okx\control'
 if (Test-Path -LiteralPath 'C:\okx\.git') { throw 'Product root is still a checkout.' }
 $entrypoint = 'C:\okx\control\okx-host-control.exe'
-if (Test-Path -LiteralPath $entrypoint) { throw 'Entrypoint exists; refusing overwrite.' }
+$entrypointExists = Test-Path -LiteralPath $entrypoint
+$previousEntrypointHash = $null
+if ($entrypointExists) {
+    $item = Get-Item -LiteralPath $entrypoint -Force
+    if ($item.PSIsContainer -or $item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'Existing CONTROL entrypoint is not a plain file.'
+    }
+    $previousEntrypointHash = (Get-FileHash -LiteralPath $entrypoint -Algorithm SHA256).Hash.ToLowerInvariant()
+}
 if (Test-Path -LiteralPath 'C:\okx\control\active-controller.json') {
     throw 'Active launcher root exists; use native update/rollback instead.'
 }
@@ -130,33 +138,74 @@ try {
     }
     $task = Get-ScheduledTask -TaskName 'iamaman11-okx-host-control' -ErrorAction SilentlyContinue
     if ($null -ne $task -and [string]$task.State -ne 'Disabled') { throw 'Scheduler state changed during verification.' }
-    if ($freshMain.commit.sha -cne $MainSha -or (Test-Path -LiteralPath $entrypoint) -or
+    if ($freshMain.commit.sha -cne $MainSha -or
+        (Test-Path -LiteralPath $entrypoint) -ne $entrypointExists -or
         (Test-Path -LiteralPath 'C:\okx\control\active-controller.json') -or
         (Test-Path -LiteralPath 'C:\okx-control') -or (Test-Path -LiteralPath 'C:\okx-runtime')) {
         throw 'Main or local installation state changed; refusing install.'
     }
-    # The installed offline inspector requires the same independently
-    # verified manifest. Preserve it; never overwrite a conflicting manifest.
-    # It is local provenance evidence, not a second remote trust authority.
+    # Check both conflicting provenance files BEFORE altering the binary.
     $installedManifest = 'C:\okx\control\manifest.json'
+    $previousManifest = 'C:\okx\control\manifest.json.previous'
     $manifestHash = Get-ExpectedChecksum $checksums 'manifest.json'
+    $existingHash = $null
     if (Test-Path -LiteralPath $installedManifest) {
         $existingManifest = Get-Item -LiteralPath $installedManifest -Force
         if ($existingManifest.PSIsContainer -or
             $existingManifest.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw 'Existing release manifest is not a plain file.'
         }
-        Assert-Sha256 $installedManifest $manifestHash
-    } else {
-        [IO.File]::Copy((Join-Path $extract 'manifest.json'), $installedManifest, $false)
-        Assert-Sha256 $installedManifest $manifestHash
+        $existingHash = (Get-FileHash -LiteralPath $installedManifest -Algorithm SHA256).Hash.ToLowerInvariant()
     }
-
-    $native = Join-Path $extract 'okx-host-control.exe'
-    & $native install
-    if ($LASTEXITCODE -ne 0) { throw 'Existing native install failed.' }
+    if ($existingHash -and $existingHash -cne $manifestHash -and
+        (Test-Path -LiteralPath $previousManifest)) {
+        $previousItem = Get-Item -LiteralPath $previousManifest -Force
+        if ($previousItem.PSIsContainer -or
+            $previousItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Existing manifest backup is not a plain file.'
+        }
+        Assert-Sha256 $previousManifest $existingHash
+    }
     $controllerHash = [string]$manifest.files.PSObject.Properties['okx-host-control.exe'].Value.sha256
+    $native = Join-Path $extract 'okx-host-control.exe'
+    if ($entrypointExists) {
+        $freshHash = (Get-FileHash -LiteralPath $entrypoint -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($freshHash -cne $previousEntrypointHash) {
+            throw 'Installed CONTROL changed during verification.'
+        }
+        if ($previousEntrypointHash -cne $controllerHash) {
+            & $native install --recover-existing-sha256 $previousEntrypointHash
+        } else {
+            & $native install
+        }
+    } else {
+        & $native install
+    }
+    if ($LASTEXITCODE -ne 0) { throw 'Native CONTROL install/recovery failed.' }
     Assert-Sha256 $entrypoint $controllerHash
+
+    # Keep historical provenance; publish the independently verified new
+    # manifest. Interruption is safe: re-running with the same main SHA
+    # completes either the binary step or this manifest-only step.
+    if ($existingHash -and $existingHash -cne $manifestHash) {
+        if (-not (Test-Path -LiteralPath $previousManifest)) {
+            [IO.File]::Copy($installedManifest, $previousManifest, $false)
+            Assert-Sha256 $previousManifest $existingHash
+        }
+        $stageManifest = 'C:\okx\control\manifest.json.recovery-new'
+        if (Test-Path -LiteralPath $stageManifest) {
+            $stageItem = Get-Item -LiteralPath $stageManifest -Force
+            if ($stageItem.PSIsContainer -or
+                $stageItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw 'Manifest staging path is not a plain file.'
+            }
+        }
+        [IO.File]::Copy((Join-Path $extract 'manifest.json'), $stageManifest, $true)
+        Assert-Sha256 $stageManifest $manifestHash
+        [IO.File]::Move($stageManifest, $installedManifest, $true)
+    } elseif (-not $existingHash) {
+        [IO.File]::Copy((Join-Path $extract 'manifest.json'), $installedManifest, $false)
+    }
     Assert-Sha256 $installedManifest $manifestHash
     [ordered]@{
         schema = 'okx.windows.bootstrap-result/v1'

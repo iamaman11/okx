@@ -81,11 +81,32 @@ if ($negativeExit -eq 0 -or
     (Get-FileHash -LiteralPath $entrypoint -Algorithm SHA256).Hash -cne $corruptHash) {
     throw 'CI_BOOTSTRAP_CONFLICTING_ENTRYPOINT_OVERWRITTEN'
 }
-# Restore only the entrypoint deliberately damaged by this CI fixture.
-# Do not call production install to overwrite conflicts: it must stay fail-closed.
-Copy-Item -LiteralPath $controller -Destination $entrypoint -Force
+# The normal install remains immutable. Explicit expected-old-hash recovery
+# is a separate native path; repeat must preserve the original old backup.
+$oldHash = $corruptHash.ToLowerInvariant()
+$wrongHash = '0' * 64
+$negativeRecovery = & $controller install --recover-existing-sha256 $wrongHash 2>&1
+if ($LASTEXITCODE -eq 0 -or
+    (Get-FileHash -LiteralPath $entrypoint -Algorithm SHA256).Hash.ToLowerInvariant() -cne $oldHash) {
+    throw 'CI_BOOTSTRAP_WRONG_OLD_SHA_NOT_REJECTED'
+}
+# Interrupted staging must not damage installed bytes or defeat safe retry.
+[IO.File]::WriteAllBytes("$entrypoint.recovery-new", [byte[]](1..16))
+[IO.File]::WriteAllBytes("$entrypoint.previous.recovery-new", [byte[]](1..16))
+$restored = & $controller install --recover-existing-sha256 $oldHash | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $restored.disposition -cne 'RECOVERED_LEGACY_CONTROLLER') {
+    throw 'CI_BOOTSTRAP_NATIVE_LEGACY_RECOVERY_FAILED'
+}
 if ((Get-FileHash -LiteralPath $entrypoint -Algorithm SHA256).Hash.ToLowerInvariant() -cne $controllerHash) {
-    throw 'CI_BOOTSTRAP_FIXTURE_RESTORE_FAILED'
+    throw 'CI_BOOTSTRAP_RECOVERED_HASH_MISMATCH'
+}
+$previous = "$entrypoint.previous"
+if ((Get-FileHash -LiteralPath $previous -Algorithm SHA256).Hash.ToLowerInvariant() -cne $oldHash) {
+    throw 'CI_BOOTSTRAP_LEGACY_BACKUP_MISSING'
+}
+$retryRecovery = & $controller install --recover-existing-sha256 $oldHash | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $retryRecovery.disposition -cne 'EXISTING_RECOVERED') {
+    throw 'CI_BOOTSTRAP_RECOVERY_RETRY_NOT_IDEMPOTENT'
 }
 if (Test-Path -LiteralPath (Join-Path $root 'runtime')) {
     throw 'CI_BOOTSTRAP_UNEXPECTED_RUNTIME_CREATION'
@@ -101,6 +122,10 @@ if (Get-ScheduledTask -TaskName 'iamaman11-okx-host-control' -ErrorAction Silent
     installed_controller_sha256 = $controllerHash
     exact_retry = 'PASS'
     preexisting_conflict_rejected_unchanged = 'PASS'
+    wrong_recovery_hash_rejected = 'PASS'
+    interrupted_staging_recovered = 'PASS'
+    legacy_backup_preserved = 'PASS'
+    recovery_exact_retry = 'PASS'
     incomplete_release_read_only_blocked = 'PASS'
     agent_launcher_installed = $false
     trading = 'NOT_STARTED'
