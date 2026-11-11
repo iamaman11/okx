@@ -427,9 +427,8 @@ mod tests {
 
         assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
         assert_eq!(std::env::var("CI").as_deref(), Ok("true"));
-        let bundle_root = PathBuf::from(
-            std::env::var("OKX_CI_BUNDLE_ROOT").expect("explicit CI bundle root"),
-        );
+        let bundle_root =
+            PathBuf::from(std::env::var("OKX_CI_BUNDLE_ROOT").expect("explicit CI bundle root"));
         let head = std::env::var("OKX_CI_EXPECTED_HEAD").expect("CI source head");
         let tree = std::env::var("OKX_CI_EXPECTED_TREE").expect("CI source tree");
         let run_id: u64 = std::env::var("GITHUB_RUN_ID")
@@ -450,10 +449,8 @@ mod tests {
         assert_eq!(manifest.source_tree, tree);
 
         let agent_bytes = fs::read(bundle_root.join("okx-agent.exe")).expect("Agent");
-        let control_bytes =
-            fs::read(bundle_root.join("okx-host-control.exe")).expect("CONTROL");
-        let launcher_bytes =
-            fs::read(bundle_root.join("okx-host-launcher.exe")).expect("Launcher");
+        let control_bytes = fs::read(bundle_root.join("okx-host-control.exe")).expect("CONTROL");
+        let launcher_bytes = fs::read(bundle_root.join("okx-host-launcher.exe")).expect("Launcher");
         for (name, binary) in [
             ("okx-agent.exe", &agent_bytes),
             ("okx-host-control.exe", &control_bytes),
@@ -469,7 +466,10 @@ mod tests {
         let control_root = Path::new(okx_host_launcher::CONTROL_ROOT);
         let runtime_root = Path::new(okx_host_launcher::RUNTIME_ROOT);
         let entrypoint = control_root.join("okx-host-control.exe");
-        assert!(control_root.is_dir(), "preceding native CONTROL install required");
+        assert!(
+            control_root.is_dir(),
+            "preceding native CONTROL install required"
+        );
         assert!(!runtime_root.exists(), "never adopt an unknown runtime");
         assert_eq!(
             okx_host_launcher::sha256_file(&entrypoint).expect("native entrypoint"),
@@ -536,7 +536,10 @@ mod tests {
         assert_eq!(entrypoint_retry["disposition"], "EXISTING");
         let launcher_status = okx_host_launcher::status_value();
         assert_eq!(launcher_status["active"]["state"], "READY");
-        assert_eq!(launcher_status["active"]["value"]["active"]["source_tree"], tree);
+        assert_eq!(
+            launcher_status["active"]["value"]["active"]["source_tree"],
+            tree
+        );
         assert_eq!(launcher_status["entrypoint_is_launcher"], true);
 
         let mut executor = HostExecutor::canonical().expect("existing native owner");
@@ -571,7 +574,10 @@ mod tests {
         };
         let before = inspect();
         assert_eq!(before["state"], "UNINITIALIZED_LOCAL_IDENTITY");
-        assert_eq!(before["local_release_integrity"], "LOCAL_HASHES_MATCH_NOT_REMOTE_ATTESTED");
+        assert_eq!(
+            before["local_release_integrity"],
+            "LOCAL_HASHES_MATCH_NOT_REMOTE_ATTESTED"
+        );
         assert_eq!(before["central_risk"], "UNKNOWN");
         assert_eq!(before["trading_permission"], "NEW_RISK_BLOCKED");
 
@@ -626,4 +632,3 @@ mod tests {
         );
     }
 }
-
