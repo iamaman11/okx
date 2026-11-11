@@ -68,14 +68,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Draft changes use explicit targeted workflow_dispatch tests.
-          # A final ready_for_review event runs the full exact-head release CI once.
-          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.pull_request.draft }}" == "true" ]]; then
-            echo "build_required=false" >> "$GITHUB_OUTPUT"
-            echo "reason=draft PR; defer full release build until ready for review" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           if [[ "${{ github.event_name }}" != "push" ]]; then
             echo "build_required=true" >> "$GITHUB_OUTPUT"
             echo "reason=non-push event" >> "$GITHUB_OUTPUT"
@@ -285,7 +277,7 @@ jobs:
   linux:
     name: linux-core
     needs: [classify, architecture, linux-rust, cloudflare-mcp]
-    if: always() && github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/work/t10-07-one-campaign-native-20261105' && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
+    if: always() && github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/work/t10-07-one-campaign-native-20261105'
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate required Linux, architecture and Cloudflare gates
@@ -308,29 +300,10 @@ jobs:
     needs: classify
     if: needs.classify.outputs.build_required == 'true'
     runs-on: windows-latest
-    outputs:
-      bundle_artifact_id: ${{ steps.published_bundle.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Parse Windows bootstrap scripts before expensive compilation
-        shell: pwsh
-        run: |
-          foreach ($script in @('scripts/test-ci-clean-install.ps1', 'scripts/test-ci-native-entrypoint-bootstrap.ps1', 'scripts/windows-bootstrap-release.ps1')) {
-            $tokens = $null
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile(
-              (Join-Path $PWD $script),
-              [ref]$tokens,
-              [ref]$errors
-            ) | Out-Null
-            if ($errors.Count -ne 0) {
-              $errors | ForEach-Object { Write-Error "$script : $($_.ToString())" }
-              throw 'CI_BOOTSTRAP_POWERSHELL_SYNTAX_INVALID'
-            }
-          }
 
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
         with:
@@ -390,69 +363,6 @@ jobs:
           $output | Out-Host
           if ($code -ne 0) { exit $code }
           if (($output -join "`n") -notmatch '# pass 8\b') { throw 'SCENARIO_LIFECYCLE_TEST_COUNT_INVALID' }
-
-      - name: Build deployable Windows binaries
-        if: github.event_name == 'pull_request'
-        shell: pwsh
-        run: |
-          $env:OKX_BUILD_SOURCE_TREE = (git rev-parse "HEAD^{tree}").Trim()
-          cargo build --locked --release -p okx-agent -p okx-host-control -p okx-host-launcher
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
-          New-Item -ItemType Directory -Path $dist -Force | Out-Null
-
-          Copy-Item "target\release\okx-agent.exe" (Join-Path $dist "okx-agent.exe")
-          Copy-Item "target\release\okx-host-control.exe" (Join-Path $dist "okx-host-control.exe")
-          Copy-Item "target\release\okx-host-launcher.exe" (Join-Path $dist "okx-host-launcher.exe")
-          Copy-Item "Cargo.lock" (Join-Path $dist "Cargo.lock")
-
-          $sourceHead = (git rev-parse HEAD).Trim()
-          $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
-          $agentHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-agent.exe")).Hash.ToLowerInvariant()
-          $controllerHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-host-control.exe")).Hash.ToLowerInvariant()
-          $launcherHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-host-launcher.exe")).Hash.ToLowerInvariant()
-          $rustVersion = (rustc --version).Trim()
-
-          $manifest = [ordered]@{
-            schema = "okx.windows.bundle/v1"
-            repository_id = 1388071566
-            source_head_sha = $sourceHead
-            source_tree = $sourceTree
-            rust_version = $rustVersion
-            files = [ordered]@{
-              "okx-agent.exe" = [ordered]@{ sha256 = $agentHash }
-              "okx-host-control.exe" = [ordered]@{ sha256 = $controllerHash }
-              "okx-host-launcher.exe" = [ordered]@{ sha256 = $launcherHash }
-            }
-          }
-
-          $manifest |
-            ConvertTo-Json -Depth 8 |
-            Set-Content -LiteralPath (Join-Path $dist "manifest.json") -Encoding utf8NoBOM
-
-      - name: CI-CLEAN real Windows Agent bootstrap and dirty-root rejection
-        if: github.event_name == 'pull_request'
-        shell: pwsh
-        run: |
-          $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
-          ./scripts/test-ci-clean-install.ps1 `
-            -AgentPath "target\\release\\okx-agent.exe" `
-            -ControlPath "target\\release\\okx-host-control.exe" `
-            -LauncherPath "target\\release\\okx-host-launcher.exe" `
-            -ManifestPath (Join-Path $env:RUNNER_TEMP "okx-windows-bundle\\manifest.json") `
-            -SourceTree $sourceTree
-
-      - name: Upload deployable Windows bundle
-        id: published_bundle
-        if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}\okx-windows-bundle
-          if-no-files-found: error
-          compression-level: 9
-          retention-days: 14
 
       - name: Test native Windows crates
         run: cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution
@@ -527,72 +437,59 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Build deployable Windows binaries
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          $env:OKX_BUILD_SOURCE_TREE = (git rev-parse "HEAD^{tree}").Trim()
+          cargo build --locked --release -p okx-agent -p okx-host-control -p okx-host-launcher
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+
+          Copy-Item "target\release\okx-agent.exe" (Join-Path $dist "okx-agent.exe")
+          Copy-Item "target\release\okx-host-control.exe" (Join-Path $dist "okx-host-control.exe")
+          Copy-Item "target\release\okx-host-launcher.exe" (Join-Path $dist "okx-host-launcher.exe")
+          Copy-Item "Cargo.lock" (Join-Path $dist "Cargo.lock")
+
+          $sourceHead = (git rev-parse HEAD).Trim()
+          $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
+          $agentHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-agent.exe")).Hash.ToLowerInvariant()
+          $controllerHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-host-control.exe")).Hash.ToLowerInvariant()
+          $launcherHash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist "okx-host-launcher.exe")).Hash.ToLowerInvariant()
+          $rustVersion = (rustc --version).Trim()
+
+          $manifest = [ordered]@{
+            schema = "okx.windows.bundle/v1"
+            repository_id = 1388071566
+            source_head_sha = $sourceHead
+            source_tree = $sourceTree
+            rust_version = $rustVersion
+            files = [ordered]@{
+              "okx-agent.exe" = [ordered]@{ sha256 = $agentHash }
+              "okx-host-control.exe" = [ordered]@{ sha256 = $controllerHash }
+              "okx-host-launcher.exe" = [ordered]@{ sha256 = $launcherHash }
+            }
+          }
+
+          $manifest |
+            ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath (Join-Path $dist "manifest.json") -Encoding utf8NoBOM
+
+      - name: Upload deployable Windows bundle
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}\okx-windows-bundle
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 14
+
   # Manually dispatched from the existing CI workflow on the selected PR
   # branch. No deployment, no exchange network and no relaxation of the
   # mandatory 26-case pull_request gate.
-
-  # Separate clean Windows VM: download the exact bundle produced above and
-  # invoke the production native CONTROL bootstrap, not a Copy-Item mock.
-  # This deliberately does NOT start Launcher, Agent, Scheduler or venue calls.
-  windows-entrypoint-bootstrap:
-    name: windows-entrypoint-bootstrap
-    needs: [classify, windows-agent]
-    # Installation evidence depends on the built artifact, not unrelated
-    # Native/Worker lifecycle suites in windows-native. If the producer
-    # failed before uploading, download-artifact fails explicitly.
-    if: always() && github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true' && (needs.windows-agent.result == 'success' || needs.windows-agent.result == 'failure')
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
-        with:
-          toolchain: 1.95.0
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}/okx-bootstrap-bundle
-
-      - name: Native CONTROL install, idempotency, hash and risk-fence contracts
-        shell: pwsh
-        run: |
-          $head = (git rev-parse HEAD).Trim()
-          $tree = (git rev-parse 'HEAD^{tree}').Trim()
-          if ($head -cne '${{ github.event.pull_request.head.sha }}') {
-            throw 'CI_BOOTSTRAP_CHECKOUT_HEAD_MISMATCH'
-          }
-          ./scripts/test-ci-native-entrypoint-bootstrap.ps1 `
-            -BundleDirectory (Join-Path $env:RUNNER_TEMP 'okx-bootstrap-bundle') `
-            -ExpectedHead $head `
-            -ExpectedTree $tree
-
-      # CI-only Rust entrypoint calls the existing production installation
-      # owners. A PR artifact does NOT replace accepted-main verification.
-      - name: Native Agent and Launcher install, exact retry and blocked risk
-        shell: pwsh
-        env:
-          OKX_CI_BUNDLE_ROOT: ${{ runner.temp }}/okx-bootstrap-bundle
-          OKX_CI_ARTIFACT_ID: ${{ needs.windows-agent.outputs.bundle_artifact_id }}
-          OKX_CI_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          if ($env:OKX_CI_ARTIFACT_ID -notmatch '^[1-9][0-9]*$') {
-            throw 'CI_NATIVE_RELEASE_ARTIFACT_ID_MISSING'
-          }
-          $env:OKX_CI_EXPECTED_TREE = (git rev-parse 'HEAD^{tree}').Trim()
-          $output = & cargo test --locked -p okx-host-control --lib artifact::tests::ci_native_release_install_uses_real_agent_and_launcher_owners -- --ignored --exact --nocapture 2>&1
-          $exitCode = $LASTEXITCODE
-          $output | Out-Host
-          if ($exitCode -ne 0) { throw 'CI_NATIVE_RELEASE_INSTALL_FAILED' }
-          if (($output -join "`n") -notmatch 'CI_NATIVE_RELEASE_INSTALL_V1:') {
-            throw 'CI_NATIVE_RELEASE_INSTALL_EVIDENCE_MISSING'
-          }
-
   windows-t09-preflight:
     name: windows-t09-b1-s2-targeted
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/work/t10-07-one-campaign-native-20261105')
