@@ -609,7 +609,7 @@ mod tests {
         let catalog = runtime_root.join("account-catalog.pb");
         let catalog_before = fs::read(&catalog).expect("durable catalog");
         assert_eq!(initialize(), genesis, "genesis exact retry");
-        assert_eq!(fs::read(catalog).unwrap(), catalog_before);
+        assert_eq!(fs::read(&catalog).unwrap(), catalog_before);
         let after = inspect();
         assert_eq!(after["state"], "IDENTITY_FILE_PRESENT_NOT_VERIFIED");
         assert_eq!(after["central_risk"], "UNKNOWN");
