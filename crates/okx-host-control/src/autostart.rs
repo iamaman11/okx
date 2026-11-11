@@ -64,7 +64,7 @@ pub fn run_now() -> HostControlResult<Value> {
 
     #[cfg(windows)]
     {
-        ensure_policy_valid()?;
+        ensure_run_allowed()?;
         let status = hidden_command("schtasks.exe")
             .args(["/Run", "/TN", TASK_NAME])
             .status()?;
@@ -91,6 +91,25 @@ pub fn ensure_policy_valid() -> HostControlResult<()> {
 
 pub fn ensure_legacy_policy_valid() -> HostControlResult<()> {
     ensure_policy_valid()
+}
+
+/// Running an explicitly disabled task is never a recovery mechanism.
+pub fn ensure_run_allowed() -> HostControlResult<()> {
+    let xml = exported_task_xml()?;
+    if exported_policy_valid(&xml, ENTRYPOINT_PATH) && task_settings_enabled(&xml) {
+        Ok(())
+    } else {
+        Err(HostControlError::AutostartPolicyInvalid)
+    }
+}
+
+fn task_settings_enabled(xml: &str) -> bool {
+    xml.split_once("<Settings>")
+        .and_then(|(_, settings)| settings.split_once("</Settings>"))
+        .is_some_and(|(settings, _)| {
+            settings.contains("<Enabled>true</Enabled>")
+                && !settings.contains("<Enabled>false</Enabled>")
+        })
 }
 
 fn ensure_expected_policy(command: &str) -> HostControlResult<()> {
@@ -287,6 +306,28 @@ mod tests {
         assert!(xml.contains("<Interval>PT1M</Interval>"));
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
         assert!(!xml.contains("<RestartOnFailure>"));
+    }
+
+    #[test]
+    fn disabled_task_cannot_be_explicitly_started() {
+        let xml = task_xml(
+            r"HOST\User",
+            TEST_START,
+            ENTRYPOINT_PATH,
+            "run",
+            okx_host_launcher::CONTROL_ROOT,
+        );
+        assert!(task_settings_enabled(&xml));
+        let disabled = xml.replacen(
+            "<Settings>\n    <MultipleInstancesPolicy>",
+            "<Settings>\n    <MultipleInstancesPolicy>",
+            1,
+        ).replace(
+            "    <Enabled>true</Enabled>\n    <Hidden>false</Hidden>",
+            "    <Enabled>false</Enabled>\n    <Hidden>false</Hidden>",
+        );
+        assert!(exported_policy_valid(&disabled, ENTRYPOINT_PATH));
+        assert!(!task_settings_enabled(&disabled));
     }
 
     #[test]

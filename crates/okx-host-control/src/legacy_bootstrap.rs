@@ -145,7 +145,7 @@ fn verify_pending(value: &LegacyPending) -> HostControlResult<()> {
 }
 
 async fn durable_handoff_ack(github: &GitHubClient, request_id: &str) -> HostControlResult<bool> {
-    let comments = github.issue_comments(12).await?;
+    let comments = github.issue_comments_for_bootstrap(12).await?;
     Ok(comments.iter().any(|comment| {
         matches_durable_ack(
             comment.user_id,

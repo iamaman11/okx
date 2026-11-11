@@ -139,6 +139,10 @@ pub async fn install_launcher_root(
         rust_version: bundle.manifest.rust_version.clone(),
         controller_sha256: actual_controller_hash.clone(),
     };
+    // A failed conflict must not leave a partially installed Launcher root.
+    // This check is read-only; it precedes every install_root filesystem write.
+    preflight_verified_manifest(&bundle.manifest)?;
+    require_current_entrypoint(&actual_controller_hash)?;
     let root = okx_host_launcher::install_root(
         launcher_bytes,
         &actual_launcher_hash,
@@ -292,6 +296,55 @@ async fn verified_bundle(
     }
 
     Ok(bundle)
+}
+
+
+fn require_current_entrypoint(expected_controller_sha256: &str) -> HostControlResult<()> {
+    // The running executable may be a downloaded new controller while the
+    // installed entrypoint still belongs to an older ReleaseSet. Do not start
+    // a migration that cannot complete its last immutable replacement step.
+    let entrypoint = Path::new(okx_host_launcher::ENTRYPOINT_PATH);
+    if !entrypoint.is_file()
+        || okx_host_launcher::sha256_file(entrypoint)? != expected_controller_sha256
+    {
+        return Err(HostControlError::ArtifactVerification(
+            "legacy installed CONTROL needs a verified controller handoff before Launcher migration",
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_verified_manifest(manifest: &BundleManifest) -> HostControlResult<()> {
+    let control = Path::new(okx_host_launcher::CONTROL_ROOT);
+    match fs::symlink_metadata(control) {
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+            return Err(HostControlError::ArtifactVerification(
+                "accepted release control root is not a plain directory",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        _ => {}
+    }
+    let path = control.join("manifest.json");
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(HostControlError::ArtifactVerification(
+                    "accepted release manifest is not a plain file",
+                ));
+            }
+            let old: BundleManifest = serde_json::from_slice(&fs::read(path)?)?;
+            if old != *manifest {
+                return Err(HostControlError::ArtifactVerification(
+                    "accepted release manifest conflicts with existing installation",
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 fn persist_verified_manifest(manifest: &BundleManifest) -> HostControlResult<()> {

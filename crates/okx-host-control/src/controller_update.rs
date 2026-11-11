@@ -54,7 +54,7 @@ pub async fn recover_terminal_ack(github: &GitHubClient) -> HostControlResult<bo
         return Ok(true);
     }
 
-    let comments = github.issue_comments(12).await?;
+    let comments = github.issue_comments_for_bootstrap(12).await?;
     if comments.iter().any(|comment| {
         matches_durable_ack(
             comment.user_id,
