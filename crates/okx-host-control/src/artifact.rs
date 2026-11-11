@@ -661,7 +661,10 @@ mod tests {
             sha256_hex(&agent_bytes),
             "recovery must retain previous even when active Agent was missing"
         );
-        assert_eq!(fs::read(&catalog).expect("catalog retained"), catalog_before);
+        assert_eq!(
+            fs::read(&catalog).expect("catalog retained"),
+            catalog_before
+        );
         for (file, data) in sentinels {
             assert_eq!(
                 fs::read(sql_root.join(file)).expect("SQL family retained"),
