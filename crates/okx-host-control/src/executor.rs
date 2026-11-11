@@ -1658,14 +1658,14 @@ fn replace_recovery_entrypoint(staged: &Path, installed: &Path) -> HostControlRe
     };
     let source = wide(staged);
     let destination = wide(installed);
-    if unsafe {
+    let ok = unsafe {
         MoveFileExW(
             source.as_ptr(),
             destination.as_ptr(),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         )
-    } == 0
-    {
+    };
+    if ok == 0 {
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())

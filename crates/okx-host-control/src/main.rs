@@ -1,4 +1,5 @@
 use std::{
+    fs,
     io::{self, Read},
     path::{Path, PathBuf},
 };
@@ -93,10 +94,18 @@ async fn run(cli: Cli) -> HostControlResult<()> {
         Command::Install {
             recover_existing_sha256,
         } => {
-            if Path::new(okx_host_launcher::ACTIVE_PATH).exists()
-                || Path::new(okx_host_launcher::LAUNCHER_PATH).exists()
-            {
-                return Err(okx_host_control::HostControlError::LegacyBootstrapDisabled);
+            // Even a dangling reparse point is an occupied launcher root.
+            for path in [
+                okx_host_launcher::ACTIVE_PATH,
+                okx_host_launcher::LAUNCHER_PATH,
+            ] {
+                match fs::symlink_metadata(path) {
+                    Ok(_) => {
+                        return Err(okx_host_control::HostControlError::LegacyBootstrapDisabled);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
             let destination = PathBuf::from(INSTALL_PATH);
             let result = if let Some(previous) = recover_existing_sha256.as_deref() {
