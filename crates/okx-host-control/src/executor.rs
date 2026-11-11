@@ -1710,7 +1710,10 @@ pub fn recover_existing_controller(
     let installed_sha = okx_host_launcher::sha256_file(destination)?;
     let previous = PathBuf::from(format!("{}.recovery-previous", destination.display()));
     let candidate = PathBuf::from(format!("{}.recovery-new", destination.display()));
-    let backup_stage = PathBuf::from(format!("{}.recovery-previous.staging", destination.display()));
+    let backup_stage = PathBuf::from(format!(
+        "{}.recovery-previous.staging",
+        destination.display()
+    ));
 
     // This dedicated recovery backup must never overwrite any existing
     // .previous file used by the normal Controller update/rollback owner.
