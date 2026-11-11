@@ -298,7 +298,6 @@ async fn verified_bundle(
     Ok(bundle)
 }
 
-
 fn require_current_entrypoint(expected_controller_sha256: &str) -> HostControlResult<()> {
     // The running executable may be a downloaded new controller while the
     // installed entrypoint still belongs to an older ReleaseSet. Do not start

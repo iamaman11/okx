@@ -279,14 +279,18 @@ pub fn install_root(
     }
 
     // All conflicts are checked before the first directory or binary write.
-    if let Ok(metadata) = fs::symlink_metadata(CONTROL_ROOT) {
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+    match fs::symlink_metadata(CONTROL_ROOT) {
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
             return Err(LauncherError::RootConflict);
         }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     match fs::symlink_metadata(LAUNCHER_PATH) {
         Ok(metadata) => {
-            if !metadata.is_file() || metadata.file_type().is_symlink()
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
                 || sha256_file(Path::new(LAUNCHER_PATH))? != launcher_sha256
             {
                 return Err(LauncherError::RootConflict);
@@ -296,13 +300,17 @@ pub fn install_root(
         Err(error) => return Err(error.into()),
     }
     let prior = load_active()?;
-    if prior.as_ref().is_some_and(|existing| existing.active != active) {
+    if prior
+        .as_ref()
+        .is_some_and(|existing| existing.active != active)
+    {
         return Err(LauncherError::RootConflict);
     }
     let version_path = active.binary_path()?;
     match fs::symlink_metadata(&version_path) {
         Ok(metadata) => {
-            if !metadata.is_file() || metadata.file_type().is_symlink()
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
                 || sha256_file(&version_path)? != active.controller_sha256
             {
                 return Err(LauncherError::HashMismatch);
