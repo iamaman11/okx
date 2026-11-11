@@ -81,6 +81,12 @@ if ($negativeExit -eq 0 -or
     (Get-FileHash -LiteralPath $entrypoint -Algorithm SHA256).Hash -cne $corruptHash) {
     throw 'CI_BOOTSTRAP_CONFLICTING_ENTRYPOINT_OVERWRITTEN'
 }
+# Restore only the entrypoint deliberately damaged by this CI fixture.
+# Do not call production install to overwrite conflicts: it must stay fail-closed.
+Copy-Item -LiteralPath $controller -Destination $entrypoint -Force
+if ((Get-FileHash -LiteralPath $entrypoint -Algorithm SHA256).Hash.ToLowerInvariant() -cne $controllerHash) {
+    throw 'CI_BOOTSTRAP_FIXTURE_RESTORE_FAILED'
+}
 if (Test-Path -LiteralPath (Join-Path $root 'runtime')) {
     throw 'CI_BOOTSTRAP_UNEXPECTED_RUNTIME_CREATION'
 }
