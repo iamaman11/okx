@@ -616,6 +616,64 @@ mod tests {
         assert_eq!(after["trading_permission"], "NEW_RISK_BLOCKED");
         assert_eq!(after["safe_start"], "READ_ONLY_INSPECTION_ONLY");
 
+        // Real deploy owner must make an identical release a pure no-op:
+        // otherwise a retry can disturb a live binary or discard recovery.
+        executor
+            .install_verified_agent(&agent_bytes)
+            .expect("same Agent is an inert retry");
+        let previous = runtime_root.join("okx-agent.exe.previous");
+        assert!(!previous.exists(), "exact retry must not create a backup");
+
+        // CI-CRASH pre-commit boundary: power loss after moving current to
+        // previous, before staged replacement becomes active. These three
+        // files are byte sentinels, not a claim to have verified SQL semantics.
+        let sql_root = runtime_root.join("accounts").join("ci-crash-boundary");
+        fs::create_dir_all(&sql_root).expect("isolated financial fixture");
+        let sentinels = [
+            ("account.sqlite", b"ci-sql-original".as_slice()),
+            ("account.sqlite-wal", b"ci-wal-original".as_slice()),
+            ("account.sqlite-shm", b"ci-shm-original".as_slice()),
+        ];
+        for (file, data) in sentinels {
+            fs::write(sql_root.join(file), data).expect("SQL family sentinel");
+        }
+        let interrupted_staging = runtime_root.join("okx-agent.exe.new");
+        fs::write(&interrupted_staging, &agent_bytes).expect("durable candidate fixture");
+        fs::rename(&agent_path, &previous).expect("interrupted move to previous");
+        assert!(!agent_path.exists());
+        assert_eq!(
+            okx_host_launcher::sha256_file(&previous).expect("last-known-good Agent"),
+            sha256_hex(&agent_bytes)
+        );
+        let broken = inspect();
+        assert_eq!(broken["state"], "BLOCKED_RELEASE_FILES_MISSING");
+        assert_eq!(broken["trading_permission"], "NEW_RISK_BLOCKED");
+
+        executor
+            .install_verified_agent(&agent_bytes)
+            .expect("recover interrupted native Agent install");
+        assert_eq!(
+            okx_host_launcher::sha256_file(&agent_path).expect("recovered Agent"),
+            sha256_hex(&agent_bytes)
+        );
+        assert_eq!(
+            okx_host_launcher::sha256_file(&previous).expect("preserved backup"),
+            sha256_hex(&agent_bytes),
+            "recovery must retain previous even when active Agent was missing"
+        );
+        assert_eq!(fs::read(&catalog).expect("catalog retained"), catalog_before);
+        for (file, data) in sentinels {
+            assert_eq!(
+                fs::read(sql_root.join(file)).expect("SQL family retained"),
+                data,
+                "{file} changed during Agent recovery"
+            );
+        }
+        let recovered = inspect();
+        assert_eq!(recovered["state"], "IDENTITY_FILE_PRESENT_NOT_VERIFIED");
+        assert_eq!(recovered["central_risk"], "UNKNOWN");
+        assert_eq!(recovered["trading_permission"], "NEW_RISK_BLOCKED");
+
         println!(
             "CI_NATIVE_RELEASE_INSTALL_V1:{}",
             serde_json::json!({
@@ -625,6 +683,9 @@ mod tests {
                 "controller_entrypoint": "IMMUTABLE_LAUNCHER",
                 "exact_retry": "PASS",
                 "identity_genesis": "PASS",
+                "crash_after_agent_backup_before_rename": "RECOVERED",
+                "previous_agent_backup": "PRESERVED",
+                "sql_wal_shm_byte_sentinels": "UNCHANGED_NOT_SEMANTIC_SQL_PROOF",
                 "risk": "UNKNOWN_BLOCKED",
                 "trading": "NOT_STARTED",
                 "trust": "CI_ARTIFACT_ONLY_NOT_ACCEPTED_MAIN"
