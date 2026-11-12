@@ -1,3 +1,4 @@
+import {observedOwnedDescendants} from "../../../scripts/trade-integration/process-ownership.mjs";
 #!/usr/bin/env node
 // Workerd/Miniflare executes the ACTUAL RuntimeSession with SQLite-backed DO
 // transactions. Only the incoming WSS frames are scripted. No Map storage,
@@ -68,18 +69,7 @@ async function ownedDescendants(pid) {
         created:fields.slice(0,5).join(" "), name:fields.slice(5).join(" ")};
     });
   }
-  const owned = new Set([pid]);
-  const result = [];
-  for (let round=0; round<16; round++) {
-    const next = rows.filter(row => owned.has(row.parent_pid) && !owned.has(row.pid));
-    if (!next.length) return result;
-    for (const row of next) {
-      if (!row.created) throw Error("LIFECYCLE_PROCESS_IDENTITY_UNAVAILABLE");
-      owned.add(row.pid); result.push(row);
-    }
-    if (result.length > 64) throw Error("LIFECYCLE_OWNERSHIP_LIMIT");
-  }
-  throw Error("LIFECYCLE_OWNERSHIP_DEPTH_LIMIT");
+  return observedOwnedDescendants(rows,pid);
 }
 async function lifecycleBoundary(handoffPath) {
   if (!lifecycleProbe) return;
