@@ -1,6 +1,45 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { nativeDriverPrimaryCode, nativeDriverTeardownFailure, summarizeNativeWorkerdFailure, summarizeRustPanics } from "./native-failure.mjs";
+import { nativeDriverPrimaryCode, nativeDriverTeardownFailure, summarizeNativeWorkerdFailure, summarizeRustPanics, signedGetSourceFailure } from "./native-failure.mjs";
+
+test("signed T09.2 source denial keeps the original typed cause without private routes", () => {
+  const privateValue="PRIVATE_SENTINEL_87654321";
+  const payload = {
+    outcome:{status:"completed",data:{
+      primary_reason:"COHORT_FINANCIAL_SOURCE_INCOMPLETE",
+      state:"REJECTED", send_state:"NOT_STARTED", risk_release_state:"RELEASED",
+    }},
+    outbound_posts:3,
+    denied_routes:[
+      "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED:fixture-executor-a:/api/v5/trade/order?clOrdId="+privateValue,
+      "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED:fixture-executor-a:/api/v5/trade/fills-history?instType=SPOT",
+    ],
+  };
+  const source = "T09_2_SIGNED_GET_DENIAL_V1:"+JSON.stringify(payload)+"\n";
+  const safe = signedGetSourceFailure(source);
+  assert.equal(safe.parse_state,"VALID");
+  assert.equal(safe.origin_case,"T09.2");
+  assert.equal(safe.reason_code,"COHORT_FINANCIAL_SOURCE_INCOMPLETE");
+  assert.equal(safe.send_state,"NOT_STARTED");
+  assert.equal(safe.risk_release_state,"RELEASED");
+  assert.equal(safe.outbound_posts,3);
+  assert.equal(safe.denial_count,2);
+  assert.deepEqual(safe.source_denial_codes,["TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED"]);
+  assert.equal(JSON.stringify(safe).includes(privateValue),false);
+  for(const malformed of [
+    source.repeat(2),
+    "T09_2_SIGNED_GET_DENIAL_V1:{not-json}",
+    "T09_2_SIGNED_GET_DENIAL_V1:"+JSON.stringify({
+      ...payload,outcome:{data:{primary_reason:privateValue}}
+    }),
+    "T09_2_SIGNED_GET_DENIAL_V1:"+JSON.stringify({...payload,denied_routes:[privateValue]})
+  ]) {
+    const refused=signedGetSourceFailure(malformed);
+    assert.equal(refused.parse_state,"INVALID");
+    assert.equal(JSON.stringify(refused).includes(privateValue),false);
+  }
+  assert.equal(signedGetSourceFailure("ordinary Native failure"),null);
+});
 
 const teardownFixture = () => ({schema:"okx.native-driver-teardown-failure/v1",
   primary_code:"LIFECYCLE_PROBE_PRIMARY_ERROR",
