@@ -108,6 +108,18 @@ mod tests {
     }
 
     #[test]
+    fn all_handoff_recovery_paths_scan_bounded_full_history() {
+        for source in [
+            include_str!("root_migration.rs"),
+            include_str!("controller_update.rs"),
+            include_str!("legacy_bootstrap.rs"),
+        ] {
+            assert!(source.contains("github.issue_comments_for_bootstrap(12).await?"));
+            assert!(!source.contains("github.issue_comments(12).await?"));
+        }
+    }
+
+    #[test]
     fn durable_ack_accepts_only_typed_launcher_root_operation() {
         let request = "ctl_root_migration_012345";
         let mut result = handoff_result();

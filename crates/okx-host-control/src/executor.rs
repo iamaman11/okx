@@ -815,6 +815,15 @@ impl HostExecutor {
     }
 
     pub fn install_verified_agent(&mut self, bytes: &[u8]) -> HostControlResult<()> {
+        let current = self.agent_binary();
+        let expected_hash = okx_host_launcher::sha256_bytes(bytes);
+
+        // Exact retry must not interrupt an already running Agent, replace
+        // its durable backup, or publish a new partially staged executable.
+        if current.is_file() && okx_host_launcher::sha256_file(&current)? == expected_hash {
+            return Ok(());
+        }
+
         let should_restore = self.desired_agent == AgentDesired::Running;
         let running = self.agent_is_running()?;
         if running {
@@ -823,16 +832,26 @@ impl HostExecutor {
 
         fs::create_dir_all(self.runtime_dir())?;
 
-        let current = self.agent_binary();
         let staging = self.runtime_dir().join("okx-agent.exe.new");
         let backup = self.runtime_dir().join("okx-agent.exe.previous");
 
-        fs::write(&staging, bytes)?;
-
-        if backup.exists() {
-            fs::remove_file(&backup)?;
+        // Persist and verify the candidate BEFORE changing any last-known
+        // executable. This is still the existing production install owner.
+        let mut staged = File::create(&staging)?;
+        staged.write_all(bytes)?;
+        staged.sync_all()?;
+        drop(staged);
+        if okx_host_launcher::sha256_file(&staging)? != expected_hash {
+            return Err(HostControlError::ArtifactHashMismatch);
         }
+
         if current.exists() {
+            // Only discard an older backup while a known current binary still
+            // exists. If a crash has already moved current -> backup, that
+            // backup is the sole recoverable executable and must survive.
+            if backup.exists() {
+                fs::remove_file(&backup)?;
+            }
             fs::rename(&current, &backup)?;
         }
 
@@ -841,6 +860,10 @@ impl HostExecutor {
                 let _ = fs::rename(&backup, &current);
             }
             return Err(error.into());
+        }
+
+        if okx_host_launcher::sha256_file(&current)? != expected_hash {
+            return Err(HostControlError::ArtifactHashMismatch);
         }
 
         if should_restore && let Err(error) = self.start_agent_process() {
@@ -1536,18 +1559,213 @@ pub fn install_current_executable(destination: &Path) -> HostControlResult<Value
     if !source.is_file() {
         return Err(HostControlError::InvalidInstallSource);
     }
+    let expected_hash = okx_host_launcher::sha256_file(&source)?;
+
+    // An already installed bootstrap entrypoint is immutable. Never truncate
+    // or replace it just because a second install was requested.
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(HostControlError::ArtifactVerification(
+                    "bootstrap destination is not a plain file",
+                ));
+            }
+            if okx_host_launcher::sha256_file(destination)? != expected_hash {
+                return Err(HostControlError::ArtifactVerification(
+                    "bootstrap destination conflicts with the selected release",
+                ));
+            }
+            return Ok(json!({
+                "installed": true,
+                "disposition": "EXISTING",
+                "destination": destination,
+                "sha256": expected_hash
+            }));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
 
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    if source != destination {
-        fs::copy(&source, destination)?;
+    // create_new fails rather than overwriting an entrypoint created by
+    // another process between the initial check and the write.
+    let mut target = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let mut input = File::open(&source)?;
+    std::io::copy(&mut input, &mut target)?;
+    target.sync_all()?;
+    drop(target);
+    if okx_host_launcher::sha256_file(destination)? != expected_hash {
+        return Err(HostControlError::ArtifactVerification(
+            "bootstrap copied executable failed SHA-256 validation",
+        ));
     }
 
     Ok(json!({
         "installed": true,
-        "destination": destination
+        "disposition": "CREATED",
+        "destination": destination,
+        "sha256": expected_hash
+    }))
+}
+
+fn write_verified_recovery_copy(
+    source: &Path,
+    target: &Path,
+    expected_sha256: &str,
+) -> HostControlResult<()> {
+    match fs::symlink_metadata(target) {
+        Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() => {
+            return Err(HostControlError::InvalidExecutionPath);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // A crash may leave an incomplete file at this dedicated staging path.
+    // Rewriting this file cannot mutate installed controller or account data.
+    let mut output = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(target)?;
+    let mut input = File::open(source)?;
+    std::io::copy(&mut input, &mut output)?;
+    output.sync_all()?;
+    drop(output);
+    if okx_host_launcher::sha256_file(target)? != expected_sha256 {
+        return Err(HostControlError::ControllerUpdateHashMismatch);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_recovery_entrypoint(staged: &Path, installed: &Path) -> HostControlResult<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<u16>>()
+    };
+    let source = wide(staged);
+    let destination = wide(installed);
+    let ok = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_recovery_entrypoint(staged: &Path, installed: &Path) -> HostControlResult<()> {
+    fs::rename(staged, installed)?;
+    Ok(())
+}
+
+/// Recover an existing stopped, launcher-less CONTROL with the existing
+/// native installer. The caller must attest the source against accepted main.
+/// The exact old SHA is mandatory; previous bytes are kept for rollback.
+pub fn recover_existing_controller(
+    destination: &Path,
+    expected_old_sha256: &str,
+) -> HostControlResult<Value> {
+    if expected_old_sha256.len() != 64
+        || !expected_old_sha256
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(HostControlError::ControllerUpdateStateInvalid);
+    }
+    let source = std::env::current_exe()?;
+    let new_sha = okx_host_launcher::sha256_file(&source)?;
+    if new_sha == expected_old_sha256 {
+        return Err(HostControlError::ControllerUpdateStateInvalid);
+    }
+    let parent = destination
+        .parent()
+        .ok_or(HostControlError::InvalidExecutionPath)?;
+    let parent_meta = fs::symlink_metadata(parent)?;
+    if !parent_meta.is_dir() || parent_meta.file_type().is_symlink() {
+        return Err(HostControlError::InvalidExecutionPath);
+    }
+    let meta = fs::symlink_metadata(destination)?;
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err(HostControlError::InvalidExecutionPath);
+    }
+    let installed_sha = okx_host_launcher::sha256_file(destination)?;
+    let previous = PathBuf::from(format!("{}.recovery-previous", destination.display()));
+    let candidate = PathBuf::from(format!("{}.recovery-new", destination.display()));
+    let backup_stage = PathBuf::from(format!(
+        "{}.recovery-previous.staging",
+        destination.display()
+    ));
+
+    // This dedicated recovery backup must never overwrite any existing
+    // .previous file used by the normal Controller update/rollback owner.
+    match fs::symlink_metadata(&previous) {
+        Ok(meta) => {
+            if !meta.is_file()
+                || meta.file_type().is_symlink()
+                || okx_host_launcher::sha256_file(&previous)? != expected_old_sha256
+            {
+                return Err(HostControlError::ControllerUpdateConflict);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if installed_sha == new_sha {
+        if !previous.is_file() {
+            return Err(HostControlError::ControllerUpdateStateInvalid);
+        }
+        return Ok(json!({
+            "installed": true,
+            "disposition": "EXISTING_RECOVERED",
+            "destination": destination,
+            "sha256": new_sha,
+            "previous_sha256": expected_old_sha256
+        }));
+    }
+    if installed_sha != expected_old_sha256 {
+        return Err(HostControlError::ControllerUpdateHashMismatch);
+    }
+
+    // Backup must be durable before the single atomic installed-file switch.
+    if !previous.exists() {
+        write_verified_recovery_copy(destination, &backup_stage, expected_old_sha256)?;
+        fs::rename(&backup_stage, &previous)?;
+    }
+    write_verified_recovery_copy(&source, &candidate, &new_sha)?;
+    if okx_host_launcher::sha256_file(destination)? != expected_old_sha256 {
+        return Err(HostControlError::ControllerUpdateHashMismatch);
+    }
+    replace_recovery_entrypoint(&candidate, destination)?;
+    if okx_host_launcher::sha256_file(destination)? != new_sha {
+        return Err(HostControlError::ControllerUpdateHashMismatch);
+    }
+    Ok(json!({
+        "installed": true,
+        "disposition": "RECOVERED_LEGACY_CONTROLLER",
+        "destination": destination,
+        "sha256": new_sha,
+        "previous_sha256": expected_old_sha256,
+        "scheduler_changed": false,
+        "agent_started": false
     }))
 }
 
@@ -1595,6 +1813,86 @@ fn direct_git_command(repo_root: &Path, args: &[&str]) -> std::process::Command 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_bootstrap_install_is_idempotent_and_never_overwrites_a_conflict() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("monotonic wall clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "okx-control-bootstrap-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("private fixture");
+        let entrypoint = root.join("okx-host-control.exe");
+
+        let created = install_current_executable(&entrypoint).expect("first native install");
+        assert_eq!(created["disposition"], "CREATED");
+        let expected_hash =
+            okx_host_launcher::sha256_file(&std::env::current_exe().unwrap()).expect("source SHA");
+        assert_eq!(
+            okx_host_launcher::sha256_file(&entrypoint).unwrap(),
+            expected_hash
+        );
+
+        let retry = install_current_executable(&entrypoint).expect("exact retry");
+        assert_eq!(retry["disposition"], "EXISTING");
+        fs::write(&entrypoint, b"corrupted installed controller").expect("tamper");
+        assert!(install_current_executable(&entrypoint).is_err());
+        assert_eq!(
+            fs::read(&entrypoint).unwrap(),
+            b"corrupted installed controller"
+        );
+
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn legacy_controller_recovery_preserves_backup_and_retries_after_staging_crash() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "okx-control-recovery-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("private fixture");
+        let entrypoint = root.join("okx-host-control.exe");
+        let old_bytes = b"stopped historical controller fixture";
+        fs::write(&entrypoint, old_bytes).expect("old fixture");
+        let old_hash = okx_host_launcher::sha256_file(&entrypoint).unwrap();
+        assert!(recover_existing_controller(&entrypoint, &"0".repeat(64)).is_err());
+        assert_eq!(fs::read(&entrypoint).unwrap(), old_bytes);
+
+        let previous = PathBuf::from(format!("{}.recovery-previous", entrypoint.display()));
+        fs::write(&previous, b"unrelated previous release").unwrap();
+        assert!(recover_existing_controller(&entrypoint, &old_hash).is_err());
+        assert_eq!(fs::read(&entrypoint).unwrap(), old_bytes);
+        fs::remove_file(&previous).unwrap();
+
+        fs::write(format!("{}.recovery-new", entrypoint.display()), b"partial").unwrap();
+        fs::write(
+            format!("{}.recovery-previous.staging", entrypoint.display()),
+            b"partial",
+        )
+        .unwrap();
+        let repaired = recover_existing_controller(&entrypoint, &old_hash).unwrap();
+        assert_eq!(repaired["disposition"], "RECOVERED_LEGACY_CONTROLLER");
+        assert_eq!(fs::read(&previous).unwrap(), old_bytes);
+        let current_hash =
+            okx_host_launcher::sha256_file(&std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(
+            okx_host_launcher::sha256_file(&entrypoint).unwrap(),
+            current_hash
+        );
+        let repeated = recover_existing_controller(&entrypoint, &old_hash).unwrap();
+        assert_eq!(repeated["disposition"], "EXISTING_RECOVERED");
+        assert_eq!(fs::read(&previous).unwrap(), old_bytes);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn git_commands_ignore_shell_proxy_and_global_git_configuration() {
         let command = direct_git_command(

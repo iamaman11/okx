@@ -1,11 +1,13 @@
 use std::{
     collections::BTreeMap,
-    io::{Cursor, Read},
+    fs::{self, OpenOptions},
+    io::{Cursor, Read, Write},
+    path::Path,
 };
 
 use okx_github::{GitHubClient, REPOSITORY_ID};
 use okx_host_launcher::ControllerVersion;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zip::{ZipArchive, result::ZipError};
@@ -24,7 +26,7 @@ const MAX_AGENT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_CONTROLLER_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_LAUNCHER_BYTES: u64 = 32 * 1024 * 1024;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct BundleManifest {
     schema: String,
@@ -35,7 +37,7 @@ struct BundleManifest {
     files: BTreeMap<String, BundleFile>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct BundleFile {
     sha256: String,
@@ -109,6 +111,11 @@ pub async fn install_launcher_root(
     if actual_launcher_hash != declared_launcher_hash {
         return Err(HostControlError::ArtifactHashMismatch);
     }
+    // A single accepted ReleaseSet must attest all three binaries before
+    // publishing even a local manifest for offline inspection.
+    if sha256_hex(&bundle.agent_bytes) != declared_hash(&bundle.manifest, "okx-agent.exe")? {
+        return Err(HostControlError::ArtifactHashMismatch);
+    }
 
     let declared_controller_hash = declared_hash(&bundle.manifest, "okx-host-control.exe")?;
     let actual_controller_hash = sha256_hex(&bundle.controller_bytes);
@@ -132,12 +139,20 @@ pub async fn install_launcher_root(
         rust_version: bundle.manifest.rust_version.clone(),
         controller_sha256: actual_controller_hash.clone(),
     };
+    // A failed conflict must not leave a partially installed Launcher root.
+    // This check is read-only; it precedes every install_root filesystem write.
+    preflight_verified_manifest(&bundle.manifest)?;
+    require_current_entrypoint(&actual_controller_hash)?;
     let root = okx_host_launcher::install_root(
         launcher_bytes,
         &actual_launcher_hash,
         active,
         &bundle.controller_bytes,
     )?;
+    // This manifest comes only from verified_bundle's accepted-main GitHub
+    // attestation. Exact retry is allowed; a different release cannot
+    // silently replace provenance during the one-time launcher installation.
+    persist_verified_manifest(&bundle.manifest)?;
     let migration =
         root_migration::prepare(request_id, &actual_controller_hash, &actual_launcher_hash)?;
 
@@ -281,6 +296,88 @@ async fn verified_bundle(
     }
 
     Ok(bundle)
+}
+
+fn require_current_entrypoint(expected_controller_sha256: &str) -> HostControlResult<()> {
+    // The running executable may be a downloaded new controller while the
+    // installed entrypoint still belongs to an older ReleaseSet. Do not start
+    // a migration that cannot complete its last immutable replacement step.
+    let entrypoint = Path::new(okx_host_launcher::ENTRYPOINT_PATH);
+    if !entrypoint.is_file()
+        || okx_host_launcher::sha256_file(entrypoint)? != expected_controller_sha256
+    {
+        return Err(HostControlError::ArtifactVerification(
+            "legacy installed CONTROL needs a verified controller handoff before Launcher migration",
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_verified_manifest(manifest: &BundleManifest) -> HostControlResult<()> {
+    let control = Path::new(okx_host_launcher::CONTROL_ROOT);
+    match fs::symlink_metadata(control) {
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+            return Err(HostControlError::ArtifactVerification(
+                "accepted release control root is not a plain directory",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        _ => {}
+    }
+    let path = control.join("manifest.json");
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(HostControlError::ArtifactVerification(
+                    "accepted release manifest is not a plain file",
+                ));
+            }
+            let old: BundleManifest = serde_json::from_slice(&fs::read(path)?)?;
+            if old != *manifest {
+                return Err(HostControlError::ArtifactVerification(
+                    "accepted release manifest conflicts with existing installation",
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn persist_verified_manifest(manifest: &BundleManifest) -> HostControlResult<()> {
+    let control = Path::new(okx_host_launcher::CONTROL_ROOT);
+    let metadata = fs::symlink_metadata(control)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(HostControlError::ArtifactVerification(
+            "accepted release control root is not a plain directory",
+        ));
+    }
+    let path = control.join("manifest.json");
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(HostControlError::ArtifactVerification(
+                    "accepted release manifest is not a plain file",
+                ));
+            }
+            let old: BundleManifest = serde_json::from_slice(&fs::read(path)?)?;
+            if old != *manifest {
+                return Err(HostControlError::ArtifactVerification(
+                    "accepted release manifest conflicts with existing installation",
+                ));
+            }
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let bytes = serde_json::to_vec_pretty(manifest)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    Ok(())
 }
 
 fn declared_hash<'a>(

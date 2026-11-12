@@ -27,6 +27,10 @@ pub const OWNER_USER_ID: u64 = 44_100_369;
 
 const COMMENTS_PER_PAGE: u32 = 100;
 const MAX_COMMENT_PAGES: u32 = 10;
+// Only the initial, read-only terminal-ledger reconstruction may scan older pages.
+// Regular cursor-based polling keeps its strict 10-page limit. A larger history
+// still fails closed before any old request can be executed.
+const MAX_BOOTSTRAP_COMMENT_PAGES: u32 = 100;
 pub const MAX_COMMENT_BODY_BYTES: usize = 64 * 1024;
 pub const ISSUE_CURSOR_SCHEMA_V1: &str = "okx.github.issue-cursor/v1";
 pub const GITHUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -606,10 +610,30 @@ impl GitHubClient {
         Ok(comments[keep_from..].to_vec())
     }
 
+    /// Rebuild the terminal ledger after loss of the local cursor. The caller
+    /// must collect all terminal results before executing any pending command.
+    pub async fn issue_comments_for_bootstrap(
+        &self,
+        issue_number: u64,
+    ) -> Result<Vec<IssueComment>, GitHubError> {
+        self.issue_comments_after_bounded(issue_number, None, MAX_BOOTSTRAP_COMMENT_PAGES)
+            .await
+    }
+
     pub async fn issue_comments_after(
         &self,
         issue_number: u64,
         cursor: Option<&IssueCommentCursor>,
+    ) -> Result<Vec<IssueComment>, GitHubError> {
+        self.issue_comments_after_bounded(issue_number, cursor, MAX_COMMENT_PAGES)
+            .await
+    }
+
+    async fn issue_comments_after_bounded(
+        &self,
+        issue_number: u64,
+        cursor: Option<&IssueCommentCursor>,
+        max_pages: u32,
     ) -> Result<Vec<IssueComment>, GitHubError> {
         validate_issue_number(issue_number)?;
 
@@ -622,7 +646,7 @@ impl GitHubClient {
             page: 1,
         };
 
-        for page in 1..=MAX_COMMENT_PAGES {
+        for page in 1..=max_pages {
             let conditional = cursor.is_some() && page == 1;
             let page_fetch = self
                 .fetch_comment_page(issue_number, since.as_deref(), page, conditional)

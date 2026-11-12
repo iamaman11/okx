@@ -126,7 +126,7 @@ pub async fn recover_terminal_ack(github: &GitHubClient) -> HostControlResult<bo
         return Ok(true);
     }
 
-    let comments = github.issue_comments(12).await?;
+    let comments = github.issue_comments_for_bootstrap(12).await?;
     if comments.iter().any(|comment| {
         matches_durable_ack(
             comment.user_id,
@@ -194,7 +194,13 @@ pub fn activate(request_id: &str) -> HostControlResult<Value> {
     if Path::new(ROOT_MIGRATION_PATH).exists() {
         fs::remove_file(ROOT_MIGRATION_PATH)?;
     }
-    let scheduler = autostart::run_now()?;
+    // Migration changes the entrypoint only. A disabled Scheduler must stay
+    // disabled, and even an enabled task resumes on its normal TimeTrigger.
+    // Never force-start Agent/CONTROL as a side effect of file migration.
+    let scheduler = json!({
+        "run_requested": false,
+        "disposition": "NORMAL_SCHEDULE_ONLY"
+    });
 
     Ok(json!({
         "migrated": true,

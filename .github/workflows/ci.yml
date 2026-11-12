@@ -68,6 +68,14 @@ jobs:
         run: |
           set -euo pipefail
 
+          # In-progress Draft edits must not launch repeated Windows releases.
+          # A Ready-for-review event retains the original full CI contract.
+          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.pull_request.draft }}" == "true" ]]; then
+            echo "build_required=false" >> "$GITHUB_OUTPUT"
+            echo "reason=draft PR; defer release build until ready" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           if [[ "${{ github.event_name }}" != "push" ]]; then
             echo "build_required=true" >> "$GITHUB_OUTPUT"
             echo "reason=non-push event" >> "$GITHUB_OUTPUT"
@@ -277,7 +285,7 @@ jobs:
   linux:
     name: linux-core
     needs: [classify, architecture, linux-rust, cloudflare-mcp]
-    if: always() && github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/work/t10-07-one-campaign-native-20261105'
+    if: always() && github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/work/t10-07-one-campaign-native-20261105' && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate required Linux, architecture and Cloudflare gates

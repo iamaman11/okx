@@ -1,6 +1,7 @@
 use std::{
+    fs,
     io::{self, Read},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use clap::{Parser, Subcommand};
@@ -8,7 +9,7 @@ use okx_github::GitHubClient;
 use okx_host_control::{
     HostControlResult,
     auth::{load_native_github_token, store_native_github_token},
-    executor::{HostExecutor, install_current_executable},
+    executor::{HostExecutor, install_current_executable, recover_existing_controller},
     legacy_bootstrap, root_migration,
     runtime::{DEFAULT_CONTROL_POLL_SECONDS, process_pending, run_until_shutdown},
     single_instance::SingleInstanceGuard,
@@ -28,7 +29,11 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Copy this trusted binary outside the optional C:\okx\workspace worktree.
-    Install,
+    Install {
+        /// Exact old SHA-256 for a one-time stopped legacy CONTROL recovery.
+        #[arg(long)]
+        recover_existing_sha256: Option<String>,
+    },
 
     /// Store the GitHub control token from stdin in Windows Credential Manager.
     SetGithubToken,
@@ -67,11 +72,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(cli: Cli) -> HostControlResult<()> {
     match cli.command {
-        Command::Install => {
-            if Path::new(okx_host_launcher::ACTIVE_PATH).exists() {
-                return Err(okx_host_control::HostControlError::LegacyBootstrapDisabled);
+        Command::Install {
+            recover_existing_sha256,
+        } => {
+            for path in [
+                okx_host_launcher::ACTIVE_PATH,
+                okx_host_launcher::LAUNCHER_PATH,
+            ] {
+                match fs::symlink_metadata(path) {
+                    Ok(_) => {
+                        return Err(okx_host_control::HostControlError::LegacyBootstrapDisabled);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
-            let result = install_current_executable(&PathBuf::from(INSTALL_PATH))?;
+            let destination = PathBuf::from(INSTALL_PATH);
+            let result = if let Some(previous) = recover_existing_sha256.as_deref() {
+                let _guard = SingleInstanceGuard::acquire()?;
+                recover_existing_controller(&destination, previous)?
+            } else {
+                install_current_executable(&destination)?
+            };
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::SetGithubToken => {

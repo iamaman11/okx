@@ -278,22 +278,59 @@ pub fn install_root(
         return Err(LauncherError::HashMismatch);
     }
 
-    fs::create_dir_all(CONTROL_ROOT)?;
-    match Path::new(LAUNCHER_PATH).is_file() {
-        true if sha256_file(Path::new(LAUNCHER_PATH))? == launcher_sha256 => {}
-        true => return Err(LauncherError::RootConflict),
-        false => write_atomic_bytes(Path::new(LAUNCHER_PATH), launcher_bytes)?,
+    // All conflicts are checked before the first directory or binary write.
+    match fs::symlink_metadata(CONTROL_ROOT) {
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+            return Err(LauncherError::RootConflict);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    match fs::symlink_metadata(LAUNCHER_PATH) {
+        Ok(metadata) => {
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || sha256_file(Path::new(LAUNCHER_PATH))? != launcher_sha256
+            {
+                return Err(LauncherError::RootConflict);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let prior = load_active()?;
+    if prior
+        .as_ref()
+        .is_some_and(|existing| existing.active != active)
+    {
+        return Err(LauncherError::RootConflict);
+    }
+    let version_path = active.binary_path()?;
+    match fs::symlink_metadata(&version_path) {
+        Ok(metadata) => {
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || sha256_file(&version_path)? != active.controller_sha256
+            {
+                return Err(LauncherError::HashMismatch);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
 
+    fs::create_dir_all(CONTROL_ROOT)?;
+    if !Path::new(LAUNCHER_PATH).exists() {
+        write_atomic_bytes(Path::new(LAUNCHER_PATH), launcher_bytes)?;
+    }
     stage_version(&active, controller_bytes)?;
 
-    match load_active()? {
-        Some(existing) if existing.active.controller_sha256 == active.controller_sha256 => {}
-        Some(_) => return Err(LauncherError::RootConflict),
-        None => save_json(
+    if prior.is_none() {
+        save_json(
             Path::new(ACTIVE_PATH),
             &ActiveController::new(active.clone(), None),
-        )?,
+        )?;
     }
 
     Ok(json!({
