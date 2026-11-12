@@ -114,96 +114,25 @@ for(const tool of PUBLIC_TOOLS as any[]){
  if(tool.name.startsWith('trade.'))continue;
  const expanded=resolvePublicSchema(tool.inputSchema,tool.inputSchema.$defs??{});
  if(tool.name==='accounts'){
-  // The host's linked-account selector is metadata, not a native argument.
-  // With a bare oneOf the host cannot attach link_id to this union tool.
-  fail(expanded.type==='object'&&expanded.required.length===1&&expanded.required[0]==='action'
-    &&expanded.additionalProperties===false,'accounts root must be link-selectable object');
-  fail(expanded.properties.link_id?.pattern==='^link_[a-f0-9]{32}
-  fail(!validTool('accounts',{action:'list',link_id:'link_fixture'}),
-    'native accounts DTO must reject host-only link selector');
-  // Public linked-object descriptor shares a typed field dictionary; exact
-  // per-action extra-key rejection remains in strict native validTool below.
-}else{
-  fail(JSON.stringify(expanded)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),
-    `exact public schema factoring ${tool.name}`);
-  for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))
-    for(const input of [fixture.positive,...fixture.negative])
-      fail(matches(expanded,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),
-        `factored positive/negative semantics ${tool.name}.${fixture.action}`);
-}
-}
-
-for(const action of ['backtest','grid','validate']){
- const base=payloadFixtures.find(x=>x.tool==='research'&&x.action===action)!.positive;
- const positive={...base,strategy_id:'ema_momentum_confirm_v1'};
- const negative={...positive,strategy_id:'unregistered_source_code'};
- fail(validTool('research',positive),`registered research composition ${action}`);
- fail(!validTool('research',negative),'unregistered strategy cannot cross research boundary');
- payloadFixtures.push({tool:'research',action:action+'_composition',positive,negative:[negative]});
-}
-
-for(const action of ['backtest','grid','validate']){
- const base=payloadFixtures.find(x=>x.tool==='research'&&x.action===action)!.positive;
- const withPeriods=(fast:number,slow:number)=>action==='grid'?{...base,variants:[{fast,slow}]}:{...base,parameters:{fast,slow}};
- const positive=withPeriods(999,1000),negative=[withPeriods(999,1001),withPeriods(1000,1000)];
- fail(validTool('research',positive),`research ${action} maximum supported periods`);
- for(const bad of negative)fail(!validTool('research',bad),'research EMA periods match Native bounds');
- payloadFixtures.push({tool:'research',action:action+'_period_bounds',positive,negative});
-}
-,
-    'linked account selector is host-only and bounded');
+  fail(expanded.type==='object' && expanded.required.length===1 && expanded.required[0]==='action'
+    && expanded.additionalProperties===false,'linked accounts root is strict object');
+  fail(expanded.properties.link_id.pattern==='^link_[a-f0-9]{32}$',
+    'host-only linked account selector is bounded');
   fail(expanded.oneOf.length===ACTION_SCHEMAS.accounts.length
-    &&expanded.oneOf.every((branch:any)=>branch.properties?.action
-      &&branch.properties?.link_id?.pattern==='^link_[a-f0-9]{32}
+    && expanded.oneOf.every((branch:any)=>branch.additionalProperties===false
+      && branch.properties?.link_id?.pattern==='^link_[a-f0-9]{32}$'),
+    'every account action retains strict allowed fields');
   fail(!validTool('accounts',{action:'list',link_id:'link_fixture'}),
-    'native accounts DTO must reject host-only link selector');
-  // Public linked-object descriptor shares a typed field dictionary; exact
-  // per-action extra-key rejection remains in strict native validTool below.
-}else{
+    'native protocol never accepts host-only link selector');
+ }else{
   fail(JSON.stringify(expanded)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),
     `exact public schema factoring ${tool.name}`);
   for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))
-    for(const input of [fixture.positive,...fixture.negative])
-      fail(matches(expanded,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),
-        `factored positive/negative semantics ${tool.name}.${fixture.action}`);
+   for(const input of [fixture.positive,...fixture.negative])
+    fail(matches(expanded,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),
+      `factored positive/negative semantics ${tool.name}.${fixture.action}`);
+ }
 }
-}
-
-for(const action of ['backtest','grid','validate']){
- const base=payloadFixtures.find(x=>x.tool==='research'&&x.action===action)!.positive;
- const positive={...base,strategy_id:'ema_momentum_confirm_v1'};
- const negative={...positive,strategy_id:'unregistered_source_code'};
- fail(validTool('research',positive),`registered research composition ${action}`);
- fail(!validTool('research',negative),'unregistered strategy cannot cross research boundary');
- payloadFixtures.push({tool:'research',action:action+'_composition',positive,negative:[negative]});
-}
-
-for(const action of ['backtest','grid','validate']){
- const base=payloadFixtures.find(x=>x.tool==='research'&&x.action===action)!.positive;
- const withPeriods=(fast:number,slow:number)=>action==='grid'?{...base,variants:[{fast,slow}]}:{...base,parameters:{fast,slow}};
- const positive=withPeriods(999,1000),negative=[withPeriods(999,1001),withPeriods(1000,1000)];
- fail(validTool('research',positive),`research ${action} maximum supported periods`);
- for(const bad of negative)fail(!validTool('research',bad),'research EMA periods match Native bounds');
- payloadFixtures.push({tool:'research',action:action+'_period_bounds',positive,negative});
-}
-
-      &&branch.additionalProperties===false
-      &&Array.isArray(branch.required)),
-    'accounts action cases preserve strict allowed fields and discriminators');
-  fail(!validTool('accounts',{action:'list',link_id:'link_fixture'}),
-    'native accounts DTO must reject host-only link selector');
-  // Public linked-object descriptor shares a typed field dictionary; exact
-  // per-action extra-key rejection remains in strict native validTool below.
-}else{
-  fail(JSON.stringify(expanded)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),
-    `exact public schema factoring ${tool.name}`);
-  for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))
-    for(const input of [fixture.positive,...fixture.negative])
-      fail(matches(expanded,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),
-        `factored positive/negative semantics ${tool.name}.${fixture.action}`);
-}
-}
-
 for(const action of ['backtest','grid','validate']){
  const base=payloadFixtures.find(x=>x.tool==='research'&&x.action===action)!.positive;
  const positive={...base,strategy_id:'ema_momentum_confirm_v1'};
