@@ -236,6 +236,66 @@ for(const [tool,action] of fakeMutationActions){
 }
 console.log('mcp_fake_venue_mutation_routes PASS 11 actions positive/negative 0 real exchange POST');
 
+const connectFixture=payloadFixtures.find(x=>x.tool==='accounts'&&x.action==='connect')!;
+const attachArgs={...connectFixture.positive,enabled:false};
+const attachedUid='a'.repeat(64),attachedKey='okx:demo:'+attachedUid;
+const attachedAccount={id:attachArgs.alias,label:attachArgs.label??attachArgs.alias,
+ account_key:attachedKey,uid_fingerprint:attachedUid,venue:'okx',environment:'demo',
+ identity_verified:true,enabled:true,explicit_pause:false,policy_revision:3,
+ limits:attachArgs.limits,strategies:[]};
+for(const variation of ['requires_pause','already_disabled','wrong_identity','unsafe_enable','pause_refused']){
+ const args={...attachArgs,enabled:variation==='unsafe_enable'};
+ const account={...attachedAccount,...(variation==='already_disabled'?{enabled:false}:{})};
+ if(variation==='wrong_identity')account.uid_fingerprint='b'.repeat(64);
+ const state={status:'CONFIGURED',revision:3,accounts:[account]};
+ const visits:{path:string;request:any}[]=[];
+ const fakeHandler=async(url:string,init?:RequestInit)=>{
+  const path=new URL(url).pathname;
+  const request=init?.body?JSON.parse(String(init.body)):null;
+  visits.push({path,request});
+  if(path==='/dispatch'){
+   const op=request.operation;
+   return Response.json({status:'completed',result:{alias:op.alias,credential_ref:op.credential_ref,
+    connect_operation_id:op.operation_id,configuration_digest:op.request_digest,
+    account_key:{venue:'okx',environment:'demo',verified_uid:attachedUid}}});
+  }
+  if(path==='/account-governance')return Response.json(state);
+  if(path==='/account-governance/pause'){
+   if(request.account!==args.alias||request.expected_revision!==3||
+      request.explicit_pause!==true||request.idempotency_key!==args.idempotency_key)
+    throw Error('unsafe attached account CAS pause');
+   if(variation==='pause_refused')return Response.json({status:'FAILED',reason:'STALE_ACCESS_REVISION'});
+   return Response.json({status:'CONFIGURED',configuration:{...state,revision:4,
+    accounts:[{...account,explicit_pause:true,policy_revision:4}]}});
+  }
+  throw Error('reattachment must not enroll or mutate an independent owner: '+path);
+ };
+ const fake:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:fakeHandler})}};
+ const rpc:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
+  body:JSON.stringify({jsonrpc:'2.0',id:913,method:'tools/call',
+   params:publicArgs('accounts',args)})}),fake,ctx)).json();
+ if(rpc.error||!rpc.result?.structuredContent)throw Error('verified reattach tool error '+JSON.stringify(rpc.error));
+ const outcome=rpc.result.structuredContent;
+ if(variation==='requires_pause'){
+  if(outcome.status!=='completed'||outcome.data.reattached_existing!==true||
+     outcome.data.configuration.accounts.length!==1||outcome.data.account.explicit_pause!==true||
+     visits.map(v=>v.path).join(',')!=='/dispatch,/account-governance,/account-governance/pause')
+   throw Error('existing verified account was not paused/reused exactly once');
+ }else if(variation==='already_disabled'){
+  if(outcome.status!=='completed'||outcome.data.reattached_existing!==true||
+    visits.map(v=>v.path).join(',')!=='/dispatch,/account-governance')
+   throw Error('already-disabled account created new central mutation');
+ }else{
+  const expected=variation==='wrong_identity'?'EXISTING_ACCOUNT_IDENTITY_MISMATCH':
+    variation==='unsafe_enable'?'EXISTING_ACCOUNT_ATTACH_MUST_BE_DISABLED':'STALE_ACCESS_REVISION';
+  if(outcome.reason_code!==expected||!['failed','rejected'].includes(outcome.status)||
+    visits.some(v=>v.path==='/account-governance/enroll'))
+   throw Error('reattach failure not fail-closed '+variation+': '+JSON.stringify(outcome));
+ }
+}
+console.log('existing_verified_account_reattach_fail_closed PASS one account no venue POST');
+
+
 const rawFailure=(code:string)=>({schema:'okx.agent.response/v1',request_id:'native_fail_398',
  status:'rejected',generated_at:'2026-10-23T00:00:00Z',quality:'NOT_READY',result_schema:'okx.product/v1',
  result:null,failure:{code,message:code,retryable:false},warnings:[]});
