@@ -58,11 +58,48 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$OKX_MCP_OWNER_SECRET" || { echo "MCP owner secret missing"; exit 25; }
-          curl --fail --silent --show-error \
-            --retry 6 --retry-delay 2 --retry-all-errors \
-            -H "Authorization: Bearer $OKX_MCP_OWNER_SECRET" \
-            https://okx-cloudflare-mcp.okx-794.workers.dev/installation/inspect |
-            jq -e -c '{schema,state,installation_id,accounts_total,revision,release_present,account_access,real_accounts_enabled,all_new_real_risk_paused,risk}'
+          # New Worker version propagation is not instantaneous. HTTP 200
+          # plus jq's object construction is NOT evidence that new fields exist:
+          # missing fields become null and previously passed deploy acceptance.
+          expected_tree="$(git rev-parse 'HEAD^{tree}')"
+          for attempt in 1 2 3 4 5 6 7 8; do
+            health="$(curl -fsS https://okx-cloudflare-mcp.okx-794.workers.dev/health || true)"
+            if ! jq -e --arg tree "$expected_tree" '
+              .status == "ok" and
+              .service == "okx-cloudflare-mcp" and
+              .release_source_tree == $tree
+            ' >/dev/null 2>&1 <<< "$health"; then
+              sleep 2
+              continue
+            fi
+            inspected="$(curl -fsS -H "Authorization: Bearer $OKX_MCP_OWNER_SECRET" \
+              https://okx-cloudflare-mcp.okx-794.workers.dev/installation/inspect || true)"
+            if jq -e '
+              .schema == "okx.installation-inspection/v1" and
+              .state == "BOUND" and
+              (.installation_id | type) == "string" and
+              (.accounts_total | type) == "number" and
+              (.revision | type) == "number" and
+              .release_present == true and
+              (.account_access | type) == "array" and
+              (.account_access | length) == .accounts_total and
+              (.real_accounts_enabled | type) == "number" and
+              (.all_new_real_risk_paused | type) == "boolean" and
+              (.risk.unresolved_entries | type) == "number" and
+              (.account_access | all(.[]; 
+                (.id | type) == "string" and
+                (.enabled | type) == "boolean" and
+                (.explicit_pause | type) == "boolean" and
+                (.identity_verified | type) == "boolean"))
+            ' >/dev/null 2>&1 <<< "$inspected"; then
+              jq -e -c '{schema,state,installation_id,accounts_total,revision,release_present,account_access,real_accounts_enabled,all_new_real_risk_paused,risk}' <<< "$inspected"
+              echo "OWNER_POLICY_READBACK_CURRENT=PASS"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "OWNER_POLICY_READBACK_CURRENT=FAIL" >&2
+          exit 26
 
       - name: Health check
         shell: bash
