@@ -1,5 +1,5 @@
-import {observedOwnedDescendants} from "../../../scripts/trade-integration/process-ownership.mjs";
 #!/usr/bin/env node
+import {observedOwnedDescendants} from "../../../scripts/trade-integration/process-ownership.mjs";
 // Workerd/Miniflare executes the ACTUAL RuntimeSession with SQLite-backed DO
 // transactions. Only the incoming WSS frames are scripted. No Map storage,
 // alternate RiskBook, exchange server, endpoint in production, or financial stub.
