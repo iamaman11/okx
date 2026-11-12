@@ -1,7 +1,12 @@
-use std::{str::FromStr, time::{Duration, Instant}};
+use std::{
+    str::FromStr,
+    time::{Duration, Instant},
+};
 
 use clap::Parser;
-use okx_api::{AccountApi, Credentials, MarginMode, OkxEnvironment, OkxRestClient, Region, TradeApi};
+use okx_api::{
+    AccountApi, Credentials, MarginMode, OkxEnvironment, OkxRestClient, Region, TradeApi,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "okx-capabilities")]
@@ -13,7 +18,10 @@ struct Args {
     #[arg(long)]
     demo: bool,
 
-    #[arg(long, help = "Read authenticated opening-risk inventory using GET only; no trading")]
+    #[arg(
+        long,
+        help = "Read authenticated opening-risk inventory using GET only; no trading"
+    )]
     opening_inventory: bool,
 
     #[arg(long, default_value = "BTC-USDT-SWAP")]
@@ -51,17 +59,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "EXPOSURE_PRESENT"
         };
         // No UID, key, instrument, order ID, financial amounts or samples.
-        println!("{}", serde_json::json!({
-            "schema": "okx.readonly-opening-inventory/v1",
-            "state": state,
-            "complete": complete,
-            "position_rows": positions.len(),
-            "pending_order_rows": orders.len(),
-            "pending_derivative_algo_rows": algos.rows,
-            "algo_scopes_checked": algos.scopes_checked,
-            "algo_received_at_ms": algos.received_at_ms,
-            "authenticated_reads_only": true
-        }));
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": "okx.readonly-opening-inventory/v1",
+                "state": state,
+                "complete": complete,
+                "position_rows": positions.len(),
+                "pending_order_rows": orders.len(),
+                "pending_derivative_algo_rows": algos.rows,
+                "algo_scopes_checked": algos.scopes_checked,
+                "algo_received_at_ms": algos.received_at_ms,
+                "authenticated_reads_only": true
+            })
+        );
         return Ok(());
     }
     let account = AccountApi::new(client);
