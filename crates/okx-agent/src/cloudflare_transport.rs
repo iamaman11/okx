@@ -4320,50 +4320,17 @@ mod raw_native_session_tests {
                         }])),
                     });
                 }
-                // The two filled order observations have exact authenticated
-                // POST ACK identities. Publish each as one immutable signed
-                // phase: maintenance and Status must not compete for one page.
-                let close_client = accounts.resolve("fixture-a").await.unwrap()
-                    .execution.store.call(
-                        std::time::Instant::now() + Duration::from_secs(3),
-                        |sql| {
-                            Ok(sql.by_idempotency("t09_real_public_close_0001")?
-                                .ok_or(okx_execution::StoreError::Invalid(
-                                    "T09_CLOSE_SQL_ORDER_MISSING"
-                                ))?.client_order_id)
-                        }
-                    ).await.expect("verified close must have durable client order identity");
-                assert_ne!(close_client, saved.client_order_id,
-                    "close and opening cannot share an exchange client ID");
-                let phased_orders = terminal_orders.iter()
-                    .zip([close_client, saved.client_order_id.clone()])
-                    .map(|(recorded, client)| RecordedGet {
-                        access_key: recorded.access_key.clone(),
-                        path: recorded.path.clone(),
-                        required_query: vec![
-                            ("instId".into(), "BTC-USDT-SWAP".into()),
-                            ("clOrdId".into(), client),
-                        ],
-                        raw_response: recorded.raw_response.clone(),
-                    }).collect::<Vec<_>>();
+                // The CLOSE ACK is the verified source-event boundary.
+                // Keep order readbacks in the existing identity/ACK-bound
+                // recorded queue: later public Close/Status and late-fee
+                // scenarios advance this same route. Promoting these two
+                // terminal orders to permanent immutable phases blocked
+                // later order identities and mixed the two source owners.
                 feed.advance_recorded_route(
                     "fixture-executor-a",
                     "/api/v5/trade/order",
                     terminal_orders,
                 );
-                for (index, page) in phased_orders.into_iter().enumerate() {
-                    let promoted = feed.supersede_queued_signed_source_at_event(
-                        "t09-1-verified-terminal-order",
-                        if index == 0 {
-                            "t09-1-filled-close-order"
-                        } else {
-                            "t09-1-filled-opening-order"
-                        },
-                        page,
-                    );
-                    assert!(promoted > 0,
-                        "an immutable filled order requires an ACK-bound recorded predecessor");
-                }
                 // The original attached stop remains LIVE after close, so the
                 // production flat-protection owner must cancel that exact algoId.
                 // Subsequent source inventories are explicitly empty, only after
