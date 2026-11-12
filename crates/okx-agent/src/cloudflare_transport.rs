@@ -3811,10 +3811,6 @@ mod raw_native_session_tests {
         // workerd RiskBook, but never changes the accepted T09.0/T09.5 run.
         let mut managed_add_proof: Option<serde_json::Value> = None;
         let mut first_close_at: Option<String> = None;
-        // Retain the EXACT immutable signed T09.1 terminal wire sources for
-        // the later A-pending/B-admission causal phases. This is test input,
-        // not a replay of SQL facts or a derived financial oracle.
-        let mut b1_terminal_financial_wire: Option<(Vec<u8>, Vec<u8>)> = None;
         if status_probe {
             let after_fill_order = envelope(json!([{
                 "instId":"BTC-USDT-SWAP",
@@ -4239,8 +4235,6 @@ mod raw_native_session_tests {
                         "ts":closing_at
                     }
                 ]));
-                b1_terminal_financial_wire =
-                    Some((raw_close_fill.clone(), raw_close_bill.clone()));
                 // All six history partitions remain strictly scripted; old
                 // entry-only repetitions are retired at the acknowledged venue
                 // transition so the first terminal source read sees BOTH trades.
@@ -5578,11 +5572,6 @@ mod raw_native_session_tests {
                         // the five exact instType partitions and one bill
                         // archive. There is NO default empty-page fallback,
                         // extra GET, financial rewrite or production TTL bypass.
-                        let (a_terminal_fills, a_terminal_bills) =
-                            b1_terminal_financial_wire
-                                .as_ref()
-                                .expect("B1 requires accepted T09.1 signed terminal sources")
-                                .clone();
                         // T09.1's signed terminal history is now one immutable
                         // event-scoped source for concurrent finance readers.
                         // Re-reading A must not republish fresh pages, timestamps,
