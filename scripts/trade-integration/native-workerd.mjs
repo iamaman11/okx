@@ -16,7 +16,7 @@ function receipt(stdout, prefix) {
   assert.equal(matches.length, 1, prefix + " must have one authentic child readback");
   return JSON.parse(matches[0][1]);
 }
-export async function actualNativeWorker(root, signal, { statusProbe = false, secondAdmission = false, partialFills = false, protectionFailure = false, managedAdd = false, closeMode = false, budgetDenial = false } = {}) {
+export async function actualNativeWorker(root, signal, { statusProbe = false, secondAdmission = false, partialFills = false, protectionFailure = false, managedAdd = false, closeMode = false, budgetDenial = false, staleFirstFee = false } = {}) {
   assert.ok(!secondAdmission || statusProbe, "T09.2 needs the completed terminal T09.1 readback");
   if (partialFills && !secondAdmission) throw Error("T09.3_REQUIRES_T09.2");
   if (protectionFailure && !partialFills) throw Error("T10_08_REQUIRES_T09_3");
@@ -36,6 +36,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     : statusProbe ? "post-fill-status" : "baseline";
   // Financial evidence must never be memoized across different opt-in probes.
   const key = [mode,
+    staleFirstFee ? "delayed-expired-first-fee" : "normal-fee",
     process.env.OKX_S2_05_POLICY_CAS_PROBE === "1" ? "policy-cas" : "normal-policy",
     process.env.OKX_B1_NATIVE_CAP_PROBE === "1" ? "b1-cap" : "normal-cap",
     process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1" ? "b1-positive" : "normal-b",
@@ -73,6 +74,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
         env: {
           ...process.env, OKX_NATIVE_WORKER_INTEGRATION: "1",
           OKX_T09_1_STATUS_PROBE: statusProbe ? "1" : "0",
+          OKX_T09_FIRST_FEE_EXPIRED_PROBE: staleFirstFee ? "1" : "0",
           OKX_T09_2_ADMISSION_PROBE: secondAdmission ? "1" : "0",
           OKX_T09_3_PARTIAL_PROBE: partialFills ? "1" : "0",
           OKX_T10_08_PROTECTION_FAILURE_PROBE: protectionFailure ? "1" : "0",
@@ -248,6 +250,9 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     return {
       nativeBootstrap: receipt(stdout, "T09_0_NATIVE_SQL_EVIDENCE_V1"),
       workerBootstrap: receipt(stdout, "T09_0_WORKER_EVIDENCE_V1"),
+      ...(staleFirstFee ? {
+        nativePreIntentExpiredFee: receipt(stdout, "T09_1_PRE_INTENT_STALE_FEE_PROOF_V1"),
+      } : {}),
       nativeReplay: receipt(stdout, "T09_5_NATIVE_IDEMPOTENCY_EVIDENCE_V1"),
       ...(process.env.OKX_T10_06_CONCURRENT_PROBE === "1" ? {
         nativeT10Cold: receipt(stdout, "T10_06_NATIVE_COLD_CONCURRENT_V1"),
