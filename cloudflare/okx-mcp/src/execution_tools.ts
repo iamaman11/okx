@@ -99,10 +99,24 @@ function publicSchema(schema:Schema):Schema {
  return Object.keys(used).length?{...factor(schema),$defs:used}:schema;
 }
 
+// Multi-action accounts is an object tool with a strict server-side oneOf.
+// Unlike a top-level bare oneOf, an object root lets linked MCP clients add
+// their host-managed account selector (link_id) without changing action DTOs.
+// The host consumes that selector; validTool still rejects any extra wire keys.
+function publicAccountsSchema():Schema {
+ const variants=ACTION_SCHEMAS.accounts;
+ const properties=Object.assign({},...variants.map(s=>s.properties));
+ properties.action=choice('list','status','connect','pause','resume','set_limits');
+ return publicSchema({
+   type:'object',properties,required:['action'],additionalProperties:false,
+   oneOf:variants.map(s=>({...s,additionalProperties:true}))
+ });
+}
 export const PUBLIC_TOOLS:Json[]=[
  ...Object.entries(ACTION_SCHEMAS).filter(([name])=>name!=='trade')
    .map(([name,schemas])=>({name,description:TOOL_NOTES[name].description,
-     inputSchema:publicSchema({oneOf:schemas}),annotations:annotation(TOOL_NOTES[name])})),
+     inputSchema:name==='accounts'?publicAccountsSchema():publicSchema({oneOf:schemas}),
+     annotations:annotation(TOOL_NOTES[name])})),
  ...ACTION_SCHEMAS.trade.map(schema=>{
    const scopedAction=String(schema.properties.action.const);
    const {action:_action,...properties}=schema.properties;
