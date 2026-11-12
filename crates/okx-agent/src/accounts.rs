@@ -1351,7 +1351,9 @@ pub(crate) mod recorded_support {
         feed.expect_get(page());
         assert_eq!(
             feed.supersede_queued_signed_source_at_event(
-                "verified-terminal-finance", "signed-terminal-spot", page()
+                "verified-terminal-finance",
+                "signed-terminal-spot",
+                page()
             ),
             1
         );
@@ -1378,7 +1380,9 @@ pub(crate) mod recorded_support {
         }
         assert_eq!(
             feed.immutable_signed_phase_reads(
-                "fixture-executor-a", "/api/v5/trade/fills-history", "signed-terminal-spot"
+                "fixture-executor-a",
+                "/api/v5/trade/fills-history",
+                "signed-terminal-spot"
             ),
             2
         );
@@ -1386,7 +1390,9 @@ pub(crate) mod recorded_support {
             feed.send(
                 request("SWAP", 1_794_498_235_000),
                 Instant::now() + std::time::Duration::from_secs(1)
-            ).await.is_err(),
+            )
+            .await
+            .is_err(),
             "another instType must not borrow SPOT evidence"
         );
         assert!(feed.outbound_posts.lock().unwrap().is_empty());
@@ -1399,10 +1405,13 @@ pub(crate) mod recorded_support {
         );
         assert_eq!(retired, 0);
         assert_eq!(feed.unconsumed_reads(), 0);
-        let new_event_read = feed.send(
-            request("SPOT", 1_794_498_237_000),
-            Instant::now() + std::time::Duration::from_secs(1),
-        ).await.expect("published history event must remain available");
+        let new_event_read = feed
+            .send(
+                request("SPOT", 1_794_498_237_000),
+                Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("published history event must remain available");
         assert_eq!(new_event_read.body, raw);
     }
 
@@ -2355,10 +2364,12 @@ pub(crate) mod recorded_support {
             // not a consumable page budget tied to their scheduling order.
             // Reuse the existing immutable phase store; never synthesize an
             // exchange response on GET or change the production observer.
-            if matches!(path, "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive") {
-                let mut grouped = std::collections::BTreeMap::<
-                    Vec<(String, String)>, (Vec<u8>, usize)
-                >::new();
+            if matches!(
+                path,
+                "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive"
+            ) {
+                let mut grouped =
+                    std::collections::BTreeMap::<Vec<(String, String)>, (Vec<u8>, usize)>::new();
                 for page in &pages {
                     let mut query = page.required_query.clone();
                     query.sort();
@@ -2368,7 +2379,8 @@ pub(crate) mod recorded_support {
                         }
                         std::collections::btree_map::Entry::Occupied(mut entry) => {
                             assert_eq!(
-                                entry.get().0, page.raw_response,
+                                entry.get().0,
+                                page.raw_response,
                                 "TRANSCRIPT_HISTORY_SAME_EVENT_RAW_CONFLICT"
                             );
                             entry.get_mut().1 += 1;
@@ -2377,13 +2389,15 @@ pub(crate) mod recorded_support {
                 }
                 let mut phases = self.immutable_signed_phases.lock().unwrap();
                 let mut required = self.reads.lock().unwrap();
-                let retired = required.iter().filter(|p|
-                    p.access_key == access_key && p.path == path
-                ).count();
+                let retired = required
+                    .iter()
+                    .filter(|p| p.access_key == access_key && p.path == path)
+                    .count();
                 required.retain(|p| p.access_key != access_key || p.path != path);
-                self.optional_reads.lock().unwrap().retain(|p|
-                    p.access_key != access_key || p.path != path
-                );
+                self.optional_reads
+                    .lock()
+                    .unwrap()
+                    .retain(|p| p.access_key != access_key || p.path != path);
                 for (query, (raw, recorded_copies)) in grouped {
                     let source = RecordedGet {
                         access_key: access_key.to_owned(),
@@ -2398,9 +2412,9 @@ pub(crate) mod recorded_support {
                             && item.source.path == path
                             && previous == query
                     });
-                    let old_digest = old.as_ref().map(|item|
+                    let old_digest = old.as_ref().map(|item| {
                         format!("{:x}", sha2::Sha256::digest(&item.source.raw_response))
-                    );
+                    });
                     let digest = format!("{:x}", sha2::Sha256::digest(&source.raw_response));
                     if let Some(phase) = old {
                         phase.source = source;
@@ -4631,8 +4645,11 @@ pub(crate) mod recorded_support {
                                     .collect::<Vec<_>>();
                                 sent.sort();
                                 (required == sent
-                                    || (matches!(path, "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive")
-                                        && required.iter().all(|pair| sent.contains(pair))))
+                                    || (matches!(
+                                        path,
+                                        "/api/v5/trade/fills-history"
+                                            | "/api/v5/account/bills-archive"
+                                    ) && required.iter().all(|pair| sent.contains(pair))))
                             })
                             .then_some(index)
                         })
