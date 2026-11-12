@@ -51,6 +51,19 @@ jobs:
           trap 'rm -f wrangler.release.jsonc' EXIT
           npx wrangler deploy --config wrangler.release.jsonc
 
+      - name: Owner-only read-only installation inspection
+        shell: bash
+        env:
+          OKX_MCP_OWNER_SECRET: ${{ secrets.OKX_MCP_OWNER_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "$OKX_MCP_OWNER_SECRET" || { echo "MCP owner secret missing"; exit 25; }
+          curl --fail --silent --show-error \
+            --retry 6 --retry-delay 2 --retry-all-errors \
+            -H "Authorization: Bearer $OKX_MCP_OWNER_SECRET" \
+            https://okx-cloudflare-mcp.okx-794.workers.dev/installation/inspect |
+            jq -e -c '{schema,state,installation_id,accounts_total,revision,release_present,risk}'
+
       - name: Health check
         shell: bash
         run: |
