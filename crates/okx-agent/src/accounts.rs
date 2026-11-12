@@ -4644,12 +4644,12 @@ pub(crate) mod recorded_support {
                                     .map(|(name, value)| (name.into_owned(), value.into_owned()))
                                     .collect::<Vec<_>>();
                                 sent.sort();
-                                (required == sent
+                                required == sent
                                     || (matches!(
                                         path,
                                         "/api/v5/trade/fills-history"
                                             | "/api/v5/account/bills-archive"
-                                    ) && required.iter().all(|pair| sent.contains(pair))))
+                                    ) && required.iter().all(|pair| sent.contains(pair)))
                             })
                             .then_some(index)
                         })
