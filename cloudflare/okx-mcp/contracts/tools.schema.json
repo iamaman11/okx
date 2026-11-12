@@ -115,6 +115,10 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991
+          },
+          "link_id": {
+            "type": "string",
+            "pattern": "^link_[a-f0-9]{32}$"
           }
         },
         "required": [
@@ -126,27 +130,48 @@
             "properties": {
               "action": {
                 "const": "list"
+              },
+              "link_id": {
+                "type": "string",
+                "pattern": "^link_[a-f0-9]{32}$"
               }
             },
             "required": [
               "action"
-            ]
+            ],
+            "additionalProperties": false
           },
           {
             "properties": {
               "action": {
                 "const": "status"
+              },
+              "account": {},
+              "link_id": {
+                "type": "string",
+                "pattern": "^link_[a-f0-9]{32}$"
               }
             },
             "required": [
               "action",
               "account"
-            ]
+            ],
+            "additionalProperties": false
           },
           {
             "properties": {
               "action": {
                 "const": "connect"
+              },
+              "idempotency_key": {},
+              "credential_ref": {},
+              "alias": {},
+              "label": {},
+              "limits": {},
+              "enabled": {},
+              "link_id": {
+                "type": "string",
+                "pattern": "^link_[a-f0-9]{32}$"
               }
             },
             "required": [
@@ -156,7 +181,8 @@
               "alias",
               "limits",
               "enabled"
-            ]
+            ],
+            "additionalProperties": false
           },
           {
             "properties": {
@@ -165,6 +191,13 @@
                   "pause",
                   "resume"
                 ]
+              },
+              "account": {},
+              "idempotency_key": {},
+              "expected_revision": {},
+              "link_id": {
+                "type": "string",
+                "pattern": "^link_[a-f0-9]{32}$"
               }
             },
             "required": [
@@ -172,12 +205,21 @@
               "account",
               "idempotency_key",
               "expected_revision"
-            ]
+            ],
+            "additionalProperties": false
           },
           {
             "properties": {
               "action": {
                 "const": "set_limits"
+              },
+              "account": {},
+              "idempotency_key": {},
+              "expected_revision": {},
+              "limits": {},
+              "link_id": {
+                "type": "string",
+                "pattern": "^link_[a-f0-9]{32}$"
               }
             },
             "required": [
@@ -186,7 +228,8 @@
               "idempotency_key",
               "expected_revision",
               "limits"
-            ]
+            ],
+            "additionalProperties": false
           }
         ],
         "$defs": {
