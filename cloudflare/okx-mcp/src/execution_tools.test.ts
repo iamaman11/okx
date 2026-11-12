@@ -113,7 +113,20 @@ function resolvePublicSchema(node:any,defs:Record<string,any>):any{
 for(const tool of PUBLIC_TOOLS as any[]){
  if(tool.name.startsWith('trade.'))continue;
  const expanded=resolvePublicSchema(tool.inputSchema,tool.inputSchema.$defs??{});
- fail(JSON.stringify(expanded)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),`exact public schema factoring ${tool.name}`);
+ if(tool.name==='accounts'){
+  // The host's linked-account selector is metadata, not a native argument.
+  // With a bare oneOf the host cannot attach link_id to this union tool.
+  fail(expanded.type==='object'&&expanded.required.length===1&&expanded.required[0]==='action'
+    &&expanded.additionalProperties===false,'accounts root must be link-selectable object');
+  fail(expanded.oneOf.length===ACTION_SCHEMAS.accounts.length
+    &&expanded.oneOf.every((branch:any)=>branch.additionalProperties===true),
+    'accounts action cases preserve outer link selector with oneOf');
+  fail(!validTool('accounts',{action:'list',link_id:'link_fixture'}),
+    'native accounts DTO must reject host-only link selector');
+}else{
+  fail(JSON.stringify(expanded)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),
+    `exact public schema factoring ${tool.name}`);
+}
  for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))for(const input of [fixture.positive,...fixture.negative])
   fail(matches(expanded,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),`factored positive/negative semantics ${tool.name}.${fixture.action}`);
 }
