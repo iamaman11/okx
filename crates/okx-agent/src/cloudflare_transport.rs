@@ -2687,7 +2687,7 @@ mod raw_native_session_tests {
                         }).collect(),
                     );
                 }
-                let admission = if attempt == 0
+                let admission: Result<serde_json::Value, String> = if attempt == 0
                     && std::env::var("OKX_T10_06_CONCURRENT_PROBE").as_deref() == Ok("1")
                 {
                     // Unlike the warm replay test below, NONE of these 100
@@ -2802,66 +2802,106 @@ mod raw_native_session_tests {
                         "outbound_create_posts":1,
                         "elapsed_ms":started.elapsed().as_millis()
                     }));
-                    acknowledged
+                    Ok(acknowledged)
                 } else {
                     trade.trade("fixture-a", &execute, None).await
-                        .expect("T09.1 public Execute must return its typed admission")
                 };
-                if t10_12_reserve_enabled()
-                    && T10_12_RESERVE_WAS_HELD.load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    // Do not convert a lost Worker HELD response into another
-                    // Execute or a possibly sent exchange order. The same
-                    // original Native SQL rejection is reconciled below.
-                    return admission;
-                }
-                if admission["status"] == "partial" {
-                    return admission;
-                }
-                assert_eq!(
-                    admission["status"], "completed",
-                    "T09.1 cannot retry UNKNOWN or partial execution: {admission}"
-                );
-                assert_eq!(
-                    admission["data"]["state"], "REJECTED",
-                    "only definitive local rejection may permit a new intent: {admission}"
-                );
-                assert_eq!(
-                    admission["data"]["rejection_origin"], "LOCAL",
-                    "venue-side or unverified rejection cannot authorize retry: {admission}"
-                );
-                assert_eq!(
-                    admission["data"]["send_state"], "NOT_STARTED",
-                    "potentially sent POST must remain UNKNOWN/no-resubmit: {admission}"
-                );
-                assert_eq!(
-                    admission["data"]["risk_release_state"], "RELEASED",
-                    "risk must be released after definitive local rejection: {admission}"
-                );
-                assert_eq!(
-                    feed.outbound_posts.lock().unwrap().len(),
-                    0,
-                    "local rate denial must occur before ANY venue create attempt"
-                );
-                let reason = admission["data"]["primary_reason"]
-                    .as_str()
-                    .expect("T09.1 local denial must provide a reason");
-                let local_reason = reason.strip_prefix("OKX API error: ").unwrap_or(reason);
-                let remaining =
-                    admission_deadline.saturating_duration_since(std::time::Instant::now());
-                let delay = if local_reason == "ENTRY_FEE_EXCHANGE_TIME_STALE" {
-                    // The signed fee source has expired while another owner
-                    // consumed this account's rate budget. The guards above
-                    // prove NOT_STARTED, RELEASED and zero venue POSTs.
-                    // Publish the next independently timed signed fee event
-                    // below; never reuse or treat the stale fee as current.
-                    Duration::ZERO
-                } else {
-                    recorded_preview_local_defer(local_reason, &rate_budget, remaining)
-                        .unwrap_or_else(|| {
-                            panic!("T09.1 non-private-GET/nonlocal denial cannot retry: {admission}; rate={:?}",
-                                rate_budget.snapshot().last_throttle)
-                        })
+                let (reason, delay) = match admission {
+                    Ok(admission) => {
+                        if t10_12_reserve_enabled()
+                            && T10_12_RESERVE_WAS_HELD.load(std::sync::atomic::Ordering::SeqCst)
+                        {
+                            // Do not convert a lost Worker HELD response into another
+                            // Execute or a possibly sent exchange order. The same
+                            // original Native SQL rejection is reconciled below.
+                            return admission;
+                        }
+                        if admission["status"] == "partial" {
+                            return admission;
+                        }
+                        assert_eq!(
+                            admission["status"], "completed",
+                            "T09.1 cannot retry UNKNOWN or partial execution: {admission}"
+                        );
+                        assert_eq!(
+                            admission["data"]["state"], "REJECTED",
+                            "only definitive local rejection may permit a new intent: {admission}"
+                        );
+                        assert_eq!(
+                            admission["data"]["rejection_origin"], "LOCAL",
+                            "venue-side or unverified rejection cannot authorize retry: {admission}"
+                        );
+                        assert_eq!(
+                            admission["data"]["send_state"], "NOT_STARTED",
+                            "potentially sent POST must remain UNKNOWN/no-resubmit: {admission}"
+                        );
+                        assert_eq!(
+                            admission["data"]["risk_release_state"], "RELEASED",
+                            "risk must be released after definitive local rejection: {admission}"
+                        );
+                        assert_eq!(
+                            feed.outbound_posts.lock().unwrap().len(),
+                            0,
+                            "local rate denial must occur before ANY venue create attempt"
+                        );
+                        let reason = admission["data"]["primary_reason"]
+                            .as_str()
+                            .expect("T09.1 local denial must provide a reason")
+                            .to_owned();
+                        let local_reason = reason
+                            .strip_prefix("OKX API error: ")
+                            .unwrap_or(reason.as_str());
+                        let remaining =
+                            admission_deadline.saturating_duration_since(std::time::Instant::now());
+                        let delay = if local_reason == "ENTRY_FEE_EXCHANGE_TIME_STALE" {
+                            // The signed fee source has expired while another owner
+                            // consumed this account's rate budget. The guards above
+                            // prove NOT_STARTED, RELEASED and zero venue POSTs.
+                            // Publish the next independently timed signed fee event
+                            // below; never reuse or treat the stale fee as current.
+                            Duration::ZERO
+                        } else {
+                            recorded_preview_local_defer(local_reason, &rate_budget, remaining)
+                                .unwrap_or_else(|| {
+                                    panic!("T09.1 non-private-GET/nonlocal denial cannot retry: {admission}; rate={:?}",
+                                        rate_budget.snapshot().last_throttle)
+                                })
+                        };
+                        (reason, delay)
+                    }
+                    Err(reason) if reason == "ENTRY_FEE_EXCHANGE_TIME_STALE" => {
+                        // An expired tariff may be retried with a fresh recorded
+                        // source ONLY if the original SQL owner has no intent.
+                        // Later-stage expiry after PREPARE is NO-RESUBMIT.
+                        assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0,
+                            "pre-plan expired fee cannot send venue POST");
+                        let key = match &execute {
+                            TradeRequest::Execute { idempotency_key, .. } => idempotency_key.clone(),
+                            _ => panic!("T09.1 Execute identity required"),
+                        };
+                        let owner = accounts.resolve("fixture-a").await
+                            .expect("T09.1 original SQL owner required");
+                        let persisted = owner.execution.store.call(
+                            std::time::Instant::now() + Duration::from_secs(2),
+                            move |sql| sql.by_idempotency(&key),
+                        ).await.expect("T09.1 exact SQL identity readback required");
+                        assert!(persisted.is_none(),
+                            "expired fee after SQL PREPARE must not create a new intent");
+                        if attempt == 0 {
+                            println!(
+                                "T09_1_PRE_INTENT_STALE_FEE_PROOF_V1:{}",
+                                json!({
+                                    "reason": reason,
+                                    "durable_intent_found": false,
+                                    "outbound_posts": 0,
+                                })
+                            );
+                        }
+                        (reason, Duration::ZERO)
+                    }
+                    Err(reason) => panic!(
+                        "T09.1 unexpected Native error cannot authorize retry: {reason}"
+                    ),
                 };
                 assert!(attempt < 3, "T09.1 bounded local no-send recovery exhausted");
                 let mut audit = summary(&format!("risk_t09_1_local_no_send_{attempt}"));
@@ -6667,10 +6707,25 @@ mod raw_native_session_tests {
                             let mut witness=serde_json::json!(null);
                             tokio::time::timeout(Duration::from_secs(20),async {
                                 loop {
-                                    let (fills,bills)=owner.execution.store.call(
+                                    // Only a read-only observation can be retried when the
+                                    // existing SQL owner is temporarily busy. Do not change
+                                    // its per-job deadline or the 20s terminal proof budget.
+                                    let (fills,bills)=match owner.execution.store.call(
                                         std::time::Instant::now()+Duration::from_secs(3),
                                         |s|Ok((s.cursor("fills","SWAP")?,s.cursor("bills","account")?))
-                                    ).await.expect("T09.6 source cursors from native SQL");
+                                    ).await {
+                                        Ok(cursors) => cursors,
+                                        Err(okx_execution::StoreError::Invalid("ACCOUNT_QUEUE_DEADLINE")) => {
+                                            witness=serde_json::json!({
+                                                "stage":"SQL_QUEUE_BUSY",
+                                                "sql_timing":owner.execution.store.sql_timing(),
+                                                "maintenance":owner.execution.store.maintenance_timing(),
+                                            });
+                                            tokio::time::sleep(Duration::from_millis(50)).await;
+                                            continue;
+                                        }
+                                        Err(error) => panic!("T09.6 source cursors from native SQL: {error:?}"),
+                                    };
                                     let health=owner.source_capture_health.read().await.clone();
                                     let snapshot=owner.latest_snapshot.read().await.clone();
                                     let ready_f=fills.as_ref().is_some_and(|c|
