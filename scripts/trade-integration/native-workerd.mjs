@@ -36,7 +36,7 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
     : statusProbe ? "post-fill-status" : "baseline";
   // Financial evidence must never be memoized across different opt-in probes.
   const key = [mode,
-    staleFirstFee ? "delayed-expired-first-fee" : "normal-fee",
+    staleFirstFee ? "recorded-expired-first-fee" : "normal-fee",
     process.env.OKX_S2_05_POLICY_CAS_PROBE === "1" ? "policy-cas" : "normal-policy",
     process.env.OKX_B1_NATIVE_CAP_PROBE === "1" ? "b1-cap" : "normal-cap",
     process.env.OKX_B1_SECOND_POSITIVE_PROBE === "1" ? "b1-positive" : "normal-b",
