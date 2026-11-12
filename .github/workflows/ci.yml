@@ -886,7 +886,9 @@ jobs:
   b1-native:
     name: windows-b1-native-prerequisite
     needs: classify
-    if: github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true'
+    # The same exact native-source proof applies to this partial prerequisite.
+    # Any source change or unproven Cloudflare change still runs the real B1.
+    if: github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true' && needs.classify.outputs.native_required != 'false'
     runs-on: windows-latest
     timeout-minutes: 18
     steps:
