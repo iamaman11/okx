@@ -2853,7 +2853,9 @@ mod raw_native_session_tests {
                             .as_str()
                             .expect("T09.1 local denial must provide a reason")
                             .to_owned();
-                        let local_reason = reason.strip_prefix("OKX API error: ").unwrap_or(reason.as_str());
+                        let local_reason = reason
+                            .strip_prefix("OKX API error: ")
+                            .unwrap_or(reason.as_str());
                         let remaining =
                             admission_deadline.saturating_duration_since(std::time::Instant::now());
                         let delay = if local_reason == "ENTRY_FEE_EXCHANGE_TIME_STALE" {
@@ -2890,14 +2892,16 @@ mod raw_native_session_tests {
                         ).await.expect("T09.1 exact SQL identity readback required");
                         assert!(persisted.is_none(),
                             "expired fee after SQL PREPARE must not create a new intent");
-                        println!(
-                            "T09_1_PRE_INTENT_STALE_FEE_PROOF_V1:{}",
-                            json!({
-                                "reason": reason,
-                                "durable_intent_found": false,
-                                "outbound_posts": 0,
-                            })
-                        );
+                        if attempt == 0 {
+                            println!(
+                                "T09_1_PRE_INTENT_STALE_FEE_PROOF_V1:{}",
+                                json!({
+                                    "reason": reason,
+                                    "durable_intent_found": false,
+                                    "outbound_posts": 0,
+                                })
+                            );
+                        }
                         (reason, Duration::ZERO)
                     }
                     Err(reason) => panic!(
