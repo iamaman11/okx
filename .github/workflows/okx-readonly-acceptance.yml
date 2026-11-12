@@ -106,3 +106,39 @@ jobs:
           set -euo pipefail
           test "$OBSERVER_FINGERPRINT" = "$EXECUTOR_FINGERPRINT"
           echo "ACCOUNT_IDENTITY_MATCH=PASS"
+
+  opening-inventory:
+    name: authenticated-observer-opening-inventory
+    needs: [observer, executor, identity-match]
+    if: needs.identity-match.result == 'success'
+    runs-on: ubuntu-latest
+    environment: okx-succession-global-observer
+    env:
+      OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+      OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+      OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Signed GET-only full-account derivative opening census
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="$RUNNER_TEMP/opening-inventory.json"
+          trap 'rm -f "$file"' EXIT
+          cargo run --locked --quiet -p okx-cli -- --region global --opening-inventory > "$file"
+          jq -e '
+            .schema == "okx.readonly-opening-inventory/v1" and
+            .authenticated_reads_only == true and
+            (.state == "INCOMPLETE" or .state == "EXPOSURE_PRESENT" or .state == "DERIVATIVES_EXPOSURE_EMPTY") and
+            (.complete == true or .state == "INCOMPLETE") and
+            .algo_scopes_checked == 16 and
+            .algo_received_at_ms > 0 and
+            (.position_rows | type == "number") and
+            (.pending_order_rows | type == "number") and
+            (.pending_derivative_algo_rows | type == "number")
+          ' "$file" > /dev/null
+          jq -c '{schema,state,complete,position_rows,pending_order_rows,pending_derivative_algo_rows,algo_scopes_checked,algo_received_at_ms,authenticated_reads_only}' "$file"
+          echo "READONLY_OPENING_INVENTORY_RECORDED=PASS"
+          # Important: a complete nonempty inventory is a valid observation,
+          # NOT authorization to retire an owner or enable real trading.
