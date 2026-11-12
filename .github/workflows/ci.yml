@@ -394,7 +394,7 @@ jobs:
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
-          if (($output -join "`n") -notmatch '# pass 4\b') {
+          if (($output -join "`n") -notmatch '# pass 5\b') {
             throw 'NATIVE_WORKER_LIFECYCLE_TEST_COUNT_INVALID'
           }
 

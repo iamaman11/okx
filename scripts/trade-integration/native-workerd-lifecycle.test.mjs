@@ -1,3 +1,4 @@
+import {observedOwnedDescendants} from "./process-ownership.mjs";
 // Whole existing Native/workerd driver, with metadata-only faults at its
 // pre-handoff ownership boundary. No alternative venue or trading algorithm.
 import assert from "node:assert/strict";
@@ -122,6 +123,36 @@ async function finishOwned(run) {
   }
   if (ready) await noOwnedSurvivors(ready);
 }
+
+
+// A recycled Windows parent PID is not proof of process ownership.
+test("lifecycle ownership rejects recycled PID without hiding real children", () => {
+  const rows = [
+    {pid:100,name:"driver.exe",parent_pid:1,created:"2026-11-12T13:05:00.000Z"},
+    {pid:101,name:"csrss.exe",parent_pid:100,created:"2026-11-12T13:01:00.000Z"},
+    {pid:102,name:"winlogon.exe",parent_pid:101,created:"2026-11-12T13:01:01.000Z"},
+    {pid:103,name:"vctip.exe",parent_pid:100,created:"2026-11-12T13:04:59.000Z"},
+    {pid:104,name:"okx-agent.exe",parent_pid:100,created:"2026-11-12T13:05:01.000Z"},
+    {pid:105,name:"workerd.exe",parent_pid:104,created:"2026-11-12T13:05:02.000Z"},
+    {pid:106,name:"child.exe",parent_pid:105,created:"2026-11-12T13:05:03.000Z"},
+    {pid:107,name:"stale-service.exe",parent_pid:105,created:"2026-11-12T13:04:00.000Z"},
+  ];
+  assert.deepEqual(
+    observedOwnedDescendants(rows,100).map(row=>row.pid),
+    [104,105,106],
+    "Only causally newer descendants may be asserted or terminated",
+  );
+  assert.throws(
+    ()=>observedOwnedDescendants(rows,999),
+    /LIFECYCLE_ROOT_IDENTITY_UNAVAILABLE/,
+    "Missing owner identity cannot prove a process tree",
+  );
+  assert.throws(
+    ()=>observedOwnedDescendants([{...rows[0],created:null},rows[4]],100),
+    /LIFECYCLE_PROCESS_IDENTITY_UNAVAILABLE/,
+    "Missing owner creation time must fail closed",
+  );
+});
 
 for (const outcome of ["success", "error", "timeout", "error_teardown"]) {
   test(`actual Native/workerd ${outcome} closes owned processes and isolates next run`,
