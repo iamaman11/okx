@@ -181,6 +181,11 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
             ||!["real","demo"].includes(String(snapshot.result.account_key.environment))
             ||typeof snapshot.result.account_key.verified_uid!=="string"||!/^[0-9a-f]{64}$/.test(snapshot.result.account_key.verified_uid))
             return jsonRpc(id,toolResult(snapshot));
+          const enrollment={venue:"okx",environment:snapshot.result.account_key.environment,
+            uid_fingerprint:snapshot.result.account_key.verified_uid,alias:args.alias,label:args.label??args.alias,
+            credential_ref:args.credential_ref,limits:args.limits,enabled:args.enabled,idempotency_key:args.idempotency_key};
+          const enroll=()=>runtimeFetch(env,"/account-governance/enroll",{method:"POST",
+            headers:{"content-type":"application/json"},body:JSON.stringify(enrollment)});
           // One owner, one account. A clean local Windows catalog may be
           // attached to the verified account already held by this same DO.
           // Never reenroll the same venue identity or reset its RiskBook.
@@ -199,8 +204,11 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
               return jsonRpc(id,toolResult({status:"failed",reason_code:"EXISTING_ACCOUNT_IDENTITY_MISMATCH",retryable:false}));
             // Reattachment never enables real trading. Existing limits,
             // strategies and financial data remain under the same DO.
+            // The exact original enabled enrollment may be replayed through
+            // the DO's existing body-bound durable receipt. A different key
+            // still rejects ACCOUNT_ALREADY_CONNECTED; no new risk grant.
             if(args.enabled!==false)
-              return jsonRpc(id,toolResult({status:"rejected",reason_code:"EXISTING_ACCOUNT_ATTACH_MUST_BE_DISABLED",retryable:false}));
+              return jsonRpc(id,toolResult(await enroll()));
             let stopped:Record<string,unknown>=central;
             if(old.enabled===true&&old.explicit_pause!==true){
               const pause=await runtimeFetch(env,"/account-governance/pause",{method:"POST",
@@ -224,10 +232,7 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
             return jsonRpc(id,toolResult({status:"CONNECTED",account:attached as Json,configuration:stopped as Json,
               readiness:{state:"not_evaluated"},reattached_existing:true}));
           }
-          return jsonRpc(id,toolResult(await runtimeFetch(env,"/account-governance/enroll",{method:"POST",headers:{"content-type":"application/json"},
-            body:JSON.stringify({venue:"okx",environment:snapshot.result.account_key.environment,
-              uid_fingerprint:snapshot.result.account_key.verified_uid,alias:args.alias,label:args.label??args.alias,
-              credential_ref:args.credential_ref,limits:args.limits,enabled:args.enabled,idempotency_key:args.idempotency_key})})));
+          return jsonRpc(id,toolResult(await enroll()));
         }
         if(args.action==="set_limits"){
           return jsonRpc(id,toolResult(await runtimeFetch(env,"/account-governance/limits",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(args)})));
