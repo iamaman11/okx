@@ -1338,6 +1338,60 @@ pub(crate) mod recorded_support {
         }
     }
 
+    #[tokio::test]
+    async fn immutable_signed_history_replays_same_source_across_capture_windows() {
+        let feed = RecordedAccountHttp::default();
+        let raw = br#"{"code":"0","msg":"","data":[]}"#.to_vec();
+        let page = || RecordedGet {
+            access_key: "fixture-executor-a".into(),
+            path: "/api/v5/trade/fills-history".into(),
+            required_query: vec![("instType".into(), "SPOT".into())],
+            raw_response: raw.clone(),
+        };
+        feed.expect_get(page());
+        assert_eq!(
+            feed.supersede_queued_signed_source_at_event(
+                "verified-terminal-finance", "signed-terminal-spot", page()
+            ),
+            1
+        );
+        let client = reqwest::Client::new();
+        let request = |partition: &str, from: i64| {
+            client
+                .get(format!(
+                    "https://www.okx.com/api/v5/trade/fills-history?instType={partition}&begin={from}&end={}&limit=100",
+                    from + 1_000
+                ))
+                .header("OK-ACCESS-KEY", "fixture-executor-a")
+                .build()
+                .unwrap()
+        };
+        for start in [1_794_498_231_000_i64, 1_794_498_233_000] {
+            let delivered = feed
+                .send(
+                    request("SPOT", start),
+                    Instant::now() + std::time::Duration::from_secs(1),
+                )
+                .await
+                .expect("signed source must serve independent readers");
+            assert_eq!(delivered.body, raw);
+        }
+        assert_eq!(
+            feed.immutable_signed_phase_reads(
+                "fixture-executor-a", "/api/v5/trade/fills-history", "signed-terminal-spot"
+            ),
+            2
+        );
+        assert!(
+            feed.send(
+                request("SWAP", 1_794_498_235_000),
+                Instant::now() + std::time::Duration::from_secs(1)
+            ).await.is_err(),
+            "another instType must not borrow SPOT evidence"
+        );
+        assert!(feed.outbound_posts.lock().unwrap().is_empty());
+    }
+
     // Bind history rows only to the already-observed signed POST ACK.
     fn bind_recorded_history_ids(
         acknowledgements: &[(String, String, String)],
@@ -1975,6 +2029,8 @@ pub(crate) mod recorded_support {
                     "/api/v5/account/trade-fee"
                         | "/api/v5/account/leverage-info"
                         | "/api/v5/trade/order"
+                        | "/api/v5/trade/fills-history"
+                        | "/api/v5/account/bills-archive"
                 ),
                 "TRANSCRIPT_SOURCE_EVENT_ROUTE_NOT_ALLOWED"
             );
@@ -4486,7 +4542,9 @@ pub(crate) mod recorded_support {
                                     .map(|(name, value)| (name.into_owned(), value.into_owned()))
                                     .collect::<Vec<_>>();
                                 sent.sort();
-                                required == sent
+                                (required == sent
+                                    || (matches!(path, "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive")
+                                        && required.iter().all(|pair| sent.contains(pair))))
                             })
                             .then_some(index)
                         })
@@ -4544,6 +4602,16 @@ pub(crate) mod recorded_support {
                             })?
                             .replace("__REQUEST_CL_ORD_ID__", client)
                             .into_bytes()
+                    } else if matches!(
+                        path,
+                        "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive"
+                    ) {
+                        // Repeated signed reads retain the original ACK binding.
+                        bind_recorded_history_ids(
+                            &self.acknowledged_creates.lock().unwrap(),
+                            key,
+                            body,
+                        )?
                     } else {
                         body
                     };
