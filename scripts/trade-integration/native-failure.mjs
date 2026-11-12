@@ -57,6 +57,46 @@ function fixedCode(value) {
   return /^(?:BUDGET|CENTRAL|LOCAL|ENTRY|STRATEGY|ACCOUNT|CAMPAIGN|INTENT|PROTECTION|SOURCE|SQL|ORDER|RISK|POLICY|FEE|LEVERAGE|NAV|UNATTRIBUTED|COHORT|TRANSCRIPT)_[A-Z0-9_]{1,80}$/.test(value)
     ? value : null;
 }
+// The Rust producer already emits typed outcome fields at the original
+// T09.2 refusal. Keep these bounded fields instead of reconstructing a
+// business reason from panic text or forwarding private HTTP query values.
+export function signedGetSourceFailure(stderr) {
+  const marker = "T09_2_SIGNED_GET_DENIAL_V1:";
+  const lines = String(stderr ?? "").replace(ansi, "").split(/\r?\n/)
+    .map(line => line.trim()).filter(line => line.startsWith(marker));
+  if (!lines.length) return null;
+  const invalid = () => ({
+    schema:"okx.t09-signed-source-failure/v1", parse_state:"INVALID",
+    origin_case:"T09.2", stage:"EXECUTE",
+    reason_code:"T09_2_SOURCE_DIAGNOSTIC_INVALID",
+  });
+  if (lines.length !== 1 || lines[0].length > 64*1024) return invalid();
+  let value;
+  try { value = JSON.parse(lines[0].slice(marker.length)); }
+  catch { return invalid(); }
+  const code = fixedCode(value?.outcome?.data?.primary_reason);
+  const routes = value?.denied_routes;
+  const posts = value?.outbound_posts;
+  if (!code || !Array.isArray(routes) || routes.length > 32 ||
+      routes.some(route => typeof route !== "string" || route.length > 1024) ||
+      !Number.isSafeInteger(posts) || posts < 0 || posts > 1000)
+    return invalid();
+  const causes = routes.map(route => fixedCode(route.split(":")[0]));
+  if (causes.some(cause => !cause)) return invalid();
+  return {
+    schema:"okx.t09-signed-source-failure/v1", parse_state:"VALID",
+    origin_case:"T09.2", stage:"EXECUTE",
+    reason_code:code,
+    state:fixedState(value.outcome.data.state),
+    send_state:["NOT_STARTED","POSTING","UNKNOWN","ACKED","SENT","NOT_SENT"]
+      .includes(value.outcome.data.send_state) ? value.outcome.data.send_state : null,
+    risk_release_state:["RELEASED","HELD","PENDING","UNKNOWN"]
+      .includes(value.outcome.data.risk_release_state) ? value.outcome.data.risk_release_state : null,
+    denial_count:routes.length, source_denial_codes:[...new Set(causes)],
+    outbound_posts:posts,
+  };
+}
+
 function unexpectedPostsDetail(line) {
   const text=String(line).replace(ansi, "").trim();
   const marker=["T10_02_UNEXPECTED_POSTS_V1","T09_6_STATUS_POSTS_V1"]
