@@ -62,7 +62,7 @@ jobs:
             --retry 6 --retry-delay 2 --retry-all-errors \
             -H "Authorization: Bearer $OKX_MCP_OWNER_SECRET" \
             https://okx-cloudflare-mcp.okx-794.workers.dev/installation/inspect |
-            jq -e -c '{schema,state,installation_id,accounts_total,revision,release_present,risk}'
+            jq -e -c '{schema,state,installation_id,accounts_total,revision,release_present,account_access,real_accounts_enabled,all_new_real_risk_paused,risk}'
 
       - name: Health check
         shell: bash

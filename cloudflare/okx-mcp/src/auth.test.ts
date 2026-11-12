@@ -1,6 +1,6 @@
 import {defaultHandler} from './auth.js';
 import {RuntimeSession} from './runtime_session.js';
-import {initial} from './account_governance.test.js';
+import {initial,account} from './account_governance.test.js';
 import {FRAME_SCHEMA} from './shared.js';
 class Storage{map=new Map();async get(k:string){return structuredClone(this.map.get(k));}async list(opts:{prefix:string;limit:number}){return new Map([...this.map.entries()].filter(([key])=>key.startsWith(opts.prefix)).slice(0,opts.limit));}async put(k:string,v:any){this.map.set(k,structuredClone(v));}async delete(keys:string[]){let n=0;for(const key of keys)if(this.map.delete(key))n++;return n;}async transaction(fn:any){const backup=structuredClone(this.map);try{return await fn(this);}catch(e){this.map=backup;throw e;}}}
 const storage=new Storage(),owner=new RuntimeSession({storage},{} as any);
@@ -41,6 +41,24 @@ if(inspected.schema!=='okx.installation-inspection/v1'||inspected.state!=='BOUND
  throw Error('owner inspection must be read-only with bounded safe summary');
 if(JSON.stringify(inspected).includes('fixture_secret')||'occupied_usd' in inspected.risk)
  throw Error('inspection must not disclose secrets or financial amounts');
+
+const accountTemplate=account;
+storage.map.set('account_access_v1',{...initial,revision:1,accounts:[{...accountTemplate,explicit_pause:true}]});
+const pausedPolicy:any=await(await defaultHandler.fetch(inspection('Bearer fixture_secret'),env)).json();
+if(pausedPolicy.account_access?.length!==1||pausedPolicy.account_access[0].id!=='primary'
+ ||pausedPolicy.account_access[0].environment!=='real'
+ ||pausedPolicy.account_access[0].enabled!==true
+ ||pausedPolicy.account_access[0].explicit_pause!==true
+ ||pausedPolicy.real_accounts_enabled!==0||pausedPolicy.all_new_real_risk_paused!==true)
+ throw Error('owner inspection must report original paused real account policy');
+if(JSON.stringify(pausedPolicy).includes(accountTemplate.uid_fingerprint)
+ ||JSON.stringify(pausedPolicy).includes(accountTemplate.account_key))
+ throw Error('owner inspection cannot disclose UID fingerprint or account key');
+storage.map.set('account_access_v1',{...initial,revision:1,accounts:[accountTemplate]});
+const openPolicy:any=await(await defaultHandler.fetch(inspection('Bearer fixture_secret'),env)).json();
+if(openPolicy.real_accounts_enabled!==1||openPolicy.all_new_real_risk_paused!==false)
+ throw Error('active real account must be reported as non-paused');
+storage.map.set('account_access_v1',{...initial});
 storage.map.set('risk_entry_v2:fixture_01',{state:'UNKNOWN'});
 const unsettled:any=await(await defaultHandler.fetch(inspection('Bearer fixture_secret'),env)).json();
 if(unsettled.risk.unresolved_entries!==1||unsettled.risk.reservation_entries!==1)

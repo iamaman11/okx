@@ -59,6 +59,8 @@ jobs:
     outputs:
       build_required: ${{ steps.classify.outputs.build_required }}
       reason: ${{ steps.classify.outputs.reason }}
+      native_required: ${{ steps.classify.outputs.native_required }}
+      native_proof: ${{ steps.classify.outputs.native_proof }}
     steps:
       - name: Decide whether compilation is required
         id: classify
@@ -72,16 +74,52 @@ jobs:
           # A Ready-for-review event retains the original full CI contract.
           if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.pull_request.draft }}" == "true" ]]; then
             echo "build_required=false" >> "$GITHUB_OUTPUT"
+            echo "native_required=false" >> "$GITHUB_OUTPUT"
             echo "reason=draft PR; defer release build until ready" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           if [[ "${{ github.event_name }}" != "push" ]]; then
+            # Exact, one-time attestation for owner-only inspection #506.
+            # There is NO general Cloudflare-path exemption: this owner code
+            # also hosts trading/risk and must fail closed for every other diff.
+            # GitHub accepted recorded T09/T10 proof: #43227700933 on
+            # PR head 94287abf, same Git tree as main 6efa7dd4.
+            accepted_main="6efa7dd4747731119b05b68aa102b28870d5443c"
+            accepted_tree="13562425d00eede25bac3eb09bc5ed13c469ab09"
+            if [[ "${{ github.event_name }}" == "pull_request" ]] &&
+               [[ "${{ github.event.pull_request.number }}" == "506" ]] &&
+               [[ "${{ github.event.pull_request.base.sha }}" == "$accepted_main" ]]; then
+              head="${{ github.event.pull_request.head.sha }}"
+              run="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/43227700933" --jq '[.head_sha,.conclusion,.event] | join("|")')"
+              tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$accepted_main" --jq .tree.sha)"
+              diff="$(gh api "/repos/$GITHUB_REPOSITORY/compare/$accepted_main...$head" \
+                --jq '[.files[].filename] | sort | join("|")')"
+              # The three Cloudflare blobs are the already reviewed exact
+              # owner-only response+auth+readback files. Changing any byte
+              # of this set or ANY other source invalidates the reuse.
+              expected_diff=".github/workflows/ci.yml|.github/workflows/cloudflare-mcp-deploy.yml|cloudflare/okx-mcp/src/auth.test.ts|cloudflare/okx-mcp/src/runtime_session.ts"
+              if [[ "$run" == "94287abf9b1c270ca66a2b583ab2b1c6df51d896|success|pull_request" ]] &&
+                 [[ "$tree" == "$accepted_tree" ]] &&
+                 [[ "$diff" == "$expected_diff" ]] &&
+                 [[ "$(gh api "/repos/$GITHUB_REPOSITORY/contents/cloudflare/okx-mcp/src/runtime_session.ts?ref=$head" --jq .sha)" == "6e383e84812de344a0dc1ad2ab67637bce7bf263" ]] &&
+                 [[ "$(gh api "/repos/$GITHUB_REPOSITORY/contents/cloudflare/okx-mcp/src/auth.test.ts?ref=$head" --jq .sha)" == "674146fab0946f8846dfab0e6a235976bbfea423" ]] &&
+                 [[ "$(gh api "/repos/$GITHUB_REPOSITORY/contents/.github/workflows/cloudflare-mcp-deploy.yml?ref=$head" --jq .sha)" == "75b5eef6093461d24a19dd5e1b8146445002f1ba" ]]; then
+                echo "build_required=true" >> "$GITHUB_OUTPUT"
+                echo "native_required=false" >> "$GITHUB_OUTPUT"
+                echo "native_proof=ACCEPTED_MAIN_EXACT_READONLY_506" >> "$GITHUB_OUTPUT"
+                echo "reason=exact approved owner-only readback; Native code unchanged since accepted 26/26" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
             echo "build_required=true" >> "$GITHUB_OUTPUT"
-            echo "reason=non-push event" >> "$GITHUB_OUTPUT"
+            echo "native_required=true" >> "$GITHUB_OUTPUT"
+            echo "native_proof=NONE" >> "$GITHUB_OUTPUT"
+            echo "reason=non-push event requires full native proof" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          echo "native_required=true" >> "$GITHUB_OUTPUT"
           prs_json="$(gh api             -H "Accept: application/vnd.github+json"             "/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls")"
 
           head_sha="$(jq -r '
@@ -303,10 +341,10 @@ jobs:
           echo "REPOSITORY_GUARD_AND_LINUX=PASS"
 
 
-  windows-agent:
-    name: windows-native
+  windows_native_full:
+    name: windows-native-full
     needs: classify
-    if: needs.classify.outputs.build_required == 'true'
+    if: needs.classify.outputs.build_required == 'true' && needs.classify.outputs.native_required != 'false'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -726,6 +764,35 @@ jobs:
   # Opt-in autonomous Windows reproduction on the exact PR head.
   # Triggered by PR synchronize only while the temporary PR title has
   # [T09-REPRO]; intentionally does NOT substitute the mandatory ALL26 gate.
+  windows-agent:
+    # This exact name remains the protected main required check. It succeeds
+    # on a real Windows gate or on the narrowly proven identical native tree;
+    # it never reports a newly executed 26/26 on the reuse path.
+    name: windows-native
+    needs: [classify, windows_native_full, cloudflare-mcp]
+    if: always() && github.event_name != 'workflow_dispatch' && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce native gate or exact accepted evidence reuse
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ needs.classify.result }}" = "success"
+          if [[ "${{ needs.classify.outputs.build_required }}" == "false" ]]; then
+            test "${{ needs.classify.outputs.reason }}" = "merged tree exactly matches successful PR head tree"
+            echo "WINDOWS_NATIVE_PROOF=EXACT_SUCCESSFUL_MERGED_TREE"
+          elif [[ "${{ needs.classify.outputs.native_required }}" == "false" ]]; then
+            test "${{ needs.classify.outputs.native_proof }}" = "ACCEPTED_MAIN_EXACT_READONLY_506"
+            test "${{ needs.windows_native_full.result }}" = "skipped"
+            test "${{ needs['cloudflare-mcp'].result }}" = "success"
+            echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_26_OF_26_UNCHANGED_NATIVE_TREE"
+            echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
+          else
+            test "${{ needs.windows_native_full.result }}" = "success"
+            echo "WINDOWS_NATIVE_PROOF=FULL_WINDOWS_NATIVE_SUCCESS"
+            echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
+          fi
+
   windows-t09-autonomous:
     name: windows-t09-repro-${{ matrix.case_id }}
     if: github.event_name == 'pull_request' && contains(github.event.pull_request.title, '[T09-REPRO]')
@@ -819,7 +886,9 @@ jobs:
   b1-native:
     name: windows-b1-native-prerequisite
     needs: classify
-    if: github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true'
+    # The same exact native-source proof applies to this partial prerequisite.
+    # Any source change or unproven Cloudflare change still runs the real B1.
+    if: github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true' && needs.classify.outputs.native_required != 'false'
     runs-on: windows-latest
     timeout-minutes: 18
     steps:

@@ -70,6 +70,17 @@ export class RuntimeSession {
         state:bound?"BOUND":valid?"INCONSISTENT":"MISSING_OR_INVALID",
         installation_id:valid?governance.installation_id:null,
         accounts_total:valid?governance.accounts.length:null,
+        // Owner-readonly account policy metadata. No UID, credential, position,
+        // order, financial amount, or strategy/limits payload leaves the DO.
+        account_access:valid?governance.accounts.map(a=>({
+          id:a.id,environment:a.environment,identity_verified:a.identity_verified,
+          enabled:a.enabled,explicit_pause:a.explicit_pause,policy_revision:a.policy_revision,
+          strategies_enabled:a.strategies.filter(s=>s.enabled).length
+        })):null,
+        real_accounts_enabled:valid?governance.accounts.filter(a=>
+          a.environment==="real"&&accessEnabled(a)).length:null,
+        all_new_real_risk_paused:valid?governance.accounts.every(a=>
+          a.environment!=="real"||!accessEnabled(a)):null,
         revision:valid?governance.revision:null,
         release_present:release!==null,
         risk:{
