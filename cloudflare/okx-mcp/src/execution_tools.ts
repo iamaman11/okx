@@ -110,7 +110,7 @@ function publicAccountsSchema():Schema {
  const fields=Object.assign({},...variants.map(s=>s.properties));
  const properties=Object.fromEntries(
    Object.keys(fields).map(key=>[key,key==='action'
-     ?choice('list','status','connect','pause','resume','set_limits'):{type:['string','number','boolean','object','array','null']}])
+     ?choice('list','status','connect','pause','resume','set_limits'):{}])
  );
  return publicSchema({
    type:'object',properties,required:['action'],additionalProperties:false,
