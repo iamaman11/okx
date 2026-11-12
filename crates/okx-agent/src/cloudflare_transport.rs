@@ -2686,8 +2686,13 @@ mod raw_native_session_tests {
                             }])),
                         }).collect(),
                     );
+                    if std::env::var("OKX_T09_FIRST_FEE_EXPIRED_PROBE").as_deref() == Ok("1") {
+                        // An actual elapsed wall-time delay preserves the
+                        // immutable signed GET timestamp; never refresh it.
+                        tokio::time::sleep(Duration::from_millis(5_300)).await;
+                    }
                 }
-                let admission = if attempt == 0
+                let admission: Result<serde_json::Value, String> = if attempt == 0
                     && std::env::var("OKX_T10_06_CONCURRENT_PROBE").as_deref() == Ok("1")
                 {
                     // Unlike the warm replay test below, NONE of these 100
@@ -2802,11 +2807,12 @@ mod raw_native_session_tests {
                         "outbound_create_posts":1,
                         "elapsed_ms":started.elapsed().as_millis()
                     }));
-                    acknowledged
+                    Ok(acknowledged)
                 } else {
                     trade.trade("fixture-a", &execute, None).await
-                        .expect("T09.1 public Execute must return its typed admission")
                 };
+                let (reason, delay) = match admission {
+                    Ok(admission) => {
                 if t10_12_reserve_enabled()
                     && T10_12_RESERVE_WAS_HELD.load(std::sync::atomic::Ordering::SeqCst)
                 {
@@ -2845,7 +2851,8 @@ mod raw_native_session_tests {
                 );
                 let reason = admission["data"]["primary_reason"]
                     .as_str()
-                    .expect("T09.1 local denial must provide a reason");
+                    .expect("T09.1 local denial must provide a reason")
+                    .to_owned();
                 let local_reason = reason.strip_prefix("OKX API error: ").unwrap_or(reason);
                 let remaining =
                     admission_deadline.saturating_duration_since(std::time::Instant::now());
@@ -2862,6 +2869,35 @@ mod raw_native_session_tests {
                             panic!("T09.1 non-private-GET/nonlocal denial cannot retry: {admission}; rate={:?}",
                                 rate_budget.snapshot().last_throttle)
                         })
+                };
+                        (reason, delay)
+                    }
+                    Err(reason) if reason == "ENTRY_FEE_EXCHANGE_TIME_STALE" => {
+                        // An expired tariff may be retried with a fresh recorded
+                        // source ONLY if the original SQL owner has no intent.
+                        // Later-stage expiry after PREPARE is NO-RESUBMIT.
+                        assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0,
+                            "pre-plan expired fee cannot send venue POST");
+                        let key = match &execute {
+                            TradeRequest::Execute { idempotency_key, .. } => idempotency_key.clone(),
+                            _ => panic!("T09.1 Execute identity required"),
+                        };
+                        let owner = accounts.resolve("fixture-a").await
+                            .expect("T09.1 original SQL owner required");
+                        let persisted = owner.execution.store.call(
+                            std::time::Instant::now() + Duration::from_secs(2),
+                            move |sql| sql.by_idempotency(&key),
+                        ).await.expect("T09.1 exact SQL identity readback required");
+                        assert!(persisted.is_none(),
+                            "expired fee after SQL PREPARE must not create a new intent");
+                        println!("T09_1_PRE_INTENT_STALE_FEE_PROOF_V1:{}",json!({
+                            "reason":reason,"durable_intent_found":false,"outbound_posts":0
+                        }));
+                        (reason, Duration::ZERO)
+                    }
+                    Err(reason) => panic!(
+                        "T09.1 unexpected Native error cannot authorize retry: {reason}"
+                    ),
                 };
                 assert!(attempt < 3, "T09.1 bounded local no-send recovery exhausted");
                 let mut audit = summary(&format!("risk_t09_1_local_no_send_{attempt}"));
