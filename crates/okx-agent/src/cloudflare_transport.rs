@@ -4324,14 +4324,50 @@ mod raw_native_session_tests {
                         }])),
                     });
                 }
-                // A previously rate-deferred live-order GET may remain
-                // unconsumed. The confirmed CLOSE ACK is the phase boundary:
-                // retire those old recorded bytes before terminal readbacks.
+                // The two filled order observations have exact authenticated
+                // POST ACK identities. Publish each as one immutable signed
+                // phase: maintenance and Status must not compete for one page.
+                let close_client = accounts.resolve("fixture-a").await.unwrap()
+                    .execution.store.call(
+                        std::time::Instant::now() + Duration::from_secs(3),
+                        |sql| {
+                            Ok(sql.by_idempotency("t09_real_public_close_0001")?
+                                .ok_or(okx_execution::StoreError::Invalid(
+                                    "T09_CLOSE_SQL_ORDER_MISSING"
+                                ))?.client_order_id)
+                        }
+                    ).await.expect("verified close must have durable client order identity");
+                assert_ne!(close_client, saved.client_order_id,
+                    "close and opening cannot share an exchange client ID");
+                let phased_orders = terminal_orders.iter()
+                    .zip([close_client, saved.client_order_id.clone()])
+                    .map(|(recorded, client)| RecordedGet {
+                        access_key: recorded.access_key.clone(),
+                        path: recorded.path.clone(),
+                        required_query: vec![
+                            ("instId".into(), "BTC-USDT-SWAP".into()),
+                            ("clOrdId".into(), client),
+                        ],
+                        raw_response: recorded.raw_response.clone(),
+                    }).collect::<Vec<_>>();
                 feed.advance_recorded_route(
                     "fixture-executor-a",
                     "/api/v5/trade/order",
                     terminal_orders,
                 );
+                for (index, page) in phased_orders.into_iter().enumerate() {
+                    let promoted = feed.supersede_queued_signed_source_at_event(
+                        "t09-1-verified-terminal-order",
+                        if index == 0 {
+                            "t09-1-filled-close-order"
+                        } else {
+                            "t09-1-filled-opening-order"
+                        },
+                        page,
+                    );
+                    assert!(promoted > 0,
+                        "an immutable filled order requires an ACK-bound recorded predecessor");
+                }
                 // The original attached stop remains LIVE after close, so the
                 // production flat-protection owner must cancel that exact algoId.
                 // Subsequent source inventories are explicitly empty, only after
@@ -5545,43 +5581,16 @@ mod raw_native_session_tests {
                                 .as_ref()
                                 .expect("B1 requires accepted T09.1 signed terminal sources")
                                 .clone();
-                        let rearm_a_finance = |phase: &str| {
-                            const ROUNDS: usize = 8;
-                            let mut recorded = Vec::with_capacity(ROUNDS * 5);
-                            for _ in 0..ROUNDS {
-                                for partition in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
-                                    recorded.push(RecordedGet {
-                                        access_key: "fixture-executor-a".into(),
-                                        path: "/api/v5/trade/fills-history".into(),
-                                        required_query: vec![("instType".into(), partition.into())],
-                                        raw_response: if partition == "SWAP" {
-                                            a_terminal_fills.clone()
-                                        } else {
-                                            envelope(json!([]))
-                                        },
-                                    });
-                                }
-                            }
-                            let retired_fills = feed.advance_recorded_route(
-                                "fixture-executor-a", "/api/v5/trade/fills-history", recorded,
-                            );
-                            let retired_bills = feed.advance_recorded_route(
-                                "fixture-executor-a",
-                                "/api/v5/account/bills-archive",
-                                (0..ROUNDS)
-                                    .map(|_| RecordedGet {
-                                        access_key: "fixture-executor-a".into(),
-                                        path: "/api/v5/account/bills-archive".into(),
-                                        required_query: vec![],
-                                        raw_response: a_terminal_bills.clone(),
-                                    })
-                                    .collect(),
-                            );
+                        // T09.1's signed terminal history is now one immutable
+                        // event-scoped source for concurrent finance readers.
+                        // Re-reading A must not republish fresh pages, timestamps,
+                        // financial facts or alter a shared GET queue.
+                        let observe_a_finance = |phase: &str| {
                             eprintln!(
-                                "B1_A_FINANCIAL_CAUSAL_PHASE_V1:phase={phase} read_cycles={ROUNDS} partitions=5 retired_fills={retired_fills} retired_bills={retired_bills}"
+                                "B1_A_FINANCIAL_SOURCE_REUSE_V1:phase={phase} source=SIGNED_TERMINAL_HISTORY"
                             );
                         };
-                        rearm_a_finance("A_PENDING_ACK_BEFORE_B_DENIAL");
+                        observe_a_finance("A_PENDING_ACK_BEFORE_B_DENIAL");
 
                         // B1 causal source boundary: A's signed venue ACK
                         // was persisted before B may request a new central
@@ -5921,7 +5930,7 @@ mod raw_native_session_tests {
                             // a license for indefinite A history reads.
                             // The same immutable A finance history remains
                             // authoritative; only observation slots change.
-                            rearm_a_finance("B_POSITIVE_AFTER_CENTRAL_NO_SEND");
+                            observe_a_finance("B_POSITIVE_AFTER_CENTRAL_NO_SEND");
                             refresh_recorded_market();
                             let b_positive_ts = chrono::Utc::now().timestamp_millis().to_string();
                             feed.advance_recorded_route(
@@ -6411,7 +6420,7 @@ mod raw_native_session_tests {
                                         reduction["signed_reduce_at_ms"].as_i64().unwrap(),
                                         new_clock.parse::<i64>()
                                             .expect("T10-09 original signed A create time"),
-                                        &rearm_a_finance,
+                                        &observe_a_finance,
                                     ).await;
                                     println!("T10_09_NATIVE_TERMINAL_V1:{terminal}");
                                 }
