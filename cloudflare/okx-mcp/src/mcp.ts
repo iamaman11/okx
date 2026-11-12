@@ -221,7 +221,7 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
               !(attached.enabled===false||attached.explicit_pause===true)||
               !Array.isArray(stopped.accounts)||stopped.accounts.length!==central.accounts.length)
               return jsonRpc(id,toolResult({status:"failed",reason_code:"EXISTING_ACCOUNT_STOP_UNVERIFIED",retryable:false}));
-            return jsonRpc(id,toolResult({status:"CONNECTED",account:attached,configuration:stopped,
+            return jsonRpc(id,toolResult({status:"CONNECTED",account:attached as Json,configuration:stopped as Json,
               readiness:{state:"not_evaluated"},reattached_existing:true}));
           }
           return jsonRpc(id,toolResult(await runtimeFetch(env,"/account-governance/enroll",{method:"POST",headers:{"content-type":"application/json"},
