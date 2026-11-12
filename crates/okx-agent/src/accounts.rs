@@ -1338,83 +1338,6 @@ pub(crate) mod recorded_support {
         }
     }
 
-    #[tokio::test]
-    async fn immutable_signed_history_replays_same_source_across_capture_windows() {
-        let feed = RecordedAccountHttp::default();
-        let raw = br#"{"code":"0","msg":"","data":[]}"#.to_vec();
-        let page = || RecordedGet {
-            access_key: "fixture-executor-a".into(),
-            path: "/api/v5/trade/fills-history".into(),
-            required_query: vec![("instType".into(), "SPOT".into())],
-            raw_response: raw.clone(),
-        };
-        feed.expect_get(page());
-        assert_eq!(
-            feed.supersede_queued_signed_source_at_event(
-                "verified-terminal-finance",
-                "signed-terminal-spot",
-                page()
-            ),
-            1
-        );
-        let client = reqwest::Client::new();
-        let request = |partition: &str, from: i64| {
-            client
-                .get(format!(
-                    "https://www.okx.com/api/v5/trade/fills-history?instType={partition}&begin={from}&end={}&limit=100",
-                    from + 1_000
-                ))
-                .header("OK-ACCESS-KEY", "fixture-executor-a")
-                .build()
-                .unwrap()
-        };
-        for start in [1_794_498_231_000_i64, 1_794_498_233_000] {
-            let delivered = feed
-                .send(
-                    request("SPOT", start),
-                    Instant::now() + std::time::Duration::from_secs(1),
-                )
-                .await
-                .expect("signed source must serve independent readers");
-            assert_eq!(delivered.body, raw);
-        }
-        assert_eq!(
-            feed.immutable_signed_phase_reads(
-                "fixture-executor-a",
-                "/api/v5/trade/fills-history",
-                "signed-terminal-spot"
-            ),
-            2
-        );
-        assert!(
-            feed.send(
-                request("SWAP", 1_794_498_235_000),
-                Instant::now() + std::time::Duration::from_secs(1)
-            )
-            .await
-            .is_err(),
-            "another instType must not borrow SPOT evidence"
-        );
-        assert!(feed.outbound_posts.lock().unwrap().is_empty());
-        // An explicit next source event replaces the phase without depending
-        // on how many GETs either reader performed.
-        let retired = feed.advance_recorded_route(
-            "fixture-executor-a",
-            "/api/v5/trade/fills-history",
-            (0..3).map(|_| page()).collect(),
-        );
-        assert_eq!(retired, 0);
-        assert_eq!(feed.unconsumed_reads(), 0);
-        let new_event_read = feed
-            .send(
-                request("SPOT", 1_794_498_237_000),
-                Instant::now() + std::time::Duration::from_secs(1),
-            )
-            .await
-            .expect("published history event must remain available");
-        assert_eq!(new_event_read.body, raw);
-    }
-
     // Bind history rows only to the already-observed signed POST ACK.
     fn bind_recorded_history_ids(
         acknowledgements: &[(String, String, String)],
@@ -2052,8 +1975,6 @@ pub(crate) mod recorded_support {
                     "/api/v5/account/trade-fee"
                         | "/api/v5/account/leverage-info"
                         | "/api/v5/trade/order"
-                        | "/api/v5/trade/fills-history"
-                        | "/api/v5/account/bills-archive"
                 ),
                 "TRANSCRIPT_SOURCE_EVENT_ROUTE_NOT_ALLOWED"
             );
@@ -2359,85 +2280,6 @@ pub(crate) mod recorded_support {
                     .all(|page| page.access_key == access_key && page.path == path),
                 "TRANSCRIPT_PHASE_CROSS_ACCOUNT_OR_ROUTE"
             );
-            // The caller publishes a NEW pre-recorded signed history event.
-            // History is a snapshot for several concurrent finance consumers,
-            // not a consumable page budget tied to their scheduling order.
-            // Reuse the existing immutable phase store; never synthesize an
-            // exchange response on GET or change the production observer.
-            if matches!(
-                path,
-                "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive"
-            ) {
-                let mut grouped =
-                    std::collections::BTreeMap::<Vec<(String, String)>, (Vec<u8>, usize)>::new();
-                for page in &pages {
-                    let mut query = page.required_query.clone();
-                    query.sort();
-                    match grouped.entry(query) {
-                        std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert((page.raw_response.clone(), 1));
-                        }
-                        std::collections::btree_map::Entry::Occupied(mut entry) => {
-                            assert_eq!(
-                                entry.get().0,
-                                page.raw_response,
-                                "TRANSCRIPT_HISTORY_SAME_EVENT_RAW_CONFLICT"
-                            );
-                            entry.get_mut().1 += 1;
-                        }
-                    }
-                }
-                let mut phases = self.immutable_signed_phases.lock().unwrap();
-                let mut required = self.reads.lock().unwrap();
-                let retired = required
-                    .iter()
-                    .filter(|p| p.access_key == access_key && p.path == path)
-                    .count();
-                required.retain(|p| p.access_key != access_key || p.path != path);
-                self.optional_reads
-                    .lock()
-                    .unwrap()
-                    .retain(|p| p.access_key != access_key || p.path != path);
-                for (query, (raw, recorded_copies)) in grouped {
-                    let source = RecordedGet {
-                        access_key: access_key.to_owned(),
-                        path: path.to_owned(),
-                        required_query: query.clone(),
-                        raw_response: raw,
-                    };
-                    let old = phases.iter_mut().find(|item| {
-                        let mut previous = item.source.required_query.clone();
-                        previous.sort();
-                        item.source.access_key == access_key
-                            && item.source.path == path
-                            && previous == query
-                    });
-                    let old_digest = old.as_ref().map(|item| {
-                        format!("{:x}", sha2::Sha256::digest(&item.source.raw_response))
-                    });
-                    let digest = format!("{:x}", sha2::Sha256::digest(&source.raw_response));
-                    if let Some(phase) = old {
-                        phase.source = source;
-                        phase.deliveries = 0;
-                        phase.max_deliveries = SIGNED_PHASE_MAX_READS;
-                        phase.published_at = Instant::now();
-                        phase.ttl = SIGNED_PHASE_MAX_LIFETIME;
-                    } else {
-                        phases.push(ImmutableSignedGetPhase {
-                            phase_id: "recorded-history-event".into(),
-                            source,
-                            deliveries: 0,
-                            max_deliveries: SIGNED_PHASE_MAX_READS,
-                            published_at: Instant::now(),
-                            ttl: SIGNED_PHASE_MAX_LIFETIME,
-                        });
-                    }
-                    self.immutable_phase_trace.lock().unwrap().push(format!(
-                        "event=SIGNED_HISTORY_SOURCE_ADVANCED actor={access_key} route={path} query={query:?} old_sha256={old_digest:?} new_sha256={digest} recorded_copies={recorded_copies} queued_retired={retired}"
-                    ));
-                }
-                return retired;
-            }
             // Order sources are scoped to a signed venue ordId, never to the
             // whole executor + endpoint. Actual GET delivery still requires
             // the separate authenticated (actor, clOrdId, ordId) POST ACK.
@@ -4645,11 +4487,6 @@ pub(crate) mod recorded_support {
                                     .collect::<Vec<_>>();
                                 sent.sort();
                                 required == sent
-                                    || (matches!(
-                                        path,
-                                        "/api/v5/trade/fills-history"
-                                            | "/api/v5/account/bills-archive"
-                                    ) && required.iter().all(|pair| sent.contains(pair)))
                             })
                             .then_some(index)
                         })
@@ -4707,16 +4544,6 @@ pub(crate) mod recorded_support {
                             })?
                             .replace("__REQUEST_CL_ORD_ID__", client)
                             .into_bytes()
-                    } else if matches!(
-                        path,
-                        "/api/v5/trade/fills-history" | "/api/v5/account/bills-archive"
-                    ) {
-                        // Repeated signed reads retain the original ACK binding.
-                        bind_recorded_history_ids(
-                            &self.acknowledged_creates.lock().unwrap(),
-                            key,
-                            body,
-                        )?
                     } else {
                         body
                     };

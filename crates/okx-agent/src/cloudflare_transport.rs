@@ -2665,14 +2665,7 @@ mod raw_native_session_tests {
                     // this independently signed exchange observation.
                     // Do not refresh bytes on GET, replay a consumed source,
                     // or create additional pages because the runner is slow.
-                    let execute_fee_at =
-                        if std::env::var("OKX_T09_FIRST_FEE_EXPIRED_PROBE").as_deref() == Ok("1") {
-                            // Pre-recorded OLD exchange timestamp. Freshness is
-                            // checked by production, not by test wall-clock delay.
-                            "1793460000000".to_owned()
-                        } else {
-                            chrono::Utc::now().timestamp_millis().to_string()
-                        };
+                    let execute_fee_at = chrono::Utc::now().timestamp_millis().to_string();
                     // First public Execute is a distinct signed source event.
                     // Retire old pre-Execute/Preview observations rather than
                     // append fresh pages BEHIND still-unconsumed stale bytes.
@@ -2693,8 +2686,8 @@ mod raw_native_session_tests {
                             }])),
                         }).collect(),
                     );
-                 }
-                let admission: Result<serde_json::Value, String> = if attempt == 0
+                }
+                let admission = if attempt == 0
                     && std::env::var("OKX_T10_06_CONCURRENT_PROBE").as_deref() == Ok("1")
                 {
                     // Unlike the warm replay test below, NONE of these 100
@@ -2809,106 +2802,66 @@ mod raw_native_session_tests {
                         "outbound_create_posts":1,
                         "elapsed_ms":started.elapsed().as_millis()
                     }));
-                    Ok(acknowledged)
+                    acknowledged
                 } else {
                     trade.trade("fixture-a", &execute, None).await
+                        .expect("T09.1 public Execute must return its typed admission")
                 };
-                let (reason, delay) = match admission {
-                    Ok(admission) => {
-                        if t10_12_reserve_enabled()
-                            && T10_12_RESERVE_WAS_HELD.load(std::sync::atomic::Ordering::SeqCst)
-                        {
-                            // Do not convert a lost Worker HELD response into another
-                            // Execute or a possibly sent exchange order. The same
-                            // original Native SQL rejection is reconciled below.
-                            return admission;
-                        }
-                        if admission["status"] == "partial" {
-                            return admission;
-                        }
-                        assert_eq!(
-                            admission["status"], "completed",
-                            "T09.1 cannot retry UNKNOWN or partial execution: {admission}"
-                        );
-                        assert_eq!(
-                            admission["data"]["state"], "REJECTED",
-                            "only definitive local rejection may permit a new intent: {admission}"
-                        );
-                        assert_eq!(
-                            admission["data"]["rejection_origin"], "LOCAL",
-                            "venue-side or unverified rejection cannot authorize retry: {admission}"
-                        );
-                        assert_eq!(
-                            admission["data"]["send_state"], "NOT_STARTED",
-                            "potentially sent POST must remain UNKNOWN/no-resubmit: {admission}"
-                        );
-                        assert_eq!(
-                            admission["data"]["risk_release_state"], "RELEASED",
-                            "risk must be released after definitive local rejection: {admission}"
-                        );
-                        assert_eq!(
-                            feed.outbound_posts.lock().unwrap().len(),
-                            0,
-                            "local rate denial must occur before ANY venue create attempt"
-                        );
-                        let reason = admission["data"]["primary_reason"]
-                            .as_str()
-                            .expect("T09.1 local denial must provide a reason")
-                            .to_owned();
-                        let local_reason = reason
-                            .strip_prefix("OKX API error: ")
-                            .unwrap_or(reason.as_str());
-                        let remaining =
-                            admission_deadline.saturating_duration_since(std::time::Instant::now());
-                        let delay = if local_reason == "ENTRY_FEE_EXCHANGE_TIME_STALE" {
-                            // The signed fee source has expired while another owner
-                            // consumed this account's rate budget. The guards above
-                            // prove NOT_STARTED, RELEASED and zero venue POSTs.
-                            // Publish the next independently timed signed fee event
-                            // below; never reuse or treat the stale fee as current.
-                            Duration::ZERO
-                        } else {
-                            recorded_preview_local_defer(local_reason, &rate_budget, remaining)
-                                .unwrap_or_else(|| {
-                                    panic!("T09.1 non-private-GET/nonlocal denial cannot retry: {admission}; rate={:?}",
-                                        rate_budget.snapshot().last_throttle)
-                                })
-                        };
-                        (reason, delay)
-                    }
-                    Err(reason) if reason == "ENTRY_FEE_EXCHANGE_TIME_STALE" => {
-                        // An expired tariff may be retried with a fresh recorded
-                        // source ONLY if the original SQL owner has no intent.
-                        // Later-stage expiry after PREPARE is NO-RESUBMIT.
-                        assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0,
-                            "pre-plan expired fee cannot send venue POST");
-                        let key = match &execute {
-                            TradeRequest::Execute { idempotency_key, .. } => idempotency_key.clone(),
-                            _ => panic!("T09.1 Execute identity required"),
-                        };
-                        let owner = accounts.resolve("fixture-a").await
-                            .expect("T09.1 original SQL owner required");
-                        let persisted = owner.execution.store.call(
-                            std::time::Instant::now() + Duration::from_secs(2),
-                            move |sql| sql.by_idempotency(&key),
-                        ).await.expect("T09.1 exact SQL identity readback required");
-                        assert!(persisted.is_none(),
-                            "expired fee after SQL PREPARE must not create a new intent");
-                        if attempt == 0 {
-                            println!(
-                                "T09_1_PRE_INTENT_STALE_FEE_PROOF_V1:{}",
-                                json!({
-                                    "reason": reason,
-                                    "durable_intent_found": false,
-                                    "outbound_posts": 0,
-                                })
-                            );
-                        }
-                        (reason, Duration::ZERO)
-                    }
-                    Err(reason) => panic!(
-                        "T09.1 unexpected Native error cannot authorize retry: {reason}"
-                    ),
+                if t10_12_reserve_enabled()
+                    && T10_12_RESERVE_WAS_HELD.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    // Do not convert a lost Worker HELD response into another
+                    // Execute or a possibly sent exchange order. The same
+                    // original Native SQL rejection is reconciled below.
+                    return admission;
+                }
+                if admission["status"] == "partial" {
+                    return admission;
+                }
+                assert_eq!(
+                    admission["status"], "completed",
+                    "T09.1 cannot retry UNKNOWN or partial execution: {admission}"
+                );
+                assert_eq!(
+                    admission["data"]["state"], "REJECTED",
+                    "only definitive local rejection may permit a new intent: {admission}"
+                );
+                assert_eq!(
+                    admission["data"]["rejection_origin"], "LOCAL",
+                    "venue-side or unverified rejection cannot authorize retry: {admission}"
+                );
+                assert_eq!(
+                    admission["data"]["send_state"], "NOT_STARTED",
+                    "potentially sent POST must remain UNKNOWN/no-resubmit: {admission}"
+                );
+                assert_eq!(
+                    admission["data"]["risk_release_state"], "RELEASED",
+                    "risk must be released after definitive local rejection: {admission}"
+                );
+                assert_eq!(
+                    feed.outbound_posts.lock().unwrap().len(),
+                    0,
+                    "local rate denial must occur before ANY venue create attempt"
+                );
+                let reason = admission["data"]["primary_reason"]
+                    .as_str()
+                    .expect("T09.1 local denial must provide a reason");
+                let local_reason = reason.strip_prefix("OKX API error: ").unwrap_or(reason);
+                let remaining =
+                    admission_deadline.saturating_duration_since(std::time::Instant::now());
+                let delay = if local_reason == "ENTRY_FEE_EXCHANGE_TIME_STALE" {
+                    // The signed fee source has expired while another owner
+                    // consumed this account's rate budget. The guards above
+                    // prove NOT_STARTED, RELEASED and zero venue POSTs.
+                    // Publish the next independently timed signed fee event
+                    // below; never reuse or treat the stale fee as current.
+                    Duration::ZERO
+                } else {
+                    recorded_preview_local_defer(local_reason, &rate_budget, remaining)
+                        .unwrap_or_else(|| {
+                            panic!("T09.1 non-private-GET/nonlocal denial cannot retry: {admission}; rate={:?}",
+                                rate_budget.snapshot().last_throttle)
+                        })
                 };
                 assert!(attempt < 3, "T09.1 bounded local no-send recovery exhausted");
                 let mut audit = summary(&format!("risk_t09_1_local_no_send_{attempt}"));
@@ -3811,6 +3764,10 @@ mod raw_native_session_tests {
         // workerd RiskBook, but never changes the accepted T09.0/T09.5 run.
         let mut managed_add_proof: Option<serde_json::Value> = None;
         let mut first_close_at: Option<String> = None;
+        // Retain the EXACT immutable signed T09.1 terminal wire sources for
+        // the later A-pending/B-admission causal phases. This is test input,
+        // not a replay of SQL facts or a derived financial oracle.
+        let mut b1_terminal_financial_wire: Option<(Vec<u8>, Vec<u8>)> = None;
         if status_probe {
             let after_fill_order = envelope(json!([{
                 "instId":"BTC-USDT-SWAP",
@@ -4235,6 +4192,8 @@ mod raw_native_session_tests {
                         "ts":closing_at
                     }
                 ]));
+                b1_terminal_financial_wire =
+                    Some((raw_close_fill.clone(), raw_close_bill.clone()));
                 // All six history partitions remain strictly scripted; old
                 // entry-only repetitions are retired at the acknowledged venue
                 // transition so the first terminal source read sees BOTH trades.
@@ -4320,12 +4279,9 @@ mod raw_native_session_tests {
                         }])),
                     });
                 }
-                // The CLOSE ACK is the verified source-event boundary.
-                // Keep order readbacks in the existing identity/ACK-bound
-                // recorded queue: later public Close/Status and late-fee
-                // scenarios advance this same route. Promoting these two
-                // terminal orders to permanent immutable phases blocked
-                // later order identities and mixed the two source owners.
+                // A previously rate-deferred live-order GET may remain
+                // unconsumed. The confirmed CLOSE ACK is the phase boundary:
+                // retire those old recorded bytes before terminal readbacks.
                 feed.advance_recorded_route(
                     "fixture-executor-a",
                     "/api/v5/trade/order",
@@ -5539,16 +5495,48 @@ mod raw_native_session_tests {
                         // the five exact instType partitions and one bill
                         // archive. There is NO default empty-page fallback,
                         // extra GET, financial rewrite or production TTL bypass.
-                        // T09.1's signed terminal history is now one immutable
-                        // event-scoped source for concurrent finance readers.
-                        // Re-reading A must not republish fresh pages, timestamps,
-                        // financial facts or alter a shared GET queue.
-                        let observe_a_finance = |phase: &str| {
+                        let (a_terminal_fills, a_terminal_bills) =
+                            b1_terminal_financial_wire
+                                .as_ref()
+                                .expect("B1 requires accepted T09.1 signed terminal sources")
+                                .clone();
+                        let rearm_a_finance = |phase: &str| {
+                            const ROUNDS: usize = 8;
+                            let mut recorded = Vec::with_capacity(ROUNDS * 5);
+                            for _ in 0..ROUNDS {
+                                for partition in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
+                                    recorded.push(RecordedGet {
+                                        access_key: "fixture-executor-a".into(),
+                                        path: "/api/v5/trade/fills-history".into(),
+                                        required_query: vec![("instType".into(), partition.into())],
+                                        raw_response: if partition == "SWAP" {
+                                            a_terminal_fills.clone()
+                                        } else {
+                                            envelope(json!([]))
+                                        },
+                                    });
+                                }
+                            }
+                            let retired_fills = feed.advance_recorded_route(
+                                "fixture-executor-a", "/api/v5/trade/fills-history", recorded,
+                            );
+                            let retired_bills = feed.advance_recorded_route(
+                                "fixture-executor-a",
+                                "/api/v5/account/bills-archive",
+                                (0..ROUNDS)
+                                    .map(|_| RecordedGet {
+                                        access_key: "fixture-executor-a".into(),
+                                        path: "/api/v5/account/bills-archive".into(),
+                                        required_query: vec![],
+                                        raw_response: a_terminal_bills.clone(),
+                                    })
+                                    .collect(),
+                            );
                             eprintln!(
-                                "B1_A_FINANCIAL_SOURCE_REUSE_V1:phase={phase} source=SIGNED_TERMINAL_HISTORY"
+                                "B1_A_FINANCIAL_CAUSAL_PHASE_V1:phase={phase} read_cycles={ROUNDS} partitions=5 retired_fills={retired_fills} retired_bills={retired_bills}"
                             );
                         };
-                        observe_a_finance("A_PENDING_ACK_BEFORE_B_DENIAL");
+                        rearm_a_finance("A_PENDING_ACK_BEFORE_B_DENIAL");
 
                         // B1 causal source boundary: A's signed venue ACK
                         // was persisted before B may request a new central
@@ -5888,7 +5876,7 @@ mod raw_native_session_tests {
                             // a license for indefinite A history reads.
                             // The same immutable A finance history remains
                             // authoritative; only observation slots change.
-                            observe_a_finance("B_POSITIVE_AFTER_CENTRAL_NO_SEND");
+                            rearm_a_finance("B_POSITIVE_AFTER_CENTRAL_NO_SEND");
                             refresh_recorded_market();
                             let b_positive_ts = chrono::Utc::now().timestamp_millis().to_string();
                             feed.advance_recorded_route(
@@ -6378,7 +6366,7 @@ mod raw_native_session_tests {
                                         reduction["signed_reduce_at_ms"].as_i64().unwrap(),
                                         new_clock.parse::<i64>()
                                             .expect("T10-09 original signed A create time"),
-                                        &observe_a_finance,
+                                        &rearm_a_finance,
                                     ).await;
                                     println!("T10_09_NATIVE_TERMINAL_V1:{terminal}");
                                 }

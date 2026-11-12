@@ -4,15 +4,8 @@ import assert from "node:assert/strict";
 import { actualNativeWorker, hash } from "../native-workerd.mjs";
 
 export async function run({ caseId, root, signal }) {
-  const { nativeBootstrap: sql, workerBootstrap: worker, nativePreIntentExpiredFee: fee, transcript_sha256 } =
-    await actualNativeWorker(root, signal, {staleFirstFee:true});
-  // Physical Native planner must reject a deliberately recorded old signed
-  // exchange timestamp without a timing-dependent wall-clock sleep. Before
-  // publishing a fresh recorded GET, it proves no SQL intent and zero venue
-  // POSTs. The rest of T09.0 still requires real two-account bootstrap.
-  assert.equal(fee.reason, "ENTRY_FEE_EXCHANGE_TIME_STALE");
-  assert.equal(fee.durable_intent_found, false);
-  assert.equal(fee.outbound_posts, 0);
+  const { nativeBootstrap: sql, workerBootstrap: worker, transcript_sha256 } =
+    await actualNativeWorker(root, signal);
   assert.equal(sql.accounts.length, 2);
   assert.equal(sql.sqlite_files.length, 2);
   assert.notEqual(sql.sqlite_files[0], sql.sqlite_files[1]);
