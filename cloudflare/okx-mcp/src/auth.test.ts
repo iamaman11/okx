@@ -4,7 +4,14 @@ import {initial} from './account_governance.test.js';
 import {FRAME_SCHEMA} from './shared.js';
 class Storage{map=new Map();async get(k:string){return structuredClone(this.map.get(k));}async list(opts:{prefix:string;limit:number}){return new Map([...this.map.entries()].filter(([key])=>key.startsWith(opts.prefix)).slice(0,opts.limit));}async put(k:string,v:any){this.map.set(k,structuredClone(v));}async delete(keys:string[]){let n=0;for(const key of keys)if(this.map.delete(key))n++;return n;}async transaction(fn:any){const backup=structuredClone(this.map);try{return await fn(this);}catch(e){this.map=backup;throw e;}}}
 const storage=new Storage(),owner=new RuntimeSession({storage},{} as any);
-let calls=0;const env:any={MCP_OWNER_SECRET:'fixture_secret',RUNTIME:{idFromName:()=>0,get:()=>({fetch:(r:Request)=>{calls++;return owner.fetch(r);}})}};
+let calls=0;const forwards:{url:string;has_auth:boolean}[]=[];
+const env:any={MCP_OWNER_SECRET:'fixture_secret',RUNTIME:{idFromName:()=>0,get:()=>({
+ fetch:(r:Request|string,init?:RequestInit)=>{
+   const target=typeof r==="string"?new Request(r,init):r;
+   calls++;forwards.push({url:target.url,has_auth:target.headers.has("authorization")});
+   return owner.fetch(target);
+ }
+})}};
 const releaseHealth:any=await(await defaultHandler.fetch(new Request('https://fixture/health'),
  {...env,RELEASE_SOURCE_TREE:'a'.repeat(40)})).json();
 if(releaseHealth.status!=='ok'||releaseHealth.release_source_tree!=='a'.repeat(40))
@@ -34,6 +41,9 @@ if((await defaultHandler.fetch(inspection(),env)).status!==401||calls!==forwarde
  throw Error('installation inspect must reject unauthenticated request before DO');
 const snapshot=JSON.stringify([...storage.map.entries()]);
 const inspected:any=await(await defaultHandler.fetch(inspection('Bearer fixture_secret'),env)).json();
+const lastForward=forwards.at(-1);
+if(lastForward?.url!=="https://runtime.internal/installation/inspect"||lastForward.has_auth)
+ throw Error('owner inspection must use canonical internal DO URL without forwarding owner credentials');
 if(inspected.schema!=='okx.installation-inspection/v1'||inspected.state!=='BOUND'
  ||inspected.accounts_total!==0||inspected.risk.metadata_present!==true
  ||inspected.risk.unresolved_entries!==0||inspected.risk.occupied_usd_nonzero!==false

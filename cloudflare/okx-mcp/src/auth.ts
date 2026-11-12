@@ -128,6 +128,12 @@ export const defaultHandler = {
     if(((url.pathname==="/installation/initialize"||url.pathname==="/account-governance/campaign-limit")&&request.method==="POST")||(url.pathname==="/installation/inspect"&&request.method==="GET")){
       const supplied=request.headers.get("authorization");
       if(!supplied?.startsWith("Bearer ")||!sameHex(await sha256Hex(supplied.slice(7)),await sha256Hex(env.MCP_OWNER_SECRET)))return new Response("unauthorized",{status:401});
+      // Read-only inspection is an internal DO operation, not a public URL or a
+      // forwarded owner credential. Use the same canonical DO transport as runtimeFetch.
+      if(url.pathname==="/installation/inspect"){
+        const stub=await runtimeStub(env);
+        return stub.fetch("https://runtime.internal/installation/inspect",{method:"GET"});
+      }
       const stub=await runtimeStub(env);return stub.fetch(request);
     }
     if (url.pathname === "/runtime") {
