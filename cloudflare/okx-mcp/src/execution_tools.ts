@@ -105,8 +105,13 @@ function publicSchema(schema:Schema):Schema {
 // The host consumes that selector; validTool still rejects any extra wire keys.
 function publicAccountsSchema():Schema {
  const variants=ACTION_SCHEMAS.accounts;
- const properties=Object.assign({},...variants.map(s=>s.properties));
- properties.action=choice('list','status','connect','pause','resume','set_limits');
+ // Shape-only root avoids repeating all nested field constraints in
+ // tools/list. The exact field types stay in oneOf, and validTool is stricter.
+ const fields=Object.assign({},...variants.map(s=>s.properties));
+ const properties=Object.fromEntries(
+   Object.keys(fields).map(key=>[key,key==='action'
+     ?choice('list','status','connect','pause','resume','set_limits'):{type:['string','number','boolean','object','array','null']}])
+ );
  return publicSchema({
    type:'object',properties,required:['action'],additionalProperties:false,
    oneOf:variants.map(s=>({...s,additionalProperties:true}))
