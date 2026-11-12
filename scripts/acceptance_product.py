@@ -85,10 +85,19 @@ def checked_schema_negative(route,arguments,response,proof,executed_tests,tool_c
                    if tool.get("name")==tool_name),[])
     selected=[variant for variant in variants
               if variant.get("properties",{}).get("action",{}).get("const")==action]
-    if (len(selected)!=1 or set(selected[0].get("properties",{}))!={"action"}
+    allowed_fields={"action","link_id"} if route=="accounts.list" else {"action"}
+    if (len(selected)!=1 or set(selected[0].get("properties",{}))!=allowed_fields
         or selected[0].get("required")!=["action"]
         or selected[0].get("additionalProperties") is not False):
         return False
+    if route=="accounts.list":
+        root=next((tool["inputSchema"] for tool in tool_contract["tools"]
+                   if tool.get("name")=="accounts"),{})
+        selector={"type":"string","pattern":"^link_[a-f0-9]{32}$"}
+        if (root.get("type")!="object" or root.get("additionalProperties") is not False
+            or root.get("properties",{}).get("link_id")!=selector
+            or selected[0]["properties"].get("link_id")!=selector):
+            return False
     error=response["tool_error"]
     return (isinstance(error,str)
         and len(error)<=65536

@@ -4,12 +4,136 @@
       "name": "accounts",
       "description": "Accounts and limits.",
       "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "enum": [
+              "list",
+              "status",
+              "connect",
+              "pause",
+              "resume",
+              "set_limits"
+            ]
+          },
+          "account": {
+            "$ref": "#/$defs/t"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "credential_ref": {
+            "$ref": "#/$defs/t"
+          },
+          "alias": {
+            "$ref": "#/$defs/s"
+          },
+          "label": {
+            "$ref": "#/$defs/t"
+          },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "max_modelled_loss_usdt": {
+                "$ref": "#/$defs/positiveDecimal"
+              },
+              "max_order_loss_usdt": {
+                "$ref": "#/$defs/positiveDecimal"
+              },
+              "max_notional_usdt": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/positiveDecimal"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_leverage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/positiveDecimal"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_daily_realized_loss_usdt": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/positiveDecimal"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_drawdown_ratio": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(?:0(?:\\.[0-9]{1,27})?|1(?:\\.0{1,27})?)$",
+                    "maxLength": 29
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "allowed_instruments": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s"
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "max_entry_usd": {
+                "$ref": "#/$defs/positiveDecimal"
+              }
+            },
+            "required": [
+              "max_modelled_loss_usdt",
+              "max_order_loss_usdt",
+              "max_notional_usdt",
+              "max_leverage",
+              "max_daily_realized_loss_usdt",
+              "max_drawdown_ratio",
+              "allowed_instruments"
+            ],
+            "additionalProperties": false
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "link_id": {
+            "type": "string",
+            "pattern": "^link_[a-f0-9]{32}$"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false,
         "oneOf": [
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "list"
+              },
+              "link_id": {
+                "type": "string",
+                "pattern": "^link_[a-f0-9]{32}$"
               }
             },
             "required": [
@@ -18,13 +142,14 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "status"
               },
-              "account": {
-                "$ref": "#/$defs/t"
+              "account": {},
+              "link_id": {
+                "type": "string",
+                "pattern": "^link_[a-f0-9]{32}$"
               }
             },
             "required": [
@@ -34,96 +159,19 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "connect"
               },
-              "idempotency_key": {
-                "$ref": "#/$defs/k"
-              },
-              "credential_ref": {
-                "$ref": "#/$defs/t"
-              },
-              "alias": {
-                "$ref": "#/$defs/s"
-              },
-              "label": {
-                "$ref": "#/$defs/t"
-              },
-              "limits": {
-                "type": "object",
-                "properties": {
-                  "max_modelled_loss_usdt": {
-                    "$ref": "#/$defs/positiveDecimal"
-                  },
-                  "max_order_loss_usdt": {
-                    "$ref": "#/$defs/positiveDecimal"
-                  },
-                  "max_notional_usdt": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/positiveDecimal"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "max_leverage": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/positiveDecimal"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "max_daily_realized_loss_usdt": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/positiveDecimal"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "max_drawdown_ratio": {
-                    "anyOf": [
-                      {
-                        "type": "string",
-                        "pattern": "^(?:0(?:\\.[0-9]{1,27})?|1(?:\\.0{1,27})?)$",
-                        "maxLength": 29
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "allowed_instruments": {
-                    "type": "array",
-                    "items": {
-                      "$ref": "#/$defs/s"
-                    },
-                    "maxItems": 32,
-                    "uniqueItems": true
-                  }
-                },
-                "required": [
-                  "max_modelled_loss_usdt",
-                  "max_order_loss_usdt",
-                  "max_notional_usdt",
-                  "max_leverage",
-                  "max_daily_realized_loss_usdt",
-                  "max_drawdown_ratio",
-                  "allowed_instruments"
-                ],
-                "additionalProperties": false
-              },
-              "enabled": {
-                "type": "boolean"
+              "idempotency_key": {},
+              "credential_ref": {},
+              "alias": {},
+              "label": {},
+              "limits": {},
+              "enabled": {},
+              "link_id": {
+                "type": "string",
+                "pattern": "^link_[a-f0-9]{32}$"
               }
             },
             "required": [
@@ -137,7 +185,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "enum": [
@@ -145,14 +192,12 @@
                   "resume"
                 ]
               },
-              "account": {
-                "$ref": "#/$defs/t"
-              },
-              "idempotency_key": {
-                "$ref": "#/$defs/k"
-              },
-              "expected_revision": {
-                "$ref": "#/$defs/i"
+              "account": {},
+              "idempotency_key": {},
+              "expected_revision": {},
+              "link_id": {
+                "type": "string",
+                "pattern": "^link_[a-f0-9]{32}$"
               }
             },
             "required": [
@@ -164,93 +209,17 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "set_limits"
               },
-              "account": {
-                "$ref": "#/$defs/t"
-              },
-              "idempotency_key": {
-                "$ref": "#/$defs/k"
-              },
-              "expected_revision": {
-                "$ref": "#/$defs/i"
-              },
-              "limits": {
-                "type": "object",
-                "properties": {
-                  "max_modelled_loss_usdt": {
-                    "$ref": "#/$defs/positiveDecimal"
-                  },
-                  "max_order_loss_usdt": {
-                    "$ref": "#/$defs/positiveDecimal"
-                  },
-                  "max_notional_usdt": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/positiveDecimal"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "max_leverage": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/positiveDecimal"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "max_daily_realized_loss_usdt": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/positiveDecimal"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "max_drawdown_ratio": {
-                    "anyOf": [
-                      {
-                        "type": "string",
-                        "pattern": "^(?:0(?:\\.[0-9]{1,27})?|1(?:\\.0{1,27})?)$",
-                        "maxLength": 29
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "allowed_instruments": {
-                    "type": "array",
-                    "items": {
-                      "$ref": "#/$defs/s"
-                    },
-                    "maxItems": 32,
-                    "uniqueItems": true
-                  },
-                  "max_entry_usd": {
-                    "$ref": "#/$defs/positiveDecimal"
-                  }
-                },
-                "required": [
-                  "max_modelled_loss_usdt",
-                  "max_order_loss_usdt",
-                  "max_notional_usdt",
-                  "max_leverage",
-                  "max_daily_realized_loss_usdt",
-                  "max_drawdown_ratio",
-                  "allowed_instruments"
-                ],
-                "additionalProperties": false
+              "account": {},
+              "idempotency_key": {},
+              "expected_revision": {},
+              "limits": {},
+              "link_id": {
+                "type": "string",
+                "pattern": "^link_[a-f0-9]{32}$"
               }
             },
             "required": [
@@ -278,17 +247,6 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 64
-          },
-          "k": {
-            "type": "string",
-            "minLength": 8,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9_-]+$"
-          },
-          "i": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 9007199254740991
           }
         }
       },

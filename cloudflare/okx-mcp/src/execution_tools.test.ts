@@ -113,11 +113,26 @@ function resolvePublicSchema(node:any,defs:Record<string,any>):any{
 for(const tool of PUBLIC_TOOLS as any[]){
  if(tool.name.startsWith('trade.'))continue;
  const expanded=resolvePublicSchema(tool.inputSchema,tool.inputSchema.$defs??{});
- fail(JSON.stringify(expanded)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),`exact public schema factoring ${tool.name}`);
- for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))for(const input of [fixture.positive,...fixture.negative])
-  fail(matches(expanded,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),`factored positive/negative semantics ${tool.name}.${fixture.action}`);
+ if(tool.name==='accounts'){
+  fail(expanded.type==='object' && expanded.required.length===1 && expanded.required[0]==='action'
+    && expanded.additionalProperties===false,'linked accounts root is strict object');
+  fail(expanded.properties.link_id.pattern==='^link_[a-f0-9]{32}$',
+    'host-only linked account selector is bounded');
+  fail(expanded.oneOf.length===ACTION_SCHEMAS.accounts.length
+    && expanded.oneOf.every((branch:any)=>branch.additionalProperties===false
+      && branch.properties?.link_id?.pattern==='^link_[a-f0-9]{32}$'),
+    'every account action retains strict allowed fields');
+  fail(!validTool('accounts',{action:'list',link_id:'link_fixture'}),
+    'native protocol never accepts host-only link selector');
+ }else{
+  fail(JSON.stringify(expanded)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),
+    `exact public schema factoring ${tool.name}`);
+  for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))
+   for(const input of [fixture.positive,...fixture.negative])
+    fail(matches(expanded,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),
+      `factored positive/negative semantics ${tool.name}.${fixture.action}`);
+ }
 }
-
 for(const action of ['backtest','grid','validate']){
  const base=payloadFixtures.find(x=>x.tool==='research'&&x.action===action)!.positive;
  const positive={...base,strategy_id:'ema_momentum_confirm_v1'};
