@@ -2665,7 +2665,14 @@ mod raw_native_session_tests {
                     // this independently signed exchange observation.
                     // Do not refresh bytes on GET, replay a consumed source,
                     // or create additional pages because the runner is slow.
-                    let execute_fee_at = chrono::Utc::now().timestamp_millis().to_string();
+                    let execute_fee_at =
+                        if std::env::var("OKX_T09_FIRST_FEE_EXPIRED_PROBE").as_deref() == Ok("1") {
+                            // Pre-recorded OLD exchange timestamp. Freshness is
+                            // checked by production, not by test wall-clock delay.
+                            "1793460000000".to_owned()
+                        } else {
+                            chrono::Utc::now().timestamp_millis().to_string()
+                        };
                     // First public Execute is a distinct signed source event.
                     // Retire old pre-Execute/Preview observations rather than
                     // append fresh pages BEHIND still-unconsumed stale bytes.
@@ -2686,12 +2693,7 @@ mod raw_native_session_tests {
                             }])),
                         }).collect(),
                     );
-                    if std::env::var("OKX_T09_FIRST_FEE_EXPIRED_PROBE").as_deref() == Ok("1") {
-                        // An actual elapsed wall-time delay preserves the
-                        // immutable signed GET timestamp; never refresh it.
-                        tokio::time::sleep(Duration::from_millis(5_300)).await;
-                    }
-                }
+                 }
                 let admission: Result<serde_json::Value, String> = if attempt == 0
                     && std::env::var("OKX_T10_06_CONCURRENT_PROBE").as_deref() == Ok("1")
                 {
