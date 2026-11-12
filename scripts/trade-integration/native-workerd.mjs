@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { execOwnedChild as exec, preserveTeardownFailure } from "./scenario-lifecycle.mjs";
 import { resolve } from "node:path";
-import { nativeDriverTeardownFailure, summarizeNativeWorkerdFailure } from "./native-failure.mjs";
+import { nativeDriverTeardownFailure, summarizeNativeWorkerdFailure, signedGetSourceFailure } from "./native-failure.mjs";
 
 const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const memo = new Map();
@@ -102,11 +102,15 @@ export async function actualNativeWorker(root, signal, { statusProbe = false, se
       // forwarding "Command failed: node ..." discards the actual blocker.
       // Prefer the final production assertion, then a Rust panic line.
       const stderr = String(error.stderr ?? "");
-      const signedGetDenial = stderr.match(/T09_2_SIGNED_GET_DENIAL_V1:(\{[^\r\n]+\})/);
+      const signedGetDenial = signedGetSourceFailure(stderr);
       if (signedGetDenial) {
-        const diagnostic = JSON.parse(signedGetDenial[1]);
-        process.stderr.write("T09_2_SIGNED_GET_DENIAL_V1:" +
-          JSON.stringify(diagnostic) + "\n");
+        // Only the validated producer fields cross the child boundary.
+        // The raw GET route, query, client IDs and panic text stay private.
+        process.stderr.write("T09_2_TYPED_SOURCE_FAILURE_V1:" +
+          JSON.stringify(signedGetDenial) + "\n");
+        throw Error("T09_2_UPSTREAM_SOURCE_FAILURE:" + signedGetDenial.reason_code +
+          ":stage=" + signedGetDenial.stage +
+          ":posts=" + (signedGetDenial.outbound_posts ?? "UNKNOWN"));
       }
       const recorded = stderr.match(/T09_1_CLOSE_ERROR_FROM_RUST_V1:(\{[^\r\n]+\})/);
       if (recorded) {
