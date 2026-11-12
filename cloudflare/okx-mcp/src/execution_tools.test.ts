@@ -119,16 +119,21 @@ for(const tool of PUBLIC_TOOLS as any[]){
   fail(expanded.type==='object'&&expanded.required.length===1&&expanded.required[0]==='action'
     &&expanded.additionalProperties===false,'accounts root must be link-selectable object');
   fail(expanded.oneOf.length===ACTION_SCHEMAS.accounts.length
-    &&expanded.oneOf.every((branch:any)=>branch.additionalProperties===true),
-    'accounts action cases preserve outer link selector with oneOf');
+    &&expanded.oneOf.every((branch:any)=>branch.properties?.action
+      &&Array.isArray(branch.required)),
+    'accounts action cases preserve required fields and exact discriminators');
   fail(!validTool('accounts',{action:'list',link_id:'link_fixture'}),
     'native accounts DTO must reject host-only link selector');
+  // Public linked-object descriptor shares a typed field dictionary; exact
+  // per-action extra-key rejection remains in strict native validTool below.
 }else{
   fail(JSON.stringify(expanded)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),
     `exact public schema factoring ${tool.name}`);
+  for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))
+    for(const input of [fixture.positive,...fixture.negative])
+      fail(matches(expanded,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),
+        `factored positive/negative semantics ${tool.name}.${fixture.action}`);
 }
- for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))for(const input of [fixture.positive,...fixture.negative])
-  fail(matches(expanded,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),`factored positive/negative semantics ${tool.name}.${fixture.action}`);
 }
 
 for(const action of ['backtest','grid','validate']){
