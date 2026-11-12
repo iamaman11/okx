@@ -105,14 +105,22 @@ function publicSchema(schema:Schema):Schema {
 // The host consumes that selector; validTool still rejects any extra wire keys.
 function publicAccountsSchema():Schema {
  const variants=ACTION_SCHEMAS.accounts;
- // One typed field dictionary; tiny action-only branches. No duplicate
- // limits definitions in tools/list. Runtime validTool retains the stricter
- // per-action rejection of extra fields.
+ // One typed field dictionary and strict action-specific allowed keys.
+ // The linked-app host consumes link_id; native validTool still rejects it.
+ const linkSelector={type:'string',pattern:'^link_[a-f0-9]{32}$'};
  const properties=Object.assign({},...variants.map(s=>s.properties));
  properties.action=choice('list','status','connect','pause','resume','set_limits');
+ properties.link_id=linkSelector;
  return publicSchema({
    type:'object',properties,required:['action'],additionalProperties:false,
-   oneOf:variants.map(s=>({properties:{action:s.properties.action},required:s.required}))
+   oneOf:variants.map(s=>({
+     properties:{
+       ...Object.fromEntries(Object.keys(s.properties)
+         .map(key=>[key,key==='action'?s.properties.action:{}])),
+       link_id:linkSelector,
+     },
+     required:s.required,additionalProperties:false
+   }))
  });
 }
 export const PUBLIC_TOOLS:Json[]=[
