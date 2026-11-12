@@ -197,6 +197,7 @@ for(const [tool,action] of fakeMutationActions){
      connect_operation_id:op.operation_id,configuration_digest:op.request_digest,
      account_key:{venue:'okx',environment:'demo',verified_uid:'a'.repeat(64)}}});
    }
+   if(path==='/account-governance')return Response.json({status:'CONFIGURED',revision:0,accounts:[]});
    if(path==='/dispatch')return Response.json({schema:'okx.agent.response/v1',
     request_id:'fake_mutation_native',status:'completed',quality:'FRESH',warnings:[],
     result:{schema:'okx.fake-venue.fixture/v1',venue:'fake',exchange_post_count:0}});
@@ -226,8 +227,9 @@ for(const [tool,action] of fakeMutationActions){
   }else if(first.request?.action!==action||first.request?.account!==args.account)
     throw Error('set_limits action/account lost');
   if(tool==='accounts'&&action==='connect'&&!negative){
-   if(visits.length!==2||visits[1].path!=='/account-governance/enroll'||
-     visits[1].request?.alias!==args.alias||visits[1].request?.credential_ref!==args.credential_ref)
+   if(visits.length!==3||visits[1].path!=='/account-governance'||
+     visits[2].path!=='/account-governance/enroll'||
+     visits[2].request?.alias!==args.alias||visits[2].request?.credential_ref!==args.credential_ref)
     throw Error('connect did not prove central enrollment binding');
   }else if(visits.length!==1)throw Error('mutation dispatched repeatedly '+tool+'.'+action);
  }
