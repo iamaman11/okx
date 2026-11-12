@@ -268,6 +268,13 @@ for(const variation of ['requires_pause','already_disabled','wrong_identity','un
    return Response.json({status:'CONFIGURED',configuration:{...state,revision:4,
     accounts:[{...account,explicit_pause:true,policy_revision:4}]}});
   }
+  if(path==='/account-governance/enroll'&&variation==='unsafe_enable'){
+   if(request.alias!==args.alias||request.enabled!==true)
+    throw Error('unsafe enrollment replay request changed');
+   // A new operation key cannot register a duplicate; the real DO owns
+   // exact original-key replay and refuses any new enable grant.
+   return Response.json({status:'FAILED',reason:'ACCOUNT_ALREADY_CONNECTED'});
+  }
   throw Error('reattachment must not enroll or mutate an independent owner: '+path);
  };
  const fake:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:fakeHandler})}};
@@ -287,9 +294,10 @@ for(const variation of ['requires_pause','already_disabled','wrong_identity','un
    throw Error('already-disabled account created new central mutation');
  }else{
   const expected=variation==='wrong_identity'?'EXISTING_ACCOUNT_IDENTITY_MISMATCH':
-    variation==='unsafe_enable'?'EXISTING_ACCOUNT_ATTACH_MUST_BE_DISABLED':'STALE_ACCESS_REVISION';
+    variation==='unsafe_enable'?'ACCOUNT_ALREADY_CONNECTED':'STALE_ACCESS_REVISION';
+  const enrollmentVisits=visits.filter(v=>v.path==='/account-governance/enroll').length;
   if(outcome.reason_code!==expected||!['failed','rejected'].includes(outcome.status)||
-    visits.some(v=>v.path==='/account-governance/enroll'))
+    enrollmentVisits!==(variation==='unsafe_enable'?1:0))
    throw Error('reattach failure not fail-closed '+variation+': '+JSON.stringify(outcome));
  }
 }
