@@ -589,7 +589,15 @@ impl RiskBookStore {
             })?;
             for item in iter {
                 let (account, limit, order, entry, reserved) = item?;
-                policies.insert(account, (amount(limit)?, amount(order)?, amount(entry)?, amount(reserved)?));
+                policies.insert(
+                    account,
+                    (
+                        amount(limit)?,
+                        amount(order)?,
+                        amount(entry)?,
+                        amount(reserved)?,
+                    ),
+                );
             }
         }
         if policies.is_empty()
@@ -623,7 +631,9 @@ impl RiskBookStore {
         }
         if &input.proposal.entry_upper_usd > account_entry_limit {
             tx.commit()?;
-            return Err(RiskStoreError::Denied(RiskRuleError::AccountEntryLimitExceeded));
+            return Err(RiskStoreError::Denied(
+                RiskRuleError::AccountEntryLimitExceeded,
+            ));
         }
         let key = input.reservation_key();
         let digest = input.digest()?;
