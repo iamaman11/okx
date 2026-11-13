@@ -197,6 +197,7 @@ for(const [tool,action] of fakeMutationActions){
      connect_operation_id:op.operation_id,configuration_digest:op.request_digest,
      account_key:{venue:'okx',environment:'demo',verified_uid:'a'.repeat(64)}}});
    }
+   if(path==='/account-governance')return Response.json({status:'CONFIGURED',revision:0,accounts:[]});
    if(path==='/dispatch')return Response.json({schema:'okx.agent.response/v1',
     request_id:'fake_mutation_native',status:'completed',quality:'FRESH',warnings:[],
     result:{schema:'okx.fake-venue.fixture/v1',venue:'fake',exchange_post_count:0}});
@@ -226,13 +227,82 @@ for(const [tool,action] of fakeMutationActions){
   }else if(first.request?.action!==action||first.request?.account!==args.account)
     throw Error('set_limits action/account lost');
   if(tool==='accounts'&&action==='connect'&&!negative){
-   if(visits.length!==2||visits[1].path!=='/account-governance/enroll'||
-     visits[1].request?.alias!==args.alias||visits[1].request?.credential_ref!==args.credential_ref)
+   if(visits.length!==3||visits[1].path!=='/account-governance'||
+     visits[2].path!=='/account-governance/enroll'||
+     visits[2].request?.alias!==args.alias||visits[2].request?.credential_ref!==args.credential_ref)
     throw Error('connect did not prove central enrollment binding');
   }else if(visits.length!==1)throw Error('mutation dispatched repeatedly '+tool+'.'+action);
  }
 }
 console.log('mcp_fake_venue_mutation_routes PASS 11 actions positive/negative 0 real exchange POST');
+
+const connectFixture=payloadFixtures.find(x=>x.tool==='accounts'&&x.action==='connect')!;
+const attachArgs={...connectFixture.positive,enabled:false};
+const attachedUid='a'.repeat(64),attachedKey='okx:demo:'+attachedUid;
+const attachedAccount={id:attachArgs.alias,label:attachArgs.label??attachArgs.alias,
+ account_key:attachedKey,uid_fingerprint:attachedUid,venue:'okx',environment:'demo',
+ identity_verified:true,enabled:true,explicit_pause:false,policy_revision:3,
+ limits:attachArgs.limits,strategies:[]};
+for(const variation of ['requires_pause','already_disabled','wrong_identity','unsafe_enable','pause_refused']){
+ const args={...attachArgs,enabled:variation==='unsafe_enable'};
+ const account={...attachedAccount,...(variation==='already_disabled'?{enabled:false}:{})};
+ if(variation==='wrong_identity')account.uid_fingerprint='b'.repeat(64);
+ const state={status:'CONFIGURED',revision:3,accounts:[account]};
+ const visits:{path:string;request:any}[]=[];
+ const fakeHandler=async(url:string,init?:RequestInit)=>{
+  const path=new URL(url).pathname;
+  const request=init?.body?JSON.parse(String(init.body)):null;
+  visits.push({path,request});
+  if(path==='/dispatch'){
+   const op=request.operation;
+   return Response.json({status:'completed',result:{alias:op.alias,credential_ref:op.credential_ref,
+    connect_operation_id:op.operation_id,configuration_digest:op.request_digest,
+    account_key:{venue:'okx',environment:'demo',verified_uid:attachedUid}}});
+  }
+  if(path==='/account-governance')return Response.json(state);
+  if(path==='/account-governance/pause'){
+   if(request.account!==args.alias||request.expected_revision!==3||
+      request.explicit_pause!==true||request.idempotency_key!==args.idempotency_key)
+    throw Error('unsafe attached account CAS pause');
+   if(variation==='pause_refused')return Response.json({status:'FAILED',reason:'STALE_ACCESS_REVISION'});
+   return Response.json({status:'CONFIGURED',configuration:{...state,revision:4,
+    accounts:[{...account,explicit_pause:true,policy_revision:4}]}});
+  }
+  if(path==='/account-governance/enroll'&&variation==='unsafe_enable'){
+   if(request.alias!==args.alias||request.enabled!==true)
+    throw Error('unsafe enrollment replay request changed');
+   // A new operation key cannot register a duplicate; the real DO owns
+   // exact original-key replay and refuses any new enable grant.
+   return Response.json({status:'FAILED',reason:'ACCOUNT_ALREADY_CONNECTED'});
+  }
+  throw Error('reattachment must not enroll or mutate an independent owner: '+path);
+ };
+ const fake:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:fakeHandler})}};
+ const rpc:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
+  body:JSON.stringify({jsonrpc:'2.0',id:913,method:'tools/call',
+   params:publicArgs('accounts',args)})}),fake,ctx)).json();
+ if(rpc.error||!rpc.result?.structuredContent)throw Error('verified reattach tool error '+JSON.stringify(rpc.error));
+ const outcome=rpc.result.structuredContent;
+ if(variation==='requires_pause'){
+  if(outcome.status!=='completed'||outcome.data.reattached_existing!==true||
+     outcome.data.configuration.accounts.length!==1||outcome.data.account.explicit_pause!==true||
+     visits.map(v=>v.path).join(',')!=='/dispatch,/account-governance,/account-governance/pause')
+   throw Error('existing verified account was not paused/reused exactly once');
+ }else if(variation==='already_disabled'){
+  if(outcome.status!=='completed'||outcome.data.reattached_existing!==true||
+    visits.map(v=>v.path).join(',')!=='/dispatch,/account-governance')
+   throw Error('already-disabled account created new central mutation');
+ }else{
+  const expected=variation==='wrong_identity'?'EXISTING_ACCOUNT_IDENTITY_MISMATCH':
+    variation==='unsafe_enable'?'ACCOUNT_ALREADY_CONNECTED':'STALE_ACCESS_REVISION';
+  const enrollmentVisits=visits.filter(v=>v.path==='/account-governance/enroll').length;
+  if(outcome.reason_code!==expected||!['failed','rejected'].includes(outcome.status)||
+    enrollmentVisits!==(variation==='unsafe_enable'?1:0))
+   throw Error('reattach failure not fail-closed '+variation+': '+JSON.stringify(outcome));
+ }
+}
+console.log('existing_verified_account_reattach_fail_closed PASS one account no venue POST');
+
 
 const rawFailure=(code:string)=>({schema:'okx.agent.response/v1',request_id:'native_fail_398',
  status:'rejected',generated_at:'2026-10-23T00:00:00Z',quality:'NOT_READY',result_schema:'okx.product/v1',
