@@ -39,7 +39,7 @@ ALLOWED = {
 # Scoped supplemental source guard: the Cargo DAG cannot see std::fs/network/
 # wall-clock use. This does not replace Rust visibility/compile-fail checks.
 RISK_PURE_FORBIDDEN = re.compile(
-    r"\\b(?:tokio|rusqlite|std::(?:fs|net|env|thread|time)|SystemTime|Instant|unsafe)\\b"
+    r"\b(?:tokio|rusqlite|std::(?:fs|net|env|thread|time)|SystemTime|Instant|unsafe)\b"
 )
 
 
