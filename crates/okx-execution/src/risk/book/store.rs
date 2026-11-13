@@ -59,7 +59,9 @@ pub(super) enum RiskStoreError {
 }
 type Result<T> = std::result::Result<T, RiskStoreError>;
 const LEGACY_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-fn safe_integer(value:i64)->bool { value>=0 && (value as u64)<=LEGACY_MAX_SAFE_INTEGER }
+fn safe_integer(value: i64) -> bool {
+    value >= 0 && (value as u64) <= LEGACY_MAX_SAFE_INTEGER
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct AccountPolicy {
@@ -197,10 +199,15 @@ fn valid_token(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
-fn valid_strategy_id(value:&str)->bool {
+fn valid_strategy_id(value: &str) -> bool {
     (2..=64).contains(&value.len())
-        && value.bytes().next().is_some_and(|b|b.is_ascii_alphabetic())
-        && value.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'||b==b'-')
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 fn valid_instrument(value: &str) -> bool {
     (3..=64).contains(&value.len())
@@ -627,9 +634,12 @@ impl RiskBookStore {
         if path.exists() {
             return Err(RiskStoreError::Invalid("EXISTING_RISK_BOOK"));
         }
-        if opening.accounts.len() < 2 || opening.policy_revision == 0 || opening.generation == 0
+        if opening.accounts.len() < 2
+            || opening.policy_revision == 0
+            || opening.generation == 0
             || opening.policy_revision > LEGACY_MAX_SAFE_INTEGER
-            || opening.generation > LEGACY_MAX_SAFE_INTEGER {
+            || opening.generation > LEGACY_MAX_SAFE_INTEGER
+        {
             return Err(RiskStoreError::Invalid("FIXTURE_COHORT"));
         }
         // Test-only; never a production path to mint a fresh risk budget over
