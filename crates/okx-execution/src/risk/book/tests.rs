@@ -401,7 +401,7 @@ fn risk_book_contract_sql_loss_source_monotonic_even_on_denied_reserve() {
     let mut source=census();
     source.cumulative_loss_usd.insert(account('a'),amt("11"));
     let denied=store.reserve(&request('a',"intentloss1","95"),&source);
-    assert!(matches!(denied,Err(RiskStoreError::Denied(RiskRuleError::CampaignLossBudgetExhausted))));
+    assert!(matches!(denied,Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted))));
     let state=store.readback().unwrap();
     assert_eq!(state.book_sequence,1,"verified loss alone increments sequence");
     assert_eq!(state.consumed_loss_usd,"11");
