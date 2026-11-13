@@ -1,5 +1,30 @@
 # Trade acceptance evidence map — #448 / #449 / #501
 
+## #510 RiskBook transfer — checkpoint A inventory (IN PROGRESS)
+
+**Candidate:** [Draft PR #511](https://github.com/iamaman11/okx/pull/511), base `8bd70ceab23472d286a40d147cc1cd8e3aa5bf9c`. The table below inventories **current TS/DO behaviour** from `risk_authority.ts`, `risk_book.ts`, `risk_bridge.rs` and `risk_authority.rs`. It is **not** Rust production-wiring evidence. No new RiskBook authority has been activated. The expected properties below are independent requirements that the Rust direct witnesses must establish against original SQLite state.
+
+| RiskCommandAction | Baseline owner / entrypoint | Required persisted boundary and independent expected | Planned direct Rust witness / physical requirement | Status |
+|---|---|---|---|---|
+| `SUMMARY` | `handleNativeRiskCommand → readRiskBook` | Authorized generation, verified book and policy; no mutation; reserved/consumed/remaining from one committed snapshot; unknown opening never zero | `risk_book_contract_summary_read_only`; reopened DB + negative missing-book | NOT_PROVEN |
+| `INSTALL_ENTRY_OPENING` | `handleNativeRiskCommand → installCampaignEntryProof` | Same-cohort opening source, campaign/installation ID, all accounts/history/provenance, fresh source and digest; atomic opening marker, exact retry idempotent; absent source not zero | `risk_book_contract_install_opening`; corrupt/incomplete/foreign/duplicate and restart | NOT_PROVEN |
+| `ACCOUNT_SUMMARY` | `handleNativeRiskCommand → risk_account_v2 / risk_loss_v2` | Authenticated account scope, all aggregation rows coherent, no read-side mutation or fabricated zero for missing aggregate | `risk_book_contract_account_summary`; two distinct accounts and missing aggregate | NOT_PROVEN |
+| `INSPECT` | `handleNativeRiskCommand → inspectRisk / inspectNoReserveFence` | Exact reservation key+plan, read-only state/sequence; distinguish persisted no-send tombstone from absent reservation | `risk_book_contract_inspect`; restart/tombstone/foreign identity | NOT_PROVEN |
+| `RESERVE` | `handleNativeRiskCommand → reserveRisk` | Same SQL transaction checks current policy/session/cohort/source, applies monotonic loss, validates both entry and modelled-loss capacity, writes HELD + sequence + account/strategy/global aggregates; identical HELD replay not extra debit, same-key other payload conflict | `risk_book_contract_reserve_multi_account`; two contenders, new campaign isolation, old policy and reply lost | NOT_PROVEN |
+| `SETTLE_ENTRY` | `handleNativeRiskCommand → settleEntrySpend` | Authenticated source/revision and cumulative entry USD; nondecreasing amount, exact replay read-only even after unrelated sequence changes, late fee after RELEASE adds spend but never subtracts another reservation, monotonic bound-breach | `risk_book_contract_settle_entry`; account SQL ↔ campaign SQL ordering and reopen | NOT_PROVEN |
+| `RELEASE_UNSENT` | `handleNativeRiskCommand → releaseUnsentRisk` | Verified native no-send/SQL proof; release HELD or persist no-reserve fence; no future RESERVE for same identity; no accidental release after POST/UNKNOWN | `risk_book_contract_release_unsent`; lost reply, late reserve and restart | NOT_PROVEN |
+| `BEGIN_POST` | `handleNativeRiskCommand → beginRiskPost` | Fresh post-HELD causal reads, generation/sequence/policy/plan+source exact; persistent POSTED fence before a possible exchange POST; duplicate/stale/unknown cannot grant a second send | `risk_book_contract_begin_post`; OS kill before/after durable boundary, no double POST | NOT_PROVEN |
+| `RESOLVE` | `handleNativeRiskCommand → transitionRisk` | UNKNOWN/OPEN/RELEASED transitions conditional on exact revision and proof; terminal release requires complete native census and ledger evidence; preserve obligations on missing/late evidence | `risk_book_contract_resolve`; partial fill, terminal proof, reply lost and reopen | NOT_PROVEN |
+| init / lower-limit / governance | `initializeRiskBook`, `lowerRiskBookLimit`, `lowerCampaignEntryLimit`, `account_governance.ts` | New/legacy campaign distinguished; authoritative versioned policy, budget decrease never mints capacity; rollback/fencing denies legacy mutations after transfer | `risk_book_contract_policy_and_transfer`; negative real legacy fence in isolated Worker | NOT_PROVEN |
+
+**Only delivered source witnesses on the first branch snapshot:** `okx-kernel::risk::money` and `okx-kernel::risk::rules` contain four `risk_book_contract_*` pure tests. They ran with 4 PASS on native Windows in an **isolated staging crate**, not in the full workspace. These prove only syntax/scale/checked arithmetic and preliminary capacity predicates. They are not the tests named in the planned-witness column and do **not** prove any complete row above.
+
+**Checkpoint A still unresolved; do not start production cutover before recording exact values:** campaign SQLite path under runtime and lock/lease scope, schema version/upgrade, policy source+revision+fencing epoch, legacy snapshot export/import format, no-send/POST identifiers, each full trade caller (including recovery, summary, opening and fees), and the durable account SQL ↔ campaign SQL handshake. Confirm every exported `risk_book.ts` function and caller; this table is an initial finite operation index, not proof of complete reachable-call graph.
+
+**Performance contract:** direct domain tests may execute in milliseconds; #510 still requires actual SQLite, required OS-kill/reopen and legacy fencing physical witnesses inside the measured target, plus static checks/review separately. T09/T10 coverage may only be removed when the old authority is factually gone and the same invariant has a new proven owner.
+
+
+
 **Canonical:** [product #448](https://github.com/iamaman11/okx/issues/448), [execution #449](https://github.com/iamaman11/okx/issues/449), [bounded simplification #501](https://github.com/iamaman11/okx/issues/501). This is an evidence map, **not** a new suite, an authorization to trade, or a PASS certificate.
 
 **Current candidate:** `fix/windows-clippy-required-495-20261107`, Draft PR #499.
