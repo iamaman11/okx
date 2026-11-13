@@ -371,15 +371,11 @@ fn apply_census_loss(
     Ok(())
 }
 
-
 // The risk_entries rows carry the primary remaining obligations. Cached totals
 // never authorize a grant unless they agree with those exact-decimal records.
 // This version only implements HELD; other lifecycle states fail closed until
 // their transition and remaining-balance semantics are implemented.
-fn verify_reservation_aggregates(
-    tx: &rusqlite::Transaction<'_>,
-    meta: &BookMeta,
-) -> Result<()> {
+fn verify_reservation_aggregates(tx: &rusqlite::Transaction<'_>, meta: &BookMeta) -> Result<()> {
     let mut accounts: BTreeMap<String, RiskAmount> = BTreeMap::new();
     let mut strategies: BTreeMap<(String, String), RiskAmount> = BTreeMap::new();
     let mut global = RiskAmount::zero();
@@ -405,13 +401,23 @@ fn verify_reservation_aggregates(
             ))
         })?;
         for row in rows {
-            let (account, strategy, state, original_usdt, original_loss, original_entry,
-                remaining_usdt, remaining_loss, remaining_entry) = row?;
+            let (
+                account,
+                strategy,
+                state,
+                original_usdt,
+                original_loss,
+                original_entry,
+                remaining_usdt,
+                remaining_loss,
+                remaining_entry,
+            ) = row?;
             let remaining_usdt = amount(remaining_usdt)?;
             let remaining_loss = amount(remaining_loss)?;
             let remaining_entry = amount(remaining_entry)?;
             if state == "RELEASED" {
-                if !remaining_usdt.is_zero() || !remaining_loss.is_zero()
+                if !remaining_usdt.is_zero()
+                    || !remaining_loss.is_zero()
                     || !remaining_entry.is_zero()
                 {
                     return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
@@ -430,14 +436,17 @@ fn verify_reservation_aggregates(
             global = global.checked_add(&remaining_usdt)?;
             loss = loss.checked_add(&remaining_loss)?;
             entry = entry.checked_add(&remaining_entry)?;
-            let previous = accounts.entry(account.clone()).or_insert_with(RiskAmount::zero);
+            let previous = accounts
+                .entry(account.clone())
+                .or_insert_with(RiskAmount::zero);
             *previous = previous.checked_add(&remaining_usdt)?;
-            let previous = strategies.entry((account, strategy)).or_insert_with(RiskAmount::zero);
+            let previous = strategies
+                .entry((account, strategy))
+                .or_insert_with(RiskAmount::zero);
             *previous = previous.checked_add(&remaining_usdt)?;
         }
     }
-    if global != meta.global_reserved || loss != meta.loss_reserved
-        || entry != meta.entry_reserved
+    if global != meta.global_reserved || loss != meta.loss_reserved || entry != meta.entry_reserved
     {
         return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
     }
@@ -456,9 +465,8 @@ fn verify_reservation_aggregates(
         return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
     }
     {
-        let mut stmt = tx.prepare(
-            "SELECT account_key,strategy_id,reserved_usdt FROM risk_strategy_occupied",
-        )?;
+        let mut stmt =
+            tx.prepare("SELECT account_key,strategy_id,reserved_usdt FROM risk_strategy_occupied")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -586,11 +594,11 @@ impl RiskBookStore {
         }
         let mut policies = BTreeMap::new();
         {
-            let mut stmt=tx.prepare(
+            let mut stmt = tx.prepare(
                 "SELECT p.account_key,p.limit_usdt,p.order_limit_usdt,o.reserved_usdt
                  FROM risk_policy_account p
                  JOIN risk_account_occupied o USING(account_key)
-                 ORDER BY p.account_key"
+                 ORDER BY p.account_key",
             )?;
             let iter = stmt.query_map([], |r| {
                 Ok((
@@ -664,8 +672,7 @@ impl RiskBookStore {
             source_total = source_total.checked_add(occupied)?;
         }
         let global_occupied = source_total.checked_add(&meta.global_reserved)?;
-        let account_occupied =
-            census.occupied[&account_key].checked_add(account_reserved)?;
+        let account_occupied = census.occupied[&account_key].checked_add(account_reserved)?;
         let strategy_reserved = amount(reserved_strategy)?;
         let strategy_limit = amount(strategy_limit)?;
         let campaign_decision = evaluate_campaign_capacity(
@@ -729,16 +736,29 @@ impl RiskBookStore {
             .canonical()?;
         let policy_i64 =
             i64::try_from(input.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?;
-        tx.execute("INSERT INTO risk_entries(
+        tx.execute(
+            "INSERT INTO risk_entries(
             reservation_key,account_key,strategy_id,intent_id,plan_sha256,request_digest,
             policy_revision,state,loss_usdt,loss_usd,entry_upper_usd,
             reserved_usdt,reserved_loss_usd,reserved_entry_usd,entry_proof_digest,
             source_digest,book_sequence)
             VALUES (?1,?2,?3,?4,?5,?6,?7,'HELD',?8,?9,?10,?8,?9,?10,?11,?12,?13)",
-            params![&key,&account_key,&input.strategy_id,&input.intent_id,&input.plan_sha256,digest,
-                policy_i64,input.proposal.loss_usdt.canonical()?,input.proposal.loss_usd.canonical()?,
-                input.proposal.entry_upper_usd.canonical()?,&input.entry_proof_digest,
-                &census.source_digest,next_sequence_i64])?;
+            params![
+                &key,
+                &account_key,
+                &input.strategy_id,
+                &input.intent_id,
+                &input.plan_sha256,
+                digest,
+                policy_i64,
+                input.proposal.loss_usdt.canonical()?,
+                input.proposal.loss_usd.canonical()?,
+                input.proposal.entry_upper_usd.canonical()?,
+                &input.entry_proof_digest,
+                &census.source_digest,
+                next_sequence_i64
+            ],
+        )?;
         tx.execute(
             "UPDATE risk_account_occupied SET reserved_usdt=?1 WHERE account_key=?2",
             params![new_account, &account_key],
