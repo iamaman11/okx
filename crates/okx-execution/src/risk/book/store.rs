@@ -20,13 +20,13 @@ use std::{
 use thiserror::Error;
 mod integrity;
 mod post;
-mod settlement;
 mod queries;
+mod settlement;
 mod unsent;
 use integrity::verify_reservation_aggregates;
 pub(super) use post::{PostAuthorized, PostFenceInput};
-pub(super) use settlement::{EntrySettlementReceipt, PartialEntrySqlProof};
 pub(super) use queries::{AccountReadback, ReservationReadback};
+pub(super) use settlement::{EntrySettlementReceipt, PartialEntrySqlProof};
 pub(super) use unsent::{UnsentReceipt, UnsentSqlProof};
 
 #[derive(Debug, Error)]
@@ -337,7 +337,7 @@ fn read_meta(tx: &rusqlite::Transaction<'_>) -> Result<BookMeta> {
                 r.get(9)?,
                 r.get(10)?,
                 r.get(11)?,
-                r.get(12)?, 
+                r.get(12)?,
             ))
         },
     )?;
@@ -355,7 +355,7 @@ fn read_meta(tx: &rusqlite::Transaction<'_>) -> Result<BookMeta> {
         entry_consumed: RiskAmount::parse(&row.9)?,
         entry_opening_consumed: RiskAmount::parse(&row.10)?,
         entry_reserved: RiskAmount::parse(&row.11)?,
-        entry_breach: RiskAmount::parse(&row.12)?, 
+        entry_breach: RiskAmount::parse(&row.12)?,
     })
 }
 fn amount(text: String) -> Result<RiskAmount> {
