@@ -11,7 +11,7 @@ pub(super) const CORE_SCHEMA: &str = include_str!("finance-v1.sql");
 const MAX_SAFE_SEQUENCE: i64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone)]
-pub(super) struct EntryRef<'a> {
+pub(in crate::account_store) struct EntryRef<'a> {
     pub installation: &'a str,
     pub campaign: &'a str,
     pub reservation: &'a str,
@@ -23,7 +23,7 @@ pub(super) struct EntryRef<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct EntryCommit {
+pub(in crate::account_store) struct EntryCommit {
     pub book_sequence: i64,
     pub cumulative_entry_usd: String,
     pub replayed: bool,
@@ -121,7 +121,7 @@ fn verify_campaign(
                         reservation_key,
                         revision
                     ],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)), 
                 )
                 .optional()?;
             match receipt {
@@ -151,7 +151,7 @@ fn verify_campaign(
 /// It reads the original immutable source revision, intent, fill and bill
 /// from the SAME SQLite snapshot as the campaign CAS. Existing source
 /// capture must populate these primary rows before this can be used live.
-pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreResult<EntryCommit> {
+pub(in crate::account_store) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreResult<EntryCommit> {
     if [
         scope.installation,
         scope.campaign,
@@ -226,12 +226,13 @@ pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreR
     if state != "POSTED" || old_rev < 0 {
         return Err(StoreError::Invalid("UNIFIED_ENTRY_NOT_POSTED"));
     }
-    let intent_plan: String = tx.query_row(
-        "SELECT plan_sha256 FROM finance_intents
+    let intent_identity: (String, String) = tx.query_row(
+        "SELECT plan_sha256,exchange_order_id FROM finance_intents
          WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
         params![scope.installation, scope.account, scope.intent],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?,r.get(1)?)),
     )?;
+    let (intent_plan, intent_exchange) = intent_identity;
     if intent_plan != plan || !digest_ok(&plan) {
         return Err(StoreError::Invalid("UNIFIED_ORIGINAL_PLAN_CONFLICT"));
     }
@@ -239,9 +240,9 @@ pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreR
     // All joins are scoped by BOTH installation and source account. Even
     // identical venue order/fill/bill IDs on a different account cannot
     // become a source for this risk reservation.
-    let source: Option<(String, String, String)> = tx
+    let source: Option<(String, String, String, String)> = tx
         .query_row(
-            "SELECT s.source_digest,s.cumulative_entry_usd,b.source_digest
+            "SELECT s.source_digest,s.cumulative_entry_usd,b.source_digest,s.original_receipt_json
              FROM finance_entry_sources s
              JOIN finance_fills f
                ON f.installation_id=s.installation_id AND f.account_key=s.account_key
@@ -260,13 +261,34 @@ pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreR
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((source_digest, source_amount, bill_digest)) = source else {
+    let Some((source_digest, source_amount, bill_digest, original_json)) = source else {
         return Err(StoreError::Invalid("UNIFIED_ORIGINAL_SOURCE_MISSING"));
     };
     if !digest_ok(&source_digest) || !digest_ok(&bill_digest) {
         return Err(StoreError::Invalid("UNIFIED_SOURCE_DIGEST_INVALID"));
     }
     let cumulative = money(&source_amount)?;
+    // Legacy-imported rows must carry the byte-exact original AccountStore
+    // proof. Synthetic scope/OS tests use only test-seeded source rows; the
+    // complete production schema must require this native provenance.
+    if !original_json.is_empty() {
+        let original: crate::EntrySettlementEvidence = serde_json::from_str(&original_json)
+            .map_err(|_| StoreError::Invalid("UNIFIED_ORIGINAL_JSON_CORRUPT"))?;
+        let original_amount = money(&original.cumulative_entry_usd.normalize().to_string())?;
+        if original.schema != "okx.entry-partial-settlement/v1"
+            || original.account_key != scope.account
+            || original.intent_id != scope.intent
+            || original.plan_hash != plan
+            || original.reservation_key != scope.reservation
+            || original.venue_order_id != intent_exchange
+            || original.source_digest != source_digest
+            || bill_digest != source_digest
+            || i64::try_from(original.settlement_revision).ok() != Some(scope.source_revision)
+            || original_amount != cumulative
+        {
+            return Err(StoreError::Invalid("UNIFIED_ORIGINAL_RECEIPT_CONFLICT"));
+        }
+    }
     if cumulative.is_zero() {
         return Err(StoreError::Invalid("UNIFIED_SOURCE_EMPTY"));
     }
