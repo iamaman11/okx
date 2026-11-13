@@ -113,9 +113,17 @@ fn risk_book_contract_sql_concurrent_accounts_share_one_budget() {
         ))
     ));
     let read = s.readback().unwrap();
+    assert_eq!(read.global_limit_usdt, "10");
     assert_eq!(read.global_reserved_usdt, "6");
+    assert_eq!(read.loss_limit_usd, "100");
+    assert_eq!(read.consumed_loss_usd, "0");
     assert_eq!(read.reserved_loss_usd, "6");
+    assert_eq!(read.remaining_loss_usd, "94");
+    assert_eq!(read.entry_limit_usd, "100");
+    assert_eq!(read.consumed_entry_usd, "0");
     assert_eq!(read.reserved_entry_usd, "1");
+    assert_eq!(read.entry_bound_breach_usd, "0");
+    assert_eq!(read.remaining_entry_usd, "99");
     assert_eq!(read.book_sequence, 1);
     drop(s);
     let mut recovered = open(&f);
@@ -407,12 +415,14 @@ fn risk_book_contract_sql_loss_source_monotonic_even_on_denied_reserve() {
         "verified loss alone increments sequence"
     );
     assert_eq!(state.consumed_loss_usd, "11");
+    assert_eq!(state.remaining_loss_usd, "89");
     assert_eq!(state.global_reserved_usdt, "0");
     let accepted = store
         .reserve(&request('a', "intentloss2", "5"), &source)
         .unwrap();
     assert_eq!(accepted.book_sequence, 2);
     assert_eq!(store.readback().unwrap().consumed_loss_usd, "11");
+    assert_eq!(store.readback().unwrap().remaining_loss_usd, "84");
     let mut regression = source.clone();
     regression
         .cumulative_loss_usd
