@@ -40,6 +40,7 @@ pub fn validate_post_causality(
             && s.bytes()
                 .all(|ch| ch.is_ascii_digit() || (b'a'..=b'f').contains(&ch))
     };
+    let mut independent_reads = std::collections::BTreeSet::new();
     if proof.reserve_anchor != reservation_key
         || !hex(&proof.native_incarnation, 32)
         || proof.native_incarnation != original_incarnation
@@ -54,6 +55,7 @@ pub fn validate_post_causality(
                 read.account_key != *member
                     || read.private_generation == 0
                     || !hex(&read.source_read_id, 64)
+                    || !independent_reads.insert(&read.source_read_id)
                     || !hex(&read.content_digest, 64)
                     || read.started_after_held_ms > read.completed_after_held_ms
                     || read.completed_after_held_ms > proof.elapsed_to_proof_ms
@@ -246,6 +248,14 @@ mod tests {
                 "original-reservation",
                 &"f".repeat(32),
                 &accounts
+            ),
+            Err(RiskRuleError::PostCausalProofUnproven)
+        );
+        let mut reused_read = proof.clone();
+        reused_read.account_reads[1].source_read_id = reused_read.account_reads[0].source_read_id.clone();
+        assert_eq!(
+            validate_post_causality(
+                &reused_read, "original-reservation", &"f".repeat(32), &accounts
             ),
             Err(RiskRuleError::PostCausalProofUnproven)
         );
