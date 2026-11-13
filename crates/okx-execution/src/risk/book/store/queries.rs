@@ -6,7 +6,7 @@ use okx_kernel::risk::{model::RiskEntryState, money::RiskAmount};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AccountReadback {
+pub(in crate::risk::book) struct AccountReadback {
     pub account_key: String,
     pub policy_revision: u64,
     pub book_sequence: u64,
@@ -17,7 +17,7 @@ pub(super) struct AccountReadback {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ReservationReadback {
+pub(in crate::risk::book) struct ReservationReadback {
     pub reservation_key: String,
     pub plan_sha256: String,
     pub state: RiskEntryState,
