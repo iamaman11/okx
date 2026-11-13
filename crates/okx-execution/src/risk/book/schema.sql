@@ -15,6 +15,7 @@ CREATE TABLE risk_meta (
  loss_reserved_usd TEXT NOT NULL,
  entry_limit_usd TEXT NOT NULL,
  entry_consumed_usd TEXT NOT NULL,
+ entry_opening_consumed_usd TEXT NOT NULL,
  entry_reserved_usd TEXT NOT NULL,
  entry_bound_breach_usd TEXT NOT NULL
 ) STRICT;
@@ -65,6 +66,10 @@ CREATE TABLE risk_entries (
  reserved_usdt TEXT NOT NULL,
  reserved_loss_usd TEXT NOT NULL,
  reserved_entry_usd TEXT NOT NULL,
+ entry_settled_usd TEXT NOT NULL DEFAULT '0',
+ entry_settlement_revision INTEGER NOT NULL DEFAULT 0 CHECK(entry_settlement_revision>=0),
+ entry_settlement_digest TEXT NOT NULL DEFAULT '',
+ entry_bound_breach_usd TEXT NOT NULL DEFAULT '0',
  entry_proof_digest TEXT NOT NULL,
  source_digest TEXT NOT NULL,
  book_sequence INTEGER NOT NULL CHECK(book_sequence>0),
@@ -81,6 +86,9 @@ CREATE TABLE risk_entries (
  release_proof_digest TEXT NOT NULL DEFAULT '',
  release_request_hash TEXT NOT NULL DEFAULT '',
  release_reason TEXT NOT NULL DEFAULT '',
+ CHECK(state <> 'HELD' OR
+       (entry_settled_usd='0' AND entry_settlement_revision=0 AND entry_settlement_digest='')),
+ CHECK(entry_settlement_revision=0 OR length(entry_settlement_digest)=64),
  CHECK(state <> 'HELD' OR
        (post_authorized_at_ms=0 AND post_sequence=0
         AND post_proof_digest='' AND post_source_digest=''
@@ -112,4 +120,4 @@ CREATE INDEX idx_risk_entries_active_account ON risk_entries(account_key,state);
 -- Only currently held obligations are audited per mutation, never full history.
 CREATE INDEX idx_risk_entries_active_balance ON risk_entries(state)
  WHERE state <> 'RELEASED';
-PRAGMA user_version=4;
+PRAGMA user_version=5;
