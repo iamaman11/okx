@@ -30,6 +30,12 @@ pub(super) enum RiskStoreError {
     Denied(#[from] RiskRuleError),
     #[error("RISK_BOOK_UNINITIALIZED")]
     Uninitialized,
+    #[error("RISK_OWNER_QUEUE_FULL")]
+    QueueFull,
+    #[error("RISK_OWNER_STOPPED")]
+    WorkerStopped,
+    #[error("RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY")]
+    OutcomeUnknown,
     #[error("RISK_WRITER_ALREADY_RUNNING")]
     WriterBusy,
     #[error("RISK_BOOK_IDENTITY_MISMATCH")]
