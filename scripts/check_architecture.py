@@ -14,7 +14,7 @@ ALLOWED = {
     "okx-kernel": set(),
     "okx-analysis": {"okx-kernel"},
     "okx-research": {"okx-analysis"},
-    "okx-execution": {"okx-api", "okx-analysis", "okx-observation"},
+    "okx-execution": {"okx-api", "okx-analysis", "okx-kernel", "okx-observation"},
     "okx-protocol": set(),
     "okx-github": set(),
     "okx-cli": {"okx-api"},
@@ -147,6 +147,12 @@ def self_test() -> int:
     simplified["okx-agent"].remove("okx-research")
     if validate(simplified):
         print("self-test failed: a removed dependency was rejected", file=sys.stderr)
+        return 1
+
+    reverse = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
+    reverse["okx-kernel"].add("okx-execution")
+    if "forbidden local dependency: okx-kernel -> okx-execution" not in validate(reverse):
+        print("self-test failed: reverse risk domain dependency passed", file=sys.stderr)
         return 1
 
     forbidden = {name: set(dependencies) for name, dependencies in ALLOWED.items()}

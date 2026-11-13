@@ -6,4 +6,5 @@ pub mod fee_model;
 pub mod observation_model;
 pub mod operators;
 pub mod query_plan;
+pub mod risk;
 pub mod time_series;
