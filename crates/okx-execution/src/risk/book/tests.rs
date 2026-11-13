@@ -2244,9 +2244,9 @@ async fn risk_book_contract_sql_real_two_owner_os_kill_after_campaign_before_acc
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    let (fixture, account, input, _) = source_verified_partial_fixture("two-sql-os-kill").await;
-    let mut termination = account.termination_signal();
-    drop(account);
+    let (fixture, account_owner, input, _) = source_verified_partial_fixture("two-sql-os-kill").await;
+    let mut termination = account_owner.termination_signal();
+    drop(account_owner);
     tokio::time::timeout(Duration::from_secs(5), async {
         while !*termination.borrow() {
             termination.changed().await.unwrap();
