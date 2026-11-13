@@ -560,3 +560,111 @@ fn risk_book_contract_sql_old_schema_version_is_rejected() {
         Err(RiskStoreError::Corrupt("SCHEMA_OR_JOURNAL"))
     ));
 }
+
+#[test]
+fn risk_book_contract_sql_account_observation_and_inspect_preserve_revision() {
+    use okx_kernel::risk::model::RiskEntryState;
+    let fixture = Fixture::new("readonly");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+
+    let empty = store.account_readback(&account('b')).unwrap();
+    assert_eq!(empty.active_reservations, 0);
+    assert_eq!(empty.reserved_loss_usdt, "0");
+    assert_eq!(empty.reserved_loss_usd, "0");
+
+    let request = request('a', "intentread1", "6");
+    let held = store.reserve(&request, &census()).unwrap();
+    let account_a = store.account_readback(&account('a')).unwrap();
+    assert_eq!(account_a.active_reservations, 1);
+    assert_eq!(account_a.reserved_loss_usdt, "6");
+    assert_eq!(account_a.reserved_loss_usd, "6");
+    assert_eq!(account_a.cumulative_loss_usd, "0");
+    assert_eq!(account_a.book_sequence, held.book_sequence);
+    assert_eq!(account_a.policy_revision, 1);
+    let account_b = store.account_readback(&account('b')).unwrap();
+    assert_eq!(account_b.book_sequence, held.book_sequence);
+    assert_eq!(account_b.active_reservations, 0);
+    assert_eq!(account_b.reserved_loss_usdt, "0");
+    let found = store
+        .inspect(&request.reservation_key(), &request.plan_sha256)
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.reservation_key, request.reservation_key());
+    assert_eq!(found.plan_sha256, request.plan_sha256);
+    assert_eq!(found.state, RiskEntryState::Held);
+    assert_eq!(found.reservation_sequence, 1);
+    assert_eq!(found.current_book_sequence, 1);
+    assert_eq!(found.policy_revision, 1);
+    assert!(store.inspect(&request.reservation_key(), &uid('b')).unwrap().is_none());
+    assert!(store.inspect(&request('b', "intentnever1", "1").reservation_key(), &uid('e')).unwrap().is_none());
+    assert!(matches!(
+        store.account_readback(&account('c')),
+        Err(RiskStoreError::Invalid("ACCOUNT_NOT_ACTIVE"))
+    ));
+    assert!(matches!(
+        store.inspect(&request.reservation_key(), "bad"),
+        Err(RiskStoreError::Invalid("INSPECTION_IDENTITY"))
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 1);
+    drop(store);
+
+    let mut reopened = open(&fixture);
+    assert_eq!(reopened.account_readback(&account('a')).unwrap(), account_a);
+    assert_eq!(reopened.inspect(&request.reservation_key(), &request.plan_sha256).unwrap(), Some(found));
+    assert_eq!(reopened.readback().unwrap().book_sequence, 1);
+}
+
+#[test]
+fn risk_book_contract_sql_loss_source_total_and_presence_are_durable() {
+    let fixture = Fixture::new("loss-primary");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let mut source = census();
+    source.cumulative_loss_usd.insert(account('a'), amt("11"));
+    assert!(matches!(
+        store.reserve(&request('a', "intentloss5", "95"), &source),
+        Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted))
+    ));
+    assert_eq!(store.readback().unwrap().consumed_loss_usd, "11");
+    drop(store);
+    let connection = rusqlite::Connection::open(&fixture.path).unwrap();
+    connection.execute("UPDATE risk_meta SET loss_consumed_usd='0' WHERE singleton=1", []).unwrap();
+    drop(connection);
+    assert!(matches!(
+        RiskBookStore::open_existing(&fixture.path, "test-installation", &opening().campaign_id),
+        Err(RiskStoreError::Corrupt("LOSS_SOURCE_AGGREGATES"))
+    ));
+
+    let missing = Fixture::new("loss-row-missing");
+    RiskBookStore::initialize_fixture(&missing.path, &opening()).unwrap();
+    let connection = rusqlite::Connection::open(&missing.path).unwrap();
+    connection.execute("DELETE FROM risk_loss_source WHERE account_key=?1", rusqlite::params![account('a')]).unwrap();
+    drop(connection);
+    assert!(matches!(
+        RiskBookStore::open_existing(&missing.path, "test-installation", &opening().campaign_id),
+        Err(RiskStoreError::Corrupt("LOSS_SOURCE_AGGREGATES"))
+    ));
+}
+
+#[tokio::test]
+async fn risk_book_contract_sql_bounded_owner_answers_readonly_observations() {
+    use super::owner::RiskBookHandle;
+    use okx_kernel::risk::model::RiskEntryState;
+
+    let fixture = Fixture::new("owner-readonly");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let owner = RiskBookHandle::open_existing(
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    ).await.unwrap();
+    let input = request('a', "intentowner1", "3");
+    owner.reserve(input.clone(), census()).await.unwrap();
+    let observed = owner.account_readback(account('a')).await.unwrap();
+    assert_eq!(observed.active_reservations, 1);
+    assert_eq!(observed.reserved_loss_usdt, "3");
+    let entry = owner.inspect(input.reservation_key(), input.plan_sha256.clone()).await.unwrap().unwrap();
+    assert_eq!(entry.state, RiskEntryState::Held);
+    assert_eq!(owner.readback().await.unwrap().book_sequence, 1);
+}
