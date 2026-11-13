@@ -571,7 +571,7 @@ impl RiskBookStore {
         let mut policies = BTreeMap::new();
         {
             let mut stmt = tx.prepare(
-                "SELECT p.account_key,p.limit_usdt,p.order_limit_usdt,o.reserved_usdt
+                "SELECT p.account_key,p.limit_usdt,p.order_limit_usdt,p.entry_limit_usd,o.reserved_usdt
                  FROM risk_policy_account p
                  JOIN risk_account_occupied o USING(account_key)
                  ORDER BY p.account_key",
@@ -582,11 +582,12 @@ impl RiskBookStore {
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
                 ))
             })?;
             for item in iter {
-                let (account, limit, order, reserved) = item?;
-                policies.insert(account, (amount(limit)?, amount(order)?, amount(reserved)?));
+                let (account, limit, order, entry, reserved) = item?;
+                policies.insert(account, (amount(limit)?, amount(order)?, amount(entry)?, amount(reserved)?));
             }
         }
         if policies.is_empty()
@@ -596,7 +597,7 @@ impl RiskBookStore {
             return Err(RiskStoreError::CensusUnproven);
         }
         let account_key = input.account_key();
-        let (account_limit, order_limit, account_reserved) = policies
+        let (account_limit, order_limit, account_entry_limit, account_reserved) = policies
             .get(&account_key)
             .ok_or(RiskStoreError::Invalid("ACCOUNT_NOT_ACTIVE"))?;
         let strategy_limit:String=tx.query_row(
@@ -611,12 +612,16 @@ impl RiskBookStore {
         apply_census_loss(&tx, &mut meta, census)?;
         // Check every policy cohort member, not only the requesting account.
         // Apply observed cumulative loss first, even on an ordinary cap denial.
-        for (member, (limit, _, reserved)) in &policies {
+        for (member, (limit, _, _, reserved)) in &policies {
             let occupied = census.occupied[member].checked_add(reserved)?;
             if let Err(reason) = validate_account_occupancy(limit, &occupied) {
                 tx.commit()?;
                 return Err(RiskStoreError::Denied(reason));
             }
+        }
+        if &input.proposal.entry_upper_usd > account_entry_limit {
+            tx.commit()?;
+            return Err(RiskStoreError::Denied(RiskRuleError::AccountEntryLimitExceeded));
         }
         let key = input.reservation_key();
         let digest = input.digest()?;
