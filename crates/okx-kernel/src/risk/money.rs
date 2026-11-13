@@ -84,6 +84,13 @@ impl RiskAmount {
         Self::checked_from_units(&self.0 + &rhs.0)
     }
 
+    /// Comparison must not reject an over-budget proposal merely because
+    /// an intermediate sum exceeds the wire's representable 28 digits.
+    pub fn sum_exceeds(terms: &[&Self], limit: &Self) -> bool {
+        let total = terms.iter().fold(BigUint::from(0_u8), |sum, value| sum + &value.0);
+        total > limit.0
+    }
+
     pub fn checked_sub(&self, rhs: &Self) -> Result<Self, MoneyError> {
         if self < rhs {
             return Err(MoneyError::Negative);
@@ -144,8 +151,9 @@ mod tests {
     #[test]
     fn risk_book_contract_exact_ceiling_conversion_and_checked_arithmetic() {
         let atom = RiskAmount::parse("0.000000000000000000000000001").unwrap();
-        let quantum = RiskAmount::parse("0.0000000000000000000000000001").unwrap();
-        assert_eq!(atom.checked_mul_ceil(&atom).unwrap(), quantum);
+        // The internal 10^-28 quantum exists, but the legacy wire syntax
+        // rejects 28 fractional digits plus the required leading zero.
+        assert_eq!(atom.checked_mul_ceil(&atom), Err(MoneyError::NumericRange));
         assert_eq!(
             RiskAmount::parse("1.000000001").unwrap()
                 .checked_mul_ceil(&RiskAmount::parse("1.001").unwrap()).unwrap().to_string(),
