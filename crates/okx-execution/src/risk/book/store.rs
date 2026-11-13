@@ -5,8 +5,8 @@ use okx_kernel::risk::{
     model::{CampaignCapacity, RiskProposal, ScopeCapacity},
     money::{MoneyError, RiskAmount},
     rules::{
-        RiskRuleError, evaluate_campaign_capacity, evaluate_scope_capacity,
-        remaining_budget, validate_account_occupancy,
+        RiskRuleError, evaluate_campaign_capacity, evaluate_scope_capacity, remaining_budget,
+        validate_account_occupancy,
     },
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -454,7 +454,8 @@ impl RiskBookStore {
                 &meta.loss_limit,
                 &meta.loss_consumed,
                 &meta.loss_reserved,
-            )?.canonical()?,
+            )?
+            .canonical()?,
             entry_limit_usd: meta.entry_limit.canonical()?,
             consumed_entry_usd: meta.entry_consumed.canonical()?,
             reserved_entry_usd: meta.entry_reserved.canonical()?,
@@ -463,7 +464,8 @@ impl RiskBookStore {
                 &meta.entry_limit,
                 &meta.entry_consumed,
                 &meta.entry_reserved,
-            )?.canonical()?,
+            )?
+            .canonical()?,
         })
     }
     /// Read-only, verified account SQL observation. Policy authorization is the
