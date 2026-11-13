@@ -3099,20 +3099,6 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                     rusqlite::params![&s.meta.installation_id, &s.meta.account_key],
                 )
                 .unwrap();
-            unified
-                .execute(
-                    "INSERT INTO finance_risk_entries(
-                   installation_id,campaign_id,reservation_key,account_key,
-                   intent_id,plan_sha256,state,entry_upper_usd,reserved_entry_usd)
-                 VALUES(?1,'campaign-20',?2,?3,'intent',?4,'POSTED','100.05','100.05')",
-                    rusqlite::params![
-                        &s.meta.installation_id,
-                        &partial.reservation_key,
-                        &s.meta.account_key,
-                        &partial.plan_hash
-                    ],
-                )
-                .unwrap();
             let scope = super::sql::unified_financial::EntryRef {
                 installation: &s.meta.installation_id,
                 campaign: "campaign-20",
@@ -3129,6 +3115,20 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                     .unwrap();
                 super::sql::unified_financial::import_legacy_partial_source(&tx, &migration)
                     .unwrap();
+                tx
+                .execute(
+                    "INSERT INTO finance_risk_entries(
+                   installation_id,campaign_id,reservation_key,account_key,
+                   intent_id,plan_sha256,state,entry_upper_usd,reserved_entry_usd)
+                 VALUES(?1,'campaign-20',?2,?3,'intent',?4,'POSTED','100.05','100.05')",
+                    rusqlite::params![
+                        &s.meta.installation_id,
+                        &partial.reservation_key,
+                        &s.meta.account_key,
+                        &partial.plan_hash
+                    ],
+                )
+                .unwrap();
                 let accepted = super::sql::unified_financial::settle_entry(&tx, &scope).unwrap();
                 assert!(!accepted.replayed);
                 assert_eq!(accepted.book_sequence, 1);
