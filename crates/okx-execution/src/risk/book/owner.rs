@@ -3,7 +3,7 @@
 //! identity, never blindly repeat external POST or assume a timed-out mutation failed.
 use super::store::{
     AccountReadback, BookReadback, HeldReceipt, ReservationReadback, ReserveInput, RiskBookStore,
-    RiskStoreError, VerifiedCensus,
+    RiskStoreError, UnsentReceipt, UnsentSqlProof, VerifiedCensus,
 };
 use std::{
     path::PathBuf,
@@ -139,6 +139,18 @@ impl RiskBookHandle {
         census: VerifiedCensus,
     ) -> Result<HeldReceipt, RiskStoreError> {
         self.call(move |store| store.reserve(&input, &census)).await
+    }
+
+    /// Only the future account-SQL verified receipt adapter may call this:
+    /// no network source/digest is independently trusted by RiskBook.
+    pub(super) async fn release_unsent(
+        &self,
+        proof: UnsentSqlProof,
+        expected_sequence: u64,
+        generation: u64,
+    ) -> Result<UnsentReceipt, RiskStoreError> {
+        self.call(move |store| store.release_unsent(&proof, expected_sequence, generation))
+            .await
     }
 
     pub(super) async fn readback(&self) -> Result<BookReadback, RiskStoreError> {
