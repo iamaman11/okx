@@ -136,3 +136,59 @@ fn risk_book_contract_sql_unproven_source_and_stale_revision_fail_closed() {
     assert!(matches!(s.reserve(&stale_clock,&census()),Err(RiskStoreError::CensusUnproven)));
     assert_eq!(s.readback().unwrap().book_sequence,0);
 }
+
+
+#[test]
+fn risk_book_contract_sql_child_post_commit_wait() {
+    let Ok(db) = std::env::var("OKX_510_TEST_KILL_DB") else { return; };
+    let path = PathBuf::from(db);
+    let mut book = RiskBookStore::open_existing(
+        &path, "test-installation", &opening().campaign_id,
+    ).unwrap();
+    book.reserve(&request('a', "intentkill1", "3"), &census()).unwrap();
+    use std::io::Write;
+    println!("RISK_SQL_COMMITTED_WITHOUT_REPLY");
+    std::io::stdout().flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(60));
+    unreachable!("parent must terminate this OS process after commit");
+}
+
+#[test]
+fn risk_book_contract_sql_os_kill_after_durable_commit() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let fixture=Fixture::new("physical-kill");
+    RiskBookStore::initialize_fixture(&fixture.path,&opening()).unwrap();
+    let mut child=Command::new(std::env::current_exe().unwrap())
+        .args(["--exact","book::tests::risk_book_contract_sql_child_post_commit_wait","--nocapture"])
+        .env("OKX_510_TEST_KILL_DB",&fixture.path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn().unwrap();
+    let stdout=child.stdout.take().unwrap();
+    let (tx,rx)=mpsc::sync_channel(1);
+    let reader=std::thread::spawn(move||{
+        for line in BufReader::new(stdout).lines() {
+            if line.unwrap_or_default().contains("RISK_SQL_COMMITTED_WITHOUT_REPLY") {
+                let _=tx.send(());
+                return;
+            }
+        }
+    });
+    let committed=rx.recv_timeout(Duration::from_secs(15));
+    child.kill().unwrap();
+    let _=child.wait().unwrap();
+    reader.join().unwrap();
+    assert!(committed.is_ok(),"SQLite commit witness not observed before forced kill");
+    // No simulated task cancellation: the writer OS process was killed while
+    // SQLite and its file lease remained open. WAL must be durable/reopenable.
+    let mut recovered=open(&fixture);
+    assert_eq!(recovered.readback().unwrap().book_sequence,1);
+    assert_eq!(recovered.readback().unwrap().global_reserved_usdt,"3");
+    let replay=recovered.reserve(&request('a',"intentkill1","3"),&census()).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(recovered.readback().unwrap().book_sequence,1);
+}
