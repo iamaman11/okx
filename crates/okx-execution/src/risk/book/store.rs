@@ -6,7 +6,7 @@ use okx_kernel::risk::{
     money::{MoneyError, RiskAmount},
     rules::{
         RiskRuleError, evaluate_campaign_capacity, evaluate_scope_capacity,
-        validate_account_occupancy,
+        remaining_budget, validate_account_occupancy,
     },
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -233,10 +233,17 @@ pub(super) struct HeldReceipt {
 pub(super) struct BookReadback {
     pub book_sequence: u64,
     pub policy_revision: u64,
+    pub global_limit_usdt: String,
     pub global_reserved_usdt: String,
+    pub loss_limit_usd: String,
     pub consumed_loss_usd: String,
     pub reserved_loss_usd: String,
+    pub remaining_loss_usd: String,
+    pub entry_limit_usd: String,
+    pub consumed_entry_usd: String,
     pub reserved_entry_usd: String,
+    pub entry_bound_breach_usd: String,
+    pub remaining_entry_usd: String,
 }
 
 struct BookMeta {
@@ -438,10 +445,25 @@ impl RiskBookStore {
         Ok(BookReadback {
             book_sequence: meta.sequence,
             policy_revision: meta.policy_revision,
+            global_limit_usdt: meta.global_limit.canonical()?,
             global_reserved_usdt: meta.global_reserved.canonical()?,
+            loss_limit_usd: meta.loss_limit.canonical()?,
             consumed_loss_usd: meta.loss_consumed.canonical()?,
             reserved_loss_usd: meta.loss_reserved.canonical()?,
+            remaining_loss_usd: remaining_budget(
+                &meta.loss_limit,
+                &meta.loss_consumed,
+                &meta.loss_reserved,
+            )?.canonical()?,
+            entry_limit_usd: meta.entry_limit.canonical()?,
+            consumed_entry_usd: meta.entry_consumed.canonical()?,
             reserved_entry_usd: meta.entry_reserved.canonical()?,
+            entry_bound_breach_usd: meta.entry_breach.canonical()?,
+            remaining_entry_usd: remaining_budget(
+                &meta.entry_limit,
+                &meta.entry_consumed,
+                &meta.entry_reserved,
+            )?.canonical()?,
         })
     }
     /// Read-only, verified account SQL observation. Policy authorization is the
