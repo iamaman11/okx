@@ -161,6 +161,30 @@ jobs:
           echo "BUILD_REQUIRED=${{ steps.classify.outputs.build_required }}"
           echo "REASON=${{ steps.classify.outputs.reason }}"
 
+  riskbook-draft-rust:
+    # Fast, real-source feedback for the active Rust RiskBook draft. Final
+    # acceptance remains the existing full required CI after Ready for review.
+    name: riskbook-draft-rust
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.pull_request.head.ref == 'work/510-riskbook-rust-20261113' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Verify existing architecture guard and its negative self-tests
+        run: |
+          python3 scripts/check_architecture.py --self-test
+          python3 scripts/check_architecture.py
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Direct RiskBook Rust/SQLite regression target
+        run: cargo test --locked -p okx-kernel -p okx-execution --lib risk_book_contract -- --nocapture
+
   architecture:
     name: architecture
     needs: classify
