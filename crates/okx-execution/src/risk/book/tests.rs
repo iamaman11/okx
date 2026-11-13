@@ -132,6 +132,7 @@ fn risk_book_contract_sql_unproven_source_and_stale_revision_fail_closed() {
     assert!(matches!(s.reserve(&revision,&census()),Err(RiskStoreError::PolicyConflict)));
     let mut stale_clock=input.clone();
     stale_clock.now_ms=16_001;
+    stale_clock.conversion_observed_at_ms=16_000;
     assert!(matches!(s.reserve(&stale_clock,&census()),Err(RiskStoreError::CensusUnproven)));
     assert_eq!(s.readback().unwrap().book_sequence,0);
 }
