@@ -392,31 +392,40 @@ fn risk_book_contract_sql_external_occupancy_counts_before_reserve() {
     assert_eq!(store.readback().unwrap().book_sequence, 0);
 }
 
-
 #[test]
 fn risk_book_contract_sql_loss_source_monotonic_even_on_denied_reserve() {
-    let fixture=Fixture::new("loss-monotonic");
-    RiskBookStore::initialize_fixture(&fixture.path,&opening()).unwrap();
-    let mut store=open(&fixture);
-    let mut source=census();
-    source.cumulative_loss_usd.insert(account('a'),amt("11"));
-    let denied=store.reserve(&request('a',"intentloss1","95"),&source);
-    assert!(matches!(denied,Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted))));
-    let state=store.readback().unwrap();
-    assert_eq!(state.book_sequence,1,"verified loss alone increments sequence");
-    assert_eq!(state.consumed_loss_usd,"11");
-    assert_eq!(state.global_reserved_usdt,"0");
-    let accepted=store.reserve(&request('a',"intentloss2","5"),&source).unwrap();
-    assert_eq!(accepted.book_sequence,2);
-    assert_eq!(store.readback().unwrap().consumed_loss_usd,"11");
-    let mut regression=source.clone();
-    regression.cumulative_loss_usd.insert(account('a'),amt("10"));
+    let fixture = Fixture::new("loss-monotonic");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let mut source = census();
+    source.cumulative_loss_usd.insert(account('a'), amt("11"));
+    let denied = store.reserve(&request('a', "intentloss1", "95"), &source);
     assert!(matches!(
-        store.reserve(&request('b',"intentloss3","1"),&regression),
+        denied,
+        Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted))
+    ));
+    let state = store.readback().unwrap();
+    assert_eq!(
+        state.book_sequence, 1,
+        "verified loss alone increments sequence"
+    );
+    assert_eq!(state.consumed_loss_usd, "11");
+    assert_eq!(state.global_reserved_usdt, "0");
+    let accepted = store
+        .reserve(&request('a', "intentloss2", "5"), &source)
+        .unwrap();
+    assert_eq!(accepted.book_sequence, 2);
+    assert_eq!(store.readback().unwrap().consumed_loss_usd, "11");
+    let mut regression = source.clone();
+    regression
+        .cumulative_loss_usd
+        .insert(account('a'), amt("10"));
+    assert!(matches!(
+        store.reserve(&request('b', "intentloss3", "1"), &regression),
         Err(RiskStoreError::LossRegression)
     ));
     drop(store);
-    let mut reopened=open(&fixture);
-    assert_eq!(reopened.readback().unwrap().consumed_loss_usd,"11");
-    assert_eq!(reopened.readback().unwrap().book_sequence,2);
+    let mut reopened = open(&fixture);
+    assert_eq!(reopened.readback().unwrap().consumed_loss_usd, "11");
+    assert_eq!(reopened.readback().unwrap().book_sequence, 2);
 }

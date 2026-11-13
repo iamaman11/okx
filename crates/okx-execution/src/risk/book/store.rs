@@ -289,14 +289,17 @@ fn amount(text: String) -> Result<RiskAmount> {
 // One durable source-high-water per managed account. The caller's complete
 // census must have already been checked against the entire SQL policy cohort.
 fn apply_census_loss(
-    tx: &rusqlite::Transaction<'_>, meta: &mut BookMeta, census: &VerifiedCensus,
+    tx: &rusqlite::Transaction<'_>,
+    meta: &mut BookMeta,
+    census: &VerifiedCensus,
 ) -> Result<()> {
     let mut delta = RiskAmount::zero();
     let mut updates = Vec::new();
     for (account, observed) in &census.cumulative_loss_usd {
         let previous: String = tx.query_row(
             "SELECT cumulative_loss_usd FROM risk_loss_source WHERE account_key=?1",
-            params![account], |row| row.get(0)
+            params![account],
+            |row| row.get(0),
         )?;
         let previous = RiskAmount::parse(&previous)?;
         if observed < &previous {
@@ -307,29 +310,41 @@ fn apply_census_loss(
             updates.push((account, observed));
         }
     }
-    if delta.is_zero() { return Ok(()); }
+    if delta.is_zero() {
+        return Ok(());
+    }
     let consumed = meta.loss_consumed.checked_add(&delta)?;
-    let sequence = meta.sequence.checked_add(1)
+    let sequence = meta
+        .sequence
+        .checked_add(1)
         .ok_or(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
-    let new_sequence = i64::try_from(sequence)
-        .map_err(|_|RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+    let new_sequence =
+        i64::try_from(sequence).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
     for (account, observed) in updates {
         let updated=tx.execute(
             "UPDATE risk_loss_source SET cumulative_loss_usd=?1,source_digest=?2 WHERE account_key=?3",
             params![observed.canonical()?, &census.source_digest, account]
         )?;
-        if updated!=1 {return Err(RiskStoreError::Corrupt("MISSING_LOSS_SOURCE"));}
+        if updated != 1 {
+            return Err(RiskStoreError::Corrupt("MISSING_LOSS_SOURCE"));
+        }
     }
-    let updated=tx.execute(
+    let updated = tx.execute(
         "UPDATE risk_meta SET loss_consumed_usd=?1,book_sequence=?2
          WHERE singleton=1 AND book_sequence=?3 AND policy_revision=?4",
-        params![consumed.canonical()?, new_sequence,
-            i64::try_from(meta.sequence).map_err(|_|RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
-            i64::try_from(meta.policy_revision).map_err(|_|RiskStoreError::PolicyConflict)?]
+        params![
+            consumed.canonical()?,
+            new_sequence,
+            i64::try_from(meta.sequence)
+                .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
+            i64::try_from(meta.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?
+        ],
     )?;
-    if updated!=1{return Err(RiskStoreError::PolicyConflict);}
-    meta.loss_consumed=consumed;
-    meta.sequence=sequence;
+    if updated != 1 {
+        return Err(RiskStoreError::PolicyConflict);
+    }
+    meta.loss_consumed = consumed;
+    meta.sequence = sequence;
     Ok(())
 }
 
