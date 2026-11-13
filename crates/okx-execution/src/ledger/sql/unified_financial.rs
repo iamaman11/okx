@@ -121,7 +121,7 @@ fn verify_campaign(
                         reservation_key,
                         revision
                     ],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)), 
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()?;
             match receipt {
@@ -151,7 +151,10 @@ fn verify_campaign(
 /// It reads the original immutable source revision, intent, fill and bill
 /// from the SAME SQLite snapshot as the campaign CAS. Existing source
 /// capture must populate these primary rows before this can be used live.
-pub(in crate::account_store) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreResult<EntryCommit> {
+pub(in crate::account_store) fn settle_entry(
+    tx: &Transaction<'_>,
+    scope: &EntryRef<'_>,
+) -> StoreResult<EntryCommit> {
     if [
         scope.installation,
         scope.campaign,
@@ -230,7 +233,7 @@ pub(in crate::account_store) fn settle_entry(tx: &Transaction<'_>, scope: &Entry
         "SELECT plan_sha256,exchange_order_id FROM finance_intents
          WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
         params![scope.installation, scope.account, scope.intent],
-        |r| Ok((r.get(0)?,r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let (intent_plan, intent_exchange) = intent_identity;
     if intent_plan != plan || !digest_ok(&plan) {
@@ -453,7 +456,8 @@ pub(in crate::account_store) fn inspect_legacy_partial_source(
     account: &mut crate::AccountStore,
     intent_id: &str,
 ) -> StoreResult<LegacyPartialSource> {
-    let receipt = account.partial_entry_settlement_receipt(intent_id)?
+    let receipt = account
+        .partial_entry_settlement_receipt(intent_id)?
         .ok_or(StoreError::Invalid("UNIFIED_ORIGINAL_RECEIPT_MISSING"))?;
     // Re-evaluate the original immutable captured evidence using its real
     // existing owner; a cached head alone is not an authenticated producer.
@@ -479,15 +483,19 @@ pub(in crate::account_store) fn inspect_legacy_partial_source(
          ORDER BY f.fill_id,b.bill_id LIMIT 2",
     )?;
     let mut rows = stmt.query(params![
-        intent_id, &receipt.venue_order_id, receipt.source_covered_through_ms
+        intent_id,
+        &receipt.venue_order_id,
+        receipt.source_covered_through_ms
     ])?;
     let Some(first) = rows.next()? else {
         return Err(StoreError::Invalid("UNIFIED_LINKED_FILL_BILL_MISSING"));
     };
-    let (fill_id, trade_id, instrument_id, bill_id): (String,String,String,String) =
-        (first.get(0)?,first.get(1)?,first.get(2)?,first.get(3)?);
+    let (fill_id, trade_id, instrument_id, bill_id): (String, String, String, String) =
+        (first.get(0)?, first.get(1)?, first.get(2)?, first.get(3)?);
     if rows.next()?.is_some() {
-        return Err(StoreError::Invalid("UNIFIED_MULTI_SOURCE_IMPORT_NOT_SUPPORTED"));
+        return Err(StoreError::Invalid(
+            "UNIFIED_MULTI_SOURCE_IMPORT_NOT_SUPPORTED",
+        ));
     }
     Ok(LegacyPartialSource {
         receipt,
@@ -535,7 +543,7 @@ pub(in crate::account_store) fn import_legacy_partial_source(
     let account_exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM finance_accounts
          WHERE installation_id=?1 AND account_key=?2)",
-        params![&source.installation,&proof.account_key],
+        params![&source.installation, &proof.account_key],
         |r| r.get(0),
     )?;
     if !account_exists {
@@ -548,7 +556,10 @@ pub(in crate::account_store) fn import_legacy_partial_source(
            installation_id,account_key,intent_id,plan_sha256,exchange_order_id)
          VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
         params![
-            &source.installation,&proof.account_key,&proof.intent_id,&proof.plan_hash,
+            &source.installation,
+            &proof.account_key,
+            &proof.intent_id,
+            &proof.plan_hash,
             &proof.venue_order_id,
         ],
     )?;
@@ -558,8 +569,13 @@ pub(in crate::account_store) fn import_legacy_partial_source(
            trade_id,instrument_id)
          VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT DO NOTHING",
         params![
-            &source.installation,&proof.account_key,&source.fill_id,&proof.intent_id,
-            &proof.venue_order_id,&source.trade_id,&source.instrument_id,
+            &source.installation,
+            &proof.account_key,
+            &source.fill_id,
+            &proof.intent_id,
+            &proof.venue_order_id,
+            &source.trade_id,
+            &source.instrument_id,
         ],
     )?;
     tx.execute(
@@ -567,7 +583,10 @@ pub(in crate::account_store) fn import_legacy_partial_source(
            installation_id,account_key,bill_id,fill_id,source_digest)
          VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
         params![
-            &source.installation,&proof.account_key,&source.bill_id,&source.fill_id,
+            &source.installation,
+            &proof.account_key,
+            &source.bill_id,
+            &source.fill_id,
             &proof.source_digest,
         ],
     )?;
@@ -578,14 +597,30 @@ pub(in crate::account_store) fn import_legacy_partial_source(
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
          ON CONFLICT DO NOTHING",
         params![
-            &source.installation,&proof.account_key,&proof.intent_id,revision,
-            &source.fill_id,&source.bill_id,&proof.source_digest,
-            canonical(&original_amount)?,&original_json,
+            &source.installation,
+            &proof.account_key,
+            &proof.intent_id,
+            revision,
+            &source.fill_id,
+            &source.bill_id,
+            &proof.source_digest,
+            canonical(&original_amount)?,
+            &original_json,
         ],
     )?;
     // ON CONFLICT DO NOTHING is safe only when the FULL imported source
     // identity is byte-exact on replay. Reject foreign/partial prior imports.
-    let saved: (String,String,String,String,String,String,String,String,String) = tx.query_row(
+    let saved: (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = tx.query_row(
         "SELECT i.plan_sha256,i.exchange_order_id,f.trade_id,f.instrument_id,
                 f.fill_id,b.bill_id,b.source_digest,s.cumulative_entry_usd,s.original_receipt_json
          FROM finance_intents i
@@ -598,17 +633,39 @@ pub(in crate::account_store) fn import_legacy_partial_source(
            AND b.account_key=s.account_key AND b.bill_id=s.bill_id AND b.fill_id=s.fill_id
          WHERE i.installation_id=?1 AND i.account_key=?2 AND i.intent_id=?3
            AND s.settlement_revision=?4",
-        params![&source.installation,&proof.account_key,&proof.intent_id,revision],
-        |r| Ok((
-            r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,
-            r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,
-        )),
+        params![
+            &source.installation,
+            &proof.account_key,
+            &proof.intent_id,
+            revision
+        ],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+            ))
+        },
     )?;
-    if saved != (
-        proof.plan_hash.clone(),proof.venue_order_id.clone(),source.trade_id.clone(),
-        source.instrument_id.clone(),source.fill_id.clone(),source.bill_id.clone(),
-        proof.source_digest.clone(),canonical(&original_amount)?,original_json,
-    ) {
+    if saved
+        != (
+            proof.plan_hash.clone(),
+            proof.venue_order_id.clone(),
+            source.trade_id.clone(),
+            source.instrument_id.clone(),
+            source.fill_id.clone(),
+            source.bill_id.clone(),
+            proof.source_digest.clone(),
+            canonical(&original_amount)?,
+            original_json,
+        )
+    {
         return Err(StoreError::Invalid("UNIFIED_LEGACY_IMPORT_CONFLICT"));
     }
     Ok(())
