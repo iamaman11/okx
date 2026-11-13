@@ -2,8 +2,9 @@
 //! Completion after queueing may be unknown: callers must inspect durable
 //! identity, never blindly repeat external POST or assume a timed-out mutation failed.
 use super::store::{
-    AccountReadback, BookReadback, HeldReceipt, PostAuthorized, PostFenceInput, ReservationReadback,
-    ReserveInput, RiskBookStore, RiskStoreError, UnsentReceipt, UnsentSqlProof, VerifiedCensus,
+    AccountReadback, BookReadback, HeldReceipt, PostAuthorized, PostFenceInput,
+    ReservationReadback, ReserveInput, RiskBookStore, RiskStoreError, UnsentReceipt,
+    UnsentSqlProof, VerifiedCensus,
 };
 use crate::account_worker::AccountStoreHandle;
 use std::{
