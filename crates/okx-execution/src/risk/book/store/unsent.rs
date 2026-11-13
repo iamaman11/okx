@@ -9,7 +9,7 @@ use super::{
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct UnsentSqlProof {
+pub(in crate::risk::book) struct UnsentSqlProof {
     pub reservation_key: String,
     pub account_key: String,
     pub intent_id: String,
@@ -19,7 +19,7 @@ pub(super) struct UnsentSqlProof {
     pub record_digest: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct UnsentReceipt {
+pub(in crate::risk::book) struct UnsentReceipt {
     pub reservation_key: String,
     pub book_sequence: u64,
     pub replayed: bool,
@@ -78,7 +78,7 @@ fn next_sequence(current: u64) -> Result<i64> {
 impl RiskBookStore {
     /// Internal SQL mutation. Cannot be wired to an arbitrary network proof:
     /// the native AccountStore must first verify its own durable no-send CAS.
-    pub(super) fn release_unsent(
+    pub(in crate::risk::book) fn release_unsent(
         &mut self,
         proof: &UnsentSqlProof,
         expected_sequence: u64,
@@ -123,27 +123,37 @@ impl RiskBookStore {
                 replayed: true,
             });
         }
-        let entry: Option<(String, String, String, String, String, String, String)> = tx
+        let entry: Option<(String, String, String, String, String, String, String, String)> = tx
             .query_row(
                 "SELECT account_key,intent_id,plan_sha256,state,strategy_id,
-                        reserved_usdt,reserved_loss_usd
+                        reserved_usdt,reserved_loss_usd,release_proof_digest
                  FROM risk_entries WHERE reservation_key=?1",
                 params![&proof.reservation_key],
                 |r| Ok((
                     r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                    r.get(5)?, r.get(6)?
+                    r.get(5)?, r.get(6)?, r.get(7)?
                 )),
             )
             .optional()?;
         let new_sequence = next_sequence(meta.sequence)?;
         let new_sequence_u64 =
             u64::try_from(new_sequence).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
-        if let Some((account, intent, plan, state, strategy, remaining_usdt, remaining_loss)) = entry {
+        if let Some((account, intent, plan, state, strategy, remaining_usdt, remaining_loss, previous_proof)) = entry {
             if account != proof.account_key
                 || intent != proof.intent_id
                 || plan != proof.plan_sha256
             {
                 return Err(RiskStoreError::IdempotencyConflict);
+            }
+            if state == "RELEASED" {
+                if previous_proof != proof.record_digest {
+                    return Err(RiskStoreError::IdempotencyConflict);
+                }
+                return Ok(UnsentReceipt {
+                    reservation_key: proof.reservation_key.clone(),
+                    book_sequence: meta.sequence,
+                    replayed: true,
+                });
             }
             // A POSTED fence is not a venue no-send witness. The existing
             // AccountStore source-binding for that state must be proven first.
@@ -174,9 +184,10 @@ impl RiskBookStore {
             let strategy_remaining = amount(strategy_total)?.checked_sub(&reserved_usdt)?.canonical()?;
             let updated = tx.execute(
                 "UPDATE risk_entries SET state='RELEASED',
-                       reserved_usdt='0',reserved_loss_usd='0',reserved_entry_usd='0'
+                       reserved_usdt='0',reserved_loss_usd='0',reserved_entry_usd='0',
+                       release_proof_digest=?2
                  WHERE reservation_key=?1 AND state='HELD'",
-                params![&proof.reservation_key],
+                params![&proof.reservation_key, &proof.record_digest],
             )?;
             if updated != 1 {
                 return Err(RiskStoreError::StaleSequence);
