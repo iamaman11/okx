@@ -1,7 +1,7 @@
 //! Pure capacity decisions ported from the same legacy RiskBook predicates.
 //! The owner must re-read identity, policy, census and revisions in its SQL transaction.
 use super::model::{CampaignCapacity, RiskProposal, ScopeCapacity};
-use super::money::RiskAmount;
+use super::money::{MoneyError, RiskAmount};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -20,6 +20,20 @@ pub enum RiskRuleError {
     AccountAlreadyOverLimit,
     #[error("INSUFFICIENT_AGGREGATE_OR_ACCOUNT_RISK")]
     InsufficientAggregateOrAccountRisk,
+}
+
+/// Remaining budget is a read-only statement about one committed book.
+/// Historical obligations can exceed a lowered limit; never return a
+/// negative number or reinterpret that debt as newly available capacity.
+pub fn remaining_budget(
+    limit: &RiskAmount,
+    consumed: &RiskAmount,
+    reserved: &RiskAmount,
+) -> Result<RiskAmount, MoneyError> {
+    if RiskAmount::sum_exceeds(&[consumed, reserved], limit) {
+        return Ok(RiskAmount::zero());
+    }
+    limit.checked_sub(consumed)?.checked_sub(reserved)
 }
 
 /// Called only after the persisted policy, opening proof and cohort are validated.
@@ -146,6 +160,37 @@ mod tests {
         assert_eq!(
             evaluate_campaign_capacity(&breached, &proposal()),
             Err(RiskRuleError::BoundBreach)
+        );
+    }
+
+    #[test]
+    fn risk_book_contract_exact_remaining_budget_never_mints_headroom() {
+        assert_eq!(
+            remaining_budget(&amount("10.1"), &amount("2.05"), &amount("3.005"))
+                .unwrap()
+                .canonical()
+                .unwrap(),
+            "5.045"
+        );
+        assert_eq!(
+            remaining_budget(&amount("4"), &amount("3"), &amount("2"))
+                .unwrap()
+                .canonical()
+                .unwrap(),
+            "0"
+        );
+        // Intermediate sum may exceed legacy 28-digit serialization capacity,
+        // but a safe zero-remaining decision must still be representable.
+        assert_eq!(
+            remaining_budget(
+                &amount("1"),
+                &amount("9999999999999999999999999999"),
+                &amount("9999999999999999999999999999")
+            )
+            .unwrap()
+            .canonical()
+            .unwrap(),
+            "0"
         );
     }
 
