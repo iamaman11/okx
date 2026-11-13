@@ -105,7 +105,41 @@ pub(super) fn inspect(
         )
         .optional()?;
     let Some((stored_plan, state, entry_seq, revision)) = row else {
-        return Ok(None);
+        // A committed negative fence is an explicit terminal observation.
+        // Without either durable row, absence is UNKNOWN, not no-send proof.
+        let fence: Option<(String, i64, i64)> = tx
+            .query_row(
+                "SELECT plan_sha256,book_sequence,policy_revision
+                 FROM risk_no_reserve WHERE reservation_key=?1",
+                params![reservation_key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((stored_plan, sequence, revision)) = fence else {
+            return Ok(None);
+        };
+        if stored_plan != plan_sha256 {
+            return Ok(None);
+        }
+        let reservation_sequence =
+            u64::try_from(sequence).map_err(|_| RiskStoreError::Corrupt("NO_RESERVE_SEQUENCE"))?;
+        let policy_revision =
+            u64::try_from(revision).map_err(|_| RiskStoreError::Corrupt("NO_RESERVE_POLICY"))?;
+        if reservation_sequence == 0
+            || reservation_sequence > meta.sequence
+            || policy_revision == 0
+            || policy_revision > meta.policy_revision
+        {
+            return Err(RiskStoreError::Corrupt("NO_RESERVE_REVISION"));
+        }
+        return Ok(Some(ReservationReadback {
+            reservation_key: reservation_key.to_owned(),
+            plan_sha256: stored_plan,
+            state: RiskEntryState::Released,
+            reservation_sequence,
+            current_book_sequence: meta.sequence,
+            policy_revision,
+        }));
     };
     // Match the exact original immutable plan, never disclose a different one.
     if stored_plan != plan_sha256 {
