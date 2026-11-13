@@ -373,8 +373,9 @@ fn apply_census_loss(
 
 // The risk_entries rows carry the primary remaining obligations. Cached totals
 // never authorize a grant unless they agree with those exact-decimal records.
-// This version only implements HELD; other lifecycle states fail closed until
-// their transition and remaining-balance semantics are implemented.
+// This version only implements HELD; other nonterminal states fail closed
+// until their transition and remaining-balance semantics are implemented.
+// RELEASED rows are protected by SQLite CHECK and excluded from this scan.
 fn verify_reservation_aggregates(tx: &rusqlite::Transaction<'_>, meta: &BookMeta) -> Result<()> {
     let mut accounts: BTreeMap<String, RiskAmount> = BTreeMap::new();
     let mut strategies: BTreeMap<(String, String), RiskAmount> = BTreeMap::new();
@@ -385,7 +386,8 @@ fn verify_reservation_aggregates(tx: &rusqlite::Transaction<'_>, meta: &BookMeta
     {
         let mut stmt = tx.prepare(
             "SELECT account_key,strategy_id,state,loss_usdt,loss_usd,entry_upper_usd,
-                    reserved_usdt,reserved_loss_usd,reserved_entry_usd FROM risk_entries",
+                    reserved_usdt,reserved_loss_usd,reserved_entry_usd
+             FROM risk_entries WHERE state <> 'RELEASED'",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -415,15 +417,6 @@ fn verify_reservation_aggregates(tx: &rusqlite::Transaction<'_>, meta: &BookMeta
             let remaining_usdt = amount(remaining_usdt)?;
             let remaining_loss = amount(remaining_loss)?;
             let remaining_entry = amount(remaining_entry)?;
-            if state == "RELEASED" {
-                if !remaining_usdt.is_zero()
-                    || !remaining_loss.is_zero()
-                    || !remaining_entry.is_zero()
-                {
-                    return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
-                }
-                continue;
-            }
             if state != "HELD" {
                 return Err(RiskStoreError::Corrupt("RESERVATION_STATE_UNIMPLEMENTED"));
             }
