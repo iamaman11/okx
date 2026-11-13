@@ -242,11 +242,7 @@ fn risk_book_contract_sql_os_kill_after_durable_commit() {
     let fixture = Fixture::new("physical-kill");
     RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "book::tests::risk_book_contract_sql_child_post_commit_wait",
-            "--nocapture",
-        ])
+        .args(["risk_book_contract_sql_child_post_commit_wait", "--nocapture"])
         .env("OKX_510_TEST_KILL_DB", &fixture.path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -360,16 +356,14 @@ fn risk_book_contract_sql_cross_process_exclusive_lease() {
     RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
     let store = open(&fixture);
     let probe = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "book::tests::risk_book_contract_sql_child_writer_probe",
-        ])
+        .args(["risk_book_contract_sql_child_writer_probe", "--nocapture"])
         .env("OKX_510_TEST_BUSY_DB", &fixture.path)
         .output()
         .unwrap();
     assert!(
-        probe.status.success(),
-        "second Windows OS process acquired live campaign lease: {}",
+        probe.status.success() && String::from_utf8_lossy(&probe.stdout).contains("1 passed"),
+        "independent OS writer probe was not executed and passed: stdout={} stderr={}",
+        String::from_utf8_lossy(&probe.stdout),
         String::from_utf8_lossy(&probe.stderr)
     );
     drop(store);
