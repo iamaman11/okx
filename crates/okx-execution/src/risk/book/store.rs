@@ -19,7 +19,9 @@ use std::{
 };
 use thiserror::Error;
 mod integrity;
+mod queries;
 use integrity::verify_reservation_aggregates;
+pub(super) use queries::{AccountReadback, ReservationReadback};
 
 #[derive(Debug, Error)]
 pub(super) enum RiskStoreError {
@@ -442,6 +444,36 @@ impl RiskBookStore {
             reserved_entry_usd: meta.entry_reserved.canonical()?,
         })
     }
+    /// Read-only, verified account SQL observation. Policy authorization is the
+    /// responsibility of the future production adapter, not this private API.
+    pub(super) fn account_readback(&mut self, account_key: &str) -> Result<AccountReadback> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let meta = read_meta(&tx)?;
+        verify_reservation_aggregates(&tx, &meta)?;
+        let result = queries::account_readback(&tx, &meta, account_key)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Missing is unknown, not proof that a request was never sent.
+    /// This cannot stand in for the durable no-reserve fence operation.
+    pub(super) fn inspect(
+        &mut self,
+        reservation_key: &str,
+        plan_sha256: &str,
+    ) -> Result<Option<ReservationReadback>> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let meta = read_meta(&tx)?;
+        verify_reservation_aggregates(&tx, &meta)?;
+        let result = queries::inspect(&tx, &meta, reservation_key, plan_sha256)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
     /// The source proof type is private to this module pending validated native
     /// evidence constructor and production wiring. A caller cannot mint grants.
     pub(super) fn reserve(
