@@ -478,3 +478,49 @@ fn risk_book_contract_sql_legacy_identity_and_safe_number_ranges() {
     input.now_ms = 9_007_199_254_740_992;
     assert!(matches!(input.validate(), Err(RiskStoreError::Invalid(_))));
 }
+
+#[test]
+fn risk_book_contract_sql_rejects_over_limit_other_account() {
+    let fixture = Fixture::new("cohort-over-limit");
+    let mut policy = opening();
+    policy.global_limit = amt("30");
+    RiskBookStore::initialize_fixture(&fixture.path, &policy).unwrap();
+    let mut store = open(&fixture);
+    let mut source = census();
+    // A already violates its own 10 USDT cap; B's 1 USDT cannot be admitted.
+    // Checking only B and the global 30 USDT cap would incorrectly grant HELD.
+    source.occupied.insert(account('a'), amt("11"));
+    assert!(matches!(
+        store.reserve(&request('b', "intentcohort1", "1"), &source),
+        Err(RiskStoreError::Denied(RiskRuleError::AccountAlreadyOverLimit))
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 0);
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "0");
+}
+
+#[test]
+fn risk_book_contract_sql_corrupted_reservation_aggregates_reject_reopen() {
+    let fixture = Fixture::new("aggregate-corruption");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    store.reserve(&request('a', "intentcorrupt1", "6"), &census())
+        .unwrap();
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "6");
+    drop(store);
+
+    // Deliberately damage only a materialized total in an isolated test DB.
+    // The primary HELD reservation and account/strategy aggregates remain intact.
+    let connection = rusqlite::Connection::open(&fixture.path).unwrap();
+    connection
+        .execute(
+            "UPDATE risk_meta SET global_reserved_usdt='0' WHERE singleton=1",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        RiskBookStore::open_existing(&fixture.path, "test-installation", &opening().campaign_id),
+        Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"))
+    ));
+}
