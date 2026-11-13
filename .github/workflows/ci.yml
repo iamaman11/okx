@@ -184,6 +184,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Direct RiskBook Rust/SQLite regression target
         run: cargo test --locked -p okx-kernel -p okx-execution --lib risk_book_contract -- --nocapture
+      - name: Verify original AccountStore fill/bill source partial receipt
+        run: cargo test --locked -p okx-execution --lib e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted -- --nocapture
 
   architecture:
     name: architecture
