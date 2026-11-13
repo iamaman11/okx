@@ -115,7 +115,18 @@ pub(super) fn verify_reservation_aggregates(
     if !strategies.is_empty() {
         return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
     }
-    // Loss high-water marks are the primary per-account facts in this v2 book.
+    // A negative SQL fence and an actual reservation for the same address
+    // must never coexist, even if an out-of-band writer damaged the DB.
+    let contradictory: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM risk_no_reserve f
+         JOIN risk_entries e USING(reservation_key)",
+        [],
+        |r| r.get(0),
+    )?;
+    if contradictory != 0 {
+        return Err(RiskStoreError::Corrupt("NO_RESERVE_FENCE_CONFLICT"));
+    }
+    // Loss high-water marks are the primary per-account facts in this v3 book.
     // Their complete sum must equal the cached campaign consumed-loss total.
     let mut cumulative = RiskAmount::zero();
     let mut policy_count = 0_u64;
