@@ -2941,7 +2941,8 @@ fn k5_recovery_pages_over_100_intents_are_disjoint_and_bounded() {
 #[test]
 fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
     let mut s = store();
-    let i = intent(&mut s);
+    // A canonical digest is needed for the new scoped finance migration.
+    let i = intent_with_plan_hash(&mut s, &"e".repeat(64));
     let quote = e1_source_quote(&s, &i);
     s.bind_entry_quote(&quote).unwrap();
     s.bind_entry_admission(&EntryAdmissionEvidence {
@@ -6191,6 +6192,9 @@ fn store_with_account(account_key: &str) -> AccountStore {
     a
 }
 fn intent(s: &mut AccountStore) -> StoredIntent {
+    intent_with_plan_hash(s, "plan")
+}
+fn intent_with_plan_hash(s: &mut AccountStore, plan_hash: &str) -> StoredIntent {
     let definition = s.ensure_manual_instance(1).unwrap();
     let d = Decision {
         decision_id: "decision".into(),
@@ -6224,7 +6228,7 @@ fn intent(s: &mut AccountStore) -> StoredIntent {
         request_hash: "body".into(),
         client_order_id: "stableclient".into(),
         deadline: 100,
-        plan_hash: "plan".into(),
+        plan_hash: plan_hash.into(),
         policy_revision: 1,
         risk_increase: true,
         instrument_id: "BTC-USDT-SWAP".into(),
