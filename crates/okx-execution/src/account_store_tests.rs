@@ -3056,6 +3056,114 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                     .unwrap(),
                 partial
             );
+            // One-time source migration: actual original AccountStore fill,
+            // fee and FX calculation, not a second synthetic money engine.
+            // An isolated destination DB has one scoped SQL transaction that
+            // imports the original sealed receipt and debits RiskBook once.
+            let migration = super::sql::unified_financial::inspect_legacy_partial_source(
+                &mut s, "intent",
+            ).unwrap();
+            let target = s.path.with_extension("r4-finance.sqlite");
+            let mut unified = rusqlite::Connection::open(&target).unwrap();
+            unified.pragma_update(None, "journal_mode", "WAL").unwrap();
+            unified.pragma_update(None, "synchronous", "FULL").unwrap();
+            unified.pragma_update(None, "foreign_keys", "ON").unwrap();
+            unified.execute_batch(include_str!("ledger/sql/finance-v1.sql")).unwrap();
+            unified.execute(
+                "INSERT INTO finance_installations VALUES(?1,1)",
+                [&s.meta.installation_id],
+            ).unwrap();
+            unified.execute(
+                "INSERT INTO finance_accounts VALUES(?1,?2)",
+                rusqlite::params![&s.meta.installation_id,&s.meta.account_key],
+            ).unwrap();
+            unified.execute(
+                "INSERT INTO finance_campaigns(
+                   installation_id,campaign_id,policy_revision,generation,book_sequence,
+                   entry_limit_usd,entry_consumed_usd,entry_opening_consumed_usd,
+                   entry_reserved_usd,entry_breach_usd)
+                 VALUES(?1,'campaign-20',1,7,0,'200','0','0','100.05','0')",
+                [&s.meta.installation_id],
+            ).unwrap();
+            unified.execute(
+                "INSERT INTO finance_campaign_accounts VALUES(?1,'campaign-20',?2)",
+                rusqlite::params![&s.meta.installation_id,&s.meta.account_key],
+            ).unwrap();
+            unified.execute(
+                "INSERT INTO finance_risk_entries(
+                   installation_id,campaign_id,reservation_key,account_key,
+                   intent_id,plan_sha256,state,entry_upper_usd,reserved_entry_usd)
+                 VALUES(?1,'campaign-20',?2,?3,'intent',?4,'POSTED','100.05','100.05')",
+                rusqlite::params![
+                    &s.meta.installation_id,&partial.reservation_key,
+                    &s.meta.account_key,&partial.plan_hash
+                ],
+            ).unwrap();
+            let scope = super::sql::unified_financial::EntryRef {
+                installation: &s.meta.installation_id,
+                campaign: "campaign-20",
+                reservation: &partial.reservation_key,
+                account: &s.meta.account_key,
+                intent: "intent",
+                source_revision: 1,
+                expected_sequence: 0,
+                generation: 7,
+            };
+            {
+                let tx = unified.transaction_with_behavior(
+                    rusqlite::TransactionBehavior::Immediate,
+                ).unwrap();
+                super::sql::unified_financial::import_legacy_partial_source(&tx, &migration)
+                    .unwrap();
+                let accepted = super::sql::unified_financial::settle_entry(&tx, &scope).unwrap();
+                assert!(!accepted.replayed);
+                assert_eq!(accepted.book_sequence, 1);
+                assert_eq!(accepted.cumulative_entry_usd, "50.01");
+                tx.commit().unwrap();
+            }
+            let imported: (String,String,i64) = unified.query_row(
+                "SELECT entry_consumed_usd,entry_reserved_usd,book_sequence
+                 FROM finance_campaigns
+                 WHERE installation_id=?1 AND campaign_id='campaign-20'",
+                [&s.meta.installation_id],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            ).unwrap();
+            assert_eq!(imported, ("50.01".into(),"50.04".into(),1));
+            let exact_json: String = unified.query_row(
+                "SELECT original_receipt_json FROM finance_entry_sources
+                 WHERE installation_id=?1 AND account_key=?2
+                   AND intent_id='intent' AND settlement_revision=1",
+                rusqlite::params![&s.meta.installation_id,&s.meta.account_key],
+                |r| r.get(0),
+            ).unwrap();
+            assert_eq!(
+                serde_json::from_str::<EntrySettlementEvidence>(&exact_json).unwrap(),
+                partial
+            );
+            {
+                let tx = unified.transaction_with_behavior(
+                    rusqlite::TransactionBehavior::Immediate,
+                ).unwrap();
+                super::sql::unified_financial::import_legacy_partial_source(&tx, &migration)
+                    .unwrap();
+                assert!(super::sql::unified_financial::settle_entry(&tx, &scope)
+                    .unwrap().replayed);
+                tx.commit().unwrap();
+            }
+            let receipts: i64 = unified.query_row(
+                "SELECT COUNT(*) FROM finance_entry_receipts", [], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(receipts, 1, "legacy re-import and replay never charge twice");
+            drop(unified);
+            let reopened = rusqlite::Connection::open(&target).unwrap();
+            let committed: (String,String) = reopened.query_row(
+                "SELECT entry_consumed_usd,entry_reserved_usd FROM finance_campaigns
+                 WHERE installation_id=?1 AND campaign_id='campaign-20'",
+                [&s.meta.installation_id],|r| Ok((r.get(0)?,r.get(1)?)),
+            ).unwrap();
+            assert_eq!(committed, ("50.01".into(),"50.04".into()));
+            drop(reopened);
+            let _ = std::fs::remove_file(target);
             // Even an equal-money replacement economic event is NOT
             // permitted: the original fill is append-only. Validate the
             // actual SQL immutable trigger, then verify the settled digest
