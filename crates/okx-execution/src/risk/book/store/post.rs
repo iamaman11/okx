@@ -242,6 +242,7 @@ impl RiskBookStore {
             .ok_or(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
         let next_seq_sql =
             i64::try_from(next_seq).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+        let existing = total.checked_sub(&amount(reserved_usdt)?)?.canonical()?;
         let changed = tx.execute(
             "UPDATE risk_entries SET state='POSTED',
                     post_authorized_at_ms=?1,post_sequence=?2,
@@ -254,7 +255,7 @@ impl RiskBookStore {
                 next_seq_sql,
                 &request.source_proof_digest,
                 &census.source_digest,
-                total.checked_sub(&amount(reserved_usdt)?)?.canonical()?,
+                &existing,
                 &request.reservation_key,
                 &request.plan_sha256,
                 i64::try_from(request.policy_revision)
@@ -279,7 +280,6 @@ impl RiskBookStore {
         if changed != 1 {
             return Err(RiskStoreError::StaleSequence);
         }
-        let existing = total.checked_sub(&amount(reserved_usdt)?)?.canonical()?;
         tx.commit()?;
         Ok(PostAuthorized {
             reservation_key: request.reservation_key.clone(),
