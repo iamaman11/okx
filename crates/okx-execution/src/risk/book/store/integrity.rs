@@ -115,37 +115,28 @@ pub(super) fn verify_reservation_aggregates(
     if !strategies.is_empty() {
         return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
     }
-    // This v2 fixture starts with zero loss; any imported opening must
-    // populate the same primary per-account high-water marks atomically.
-    // A missing/corrupt primary source must not mint new loss capacity.
+    // Loss high-water marks are the primary per-account facts in this v2 book.
+    // Their complete sum must equal the cached campaign consumed-loss total.
     let mut cumulative = RiskAmount::zero();
-    let mut source_count = 0_u64;
     let mut policy_count = 0_u64;
     {
-        let mut stmt =
-            tx.prepare("SELECT cumulative_loss_usd FROM risk_loss_source ORDER BY account_key")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut stmt = tx.prepare(
+            "SELECT p.account_key, l.cumulative_loss_usd
+             FROM risk_policy_account p
+             LEFT JOIN risk_loss_source l USING(account_key)",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
         for row in rows {
-            cumulative = cumulative.checked_add(&amount(row?)?)?;
-            source_count += 1;
-        }
-    }
-    {
-        let mut stmt = tx.prepare("SELECT account_key FROM risk_policy_account")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        for row in rows {
-            let account = row?;
-            let exists: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM risk_loss_source WHERE account_key=?1",
-                rusqlite::params![account],
-                |r| r.get(0),
-            )?;
-            if exists != 1 {
-                return Err(RiskStoreError::Corrupt("LOSS_SOURCE_AGGREGATES"));
-            }
+            let (_, observed) = row?;
+            let observed = observed.ok_or(RiskStoreError::Corrupt("LOSS_SOURCE_AGGREGATES"))?;
+            cumulative = cumulative.checked_add(&amount(observed)?)?;
             policy_count += 1;
         }
     }
+    let source_count: u64 =
+        tx.query_row("SELECT COUNT(*) FROM risk_loss_source", [], |r| r.get(0))?;
     if cumulative != meta.loss_consumed || source_count != policy_count {
         return Err(RiskStoreError::Corrupt("LOSS_SOURCE_AGGREGATES"));
     }
