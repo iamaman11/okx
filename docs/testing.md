@@ -1,5 +1,15 @@
 # Trade acceptance evidence map — #448 / #449 / #501
 
+## #510 r4.0 — single financial SQLite / single commit (NEW REQUIRED CONTRACT, NOT PROVEN)
+
+**14 Nov 2026:** [Canonical Issue #510](https://github.com/iamaman11/okx/issues/510) changed its transaction and storage boundary to **one local file** `runtime_root/finance/finance.sqlite` and **one SQL writer** for all accounts and campaigns of one authoritative Rust Engine. `AccountStore` retains ownership of original fill/bill/FX evidence; `risk::book` retains policy, risk/grant calculations; they must operate under **the same `rusqlite::Transaction` and single COMMIT** when settling an account financial fact and changing campaign reserves/budget/receipt. Scoped PK/UNIQUE/FK/joins/cursors/immutable triggers must separate accounts (including identical original venue IDs) and campaigns. Unscoped account/campaign singleton tables from separate-file schemas require migration. No new framework or second financial owner. External OKX POST/network ACK remains outside SQL transaction and retains UNKNOWN recovery.
+
+**CURRENT STATUS: NOT_PROVEN, PR #511 remains Draft/NO-GO.** Historical v5 campaign fixture, standalone `risk-book.sqlite` writer and two-database `AccountStore → RiskBook → AccountStore ACK` tests below represent the **superseded r3.1 design**. The historical [50/50 filtered cases](https://github.com/iamaman11/okx/actions/runs/43521514579) PASSED for that original two-file design; they are **NOT** RB07/RB08/production acceptance of r4. They remain an inventory of reusable pure rules, immutable original source witnesses, exact money regression cases and OS-kill harnesses. Do not add more two-file ACK machinery for r4. Do not delete original account history or invent empty campaign capacity.
+
+**Replace RB07/RB08 physical witnesses:** on original single SQLite/WAL, verify one `BEGIN IMMEDIATE/COMMIT` updates *both* immutable account source/settlement and RiskBook consumed/reserved/receipt; inject genuine failure **before** COMMIT (neither changes), OS kill **after** COMMIT but before caller reply (both changes exactly once), stale/missing/source-conflicting retry (no extra financial effect). Test A/B same exchange IDs + independent campaign IDs, queue fairness, protected legacy import, negative real Cloudflare server-side authority fence and owner epoch. Existing RB01–RB16, T09/T10 and Windows P95 target remain required. See #510 r4.0 for exact acceptance criteria and scope. No merging, trading or production activation on these incomplete observations.
+
+---
+
 ## #510 RiskBook transfer — checkpoint A inventory (IN PROGRESS)
 
 **Candidate:** [Draft PR #511](https://github.com/iamaman11/okx/pull/511), base `8bd70ceab23472d286a40d147cc1cd8e3aa5bf9c`. The table below inventories **current TS/DO behaviour** from `risk_authority.ts`, `risk_book.ts`, `risk_bridge.rs` and `risk_authority.rs`. It is **not** Rust production-wiring evidence. No new RiskBook authority has been activated. The expected properties below are independent requirements that the Rust direct witnesses must establish against original SQLite state.
