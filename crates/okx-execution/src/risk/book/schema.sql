@@ -75,4 +75,4 @@ CREATE INDEX idx_risk_entries_active_account ON risk_entries(account_key,state);
 -- Only currently held obligations are audited per mutation, never full history.
 CREATE INDEX idx_risk_entries_active_balance ON risk_entries(state)
  WHERE state <> 'RELEASED';
-PRAGMA user_version=1;
+PRAGMA user_version=2;
