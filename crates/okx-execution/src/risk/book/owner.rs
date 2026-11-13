@@ -3,8 +3,8 @@
 //! identity, never blindly repeat external POST or assume a timed-out mutation failed.
 use super::store::{
     AccountReadback, BookReadback, EntrySettlementReceipt, HeldReceipt, PartialEntrySqlProof,
-    PostAuthorized, PostFenceInput, ReservationReadback, ReserveInput, RiskBookStore, RiskStoreError,
-    UnsentReceipt, UnsentSqlProof, VerifiedCensus,
+    PostAuthorized, PostFenceInput, ReservationReadback, ReserveInput, RiskBookStore,
+    RiskStoreError, UnsentReceipt, UnsentSqlProof, VerifiedCensus,
 };
 use crate::account_worker::AccountStoreHandle;
 use std::{
@@ -163,7 +163,9 @@ impl RiskBookHandle {
         deadline: std::time::Instant,
     ) -> Result<EntrySettlementReceipt, RiskStoreError> {
         let sql = account
-            .call(deadline, move |s| s.partial_entry_settlement_receipt(&intent_id))
+            .call(deadline, move |s| {
+                s.partial_entry_settlement_receipt(&intent_id)
+            })
             .await
             .map_err(|_| RiskStoreError::UnsentSqlUnavailable)?
             .ok_or(RiskStoreError::UnsentSqlUnproven)?;
