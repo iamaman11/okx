@@ -339,3 +339,41 @@ async fn risk_book_contract_sql_bounded_owner_serializes_competitors() {
     let mut reloaded = open(&fixture);
     assert_eq!(reloaded.readback().unwrap().global_reserved_usdt, "6");
 }
+
+
+#[test]
+fn risk_book_contract_sql_child_writer_probe() {
+    let Ok(db)=std::env::var("OKX_510_TEST_BUSY_DB") else { return; };
+    let attempt=RiskBookStore::open_existing(&PathBuf::from(db),"test-installation",&opening().campaign_id);
+    assert!(matches!(attempt,Err(RiskStoreError::WriterBusy)));
+}
+
+#[test]
+fn risk_book_contract_sql_cross_process_exclusive_lease() {
+    let fixture=Fixture::new("cross-process");
+    RiskBookStore::initialize_fixture(&fixture.path,&opening()).unwrap();
+    let store=open(&fixture);
+    let probe=std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact","book::tests::risk_book_contract_sql_child_writer_probe"])
+        .env("OKX_510_TEST_BUSY_DB",&fixture.path)
+        .output().unwrap();
+    assert!(probe.status.success(),
+        "second Windows OS process acquired live campaign lease: {}",
+        String::from_utf8_lossy(&probe.stderr));
+    drop(store);
+    assert!(open(&fixture).readback().is_ok());
+}
+
+#[test]
+fn risk_book_contract_sql_external_occupancy_counts_before_reserve() {
+    let fixture=Fixture::new("external");
+    RiskBookStore::initialize_fixture(&fixture.path,&opening()).unwrap();
+    let mut store=open(&fixture);
+    let mut attested=census();
+    attested.occupied.insert(account('a'),amt("9"));
+    assert!(matches!(
+        store.reserve(&request('b',"intent0099","2"),&attested),
+        Err(RiskStoreError::Denied(RiskRuleError::InsufficientAggregateOrAccountRisk))
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence,0);
+}
