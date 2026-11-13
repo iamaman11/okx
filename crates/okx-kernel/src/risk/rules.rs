@@ -53,6 +53,19 @@ pub fn evaluate_campaign_capacity(
     Ok(())
 }
 
+/// Every member of an authorized campaign cohort must respect its individual cap,
+/// including occupancy established before this particular account's request.
+pub fn validate_account_occupancy(
+    limit: &RiskAmount,
+    occupied: &RiskAmount,
+) -> Result<(), RiskRuleError> {
+    if occupied > limit {
+        Err(RiskRuleError::AccountAlreadyOverLimit)
+    } else {
+        Ok(())
+    }
+}
+
 /// Caller must include all accounts' source-attested occupancy and central reservations.
 pub fn evaluate_scope_capacity(
     scope: &ScopeCapacity,
@@ -67,9 +80,7 @@ pub fn evaluate_scope_capacity(
     ) {
         return Err(RiskRuleError::StrategyAggregateLimit);
     }
-    if scope.account_occupied_usdt > scope.account_limit_usdt {
-        return Err(RiskRuleError::AccountAlreadyOverLimit);
-    }
+    validate_account_occupancy(&scope.account_limit_usdt, &scope.account_occupied_usdt)?;
     if RiskAmount::sum_exceeds(
         &[&scope.global_occupied_usdt, &request.loss_usdt],
         &scope.global_limit_usdt,
