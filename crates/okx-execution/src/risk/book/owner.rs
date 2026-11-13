@@ -5,6 +5,7 @@ use super::store::{
     AccountReadback, BookReadback, HeldReceipt, ReservationReadback, ReserveInput, RiskBookStore,
     RiskStoreError, UnsentReceipt, UnsentSqlProof, VerifiedCensus,
 };
+use crate::account_worker::AccountStoreHandle;
 use std::{
     path::PathBuf,
     sync::{
@@ -141,8 +142,30 @@ impl RiskBookHandle {
         self.call(move |store| store.reserve(&input, &census)).await
     }
 
-    /// Only the future account-SQL verified receipt adapter may call this:
-    /// no network source/digest is independently trusted by RiskBook.
+    /// The only account-originated no-send route: read the existing native
+    /// AccountStore owner first, then apply its durable witness inside the
+    /// separately committed campaign SQLite transaction. No shared DB or
+    /// caller-provided "not sent" flag exists.
+    pub(super) async fn release_unsent_from_account_sql(
+        &self,
+        account: &AccountStoreHandle,
+        intent_id: String,
+        expected_sequence: u64,
+        generation: u64,
+        deadline: std::time::Instant,
+    ) -> Result<UnsentReceipt, RiskStoreError> {
+        let sql = account
+            .call(deadline, move |store| store.unsent_release_receipt(&intent_id))
+            .await
+            .map_err(|_| RiskStoreError::UnsentSqlUnavailable)?
+            .ok_or(RiskStoreError::UnsentSqlUnproven)?;
+        let proof = UnsentSqlProof::from_account_receipt(sql)?;
+        self.release_unsent(proof, expected_sequence, generation)
+            .await
+    }
+
+    /// Transaction-level entrypoint stays private to this RiskBook module;
+    /// external callers cannot supply arbitrary evidence as a grant.
     pub(super) async fn release_unsent(
         &self,
         proof: UnsentSqlProof,
