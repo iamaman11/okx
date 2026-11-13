@@ -1576,7 +1576,8 @@ fn partial_proof(
         cumulative_entry_usd: Decimal::from_str(cumulative).unwrap(),
         settlement_revision: revision,
         source_digest: uid(digest_letter),
-    }).unwrap()
+    })
+    .unwrap()
 }
 
 #[test]
@@ -1623,11 +1624,19 @@ fn risk_book_contract_sql_partial_entry_consumes_reserved_budget_once() {
     drop(s);
     let mut reopened = open(&fixture);
     assert_eq!(reopened.readback().unwrap(), b);
-    assert!(reopened.settle_partial_entry(&revision2, 3, 7).unwrap().replayed);
+    assert!(
+        reopened
+            .settle_partial_entry(&revision2, 3, 7)
+            .unwrap()
+            .replayed
+    );
     assert_eq!(reopened.readback().unwrap().book_sequence, 4);
     let further = partial_proof(&input, 3, "1", 'd');
     assert_eq!(
-        reopened.settle_partial_entry(&further, 4, 7).unwrap().book_sequence,
+        reopened
+            .settle_partial_entry(&further, 4, 7)
+            .unwrap()
+            .book_sequence,
         5
     );
     assert_eq!(reopened.readback().unwrap().reserved_entry_usd, "0");
@@ -1644,7 +1653,9 @@ fn risk_book_contract_sql_partial_entry_regression_and_breach_fail_closed() {
     s.begin_post(&post_fence(&input, 1)).unwrap();
     let over = partial_proof(&input, 1, "2", 'b');
     assert_eq!(
-        s.settle_partial_entry(&over, 2, 7).unwrap().entry_bound_breach_usd,
+        s.settle_partial_entry(&over, 2, 7)
+            .unwrap()
+            .entry_bound_breach_usd,
         "1"
     );
     let read = s.readback().unwrap();
@@ -1660,12 +1671,16 @@ fn risk_book_contract_sql_partial_entry_regression_and_breach_fail_closed() {
     let regression = partial_proof(&input, 2, "1.5", 'c');
     assert!(matches!(
         s.settle_partial_entry(&regression, 3, 7),
-        Err(RiskStoreError::Invalid("ENTRY_SETTLEMENT_REVISION_CONFLICT"))
+        Err(RiskStoreError::Invalid(
+            "ENTRY_SETTLEMENT_REVISION_CONFLICT"
+        ))
     ));
     let skipped = partial_proof(&input, 3, "3", 'd');
     assert!(matches!(
         s.settle_partial_entry(&skipped, 3, 7),
-        Err(RiskStoreError::Invalid("ENTRY_SETTLEMENT_REVISION_CONFLICT"))
+        Err(RiskStoreError::Invalid(
+            "ENTRY_SETTLEMENT_REVISION_CONFLICT"
+        ))
     ));
     let wrong_epoch = partial_proof(&input, 2, "2.5", 'c');
     assert!(matches!(
@@ -1683,12 +1698,15 @@ fn risk_book_contract_sql_partial_entry_integrity_detects_forged_cache() {
     let input = request('a', "intentpartial3", "2");
     s.reserve(&input, &census()).unwrap();
     s.begin_post(&post_fence(&input, 1)).unwrap();
-    s.settle_partial_entry(&partial_proof(&input, 1, "0.25", 'b'), 2, 7).unwrap();
+    s.settle_partial_entry(&partial_proof(&input, 1, "0.25", 'b'), 2, 7)
+        .unwrap();
     drop(s);
     let db = rusqlite::Connection::open(&fixture.path).unwrap();
     db.execute(
-        "UPDATE risk_meta SET entry_consumed_usd='0' WHERE singleton=1", []
-    ).unwrap();
+        "UPDATE risk_meta SET entry_consumed_usd='0' WHERE singleton=1",
+        [],
+    )
+    .unwrap();
     drop(db);
     assert!(matches!(
         RiskBookStore::open_existing(&fixture.path, "test-installation", &opening().campaign_id),
