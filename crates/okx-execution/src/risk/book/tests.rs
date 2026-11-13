@@ -1796,3 +1796,373 @@ fn risk_book_contract_sql_os_kill_after_partial_entry_debit_is_exact() {
     assert_eq!(replay.book_sequence, 3);
     assert_eq!(recovered.readback().unwrap(), read);
 }
+
+async fn source_verified_partial_fixture(
+    label: &str,
+) -> (
+    Fixture,
+    crate::AccountStoreHandle,
+    ReserveInput,
+    crate::EntrySettlementEvidence,
+) {
+    use crate::{
+        AccountMeta, AccountStoreHandle, Bill, CentralReceipt, Decision, EntryAdmissionEvidence,
+        EntryQuoteEvidence, Fill, FinanceEntry, IngestPage, IntentPlan, IntentState, NewIntent,
+        OpeningSnapshot, SourceCursor,
+    };
+    use rust_decimal::Decimal;
+    use sha2::{Digest, Sha256};
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new(label);
+    let mut config = opening();
+    config.entry_limit = amt("200");
+    for account in &mut config.accounts {
+        account.entry_limit = amt("200");
+    }
+    RiskBookStore::initialize_fixture(&fixture.path, &config).unwrap();
+    let mut input = request('a', "intenttwosql1", "3");
+    input.proposal.entry_upper_usd = amt("100.05");
+    {
+        let mut campaign = open(&fixture);
+        campaign.reserve(&input, &census()).unwrap();
+        campaign.begin_post(&post_fence(&input, 1)).unwrap();
+    }
+    let account = AccountStoreHandle::initialize_flat(
+        fixture.root.join("account.sqlite"),
+        AccountMeta {
+            account_key: account('a'),
+            installation_id: "test-installation".into(),
+            initialized_at: 1,
+            opening_source: "fixture_flat".into(),
+            initialize_operation_id: "native-entry-setup".into(),
+            release_id: "a".repeat(40),
+        },
+        OpeningSnapshot {
+            source_ref: "fixture_flat".into(),
+            observed_at: 1,
+            opening_equity_usd: Decimal::from(200),
+            positions: 0,
+            orders: 0,
+            conditional_orders: 0,
+            liabilities: Decimal::ZERO,
+            balances: vec![("USDT".into(), Decimal::from(200))],
+        },
+    )
+    .await
+    .unwrap();
+    let reservation = input.reservation_key();
+    let intent_id = input.intent_id.clone();
+    let plan_hash = input.plan_sha256.clone();
+    let source = account
+        .call(Instant::now() + Duration::from_secs(5), move |s| {
+            s.apply_authority_policy(1, false, "campaign-native-test", Decimal::from(200))?;
+            let definition = s.ensure_manual_instance(1)?;
+            let prepared = s.prepare(
+                &Decision {
+                    decision_id: "decision_native_partial".into(),
+                    instance_id: None,
+                    decision_at: 2,
+                    input_digest: "e".repeat(64),
+                    policy_revision: 1,
+                    code_version: "rust".into(),
+                },
+                &NewIntent {
+                    intent_id: intent_id.clone(),
+                    idempotency_key: "command_native_partial".into(),
+                    request_hash: "b".repeat(64),
+                    client_order_id: "c".repeat(32),
+                    deadline: 100,
+                    plan_hash: plan_hash.clone(),
+                    policy_revision: 1,
+                    risk_increase: true,
+                    instrument_id: "BTC-USDT-SWAP".into(),
+                    plan: IntentPlan {
+                        strategy_definition_id: definition.definition_id,
+                        strategy_definition_version: definition.version,
+                        strategy_parameters_digest: definition.parameters_digest,
+                        contract_value: Decimal::ONE,
+                        inverse: false,
+                        settlement_currency: "USDT".into(),
+                        position_side: "long".into(),
+                        private_source_generation: 1,
+                        operation: "open".into(),
+                        side: "buy".into(),
+                        quantity: Decimal::ONE,
+                        limit_price: Decimal::from(100),
+                        stop_price: Some(Decimal::from(95)),
+                        strategy_instance: "manual".into(),
+                        planned_loss_usd: Decimal::from(3),
+                        source_generation: 1,
+                    },
+                },
+            )?;
+            let quote = EntryQuoteEvidence {
+                schema: "okx.entry-known-quote/v1".into(),
+                account_key: account('a'),
+                installation_id: "test-installation".into(),
+                intent_id: intent_id.clone(),
+                plan_hash: plan_hash.clone(),
+                policy_revision: 1,
+                instrument_id: "BTC-USDT-SWAP".into(),
+                quantity: Decimal::ONE,
+                limit_price: Decimal::from(100),
+                contract_value: Decimal::ONE,
+                fee_rate: Decimal::new(5, 4),
+                maker_rate: "-0.0002".into(),
+                taker_rate: "0.0005".into(),
+                fee_level: "Lv1".into(),
+                fee_exchange_at: 1,
+                usd_per_usdt: Decimal::ONE,
+                notional_usdt: Decimal::from(100),
+                fee_usdt: Decimal::new(5, 2),
+                total_usdt: Decimal::new(10005, 2),
+                total_usd: Decimal::new(10005, 2),
+                fee_generation: format!(
+                    "sha256:{:x}",
+                    Sha256::digest(
+                        serde_json::to_vec(&(
+                            "BTC-USDT-SWAP",
+                            "test_reference",
+                            "Lv1",
+                            "-0.0002",
+                            "0.0005",
+                            true,
+                        ))
+                        .unwrap()
+                    )
+                ),
+                reference_generation: "test_reference".into(),
+                fee_received_at: 1,
+                conversion_digest: "b".repeat(64),
+                conversion_received_at: 1,
+                observed_at: 2,
+            };
+            s.bind_entry_quote(&quote)?;
+            s.bind_entry_admission(&EntryAdmissionEvidence {
+                schema: "okx.entry-admission/v2".into(),
+                account_key: account('a'),
+                installation_id: "test-installation".into(),
+                intent_id: intent_id.clone(),
+                plan_hash: plan_hash.clone(),
+                quote_digest: format!("{:x}", Sha256::digest(serde_json::to_vec(&quote).unwrap())),
+                admission_usd_per_usdt: Decimal::ONE,
+                other_entry_costs_upper_usd: Decimal::ZERO,
+                entry_upper_usd: quote.total_usd,
+                entry_proof_digest: "a".repeat(64),
+                observed_at: quote.observed_at,
+            })?;
+            s.reserve(
+                &CentralReceipt {
+                    reservation_key: reservation,
+                    account_key: account('a'),
+                    installation_id: "test-installation".into(),
+                    instance_id: None,
+                    intent_id: intent_id.clone(),
+                    plan_hash,
+                    policy_revision: 1,
+                    receipt_hash: "f".repeat(64),
+                    requested_loss_usd: Decimal::from(3),
+                    conversion_digest: "b".repeat(64),
+                },
+                3,
+            )?;
+            assert!(s.begin_post(&intent_id, 1, 4)?);
+            s.record_outcome(
+                &intent_id,
+                IntentState::Acknowledged,
+                Some("venue-order"),
+                "native-venue-ack",
+                4,
+            )?;
+            let half = Decimal::new(5, 1);
+            let fee = Decimal::new(-1, 2);
+            let entry = FinanceEntry {
+                entry_id: "bill:partial:FEE".into(),
+                economic_event_key: "bill:partial".into(),
+                component: "FEE".into(),
+                allocation_leg: "account".into(),
+                amount: fee,
+                currency: "USDT".into(),
+                instance_id: None,
+                source_ref: "fill:partial".into(),
+                time: 6,
+                reverses_entry_id: None,
+            };
+            s.ingest_page(&IngestPage {
+                fills: vec![Fill {
+                    fill_id: "partial".into(),
+                    instrument_id: "BTC-USDT-SWAP".into(),
+                    trade_id: "native-trade-partial".into(),
+                    exchange_order_id: "venue-order".into(),
+                    intent_id: Some(intent_id.clone()),
+                    time: 6,
+                    qty: half,
+                    price: Decimal::from(100),
+                    fee,
+                    currency: "USDT".into(),
+                    side: "buy".into(),
+                }],
+                finance: vec![entry.clone()],
+                cursor: Some(SourceCursor {
+                    source: "fills".into(),
+                    stream_partition: "SWAP".into(),
+                    cursor: String::new(),
+                    watermark: 7,
+                    generation: 1,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })?;
+            s.ingest_page(&IngestPage {
+                bills: vec![Bill {
+                    bill_id: "partial".into(),
+                    kind: "1:trade".into(),
+                    time: 7,
+                    amount: fee,
+                    currency: "USDT".into(),
+                    economic_event_key: "bill:partial".into(),
+                }],
+                cursor: Some(SourceCursor {
+                    source: "bills".into(),
+                    stream_partition: "account".into(),
+                    cursor: String::new(),
+                    watermark: 7,
+                    generation: 1,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })?;
+            s.ingest_page(&IngestPage {
+                finance: vec![FinanceEntry {
+                    source_ref: "bill:partial".into(),
+                    time: 7,
+                    ..entry
+                }],
+                ..Default::default()
+            })?;
+            s.record_order_readback(
+                &intent_id,
+                "venue-order",
+                IntentState::PartiallyFilled,
+                half,
+                7,
+            )?;
+            let proof = s.bind_partial_entry_settlement(&intent_id, 7, half, 7)?;
+            assert_eq!(proof.cumulative_entry_usd, Decimal::new(5001, 2));
+            assert_eq!(proof.settlement_revision, 1);
+            assert_eq!(s.partial_entry_settlement_receipt(&intent_id)?, Some(proof.clone()));
+            assert!(s.partial_entry_ack_pending(&intent_id)?);
+            // The native journal only carries one original source-backed value.
+            assert_eq!(prepared.plan_hash, proof.plan_hash);
+            Ok(proof)
+        })
+        .await
+        .unwrap();
+    (fixture, account, input, source)
+}
+
+#[tokio::test]
+async fn risk_book_contract_real_source_two_sql_owners_commit_then_ack_once() {
+    use super::owner::RiskBookHandle;
+    use std::time::{Duration, Instant};
+
+    let (fixture, account, input, source) = source_verified_partial_fixture("two-owner-ack").await;
+    let campaign = RiskBookHandle::open_existing(
+        fixture.path.clone(), "test-installation".into(), opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    let missing = campaign
+        .settle_partial_from_account_sql(
+            &account, "not-sourced-intent".into(), 2, 7,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await;
+    assert!(matches!(missing, Err(RiskStoreError::EntrySqlUnproven)));
+    assert_eq!(campaign.readback().await.unwrap().book_sequence, 2);
+
+    let receipt = campaign
+        .settle_partial_from_account_sql(
+            &account, input.intent_id.clone(), 2, 7,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert!(!receipt.replayed);
+    assert_eq!(receipt.book_sequence, 3);
+    assert_eq!(receipt.cumulative_entry_usd, "50.01");
+    let read = campaign.readback().await.unwrap();
+    assert_eq!(read.consumed_entry_usd, "50.01");
+    assert_eq!(read.reserved_entry_usd, "50.04");
+    assert_eq!(read.global_reserved_usdt, "3");
+    assert_eq!(read.reserved_loss_usd, "3");
+    assert_eq!(source.reservation_key, input.reservation_key());
+
+    let id = input.intent_id.clone();
+    assert!(!account
+        .call(Instant::now() + Duration::from_secs(5), move |s| {
+            s.partial_entry_ack_pending(&id)
+        })
+        .await
+        .unwrap());
+    assert!(campaign
+        .settle_partial_from_account_sql(
+            &account, input.intent_id.clone(), 2, 7,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .replayed);
+    assert_eq!(campaign.readback().await.unwrap(), read);
+}
+
+#[tokio::test]
+async fn risk_book_contract_real_source_two_sql_owners_recover_missing_ack() {
+    use super::owner::RiskBookHandle;
+    use std::time::{Duration, Instant};
+
+    let (fixture, account, input, source) = source_verified_partial_fixture("two-owner-lost-ack").await;
+    let verified = PartialEntrySqlProof::from_account_receipt(source).unwrap();
+    {
+        let mut original = open(&fixture);
+        let accepted = original.settle_partial_entry(&verified, 2, 7).unwrap();
+        assert_eq!(accepted.book_sequence, 3);
+        assert!(!accepted.replayed);
+    }
+    // The campaign commit exists, but the native account ACK has not happened.
+    let pending_id = input.intent_id.clone();
+    assert!(account
+        .call(Instant::now() + Duration::from_secs(5), move |s| {
+            s.partial_entry_ack_pending(&pending_id)
+        })
+        .await
+        .unwrap());
+    let campaign = RiskBookHandle::open_existing(
+        fixture.path.clone(), "test-installation".into(), opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    let before = campaign.readback().await.unwrap();
+    assert_eq!(before.consumed_entry_usd, "50.01");
+    assert_eq!(before.reserved_entry_usd, "50.04");
+    // An earlier book CAS is valid for EXACT committed-source replay only;
+    // the SQL ACK is then written in the original account owner.
+    let recovered = campaign
+        .settle_partial_from_account_sql(
+            &account, input.intent_id.clone(), 2, 7,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert!(recovered.replayed);
+    assert_eq!(recovered.book_sequence, 3);
+    let id = input.intent_id.clone();
+    assert!(!account
+        .call(Instant::now() + Duration::from_secs(5), move |s| {
+            s.partial_entry_ack_pending(&id)
+        })
+        .await
+        .unwrap());
+    assert_eq!(campaign.readback().await.unwrap(), before);
+}
