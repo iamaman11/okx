@@ -53,6 +53,7 @@ fn opening() -> CampaignOpening {
                 account_key: account(letter),
                 account_limit: amt("10"),
                 order_limit: amt("8"),
+                entry_limit: amt("10"),
                 strategy_id: "strategy_test".to_owned(),
                 strategy_limit: amt("8"),
             })
@@ -83,6 +84,7 @@ fn request(letter: char, intent: &str, loss: &str) -> ReserveInput {
         conversion_digest: uid('a'),
         conversion_observed_at_ms: 9_999,
         conversion_rate: amt("1"),
+        native_incarnation: "f".repeat(32),
         proposal: RiskProposal {
             loss_usdt: amt(loss),
             loss_usd: amt(loss),
