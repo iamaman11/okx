@@ -252,10 +252,14 @@ mod tests {
             Err(RiskRuleError::PostCausalProofUnproven)
         );
         let mut reused_read = proof.clone();
-        reused_read.account_reads[1].source_read_id = reused_read.account_reads[0].source_read_id.clone();
+        reused_read.account_reads[1].source_read_id =
+            reused_read.account_reads[0].source_read_id.clone();
         assert_eq!(
             validate_post_causality(
-                &reused_read, "original-reservation", &"f".repeat(32), &accounts
+                &reused_read,
+                "original-reservation",
+                &"f".repeat(32),
+                &accounts
             ),
             Err(RiskRuleError::PostCausalProofUnproven)
         );
