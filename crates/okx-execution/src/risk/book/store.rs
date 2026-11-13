@@ -4,7 +4,10 @@
 use okx_kernel::risk::{
     model::{CampaignCapacity, RiskProposal, ScopeCapacity},
     money::{MoneyError, RiskAmount},
-    rules::{RiskRuleError, evaluate_campaign_capacity, evaluate_scope_capacity},
+    rules::{
+        RiskRuleError, evaluate_campaign_capacity, evaluate_scope_capacity,
+        validate_account_occupancy,
+    },
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -368,6 +371,117 @@ fn apply_census_loss(
     Ok(())
 }
 
+
+// The risk_entries rows carry the primary remaining obligations. Cached totals
+// never authorize a grant unless they agree with those exact-decimal records.
+// This version only implements HELD; other lifecycle states fail closed until
+// their transition and remaining-balance semantics are implemented.
+fn verify_reservation_aggregates(
+    tx: &rusqlite::Transaction<'_>,
+    meta: &BookMeta,
+) -> Result<()> {
+    let mut accounts: BTreeMap<String, RiskAmount> = BTreeMap::new();
+    let mut strategies: BTreeMap<(String, String), RiskAmount> = BTreeMap::new();
+    let mut global = RiskAmount::zero();
+    let mut loss = RiskAmount::zero();
+    let mut entry = RiskAmount::zero();
+
+    {
+        let mut stmt = tx.prepare(
+            "SELECT account_key,strategy_id,state,loss_usdt,loss_usd,entry_upper_usd,
+                    reserved_usdt,reserved_loss_usd,reserved_entry_usd FROM risk_entries",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })?;
+        for row in rows {
+            let (account, strategy, state, original_usdt, original_loss, original_entry,
+                remaining_usdt, remaining_loss, remaining_entry) = row?;
+            let remaining_usdt = amount(remaining_usdt)?;
+            let remaining_loss = amount(remaining_loss)?;
+            let remaining_entry = amount(remaining_entry)?;
+            if state == "RELEASED" {
+                if !remaining_usdt.is_zero() || !remaining_loss.is_zero()
+                    || !remaining_entry.is_zero()
+                {
+                    return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
+                }
+                continue;
+            }
+            if state != "HELD" {
+                return Err(RiskStoreError::Corrupt("RESERVATION_STATE_UNIMPLEMENTED"));
+            }
+            if remaining_usdt != amount(original_usdt)?
+                || remaining_loss != amount(original_loss)?
+                || remaining_entry != amount(original_entry)?
+            {
+                return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
+            }
+            global = global.checked_add(&remaining_usdt)?;
+            loss = loss.checked_add(&remaining_loss)?;
+            entry = entry.checked_add(&remaining_entry)?;
+            let previous = accounts.entry(account.clone()).or_insert_with(RiskAmount::zero);
+            *previous = previous.checked_add(&remaining_usdt)?;
+            let previous = strategies.entry((account, strategy)).or_insert_with(RiskAmount::zero);
+            *previous = previous.checked_add(&remaining_usdt)?;
+        }
+    }
+    if global != meta.global_reserved || loss != meta.loss_reserved
+        || entry != meta.entry_reserved
+    {
+        return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
+    }
+    {
+        let mut stmt = tx.prepare("SELECT account_key,reserved_usdt FROM risk_account_occupied")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (account, stored) = row?;
+            let expected = accounts.remove(&account).unwrap_or_else(RiskAmount::zero);
+            if amount(stored)? != expected {
+                return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
+            }
+        }
+    }
+    if !accounts.is_empty() {
+        return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
+    }
+    {
+        let mut stmt = tx.prepare(
+            "SELECT account_key,strategy_id,reserved_usdt FROM risk_strategy_occupied",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (account, strategy, stored) = row?;
+            let expected = strategies
+                .remove(&(account, strategy))
+                .unwrap_or_else(RiskAmount::zero);
+            if amount(stored)? != expected {
+                return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
+            }
+        }
+    }
+    if !strategies.is_empty() {
+        return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
+    }
+    Ok(())
+}
+
 pub(super) struct RiskBookStore {
     connection: Connection,
     _lease: File,
@@ -389,7 +503,7 @@ impl RiskBookStore {
             Err(std::fs::TryLockError::WouldBlock) => return Err(RiskStoreError::WriterBusy),
             Err(std::fs::TryLockError::Error(error)) => return Err(RiskStoreError::Io(error)),
         }
-        let connection =
+        let mut connection =
             Connection::open_with_flags(&canonical, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         connection.busy_timeout(Duration::from_millis(250))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -410,6 +524,12 @@ impl RiskBookStore {
         if identity.2 != 1 {
             return Err(RiskStoreError::Corrupt("LEGACY_FENCE_NOT_PROVEN"));
         }
+        {
+            let tx = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            let meta = read_meta(&tx)?;
+            verify_reservation_aggregates(&tx, &meta)?;
+            tx.commit()?;
+        }
         Ok(Self {
             connection,
             _lease: lock,
@@ -420,6 +540,7 @@ impl RiskBookStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)?;
         let meta = read_meta(&tx)?;
+        verify_reservation_aggregates(&tx, &meta)?;
         tx.commit()?;
         Ok(BookReadback {
             book_sequence: meta.sequence,
@@ -456,6 +577,7 @@ impl RiskBookStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut meta = read_meta(&tx)?;
+        verify_reservation_aggregates(&tx, &meta)?;
         if meta.policy_revision != input.policy_revision {
             return Err(RiskStoreError::PolicyConflict);
         }
@@ -464,17 +586,23 @@ impl RiskBookStore {
         }
         let mut policies = BTreeMap::new();
         {
-            let mut stmt=tx.prepare("SELECT account_key,limit_usdt,order_limit_usdt FROM risk_policy_account ORDER BY account_key")?;
+            let mut stmt=tx.prepare(
+                "SELECT p.account_key,p.limit_usdt,p.order_limit_usdt,o.reserved_usdt
+                 FROM risk_policy_account p
+                 JOIN risk_account_occupied o USING(account_key)
+                 ORDER BY p.account_key"
+            )?;
             let iter = stmt.query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             })?;
             for item in iter {
-                let (account, limit, order) = item?;
-                policies.insert(account, (amount(limit)?, amount(order)?));
+                let (account, limit, order, reserved) = item?;
+                policies.insert(account, (amount(limit)?, amount(order)?, amount(reserved)?));
             }
         }
         if policies.is_empty()
@@ -484,24 +612,28 @@ impl RiskBookStore {
             return Err(RiskStoreError::CensusUnproven);
         }
         let account_key = input.account_key();
-        let (account_limit, order_limit) = policies
+        let (account_limit, order_limit, account_reserved) = policies
             .get(&account_key)
             .ok_or(RiskStoreError::Invalid("ACCOUNT_NOT_ACTIVE"))?;
         let strategy_limit:String=tx.query_row(
             "SELECT limit_usdt FROM risk_policy_strategy WHERE account_key=?1 AND strategy_id=?2",
             params![&account_key,&input.strategy_id],|r|r.get(0))
             .optional()?.ok_or(RiskStoreError::Invalid("STRATEGY_NOT_ENABLED_FOR_ACCOUNT"))?;
-        let reserved_account: String = tx.query_row(
-            "SELECT reserved_usdt FROM risk_account_occupied WHERE account_key=?1",
-            params![&account_key],
-            |r| r.get(0),
-        )?;
         let reserved_strategy:String=tx.query_row(
             "SELECT reserved_usdt FROM risk_strategy_occupied WHERE account_key=?1 AND strategy_id=?2",
             params![&account_key,&input.strategy_id],|r|r.get(0))?;
         // Persist monotonic native loss before evaluating new capacity.
         // An ordinary budget denial still commits this independent observation.
         apply_census_loss(&tx, &mut meta, census)?;
+        // Check every policy cohort member, not only the requesting account.
+        // Apply observed cumulative loss first, even on an ordinary cap denial.
+        for (member, (limit, _, reserved)) in &policies {
+            let occupied = census.occupied[member].checked_add(reserved)?;
+            if let Err(reason) = validate_account_occupancy(limit, &occupied) {
+                tx.commit()?;
+                return Err(RiskStoreError::Denied(reason));
+            }
+        }
         let key = input.reservation_key();
         let digest = input.digest()?;
         let prior: Option<(String, String)> = tx
@@ -533,8 +665,7 @@ impl RiskBookStore {
         }
         let global_occupied = source_total.checked_add(&meta.global_reserved)?;
         let account_occupied =
-            census.occupied[&account_key].checked_add(&amount(reserved_account.clone())?)?;
-        let account_reserved = amount(reserved_account)?;
+            census.occupied[&account_key].checked_add(account_reserved)?;
         let strategy_reserved = amount(reserved_strategy)?;
         let strategy_limit = amount(strategy_limit)?;
         let campaign_decision = evaluate_campaign_capacity(
@@ -600,8 +731,10 @@ impl RiskBookStore {
             i64::try_from(input.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?;
         tx.execute("INSERT INTO risk_entries(
             reservation_key,account_key,strategy_id,intent_id,plan_sha256,request_digest,
-            policy_revision,state,loss_usdt,loss_usd,entry_upper_usd,entry_proof_digest,
-            source_digest,book_sequence) VALUES (?1,?2,?3,?4,?5,?6,?7,'HELD',?8,?9,?10,?11,?12,?13)",
+            policy_revision,state,loss_usdt,loss_usd,entry_upper_usd,
+            reserved_usdt,reserved_loss_usd,reserved_entry_usd,entry_proof_digest,
+            source_digest,book_sequence)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,'HELD',?8,?9,?10,?8,?9,?10,?11,?12,?13)",
             params![&key,&account_key,&input.strategy_id,&input.intent_id,&input.plan_sha256,digest,
                 policy_i64,input.proposal.loss_usdt.canonical()?,input.proposal.loss_usd.canonical()?,
                 input.proposal.entry_upper_usd.canonical()?,&input.entry_proof_digest,
