@@ -4,9 +4,8 @@
 //! Production ingress remains private until authenticated source construction,
 //! policy epoch and legacy Worker fence are proven.
 use super::{
-    LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, VerifiedCensus,
-    amount, apply_census_loss, read_meta, safe_integer, valid_digest,
-    verify_reservation_aggregates,
+    LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, VerifiedCensus, amount,
+    apply_census_loss, read_meta, safe_integer, valid_digest, verify_reservation_aggregates,
 };
 use okx_kernel::risk::{
     model::PostCausalProof,
@@ -70,7 +69,8 @@ impl RiskBookStore {
         {
             return Err(RiskStoreError::CensusUnproven);
         }
-        let tx = self.connection
+        let tx = self
+            .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut meta = read_meta(&tx)?;
         verify_reservation_aggregates(&tx, &meta)?;
@@ -84,20 +84,49 @@ impl RiskBookStore {
             return Err(RiskStoreError::StaleSequence);
         }
 
-        let entry: Option<(String, String, String, i64, i64, String, String, String, i64)> = tx
+        let entry: Option<(
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            i64,
+        )> = tx
             .query_row(
                 "SELECT plan_sha256,state,account_key,held_at_ms,reserve_read_floor_ms,
                         native_incarnation,reserved_usdt,entry_upper_usd,book_sequence
                  FROM risk_entries WHERE reservation_key=?1",
                 params![&request.reservation_key],
-                |r| Ok((
-                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                    r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?
-                )),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((plan, state, account, held_at_ms, held_read_floor, incarnation,
-                  reserved_usdt, entry_upper, reservation_seq)) = entry else {
+        let Some((
+            plan,
+            state,
+            account,
+            held_at_ms,
+            held_read_floor,
+            incarnation,
+            reserved_usdt,
+            entry_upper,
+            reservation_seq,
+        )) = entry
+        else {
             return Err(RiskStoreError::Invalid("POST_RESERVATION_NOT_FOUND"));
         };
         if plan != request.plan_sha256 {
@@ -106,7 +135,11 @@ impl RiskBookStore {
         if state != "HELD" {
             return Err(RiskStoreError::AlreadyResolved);
         }
-        if reservation_seq <= 0 || u64::try_from(reservation_seq).ok().is_none_or(|s| s > meta.sequence) {
+        if reservation_seq <= 0
+            || u64::try_from(reservation_seq)
+                .ok()
+                .is_none_or(|s| s > meta.sequence)
+        {
             return Err(RiskStoreError::Corrupt("POST_RESERVATION_SEQUENCE"));
         }
         if held_at_ms <= 0
@@ -126,10 +159,14 @@ impl RiskBookStore {
                  JOIN risk_account_occupied o USING(account_key)
                  ORDER BY p.account_key",
             )?;
-            let rows = query.query_map([], |r| Ok((
-                r.get::<_, String>(0)?, r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?, r.get::<_, String>(3)?
-            )))?;
+            let rows = query.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
             for row in rows {
                 policies.push(row?);
             }
@@ -166,11 +203,15 @@ impl RiskBookStore {
         }
         let entry_cap = entry_cap.ok_or(RiskStoreError::Corrupt("POST_ACCOUNT_POLICY_MISSING"))?;
         if amount(entry_upper)? > entry_cap {
-            return Err(RiskStoreError::Denied(RiskRuleError::AccountEntryLimitExceeded));
+            return Err(RiskStoreError::Denied(
+                RiskRuleError::AccountEntryLimitExceeded,
+            ));
         }
         let total = external.checked_add(&meta.global_reserved)?;
         if total > meta.global_limit {
-            return Err(RiskStoreError::Denied(RiskRuleError::InsufficientAggregateOrAccountRisk));
+            return Err(RiskStoreError::Denied(
+                RiskRuleError::InsufficientAggregateOrAccountRisk,
+            ));
         }
         if !meta.entry_breach.is_zero() {
             return Err(RiskStoreError::Denied(RiskRuleError::BoundBreach));
@@ -179,20 +220,28 @@ impl RiskBookStore {
         // loss high-water. It is persisted even when the refreshed budget
         // subsequently blocks POST; the SQL transaction owns this mutation.
         apply_census_loss(&tx, &mut meta, census)?;
-        if RiskAmount::sum_exceeds(&[&meta.loss_consumed, &meta.loss_reserved], &meta.loss_limit) {
+        if RiskAmount::sum_exceeds(
+            &[&meta.loss_consumed, &meta.loss_reserved],
+            &meta.loss_limit,
+        ) {
             tx.commit()?;
             return Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted));
         }
-        if RiskAmount::sum_exceeds(&[&meta.entry_consumed, &meta.entry_reserved], &meta.entry_limit) {
+        if RiskAmount::sum_exceeds(
+            &[&meta.entry_consumed, &meta.entry_reserved],
+            &meta.entry_limit,
+        ) {
             tx.commit()?;
             return Err(RiskStoreError::Denied(RiskRuleError::EntryBudgetExhausted));
         }
 
-        let next_seq = meta.sequence.checked_add(1)
+        let next_seq = meta
+            .sequence
+            .checked_add(1)
             .filter(|v| *v <= LEGACY_MAX_SAFE_INTEGER)
             .ok_or(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
-        let next_seq_sql = i64::try_from(next_seq)
-            .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+        let next_seq_sql =
+            i64::try_from(next_seq).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
         let changed = tx.execute(
             "UPDATE risk_entries SET state='POSTED',
                     post_authorized_at_ms=?1,post_sequence=?2,
@@ -208,7 +257,8 @@ impl RiskBookStore {
                 total.checked_sub(&amount(reserved_usdt)?)?.canonical()?,
                 &request.reservation_key,
                 &request.plan_sha256,
-                i64::try_from(request.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?,
+                i64::try_from(request.policy_revision)
+                    .map_err(|_| RiskStoreError::PolicyConflict)?,
                 reservation_seq,
             ],
         )?;
@@ -220,7 +270,8 @@ impl RiskBookStore {
              WHERE singleton=1 AND book_sequence=?2 AND policy_revision=?3 AND generation=?4",
             params![
                 next_seq_sql,
-                i64::try_from(meta.sequence).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
+                i64::try_from(meta.sequence)
+                    .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
                 i64::try_from(meta.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?,
                 i64::try_from(meta.generation).map_err(|_| RiskStoreError::StaleGeneration)?,
             ],
