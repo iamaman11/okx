@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 use thiserror::Error;
@@ -76,6 +76,24 @@ type Result<T> = std::result::Result<T, RiskStoreError>;
 const LEGACY_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 fn safe_integer(value: i64) -> bool {
     value >= 0 && (value as u64) <= LEGACY_MAX_SAFE_INTEGER
+}
+
+/// Unique campaign SQLite location within the already-owned installation
+/// runtime root (Windows C:\\okx\\runtime; equally valid on a native VPS).
+/// This is a path derivation, NOT initialization or proof of legacy fencing.
+pub(super) fn campaign_db_path(runtime_root: &Path, campaign_id: &str) -> Result<PathBuf> {
+    let digest = campaign_id
+        .strip_prefix("sha256:")
+        .filter(|value| valid_digest(value))
+        .ok_or(RiskStoreError::Invalid("CAMPAIGN_ID"))?;
+    if !runtime_root.is_absolute() {
+        return Err(RiskStoreError::Invalid("RUNTIME_ROOT_NOT_ABSOLUTE"));
+    }
+    Ok(runtime_root
+        .join("risk")
+        .join("campaigns")
+        .join(digest)
+        .join("risk-book.sqlite"))
 }
 
 #[derive(Debug, Clone)]
