@@ -981,107 +981,152 @@ async fn risk_book_contract_real_account_sql_unsent_proof_bridges_campaign_owner
             liabilities: Decimal::ZERO,
             balances: vec![("USD".into(), Decimal::from(100))],
         },
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let campaign = RiskBookHandle::open_existing(
-        fixture.path.clone(), "test-installation".into(), opening().campaign_id,
-    ).await.unwrap();
-    let no_source = campaign.release_unsent_from_account_sql(
-        &account_handle,
-        "intentnative1".into(),
-        0,
-        7,
-        Instant::now() + Duration::from_secs(3),
-    ).await;
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    let no_source = campaign
+        .release_unsent_from_account_sql(
+            &account_handle,
+            "intentnative1".into(),
+            0,
+            7,
+            Instant::now() + Duration::from_secs(3),
+        )
+        .await;
     assert!(matches!(no_source, Err(RiskStoreError::UnsentSqlUnproven)));
     assert_eq!(campaign.readback().await.unwrap().book_sequence, 0);
 
     let reservation = request('a', "intentnative1", "3");
     let key = reservation.reservation_key();
     let marked_key = key.clone();
-    account_handle.call(Instant::now() + Duration::from_secs(3), move |s| {
-        s.apply_authority_policy(1, false, "campaign_fixture", Decimal::from(100))?;
-        let definition = s.ensure_manual_instance(1)?;
-        s.prepare(
-            &Decision {
-                decision_id: "decision_native_unsent".into(),
-                instance_id: None,
-                decision_at: 2,
-                input_digest: "d".repeat(64),
-                policy_revision: 1,
-                code_version: "fixture".into(),
-            },
-            &NewIntent {
-                intent_id: "intentnative1".into(),
-                idempotency_key: "command_native_unsent".into(),
-                request_hash: "b".repeat(64),
-                client_order_id: "c".repeat(32),
-                deadline: 100,
-                plan_hash: "e".repeat(64),
-                policy_revision: 1,
-                risk_increase: true,
-                instrument_id: "BTC-USDT-SWAP".into(),
-                plan: IntentPlan {
-                    strategy_definition_id: definition.definition_id,
-                    strategy_definition_version: definition.version,
-                    strategy_parameters_digest: definition.parameters_digest,
-                    operation: "open".into(),
-                    side: "buy".into(),
-                    position_side: "long".into(),
-                    quantity: Decimal::ONE,
-                    limit_price: Decimal::from(5),
-                    stop_price: Some(Decimal::from(4)),
-                    strategy_instance: "manual".into(),
-                    planned_loss_usd: Decimal::ONE,
-                    source_generation: 1,
-                    private_source_generation: 1,
-                    contract_value: Decimal::ONE,
-                    inverse: false,
-                    settlement_currency: "USDT".into(),
+    account_handle
+        .call(Instant::now() + Duration::from_secs(3), move |s| {
+            s.apply_authority_policy(1, false, "campaign_fixture", Decimal::from(100))?;
+            let definition = s.ensure_manual_instance(1)?;
+            s.prepare(
+                &Decision {
+                    decision_id: "decision_native_unsent".into(),
+                    instance_id: None,
+                    decision_at: 2,
+                    input_digest: "d".repeat(64),
+                    policy_revision: 1,
+                    code_version: "fixture".into(),
                 },
-            },
-        )?;
-        s.mark_reserve_attempt("intentnative1", &marked_key, 3)?;
-        Ok(())
-    }).await.unwrap();
+                &NewIntent {
+                    intent_id: "intentnative1".into(),
+                    idempotency_key: "command_native_unsent".into(),
+                    request_hash: "b".repeat(64),
+                    client_order_id: "c".repeat(32),
+                    deadline: 100,
+                    plan_hash: "e".repeat(64),
+                    policy_revision: 1,
+                    risk_increase: true,
+                    instrument_id: "BTC-USDT-SWAP".into(),
+                    plan: IntentPlan {
+                        strategy_definition_id: definition.definition_id,
+                        strategy_definition_version: definition.version,
+                        strategy_parameters_digest: definition.parameters_digest,
+                        operation: "open".into(),
+                        side: "buy".into(),
+                        position_side: "long".into(),
+                        quantity: Decimal::ONE,
+                        limit_price: Decimal::from(5),
+                        stop_price: Some(Decimal::from(4)),
+                        strategy_instance: "manual".into(),
+                        planned_loss_usd: Decimal::ONE,
+                        source_generation: 1,
+                        private_source_generation: 1,
+                        contract_value: Decimal::ONE,
+                        inverse: false,
+                        settlement_currency: "USDT".into(),
+                    },
+                },
+            )?;
+            s.mark_reserve_attempt("intentnative1", &marked_key, 3)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
 
-    let held = campaign.reserve(reservation.clone(), census()).await.unwrap();
+    let held = campaign
+        .reserve(reservation.clone(), census())
+        .await
+        .unwrap();
     assert_eq!(held.book_sequence, 1);
     // A reserve attempt without the durable SQL terminal reject is NOT
     // sufficient to return any of the campaign's reserved capacity.
     assert!(matches!(
-        campaign.release_unsent_from_account_sql(
-            &account_handle, "intentnative1".into(), 1, 7,
-            Instant::now() + Duration::from_secs(3)
-        ).await,
+        campaign
+            .release_unsent_from_account_sql(
+                &account_handle,
+                "intentnative1".into(),
+                1,
+                7,
+                Instant::now() + Duration::from_secs(3)
+            )
+            .await,
         Err(RiskStoreError::UnsentSqlUnproven)
     ));
     assert_eq!(campaign.readback().await.unwrap().global_reserved_usdt, "3");
 
-    account_handle.call(Instant::now() + Duration::from_secs(3), |s| {
-        s.reject_unsent("intentnative1", "NO_NATIVE_POST", 4)?;
-        Ok(())
-    }).await.unwrap();
-    let released = campaign.release_unsent_from_account_sql(
-        &account_handle, "intentnative1".into(), 1, 7,
-        Instant::now() + Duration::from_secs(3)
-    ).await.unwrap();
+    account_handle
+        .call(Instant::now() + Duration::from_secs(3), |s| {
+            s.reject_unsent("intentnative1", "NO_NATIVE_POST", 4)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let released = campaign
+        .release_unsent_from_account_sql(
+            &account_handle,
+            "intentnative1".into(),
+            1,
+            7,
+            Instant::now() + Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
     assert_eq!(released.book_sequence, 2);
     assert_eq!(campaign.readback().await.unwrap().global_reserved_usdt, "0");
     assert_eq!(campaign.readback().await.unwrap().reserved_loss_usd, "0");
     assert_eq!(campaign.readback().await.unwrap().reserved_entry_usd, "0");
 
-    let original = account_handle.call(
-        Instant::now() + Duration::from_secs(3), |s| {
+    let original = account_handle
+        .call(Instant::now() + Duration::from_secs(3), |s| {
             s.unsent_release_receipt("intentnative1")?
                 .ok_or(crate::StoreError::Invalid("SQL_PROOF_MISSING"))
-        }
-    ).await.unwrap();
+        })
+        .await
+        .unwrap();
     let proof = UnsentSqlProof::from_account_receipt(original).unwrap();
-    assert!(campaign.release_unsent_from_account_sql(
-        &account_handle, "intentnative1".into(), 2, 7,
-        Instant::now() + Duration::from_secs(3)
-    ).await.unwrap().replayed);
+    assert!(
+        campaign
+            .release_unsent_from_account_sql(
+                &account_handle,
+                "intentnative1".into(),
+                2,
+                7,
+                Instant::now() + Duration::from_secs(3)
+            )
+            .await
+            .unwrap()
+            .replayed
+    );
     assert_eq!(proof.reservation_key, key);
-    let observed = campaign.inspect(key, proof.plan_sha256).await.unwrap().unwrap();
-    assert_eq!(observed.state, okx_kernel::risk::model::RiskEntryState::Released);
+    let observed = campaign
+        .inspect(key, proof.plan_sha256)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        observed.state,
+        okx_kernel::risk::model::RiskEntryState::Released
+    );
 }
