@@ -19,9 +19,11 @@ use std::{
 };
 use thiserror::Error;
 mod integrity;
+mod post;
 mod queries;
 mod unsent;
 use integrity::verify_reservation_aggregates;
+pub(super) use post::{PostAuthorized, PostFenceInput};
 pub(super) use queries::{AccountReadback, ReservationReadback};
 pub(super) use unsent::{UnsentReceipt, UnsentSqlProof};
 
