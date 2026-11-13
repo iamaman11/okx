@@ -2051,7 +2051,10 @@ async fn source_verified_partial_fixture(
             let proof = s.bind_partial_entry_settlement(&intent_id, 7, half, 7)?;
             assert_eq!(proof.cumulative_entry_usd, Decimal::new(5001, 2));
             assert_eq!(proof.settlement_revision, 1);
-            assert_eq!(s.partial_entry_settlement_receipt(&intent_id)?, Some(proof.clone()));
+            assert_eq!(
+                s.partial_entry_settlement_receipt(&intent_id)?,
+                Some(proof.clone())
+            );
             assert!(s.partial_entry_ack_pending(&intent_id)?);
             // The native journal only carries one original source-backed value.
             assert_eq!(prepared.plan_hash, proof.plan_hash);
@@ -2069,13 +2072,18 @@ async fn risk_book_contract_real_source_two_sql_owners_commit_then_ack_once() {
 
     let (fixture, account, input, source) = source_verified_partial_fixture("two-owner-ack").await;
     let campaign = RiskBookHandle::open_existing(
-        fixture.path.clone(), "test-installation".into(), opening().campaign_id,
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
     )
     .await
     .unwrap();
     let missing = campaign
         .settle_partial_from_account_sql(
-            &account, "not-sourced-intent".into(), 2, 7,
+            &account,
+            "not-sourced-intent".into(),
+            2,
+            7,
             Instant::now() + Duration::from_secs(5),
         )
         .await;
@@ -2084,7 +2092,10 @@ async fn risk_book_contract_real_source_two_sql_owners_commit_then_ack_once() {
 
     let receipt = campaign
         .settle_partial_from_account_sql(
-            &account, input.intent_id.clone(), 2, 7,
+            &account,
+            input.intent_id.clone(),
+            2,
+            7,
             Instant::now() + Duration::from_secs(5),
         )
         .await
@@ -2100,20 +2111,27 @@ async fn risk_book_contract_real_source_two_sql_owners_commit_then_ack_once() {
     assert_eq!(source.reservation_key, input.reservation_key());
 
     let id = input.intent_id.clone();
-    assert!(!account
-        .call(Instant::now() + Duration::from_secs(5), move |s| {
-            s.partial_entry_ack_pending(&id)
-        })
-        .await
-        .unwrap());
-    assert!(campaign
-        .settle_partial_from_account_sql(
-            &account, input.intent_id.clone(), 2, 7,
-            Instant::now() + Duration::from_secs(5),
-        )
-        .await
-        .unwrap()
-        .replayed);
+    assert!(
+        !account
+            .call(Instant::now() + Duration::from_secs(5), move |s| {
+                s.partial_entry_ack_pending(&id)
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        campaign
+            .settle_partial_from_account_sql(
+                &account,
+                input.intent_id.clone(),
+                2,
+                7,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+            .replayed
+    );
     assert_eq!(campaign.readback().await.unwrap(), read);
 }
 
@@ -2122,7 +2140,8 @@ async fn risk_book_contract_real_source_two_sql_owners_recover_missing_ack() {
     use super::owner::RiskBookHandle;
     use std::time::{Duration, Instant};
 
-    let (fixture, account, input, source) = source_verified_partial_fixture("two-owner-lost-ack").await;
+    let (fixture, account, input, source) =
+        source_verified_partial_fixture("two-owner-lost-ack").await;
     let verified = PartialEntrySqlProof::from_account_receipt(source).unwrap();
     {
         let mut original = open(&fixture);
@@ -2132,14 +2151,18 @@ async fn risk_book_contract_real_source_two_sql_owners_recover_missing_ack() {
     }
     // The campaign commit exists, but the native account ACK has not happened.
     let pending_id = input.intent_id.clone();
-    assert!(account
-        .call(Instant::now() + Duration::from_secs(5), move |s| {
-            s.partial_entry_ack_pending(&pending_id)
-        })
-        .await
-        .unwrap());
+    assert!(
+        account
+            .call(Instant::now() + Duration::from_secs(5), move |s| {
+                s.partial_entry_ack_pending(&pending_id)
+            })
+            .await
+            .unwrap()
+    );
     let campaign = RiskBookHandle::open_existing(
-        fixture.path.clone(), "test-installation".into(), opening().campaign_id,
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
     )
     .await
     .unwrap();
@@ -2150,7 +2173,10 @@ async fn risk_book_contract_real_source_two_sql_owners_recover_missing_ack() {
     // the SQL ACK is then written in the original account owner.
     let recovered = campaign
         .settle_partial_from_account_sql(
-            &account, input.intent_id.clone(), 2, 7,
+            &account,
+            input.intent_id.clone(),
+            2,
+            7,
             Instant::now() + Duration::from_secs(5),
         )
         .await
@@ -2158,11 +2184,13 @@ async fn risk_book_contract_real_source_two_sql_owners_recover_missing_ack() {
     assert!(recovered.replayed);
     assert_eq!(recovered.book_sequence, 3);
     let id = input.intent_id.clone();
-    assert!(!account
-        .call(Instant::now() + Duration::from_secs(5), move |s| {
-            s.partial_entry_ack_pending(&id)
-        })
-        .await
-        .unwrap());
+    assert!(
+        !account
+            .call(Instant::now() + Duration::from_secs(5), move |s| {
+                s.partial_entry_ack_pending(&id)
+            })
+            .await
+            .unwrap()
+    );
     assert_eq!(campaign.readback().await.unwrap(), before);
 }
