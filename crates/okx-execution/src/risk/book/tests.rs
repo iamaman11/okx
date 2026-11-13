@@ -1828,7 +1828,7 @@ async fn source_verified_partial_fixture(
         campaign.reserve(&input, &census()).unwrap();
         campaign.begin_post(&post_fence(&input, 1)).unwrap();
     }
-    let account = AccountStoreHandle::initialize_flat(
+    let account_owner = AccountStoreHandle::initialize_flat(
         fixture.root.join("account.sqlite"),
         AccountMeta {
             account_key: account('a'),
@@ -1854,7 +1854,7 @@ async fn source_verified_partial_fixture(
     let reservation = input.reservation_key();
     let intent_id = input.intent_id.clone();
     let plan_hash = input.plan_sha256.clone();
-    let source = account
+    let source = account_owner
         .call(Instant::now() + Duration::from_secs(5), move |s| {
             s.apply_authority_policy(1, false, "campaign-native-test", Decimal::from(200))?;
             let definition = s.ensure_manual_instance(1)?;
@@ -2059,7 +2059,7 @@ async fn source_verified_partial_fixture(
         })
         .await
         .unwrap();
-    (fixture, account, input, source)
+    (fixture, account_owner, input, source)
 }
 
 #[tokio::test]
