@@ -2211,9 +2211,11 @@ fn risk_book_contract_sql_child_two_owner_entry_committed_without_account_ack() 
         .partial_entry_settlement_receipt("intenttwosql1")
         .unwrap()
         .unwrap();
-    assert!(account_source
-        .partial_entry_ack_pending("intenttwosql1")
-        .unwrap());
+    assert!(
+        account_source
+            .partial_entry_ack_pending("intenttwosql1")
+            .unwrap()
+    );
     let proof = PartialEntrySqlProof::from_account_receipt(original).unwrap();
     let mut campaign = RiskBookStore::open_existing(
         &PathBuf::from(campaign_path),
@@ -2259,7 +2261,10 @@ async fn risk_book_contract_sql_real_two_owner_os_kill_after_campaign_before_acc
             "--nocapture",
         ])
         .env("OKX_510_TWO_OWNER_KILL_CAMPAIGN", &fixture.path)
-        .env("OKX_510_TWO_OWNER_KILL_ACCOUNT", fixture.root.join("account.sqlite"))
+        .env(
+            "OKX_510_TWO_OWNER_KILL_ACCOUNT",
+            fixture.root.join("account.sqlite"),
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -2268,7 +2273,10 @@ async fn risk_book_contract_sql_real_two_owner_os_kill_after_campaign_before_acc
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let reader = std::thread::spawn(move || {
         for line in BufReader::new(output).lines() {
-            if line.unwrap_or_default().contains("TWO_SQL_CAMPAIGN_COMMITTED_ACCOUNT_ACK_PENDING") {
+            if line
+                .unwrap_or_default()
+                .contains("TWO_SQL_CAMPAIGN_COMMITTED_ACCOUNT_ACK_PENDING")
+            {
                 let _ = ready_tx.send(());
                 return;
             }
@@ -2276,9 +2284,15 @@ async fn risk_book_contract_sql_real_two_owner_os_kill_after_campaign_before_acc
     });
     let committed = ready_rx.recv_timeout(Duration::from_secs(15));
     child.kill().unwrap();
-    assert!(!child.wait().unwrap().success(), "two-SQL source writer must be OS-killed");
+    assert!(
+        !child.wait().unwrap().success(),
+        "two-SQL source writer must be OS-killed"
+    );
     reader.join().unwrap();
-    assert!(committed.is_ok(), "child never committed original campaign debit");
+    assert!(
+        committed.is_ok(),
+        "child never committed original campaign debit"
+    );
 
     let reopened_account = crate::AccountStoreHandle::open_existing(
         fixture.root.join("account.sqlite"),
@@ -2288,12 +2302,14 @@ async fn risk_book_contract_sql_real_two_owner_os_kill_after_campaign_before_acc
     .await
     .unwrap();
     let pending_id = input.intent_id.clone();
-    assert!(reopened_account
-        .call(Instant::now() + Duration::from_secs(5), move |s| {
-            s.partial_entry_ack_pending(&pending_id)
-        })
-        .await
-        .unwrap());
+    assert!(
+        reopened_account
+            .call(Instant::now() + Duration::from_secs(5), move |s| {
+                s.partial_entry_ack_pending(&pending_id)
+            })
+            .await
+            .unwrap()
+    );
     let campaign = RiskBookHandle::open_existing(
         fixture.path.clone(),
         "test-installation".into(),
@@ -2319,11 +2335,13 @@ async fn risk_book_contract_sql_real_two_owner_os_kill_after_campaign_before_acc
     assert!(accepted.replayed);
     assert_eq!(accepted.book_sequence, 3);
     let id = input.intent_id.clone();
-    assert!(!reopened_account
-        .call(Instant::now() + Duration::from_secs(5), move |s| {
-            s.partial_entry_ack_pending(&id)
-        })
-        .await
-        .unwrap());
+    assert!(
+        !reopened_account
+            .call(Instant::now() + Duration::from_secs(5), move |s| {
+                s.partial_entry_ack_pending(&id)
+            })
+            .await
+            .unwrap()
+    );
     assert_eq!(campaign.readback().await.unwrap(), before);
 }
