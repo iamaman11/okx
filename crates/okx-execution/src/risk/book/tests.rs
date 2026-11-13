@@ -1552,3 +1552,146 @@ fn risk_book_contract_sql_posted_requires_durable_proof_fields() {
     );
     assert_eq!(recovered.readback().unwrap().book_sequence, 1);
 }
+
+fn partial_proof(
+    input: &ReserveInput,
+    revision: u64,
+    cumulative: &str,
+    digest_letter: char,
+) -> PartialEntrySqlProof {
+    use crate::EntrySettlementEvidence;
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+    PartialEntrySqlProof::from_account_receipt(EntrySettlementEvidence {
+        schema: "okx.entry-partial-settlement/v1".into(),
+        account_key: account('a'),
+        intent_id: input.intent_id.clone(),
+        plan_hash: input.plan_sha256.clone(),
+        reservation_key: input.reservation_key(),
+        venue_order_id: "venue-order-001".into(),
+        venue_update_ms: 11_000,
+        source_covered_through_ms: 11_000,
+        venue_filled_quantity: Decimal::ONE,
+        booked_notional_and_fee_usdt: Decimal::ONE,
+        cumulative_entry_usd: Decimal::from_str(cumulative).unwrap(),
+        settlement_revision: revision,
+        source_digest: uid(digest_letter),
+    }).unwrap()
+}
+
+#[test]
+fn risk_book_contract_sql_partial_entry_consumes_reserved_budget_once() {
+    let fixture = Fixture::new("entry-partial");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut s = open(&fixture);
+    let input = request('a', "intentpartial1", "3");
+    s.reserve(&input, &census()).unwrap();
+    s.begin_post(&post_fence(&input, 1)).unwrap();
+    let revision1 = partial_proof(&input, 1, "0.4", 'b');
+    let r = s.settle_partial_entry(&revision1, 2, 7).unwrap();
+    assert_eq!(r.book_sequence, 3);
+    assert_eq!(r.cumulative_entry_usd, "0.4");
+    assert_eq!(r.entry_bound_breach_usd, "0");
+    assert!(!r.replayed);
+    let b = s.readback().unwrap();
+    assert_eq!(b.consumed_entry_usd, "0.4");
+    assert_eq!(b.reserved_entry_usd, "0.6");
+    assert_eq!(b.remaining_entry_usd, "99");
+    assert_eq!(b.global_reserved_usdt, "3");
+    assert_eq!(b.reserved_loss_usd, "3");
+    // Lost ACK with an original stale sequence must not debit twice.
+    let replay = s.settle_partial_entry(&revision1, 2, 7).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.book_sequence, 3);
+    let changed_digest = partial_proof(&input, 1, "0.4", 'c');
+    assert!(matches!(
+        s.settle_partial_entry(&changed_digest, 3, 7),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
+    let changed_amount = partial_proof(&input, 1, "0.5", 'b');
+    assert!(matches!(
+        s.settle_partial_entry(&changed_amount, 3, 7),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
+    let revision2 = partial_proof(&input, 2, "0.75", 'c');
+    let r2 = s.settle_partial_entry(&revision2, 3, 7).unwrap();
+    assert_eq!(r2.book_sequence, 4);
+    let b = s.readback().unwrap();
+    assert_eq!(b.consumed_entry_usd, "0.75");
+    assert_eq!(b.reserved_entry_usd, "0.25");
+    assert_eq!(b.global_reserved_usdt, "3");
+    drop(s);
+    let mut reopened = open(&fixture);
+    assert_eq!(reopened.readback().unwrap(), b);
+    assert!(reopened.settle_partial_entry(&revision2, 3, 7).unwrap().replayed);
+    assert_eq!(reopened.readback().unwrap().book_sequence, 4);
+    let further = partial_proof(&input, 3, "1", 'd');
+    assert_eq!(
+        reopened.settle_partial_entry(&further, 4, 7).unwrap().book_sequence,
+        5
+    );
+    assert_eq!(reopened.readback().unwrap().reserved_entry_usd, "0");
+    assert_eq!(reopened.readback().unwrap().consumed_entry_usd, "1");
+}
+
+#[test]
+fn risk_book_contract_sql_partial_entry_regression_and_breach_fail_closed() {
+    let fixture = Fixture::new("entry-breach");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut s = open(&fixture);
+    let input = request('a', "intentpartial2", "3");
+    s.reserve(&input, &census()).unwrap();
+    s.begin_post(&post_fence(&input, 1)).unwrap();
+    let over = partial_proof(&input, 1, "2", 'b');
+    assert_eq!(
+        s.settle_partial_entry(&over, 2, 7).unwrap().entry_bound_breach_usd,
+        "1"
+    );
+    let read = s.readback().unwrap();
+    assert_eq!(read.consumed_entry_usd, "2");
+    assert_eq!(read.reserved_entry_usd, "0");
+    assert_eq!(read.entry_bound_breach_usd, "1");
+    // The modelled loss remains in the same original reservation.
+    assert_eq!(read.global_reserved_usdt, "3");
+    assert!(matches!(
+        s.reserve(&request('b', "intentblocked1", "1"), &census()),
+        Err(RiskStoreError::Denied(RiskRuleError::BoundBreach))
+    ));
+    let regression = partial_proof(&input, 2, "1.5", 'c');
+    assert!(matches!(
+        s.settle_partial_entry(&regression, 3, 7),
+        Err(RiskStoreError::Invalid("ENTRY_SETTLEMENT_REVISION_CONFLICT"))
+    ));
+    let skipped = partial_proof(&input, 3, "3", 'd');
+    assert!(matches!(
+        s.settle_partial_entry(&skipped, 3, 7),
+        Err(RiskStoreError::Invalid("ENTRY_SETTLEMENT_REVISION_CONFLICT"))
+    ));
+    let wrong_epoch = partial_proof(&input, 2, "2.5", 'c');
+    assert!(matches!(
+        s.settle_partial_entry(&wrong_epoch, 3, 6),
+        Err(RiskStoreError::StaleGeneration)
+    ));
+    assert_eq!(s.readback().unwrap(), read);
+}
+
+#[test]
+fn risk_book_contract_sql_partial_entry_integrity_detects_forged_cache() {
+    let fixture = Fixture::new("entry-integrity");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut s = open(&fixture);
+    let input = request('a', "intentpartial3", "2");
+    s.reserve(&input, &census()).unwrap();
+    s.begin_post(&post_fence(&input, 1)).unwrap();
+    s.settle_partial_entry(&partial_proof(&input, 1, "0.25", 'b'), 2, 7).unwrap();
+    drop(s);
+    let db = rusqlite::Connection::open(&fixture.path).unwrap();
+    db.execute(
+        "UPDATE risk_meta SET entry_consumed_usd='0' WHERE singleton=1", []
+    ).unwrap();
+    drop(db);
+    assert!(matches!(
+        RiskBookStore::open_existing(&fixture.path, "test-installation", &opening().campaign_id),
+        Err(RiskStoreError::Corrupt("ENTRY_CONSUMED_AGGREGATES"))
+    ));
+}
