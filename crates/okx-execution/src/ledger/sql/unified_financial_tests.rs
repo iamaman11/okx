@@ -67,7 +67,9 @@ fn seed(db: &Connection) {
         )
         .unwrap();
         db.execute(
-            "INSERT INTO finance_entry_sources VALUES(
+            "INSERT INTO finance_entry_sources(
+                 installation_id,account_key,intent_id,settlement_revision,
+                 fill_id,bill_id,source_digest,cumulative_entry_usd) VALUES(
                 'install-one',?1,'intent-1',1,'fill-same','bill-same',?2,?3)",
             params![
                 account,
@@ -245,7 +247,9 @@ fn risk_book_contract_single_finance_sqlite_scopes_identical_venue_ids() {
     // Same venue bill ID on B is not a permitted A-source when it has no
     // matching A fill. This is enforced by composite SQL FOREIGN KEY, not UI.
     let foreign = db.execute(
-        "INSERT INTO finance_entry_sources VALUES(
+        "INSERT INTO finance_entry_sources(
+                 installation_id,account_key,intent_id,settlement_revision,
+                 fill_id,bill_id,source_digest,cumulative_entry_usd) VALUES(
             'install-one','acct-A','intent-1',2,'fill-b-only','bill-same',?1,'7')",
         ["d".repeat(64)],
     );
@@ -355,7 +359,9 @@ fn risk_book_contract_single_finance_sqlite_rejects_stale_revision_corrupt_cache
         Err(StoreError::Invalid("UNIFIED_RECEIPT_REPLAY_CONFLICT"))
     ));
     db.execute(
-        "INSERT INTO finance_entry_sources VALUES(
+        "INSERT INTO finance_entry_sources(
+                 installation_id,account_key,intent_id,settlement_revision,
+                 fill_id,bill_id,source_digest,cumulative_entry_usd) VALUES(
          'install-one','acct-A','intent-1',2,'fill-same','bill-same',?1,'5')",
         ["d".repeat(64)],
     )
