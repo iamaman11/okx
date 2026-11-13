@@ -101,6 +101,7 @@ pub(super) struct AccountPolicy {
     pub account_key: String,
     pub account_limit: RiskAmount,
     pub order_limit: RiskAmount,
+    pub entry_limit: RiskAmount,
     pub strategy_id: String,
     pub strategy_limit: RiskAmount,
 }
@@ -138,6 +139,8 @@ pub(super) struct ReserveInput {
     pub conversion_digest: String,
     pub conversion_observed_at_ms: i64,
     pub conversion_rate: RiskAmount,
+    /// Same native process incarnation as the causal post-HELD source reader.
+    pub native_incarnation: String,
     pub proposal: RiskProposal,
     pub policy_revision: u64,
     pub now_ms: i64,
@@ -171,6 +174,7 @@ impl ReserveInput {
             &self.conversion_digest,
             self.conversion_observed_at_ms,
             self.conversion_rate.canonical()?,
+            &self.native_incarnation,
             self.proposal.loss_usdt.canonical()?,
             self.proposal.loss_usd.canonical()?,
             self.proposal.entry_upper_usd.canonical()?,
@@ -184,6 +188,7 @@ impl ReserveInput {
             || !valid_digest(&self.plan_sha256)
             || !valid_digest(&self.entry_proof_digest)
             || !valid_digest(&self.conversion_digest)
+            || !valid_incarnation(&self.native_incarnation)
             || !valid_token(&self.run_id)
             || !valid_token(&self.intent_id)
             || !valid_strategy_id(&self.strategy_id)
@@ -212,6 +217,12 @@ impl ReserveInput {
         }
         Ok(())
     }
+}
+fn valid_incarnation(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 fn valid_digest(value: &str) -> bool {
     value.len() == 64
@@ -436,7 +447,7 @@ impl RiskBookStore {
         connection.pragma_update(None, "synchronous", "FULL")?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let journal: String = connection.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
-        if version != 3 || journal != "wal" {
+        if version != 4 || journal != "wal" {
             return Err(RiskStoreError::Corrupt("SCHEMA_OR_JOURNAL"));
         }
         let identity: (String, String, i64) = connection.query_row(
@@ -723,8 +734,8 @@ impl RiskBookStore {
             reservation_key,account_key,strategy_id,intent_id,plan_sha256,request_digest,
             policy_revision,state,loss_usdt,loss_usd,entry_upper_usd,
             reserved_usdt,reserved_loss_usd,reserved_entry_usd,entry_proof_digest,
-            source_digest,book_sequence)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,'HELD',?8,?9,?10,?8,?9,?10,?11,?12,?13)",
+            source_digest,book_sequence,held_at_ms,reserve_read_floor_ms,native_incarnation)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,'HELD',?8,?9,?10,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             params![
                 &key,
                 &account_key,
@@ -738,7 +749,10 @@ impl RiskBookStore {
                 input.proposal.entry_upper_usd.canonical()?,
                 &input.entry_proof_digest,
                 &census.source_digest,
-                next_sequence_i64
+                next_sequence_i64,
+                input.now_ms,
+                census.read_floor_ms,
+                &input.native_incarnation
             ],
         )?;
         tx.execute(
@@ -807,11 +821,12 @@ impl RiskBookStore {
                 params![account.account_key],
             )?;
             tx.execute(
-                "INSERT INTO risk_policy_account VALUES(?1,?2,?3)",
+                "INSERT INTO risk_policy_account VALUES(?1,?2,?3,?4)",
                 params![
                     account.account_key,
                     account.account_limit.canonical()?,
-                    account.order_limit.canonical()?
+                    account.order_limit.canonical()?,
+                    account.entry_limit.canonical()?
                 ],
             )?;
             tx.execute(
