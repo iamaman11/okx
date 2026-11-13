@@ -155,7 +155,9 @@ impl RiskBookHandle {
         deadline: std::time::Instant,
     ) -> Result<UnsentReceipt, RiskStoreError> {
         let sql = account
-            .call(deadline, move |store| store.unsent_release_receipt(&intent_id))
+            .call(deadline, move |store| {
+                store.unsent_release_receipt(&intent_id)
+            })
             .await
             .map_err(|_| RiskStoreError::UnsentSqlUnavailable)?
             .ok_or(RiskStoreError::UnsentSqlUnproven)?;
