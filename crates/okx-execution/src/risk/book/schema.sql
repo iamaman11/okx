@@ -81,6 +81,10 @@ CREATE TABLE risk_entries (
  release_proof_digest TEXT NOT NULL DEFAULT '',
  release_request_hash TEXT NOT NULL DEFAULT '',
  release_reason TEXT NOT NULL DEFAULT '',
+ CHECK(state <> 'HELD' OR
+       (post_authorized_at_ms=0 AND post_sequence=0
+        AND post_proof_digest='' AND post_source_digest=''
+        AND post_existing_occupied_usdt='0')),
  CHECK(state = 'HELD' OR state = 'RELEASED' OR
        (post_authorized_at_ms>=held_at_ms AND post_sequence>book_sequence
         AND length(post_proof_digest)=64 AND length(post_source_digest)=64)),
