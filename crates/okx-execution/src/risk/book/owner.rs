@@ -2,8 +2,8 @@
 //! Completion after queueing may be unknown: callers must inspect durable
 //! identity, never blindly repeat external POST or assume a timed-out mutation failed.
 use super::store::{
-    AccountReadback, BookReadback, HeldReceipt, ReservationReadback, ReserveInput, RiskBookStore,
-    RiskStoreError, UnsentReceipt, UnsentSqlProof, VerifiedCensus,
+    AccountReadback, BookReadback, HeldReceipt, PostAuthorized, PostFenceInput, ReservationReadback,
+    ReserveInput, RiskBookStore, RiskStoreError, UnsentReceipt, UnsentSqlProof, VerifiedCensus,
 };
 use crate::account_worker::AccountStoreHandle;
 use std::{
@@ -140,6 +140,15 @@ impl RiskBookHandle {
         census: VerifiedCensus,
     ) -> Result<HeldReceipt, RiskStoreError> {
         self.call(move |store| store.reserve(&input, &census)).await
+    }
+
+    /// No production adapter exists yet: only authenticated source and
+    /// policy-epoch validation may eventually reach this private gateway.
+    pub(super) async fn begin_post(
+        &self,
+        input: PostFenceInput,
+    ) -> Result<PostAuthorized, RiskStoreError> {
+        self.call(move |store| store.begin_post(&input)).await
     }
 
     /// The only account-originated no-send route: read the existing native
