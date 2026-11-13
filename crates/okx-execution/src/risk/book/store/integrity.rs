@@ -82,7 +82,9 @@ pub(super) fn verify_reservation_aggregates(
                 "POSTED"
                     if original_sequence > 0
                         && post_sequence > original_sequence
-                        && u64::try_from(post_sequence).ok().is_some_and(|v| v <= meta.sequence)
+                        && u64::try_from(post_sequence)
+                            .ok()
+                            .is_some_and(|v| v <= meta.sequence)
                         && post_time >= held_time
                         && super::valid_digest(&post_proof_digest)
                         && super::valid_digest(&post_source_digest)
