@@ -2,9 +2,9 @@
 //! Completion after queueing may be unknown: callers must inspect durable
 //! identity, never blindly repeat external POST or assume a timed-out mutation failed.
 use super::store::{
-    AccountReadback, BookReadback, HeldReceipt, PostAuthorized, PostFenceInput,
-    ReservationReadback, ReserveInput, RiskBookStore, RiskStoreError, UnsentReceipt,
-    UnsentSqlProof, VerifiedCensus,
+    AccountReadback, BookReadback, EntrySettlementReceipt, HeldReceipt, PartialEntrySqlProof,
+    PostAuthorized, PostFenceInput, ReservationReadback, ReserveInput, RiskBookStore, RiskStoreError,
+    UnsentReceipt, UnsentSqlProof, VerifiedCensus,
 };
 use crate::account_worker::AccountStoreHandle;
 use std::{
@@ -150,6 +150,26 @@ impl RiskBookHandle {
         input: PostFenceInput,
     ) -> Result<PostAuthorized, RiskStoreError> {
         self.call(move |store| store.begin_post(&input)).await
+    }
+
+    /// One original partial-entry SQL receipt, not a caller-supplied debit.
+    /// Each owner has a separate durable commit; lost ACK is exact replay.
+    pub(super) async fn settle_partial_from_account_sql(
+        &self,
+        account: &AccountStoreHandle,
+        intent_id: String,
+        expected_sequence: u64,
+        generation: u64,
+        deadline: std::time::Instant,
+    ) -> Result<EntrySettlementReceipt, RiskStoreError> {
+        let sql = account
+            .call(deadline, move |s| s.partial_entry_settlement_receipt(&intent_id))
+            .await
+            .map_err(|_| RiskStoreError::UnsentSqlUnavailable)?
+            .ok_or(RiskStoreError::UnsentSqlUnproven)?;
+        let proof = PartialEntrySqlProof::from_account_receipt(sql)?;
+        self.call(move |store| store.settle_partial_entry(&proof, expected_sequence, generation))
+            .await
     }
 
     /// The only account-originated no-send route: read the existing native
