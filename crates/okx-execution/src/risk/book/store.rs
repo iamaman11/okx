@@ -95,7 +95,7 @@ impl ReserveInput {
     fn account_key(&self) -> String {
         format!("{}:real:{}", self.venue, self.uid)
     }
-    fn reservation_key(&self) -> String {
+    pub(super) fn reservation_key(&self) -> String {
         // Same length-prefixed key as legacy TS riskKey; no delimiter collision.
         [self.venue.as_str(), "real", self.uid.as_str(), self.run_id.as_str(), self.intent_id.as_str()]
             .into_iter()
