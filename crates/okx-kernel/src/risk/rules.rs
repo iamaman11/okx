@@ -1,13 +1,11 @@
 //! Pure capacity decisions ported from the same legacy RiskBook predicates.
 //! The owner must re-read identity, policy, census and revisions in its SQL transaction.
 use super::model::{CampaignCapacity, RiskProposal, ScopeCapacity};
-use super::money::MoneyError;
+use super::money::RiskAmount;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum RiskRuleError {
-    #[error("NUMERIC_RANGE")]
-    NumericRange,
     #[error("BUDGET_BOUND_BREACH")]
     BoundBreach,
     #[error("CAMPAIGN_ENTRY_BUDGET_EXHAUSTED")]
@@ -24,12 +22,6 @@ pub enum RiskRuleError {
     InsufficientAggregateOrAccountRisk,
 }
 
-impl From<MoneyError> for RiskRuleError {
-    fn from(_: MoneyError) -> Self {
-        Self::NumericRange
-    }
-}
-
 /// Called only after the persisted policy, opening proof and cohort are validated.
 pub fn evaluate_campaign_capacity(
     budget: &CampaignCapacity,
@@ -38,16 +30,16 @@ pub fn evaluate_campaign_capacity(
     if !budget.entry_bound_breach_usd.is_zero() {
         return Err(RiskRuleError::BoundBreach);
     }
-    let entry_total = budget.entry_consumed_usd
-        .checked_add(&budget.entry_reserved_usd)?
-        .checked_add(&request.entry_upper_usd)?;
-    if entry_total > budget.entry_limit_usd {
+    if RiskAmount::sum_exceeds(
+        &[&budget.entry_consumed_usd, &budget.entry_reserved_usd, &request.entry_upper_usd],
+        &budget.entry_limit_usd,
+    ) {
         return Err(RiskRuleError::EntryBudgetExhausted);
     }
-    let loss_total = budget.loss_consumed_usd
-        .checked_add(&budget.loss_reserved_usd)?
-        .checked_add(&request.loss_usd)?;
-    if loss_total > budget.loss_limit_usd {
+    if RiskAmount::sum_exceeds(
+        &[&budget.loss_consumed_usd, &budget.loss_reserved_usd, &request.loss_usd],
+        &budget.loss_limit_usd,
+    ) {
         return Err(RiskRuleError::LossBudgetExhausted);
     }
     Ok(())
@@ -63,19 +55,22 @@ pub fn evaluate_scope_capacity(
     {
         return Err(RiskRuleError::OrderOrStrategyLimit);
     }
-    if scope.strategy_occupied_usdt.checked_add(&request.loss_usdt)?
-        > scope.strategy_limit_usdt
-    {
+    if RiskAmount::sum_exceeds(
+        &[&scope.strategy_occupied_usdt, &request.loss_usdt],
+        &scope.strategy_limit_usdt,
+    ) {
         return Err(RiskRuleError::StrategyAggregateLimit);
     }
     if scope.account_occupied_usdt > scope.account_limit_usdt {
         return Err(RiskRuleError::AccountAlreadyOverLimit);
     }
-    if scope.global_occupied_usdt.checked_add(&request.loss_usdt)?
-        > scope.global_limit_usdt
-        || scope.account_occupied_usdt.checked_add(&request.loss_usdt)?
-            > scope.account_limit_usdt
-    {
+    if RiskAmount::sum_exceeds(
+        &[&scope.global_occupied_usdt, &request.loss_usdt],
+        &scope.global_limit_usdt,
+    ) || RiskAmount::sum_exceeds(
+        &[&scope.account_occupied_usdt, &request.loss_usdt],
+        &scope.account_limit_usdt,
+    ) {
         return Err(RiskRuleError::InsufficientAggregateOrAccountRisk);
     }
     Ok(())
@@ -100,7 +95,7 @@ mod tests {
     #[test]
     fn risk_book_contract_independent_entry_and_loss_budgets() {
         let budget = CampaignCapacity {
-            loss_limit_usd: amount("10"),
+            loss_limit_usd: amount("9"),
             loss_consumed_usd: amount("2"),
             loss_reserved_usd: amount("2"),
             entry_limit_usd: amount("5"),
