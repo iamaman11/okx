@@ -1504,3 +1504,42 @@ async fn risk_book_contract_sql_tokio_owner_posts_one_original_grant() {
     ));
     assert_eq!(owner.readback().await.unwrap().reserved_entry_usd, "1");
 }
+
+#[test]
+fn risk_book_contract_sql_account_entry_limit_rejects_before_held() {
+    let fixture = Fixture::new("account-entry-cap");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let mut input = request('a', "intententry1", "1");
+    input.proposal.entry_upper_usd = amt("11");
+    assert!(matches!(
+        store.reserve(&input, &census()),
+        Err(RiskStoreError::Denied(RiskRuleError::AccountEntryLimitExceeded))
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 0);
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "0");
+    assert_eq!(store.readback().unwrap().reserved_entry_usd, "0");
+}
+
+#[test]
+fn risk_book_contract_sql_posted_requires_durable_proof_fields() {
+    let fixture = Fixture::new("post-durable-check");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let input = request('a', "intentpostcheck1", "3");
+    store.reserve(&input, &census()).unwrap();
+    drop(store);
+    let db = rusqlite::Connection::open(&fixture.path).unwrap();
+    let rejected = db.execute(
+        "UPDATE risk_entries SET state='POSTED' WHERE reservation_key=?1",
+        rusqlite::params![input.reservation_key()],
+    );
+    assert!(rejected.is_err(), "SQLite may not grant POST without a saved source receipt");
+    drop(db);
+    let mut recovered = open(&fixture);
+    assert_eq!(
+        recovered.inspect(&input.reservation_key(), &input.plan_sha256).unwrap().unwrap().state,
+        okx_kernel::risk::model::RiskEntryState::Held
+    );
+    assert_eq!(recovered.readback().unwrap().book_sequence, 1);
+}
