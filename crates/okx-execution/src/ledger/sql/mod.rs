@@ -5,4 +5,4 @@ mod orders;
 mod projections;
 mod schema;
 mod sources;
-mod unified_financial;
+pub(in crate::account_store) mod unified_financial;
