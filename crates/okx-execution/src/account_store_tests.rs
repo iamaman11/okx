@@ -3046,6 +3046,11 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
             assert_eq!(partial.settlement_revision, 1);
             assert_eq!(partial.cumulative_entry_usd, Decimal::new(5001, 2));
             assert_eq!(
+                s.partial_entry_settlement_receipt("intent").unwrap(),
+                Some(partial.clone()),
+                "native SQL owner returns only original immutable source revision"
+            );
+            assert_eq!(
                 s.bind_partial_entry_settlement("intent", at, qty, at)
                     .unwrap(),
                 partial
