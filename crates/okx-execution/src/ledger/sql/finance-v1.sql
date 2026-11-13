@@ -20,6 +20,7 @@ CREATE TABLE finance_campaigns (
  book_sequence INTEGER NOT NULL CHECK(book_sequence>=0),
  entry_limit_usd TEXT NOT NULL,
  entry_consumed_usd TEXT NOT NULL DEFAULT '0',
+ entry_opening_consumed_usd TEXT NOT NULL DEFAULT '0',
  entry_reserved_usd TEXT NOT NULL DEFAULT '0',
  entry_breach_usd TEXT NOT NULL DEFAULT '0',
  PRIMARY KEY(installation_id,campaign_id),
@@ -54,6 +55,7 @@ CREATE TABLE finance_fills (
  trade_id TEXT NOT NULL,
  instrument_id TEXT NOT NULL,
  PRIMARY KEY(installation_id,account_key,fill_id),
+ UNIQUE(installation_id,account_key,fill_id,intent_id),
  UNIQUE(installation_id,account_key,instrument_id,trade_id,exchange_order_id),
  FOREIGN KEY(installation_id,account_key,intent_id)
    REFERENCES finance_intents(installation_id,account_key,intent_id)
@@ -65,6 +67,7 @@ CREATE TABLE finance_bills (
  fill_id TEXT NOT NULL,
  source_digest TEXT NOT NULL CHECK(length(source_digest)=64),
  PRIMARY KEY(installation_id,account_key,bill_id),
+ UNIQUE(installation_id,account_key,bill_id,fill_id),
  FOREIGN KEY(installation_id,account_key,fill_id)
    REFERENCES finance_fills(installation_id,account_key,fill_id)
 ) STRICT;
@@ -80,10 +83,10 @@ CREATE TABLE finance_entry_sources (
  PRIMARY KEY(installation_id,account_key,intent_id,settlement_revision),
  FOREIGN KEY(installation_id,account_key,intent_id)
    REFERENCES finance_intents(installation_id,account_key,intent_id),
- FOREIGN KEY(installation_id,account_key,fill_id)
-   REFERENCES finance_fills(installation_id,account_key,fill_id),
- FOREIGN KEY(installation_id,account_key,bill_id)
-   REFERENCES finance_bills(installation_id,account_key,bill_id)
+ FOREIGN KEY(installation_id,account_key,fill_id,intent_id)
+   REFERENCES finance_fills(installation_id,account_key,fill_id,intent_id),
+ FOREIGN KEY(installation_id,account_key,bill_id,fill_id)
+   REFERENCES finance_bills(installation_id,account_key,bill_id,fill_id)
 ) STRICT;
 CREATE TABLE finance_risk_entries (
  installation_id TEXT NOT NULL,
