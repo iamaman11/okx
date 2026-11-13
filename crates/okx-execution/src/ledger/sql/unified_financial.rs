@@ -68,8 +68,12 @@ fn overage(value: &RiskAmount, limit: &RiskAmount) -> StoreResult<RiskAmount> {
 /// Scope-keyed primary rows are checked before a mutable campaign cache may
 /// grant headroom. This is an O(active entries) proof for the initial slice;
 /// production performance/index evidence remains a checkpoint, not assumed.
-fn verify_campaign(tx: &Transaction<'_>, scope: &EntryRef<'_>,
-    opening: &RiskAmount, consumed: &RiskAmount, reserved: &RiskAmount,
+fn verify_campaign(
+    tx: &Transaction<'_>,
+    scope: &EntryRef<'_>,
+    opening: &RiskAmount,
+    consumed: &RiskAmount,
+    reserved: &RiskAmount,
 ) -> StoreResult<()> {
     let mut source_total = opening.clone();
     let mut active_reserved = RiskAmount::zero();
@@ -171,10 +175,18 @@ pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreR
              FROM finance_risk_entries
              WHERE installation_id=?1 AND campaign_id=?2 AND reservation_key=?3",
             params![scope.installation, scope.campaign, scope.reservation],
-            |r| Ok((
-                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
-                r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?,
-            )),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            },
         )
         .optional()?;
     let Some((account, intent, plan, state, upper, previous, old_rev, old_digest)) = row else {
@@ -211,7 +223,12 @@ pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreR
               AND b.bill_id=s.bill_id AND b.fill_id=s.fill_id
              WHERE s.installation_id=?1 AND s.account_key=?2
                AND s.intent_id=?3 AND s.settlement_revision=?4",
-            params![scope.installation, scope.account, scope.intent, scope.source_revision],
+            params![
+                scope.installation,
+                scope.account,
+                scope.intent,
+                scope.source_revision
+            ],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
@@ -235,7 +252,10 @@ pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreR
                  WHERE installation_id=?1 AND campaign_id=?2 AND reservation_key=?3
                    AND settlement_revision=?4",
                 params![
-                    scope.installation, scope.campaign, scope.reservation, scope.source_revision
+                    scope.installation,
+                    scope.campaign,
+                    scope.reservation,
+                    scope.source_revision
                 ],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -262,8 +282,7 @@ pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreR
     if sequence != scope.expected_sequence {
         return Err(StoreError::Invalid("UNIFIED_STALE_SEQUENCE"));
     }
-    if scope.source_revision != old_rev + 1 || cumulative < previous
-        || source_digest == old_digest
+    if scope.source_revision != old_rev + 1 || cumulative < previous || source_digest == old_digest
     {
         return Err(StoreError::Invalid("UNIFIED_SETTLEMENT_REGRESSION"));
     }
@@ -284,8 +303,12 @@ pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreR
     }
     let delta = checked_sub(&cumulative, &previous)?;
     let consumed_after = checked_add(&consumed, &delta)?;
-    let reserved_after = checked_sub(&reserved, &checked_sub(&previously_reserved, &next_reserved)?)?;
-    let breached_by_total = if RiskAmount::sum_exceeds(&[&consumed_after, &reserved_after], &limit) {
+    let reserved_after = checked_sub(
+        &reserved,
+        &checked_sub(&previously_reserved, &next_reserved)?,
+    )?;
+    let breached_by_total = if RiskAmount::sum_exceeds(&[&consumed_after, &reserved_after], &limit)
+    {
         overage(&checked_add(&consumed_after, &reserved_after)?, &limit)?
     } else {
         RiskAmount::zero()
@@ -303,11 +326,17 @@ pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreR
          WHERE installation_id=?5 AND campaign_id=?6 AND reservation_key=?7
            AND settlement_revision=?8 AND state='POSTED'",
         params![
-            canonical(&cumulative)?, canonical(&next_reserved)?,
-            scope.source_revision, &source_digest,
-            scope.installation, scope.campaign, scope.reservation, old_rev,
+            canonical(&cumulative)?,
+            canonical(&next_reserved)?,
+            scope.source_revision,
+            &source_digest,
+            scope.installation,
+            scope.campaign,
+            scope.reservation,
+            old_rev,
         ],
-    )? != 1 {
+    )? != 1
+    {
         return Err(StoreError::Invalid("UNIFIED_RESERVATION_CAS_CONFLICT"));
     }
     if tx.execute(
@@ -315,11 +344,17 @@ pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreR
          SET book_sequence=?1,entry_consumed_usd=?2,entry_reserved_usd=?3,entry_breach_usd=?4
          WHERE installation_id=?5 AND campaign_id=?6 AND generation=?7 AND book_sequence=?8",
         params![
-            next_sequence,canonical(&consumed_after)?,canonical(&reserved_after)?,
-            canonical(&breach_after)?,scope.installation,scope.campaign,
-            scope.generation,scope.expected_sequence,
+            next_sequence,
+            canonical(&consumed_after)?,
+            canonical(&reserved_after)?,
+            canonical(&breach_after)?,
+            scope.installation,
+            scope.campaign,
+            scope.generation,
+            scope.expected_sequence,
         ],
-    )? != 1 {
+    )? != 1
+    {
         return Err(StoreError::Invalid("UNIFIED_CAMPAIGN_CAS_CONFLICT"));
     }
     tx.execute(
@@ -328,8 +363,15 @@ pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreR
           settlement_revision,source_digest,cumulative_entry_usd,book_sequence)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         params![
-            scope.installation,scope.campaign,scope.reservation,scope.account,scope.intent,
-            scope.source_revision,source_digest,canonical(&cumulative)?,next_sequence,
+            scope.installation,
+            scope.campaign,
+            scope.reservation,
+            scope.account,
+            scope.intent,
+            scope.source_revision,
+            source_digest,
+            canonical(&cumulative)?,
+            next_sequence,
         ],
     )?;
     Ok(EntryCommit {
