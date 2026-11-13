@@ -855,6 +855,53 @@ impl AccountStore {
         Ok(settlement)
     }
 
+    /// Returns only the original source-linked immutable SQL partial revision.
+    /// No network-supplied settlement can call this without the current native
+    /// AccountStore owner. An independent RiskBook commit still needs an ACK.
+    pub fn partial_entry_settlement_receipt(
+        &self,
+        id: &str,
+    ) -> StoreResult<Option<EntrySettlementEvidence>> {
+        let Some(head) = self.operation(&format!("entry-partial-head:{id}"))? else {
+            return Ok(None);
+        };
+        let proof: EntrySettlementEvidence = serde_json::from_str(&head.result_ref)
+            .map_err(|_| StoreError::Invalid("ENTRY_PARTIAL_HEAD_CORRUPT"))?;
+        let immutable = self
+            .operation(&format!("entry-partial:{id}:r{}", proof.settlement_revision))?
+            .ok_or(StoreError::Invalid("ENTRY_PARTIAL_REVISION_MISSING"))?;
+        let intent = self
+            .intent(id)?
+            .ok_or(StoreError::Invalid("ENTRY_PARTIAL_INTENT_MISSING"))?;
+        let reservation = self
+            .central_receipt(id)?
+            .ok_or(StoreError::Invalid("ENTRY_PARTIAL_RESERVATION_MISSING"))?;
+        if proof.schema != "okx.entry-partial-settlement/v1"
+            || proof.account_key != self.meta.account_key
+            || proof.intent_id != id
+            || proof.plan_hash != intent.plan_hash
+            || proof.reservation_key != reservation.reservation_key
+            || proof.account_key != reservation.account_key
+            || proof.venue_order_id.is_empty()
+            || intent.exchange_order_id.as_deref() != Some(proof.venue_order_id.as_str())
+            || proof.settlement_revision == 0
+            || proof.cumulative_entry_usd <= Decimal::ZERO
+            || proof.source_digest.len() != 64
+            || !proof.source_digest.bytes().all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
+            || head.kind != "ENTRY_PARTIAL_HEAD"
+            || head.request_hash != proof.plan_hash
+            || immutable.kind != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
+            || immutable.request_hash != proof.plan_hash
+            || immutable.result_ref != head.result_ref
+        {
+            return Err(StoreError::Invalid("ENTRY_PARTIAL_SOURCE_UNPROVEN"));
+        }
+        // Existing owner checks any previously committed ACK against the
+        // immutable revision. A corrupted ACK can never authorize new spend.
+        self.partial_entry_ack_pending(id)?;
+        Ok(Some(proof))
+    }
+
     /// Read-only check of the latest durable partial settlement. A lost
     /// Worker reply must not let a terminal release overtake the ORIGINAL
     /// immutable SQL revision. No head means no partial claim to reconcile.
