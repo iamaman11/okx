@@ -167,11 +167,20 @@ impl RiskBookHandle {
                 s.partial_entry_settlement_receipt(&intent_id)
             })
             .await
-            .map_err(|_| RiskStoreError::UnsentSqlUnavailable)?
-            .ok_or(RiskStoreError::UnsentSqlUnproven)?;
-        let proof = PartialEntrySqlProof::from_account_receipt(sql)?;
-        self.call(move |store| store.settle_partial_entry(&proof, expected_sequence, generation))
+            .map_err(|_| RiskStoreError::EntrySqlUnavailable)?
+            .ok_or(RiskStoreError::EntrySqlUnproven)?;
+        let proof = PartialEntrySqlProof::from_account_receipt(sql.clone())?;
+        let accepted = self
+            .call(move |store| store.settle_partial_entry(&proof, expected_sequence, generation))
+            .await?;
+        // A distinct account SQLite commit is mandatory. Never ACK account
+        // history before campaign COMMIT. If this ACK is lost, report unknown;
+        // exact campaign revision replay remains read-only and retries the ACK.
+        account
+            .call(deadline, move |s| s.acknowledge_partial_entry_settlement(&sql))
             .await
+            .map_err(|_| RiskStoreError::OutcomeUnknown)?;
+        Ok(accepted)
     }
 
     /// The only account-originated no-send route: read the existing native
