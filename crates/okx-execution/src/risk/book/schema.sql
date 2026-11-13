@@ -71,8 +71,22 @@ CREATE TABLE risk_entries (
        (reserved_usdt='0' AND reserved_loss_usd='0' AND reserved_entry_usd='0')),
  FOREIGN KEY(account_key) REFERENCES risk_policy_account(account_key)
 ) STRICT;
+-- An authenticated account SQL no-send rejection may precede RESERVE.
+-- Absence of an entry is never proof of a terminal/no-send outcome.
+CREATE TABLE risk_no_reserve (
+ reservation_key TEXT PRIMARY KEY,
+ account_key TEXT NOT NULL,
+ intent_id TEXT NOT NULL,
+ plan_sha256 TEXT NOT NULL,
+ request_hash TEXT NOT NULL,
+ record_digest TEXT NOT NULL,
+ reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 128),
+ policy_revision INTEGER NOT NULL CHECK(policy_revision>0),
+ book_sequence INTEGER NOT NULL CHECK(book_sequence>0),
+ FOREIGN KEY(account_key) REFERENCES risk_policy_account(account_key)
+) STRICT;
 CREATE INDEX idx_risk_entries_active_account ON risk_entries(account_key,state);
 -- Only currently held obligations are audited per mutation, never full history.
 CREATE INDEX idx_risk_entries_active_balance ON risk_entries(state)
  WHERE state <> 'RELEASED';
-PRAGMA user_version=2;
+PRAGMA user_version=3;
