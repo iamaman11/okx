@@ -49,13 +49,12 @@ impl RiskAmount {
         if whole.len() + fraction.len() > MAX_TOTAL_DIGITS {
             return Err(MoneyError::NumericRange);
         }
-        let integer = BigUint::parse_bytes(whole.as_bytes(), 10)
-            .ok_or(MoneyError::InvalidSyntax)?;
+        let integer =
+            BigUint::parse_bytes(whole.as_bytes(), 10).ok_or(MoneyError::InvalidSyntax)?;
         let decimal = if fraction.is_empty() {
             BigUint::from(0_u8)
         } else {
-            BigUint::parse_bytes(fraction.as_bytes(), 10)
-                .ok_or(MoneyError::InvalidSyntax)?
+            BigUint::parse_bytes(fraction.as_bytes(), 10).ok_or(MoneyError::InvalidSyntax)?
                 * BigUint::from(10_u8).pow(SCALE_DIGITS - fraction.len() as u32)
         };
         Ok(Self(integer * quantum() + decimal))
@@ -87,7 +86,9 @@ impl RiskAmount {
     /// Comparison must not reject an over-budget proposal merely because
     /// an intermediate sum exceeds the wire's representable 28 digits.
     pub fn sum_exceeds(terms: &[&Self], limit: &Self) -> bool {
-        let total = terms.iter().fold(BigUint::from(0_u8), |sum, value| sum + &value.0);
+        let total = terms
+            .iter()
+            .fold(BigUint::from(0_u8), |sum, value| sum + &value.0);
         total > limit.0
     }
 
@@ -140,11 +141,22 @@ mod tests {
         assert_eq!(RiskAmount::parse("-1"), Err(MoneyError::InvalidSyntax));
         assert_eq!(RiskAmount::parse(".5"), Err(MoneyError::InvalidSyntax));
         assert_eq!(RiskAmount::parse("1."), Err(MoneyError::InvalidSyntax));
-        assert_eq!(RiskAmount::parse("0.0000000000000000000000000000"), Err(MoneyError::NumericRange));
-        assert_eq!(RiskAmount::parse_positive("0.0"), Err(MoneyError::MustBePositive));
+        assert_eq!(
+            RiskAmount::parse("0.0000000000000000000000000000"),
+            Err(MoneyError::NumericRange)
+        );
+        assert_eq!(
+            RiskAmount::parse_positive("0.0"),
+            Err(MoneyError::MustBePositive)
+        );
         assert_eq!(RiskAmount::parse("000.1"), Err(MoneyError::InvalidSyntax));
         assert_eq!(RiskAmount::parse("0.10000").unwrap().to_string(), "0.1");
-        assert_eq!(RiskAmount::parse("9999999999999999999999999999").unwrap().to_string(), "9999999999999999999999999999");
+        assert_eq!(
+            RiskAmount::parse("9999999999999999999999999999")
+                .unwrap()
+                .to_string(),
+            "9999999999999999999999999999"
+        );
         assert_eq!(RiskAmount::parse("0").unwrap().to_string(), "0");
     }
 
@@ -155,17 +167,22 @@ mod tests {
         // rejects 28 fractional digits plus the required leading zero.
         assert_eq!(atom.checked_mul_ceil(&atom), Err(MoneyError::NumericRange));
         assert_eq!(
-            RiskAmount::parse("1.000000001").unwrap()
-                .checked_mul_ceil(&RiskAmount::parse("1.001").unwrap()).unwrap().to_string(),
+            RiskAmount::parse("1.000000001")
+                .unwrap()
+                .checked_mul_ceil(&RiskAmount::parse("1.001").unwrap())
+                .unwrap()
+                .to_string(),
             "1.001000001001"
         );
         assert_eq!(
-            RiskAmount::parse("9999999999999999999999999999").unwrap()
+            RiskAmount::parse("9999999999999999999999999999")
+                .unwrap()
                 .checked_add(&RiskAmount::parse("1").unwrap()),
             Err(MoneyError::NumericRange)
         );
         assert_eq!(
-            RiskAmount::parse("0.1").unwrap()
+            RiskAmount::parse("0.1")
+                .unwrap()
                 .checked_sub(&RiskAmount::parse("0.2").unwrap()),
             Err(MoneyError::Negative)
         );
