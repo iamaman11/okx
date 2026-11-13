@@ -492,7 +492,9 @@ fn risk_book_contract_sql_rejects_over_limit_other_account() {
     source.occupied.insert(account('a'), amt("11"));
     assert!(matches!(
         store.reserve(&request('b', "intentcohort1", "1"), &source),
-        Err(RiskStoreError::Denied(RiskRuleError::AccountAlreadyOverLimit))
+        Err(RiskStoreError::Denied(
+            RiskRuleError::AccountAlreadyOverLimit
+        ))
     ));
     assert_eq!(store.readback().unwrap().book_sequence, 0);
     assert_eq!(store.readback().unwrap().global_reserved_usdt, "0");
@@ -503,7 +505,8 @@ fn risk_book_contract_sql_corrupted_reservation_aggregates_reject_reopen() {
     let fixture = Fixture::new("aggregate-corruption");
     RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
     let mut store = open(&fixture);
-    store.reserve(&request('a', "intentcorrupt1", "6"), &census())
+    store
+        .reserve(&request('a', "intentcorrupt1", "6"), &census())
         .unwrap();
     assert_eq!(store.readback().unwrap().global_reserved_usdt, "6");
     drop(store);
