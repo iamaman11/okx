@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 
 // The risk_entries rows carry the primary remaining obligations. Cached totals
 // never authorize a grant unless they agree with those exact-decimal records.
-// This version only implements HELD; other nonterminal states fail closed
-// until their transition and remaining-balance semantics are implemented.
+// HELD and POSTED both retain their original obligations. A committed
+// POSTED record includes immutable causal evidence and never mints another
+// grant. UNKNOWN/OPEN remain fail-closed until their balance rules exist.
 // RELEASED rows are protected by SQLite CHECK and excluded from this scan.
 pub(super) fn verify_reservation_aggregates(
     tx: &rusqlite::Transaction<'_>,
@@ -21,7 +22,9 @@ pub(super) fn verify_reservation_aggregates(
     {
         let mut stmt = tx.prepare(
             "SELECT account_key,strategy_id,state,loss_usdt,loss_usd,entry_upper_usd,
-                    reserved_usdt,reserved_loss_usd,reserved_entry_usd
+                    reserved_usdt,reserved_loss_usd,reserved_entry_usd,
+                    book_sequence,post_sequence,post_proof_digest,post_source_digest,
+                    post_authorized_at_ms,held_at_ms,post_existing_occupied_usdt
              FROM risk_entries WHERE state <> 'RELEASED'",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -35,6 +38,13 @@ pub(super) fn verify_reservation_aggregates(
                 row.get::<_, String>(6)?,
                 row.get::<_, String>(7)?,
                 row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, String>(12)?,
+                row.get::<_, i64>(13)?,
+                row.get::<_, i64>(14)?,
+                row.get::<_, String>(15)?,
             ))
         })?;
         for row in rows {
@@ -48,12 +58,39 @@ pub(super) fn verify_reservation_aggregates(
                 remaining_usdt,
                 remaining_loss,
                 remaining_entry,
+                original_sequence,
+                post_sequence,
+                post_proof_digest,
+                post_source_digest,
+                post_time,
+                held_time,
+                post_existing,
             ) = row?;
             let remaining_usdt = amount(remaining_usdt)?;
             let remaining_loss = amount(remaining_loss)?;
             let remaining_entry = amount(remaining_entry)?;
-            if state != "HELD" {
-                return Err(RiskStoreError::Corrupt("RESERVATION_STATE_UNIMPLEMENTED"));
+            // A durable POSTED observation must survive OS kill and reopen
+            // without losing any originally charged reserve. An incomplete
+            // transition is corrupt, never an alternative route to POST.
+            match state.as_str() {
+                "HELD"
+                    if post_sequence == 0
+                        && post_time == 0
+                        && post_proof_digest.is_empty()
+                        && post_source_digest.is_empty()
+                        && post_existing == "0" => {}
+                "POSTED"
+                    if original_sequence > 0
+                        && post_sequence > original_sequence
+                        && u64::try_from(post_sequence).ok().is_some_and(|v| v <= meta.sequence)
+                        && post_time >= held_time
+                        && super::valid_digest(&post_proof_digest)
+                        && super::valid_digest(&post_source_digest)
+                        && amount(post_existing).is_ok() => {}
+                "HELD" | "POSTED" => {
+                    return Err(RiskStoreError::Corrupt("POST_FENCE_INTEGRITY"));
+                }
+                _ => return Err(RiskStoreError::Corrupt("RESERVATION_STATE_UNIMPLEMENTED")),
             }
             if remaining_usdt != amount(original_usdt)?
                 || remaining_loss != amount(original_loss)?
@@ -126,7 +163,7 @@ pub(super) fn verify_reservation_aggregates(
     if contradictory != 0 {
         return Err(RiskStoreError::Corrupt("NO_RESERVE_FENCE_CONFLICT"));
     }
-    // Loss high-water marks are the primary per-account facts in this v3 book.
+    // Loss high-water marks are the primary per-account facts in this v4 book.
     // Their complete sum must equal the cached campaign consumed-loss total.
     let mut cumulative = RiskAmount::zero();
     let mut policy_count = 0_u64;
