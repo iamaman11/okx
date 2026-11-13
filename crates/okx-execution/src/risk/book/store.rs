@@ -97,11 +97,9 @@ impl ReserveInput {
     }
     fn reservation_key(&self) -> String {
         // Same length-prefixed key as legacy TS riskKey; no delimiter collision.
-        ["real", self.venue.as_str(), self.uid.as_str(), self.run_id.as_str(), self.intent_id.as_str()]
+        [self.venue.as_str(), "real", self.uid.as_str(), self.run_id.as_str(), self.intent_id.as_str()]
             .into_iter()
-            .enumerate()
-            .map(|(index, value)| if index==0 { format!("{}:{}",self.venue.len(),self.venue) }
-                 else {format!("{}:{value}",value.len())})
+            .map(|value| format!("{}:{value}", value.len()))
             .collect::<String>()
     }
     fn digest(&self) -> Result<String> {
