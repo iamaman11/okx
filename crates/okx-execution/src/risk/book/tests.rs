@@ -546,3 +546,17 @@ fn risk_book_contract_sql_release_requires_zero_reservations() {
     let mut reopened = open(&fixture);
     assert_eq!(reopened.readback().unwrap().global_reserved_usdt, "6");
 }
+
+#[test]
+fn risk_book_contract_sql_old_schema_version_is_rejected() {
+    let fixture = Fixture::new("schema-version");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let connection = rusqlite::Connection::open(&fixture.path).unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        RiskBookStore::open_existing(&fixture.path, "test-installation", &opening().campaign_id),
+        Err(RiskStoreError::Corrupt("SCHEMA_OR_JOURNAL"))
+    ));
+}
