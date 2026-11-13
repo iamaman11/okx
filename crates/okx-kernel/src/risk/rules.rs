@@ -223,7 +223,7 @@ mod tests {
                 .map(|key| PostAccountRead {
                     account_key: key.clone(),
                     private_generation: 7,
-                    source_read_id: "d".repeat(64),
+                    source_read_id: key.chars().last().unwrap().to_string().repeat(64),
                     content_digest: "c".repeat(64),
                     started_after_held_ms: 0,
                     completed_after_held_ms: 2,
