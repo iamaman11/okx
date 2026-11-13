@@ -81,6 +81,9 @@ CREATE TABLE finance_entry_sources (
  bill_id TEXT NOT NULL,
  source_digest TEXT NOT NULL CHECK(length(source_digest)=64),
  cumulative_entry_usd TEXT NOT NULL,
+ -- Preserves original verified AccountStore receipt bytes during legacy import.
+ -- Synthetic first-slice fixtures do not possess an original receipt.
+ original_receipt_json TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(installation_id,account_key,intent_id,settlement_revision),
  FOREIGN KEY(installation_id,account_key,intent_id)
    REFERENCES finance_intents(installation_id,account_key,intent_id),
