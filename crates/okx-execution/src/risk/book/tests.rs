@@ -456,3 +456,22 @@ async fn risk_book_contract_sql_denied_reserve_refreshes_owner_projection() {
     assert_eq!(visible.book_sequence, 1);
     assert_eq!(visible.global_reserved_usdt, "0");
 }
+
+
+#[test]
+fn risk_book_contract_sql_legacy_identity_and_safe_number_ranges() {
+    let mut input=request('a',"intent0001","1");
+    assert_eq!(input.reservation_key(),format!(
+        "3:okx4:real64:{}10:run_00000110:intent0001",uid('a')
+    ));
+    input.strategy_id="s1".into();
+    assert!(input.validate().is_ok(),"legacy allows two-character strategy IDs");
+    input.strategy_id="1s".into();
+    assert!(matches!(input.validate(),Err(RiskStoreError::Invalid(_))));
+    input.strategy_id="strategy_test".into();
+    input.policy_revision=9_007_199_254_740_992;
+    assert!(matches!(input.validate(),Err(RiskStoreError::Invalid(_))));
+    input.policy_revision=1;
+    input.now_ms=9_007_199_254_740_992;
+    assert!(matches!(input.validate(),Err(RiskStoreError::Invalid(_))));
+}

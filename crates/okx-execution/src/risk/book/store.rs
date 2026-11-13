@@ -58,6 +58,8 @@ pub(super) enum RiskStoreError {
     Invalid(&'static str),
 }
 type Result<T> = std::result::Result<T, RiskStoreError>;
+const LEGACY_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+fn safe_integer(value:i64)->bool { value>=0 && (value as u64)<=LEGACY_MAX_SAFE_INTEGER }
 
 #[derive(Debug, Clone)]
 pub(super) struct AccountPolicy {
@@ -141,7 +143,7 @@ impl ReserveInput {
         ))?;
         Ok(format!("{:x}", Sha256::digest(canonical)))
     }
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         if !valid_venue(&self.venue)
             || !valid_digest(&self.uid)
             || !valid_digest(&self.plan_sha256)
@@ -149,11 +151,14 @@ impl ReserveInput {
             || !valid_digest(&self.conversion_digest)
             || !valid_token(&self.run_id)
             || !valid_token(&self.intent_id)
-            || !valid_token(&self.strategy_id)
+            || !valid_strategy_id(&self.strategy_id)
             || !valid_instrument(&self.instrument_id)
             || self.policy_revision == 0
+            || self.policy_revision > LEGACY_MAX_SAFE_INTEGER
             || self.now_ms <= 0
+            || !safe_integer(self.now_ms)
             || self.conversion_observed_at_ms <= 0
+            || !safe_integer(self.conversion_observed_at_ms)
             || self.conversion_observed_at_ms > self.now_ms
             || self.now_ms - self.conversion_observed_at_ms > 5_000
         {
@@ -191,6 +196,11 @@ fn valid_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+fn valid_strategy_id(value:&str)->bool {
+    (2..=64).contains(&value.len())
+        && value.bytes().next().is_some_and(|b|b.is_ascii_alphabetic())
+        && value.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'||b==b'-')
 }
 fn valid_instrument(value: &str) -> bool {
     (3..=64).contains(&value.len())
@@ -318,6 +328,9 @@ fn apply_census_loss(
         .sequence
         .checked_add(1)
         .ok_or(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+    if sequence > LEGACY_MAX_SAFE_INTEGER {
+        return Err(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"));
+    }
     let new_sequence =
         i64::try_from(sequence).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
     for (account, observed) in updates {
@@ -420,10 +433,13 @@ impl RiskBookStore {
         input.validate()?;
         if !census.complete
             || census.generation == 0
+            || census.generation > LEGACY_MAX_SAFE_INTEGER
             || !valid_digest(&census.source_digest)
             || input.now_ms < census.generated_at_ms
             || census.generated_at_ms <= 0
+            || !safe_integer(census.generated_at_ms)
             || census.read_floor_ms <= 0
+            || !safe_integer(census.read_floor_ms)
             || census.read_floor_ms > census.generated_at_ms
             || input.now_ms - census.generated_at_ms > 5_000
         {
@@ -550,6 +566,9 @@ impl RiskBookStore {
             .sequence
             .checked_add(1)
             .ok_or(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+        if next_sequence > LEGACY_MAX_SAFE_INTEGER {
+            return Err(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"));
+        }
         let next_sequence_i64 = i64::try_from(next_sequence)
             .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
         let new_global = meta
@@ -608,7 +627,9 @@ impl RiskBookStore {
         if path.exists() {
             return Err(RiskStoreError::Invalid("EXISTING_RISK_BOOK"));
         }
-        if opening.accounts.len() < 2 || opening.policy_revision == 0 || opening.generation == 0 {
+        if opening.accounts.len() < 2 || opening.policy_revision == 0 || opening.generation == 0
+            || opening.policy_revision > LEGACY_MAX_SAFE_INTEGER
+            || opening.generation > LEGACY_MAX_SAFE_INTEGER {
             return Err(RiskStoreError::Invalid("FIXTURE_COHORT"));
         }
         // Test-only; never a production path to mint a fresh risk budget over
