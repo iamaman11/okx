@@ -3,8 +3,8 @@
 //! economic facts are produced and sealed by the existing AccountStore owner.
 //! No arbitrary network settlement, late fee or terminal release is accepted.
 use super::{
-    LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, amount,
-    read_meta, valid_digest, verify_reservation_aggregates,
+    LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, amount, read_meta,
+    valid_digest, verify_reservation_aggregates,
 };
 use crate::account_store::EntrySettlementEvidence;
 use okx_kernel::risk::money::RiskAmount;
@@ -61,9 +61,8 @@ impl PartialEntrySqlProof {
         {
             return Err(RiskStoreError::Invalid("PARTIAL_SQL_PROOF_INVALID"));
         }
-        let cumulative = RiskAmount::parse_positive(
-            &evidence.cumulative_entry_usd.normalize().to_string()
-        )?;
+        let cumulative =
+            RiskAmount::parse_positive(&evidence.cumulative_entry_usd.normalize().to_string())?;
         Ok(Self {
             account_key: evidence.account_key,
             reservation_key: evidence.reservation_key,
@@ -86,26 +85,58 @@ impl RiskBookStore {
         if expected_sequence == 0 || expected_sequence > LEGACY_MAX_SAFE_INTEGER {
             return Err(RiskStoreError::StaleSequence);
         }
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let meta = read_meta(&tx)?;
         verify_reservation_aggregates(&tx, &meta)?;
         if generation != meta.generation {
             return Err(RiskStoreError::StaleGeneration);
         }
-        let entry: Option<(String,String,String,String,String,String,i64,String,String)> = tx
+        let entry: Option<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            String,
+        )> = tx
             .query_row(
                 "SELECT account_key,plan_sha256,state,entry_upper_usd,
                         reserved_entry_usd,entry_settled_usd,entry_settlement_revision,
                         entry_settlement_digest,entry_bound_breach_usd
                  FROM risk_entries WHERE reservation_key=?1",
                 params![&proof.reservation_key],
-                |r| Ok((
-                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                    r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?
-                ))
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((account,plan,state,upper,remaining,previous,prior_revision,digest,prior_breach)) = entry else {
+        let Some((
+            account,
+            plan,
+            state,
+            upper,
+            remaining,
+            previous,
+            prior_revision,
+            digest,
+            prior_breach,
+        )) = entry
+        else {
             return Err(RiskStoreError::Invalid("PARTIAL_RESERVATION_MISSING"));
         };
         if account != proof.account_key || plan != proof.plan_sha256 {
@@ -142,10 +173,18 @@ impl RiskBookStore {
         if expected_sequence != meta.sequence {
             return Err(RiskStoreError::StaleSequence);
         }
-        if proof.revision != prior_revision.checked_add(1).ok_or(
-            RiskStoreError::Corrupt("ENTRY_SETTLEMENT_REVISION_OVERFLOW")
-        )? || proof.cumulative_usd < before || digest == proof.source_digest {
-            return Err(RiskStoreError::Invalid("ENTRY_SETTLEMENT_REVISION_CONFLICT"));
+        if proof.revision
+            != prior_revision
+                .checked_add(1)
+                .ok_or(RiskStoreError::Corrupt(
+                    "ENTRY_SETTLEMENT_REVISION_OVERFLOW",
+                ))?
+            || proof.cumulative_usd < before
+            || digest == proof.source_digest
+        {
+            return Err(RiskStoreError::Invalid(
+                "ENTRY_SETTLEMENT_REVISION_CONFLICT",
+            ));
         }
         let expected_remaining = if upper > before {
             upper.checked_sub(&before)?
@@ -167,11 +206,12 @@ impl RiskBookStore {
         let current_over = overage(&proof.cumulative_usd, &upper)?;
         let individual_delta = current_over.checked_sub(&previous_over)?;
         let prior_aggregate = aggregate_overage(
-            &meta.entry_consumed, &meta.entry_reserved, &meta.entry_limit
+            &meta.entry_consumed,
+            &meta.entry_reserved,
+            &meta.entry_limit,
         )?;
-        let current_aggregate = aggregate_overage(
-            &consumed_after, &reserved_after, &meta.entry_limit
-        )?;
+        let current_aggregate =
+            aggregate_overage(&consumed_after, &reserved_after, &meta.entry_limit)?;
         let aggregate_delta = if current_aggregate > prior_aggregate {
             current_aggregate.checked_sub(&prior_aggregate)?
         } else {
@@ -183,10 +223,13 @@ impl RiskBookStore {
             aggregate_delta
         };
         let breach_after = meta.entry_breach.checked_add(&breach_delta)?;
-        let next = meta.sequence.checked_add(1)
+        let next = meta
+            .sequence
+            .checked_add(1)
             .filter(|v| *v <= LEGACY_MAX_SAFE_INTEGER)
             .ok_or(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
-        let next_i64 = i64::try_from(next).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+        let next_i64 =
+            i64::try_from(next).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
         let changed = tx.execute(
             "UPDATE risk_entries SET reserved_entry_usd=?1,entry_settled_usd=?2,
                     entry_settlement_revision=?3,entry_settlement_digest=?4,entry_bound_breach_usd=?5
@@ -206,9 +249,12 @@ impl RiskBookStore {
                     entry_reserved_usd=?3,entry_bound_breach_usd=?4
              WHERE singleton=1 AND book_sequence=?5 AND generation=?6",
             params![
-                next_i64,consumed_after.canonical()?,reserved_after.canonical()?,
+                next_i64,
+                consumed_after.canonical()?,
+                reserved_after.canonical()?,
                 breach_after.canonical()?,
-                i64::try_from(meta.sequence).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_RANGE"))?,
+                i64::try_from(meta.sequence)
+                    .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_RANGE"))?,
                 i64::try_from(meta.generation).map_err(|_| RiskStoreError::StaleGeneration)?,
             ],
         )?;
