@@ -93,10 +93,7 @@ pub(super) fn inspect(
     reservation_key: &str,
     plan_sha256: &str,
 ) -> Result<Option<ReservationReadback>> {
-    if reservation_key.is_empty()
-        || reservation_key.len() > 512
-        || !valid_digest(plan_sha256)
-    {
+    if reservation_key.is_empty() || reservation_key.len() > 512 || !valid_digest(plan_sha256) {
         return Err(RiskStoreError::Invalid("INSPECTION_IDENTITY"));
     }
     let row: Option<(String, String, i64, i64)> = tx
@@ -122,8 +119,8 @@ pub(super) fn inspect(
         "RELEASED" => RiskEntryState::Released,
         _ => return Err(RiskStoreError::Corrupt("RESERVATION_STATE")),
     };
-    let reservation_sequence = u64::try_from(entry_seq)
-        .map_err(|_| RiskStoreError::Corrupt("RESERVATION_SEQUENCE"))?;
+    let reservation_sequence =
+        u64::try_from(entry_seq).map_err(|_| RiskStoreError::Corrupt("RESERVATION_SEQUENCE"))?;
     let policy_revision =
         u64::try_from(revision).map_err(|_| RiskStoreError::Corrupt("RESERVATION_POLICY"))?;
     if reservation_sequence == 0
