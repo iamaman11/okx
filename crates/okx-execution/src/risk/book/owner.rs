@@ -2,7 +2,8 @@
 //! Completion after queueing may be unknown: callers must inspect durable
 //! identity, never blindly repeat external POST or assume a timed-out mutation failed.
 use super::store::{
-    BookReadback, HeldReceipt, ReserveInput, RiskBookStore, RiskStoreError, VerifiedCensus,
+    AccountReadback, BookReadback, HeldReceipt, ReservationReadback, ReserveInput, RiskBookStore,
+    RiskStoreError, VerifiedCensus,
 };
 use std::{
     path::PathBuf,
@@ -142,5 +143,22 @@ impl RiskBookHandle {
 
     pub(super) async fn readback(&self) -> Result<BookReadback, RiskStoreError> {
         self.call(|store| store.readback()).await
+    }
+
+    pub(super) async fn account_readback(
+        &self,
+        account_key: String,
+    ) -> Result<AccountReadback, RiskStoreError> {
+        self.call(move |store| store.account_readback(&account_key))
+            .await
+    }
+
+    pub(super) async fn inspect(
+        &self,
+        reservation_key: String,
+        plan_sha256: String,
+    ) -> Result<Option<ReservationReadback>, RiskStoreError> {
+        self.call(move |store| store.inspect(&reservation_key, &plan_sha256))
+            .await
     }
 }
