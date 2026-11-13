@@ -46,6 +46,8 @@ pub(super) enum RiskStoreError {
     StaleGeneration,
     #[error("COMPLETE_ACCOUNT_CENSUS_UNPROVEN")]
     CensusUnproven,
+    #[error("CUMULATIVE_LOSS_SOURCE_REGRESSION")]
+    LossRegression,
     #[error("IDEMPOTENCY_CONFLICT")]
     IdempotencyConflict,
     #[error("INTENT_ALREADY_POSTED_OR_RESOLVED")]
@@ -84,6 +86,7 @@ pub(super) struct VerifiedCensus {
     pub generated_at_ms: i64,
     pub read_floor_ms: i64,
     pub occupied: BTreeMap<String, RiskAmount>,
+    pub cumulative_loss_usd: BTreeMap<String, RiskAmount>,
 }
 #[derive(Debug, Clone)]
 pub(super) struct ReserveInput {
@@ -207,6 +210,7 @@ pub(super) struct BookReadback {
     pub book_sequence: u64,
     pub policy_revision: u64,
     pub global_reserved_usdt: String,
+    pub consumed_loss_usd: String,
     pub reserved_loss_usd: String,
     pub reserved_entry_usd: String,
 }
@@ -282,6 +286,53 @@ fn amount(text: String) -> Result<RiskAmount> {
     Ok(RiskAmount::parse(&text)?)
 }
 
+// One durable source-high-water per managed account. The caller's complete
+// census must have already been checked against the entire SQL policy cohort.
+fn apply_census_loss(
+    tx: &rusqlite::Transaction<'_>, meta: &mut BookMeta, census: &VerifiedCensus,
+) -> Result<()> {
+    let mut delta = RiskAmount::zero();
+    let mut updates = Vec::new();
+    for (account, observed) in &census.cumulative_loss_usd {
+        let previous: String = tx.query_row(
+            "SELECT cumulative_loss_usd FROM risk_loss_source WHERE account_key=?1",
+            params![account], |row| row.get(0)
+        )?;
+        let previous = RiskAmount::parse(&previous)?;
+        if observed < &previous {
+            return Err(RiskStoreError::LossRegression);
+        }
+        if observed != &previous {
+            delta = delta.checked_add(&observed.checked_sub(&previous)?)?;
+            updates.push((account, observed));
+        }
+    }
+    if delta.is_zero() { return Ok(()); }
+    let consumed = meta.loss_consumed.checked_add(&delta)?;
+    let sequence = meta.sequence.checked_add(1)
+        .ok_or(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+    let new_sequence = i64::try_from(sequence)
+        .map_err(|_|RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+    for (account, observed) in updates {
+        let updated=tx.execute(
+            "UPDATE risk_loss_source SET cumulative_loss_usd=?1,source_digest=?2 WHERE account_key=?3",
+            params![observed.canonical()?, &census.source_digest, account]
+        )?;
+        if updated!=1 {return Err(RiskStoreError::Corrupt("MISSING_LOSS_SOURCE"));}
+    }
+    let updated=tx.execute(
+        "UPDATE risk_meta SET loss_consumed_usd=?1,book_sequence=?2
+         WHERE singleton=1 AND book_sequence=?3 AND policy_revision=?4",
+        params![consumed.canonical()?, new_sequence,
+            i64::try_from(meta.sequence).map_err(|_|RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
+            i64::try_from(meta.policy_revision).map_err(|_|RiskStoreError::PolicyConflict)?]
+    )?;
+    if updated!=1{return Err(RiskStoreError::PolicyConflict);}
+    meta.loss_consumed=consumed;
+    meta.sequence=sequence;
+    Ok(())
+}
+
 pub(super) struct RiskBookStore {
     connection: Connection,
     _lease: File,
@@ -339,6 +390,7 @@ impl RiskBookStore {
             book_sequence: meta.sequence,
             policy_revision: meta.policy_revision,
             global_reserved_usdt: meta.global_reserved.canonical()?,
+            consumed_loss_usd: meta.loss_consumed.canonical()?,
             reserved_loss_usd: meta.loss_reserved.canonical()?,
             reserved_entry_usd: meta.entry_reserved.canonical()?,
         })
@@ -365,7 +417,7 @@ impl RiskBookStore {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let meta = read_meta(&tx)?;
+        let mut meta = read_meta(&tx)?;
         if meta.policy_revision != input.policy_revision {
             return Err(RiskStoreError::PolicyConflict);
         }
@@ -387,7 +439,10 @@ impl RiskBookStore {
                 policies.insert(account, (amount(limit)?, amount(order)?));
             }
         }
-        if policies.is_empty() || policies.keys().ne(census.occupied.keys()) {
+        if policies.is_empty()
+            || policies.keys().ne(census.occupied.keys())
+            || policies.keys().ne(census.cumulative_loss_usd.keys())
+        {
             return Err(RiskStoreError::CensusUnproven);
         }
         let account_key = input.account_key();
@@ -406,6 +461,9 @@ impl RiskBookStore {
         let reserved_strategy:String=tx.query_row(
             "SELECT reserved_usdt FROM risk_strategy_occupied WHERE account_key=?1 AND strategy_id=?2",
             params![&account_key,&input.strategy_id],|r|r.get(0))?;
+        // Persist monotonic native loss before evaluating new capacity.
+        // An ordinary budget denial still commits this independent observation.
+        apply_census_loss(&tx, &mut meta, census)?;
         let key = input.reservation_key();
         let digest = input.digest()?;
         let prior: Option<(String, String)> = tx
@@ -417,11 +475,14 @@ impl RiskBookStore {
             .optional()?;
         if let Some((existing, state)) = prior {
             if existing != digest {
+                tx.commit()?;
                 return Err(RiskStoreError::IdempotencyConflict);
             }
             if state != "HELD" {
+                tx.commit()?;
                 return Err(RiskStoreError::AlreadyResolved);
             }
+            tx.commit()?;
             return Ok(HeldReceipt {
                 reservation_key: key,
                 book_sequence: meta.sequence,
@@ -438,7 +499,7 @@ impl RiskBookStore {
         let account_reserved = amount(reserved_account)?;
         let strategy_reserved = amount(reserved_strategy)?;
         let strategy_limit = amount(strategy_limit)?;
-        evaluate_campaign_capacity(
+        let campaign_decision = evaluate_campaign_capacity(
             &CampaignCapacity {
                 loss_limit_usd: meta.loss_limit.clone(),
                 loss_consumed_usd: meta.loss_consumed.clone(),
@@ -449,8 +510,12 @@ impl RiskBookStore {
                 entry_bound_breach_usd: meta.entry_breach.clone(),
             },
             &input.proposal,
-        )?;
-        evaluate_scope_capacity(
+        );
+        if let Err(reason) = campaign_decision {
+            tx.commit()?;
+            return Err(RiskStoreError::Denied(reason));
+        }
+        let scope_decision = evaluate_scope_capacity(
             &ScopeCapacity {
                 global_limit_usdt: meta.global_limit,
                 global_occupied_usdt: global_occupied,
@@ -461,7 +526,11 @@ impl RiskBookStore {
                 order_limit_usdt: order_limit.clone(),
             },
             &input.proposal,
-        )?;
+        );
+        if let Err(reason) = scope_decision {
+            tx.commit()?;
+            return Err(RiskStoreError::Denied(reason));
+        }
         let next_sequence = meta
             .sequence
             .checked_add(1)
@@ -563,6 +632,10 @@ impl RiskBookStore {
                     account.account_limit.canonical()?,
                     account.order_limit.canonical()?
                 ],
+            )?;
+            tx.execute(
+                "INSERT INTO risk_loss_source VALUES(?1,'0','')",
+                params![account.account_key],
             )?;
             tx.execute(
                 "INSERT INTO risk_policy_strategy VALUES(?1,?2,?3)",

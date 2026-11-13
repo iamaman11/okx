@@ -28,6 +28,12 @@ CREATE TABLE risk_account_occupied (
  account_key TEXT PRIMARY KEY,
  reserved_usdt TEXT NOT NULL
 ) STRICT;
+CREATE TABLE risk_loss_source (
+ account_key TEXT PRIMARY KEY,
+ cumulative_loss_usd TEXT NOT NULL,
+ source_digest TEXT NOT NULL,
+ FOREIGN KEY(account_key) REFERENCES risk_policy_account(account_key)
+) STRICT;
 CREATE TABLE risk_policy_strategy (
  account_key TEXT NOT NULL,
  strategy_id TEXT NOT NULL,
