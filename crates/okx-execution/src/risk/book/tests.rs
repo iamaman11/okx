@@ -1130,3 +1130,32 @@ async fn risk_book_contract_real_account_sql_unsent_proof_bridges_campaign_owner
         okx_kernel::risk::model::RiskEntryState::Released
     );
 }
+
+#[test]
+fn risk_book_contract_campaign_db_path_is_installation_scoped() {
+    let fixture = Fixture::new("campaign-path");
+    let campaign = opening().campaign_id;
+    let selected = campaign_db_path(&fixture.root, &campaign).unwrap();
+    assert_eq!(
+        selected,
+        fixture
+            .root
+            .join("risk")
+            .join("campaigns")
+            .join(uid('c'))
+            .join("risk-book.sqlite")
+    );
+    assert!(!selected.exists(), "path derivation must never bootstrap a budget");
+    assert!(matches!(
+        campaign_db_path(std::path::Path::new("relative"), &campaign),
+        Err(RiskStoreError::Invalid("RUNTIME_ROOT_NOT_ABSOLUTE"))
+    ));
+    assert!(matches!(
+        campaign_db_path(&fixture.root, "sha256:../../another-tenant"),
+        Err(RiskStoreError::Invalid("CAMPAIGN_ID"))
+    ));
+    assert!(matches!(
+        campaign_db_path(&fixture.root, &format!("sha256:{}", "A".repeat(64))),
+        Err(RiskStoreError::Invalid("CAMPAIGN_ID"))
+    ));
+}
