@@ -135,8 +135,10 @@ pub(super) fn verify_reservation_aggregates(
             policy_count += 1;
         }
     }
-    let source_count: u64 =
+    let source_count: i64 =
         tx.query_row("SELECT COUNT(*) FROM risk_loss_source", [], |r| r.get(0))?;
+    let source_count = u64::try_from(source_count)
+        .map_err(|_| RiskStoreError::Corrupt("LOSS_SOURCE_AGGREGATES"))?;
     if cumulative != meta.loss_consumed || source_count != policy_count {
         return Err(RiskStoreError::Corrupt("LOSS_SOURCE_AGGREGATES"));
     }
