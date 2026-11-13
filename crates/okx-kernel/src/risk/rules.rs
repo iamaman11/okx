@@ -31,13 +31,21 @@ pub fn evaluate_campaign_capacity(
         return Err(RiskRuleError::BoundBreach);
     }
     if RiskAmount::sum_exceeds(
-        &[&budget.entry_consumed_usd, &budget.entry_reserved_usd, &request.entry_upper_usd],
+        &[
+            &budget.entry_consumed_usd,
+            &budget.entry_reserved_usd,
+            &request.entry_upper_usd,
+        ],
         &budget.entry_limit_usd,
     ) {
         return Err(RiskRuleError::EntryBudgetExhausted);
     }
     if RiskAmount::sum_exceeds(
-        &[&budget.loss_consumed_usd, &budget.loss_reserved_usd, &request.loss_usd],
+        &[
+            &budget.loss_consumed_usd,
+            &budget.loss_reserved_usd,
+            &request.loss_usd,
+        ],
         &budget.loss_limit_usd,
     ) {
         return Err(RiskRuleError::LossBudgetExhausted);
@@ -50,9 +58,7 @@ pub fn evaluate_scope_capacity(
     scope: &ScopeCapacity,
     request: &RiskProposal,
 ) -> Result<(), RiskRuleError> {
-    if request.loss_usdt > scope.order_limit_usdt
-        || request.loss_usdt > scope.strategy_limit_usdt
-    {
+    if request.loss_usdt > scope.order_limit_usdt || request.loss_usdt > scope.strategy_limit_usdt {
         return Err(RiskRuleError::OrderOrStrategyLimit);
     }
     if RiskAmount::sum_exceeds(
@@ -82,7 +88,9 @@ mod tests {
     use crate::risk::model::{CampaignCapacity, RiskProposal, ScopeCapacity};
     use crate::risk::money::RiskAmount;
 
-    fn amount(value: &str) -> RiskAmount { RiskAmount::parse(value).unwrap() }
+    fn amount(value: &str) -> RiskAmount {
+        RiskAmount::parse(value).unwrap()
+    }
 
     fn proposal() -> RiskProposal {
         RiskProposal {
@@ -103,13 +111,31 @@ mod tests {
             entry_reserved_usd: amount("1"),
             entry_bound_breach_usd: amount("0"),
         };
-        assert_eq!(evaluate_campaign_capacity(&budget, &proposal()), Err(RiskRuleError::EntryBudgetExhausted));
-        let new_budget = CampaignCapacity { entry_limit_usd: amount("6"), ..budget.clone() };
-        assert_eq!(evaluate_campaign_capacity(&new_budget, &proposal()), Err(RiskRuleError::LossBudgetExhausted));
-        let permitted = CampaignCapacity { loss_limit_usd: amount("10.01"), ..new_budget.clone() };
+        assert_eq!(
+            evaluate_campaign_capacity(&budget, &proposal()),
+            Err(RiskRuleError::EntryBudgetExhausted)
+        );
+        let new_budget = CampaignCapacity {
+            entry_limit_usd: amount("6"),
+            ..budget.clone()
+        };
+        assert_eq!(
+            evaluate_campaign_capacity(&new_budget, &proposal()),
+            Err(RiskRuleError::LossBudgetExhausted)
+        );
+        let permitted = CampaignCapacity {
+            loss_limit_usd: amount("10.01"),
+            ..new_budget.clone()
+        };
         assert_eq!(evaluate_campaign_capacity(&permitted, &proposal()), Ok(()));
-        let breached = CampaignCapacity { entry_bound_breach_usd: amount("0.001"), ..permitted };
-        assert_eq!(evaluate_campaign_capacity(&breached, &proposal()), Err(RiskRuleError::BoundBreach));
+        let breached = CampaignCapacity {
+            entry_bound_breach_usd: amount("0.001"),
+            ..permitted
+        };
+        assert_eq!(
+            evaluate_campaign_capacity(&breached, &proposal()),
+            Err(RiskRuleError::BoundBreach)
+        );
     }
 
     #[test]
@@ -123,10 +149,23 @@ mod tests {
             strategy_occupied_usdt: amount("0"),
             order_limit_usdt: amount("10"),
         };
-        assert_eq!(evaluate_scope_capacity(&scope, &proposal()), Err(RiskRuleError::InsufficientAggregateOrAccountRisk));
-        let available = ScopeCapacity { global_occupied_usdt: amount("5"), ..scope.clone() };
+        assert_eq!(
+            evaluate_scope_capacity(&scope, &proposal()),
+            Err(RiskRuleError::InsufficientAggregateOrAccountRisk)
+        );
+        let available = ScopeCapacity {
+            global_occupied_usdt: amount("5"),
+            ..scope.clone()
+        };
         assert_eq!(evaluate_scope_capacity(&available, &proposal()), Ok(()));
-        let account_over = ScopeCapacity { account_limit_usdt: amount("4"), account_occupied_usdt: amount("5"), ..scope };
-        assert_eq!(evaluate_scope_capacity(&account_over, &proposal()), Err(RiskRuleError::AccountAlreadyOverLimit));
+        let account_over = ScopeCapacity {
+            account_limit_usdt: amount("4"),
+            account_occupied_usdt: amount("5"),
+            ..scope
+        };
+        assert_eq!(
+            evaluate_scope_capacity(&account_over, &proposal()),
+            Err(RiskRuleError::AccountAlreadyOverLimit)
+        );
     }
 }
