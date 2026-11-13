@@ -20,6 +20,8 @@ pub enum RiskRuleError {
     AccountAlreadyOverLimit,
     #[error("INSUFFICIENT_AGGREGATE_OR_ACCOUNT_RISK")]
     InsufficientAggregateOrAccountRisk,
+    #[error("ACCOUNT_ENTRY_UPPER_LIMIT_EXCEEDED")]
+    AccountEntryLimitExceeded,
     #[error("POST_CAUSAL_PROOF_UNPROVEN")]
     PostCausalProofUnproven,
 }
