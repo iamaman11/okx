@@ -1720,12 +1720,17 @@ fn risk_book_contract_sql_child_partial_entry_debit_commit_wait() {
         return;
     };
     let mut store = RiskBookStore::open_existing(
-        &PathBuf::from(db), "test-installation", &opening().campaign_id
-    ).unwrap();
+        &PathBuf::from(db),
+        "test-installation",
+        &opening().campaign_id,
+    )
+    .unwrap();
     let input = request('a', "intentkillentry1", "3");
     store.reserve(&input, &census()).unwrap();
     store.begin_post(&post_fence(&input, 1)).unwrap();
-    store.settle_partial_entry(&partial_proof(&input, 1, "0.4", 'b'), 2, 7).unwrap();
+    store
+        .settle_partial_entry(&partial_proof(&input, 1, "0.4", 'b'), 2, 7)
+        .unwrap();
     use std::io::Write;
     println!("RISK_ENTRY_DEBIT_COMMITTED_WITHOUT_REPLY");
     std::io::stdout().flush().unwrap();
@@ -1743,16 +1748,23 @@ fn risk_book_contract_sql_os_kill_after_partial_entry_debit_is_exact() {
     let fixture = Fixture::new("physical-partial-debit");
     RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["risk_book_contract_sql_child_partial_entry_debit_commit_wait", "--nocapture"])
+        .args([
+            "risk_book_contract_sql_child_partial_entry_debit_commit_wait",
+            "--nocapture",
+        ])
         .env("OKX_510_TEST_PARTIAL_KILL_DB", &fixture.path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn().unwrap();
+        .spawn()
+        .unwrap();
     let output = child.stdout.take().unwrap();
-    let (tx,rx) = mpsc::sync_channel(1);
+    let (tx, rx) = mpsc::sync_channel(1);
     let reader = std::thread::spawn(move || {
         for line in BufReader::new(output).lines() {
-            if line.unwrap_or_default().contains("RISK_ENTRY_DEBIT_COMMITTED_WITHOUT_REPLY") {
+            if line
+                .unwrap_or_default()
+                .contains("RISK_ENTRY_DEBIT_COMMITTED_WITHOUT_REPLY")
+            {
                 let _ = tx.send(());
                 return;
             }
@@ -1760,9 +1772,15 @@ fn risk_book_contract_sql_os_kill_after_partial_entry_debit_is_exact() {
     });
     let committed = rx.recv_timeout(Duration::from_secs(15));
     child.kill().unwrap();
-    assert!(!child.wait().unwrap().success(), "writer must be physically OS killed");
+    assert!(
+        !child.wait().unwrap().success(),
+        "writer must be physically OS killed"
+    );
     reader.join().unwrap();
-    assert!(committed.is_ok(), "real partial-entry COMMIT witness missing");
+    assert!(
+        committed.is_ok(),
+        "real partial-entry COMMIT witness missing"
+    );
     let mut recovered = open(&fixture);
     let input = request('a', "intentkillentry1", "3");
     let read = recovered.readback().unwrap();
@@ -1771,9 +1789,9 @@ fn risk_book_contract_sql_os_kill_after_partial_entry_debit_is_exact() {
     assert_eq!(read.reserved_entry_usd, "0.6");
     assert_eq!(read.global_reserved_usdt, "3");
     assert_eq!(read.reserved_loss_usd, "3");
-    let replay = recovered.settle_partial_entry(
-        &partial_proof(&input, 1, "0.4", 'b'), 2, 7
-    ).unwrap();
+    let replay = recovered
+        .settle_partial_entry(&partial_proof(&input, 1, "0.4", 'b'), 2, 7)
+        .unwrap();
     assert!(replay.replayed);
     assert_eq!(replay.book_sequence, 3);
     assert_eq!(recovered.readback().unwrap(), read);
