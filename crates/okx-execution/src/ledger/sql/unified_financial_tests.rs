@@ -498,3 +498,36 @@ fn risk_book_contract_single_finance_sqlite_real_os_kill_before_and_after_one_co
     tx.commit().unwrap();
     assert_eq!(receipt_count(&reopened), 1);
 }
+
+#[test]
+fn risk_book_contract_single_finance_sqlite_rejects_forged_primary_receipt_projection() {
+    let fixture = Fixture::new("immutable-primary");
+    let mut db = connection(&fixture.path);
+    seed(&db);
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    settle_entry(&tx, &entry_a()).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(campaign(&db, "campaign-X"), (1, "6".into(), "14".into(), "0".into()));
+
+    // The original SQL receipt remains immutable, but an unauthorized
+    // modification of a cached risk entry must not mint future capacity.
+    db.execute(
+        "UPDATE finance_risk_entries SET source_digest=?1
+         WHERE reservation_key='reserve-acct-A'",
+        ["d".repeat(64)],
+    ).unwrap();
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    assert!(matches!(
+        settle_entry(&tx, &EntryRef { source_revision: 1, ..entry_a() }),
+        Err(StoreError::Invalid("UNIFIED_PRIMARY_RECEIPT_CORRUPT"))
+    ));
+    tx.rollback().unwrap();
+
+    // The single-file STRICT schema forbids removing an obligation just by
+    // changing the label to RELEASED while reserved money remains.
+    assert!(db.execute(
+        "UPDATE finance_risk_entries SET state='RELEASED'
+         WHERE reservation_key='reserve-acct-B'",
+        [],
+    ).is_err());
+}
