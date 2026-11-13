@@ -1164,3 +1164,240 @@ fn risk_book_contract_campaign_db_path_is_installation_scoped() {
         Err(RiskStoreError::Invalid("CAMPAIGN_ID"))
     ));
 }
+
+fn post_fence(input: &ReserveInput, sequence: u64) -> PostFenceInput {
+    use okx_kernel::risk::model::{PostAccountRead, PostCausalProof};
+    let mut fresh = census();
+    fresh.generated_at_ms = 10_001;
+    fresh.read_floor_ms = 9_996;
+    PostFenceInput {
+        reservation_key: input.reservation_key(),
+        plan_sha256: input.plan_sha256.clone(),
+        policy_revision: input.policy_revision,
+        expected_sequence: sequence,
+        now_ms: 10_002,
+        source_proof_digest: uid('b'),
+        census: fresh,
+        causal: PostCausalProof {
+            reserve_anchor: input.reservation_key(),
+            native_incarnation: input.native_incarnation.clone(),
+            elapsed_to_proof_ms: 2,
+            account_reads: ['a', 'b'].into_iter().map(|letter| PostAccountRead {
+                account_key: account(letter),
+                private_generation: 7,
+                source_read_id: uid(letter),
+                content_digest: uid('c'),
+                started_after_held_ms: 0,
+                completed_after_held_ms: 1,
+            }).collect(),
+        },
+    }
+}
+
+#[test]
+fn risk_book_contract_sql_post_fence_commits_once() {
+    use okx_kernel::risk::model::RiskEntryState;
+    let fixture = Fixture::new("post-fence");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let input = request('a', "intentpost1", "6");
+    assert_eq!(store.reserve(&input, &census()).unwrap().book_sequence, 1);
+    let post = post_fence(&input, 1);
+    let grant = store.begin_post(&post).unwrap();
+    assert_eq!(grant.reservation_key, input.reservation_key());
+    assert_eq!(grant.book_sequence, 2);
+    assert_eq!(grant.existing_modelled_loss_usdt, "0");
+    let observed = store.inspect(&input.reservation_key(), &input.plan_sha256).unwrap().unwrap();
+    assert_eq!(observed.state, RiskEntryState::Posted);
+    assert_eq!(observed.current_book_sequence, 2);
+    assert_eq!(observed.reservation_sequence, 1);
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "6");
+    assert_eq!(store.readback().unwrap().reserved_loss_usd, "6");
+    assert_eq!(store.readback().unwrap().reserved_entry_usd, "1");
+    assert!(matches!(store.begin_post(&post), Err(RiskStoreError::StaleSequence)));
+    let mut replay = post.clone();
+    replay.expected_sequence = 2;
+    assert!(matches!(store.begin_post(&replay), Err(RiskStoreError::AlreadyResolved)));
+    assert!(matches!(
+        store.release_unsent(&unsent('a', "intentpost1"), 2, 7),
+        Err(RiskStoreError::AlreadyResolved)
+    ));
+    drop(store);
+    let db = rusqlite::Connection::open(&fixture.path).unwrap();
+    let stored: (String, i64, String, String) = db.query_row(
+        "SELECT state,post_sequence,post_proof_digest,post_source_digest
+         FROM risk_entries WHERE reservation_key=?1",
+        rusqlite::params![input.reservation_key()],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    ).unwrap();
+    assert_eq!(stored, ("POSTED".into(), 2, uid('b'), uid('d')));
+    drop(db);
+    let mut reopened = open(&fixture);
+    assert_eq!(reopened.inspect(&input.reservation_key(), &input.plan_sha256).unwrap(),Some(observed));
+    assert!(matches!(reopened.begin_post(&replay), Err(RiskStoreError::AlreadyResolved)));
+    assert_eq!(reopened.readback().unwrap().book_sequence, 2);
+}
+
+#[test]
+fn risk_book_contract_sql_post_fence_rejects_stale_causal_and_other_account_exposure() {
+    let fixture = Fixture::new("post-negative");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let input = request('a', "intentpost2", "6");
+    store.reserve(&input, &census()).unwrap();
+    let post = post_fence(&input, 1);
+    let mut stale = post.clone();
+    stale.expected_sequence = 0;
+    assert!(matches!(store.begin_post(&stale), Err(RiskStoreError::Invalid("POST_FENCE_IDENTITY"))));
+    stale.expected_sequence = 2;
+    assert!(matches!(store.begin_post(&stale), Err(RiskStoreError::StaleSequence)));
+    let mut foreign = post.clone();
+    foreign.plan_sha256 = uid('a');
+    assert!(matches!(store.begin_post(&foreign), Err(RiskStoreError::IdempotencyConflict)));
+    let mut policy = post.clone();
+    policy.policy_revision = 2;
+    assert!(matches!(store.begin_post(&policy), Err(RiskStoreError::PolicyConflict)));
+    let mut incarnation = post.clone();
+    incarnation.causal.native_incarnation = "e".repeat(32);
+    assert!(matches!(
+        store.begin_post(&incarnation),
+        Err(RiskStoreError::Denied(RiskRuleError::PostCausalProofUnproven))
+    ));
+    let mut missing = post.clone();
+    missing.causal.account_reads.pop();
+    assert!(matches!(
+        store.begin_post(&missing),
+        Err(RiskStoreError::Denied(RiskRuleError::PostCausalProofUnproven))
+    ));
+    let mut before_held = post.clone();
+    before_held.census.generated_at_ms = 10_000;
+    assert!(matches!(store.begin_post(&before_held), Err(RiskStoreError::CensusUnproven)));
+    let mut regressed_source = post.clone();
+    regressed_source.census.read_floor_ms = 9_994;
+    assert!(matches!(store.begin_post(&regressed_source), Err(RiskStoreError::CensusUnproven)));
+    let mut too_late = post.clone();
+    too_late.now_ms = 15_001;
+    too_late.causal.elapsed_to_proof_ms = 5_001;
+    assert!(matches!(store.begin_post(&too_late), Err(RiskStoreError::CensusUnproven)));
+    let mut other_over = post.clone();
+    other_over.census.occupied.insert(account('b'), amt("11"));
+    assert!(matches!(
+        store.begin_post(&other_over),
+        Err(RiskStoreError::Denied(RiskRuleError::AccountAlreadyOverLimit))
+    ));
+    let mut combined_over = post.clone();
+    combined_over.census.occupied.insert(account('b'), amt("5"));
+    assert!(matches!(
+        store.begin_post(&combined_over),
+        Err(RiskStoreError::Denied(RiskRuleError::InsufficientAggregateOrAccountRisk))
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 1);
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "6");
+    assert_eq!(store.inspect(&input.reservation_key(), &input.plan_sha256).unwrap().unwrap().state,
+        okx_kernel::risk::model::RiskEntryState::Held);
+    let grant = store.begin_post(&post).unwrap();
+    assert_eq!(grant.book_sequence, 2);
+}
+
+#[test]
+fn risk_book_contract_sql_post_loss_high_water_is_durable_on_denial() {
+    let fixture = Fixture::new("post-loss");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let input = request('a', "intentpost3", "6");
+    store.reserve(&input, &census()).unwrap();
+    let mut post = post_fence(&input, 1);
+    post.census.cumulative_loss_usd.insert(account('a'), amt("95"));
+    assert!(matches!(
+        store.begin_post(&post),
+        Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted))
+    ));
+    let read = store.readback().unwrap();
+    assert_eq!(read.book_sequence, 2, "loss source high-water survives POST denial");
+    assert_eq!(read.consumed_loss_usd, "95");
+    assert_eq!(read.reserved_loss_usd, "6");
+    assert_eq!(read.remaining_loss_usd, "0");
+    assert_eq!(read.global_reserved_usdt, "6");
+    assert_eq!(store.inspect(&input.reservation_key(), &input.plan_sha256).unwrap().unwrap().state,
+        okx_kernel::risk::model::RiskEntryState::Held);
+    drop(store);
+    let mut reopened = open(&fixture);
+    assert_eq!(reopened.readback().unwrap(), read);
+    assert!(matches!(reopened.begin_post(&post), Err(RiskStoreError::StaleSequence)));
+}
+
+#[test]
+fn risk_book_contract_sql_child_post_fence_committed_without_reply() {
+    let Ok(db) = std::env::var("OKX_510_TEST_POST_KILL_DB") else { return; };
+    let mut store = RiskBookStore::open_existing(
+        &PathBuf::from(db), "test-installation", &opening().campaign_id
+    ).unwrap();
+    let input = request('a', "intentkillpost1", "3");
+    store.reserve(&input, &census()).unwrap();
+    store.begin_post(&post_fence(&input, 1)).unwrap();
+    use std::io::Write;
+    println!("RISK_POST_FENCE_COMMITTED_WITHOUT_REPLY");
+    std::io::stdout().flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(60));
+    unreachable!("the parent must OS kill this child after post-fence commit");
+}
+
+#[test]
+fn risk_book_contract_sql_os_kill_after_post_fence_never_regrants() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let fixture = Fixture::new("physical-post-fence");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["risk_book_contract_sql_child_post_fence_committed_without_reply", "--nocapture"])
+        .env("OKX_510_TEST_POST_KILL_DB", &fixture.path)
+        .stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if line.unwrap_or_default().contains("RISK_POST_FENCE_COMMITTED_WITHOUT_REPLY") {
+                let _ = tx.send(());
+                return;
+            }
+        }
+    });
+    let committed = rx.recv_timeout(Duration::from_secs(15));
+    child.kill().unwrap();
+    assert!(!child.wait().unwrap().success(), "real post-fence writer must be OS-killed");
+    reader.join().unwrap();
+    assert!(committed.is_ok(), "did not see independently committed post-fence marker");
+    let mut reopened = open(&fixture);
+    let input = request('a', "intentkillpost1", "3");
+    let observed = reopened.inspect(&input.reservation_key(), &input.plan_sha256).unwrap().unwrap();
+    assert_eq!(observed.state, okx_kernel::risk::model::RiskEntryState::Posted);
+    assert_eq!(observed.current_book_sequence, 2);
+    assert_eq!(reopened.readback().unwrap().global_reserved_usdt, "3");
+    let mut same_post = post_fence(&input, 2);
+    same_post.now_ms = 10_003;
+    assert!(matches!(reopened.begin_post(&same_post), Err(RiskStoreError::AlreadyResolved)));
+    assert_eq!(reopened.readback().unwrap().book_sequence, 2);
+}
+
+#[tokio::test]
+async fn risk_book_contract_sql_tokio_owner_posts_one_original_grant() {
+    use super::owner::RiskBookHandle;
+    let fixture = Fixture::new("post-tokio");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let owner = RiskBookHandle::open_existing(
+        fixture.path.clone(), "test-installation".into(), opening().campaign_id
+    ).await.unwrap();
+    let input = request('a', "intentpostowner1", "3");
+    owner.reserve(input.clone(), census()).await.unwrap();
+    let first = owner.begin_post(post_fence(&input, 1)).await.unwrap();
+    assert_eq!(first.book_sequence, 2);
+    assert!(matches!(
+        owner.begin_post(post_fence(&input, 2)).await,
+        Err(RiskStoreError::AlreadyResolved)
+    ));
+    assert_eq!(owner.readback().await.unwrap().reserved_entry_usd, "1");
+}
