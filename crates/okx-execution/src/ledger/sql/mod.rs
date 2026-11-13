@@ -5,3 +5,4 @@ mod orders;
 mod projections;
 mod schema;
 mod sources;
+mod unified_financial;
