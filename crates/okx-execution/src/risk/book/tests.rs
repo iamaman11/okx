@@ -284,35 +284,58 @@ fn risk_book_contract_sql_os_kill_after_durable_commit() {
     assert_eq!(recovered.readback().unwrap().book_sequence, 1);
 }
 
-
 #[tokio::test]
 async fn risk_book_contract_sql_bounded_owner_serializes_competitors() {
     use super::owner::RiskBookHandle;
     use std::time::Duration;
-    let fixture=Fixture::new("tokio-owner");
-    RiskBookStore::initialize_fixture(&fixture.path,&opening()).unwrap();
-    let owner=RiskBookHandle::open_existing(
-        fixture.path.clone(),"test-installation".into(),opening().campaign_id
-    ).await.unwrap();
-    assert_eq!(owner.diagnostic_snapshot().unwrap().book_sequence,0);
-    let first=owner.clone();
-    let second=owner.clone();
-    let (a,b)=tokio::join!(
-        first.reserve(request('a',"intent0007","6"),census()),
-        second.reserve(request('b',"intent0008","6"),census()),
+    let fixture = Fixture::new("tokio-owner");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let owner = RiskBookHandle::open_existing(
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(owner.diagnostic_snapshot().unwrap().book_sequence, 0);
+    let first = owner.clone();
+    let second = owner.clone();
+    let (a, b) = tokio::join!(
+        first.reserve(request('a', "intent0007", "6"), census()),
+        second.reserve(request('b', "intent0008", "6"), census()),
     );
-    let accepted=[a.as_ref().is_ok(),b.as_ref().is_ok()].into_iter().filter(|v|*v).count();
-    assert_eq!(accepted,1,"one shared campaign cap; not one cap per account");
-    assert!(matches!(a,Err(RiskStoreError::Denied(RiskRuleError::InsufficientAggregateOrAccountRisk)))
-        || matches!(b,Err(RiskStoreError::Denied(RiskRuleError::InsufficientAggregateOrAccountRisk))));
-    assert_eq!(owner.readback().await.unwrap().book_sequence,1);
-    assert_eq!(owner.diagnostic_snapshot().unwrap().book_sequence,1);
-    let mut witness=owner.termination_signal();
+    let accepted = [a.as_ref().is_ok(), b.as_ref().is_ok()]
+        .into_iter()
+        .filter(|v| *v)
+        .count();
+    assert_eq!(
+        accepted, 1,
+        "one shared campaign cap; not one cap per account"
+    );
+    assert!(
+        matches!(
+            a,
+            Err(RiskStoreError::Denied(
+                RiskRuleError::InsufficientAggregateOrAccountRisk
+            ))
+        ) || matches!(
+            b,
+            Err(RiskStoreError::Denied(
+                RiskRuleError::InsufficientAggregateOrAccountRisk
+            ))
+        )
+    );
+    assert_eq!(owner.readback().await.unwrap().book_sequence, 1);
+    assert_eq!(owner.diagnostic_snapshot().unwrap().book_sequence, 1);
+    let mut witness = owner.termination_signal();
     drop(first);
     drop(second);
     drop(owner);
-    tokio::time::timeout(Duration::from_secs(2),witness.changed()).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), witness.changed())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(*witness.borrow());
-    let mut reloaded=open(&fixture);
-    assert_eq!(reloaded.readback().unwrap().global_reserved_usdt,"6");
+    let mut reloaded = open(&fixture);
+    assert_eq!(reloaded.readback().unwrap().global_reserved_usdt, "6");
 }
