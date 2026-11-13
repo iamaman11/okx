@@ -573,8 +573,8 @@ fn risk_book_contract_sql_account_observation_and_inspect_preserve_revision() {
     assert_eq!(empty.reserved_loss_usdt, "0");
     assert_eq!(empty.reserved_loss_usd, "0");
 
-    let request = request('a', "intentread1", "6");
-    let held = store.reserve(&request, &census()).unwrap();
+    let input = request('a', "intentread1", "6");
+    let held = store.reserve(&input, &census()).unwrap();
     let account_a = store.account_readback(&account('a')).unwrap();
     assert_eq!(account_a.active_reservations, 1);
     assert_eq!(account_a.reserved_loss_usdt, "6");
@@ -587,18 +587,18 @@ fn risk_book_contract_sql_account_observation_and_inspect_preserve_revision() {
     assert_eq!(account_b.active_reservations, 0);
     assert_eq!(account_b.reserved_loss_usdt, "0");
     let found = store
-        .inspect(&request.reservation_key(), &request.plan_sha256)
+        .inspect(&input.reservation_key(), &input.plan_sha256)
         .unwrap()
         .unwrap();
-    assert_eq!(found.reservation_key, request.reservation_key());
-    assert_eq!(found.plan_sha256, request.plan_sha256);
+    assert_eq!(found.reservation_key, input.reservation_key());
+    assert_eq!(found.plan_sha256, input.plan_sha256);
     assert_eq!(found.state, RiskEntryState::Held);
     assert_eq!(found.reservation_sequence, 1);
     assert_eq!(found.current_book_sequence, 1);
     assert_eq!(found.policy_revision, 1);
     assert!(
         store
-            .inspect(&request.reservation_key(), &uid('b'))
+            .inspect(&input.reservation_key(), &uid('b'))
             .unwrap()
             .is_none()
     );
@@ -616,7 +616,7 @@ fn risk_book_contract_sql_account_observation_and_inspect_preserve_revision() {
         Err(RiskStoreError::Invalid("ACCOUNT_NOT_ACTIVE"))
     ));
     assert!(matches!(
-        store.inspect(&request.reservation_key(), "bad"),
+        store.inspect(&input.reservation_key(), "bad"),
         Err(RiskStoreError::Invalid("INSPECTION_IDENTITY"))
     ));
     assert_eq!(store.readback().unwrap().book_sequence, 1);
@@ -626,7 +626,7 @@ fn risk_book_contract_sql_account_observation_and_inspect_preserve_revision() {
     assert_eq!(reopened.account_readback(&account('a')).unwrap(), account_a);
     assert_eq!(
         reopened
-            .inspect(&request.reservation_key(), &request.plan_sha256)
+            .inspect(&input.reservation_key(), &input.plan_sha256)
             .unwrap(),
         Some(found)
     );
