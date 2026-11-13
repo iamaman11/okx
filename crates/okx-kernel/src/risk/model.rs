@@ -63,4 +63,3 @@ pub struct PostCausalProof {
     pub elapsed_to_proof_ms: u64,
     pub account_reads: Vec<PostAccountRead>,
 }
-
