@@ -121,7 +121,7 @@ fn verify_campaign(
                         reservation_key,
                         revision
                     ],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
             match receipt {
@@ -261,7 +261,7 @@ pub(in crate::account_store) fn settle_entry(
                 scope.intent,
                 scope.source_revision
             ],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
     let Some((source_digest, source_amount, bill_digest, original_json)) = source else {
