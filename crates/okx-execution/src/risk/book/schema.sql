@@ -60,6 +60,10 @@ CREATE TABLE risk_entries (
  loss_usdt TEXT NOT NULL,
  loss_usd TEXT NOT NULL,
  entry_upper_usd TEXT NOT NULL,
+ -- Primary per-reservation remaining obligations. Aggregates are only cached projections.
+ reserved_usdt TEXT NOT NULL,
+ reserved_loss_usd TEXT NOT NULL,
+ reserved_entry_usd TEXT NOT NULL,
  entry_proof_digest TEXT NOT NULL,
  source_digest TEXT NOT NULL,
  book_sequence INTEGER NOT NULL CHECK(book_sequence>0),
