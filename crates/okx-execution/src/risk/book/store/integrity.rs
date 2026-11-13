@@ -24,7 +24,9 @@ pub(super) fn verify_reservation_aggregates(
             "SELECT account_key,strategy_id,state,loss_usdt,loss_usd,entry_upper_usd,
                     reserved_usdt,reserved_loss_usd,reserved_entry_usd,
                     book_sequence,post_sequence,post_proof_digest,post_source_digest,
-                    post_authorized_at_ms,held_at_ms,post_existing_occupied_usdt
+                    post_authorized_at_ms,held_at_ms,post_existing_occupied_usdt,
+                    entry_settled_usd,entry_settlement_revision,entry_settlement_digest,
+                    entry_bound_breach_usd
              FROM risk_entries WHERE state <> 'RELEASED'",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -45,6 +47,10 @@ pub(super) fn verify_reservation_aggregates(
                 row.get::<_, i64>(13)?,
                 row.get::<_, i64>(14)?,
                 row.get::<_, String>(15)?,
+                row.get::<_, String>(16)?,
+                row.get::<_, i64>(17)?,
+                row.get::<_, String>(18)?,
+                row.get::<_, String>(19)?,
             ))
         })?;
         for row in rows {
@@ -65,6 +71,10 @@ pub(super) fn verify_reservation_aggregates(
                 post_time,
                 held_time,
                 post_existing,
+                cumulative_entry,
+                settlement_revision,
+                settlement_digest,
+                entry_breach,
             ) = row?;
             let remaining_usdt = amount(remaining_usdt)?;
             let remaining_loss = amount(remaining_loss)?;
@@ -94,9 +104,31 @@ pub(super) fn verify_reservation_aggregates(
                 }
                 _ => return Err(RiskStoreError::Corrupt("RESERVATION_STATE_UNIMPLEMENTED")),
             }
-            if remaining_usdt != amount(original_usdt)?
+            let settled = amount(cumulative_entry)?;
+            let ceiling = amount(original_entry)?;
+            let expected_entry = if settled < ceiling {
+                ceiling.checked_sub(&settled)?
+            } else {
+                RiskAmount::zero()
+            };
+            let expected_breach = if settled > ceiling {
+                settled.checked_sub(&ceiling)?
+            } else {
+                RiskAmount::zero()
+            };
+            let settlement_consistent = if settlement_revision == 0 {
+                settled.is_zero() && settlement_digest.is_empty()
+            } else {
+                settlement_revision > 0
+                    && super::valid_digest(&settlement_digest)
+                    && !settled.is_zero()
+                    && state == "POSTED"
+            };
+            if !settlement_consistent
+                || amount(entry_breach)? != expected_breach
+                || remaining_usdt != amount(original_usdt)?
                 || remaining_loss != amount(original_loss)?
-                || remaining_entry != amount(original_entry)?
+                || remaining_entry != expected_entry
             {
                 return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
             }
@@ -165,7 +197,24 @@ pub(super) fn verify_reservation_aggregates(
     if contradictory != 0 {
         return Err(RiskStoreError::Corrupt("NO_RESERVE_FENCE_CONFLICT"));
     }
-    // Loss high-water marks are the primary per-account facts in this v4 book.
+    // Original SQL settlement revisions are the primary consumed-entry facts.
+    // The opening amount is explicitly separate: the cache may not be
+    // increased or reduced without a corresponding durable native receipt.
+    let mut consumed_from_receipts = meta.entry_opening_consumed.clone();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT entry_settled_usd FROM risk_entries
+             WHERE entry_settlement_revision > 0",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for row in rows {
+            consumed_from_receipts = consumed_from_receipts.checked_add(&amount(row?)?)?;
+        }
+    }
+    if consumed_from_receipts != meta.entry_consumed {
+        return Err(RiskStoreError::Corrupt("ENTRY_CONSUMED_AGGREGATES"));
+    }
+    // Loss high-water marks are the primary per-account facts in this v5 book.
     // Their complete sum must equal the cached campaign consumed-loss total.
     let mut cumulative = RiskAmount::zero();
     let mut policy_count = 0_u64;
