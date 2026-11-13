@@ -42,3 +42,25 @@ pub enum RiskEntryState {
     Open,
     Released,
 }
+
+/// Authenticated native read facts. The type alone does NOT attest provenance:
+/// only the original native source producer may create trusted observations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostAccountRead {
+    pub account_key: String,
+    pub private_generation: u64,
+    pub source_read_id: String,
+    pub content_digest: String,
+    pub started_after_held_ms: u64,
+    pub completed_after_held_ms: u64,
+}
+
+/// Pure causal inputs for the same original reservation, not venue permission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostCausalProof {
+    pub reserve_anchor: String,
+    pub native_incarnation: String,
+    pub elapsed_to_proof_ms: u64,
+    pub account_reads: Vec<PostAccountRead>,
+}
+
