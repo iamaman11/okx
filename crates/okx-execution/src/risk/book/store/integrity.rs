@@ -8,7 +8,10 @@ use std::collections::BTreeMap;
 // This version only implements HELD; other nonterminal states fail closed
 // until their transition and remaining-balance semantics are implemented.
 // RELEASED rows are protected by SQLite CHECK and excluded from this scan.
-pub(super) fn verify_reservation_aggregates(tx: &rusqlite::Transaction<'_>, meta: &BookMeta) -> Result<()> {
+pub(super) fn verify_reservation_aggregates(
+    tx: &rusqlite::Transaction<'_>,
+    meta: &BookMeta,
+) -> Result<()> {
     let mut accounts: BTreeMap<String, RiskAmount> = BTreeMap::new();
     let mut strategies: BTreeMap<(String, String), RiskAmount> = BTreeMap::new();
     let mut global = RiskAmount::zero();
