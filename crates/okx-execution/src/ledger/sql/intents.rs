@@ -868,7 +868,10 @@ impl AccountStore {
         let proof: EntrySettlementEvidence = serde_json::from_str(&head.result_ref)
             .map_err(|_| StoreError::Invalid("ENTRY_PARTIAL_HEAD_CORRUPT"))?;
         let immutable = self
-            .operation(&format!("entry-partial:{id}:r{}", proof.settlement_revision))?
+            .operation(&format!(
+                "entry-partial:{id}:r{}",
+                proof.settlement_revision
+            ))?
             .ok_or(StoreError::Invalid("ENTRY_PARTIAL_REVISION_MISSING"))?;
         let intent = self
             .intent(id)?
@@ -887,7 +890,10 @@ impl AccountStore {
             || proof.settlement_revision == 0
             || proof.cumulative_entry_usd <= Decimal::ZERO
             || proof.source_digest.len() != 64
-            || !proof.source_digest.bytes().all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
+            || !proof
+                .source_digest
+                .bytes()
+                .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
             || head.kind != "ENTRY_PARTIAL_HEAD"
             || head.request_hash != proof.plan_hash
             || immutable.kind != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
