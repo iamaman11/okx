@@ -67,8 +67,10 @@ CREATE TABLE risk_entries (
  entry_proof_digest TEXT NOT NULL,
  source_digest TEXT NOT NULL,
  book_sequence INTEGER NOT NULL CHECK(book_sequence>0),
+ release_proof_digest TEXT NOT NULL DEFAULT '',
  CHECK(state <> 'RELEASED' OR
-       (reserved_usdt='0' AND reserved_loss_usd='0' AND reserved_entry_usd='0')),
+       (reserved_usdt='0' AND reserved_loss_usd='0' AND reserved_entry_usd='0'
+        AND length(release_proof_digest)=64)),
  FOREIGN KEY(account_key) REFERENCES risk_policy_account(account_key)
 ) STRICT;
 -- An authenticated account SQL no-send rejection may precede RESERVE.
