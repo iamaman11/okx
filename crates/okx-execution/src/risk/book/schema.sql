@@ -22,6 +22,7 @@ CREATE TABLE risk_policy_account (
  account_key TEXT PRIMARY KEY,
  limit_usdt TEXT NOT NULL,
  order_limit_usdt TEXT NOT NULL,
+ entry_limit_usd TEXT NOT NULL,
  FOREIGN KEY(account_key) REFERENCES risk_account_occupied(account_key) DEFERRABLE INITIALLY DEFERRED
 ) STRICT;
 CREATE TABLE risk_account_occupied (
@@ -67,9 +68,22 @@ CREATE TABLE risk_entries (
  entry_proof_digest TEXT NOT NULL,
  source_digest TEXT NOT NULL,
  book_sequence INTEGER NOT NULL CHECK(book_sequence>0),
+ -- Source and native incarnation pinned when HELD was durably committed.
+ held_at_ms INTEGER NOT NULL CHECK(held_at_ms>0),
+ reserve_read_floor_ms INTEGER NOT NULL CHECK(reserve_read_floor_ms>0),
+ native_incarnation TEXT NOT NULL CHECK(length(native_incarnation)=32),
+ -- A POSTED transition is irreversible permission for at most one native POST.
+ post_authorized_at_ms INTEGER NOT NULL DEFAULT 0,
+ post_sequence INTEGER NOT NULL DEFAULT 0,
+ post_proof_digest TEXT NOT NULL DEFAULT '',
+ post_source_digest TEXT NOT NULL DEFAULT '',
+ post_existing_occupied_usdt TEXT NOT NULL DEFAULT '0',
  release_proof_digest TEXT NOT NULL DEFAULT '',
  release_request_hash TEXT NOT NULL DEFAULT '',
  release_reason TEXT NOT NULL DEFAULT '',
+ CHECK(state = 'HELD' OR state = 'RELEASED' OR
+       (post_authorized_at_ms>=held_at_ms AND post_sequence>book_sequence
+        AND length(post_proof_digest)=64 AND length(post_source_digest)=64)),
  CHECK(state <> 'RELEASED' OR
        (reserved_usdt='0' AND reserved_loss_usd='0' AND reserved_entry_usd='0'
         AND length(release_proof_digest)=64 AND length(release_request_hash)=64
@@ -94,4 +108,4 @@ CREATE INDEX idx_risk_entries_active_account ON risk_entries(account_key,state);
 -- Only currently held obligations are audited per mutation, never full history.
 CREATE INDEX idx_risk_entries_active_balance ON risk_entries(state)
  WHERE state <> 'RELEASED';
-PRAGMA user_version=3;
+PRAGMA user_version=4;
