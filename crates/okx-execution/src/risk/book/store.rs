@@ -401,7 +401,7 @@ impl RiskBookStore {
         connection.pragma_update(None, "synchronous", "FULL")?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let journal: String = connection.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
-        if version != 1 || journal != "wal" {
+        if version != 2 || journal != "wal" {
             return Err(RiskStoreError::Corrupt("SCHEMA_OR_JOURNAL"));
         }
         let identity: (String, String, i64) = connection.query_row(
