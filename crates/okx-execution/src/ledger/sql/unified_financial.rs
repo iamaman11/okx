@@ -412,6 +412,186 @@ pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreR
     })
 }
 
+/// A frozen, original AccountStore receipt and its one-to-one source links.
+/// This is import evidence, not an alternative producer of monetary amounts.
+/// Multi-fill/late histories require the complete future normalized importer.
+#[derive(Debug, Clone)]
+pub(in crate::account_store) struct LegacyPartialSource {
+    receipt: crate::EntrySettlementEvidence,
+    installation: String,
+    fill_id: String,
+    trade_id: String,
+    instrument_id: String,
+    bill_id: String,
+}
+
+/// Read the SAME AccountStore authority already computing fills, fees and FX.
+/// Reject unverifiable links instead of rebuilding finance calculations.
+pub(in crate::account_store) fn inspect_legacy_partial_source(
+    account: &mut crate::AccountStore,
+    intent_id: &str,
+) -> StoreResult<LegacyPartialSource> {
+    let receipt = account.partial_entry_settlement_receipt(intent_id)?
+        .ok_or(StoreError::Invalid("UNIFIED_ORIGINAL_RECEIPT_MISSING"))?;
+    // Re-evaluate the original immutable captured evidence using its real
+    // existing owner; a cached head alone is not an authenticated producer.
+    let verified = account.bind_partial_entry_settlement(
+        intent_id,
+        receipt.venue_update_ms,
+        receipt.venue_filled_quantity,
+        receipt.source_covered_through_ms,
+    )?;
+    if verified != receipt || receipt.account_key != account.meta.account_key {
+        return Err(StoreError::Invalid("UNIFIED_ORIGINAL_SOURCE_CHANGED"));
+    }
+    let mut stmt = account.connection.prepare(
+        "SELECT f.fill_id,f.trade_id,f.instrument_id,b.bill_id
+         FROM fills f
+         JOIN finance_source_links lfill ON lfill.source_ref='fill:'||f.fill_id
+         JOIN finance_entries e ON e.entry_id=lfill.entry_id
+                               AND e.component='FEE' AND e.allocation_leg='account'
+         JOIN finance_source_links lbill ON lbill.entry_id=e.entry_id
+         JOIN bills b ON lbill.source_ref='bill:'||b.bill_id
+         WHERE f.intent_id=?1 AND f.exchange_order_id=?2
+           AND f.time<=?3 AND b.time<=?3
+         ORDER BY f.fill_id,b.bill_id LIMIT 2",
+    )?;
+    let mut rows = stmt.query(params![
+        intent_id, &receipt.venue_order_id, receipt.source_covered_through_ms
+    ])?;
+    let Some(first) = rows.next()? else {
+        return Err(StoreError::Invalid("UNIFIED_LINKED_FILL_BILL_MISSING"));
+    };
+    let (fill_id, trade_id, instrument_id, bill_id): (String,String,String,String) =
+        (first.get(0)?,first.get(1)?,first.get(2)?,first.get(3)?);
+    if rows.next()?.is_some() {
+        return Err(StoreError::Invalid("UNIFIED_MULTI_SOURCE_IMPORT_NOT_SUPPORTED"));
+    }
+    Ok(LegacyPartialSource {
+        receipt,
+        installation: account.meta.installation_id.clone(),
+        fill_id,
+        trade_id,
+        instrument_id,
+        bill_id,
+    })
+}
+
+/// Import one already-authenticated original source under the FINAL new
+/// account/campaign scope into the destination's single SQLite transaction.
+/// The historical account writer must be fenced before a real migration;
+/// this function does not create/free budget or transfer the ledger itself.
+pub(in crate::account_store) fn import_legacy_partial_source(
+    tx: &Transaction<'_>,
+    source: &LegacyPartialSource,
+) -> StoreResult<()> {
+    let proof = &source.receipt;
+    if source.installation.is_empty()
+        || proof.account_key.is_empty()
+        || proof.intent_id.is_empty()
+        || proof.reservation_key.is_empty()
+        || proof.venue_order_id.is_empty()
+        || source.fill_id.is_empty()
+        || source.bill_id.is_empty()
+        || source.trade_id.is_empty()
+        || source.instrument_id.is_empty()
+        || proof.schema != "okx.entry-partial-settlement/v1"
+        || proof.settlement_revision != 1
+        || !digest_ok(&proof.source_digest)
+        || !digest_ok(&proof.plan_hash)
+    {
+        return Err(StoreError::Invalid("UNIFIED_LEGACY_IMPORT_INVALID"));
+    }
+    let original_amount = money(&proof.cumulative_entry_usd.normalize().to_string())?;
+    if original_amount.is_zero() {
+        return Err(StoreError::Invalid("UNIFIED_LEGACY_IMPORT_AMOUNT_INVALID"));
+    }
+    let revision = i64::try_from(proof.settlement_revision)
+        .map_err(|_| StoreError::Invalid("UNIFIED_LEGACY_IMPORT_REVISION"))?;
+    // Admission into an already-fenced, known installation with an existing
+    // account; never bootstrap a campaign from an arbitrary external snapshot.
+    let account_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM finance_accounts
+         WHERE installation_id=?1 AND account_key=?2)",
+        params![&source.installation,&proof.account_key],
+        |r| r.get(0),
+    )?;
+    if !account_exists {
+        return Err(StoreError::Invalid("UNIFIED_LEGACY_ACCOUNT_NOT_ADMITTED"));
+    }
+    let original_json = serde_json::to_string(proof)
+        .map_err(|_| StoreError::Invalid("UNIFIED_LEGACY_IMPORT_SERIALIZATION"))?;
+    tx.execute(
+        "INSERT INTO finance_intents(
+           installation_id,account_key,intent_id,plan_sha256,exchange_order_id)
+         VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
+        params![
+            &source.installation,&proof.account_key,&proof.intent_id,&proof.plan_hash,
+            &proof.venue_order_id,
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO finance_fills(
+           installation_id,account_key,fill_id,intent_id,exchange_order_id,
+           trade_id,instrument_id)
+         VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT DO NOTHING",
+        params![
+            &source.installation,&proof.account_key,&source.fill_id,&proof.intent_id,
+            &proof.venue_order_id,&source.trade_id,&source.instrument_id,
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO finance_bills(
+           installation_id,account_key,bill_id,fill_id,source_digest)
+         VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
+        params![
+            &source.installation,&proof.account_key,&source.bill_id,&source.fill_id,
+            &proof.source_digest,
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO finance_entry_sources(
+           installation_id,account_key,intent_id,settlement_revision,
+           fill_id,bill_id,source_digest,cumulative_entry_usd,original_receipt_json)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+         ON CONFLICT DO NOTHING",
+        params![
+            &source.installation,&proof.account_key,&proof.intent_id,revision,
+            &source.fill_id,&source.bill_id,&proof.source_digest,
+            canonical(&original_amount)?,&original_json,
+        ],
+    )?;
+    // ON CONFLICT DO NOTHING is safe only when the FULL imported source
+    // identity is byte-exact on replay. Reject foreign/partial prior imports.
+    let saved: (String,String,String,String,String,String,String,String,String) = tx.query_row(
+        "SELECT i.plan_sha256,i.exchange_order_id,f.trade_id,f.instrument_id,
+                f.fill_id,b.bill_id,b.source_digest,s.cumulative_entry_usd,s.original_receipt_json
+         FROM finance_intents i
+         JOIN finance_entry_sources s ON s.installation_id=i.installation_id
+           AND s.account_key=i.account_key AND s.intent_id=i.intent_id
+         JOIN finance_fills f ON f.installation_id=s.installation_id
+           AND f.account_key=s.account_key AND f.fill_id=s.fill_id
+           AND f.intent_id=s.intent_id
+         JOIN finance_bills b ON b.installation_id=s.installation_id
+           AND b.account_key=s.account_key AND b.bill_id=s.bill_id AND b.fill_id=s.fill_id
+         WHERE i.installation_id=?1 AND i.account_key=?2 AND i.intent_id=?3
+           AND s.settlement_revision=?4",
+        params![&source.installation,&proof.account_key,&proof.intent_id,revision],
+        |r| Ok((
+            r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,
+            r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,
+        )),
+    )?;
+    if saved != (
+        proof.plan_hash.clone(),proof.venue_order_id.clone(),source.trade_id.clone(),
+        source.instrument_id.clone(),source.fill_id.clone(),source.bill_id.clone(),
+        proof.source_digest.clone(),canonical(&original_amount)?,original_json,
+    ) {
+        return Err(StoreError::Invalid("UNIFIED_LEGACY_IMPORT_CONFLICT"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "unified_financial_tests.rs"]
 mod tests;
