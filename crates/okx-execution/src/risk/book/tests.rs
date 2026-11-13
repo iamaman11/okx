@@ -712,3 +712,181 @@ async fn risk_book_contract_sql_bounded_owner_answers_readonly_observations() {
     assert_eq!(entry.state, RiskEntryState::Held);
     assert_eq!(owner.readback().await.unwrap().book_sequence, 1);
 }
+
+fn unsent(letter: char, intent: &str) -> UnsentSqlProof {
+    let input = request(letter, intent, "1");
+    UnsentSqlProof {
+        reservation_key: input.reservation_key(),
+        account_key: account(letter),
+        intent_id: intent.to_owned(),
+        plan_sha256: input.plan_sha256,
+        request_hash: uid('b'),
+        reason: "REJECTED_UNSENT".to_owned(),
+        record_digest: uid('d'),
+    }
+}
+
+#[test]
+fn risk_book_contract_sql_durable_no_reserve_tombstone_prevents_future_grant() {
+    use okx_kernel::risk::model::RiskEntryState;
+    let fixture = Fixture::new("negative-fence");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let proof = unsent('a', "intentfence1");
+    assert!(store.inspect(&proof.reservation_key, &proof.plan_sha256).unwrap().is_none());
+    let first = store.release_unsent(&proof, 0, 7).unwrap();
+    assert_eq!(first.book_sequence, 1);
+    assert!(!first.replayed);
+    let fenced = store.inspect(&proof.reservation_key, &proof.plan_sha256).unwrap().unwrap();
+    assert_eq!(fenced.state, RiskEntryState::Released);
+    assert_eq!(fenced.reservation_sequence, 1);
+    assert_eq!(fenced.current_book_sequence, 1);
+    assert_eq!(fenced.policy_revision, 1);
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "0");
+    assert_eq!(store.readback().unwrap().reserved_entry_usd, "0");
+    let replay = store.release_unsent(&proof, 1, 7).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.book_sequence, 1);
+    let altered = UnsentSqlProof { record_digest: uid('e'), ..proof.clone() };
+    assert!(matches!(
+        store.release_unsent(&altered, 1, 7),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
+    assert!(matches!(
+        store.reserve(&request('a', "intentfence1", "1"), &census()),
+        Err(RiskStoreError::AlreadyResolved)
+    ));
+    let mut changed_plan = request('a', "intentfence1", "1");
+    changed_plan.plan_sha256 = uid('f');
+    assert!(matches!(
+        store.reserve(&changed_plan, &census()),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 1);
+    drop(store);
+
+    let mut recovered = open(&fixture);
+    assert_eq!(
+        recovered.inspect(&proof.reservation_key, &proof.plan_sha256).unwrap(),
+        Some(fenced)
+    );
+    assert!(matches!(
+        recovered.reserve(&request('a', "intentfence1", "1"), &census()),
+        Err(RiskStoreError::AlreadyResolved)
+    ));
+    assert_eq!(
+        recovered.reserve(&request('b', "intentother1", "6"), &census()).unwrap().book_sequence,
+        2
+    );
+    assert_eq!(recovered.readback().unwrap().global_reserved_usdt, "6");
+}
+
+#[test]
+fn risk_book_contract_sql_unsent_held_release_is_exact_and_durable() {
+    use okx_kernel::risk::model::RiskEntryState;
+    let fixture = Fixture::new("unsent-held");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let input = request('a', "intentunsent1", "6");
+    let first = store.reserve(&input, &census()).unwrap();
+    assert_eq!(first.book_sequence, 1);
+    let proof = unsent('a', "intentunsent1");
+    assert!(matches!(
+        store.release_unsent(&proof, 0, 7),
+        Err(RiskStoreError::StaleSequence)
+    ));
+    assert!(matches!(
+        store.release_unsent(&proof, 1, 6),
+        Err(RiskStoreError::StaleGeneration)
+    ));
+    let wrong = UnsentSqlProof {
+        plan_sha256: uid('d'),
+        ..proof.clone()
+    };
+    assert!(matches!(
+        store.release_unsent(&wrong, 1, 7),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "6");
+    let released = store.release_unsent(&proof, 1, 7).unwrap();
+    assert_eq!(released.book_sequence, 2);
+    assert_eq!(store.readback().unwrap().book_sequence, 2);
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "0");
+    assert_eq!(store.readback().unwrap().reserved_loss_usd, "0");
+    assert_eq!(store.readback().unwrap().reserved_entry_usd, "0");
+    assert_eq!(store.account_readback(&account('a')).unwrap().active_reservations, 0);
+    let entry = store.inspect(&proof.reservation_key, &proof.plan_sha256).unwrap().unwrap();
+    assert_eq!(entry.state, RiskEntryState::Released);
+    assert_eq!(entry.reservation_sequence, 1);
+    assert_eq!(entry.current_book_sequence, 2);
+    assert!(matches!(
+        store.reserve(&input, &census()), Err(RiskStoreError::AlreadyResolved)
+    ));
+    drop(store);
+
+    let mut reopened = open(&fixture);
+    assert_eq!(reopened.inspect(&proof.reservation_key, &proof.plan_sha256).unwrap(), Some(entry));
+    assert_eq!(reopened.readback().unwrap().global_reserved_usdt, "0");
+    assert_eq!(reopened.readback().unwrap().remaining_loss_usd, "100");
+    assert_eq!(reopened.readback().unwrap().remaining_entry_usd, "100");
+}
+
+#[test]
+fn risk_book_contract_sql_rejects_invalid_no_send_and_conflicting_fence() {
+    let fixture = Fixture::new("negative-corrupt");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let mut proof = unsent('a', "intentnoproof1");
+    proof.reservation_key.push_str("garbage");
+    assert!(matches!(
+        store.release_unsent(&proof, 0, 7),
+        Err(RiskStoreError::Invalid("UNSENT_SQL_PROOF_INVALID"))
+    ));
+    let mut proof = unsent('a', "intentnoproof1");
+    proof.request_hash = "not-a-digest".into();
+    assert!(matches!(
+        store.release_unsent(&proof, 0, 7),
+        Err(RiskStoreError::Invalid("UNSENT_SQL_PROOF_INVALID"))
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 0);
+    store.reserve(&request('a', "intentother2", "4"), &census()).unwrap();
+    drop(store);
+    // Out-of-band corruption must not allow both a positive reservation
+    // and a negative no-reserve fence on the exact same durable identity.
+    let conflict = unsent('a', "intentother2");
+    let db = rusqlite::Connection::open(&fixture.path).unwrap();
+    db.execute(
+        "INSERT INTO risk_no_reserve(
+           reservation_key,account_key,intent_id,plan_sha256,
+           request_hash,record_digest,reason,policy_revision,book_sequence)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,1,2)",
+        rusqlite::params![
+            &conflict.reservation_key, &conflict.account_key, &conflict.intent_id,
+            &conflict.plan_sha256, &conflict.request_hash, &conflict.record_digest,
+            &conflict.reason,
+        ],
+    ).unwrap();
+    drop(db);
+    assert!(matches!(
+        RiskBookStore::open_existing(&fixture.path, "test-installation", &opening().campaign_id),
+        Err(RiskStoreError::Corrupt("NO_RESERVE_FENCE_CONFLICT"))
+    ));
+}
+
+#[tokio::test]
+async fn risk_book_contract_sql_owner_serializes_negative_fence() {
+    use super::owner::RiskBookHandle;
+    let fixture = Fixture::new("owner-unsent");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let owner = RiskBookHandle::open_existing(
+        fixture.path.clone(), "test-installation".into(), opening().campaign_id,
+    ).await.unwrap();
+    let proof = unsent('a', "intentowner2");
+    let first = owner.release_unsent(proof.clone(), 0, 7).await.unwrap();
+    assert_eq!(first.book_sequence, 1);
+    let replay = owner.release_unsent(proof.clone(), 1, 7).await.unwrap();
+    assert!(replay.replayed);
+    let observed = owner.inspect(proof.reservation_key.clone(), proof.plan_sha256.clone()).await.unwrap().unwrap();
+    assert_eq!(observed.current_book_sequence, 1);
+    assert_eq!(owner.readback().await.unwrap().global_reserved_usdt, "0");
+}
