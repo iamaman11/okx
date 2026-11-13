@@ -67,7 +67,12 @@ CREATE TABLE risk_entries (
  entry_proof_digest TEXT NOT NULL,
  source_digest TEXT NOT NULL,
  book_sequence INTEGER NOT NULL CHECK(book_sequence>0),
+ CHECK(state <> 'RELEASED' OR
+       (reserved_usdt='0' AND reserved_loss_usd='0' AND reserved_entry_usd='0')),
  FOREIGN KEY(account_key) REFERENCES risk_policy_account(account_key)
 ) STRICT;
 CREATE INDEX idx_risk_entries_active_account ON risk_entries(account_key,state);
+-- Only currently held obligations are audited per mutation, never full history.
+CREATE INDEX idx_risk_entries_active_balance ON risk_entries(state)
+ WHERE state <> 'RELEASED';
 PRAGMA user_version=1;
