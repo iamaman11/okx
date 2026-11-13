@@ -3,8 +3,8 @@
 //! must verify and construct the receipt before production callers can use it.
 //! No absence, timeout, caller flag or source digest alone is evidence of no send.
 use super::{
-    LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, amount, read_meta, valid_digest,
-    valid_token, verify_reservation_aggregates,
+    LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, amount, read_meta,
+    valid_digest, valid_token, verify_reservation_aggregates,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
@@ -101,20 +101,29 @@ impl RiskBookStore {
                 "SELECT account_key,intent_id,plan_sha256,request_hash,record_digest,reason
                  FROM risk_no_reserve WHERE reservation_key=?1",
                 params![&proof.reservation_key],
-                |r| Ok((
-                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?
-                )),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .optional()?;
         if let Some(row) = existing {
-            if row != (
-                proof.account_key.clone(),
-                proof.intent_id.clone(),
-                proof.plan_sha256.clone(),
-                proof.request_hash.clone(),
-                proof.record_digest.clone(),
-                proof.reason.clone(),
-            ) {
+            if row
+                != (
+                    proof.account_key.clone(),
+                    proof.intent_id.clone(),
+                    proof.plan_sha256.clone(),
+                    proof.request_hash.clone(),
+                    proof.record_digest.clone(),
+                    proof.reason.clone(),
+                )
+            {
                 return Err(RiskStoreError::IdempotencyConflict);
             }
             return Ok(UnsentReceipt {
@@ -136,9 +145,21 @@ impl RiskBookStore {
             )
             .optional()?;
         let new_sequence = next_sequence(meta.sequence)?;
-        let new_sequence_u64 =
-            u64::try_from(new_sequence).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
-        if let Some((account, intent, plan, state, strategy, remaining_usdt, remaining_loss, previous_proof, previous_request, previous_reason)) = entry {
+        let new_sequence_u64 = u64::try_from(new_sequence)
+            .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+        if let Some((
+            account,
+            intent,
+            plan,
+            state,
+            strategy,
+            remaining_usdt,
+            remaining_loss,
+            previous_proof,
+            previous_request,
+            previous_reason,
+        )) = entry
+        {
             if account != proof.account_key
                 || intent != proof.intent_id
                 || plan != proof.plan_sha256
@@ -173,24 +194,44 @@ impl RiskBookStore {
             let reserved_entry = amount(held)?;
             let account_total: String = tx.query_row(
                 "SELECT reserved_usdt FROM risk_account_occupied WHERE account_key=?1",
-                params![&account], |r| r.get(0),
+                params![&account],
+                |r| r.get(0),
             )?;
             let strategy_total: String = tx.query_row(
                 "SELECT reserved_usdt FROM risk_strategy_occupied
                  WHERE account_key=?1 AND strategy_id=?2",
-                params![&account, &strategy], |r| r.get(0),
+                params![&account, &strategy],
+                |r| r.get(0),
             )?;
-            let global = meta.global_reserved.checked_sub(&reserved_usdt)?.canonical()?;
-            let loss = meta.loss_reserved.checked_sub(&reserved_loss)?.canonical()?;
-            let entry = meta.entry_reserved.checked_sub(&reserved_entry)?.canonical()?;
-            let account_remaining = amount(account_total)?.checked_sub(&reserved_usdt)?.canonical()?;
-            let strategy_remaining = amount(strategy_total)?.checked_sub(&reserved_usdt)?.canonical()?;
+            let global = meta
+                .global_reserved
+                .checked_sub(&reserved_usdt)?
+                .canonical()?;
+            let loss = meta
+                .loss_reserved
+                .checked_sub(&reserved_loss)?
+                .canonical()?;
+            let entry = meta
+                .entry_reserved
+                .checked_sub(&reserved_entry)?
+                .canonical()?;
+            let account_remaining = amount(account_total)?
+                .checked_sub(&reserved_usdt)?
+                .canonical()?;
+            let strategy_remaining = amount(strategy_total)?
+                .checked_sub(&reserved_usdt)?
+                .canonical()?;
             let updated = tx.execute(
                 "UPDATE risk_entries SET state='RELEASED',
                        reserved_usdt='0',reserved_loss_usd='0',reserved_entry_usd='0',
                        release_proof_digest=?2,release_request_hash=?3,release_reason=?4
                  WHERE reservation_key=?1 AND state='HELD'",
-                params![&proof.reservation_key, &proof.record_digest, &proof.request_hash, &proof.reason],
+                params![
+                    &proof.reservation_key,
+                    &proof.record_digest,
+                    &proof.request_hash,
+                    &proof.reason
+                ],
             )?;
             if updated != 1 {
                 return Err(RiskStoreError::StaleSequence);
@@ -211,10 +252,13 @@ impl RiskBookStore {
                 params![new_sequence, global, loss, entry],
             )?;
         } else {
-            let account: Option<i64> = tx.query_row(
-                "SELECT 1 FROM risk_policy_account WHERE account_key=?1",
-                params![&proof.account_key], |r| r.get(0),
-            ).optional()?;
+            let account: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 FROM risk_policy_account WHERE account_key=?1",
+                    params![&proof.account_key],
+                    |r| r.get(0),
+                )
+                .optional()?;
             if account.is_none() {
                 return Err(RiskStoreError::Invalid("ACCOUNT_NOT_ACTIVE"));
             }
@@ -224,10 +268,15 @@ impl RiskBookStore {
                    request_hash,record_digest,reason,policy_revision,book_sequence)
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 params![
-                    &proof.reservation_key, &proof.account_key, &proof.intent_id,
-                    &proof.plan_sha256, &proof.request_hash, &proof.record_digest,
+                    &proof.reservation_key,
+                    &proof.account_key,
+                    &proof.intent_id,
+                    &proof.plan_sha256,
+                    &proof.request_hash,
+                    &proof.record_digest,
                     &proof.reason,
-                    i64::try_from(meta.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?,
+                    i64::try_from(meta.policy_revision)
+                        .map_err(|_| RiskStoreError::PolicyConflict)?,
                     new_sequence,
                 ],
             )?;
