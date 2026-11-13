@@ -58,9 +58,7 @@ fn valid_no_reserve_address(proof: &UnsentSqlProof) -> bool {
 impl UnsentSqlProof {
     /// The receipt is read from the existing durable native AccountStore SQL
     /// owner, never decoded from a caller's proof flags or remote JSON.
-    pub(in crate::risk::book) fn from_account_receipt(
-        receipt: UnsentSqlReceipt,
-    ) -> Result<Self> {
+    pub(in crate::risk::book) fn from_account_receipt(receipt: UnsentSqlReceipt) -> Result<Self> {
         let encoded = serde_json::to_vec(&receipt)?;
         let proof = Self {
             reservation_key: receipt.reservation_key,
