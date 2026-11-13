@@ -242,7 +242,10 @@ fn risk_book_contract_sql_os_kill_after_durable_commit() {
     let fixture = Fixture::new("physical-kill");
     RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["risk_book_contract_sql_child_post_commit_wait", "--nocapture"])
+        .args([
+            "risk_book_contract_sql_child_post_commit_wait",
+            "--nocapture",
+        ])
         .env("OKX_510_TEST_KILL_DB", &fixture.path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
