@@ -733,11 +733,19 @@ fn risk_book_contract_sql_durable_no_reserve_tombstone_prevents_future_grant() {
     RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
     let mut store = open(&fixture);
     let proof = unsent('a', "intentfence1");
-    assert!(store.inspect(&proof.reservation_key, &proof.plan_sha256).unwrap().is_none());
+    assert!(
+        store
+            .inspect(&proof.reservation_key, &proof.plan_sha256)
+            .unwrap()
+            .is_none()
+    );
     let first = store.release_unsent(&proof, 0, 7).unwrap();
     assert_eq!(first.book_sequence, 1);
     assert!(!first.replayed);
-    let fenced = store.inspect(&proof.reservation_key, &proof.plan_sha256).unwrap().unwrap();
+    let fenced = store
+        .inspect(&proof.reservation_key, &proof.plan_sha256)
+        .unwrap()
+        .unwrap();
     assert_eq!(fenced.state, RiskEntryState::Released);
     assert_eq!(fenced.reservation_sequence, 1);
     assert_eq!(fenced.current_book_sequence, 1);
@@ -747,7 +755,10 @@ fn risk_book_contract_sql_durable_no_reserve_tombstone_prevents_future_grant() {
     let replay = store.release_unsent(&proof, 1, 7).unwrap();
     assert!(replay.replayed);
     assert_eq!(replay.book_sequence, 1);
-    let altered = UnsentSqlProof { record_digest: uid('e'), ..proof.clone() };
+    let altered = UnsentSqlProof {
+        record_digest: uid('e'),
+        ..proof.clone()
+    };
     assert!(matches!(
         store.release_unsent(&altered, 1, 7),
         Err(RiskStoreError::IdempotencyConflict)
@@ -767,7 +778,9 @@ fn risk_book_contract_sql_durable_no_reserve_tombstone_prevents_future_grant() {
 
     let mut recovered = open(&fixture);
     assert_eq!(
-        recovered.inspect(&proof.reservation_key, &proof.plan_sha256).unwrap(),
+        recovered
+            .inspect(&proof.reservation_key, &proof.plan_sha256)
+            .unwrap(),
         Some(fenced)
     );
     assert!(matches!(
@@ -775,7 +788,10 @@ fn risk_book_contract_sql_durable_no_reserve_tombstone_prevents_future_grant() {
         Err(RiskStoreError::AlreadyResolved)
     ));
     assert_eq!(
-        recovered.reserve(&request('b', "intentother1", "6"), &census()).unwrap().book_sequence,
+        recovered
+            .reserve(&request('b', "intentother1", "6"), &census())
+            .unwrap()
+            .book_sequence,
         2
     );
     assert_eq!(recovered.readback().unwrap().global_reserved_usdt, "6");
@@ -826,18 +842,33 @@ fn risk_book_contract_sql_unsent_held_release_is_exact_and_durable() {
     assert_eq!(store.readback().unwrap().global_reserved_usdt, "0");
     assert_eq!(store.readback().unwrap().reserved_loss_usd, "0");
     assert_eq!(store.readback().unwrap().reserved_entry_usd, "0");
-    assert_eq!(store.account_readback(&account('a')).unwrap().active_reservations, 0);
-    let entry = store.inspect(&proof.reservation_key, &proof.plan_sha256).unwrap().unwrap();
+    assert_eq!(
+        store
+            .account_readback(&account('a'))
+            .unwrap()
+            .active_reservations,
+        0
+    );
+    let entry = store
+        .inspect(&proof.reservation_key, &proof.plan_sha256)
+        .unwrap()
+        .unwrap();
     assert_eq!(entry.state, RiskEntryState::Released);
     assert_eq!(entry.reservation_sequence, 1);
     assert_eq!(entry.current_book_sequence, 2);
     assert!(matches!(
-        store.reserve(&input, &census()), Err(RiskStoreError::AlreadyResolved)
+        store.reserve(&input, &census()),
+        Err(RiskStoreError::AlreadyResolved)
     ));
     drop(store);
 
     let mut reopened = open(&fixture);
-    assert_eq!(reopened.inspect(&proof.reservation_key, &proof.plan_sha256).unwrap(), Some(entry));
+    assert_eq!(
+        reopened
+            .inspect(&proof.reservation_key, &proof.plan_sha256)
+            .unwrap(),
+        Some(entry)
+    );
     assert!(reopened.release_unsent(&proof, 2, 7).unwrap().replayed);
     assert_eq!(reopened.readback().unwrap().global_reserved_usdt, "0");
     assert_eq!(reopened.readback().unwrap().remaining_loss_usd, "100");
@@ -862,7 +893,9 @@ fn risk_book_contract_sql_rejects_invalid_no_send_and_conflicting_fence() {
         Err(RiskStoreError::Invalid("UNSENT_SQL_PROOF_INVALID"))
     ));
     assert_eq!(store.readback().unwrap().book_sequence, 0);
-    store.reserve(&request('a', "intentother2", "4"), &census()).unwrap();
+    store
+        .reserve(&request('a', "intentother2", "4"), &census())
+        .unwrap();
     drop(store);
     // Out-of-band corruption must not allow both a positive reservation
     // and a negative no-reserve fence on the exact same durable identity.
@@ -874,11 +907,16 @@ fn risk_book_contract_sql_rejects_invalid_no_send_and_conflicting_fence() {
            request_hash,record_digest,reason,policy_revision,book_sequence)
          VALUES(?1,?2,?3,?4,?5,?6,?7,1,2)",
         rusqlite::params![
-            &conflict.reservation_key, &conflict.account_key, &conflict.intent_id,
-            &conflict.plan_sha256, &conflict.request_hash, &conflict.record_digest,
+            &conflict.reservation_key,
+            &conflict.account_key,
+            &conflict.intent_id,
+            &conflict.plan_sha256,
+            &conflict.request_hash,
+            &conflict.record_digest,
             &conflict.reason,
         ],
-    ).unwrap();
+    )
+    .unwrap();
     drop(db);
     assert!(matches!(
         RiskBookStore::open_existing(&fixture.path, "test-installation", &opening().campaign_id),
@@ -892,14 +930,22 @@ async fn risk_book_contract_sql_owner_serializes_negative_fence() {
     let fixture = Fixture::new("owner-unsent");
     RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
     let owner = RiskBookHandle::open_existing(
-        fixture.path.clone(), "test-installation".into(), opening().campaign_id,
-    ).await.unwrap();
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    )
+    .await
+    .unwrap();
     let proof = unsent('a', "intentowner2");
     let first = owner.release_unsent(proof.clone(), 0, 7).await.unwrap();
     assert_eq!(first.book_sequence, 1);
     let replay = owner.release_unsent(proof.clone(), 1, 7).await.unwrap();
     assert!(replay.replayed);
-    let observed = owner.inspect(proof.reservation_key.clone(), proof.plan_sha256.clone()).await.unwrap().unwrap();
+    let observed = owner
+        .inspect(proof.reservation_key.clone(), proof.plan_sha256.clone())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(observed.current_book_sequence, 1);
     assert_eq!(owner.readback().await.unwrap().global_reserved_usdt, "0");
 }
