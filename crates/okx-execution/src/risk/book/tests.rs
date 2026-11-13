@@ -810,6 +810,18 @@ fn risk_book_contract_sql_unsent_held_release_is_exact_and_durable() {
     assert_eq!(store.readback().unwrap().global_reserved_usdt, "6");
     let released = store.release_unsent(&proof, 1, 7).unwrap();
     assert_eq!(released.book_sequence, 2);
+    assert!(!released.replayed);
+    let replay = store.release_unsent(&proof, 2, 7).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.book_sequence, 2);
+    let changed_reason = UnsentSqlProof {
+        reason: "OTHER_SQL_REASON".into(),
+        ..proof.clone()
+    };
+    assert!(matches!(
+        store.release_unsent(&changed_reason, 2, 7),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
     assert_eq!(store.readback().unwrap().book_sequence, 2);
     assert_eq!(store.readback().unwrap().global_reserved_usdt, "0");
     assert_eq!(store.readback().unwrap().reserved_loss_usd, "0");
@@ -826,6 +838,7 @@ fn risk_book_contract_sql_unsent_held_release_is_exact_and_durable() {
 
     let mut reopened = open(&fixture);
     assert_eq!(reopened.inspect(&proof.reservation_key, &proof.plan_sha256).unwrap(), Some(entry));
+    assert!(reopened.release_unsent(&proof, 2, 7).unwrap().replayed);
     assert_eq!(reopened.readback().unwrap().global_reserved_usdt, "0");
     assert_eq!(reopened.readback().unwrap().remaining_loss_usd, "100");
     assert_eq!(reopened.readback().unwrap().remaining_entry_usd, "100");
