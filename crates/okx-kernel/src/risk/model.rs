@@ -32,3 +32,13 @@ pub struct RiskProposal {
     pub loss_usd: RiskAmount,
     pub entry_upper_usd: RiskAmount,
 }
+
+/// A persisted reservation lifecycle state, not authorization to submit a venue POST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiskEntryState {
+    Held,
+    Posted,
+    Unknown,
+    Open,
+    Released,
+}
