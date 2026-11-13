@@ -61,6 +61,10 @@ pub(super) enum RiskStoreError {
     StaleSequence,
     #[error("COMPLETE_ACCOUNT_CENSUS_UNPROVEN")]
     CensusUnproven,
+    #[error("DURABLE_ENTRY_SQL_PROOF_MISSING")]
+    EntrySqlUnproven,
+    #[error("ENTRY_SQL_PROOF_UNAVAILABLE")]
+    EntrySqlUnavailable,
     #[error("DURABLE_UNSENT_SQL_PROOF_MISSING")]
     UnsentSqlUnproven,
     #[error("UNSENT_SQL_PROOF_UNAVAILABLE")]
