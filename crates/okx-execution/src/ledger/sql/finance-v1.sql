@@ -43,6 +43,7 @@ CREATE TABLE finance_intents (
  plan_sha256 TEXT NOT NULL CHECK(length(plan_sha256)=64),
  exchange_order_id TEXT NOT NULL,
  PRIMARY KEY(installation_id,account_key,intent_id),
+ UNIQUE(installation_id,account_key,exchange_order_id),
  FOREIGN KEY(installation_id,account_key)
    REFERENCES finance_accounts(installation_id,account_key)
 ) STRICT;
@@ -101,6 +102,8 @@ CREATE TABLE finance_risk_entries (
  reserved_entry_usd TEXT NOT NULL,
  settlement_revision INTEGER NOT NULL DEFAULT 0 CHECK(settlement_revision>=0),
  source_digest TEXT NOT NULL DEFAULT '',
+ CHECK(state <> 'RELEASED' OR reserved_entry_usd='0'),
+ CHECK(state <> 'HELD' OR (entry_settled_usd='0' AND settlement_revision=0)),
  PRIMARY KEY(installation_id,campaign_id,reservation_key),
  FOREIGN KEY(installation_id,campaign_id,account_key)
    REFERENCES finance_campaign_accounts(installation_id,campaign_id,account_key),
