@@ -46,14 +46,18 @@ pub fn validate_post_causality(
         || proof.elapsed_to_proof_ms > 5_000
         || policy_account_keys.is_empty()
         || proof.account_reads.len() != policy_account_keys.len()
-        || proof.account_reads.iter().zip(policy_account_keys).any(|(read, member)| {
-            read.account_key != *member
-                || read.private_generation == 0
-                || !hex(&read.source_read_id, 64)
-                || !hex(&read.content_digest, 64)
-                || read.started_after_held_ms > read.completed_after_held_ms
-                || read.completed_after_held_ms > proof.elapsed_to_proof_ms
-        })
+        || proof
+            .account_reads
+            .iter()
+            .zip(policy_account_keys)
+            .any(|(read, member)| {
+                read.account_key != *member
+                    || read.private_generation == 0
+                    || !hex(&read.source_read_id, 64)
+                    || !hex(&read.content_digest, 64)
+                    || read.started_after_held_ms > read.completed_after_held_ms
+                    || read.completed_after_held_ms > proof.elapsed_to_proof_ms
+            })
     {
         return Err(RiskRuleError::PostCausalProofUnproven);
     }
@@ -204,20 +208,25 @@ mod tests {
     #[test]
     fn risk_book_contract_causal_post_requires_exact_cohort_and_incarnation() {
         use crate::risk::model::{PostAccountRead, PostCausalProof};
-        let accounts = vec!["okx:real:".to_owned() + &"a".repeat(64),
-                            "okx:real:".to_owned() + &"b".repeat(64)];
+        let accounts = vec![
+            "okx:real:".to_owned() + &"a".repeat(64),
+            "okx:real:".to_owned() + &"b".repeat(64),
+        ];
         let proof = PostCausalProof {
             reserve_anchor: "original-reservation".into(),
             native_incarnation: "f".repeat(32),
             elapsed_to_proof_ms: 3,
-            account_reads: accounts.iter().map(|key| PostAccountRead {
-                account_key: key.clone(),
-                private_generation: 7,
-                source_read_id: "d".repeat(64),
-                content_digest: "c".repeat(64),
-                started_after_held_ms: 0,
-                completed_after_held_ms: 2,
-            }).collect(),
+            account_reads: accounts
+                .iter()
+                .map(|key| PostAccountRead {
+                    account_key: key.clone(),
+                    private_generation: 7,
+                    source_read_id: "d".repeat(64),
+                    content_digest: "c".repeat(64),
+                    started_after_held_ms: 0,
+                    completed_after_held_ms: 2,
+                })
+                .collect(),
         };
         assert_eq!(
             validate_post_causality(&proof, "original-reservation", &"f".repeat(32), &accounts),
@@ -232,13 +241,23 @@ mod tests {
         let mut old_session = proof.clone();
         old_session.native_incarnation = "e".repeat(32);
         assert_eq!(
-            validate_post_causality(&old_session, "original-reservation", &"f".repeat(32), &accounts),
+            validate_post_causality(
+                &old_session,
+                "original-reservation",
+                &"f".repeat(32),
+                &accounts
+            ),
             Err(RiskRuleError::PostCausalProofUnproven)
         );
         let mut bad_ordering = proof.clone();
         bad_ordering.account_reads[1].started_after_held_ms = 4;
         assert_eq!(
-            validate_post_causality(&bad_ordering, "original-reservation", &"f".repeat(32), &accounts),
+            validate_post_causality(
+                &bad_ordering,
+                "original-reservation",
+                &"f".repeat(32),
+                &accounts
+            ),
             Err(RiskRuleError::PostCausalProofUnproven)
         );
         let mut late = proof;
