@@ -20,10 +20,12 @@ use std::{
 use thiserror::Error;
 mod integrity;
 mod post;
+mod settlement;
 mod queries;
 mod unsent;
 use integrity::verify_reservation_aggregates;
 pub(super) use post::{PostAuthorized, PostFenceInput};
+pub(super) use settlement::{EntrySettlementReceipt, PartialEntrySqlProof};
 pub(super) use queries::{AccountReadback, ReservationReadback};
 pub(super) use unsent::{UnsentReceipt, UnsentSqlProof};
 
@@ -296,6 +298,7 @@ struct BookMeta {
     loss_reserved: RiskAmount,
     entry_limit: RiskAmount,
     entry_consumed: RiskAmount,
+    entry_opening_consumed: RiskAmount,
     entry_reserved: RiskAmount,
     entry_breach: RiskAmount,
 }
@@ -313,10 +316,11 @@ fn read_meta(tx: &rusqlite::Transaction<'_>) -> Result<BookMeta> {
         String,
         String,
         String,
+        String,
     ) = tx.query_row(
         "SELECT policy_revision,generation,book_sequence,global_limit_usdt,global_reserved_usdt,
         loss_limit_usd,loss_consumed_usd,loss_reserved_usd,entry_limit_usd,
-        entry_consumed_usd,entry_reserved_usd,entry_bound_breach_usd
+        entry_consumed_usd,entry_opening_consumed_usd,entry_reserved_usd,entry_bound_breach_usd
         FROM risk_meta WHERE singleton=1",
         [],
         |r| {
@@ -333,6 +337,7 @@ fn read_meta(tx: &rusqlite::Transaction<'_>) -> Result<BookMeta> {
                 r.get(9)?,
                 r.get(10)?,
                 r.get(11)?,
+                r.get(12)?, 
             ))
         },
     )?;
@@ -348,8 +353,9 @@ fn read_meta(tx: &rusqlite::Transaction<'_>) -> Result<BookMeta> {
         loss_reserved: RiskAmount::parse(&row.7)?,
         entry_limit: RiskAmount::parse(&row.8)?,
         entry_consumed: RiskAmount::parse(&row.9)?,
-        entry_reserved: RiskAmount::parse(&row.10)?,
-        entry_breach: RiskAmount::parse(&row.11)?,
+        entry_opening_consumed: RiskAmount::parse(&row.10)?,
+        entry_reserved: RiskAmount::parse(&row.11)?,
+        entry_breach: RiskAmount::parse(&row.12)?, 
     })
 }
 fn amount(text: String) -> Result<RiskAmount> {
@@ -449,7 +455,7 @@ impl RiskBookStore {
         connection.pragma_update(None, "synchronous", "FULL")?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let journal: String = connection.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
-        if version != 4 || journal != "wal" {
+        if version != 5 || journal != "wal" {
             return Err(RiskStoreError::Corrupt("SCHEMA_OR_JOURNAL"));
         }
         let identity: (String, String, i64) = connection.query_row(
@@ -820,7 +826,7 @@ impl RiskBookStore {
         conn.execute_batch(include_str!("schema.sql"))?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
-            "INSERT INTO risk_meta VALUES(1,?1,?2,?3,?4,0,1,?5,'0',?6,'0','0',?7,'0','0','0')",
+            "INSERT INTO risk_meta VALUES(1,?1,?2,?3,?4,0,1,?5,'0',?6,'0','0',?7,'0','0','0','0')",
             params![
                 opening.campaign_id,
                 opening.installation_id,
