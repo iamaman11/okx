@@ -6,7 +6,9 @@ use super::{
     LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, amount, read_meta,
     valid_digest, valid_token, verify_reservation_aggregates,
 };
+use crate::account_store::UnsentSqlReceipt;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::risk::book) struct UnsentSqlProof {
@@ -54,6 +56,25 @@ fn valid_no_reserve_address(proof: &UnsentSqlProof) -> bool {
 }
 
 impl UnsentSqlProof {
+    /// The receipt is read from the existing durable native AccountStore SQL
+    /// owner, never decoded from a caller's proof flags or remote JSON.
+    pub(in crate::risk::book) fn from_account_receipt(
+        receipt: UnsentSqlReceipt,
+    ) -> Result<Self> {
+        let encoded = serde_json::to_vec(&receipt)?;
+        let proof = Self {
+            reservation_key: receipt.reservation_key,
+            account_key: receipt.account_key,
+            intent_id: receipt.intent_id,
+            plan_sha256: receipt.plan_hash,
+            request_hash: receipt.request_hash,
+            reason: receipt.reason,
+            record_digest: format!("{:x}", Sha256::digest(encoded)),
+        };
+        proof.validate()?;
+        Ok(proof)
+    }
+
     fn validate(&self) -> Result<()> {
         if self.reservation_key.len() > 512
             || !valid_no_reserve_address(self)
