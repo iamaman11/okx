@@ -1145,7 +1145,10 @@ fn risk_book_contract_campaign_db_path_is_installation_scoped() {
             .join(uid('c'))
             .join("risk-book.sqlite")
     );
-    assert!(!selected.exists(), "path derivation must never bootstrap a budget");
+    assert!(
+        !selected.exists(),
+        "path derivation must never bootstrap a budget"
+    );
     assert!(matches!(
         campaign_db_path(std::path::Path::new("relative"), &campaign),
         Err(RiskStoreError::Invalid("RUNTIME_ROOT_NOT_ABSOLUTE"))
