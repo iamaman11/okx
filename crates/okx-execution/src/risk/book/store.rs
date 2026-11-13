@@ -435,4 +435,143 @@ impl RiskBookStore {
         evaluate_campaign_capacity(
             &CampaignCapacity {
                 loss_limit_usd: meta.loss_limit.clone(),
-                loss_consumed_usd: meta.loss_consum
+                loss_consumed_usd: meta.loss_consumed.clone(),
+                loss_reserved_usd: meta.loss_reserved.clone(),
+                entry_limit_usd: meta.entry_limit.clone(),
+                entry_consumed_usd: meta.entry_consumed.clone(),
+                entry_reserved_usd: meta.entry_reserved.clone(),
+                entry_bound_breach_usd: meta.entry_breach.clone(),
+            },
+            &input.proposal,
+        )?;
+        evaluate_scope_capacity(
+            &ScopeCapacity {
+                global_limit_usdt: meta.global_limit,
+                global_occupied_usdt: global_occupied,
+                account_limit_usdt: account_limit.clone(),
+                account_occupied_usdt: account_occupied,
+                strategy_limit_usdt: strategy_limit,
+                strategy_occupied_usdt: strategy_reserved.clone(),
+                order_limit_usdt: order_limit.clone(),
+            },
+            &input.proposal,
+        )?;
+        let next_sequence = meta
+            .sequence
+            .checked_add(1)
+            .ok_or(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+        let next_sequence_i64 = i64::try_from(next_sequence)
+            .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+        let new_global = meta
+            .global_reserved
+            .checked_add(&input.proposal.loss_usdt)?
+            .canonical()?;
+        let new_loss = meta
+            .loss_reserved
+            .checked_add(&input.proposal.loss_usd)?
+            .canonical()?;
+        let new_entry = meta
+            .entry_reserved
+            .checked_add(&input.proposal.entry_upper_usd)?
+            .canonical()?;
+        let new_account = account_reserved
+            .checked_add(&input.proposal.loss_usdt)?
+            .canonical()?;
+        let new_strategy = strategy_reserved
+            .checked_add(&input.proposal.loss_usdt)?
+            .canonical()?;
+        let policy_i64 =
+            i64::try_from(input.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?;
+        tx.execute("INSERT INTO risk_entries(
+            reservation_key,account_key,strategy_id,intent_id,plan_sha256,request_digest,
+            policy_revision,state,loss_usdt,loss_usd,entry_upper_usd,entry_proof_digest,
+            source_digest,book_sequence) VALUES (?1,?2,?3,?4,?5,?6,?7,'HELD',?8,?9,?10,?11,?12,?13)",
+            params![&key,&account_key,&input.strategy_id,&input.intent_id,&input.plan_sha256,digest,
+                policy_i64,input.proposal.loss_usdt.canonical()?,input.proposal.loss_usd.canonical()?,
+                input.proposal.entry_upper_usd.canonical()?,&input.entry_proof_digest,
+                &census.source_digest,next_sequence_i64])?;
+        tx.execute(
+            "UPDATE risk_account_occupied SET reserved_usdt=?1 WHERE account_key=?2",
+            params![new_account, &account_key],
+        )?;
+        tx.execute("UPDATE risk_strategy_occupied SET reserved_usdt=?1 WHERE account_key=?2 AND strategy_id=?3",
+            params![new_strategy,&account_key,&input.strategy_id])?;
+        let changed=tx.execute(
+            "UPDATE risk_meta SET book_sequence=?1,global_reserved_usdt=?2,loss_reserved_usd=?3,entry_reserved_usd=?4
+             WHERE singleton=1 AND book_sequence=?5 AND policy_revision=?6",
+            params![next_sequence_i64,new_global,new_loss,new_entry,
+                i64::try_from(meta.sequence).map_err(|_|RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
+                policy_i64])?;
+        if changed != 1 {
+            return Err(RiskStoreError::PolicyConflict);
+        }
+        tx.commit()?;
+        Ok(HeldReceipt {
+            reservation_key: key,
+            book_sequence: next_sequence,
+            replayed: false,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn initialize_fixture(path: &Path, opening: &CampaignOpening) -> Result<()> {
+        if path.exists() {
+            return Err(RiskStoreError::Invalid("EXISTING_RISK_BOOK"));
+        }
+        if opening.accounts.len() < 2 || opening.policy_revision == 0 || opening.generation == 0 {
+            return Err(RiskStoreError::Invalid("FIXTURE_COHORT"));
+        }
+        // Test-only; never a production path to mint a fresh risk budget over
+        // an unknown legacy owner. Production bootstrap requires physical fence.
+        let mut conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.execute_batch(include_str!("schema.sql"))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO risk_meta VALUES(1,?1,?2,?3,?4,0,1,?5,'0',?6,'0','0',?7,'0','0','0')",
+            params![
+                opening.campaign_id,
+                opening.installation_id,
+                i64::try_from(opening.policy_revision)
+                    .map_err(|_| RiskStoreError::PolicyConflict)?,
+                i64::try_from(opening.generation).map_err(|_| RiskStoreError::StaleGeneration)?,
+                opening.global_limit.canonical()?,
+                opening.loss_limit.canonical()?,
+                opening.entry_limit.canonical()?
+            ],
+        )?;
+        for account in &opening.accounts {
+            tx.execute(
+                "INSERT INTO risk_account_occupied VALUES (?1,'0')",
+                params![account.account_key],
+            )?;
+            tx.execute(
+                "INSERT INTO risk_policy_account VALUES(?1,?2,?3)",
+                params![
+                    account.account_key,
+                    account.account_limit.canonical()?,
+                    account.order_limit.canonical()?
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO risk_policy_strategy VALUES(?1,?2,?3)",
+                params![
+                    account.account_key,
+                    account.strategy_id,
+                    account.strategy_limit.canonical()?
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO risk_strategy_occupied VALUES(?1,?2,'0')",
+                params![account.account_key, account.strategy_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
