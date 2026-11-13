@@ -177,7 +177,9 @@ impl RiskBookHandle {
         // history before campaign COMMIT. If this ACK is lost, report unknown;
         // exact campaign revision replay remains read-only and retries the ACK.
         account
-            .call(deadline, move |s| s.acknowledge_partial_entry_settlement(&sql))
+            .call(deadline, move |s| {
+                s.acknowledge_partial_entry_settlement(&sql)
+            })
             .await
             .map_err(|_| RiskStoreError::OutcomeUnknown)?;
         Ok(accepted)
