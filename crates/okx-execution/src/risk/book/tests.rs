@@ -524,3 +524,25 @@ fn risk_book_contract_sql_corrupted_reservation_aggregates_reject_reopen() {
         Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"))
     ));
 }
+
+#[test]
+fn risk_book_contract_sql_release_requires_zero_reservations() {
+    let fixture = Fixture::new("release-check");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let input = request('a', "intentrelease1", "6");
+    let mut store = open(&fixture);
+    store.reserve(&input, &census()).unwrap();
+    drop(store);
+
+    // A terminal label alone must never erase a still-funded obligation.
+    // SQLite rejects the incomplete transition even if a caller bypasses Rust.
+    let connection = rusqlite::Connection::open(&fixture.path).unwrap();
+    let result = connection.execute(
+        "UPDATE risk_entries SET state='RELEASED' WHERE reservation_key=?1",
+        rusqlite::params![input.reservation_key()],
+    );
+    assert!(result.is_err());
+    drop(connection);
+    let mut reopened = open(&fixture);
+    assert_eq!(reopened.readback().unwrap().global_reserved_usdt, "6");
+}
