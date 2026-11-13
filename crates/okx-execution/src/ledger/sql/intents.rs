@@ -1777,7 +1777,9 @@ impl AccountStore {
                    AND (r.state IN('UNSENT_PENDING_CENTRAL','RELEASED') OR
                         (r.reservation_key IS NULL AND a.result_ref IS NOT NULL))
                    AND o.kind='REJECTED_UNSENT'
-                   AND o.request_hash=i.request_hash AND o.result_ref=i.incident",
+                   AND o.request_hash=i.request_hash AND o.result_ref=i.incident
+                   AND (r.reservation_key IS NULL OR
+                        (r.account_key=?2 AND r.plan_hash=i.plan_hash))",
                 params![id, self.meta.account_key],
                 |r| {
                     Ok(UnsentSqlReceipt {
