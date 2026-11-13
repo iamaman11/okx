@@ -1,0 +1,344 @@
+//! #510 r4: one-file account-source → campaign-budget transaction slice.
+//! The existing financial SQL owner supplies the Transaction. There is NO
+//! second Connection, writer, account ACK, venue client or bootstrap here.
+//! This first slice cannot be production-enabled until the full v2 account
+//! schema is scoped/imported and original source producers are wired.
+use crate::{StoreError, StoreResult};
+use okx_kernel::risk::money::RiskAmount;
+use rusqlite::{OptionalExtension, Transaction, params};
+
+pub(super) const CORE_SCHEMA: &str = include_str!("finance-v1.sql");
+const MAX_SAFE_SEQUENCE: i64 = 9_007_199_254_740_991;
+
+#[derive(Debug, Clone)]
+pub(super) struct EntryRef<'a> {
+    pub installation: &'a str,
+    pub campaign: &'a str,
+    pub reservation: &'a str,
+    pub account: &'a str,
+    pub intent: &'a str,
+    pub source_revision: i64,
+    pub expected_sequence: i64,
+    pub generation: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EntryCommit {
+    pub book_sequence: i64,
+    pub cumulative_entry_usd: String,
+    pub replayed: bool,
+}
+
+fn money(raw: &str) -> StoreResult<RiskAmount> {
+    RiskAmount::parse(raw).map_err(|_| StoreError::Invalid("UNIFIED_MONEY_INVALID"))
+}
+fn canonical(value: &RiskAmount) -> StoreResult<String> {
+    value
+        .canonical()
+        .map_err(|_| StoreError::Invalid("UNIFIED_MONEY_RANGE"))
+}
+fn digest_ok(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+fn checked_add(a: &RiskAmount, b: &RiskAmount) -> StoreResult<RiskAmount> {
+    a.checked_add(b)
+        .map_err(|_| StoreError::Invalid("UNIFIED_MONEY_RANGE"))
+}
+fn checked_sub(a: &RiskAmount, b: &RiskAmount) -> StoreResult<RiskAmount> {
+    a.checked_sub(b)
+        .map_err(|_| StoreError::Invalid("UNIFIED_AMOUNT_REGRESSION"))
+}
+fn remainder(upper: &RiskAmount, used: &RiskAmount) -> StoreResult<RiskAmount> {
+    if upper > used {
+        checked_sub(upper, used)
+    } else {
+        Ok(RiskAmount::zero())
+    }
+}
+fn overage(value: &RiskAmount, limit: &RiskAmount) -> StoreResult<RiskAmount> {
+    if value > limit {
+        checked_sub(value, limit)
+    } else {
+        Ok(RiskAmount::zero())
+    }
+}
+
+/// Scope-keyed primary rows are checked before a mutable campaign cache may
+/// grant headroom. This is an O(active entries) proof for the initial slice;
+/// production performance/index evidence remains a checkpoint, not assumed.
+fn verify_campaign(tx: &Transaction<'_>, scope: &EntryRef<'_>,
+    opening: &RiskAmount, consumed: &RiskAmount, reserved: &RiskAmount,
+) -> StoreResult<()> {
+    let mut source_total = opening.clone();
+    let mut active_reserved = RiskAmount::zero();
+    let mut stmt = tx.prepare(
+        "SELECT state,entry_settled_usd,reserved_entry_usd,entry_upper_usd,
+                settlement_revision,source_digest
+         FROM finance_risk_entries
+         WHERE installation_id=?1 AND campaign_id=?2",
+    )?;
+    let rows = stmt.query_map(params![scope.installation, scope.campaign], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, String>(5)?,
+        ))
+    })?;
+    for row in rows {
+        let (state, used, remaining, upper, revision, digest) = row?;
+        let used = money(&used)?;
+        let remaining = money(&remaining)?;
+        let upper = money(&upper)?;
+        if revision == 0 {
+            if !used.is_zero() || !digest.is_empty() {
+                return Err(StoreError::Invalid("UNIFIED_PRIMARY_REVISION_CORRUPT"));
+            }
+        } else if revision < 0 || !digest_ok(&digest) {
+            return Err(StoreError::Invalid("UNIFIED_PRIMARY_REVISION_CORRUPT"));
+        }
+        if state != "RELEASED" {
+            if remaining != remainder(&upper, &used)? {
+                return Err(StoreError::Invalid("UNIFIED_PRIMARY_RESERVED_CORRUPT"));
+            }
+            active_reserved = checked_add(&active_reserved, &remaining)?;
+        }
+        source_total = checked_add(&source_total, &used)?;
+    }
+    if &source_total != consumed || &active_reserved != reserved {
+        return Err(StoreError::Invalid("UNIFIED_CAMPAIGN_AGGREGATES_CORRUPT"));
+    }
+    Ok(())
+}
+
+/// This function accepts no caller-supplied money, fill, fee or FX values.
+/// It reads the original immutable source revision, intent, fill and bill
+/// from the SAME SQLite snapshot as the campaign CAS. Existing source
+/// capture must populate these primary rows before this can be used live.
+pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreResult<EntryCommit> {
+    if [
+        scope.installation,
+        scope.campaign,
+        scope.reservation,
+        scope.account,
+        scope.intent,
+    ]
+    .iter()
+    .any(|s| s.is_empty())
+        || scope.source_revision <= 0
+        || scope.source_revision > MAX_SAFE_SEQUENCE
+        || scope.generation <= 0
+        || scope.expected_sequence < 0
+        || scope.expected_sequence > MAX_SAFE_SEQUENCE
+    {
+        return Err(StoreError::Invalid("UNIFIED_SCOPE_INVALID"));
+    }
+
+    let campaign: Option<(i64, i64, i64, String, String, String, String, String)> = tx
+        .query_row(
+            "SELECT policy_revision,generation,book_sequence,entry_limit_usd,
+                    entry_consumed_usd,entry_opening_consumed_usd,entry_reserved_usd,entry_breach_usd
+             FROM finance_campaigns WHERE installation_id=?1 AND campaign_id=?2",
+            params![scope.installation, scope.campaign],
+            |r| Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
+                r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?,
+            )),
+        )
+        .optional()?;
+    let Some((policy, generation, sequence, limit, consumed, opening, reserved, breach)) = campaign
+    else {
+        return Err(StoreError::Invalid("UNIFIED_CAMPAIGN_UNAVAILABLE"));
+    };
+    if policy <= 0 || generation != scope.generation {
+        return Err(StoreError::Invalid("UNIFIED_CAMPAIGN_STALE"));
+    }
+    let limit = money(&limit)?;
+    let consumed = money(&consumed)?;
+    let opening = money(&opening)?;
+    let reserved = money(&reserved)?;
+    let prior_breach = money(&breach)?;
+    verify_campaign(tx, scope, &opening, &consumed, &reserved)?;
+
+    let row: Option<(String, String, String, String, String, String, i64, String)> = tx
+        .query_row(
+            "SELECT account_key,intent_id,plan_sha256,state,entry_upper_usd,
+                    entry_settled_usd,settlement_revision,source_digest
+             FROM finance_risk_entries
+             WHERE installation_id=?1 AND campaign_id=?2 AND reservation_key=?3",
+            params![scope.installation, scope.campaign, scope.reservation],
+            |r| Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
+                r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?,
+            )),
+        )
+        .optional()?;
+    let Some((account, intent, plan, state, upper, previous, old_rev, old_digest)) = row else {
+        return Err(StoreError::Invalid("UNIFIED_RESERVATION_MISSING"));
+    };
+    if account != scope.account || intent != scope.intent {
+        return Err(StoreError::Invalid("UNIFIED_ACCOUNT_OR_INTENT_MISMATCH"));
+    }
+    if state != "POSTED" || old_rev < 0 {
+        return Err(StoreError::Invalid("UNIFIED_ENTRY_NOT_POSTED"));
+    }
+    let intent_plan: String = tx.query_row(
+        "SELECT plan_sha256 FROM finance_intents
+         WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
+        params![scope.installation, scope.account, scope.intent],
+        |r| r.get(0),
+    )?;
+    if intent_plan != plan || !digest_ok(&plan) {
+        return Err(StoreError::Invalid("UNIFIED_ORIGINAL_PLAN_CONFLICT"));
+    }
+
+    // All joins are scoped by BOTH installation and source account. Even
+    // identical venue order/fill/bill IDs on a different account cannot
+    // become a source for this risk reservation.
+    let source: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT s.source_digest,s.cumulative_entry_usd,b.source_digest
+             FROM finance_entry_sources s
+             JOIN finance_fills f
+               ON f.installation_id=s.installation_id AND f.account_key=s.account_key
+              AND f.fill_id=s.fill_id AND f.intent_id=s.intent_id
+             JOIN finance_bills b
+               ON b.installation_id=s.installation_id AND b.account_key=s.account_key
+              AND b.bill_id=s.bill_id AND b.fill_id=s.fill_id
+             WHERE s.installation_id=?1 AND s.account_key=?2
+               AND s.intent_id=?3 AND s.settlement_revision=?4",
+            params![scope.installation, scope.account, scope.intent, scope.source_revision],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((source_digest, source_amount, bill_digest)) = source else {
+        return Err(StoreError::Invalid("UNIFIED_ORIGINAL_SOURCE_MISSING"));
+    };
+    if !digest_ok(&source_digest) || !digest_ok(&bill_digest) {
+        return Err(StoreError::Invalid("UNIFIED_SOURCE_DIGEST_INVALID"));
+    }
+    let cumulative = money(&source_amount)?;
+    if cumulative.is_zero() {
+        return Err(StoreError::Invalid("UNIFIED_SOURCE_EMPTY"));
+    }
+    let previous = money(&previous)?;
+    let upper = money(&upper)?;
+    if scope.source_revision == old_rev {
+        let previous_receipt: Option<(String, String, i64)> = tx
+            .query_row(
+                "SELECT source_digest,cumulative_entry_usd,book_sequence
+                 FROM finance_entry_receipts
+                 WHERE installation_id=?1 AND campaign_id=?2 AND reservation_key=?3
+                   AND settlement_revision=?4",
+                params![
+                    scope.installation, scope.campaign, scope.reservation, scope.source_revision
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        return match previous_receipt {
+            Some((digest, amount, receipt_seq))
+                if source_digest == old_digest
+                    && digest == source_digest
+                    && money(&amount)? == cumulative
+                    && previous == cumulative
+                    && receipt_seq > 0
+                    && receipt_seq <= sequence
+                    && scope.expected_sequence <= sequence =>
+            {
+                Ok(EntryCommit {
+                    book_sequence: sequence,
+                    cumulative_entry_usd: canonical(&cumulative)?,
+                    replayed: true,
+                })
+            }
+            _ => Err(StoreError::Invalid("UNIFIED_RECEIPT_REPLAY_CONFLICT")),
+        };
+    }
+    if sequence != scope.expected_sequence {
+        return Err(StoreError::Invalid("UNIFIED_STALE_SEQUENCE"));
+    }
+    if scope.source_revision != old_rev + 1 || cumulative < previous
+        || source_digest == old_digest
+    {
+        return Err(StoreError::Invalid("UNIFIED_SETTLEMENT_REGRESSION"));
+    }
+    if sequence >= MAX_SAFE_SEQUENCE {
+        return Err(StoreError::Invalid("UNIFIED_SEQUENCE_OVERFLOW"));
+    }
+
+    let previously_reserved = remainder(&upper, &previous)?;
+    let next_reserved = remainder(&upper, &cumulative)?;
+    let old_reservation: String = tx.query_row(
+        "SELECT reserved_entry_usd FROM finance_risk_entries
+         WHERE installation_id=?1 AND campaign_id=?2 AND reservation_key=?3",
+        params![scope.installation, scope.campaign, scope.reservation],
+        |r| r.get(0),
+    )?;
+    if money(&old_reservation)? != previously_reserved {
+        return Err(StoreError::Invalid("UNIFIED_PRIMARY_RESERVED_CORRUPT"));
+    }
+    let delta = checked_sub(&cumulative, &previous)?;
+    let consumed_after = checked_add(&consumed, &delta)?;
+    let reserved_after = checked_sub(&reserved, &checked_sub(&previously_reserved, &next_reserved)?)?;
+    let breached_by_total = if RiskAmount::sum_exceeds(&[&consumed_after, &reserved_after], &limit) {
+        overage(&checked_add(&consumed_after, &reserved_after)?, &limit)?
+    } else {
+        RiskAmount::zero()
+    };
+    let breached_by_entry = overage(&cumulative, &upper)?;
+    let breach_after = [&prior_breach, &breached_by_total, &breached_by_entry]
+        .into_iter()
+        .max()
+        .expect("nonempty loss limit candidates")
+        .clone();
+    let next_sequence = sequence + 1;
+    if tx.execute(
+        "UPDATE finance_risk_entries
+         SET entry_settled_usd=?1,reserved_entry_usd=?2,settlement_revision=?3,source_digest=?4
+         WHERE installation_id=?5 AND campaign_id=?6 AND reservation_key=?7
+           AND settlement_revision=?8 AND state='POSTED'",
+        params![
+            canonical(&cumulative)?, canonical(&next_reserved)?,
+            scope.source_revision, &source_digest,
+            scope.installation, scope.campaign, scope.reservation, old_rev,
+        ],
+    )? != 1 {
+        return Err(StoreError::Invalid("UNIFIED_RESERVATION_CAS_CONFLICT"));
+    }
+    if tx.execute(
+        "UPDATE finance_campaigns
+         SET book_sequence=?1,entry_consumed_usd=?2,entry_reserved_usd=?3,entry_breach_usd=?4
+         WHERE installation_id=?5 AND campaign_id=?6 AND generation=?7 AND book_sequence=?8",
+        params![
+            next_sequence,canonical(&consumed_after)?,canonical(&reserved_after)?,
+            canonical(&breach_after)?,scope.installation,scope.campaign,
+            scope.generation,scope.expected_sequence,
+        ],
+    )? != 1 {
+        return Err(StoreError::Invalid("UNIFIED_CAMPAIGN_CAS_CONFLICT"));
+    }
+    tx.execute(
+        "INSERT INTO finance_entry_receipts
+         (installation_id,campaign_id,reservation_key,account_key,intent_id,
+          settlement_revision,source_digest,cumulative_entry_usd,book_sequence)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            scope.installation,scope.campaign,scope.reservation,scope.account,scope.intent,
+            scope.source_revision,source_digest,canonical(&cumulative)?,next_sequence,
+        ],
+    )?;
+    Ok(EntryCommit {
+        book_sequence: next_sequence,
+        cumulative_entry_usd: canonical(&cumulative)?,
+        replayed: false,
+    })
+}
+
+#[cfg(test)]
+#[path = "unified_financial_tests.rs"]
+mod tests;
