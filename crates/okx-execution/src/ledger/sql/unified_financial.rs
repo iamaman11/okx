@@ -78,7 +78,7 @@ fn verify_campaign(
     let mut source_total = opening.clone();
     let mut active_reserved = RiskAmount::zero();
     let mut stmt = tx.prepare(
-        "SELECT state,entry_settled_usd,reserved_entry_usd,entry_upper_usd,
+        "SELECT reservation_key,state,entry_settled_usd,reserved_entry_usd,entry_upper_usd,
                 settlement_revision,source_digest
          FROM finance_risk_entries
          WHERE installation_id=?1 AND campaign_id=?2",
@@ -89,12 +89,13 @@ fn verify_campaign(
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
             r.get::<_, String>(3)?,
-            r.get::<_, i64>(4)?,
-            r.get::<_, String>(5)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, i64>(5)?,
+            r.get::<_, String>(6)?,
         ))
     })?;
     for row in rows {
-        let (state, used, remaining, upper, revision, digest) = row?;
+        let (reservation_key, state, used, remaining, upper, revision, digest) = row?;
         let used = money(&used)?;
         let remaining = money(&remaining)?;
         let upper = money(&upper)?;
@@ -102,8 +103,26 @@ fn verify_campaign(
             if !used.is_zero() || !digest.is_empty() {
                 return Err(StoreError::Invalid("UNIFIED_PRIMARY_REVISION_CORRUPT"));
             }
-        } else if revision < 0 || !digest_ok(&digest) {
+        } else if revision < 0 || revision > MAX_SAFE_SEQUENCE || !digest_ok(&digest) {
             return Err(StoreError::Invalid("UNIFIED_PRIMARY_REVISION_CORRUPT"));
+        }
+        if revision > 0 {
+            // Original immutable SQL receipt must back every materialized
+            // budget charge, not only a queried replay.
+            let receipt: Option<(String, String, i64)> = tx.query_row(
+                "SELECT source_digest,cumulative_entry_usd,book_sequence
+                 FROM finance_entry_receipts
+                 WHERE installation_id=?1 AND campaign_id=?2
+                   AND reservation_key=?3 AND settlement_revision=?4",
+                params![scope.installation,scope.campaign,reservation_key,revision],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            ).optional()?;
+            match receipt {
+                Some((record_digest,record_usd,book_seq))
+                    if record_digest==digest && money(&record_usd)? == used
+                        && book_seq > 0 && book_seq <= MAX_SAFE_SEQUENCE => {}
+                _ => return Err(StoreError::Invalid("UNIFIED_PRIMARY_RECEIPT_CORRUPT")),
+            }
         }
         if state != "RELEASED" {
             if remaining != remainder(&upper, &used)? {
@@ -282,7 +301,9 @@ pub(super) fn settle_entry(tx: &Transaction<'_>, scope: &EntryRef<'_>) -> StoreR
     if sequence != scope.expected_sequence {
         return Err(StoreError::Invalid("UNIFIED_STALE_SEQUENCE"));
     }
-    if scope.source_revision != old_rev + 1 || cumulative < previous || source_digest == old_digest
+    if old_rev >= MAX_SAFE_SEQUENCE
+        || scope.source_revision != old_rev + 1
+        || cumulative < previous || source_digest == old_digest
     {
         return Err(StoreError::Invalid("UNIFIED_SETTLEMENT_REGRESSION"));
     }
