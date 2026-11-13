@@ -123,22 +123,22 @@ impl RiskBookStore {
                 replayed: true,
             });
         }
-        let entry: Option<(String, String, String, String, String, String, String, String)> = tx
+        let entry: Option<(String, String, String, String, String, String, String, String, String, String)> = tx
             .query_row(
                 "SELECT account_key,intent_id,plan_sha256,state,strategy_id,
-                        reserved_usdt,reserved_loss_usd,release_proof_digest
+                        reserved_usdt,reserved_loss_usd,release_proof_digest,release_request_hash,release_reason
                  FROM risk_entries WHERE reservation_key=?1",
                 params![&proof.reservation_key],
                 |r| Ok((
                     r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                    r.get(5)?, r.get(6)?, r.get(7)?
+                    r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?
                 )),
             )
             .optional()?;
         let new_sequence = next_sequence(meta.sequence)?;
         let new_sequence_u64 =
             u64::try_from(new_sequence).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
-        if let Some((account, intent, plan, state, strategy, remaining_usdt, remaining_loss, previous_proof)) = entry {
+        if let Some((account, intent, plan, state, strategy, remaining_usdt, remaining_loss, previous_proof, previous_request, previous_reason)) = entry {
             if account != proof.account_key
                 || intent != proof.intent_id
                 || plan != proof.plan_sha256
@@ -146,7 +146,10 @@ impl RiskBookStore {
                 return Err(RiskStoreError::IdempotencyConflict);
             }
             if state == "RELEASED" {
-                if previous_proof != proof.record_digest {
+                if previous_proof != proof.record_digest
+                    || previous_request != proof.request_hash
+                    || previous_reason != proof.reason
+                {
                     return Err(RiskStoreError::IdempotencyConflict);
                 }
                 return Ok(UnsentReceipt {
@@ -185,9 +188,9 @@ impl RiskBookStore {
             let updated = tx.execute(
                 "UPDATE risk_entries SET state='RELEASED',
                        reserved_usdt='0',reserved_loss_usd='0',reserved_entry_usd='0',
-                       release_proof_digest=?2
+                       release_proof_digest=?2,release_request_hash=?3,release_reason=?4
                  WHERE reservation_key=?1 AND state='HELD'",
-                params![&proof.reservation_key, &proof.record_digest],
+                params![&proof.reservation_key, &proof.record_digest, &proof.request_hash, &proof.reason],
             )?;
             if updated != 1 {
                 return Err(RiskStoreError::StaleSequence);
