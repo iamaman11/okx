@@ -430,21 +430,29 @@ fn risk_book_contract_sql_loss_source_monotonic_even_on_denied_reserve() {
     assert_eq!(reopened.readback().unwrap().book_sequence, 2);
 }
 
-
 #[tokio::test]
 async fn risk_book_contract_sql_denied_reserve_refreshes_owner_projection() {
     use super::owner::RiskBookHandle;
-    let fixture=Fixture::new("loss-projection");
-    RiskBookStore::initialize_fixture(&fixture.path,&opening()).unwrap();
-    let owner=RiskBookHandle::open_existing(
-        fixture.path.clone(),"test-installation".into(),opening().campaign_id
-    ).await.unwrap();
-    let mut source=census();
-    source.cumulative_loss_usd.insert(account('a'),amt("11"));
-    let denial=owner.reserve(request('a',"intentloss4","95"),source).await;
-    assert!(matches!(denial,Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted))));
-    let visible=owner.diagnostic_snapshot().unwrap();
-    assert_eq!(visible.consumed_loss_usd,"11");
-    assert_eq!(visible.book_sequence,1);
-    assert_eq!(visible.global_reserved_usdt,"0");
+    let fixture = Fixture::new("loss-projection");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let owner = RiskBookHandle::open_existing(
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    let mut source = census();
+    source.cumulative_loss_usd.insert(account('a'), amt("11"));
+    let denial = owner
+        .reserve(request('a', "intentloss4", "95"), source)
+        .await;
+    assert!(matches!(
+        denial,
+        Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted))
+    ));
+    let visible = owner.diagnostic_snapshot().unwrap();
+    assert_eq!(visible.consumed_loss_usd, "11");
+    assert_eq!(visible.book_sequence, 1);
+    assert_eq!(visible.global_reserved_usdt, "0");
 }
