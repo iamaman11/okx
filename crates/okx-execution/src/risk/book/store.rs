@@ -20,8 +20,10 @@ use std::{
 use thiserror::Error;
 mod integrity;
 mod queries;
+mod unsent;
 use integrity::verify_reservation_aggregates;
 pub(super) use queries::{AccountReadback, ReservationReadback};
+pub(super) use unsent::{UnsentReceipt, UnsentSqlProof};
 
 #[derive(Debug, Error)]
 pub(super) enum RiskStoreError {
@@ -51,6 +53,8 @@ pub(super) enum RiskStoreError {
     PolicyConflict,
     #[error("STALE_RUNTIME_GENERATION")]
     StaleGeneration,
+    #[error("STALE_SESSION_OR_BOOK_SEQUENCE")]
+    StaleSequence,
     #[error("COMPLETE_ACCOUNT_CENSUS_UNPROVEN")]
     CensusUnproven,
     #[error("CUMULATIVE_LOSS_SOURCE_REGRESSION")]
@@ -410,7 +414,7 @@ impl RiskBookStore {
         connection.pragma_update(None, "synchronous", "FULL")?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let journal: String = connection.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
-        if version != 2 || journal != "wal" {
+        if version != 3 || journal != "wal" {
             return Err(RiskStoreError::Corrupt("SCHEMA_OR_JOURNAL"));
         }
         let identity: (String, String, i64) = connection.query_row(
@@ -604,6 +608,23 @@ impl RiskBookStore {
                 reservation_key: key,
                 book_sequence: meta.sequence,
                 replayed: true,
+            });
+        }
+        // A durable SQL rejection is final even when no reservation row
+        // was ever created. Absence alone never means no previous attempt.
+        let fence: Option<String> = tx
+            .query_row(
+                "SELECT plan_sha256 FROM risk_no_reserve WHERE reservation_key=?1",
+                params![&key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(original) = fence {
+            tx.commit()?;
+            return Err(if original == input.plan_sha256 {
+                RiskStoreError::AlreadyResolved
+            } else {
+                RiskStoreError::IdempotencyConflict
             });
         }
         let mut source_total = RiskAmount::zero();
