@@ -25,6 +25,7 @@ mod settlement;
 mod unsent;
 use integrity::verify_reservation_aggregates;
 pub(super) use post::{PostAuthorized, PostFenceInput};
+pub(in crate::risk::book) use post::{PostDecision, begin_unified_post_transaction};
 pub(super) use queries::{AccountReadback, ReservationReadback};
 pub(super) use settlement::{EntrySettlementReceipt, PartialEntrySqlProof};
 pub(super) use unsent::{UnsentReceipt, UnsentSqlProof};
