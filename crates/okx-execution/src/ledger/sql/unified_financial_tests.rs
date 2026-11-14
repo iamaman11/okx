@@ -736,3 +736,44 @@ fn risk_book_contract_unified_rejects_missing_or_fake_native_receipt() {
         (0, "0".into(), "20".into(), "0".into())
     );
 }
+
+#[test]
+fn risk_book_contract_unified_one_original_intent_one_campaign_and_original_plan() {
+    let fixture = Fixture::new("single-intent-owner");
+    let db = connection(&fixture.path);
+    seed(&db);
+    // Both campaigns include account A; an existing source intent from
+    // campaign X cannot be booked against campaign Y as a second risk entry.
+    let duplicate = db.execute(
+        "INSERT INTO finance_risk_entries(
+          installation_id,campaign_id,reservation_key,account_key,intent_id,
+          plan_sha256,state,entry_upper_usd,reserved_entry_usd)
+         VALUES('install-one','campaign-Y','reserve-duplicate',
+                'acct-A','intent-1',?1,'POSTED','1','1')",
+        ["e".repeat(64)],
+    );
+    assert!(matches!(
+        duplicate,
+        Err(rusqlite::Error::SqliteFailure(ref code, _))
+            if code.code == rusqlite::ErrorCode::ConstraintViolation
+    ), "one original account+intent must have one budget owner across all campaigns");
+
+    // A different account+intent can be allocated independently, but the
+    // plan hash MUST match the original immutable native intent.
+    let wrong_plan = db.execute(
+        "INSERT INTO finance_risk_entries(
+          installation_id,campaign_id,reservation_key,account_key,intent_id,
+          plan_sha256,state,entry_upper_usd,reserved_entry_usd)
+         VALUES('install-one','campaign-X','reserve-bad-plan',
+                'acct-A','intent-Y',?1,'POSTED','1','1')",
+        ["d".repeat(64)],
+    );
+    assert!(matches!(
+        wrong_plan,
+        Err(rusqlite::Error::SqliteFailure(ref code, _))
+            if code.code == rusqlite::ErrorCode::ConstraintViolation
+    ), "the native source plan and the budget reservation must have identical identity");
+    assert_eq!(receipt_count(&db), 0);
+    assert_eq!(campaign(&db, "campaign-X"), (0, "0".into(), "20".into(), "0".into()));
+    assert_eq!(campaign(&db, "campaign-Y"), (0, "0".into(), "3".into(), "0".into()));
+}
