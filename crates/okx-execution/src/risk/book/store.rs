@@ -747,6 +747,24 @@ impl RiskBookStore {
                 "UNIFIED_ACCOUNT_CAMPAIGN_POLICY_UNPROVEN",
             ));
         }
+        // The account's immutable original plan is the canonical strategy
+        // owner. RiskBook's budget partition must be that same instance;
+        // matching only the account/campaign would debit a different strategy.
+        // AccountStore::reserve_sql_transaction still owns the full original
+        // decision, strategy version and receipt checks below.
+        let plan_owner: Option<String> = tx
+            .query_row(
+                "SELECT p.strategy_instance FROM intent_plans p
+                 WHERE p.installation_id=?1 AND p.account_key=?2 AND p.intent_id=?3",
+                params![installation, &receipt.account_key, &receipt.intent_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if plan_owner.as_deref() != Some(input.strategy_id.as_str()) {
+            return Err(RiskStoreError::Invalid(
+                "UNIFIED_ACCOUNT_STRATEGY_OWNER_UNPROVEN",
+            ));
+        }
         let decision =
             Self::reserve_sql_transaction(tx, Some((installation, campaign)), input, census)?;
         if let ReserveDecision::Held(_) = &decision {
