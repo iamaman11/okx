@@ -143,7 +143,7 @@ impl RiskBookStore {
             crate::StoreError::Io(error) => RiskStoreError::Io(error),
         })?
         .ok_or(RiskStoreError::EntrySqlUnproven)?;
-        let proof = PartialEntrySqlProof::from_account_receipt(original)?;
+        let proof = PartialEntrySqlProof::from_account_receipt(original.clone())?;
         if proof.account_key != account_key {
             return Err(RiskStoreError::EntrySqlUnproven);
         }
