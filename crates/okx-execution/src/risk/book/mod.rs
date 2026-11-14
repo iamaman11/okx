@@ -4,5 +4,6 @@
 //! No public opening or POST permission exists in this intermediate draft.
 mod owner;
 mod store;
+pub(crate) use store::verify_legacy_import_source;
 #[cfg(test)]
 mod tests;
