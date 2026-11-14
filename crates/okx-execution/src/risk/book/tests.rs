@@ -2441,7 +2441,10 @@ fn unified_reserve_os_kill(path: &std::path::Path, phase: &str) {
         marker.is_ok(),
         "joint original AccountStore+RiskBook {phase} SQL witness not reached"
     );
-    assert!(killed.is_ok() && !exit.success(), "physical child kill failed");
+    assert!(
+        killed.is_ok() && !exit.success(),
+        "physical child kill failed"
+    );
 }
 
 #[test]
