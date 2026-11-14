@@ -12753,6 +12753,20 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert_eq!(inventory.accounts, 2);
     assert_eq!(inventory.campaigns, 1);
     assert_eq!(inventory.state, "OFFLINE_NOT_AUTHORIZED");
+    // Read the original RiskBook summary through that very same owner.
+    // No copied risk formulas or independently opened campaign SQL handle.
+    let summary = owner.campaign_summary("campaign-X".into()).await.unwrap();
+    assert_eq!(summary.campaign, "campaign-X");
+    assert_eq!(summary.book_sequence, 2);
+    assert_eq!(summary.global_reserved_usdt, "1");
+    assert_eq!(summary.remaining_loss_usd, "99");
+    assert_eq!(summary.remaining_entry_usd, "98");
+    assert!(matches!(
+        owner.campaign_summary("campaign-Y".into()).await,
+        Err(StoreError::Invalid(
+            "UNIFIED_CAMPAIGN_PRIMARY_AGGREGATES_INVALID"
+        ))
+    ));
 
     // The same installation cannot spawn a second simultaneous SQL owner,
     // even when both handles present the exact same complete import roster.
@@ -12856,6 +12870,13 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     );
     let after_kill = open().await.unwrap();
     assert_eq!(after_kill.inventory().await.unwrap(), inventory);
+    assert_eq!(
+        after_kill
+            .campaign_summary("campaign-X".into())
+            .await
+            .unwrap(),
+        summary
+    );
     let mut terminated = after_kill.termination_signal();
     drop(after_kill);
     tokio::time::timeout(Duration::from_secs(2), terminated.changed())
