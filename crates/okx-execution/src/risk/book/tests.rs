@@ -15,8 +15,15 @@ struct Fixture {
 impl Fixture {
     fn new(label: &str) -> Self {
         let number = NEXT.fetch_add(1, Ordering::Relaxed);
+        // OS-process identity + a fresh time nonce isolates real SQLite/WAL
+        // paths across independent test binaries and CI runner reuse. File
+        // locks are still exclusive; no retry or weaker lock is permitted.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "okx-riskbook-{label}-{}-{number}",
+            "okx-riskbook-{label}-{}-{number}-{nonce}",
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
@@ -128,6 +135,17 @@ fn risk_book_contract_sql_concurrent_accounts_share_one_budget() {
     assert_eq!(read.remaining_entry_usd, "99");
     assert_eq!(read.book_sequence, 1);
     drop(s);
+    // The original owner must have physically released the OS lock before
+    // another one opens; no sleep/retry may substitute for this observation.
+    let lease_path = format!("{}.writer.lock", f.path.canonicalize().unwrap().display());
+    let probe = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lease_path)
+        .unwrap();
+    probe.try_lock().expect("former RiskBook writer still owns the lease");
+    probe.unlock().unwrap();
+    drop(probe);
     let mut recovered = open(&f);
     assert_eq!(recovered.readback().unwrap(), read);
     assert_eq!(
@@ -2825,9 +2843,16 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         let tx = db.transaction().unwrap();
         assert_eq!(
             tx.execute(
-                "UPDATE risk_entries SET state='POSTED' WHERE installation_id=?1
-             AND campaign_id=?2 AND reservation_key=?3 AND state='HELD'",
-                rusqlite::params!["test-installation", &campaign, original.reservation_key()],
+                "UPDATE risk_entries SET state='POSTED',
+                 post_authorized_at_ms=held_at_ms+1,
+                 post_sequence=book_sequence+1,
+                 post_proof_digest=?4,post_source_digest=?5
+             WHERE installation_id=?1 AND campaign_id=?2
+               AND reservation_key=?3 AND state='HELD'",
+                rusqlite::params![
+                    "test-installation", &campaign, original.reservation_key(),
+                    uid('a'), uid('b')
+                ],
             )
             .unwrap(),
             1
