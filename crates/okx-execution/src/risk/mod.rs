@@ -11,7 +11,8 @@ pub(crate) use book::{
     AccountReadback, PostFenceInput, ReservationReadback, ReserveInput, UnifiedRiskDecision,
     VerifiedCensus, begin_post_unified_native, read_unified_campaign_account_summary,
     read_unified_campaign_reservation, read_unified_campaign_summary,
-    release_unsent_unified_native, reserve_unified_native, settle_partial_unified_native,
+    recover_posting_unified_native, release_unsent_unified_native, reserve_unified_native,
+    settle_partial_unified_native,
     verify_legacy_import_source, verify_unified_import_campaign,
 };
 

@@ -177,6 +177,22 @@ pub(crate) fn release_unsent_unified_native(
     })
 }
 
+/// Original POST-fence recovery: the local intent and RiskBook transition
+/// happen under one caller-owned installation transaction and retain all
+/// charged budget until independent venue readback resolves UNKNOWN.
+pub(crate) fn recover_posting_unified_native(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    account: &str,
+) -> Result<usize, &'static str> {
+    store::RiskBookStore::recover_unified_posting_from_account_sql_transaction(
+        tx,
+        installation,
+        account,
+    )
+    .map_err(|error| original_finance_error(&error))
+}
+
 #[cfg(test)]
 mod tests;
 

@@ -639,7 +639,7 @@ pub(crate) enum UnifiedFinanceWriteReceipt {
 /// AccountStore/RiskBook handle, independent COMMIT or RPC can participate.
 /// The only caller that may commit this change is the installation SQL FIFO.
 /// For offline tests this very same function runs inside a ROLLBACK.
-fn apply_original_unified_finance_transaction(
+pub(crate) fn apply_original_unified_finance_transaction(
     tx: &rusqlite::Transaction<'_>,
     installation: &str,
     command: UnifiedFinanceWrite,
@@ -724,6 +724,11 @@ fn apply_original_unified_finance_transaction(
             generation,
         )),
         UnifiedFinanceWrite::RecoverPosting { account, now } => {
+            // RiskBook and AccountStore retain their original POST fences and
+            // reserved capacity, but change to UNKNOWN in ONE SQL commit.
+            // Any missing foreign campaign receipt rejects the whole call.
+            risk::recover_posting_unified_native(tx, installation, &account)
+                .map_err(StoreError::Invalid)?;
             let changed = AccountStore::recover_posting_sql_transaction(
                 tx,
                 Some((installation, &account)),
@@ -732,6 +737,26 @@ fn apply_original_unified_finance_transaction(
             Ok(UnifiedFinanceWriteReceipt::Recovered { changed })
         }
         UnifiedFinanceWrite::RecoverInstallation { now } => {
+            // The exact installed roster comes from the original account_meta
+            // primary identities in this SAME financial SQLite snapshot.
+            // AccountStore's own installation-wide recovery performs the
+            // original receipt checks; failure rolls back the entire caller
+            // transaction including all RiskBook UNKNOWN transitions.
+            let accounts = {
+                let mut query = tx.prepare(
+                    "SELECT account_key FROM account_meta
+                     WHERE installation_id=?1 ORDER BY account_key",
+                )?;
+                query.query_map([installation], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            if accounts.is_empty() {
+                return Err(StoreError::Invalid("UNIFIED_RECOVERY_ACCOUNT_ROSTER_EMPTY"));
+            }
+            for account in accounts {
+                risk::recover_posting_unified_native(tx, installation, &account)
+                    .map_err(StoreError::Invalid)?;
+            }
             let changed =
                 AccountStore::recover_installation_posting_sql_transaction(tx, installation, now)?;
             Ok(UnifiedFinanceWriteReceipt::Recovered { changed })

@@ -6,9 +6,10 @@ use std::collections::BTreeMap;
 
 // The risk_entries rows carry the primary remaining obligations. Cached totals
 // never authorize a grant unless they agree with those exact-decimal records.
-// HELD and POSTED both retain their original obligations. A committed
-// POSTED record includes immutable causal evidence and never mints another
-// grant. UNKNOWN/OPEN remain fail-closed until their balance rules exist.
+// HELD, POSTED and UNKNOWN retain their original obligations. A committed
+// POSTED/UNKNOWN record preserves the same immutable causal proof: UNKNOWN
+// is NOT a new POST grant or a release. OPEN is still rejected until its
+// source-verified transition and accounting rules are implemented.
 // RELEASED rows are protected by SQLite CHECK and excluded from this scan.
 pub(super) fn verify_reservation_aggregates(
     tx: &rusqlite::Transaction<'_>,
@@ -113,7 +114,7 @@ pub(super) fn verify_reservation_aggregates_for_scope(
                         && post_proof_digest.is_empty()
                         && post_source_digest.is_empty()
                         && post_existing == "0" => {}
-                "POSTED"
+                "POSTED" | "UNKNOWN"
                     if original_sequence > 0
                         && post_sequence > original_sequence
                         && u64::try_from(post_sequence)
@@ -123,7 +124,7 @@ pub(super) fn verify_reservation_aggregates_for_scope(
                         && super::valid_digest(&post_proof_digest)
                         && super::valid_digest(&post_source_digest)
                         && amount(post_existing).is_ok() => {}
-                "HELD" | "POSTED" => {
+                "HELD" | "POSTED" | "UNKNOWN" => {
                     return Err(RiskStoreError::Corrupt("POST_FENCE_INTEGRITY"));
                 }
                 _ => return Err(RiskStoreError::Corrupt("RESERVATION_STATE_UNIMPLEMENTED")),
@@ -146,7 +147,7 @@ pub(super) fn verify_reservation_aggregates_for_scope(
                 settlement_revision > 0
                     && super::valid_digest(&settlement_digest)
                     && !settled.is_zero()
-                    && state == "POSTED"
+                    && matches!(state.as_str(), "POSTED" | "UNKNOWN")
             };
             if !settlement_consistent
                 || amount(entry_breach)? != expected_breach

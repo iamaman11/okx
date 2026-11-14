@@ -1235,6 +1235,130 @@ impl RiskBookStore {
         }))
     }
 
+    /// A native crash can lose the venue ACK after the ORIGINAL AccountStore
+    /// POST fence has committed. In the SAME finance transaction, preserve
+    /// every reserved obligation while marking its RiskBook entry UNKNOWN.
+    /// This is not a RELEASE, another POST grant or a source-independent
+    /// replay. Only CURRENT POSTING intents with original POSTED account
+    /// receipts are candidates; a missing/mismatched campaign entry fails.
+    pub(in crate::risk::book) fn recover_unified_posting_from_account_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        installation: &str,
+        account: &str,
+    ) -> Result<usize> {
+        if installation.is_empty() || account.is_empty() {
+            return Err(RiskStoreError::Invalid("UNIFIED_RISK_RECOVERY_SCOPE_INVALID"));
+        }
+        let pending: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM intents
+             WHERE installation_id=?1 AND account_key=?2
+               AND state='POSTING' AND risk_increase=1",
+            params![installation, account],
+            |row| row.get(0),
+        )?;
+        let candidates = {
+            let mut query = tx.prepare(
+                "SELECT p.campaign_id,r.reservation_key,i.intent_id,
+                        i.plan_hash,i.policy_revision,i.begin_post_at
+                 FROM intents i
+                 JOIN risk_receipts r
+                   ON r.installation_id=i.installation_id
+                  AND r.account_key=i.account_key
+                  AND r.intent_id=i.intent_id
+                 JOIN account_policy p
+                   ON p.installation_id=i.installation_id
+                  AND p.account_key=i.account_key AND p.singleton=1
+                 WHERE i.installation_id=?1 AND i.account_key=?2
+                   AND i.state='POSTING' AND i.risk_increase=1
+                   AND r.state='POSTED'
+                 ORDER BY p.campaign_id,r.reservation_key",
+            )?;
+            query
+                .query_map(params![installation, account], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if i64::try_from(candidates.len()).ok() != Some(pending) {
+            return Err(RiskStoreError::Invalid("UNIFIED_RISK_RECOVERY_SOURCE_UNPROVEN"));
+        }
+        for (campaign, reservation, intent, plan, policy, begin_post_at) in &candidates {
+            if begin_post_at.is_none_or(|at| at <= 0) {
+                return Err(RiskStoreError::Invalid("UNIFIED_RISK_RECOVERY_POST_FENCE_MISSING"));
+            }
+            let scope = Some((installation, campaign.as_str()));
+            let meta = read_meta_for_scope(tx, scope)?;
+            integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope)?;
+            let recorded: Option<(String, String, String, i64, String, i64)> = tx
+                .query_row(
+                    "SELECT account_key,intent_id,plan_sha256,policy_revision,
+                            state,post_authorized_at_ms
+                     FROM risk_entries
+                     WHERE installation_id=?1 AND campaign_id=?2
+                       AND reservation_key=?3",
+                    params![installation, campaign, reservation],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((saved_account, saved_intent, saved_plan, saved_policy, state, post_at)) =
+                recorded
+            else {
+                return Err(RiskStoreError::Invalid("UNIFIED_RISK_RECOVERY_ENTRY_MISSING"));
+            };
+            if saved_account != account || saved_intent != *intent || saved_plan != *plan
+                || saved_policy != *policy || state != "POSTED" || post_at <= 0
+            {
+                return Err(RiskStoreError::Invalid("UNIFIED_RISK_RECOVERY_IDENTITY_MISMATCH"));
+            }
+            let next = meta.sequence.checked_add(1)
+                .filter(|sequence| *sequence <= LEGACY_MAX_SAFE_INTEGER)
+                .ok_or(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+            let changed = tx.execute(
+                "UPDATE risk_entries SET state='UNKNOWN'
+                 WHERE installation_id=?1 AND campaign_id=?2
+                   AND reservation_key=?3 AND account_key=?4 AND intent_id=?5
+                   AND plan_sha256=?6 AND policy_revision=?7 AND state='POSTED'",
+                params![installation, campaign, reservation, account, intent, plan, policy],
+            )?;
+            if changed != 1 {
+                return Err(RiskStoreError::StaleSequence);
+            }
+            let changed = tx.execute(
+                "UPDATE risk_meta SET book_sequence=?1
+                 WHERE singleton=1 AND installation_id=?2 AND campaign_id=?3
+                   AND book_sequence=?4",
+                params![
+                    i64::try_from(next).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
+                    installation,
+                    campaign,
+                    i64::try_from(meta.sequence).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?
+                ],
+            )?;
+            if changed != 1 {
+                return Err(RiskStoreError::StaleSequence);
+            }
+            let new_meta = read_meta_for_scope(tx, scope)?;
+            integrity::verify_reservation_aggregates_for_scope(tx, &new_meta, scope)?;
+        }
+        Ok(candidates.len())
+    }
+
     #[cfg(test)]
     pub(super) fn initialize_fixture(path: &Path, opening: &CampaignOpening) -> Result<()> {
         if path.exists() {
