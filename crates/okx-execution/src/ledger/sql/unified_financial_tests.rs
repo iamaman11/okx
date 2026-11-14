@@ -789,3 +789,99 @@ fn risk_book_contract_unified_one_original_intent_one_campaign_and_original_plan
         (0, "0".into(), "3".into(), "0".into())
     );
 }
+
+#[test]
+fn risk_book_contract_unified_full_original_47_tables_have_scoped_identity() {
+    let fixture = Fixture::new("full-original-47");
+    let db = connection(&fixture.path);
+    db.execute_batch(include_str!("../../../schema/finance-unified-v1.sql"))
+        .unwrap();
+    let total: i64 = db.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+           AND name NOT LIKE 'sqlite_%'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(total, 47, "all 39 original AccountStore and 8 RiskBook tables");
+    for account in ["acct-A", "acct-B"] {
+        db.execute(
+            "INSERT INTO account_meta(
+                installation_id,account_key,singleton,schema_version,initialized_at,
+                opening_source,initialize_operation_id,release_id)
+             VALUES('install-one',?1,1,2,1,'verified-test',?2,'release-test')",
+            params![account,format!("init-{account}")],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO storage_recovery(
+                installation_id,account_key,singleton,requires_reconcile,backup_at,
+                reconciled_evidence) VALUES('install-one',?1,1,0,NULL,NULL)",
+            [account],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO account_policy(
+                installation_id,account_key,singleton,revision,paused,
+                campaign_id,campaign_limit,campaign_loss)
+             VALUES('install-one',?1,1,1,0,'campaign-X','200','0')",
+            [account],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO strategy_definition_versions(
+                installation_id,account_key,definition_id,version,
+                parameters,parameters_digest,created_at)
+             VALUES('install-one',?1,'same-definition','1','{}',?2,1)",
+            params![account,"a".repeat(64)],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO decisions(
+                installation_id,account_key,decision_id,instance_id,
+                decision_at,input_digest,policy_revision,code_version)
+             VALUES('install-one',?1,'same-decision',NULL,1,?2,1,'rust')",
+            params![account,"b".repeat(64)],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO intents(
+                installation_id,account_key,intent_id,idempotency_key,request_hash,
+                decision_id,state,revision,client_order_id,deadline,plan_hash,
+                policy_revision,risk_increase,instrument_id,created_at,updated_at)
+             VALUES('install-one',?1,'same-intent','same-command',?2,
+                    'same-decision','PREPARED',1,'same-client-id',100,?3,
+                    1,1,'BTC-USDT-SWAP',1,1)",
+            params![account,"c".repeat(64),"d".repeat(64)],
+        ).unwrap();
+    }
+    let all: i64 = db.query_row(
+        "SELECT COUNT(*) FROM intents WHERE intent_id='same-intent'",
+        [],|r|r.get(0),
+    ).unwrap();
+    assert_eq!(all,2, "identical ORIGINAL intent, client-order and decision IDs coexist");
+    let same_recovery: i64 = db.query_row(
+        "SELECT COUNT(*) FROM storage_recovery WHERE singleton=1",
+        [],|r|r.get(0),
+    ).unwrap();
+    assert_eq!(same_recovery,2, "account singleton is per-account, not per-file");
+    let bad_parent = db.execute(
+        "INSERT INTO intent_plans(
+            installation_id,account_key,intent_id,operation,side,
+            quantity,limit_price,strategy_instance,planned_loss_usd,
+            source_generation,position_side,private_source_generation,
+            contract_value,inverse,settlement_currency,strategy_definition_id,
+            strategy_definition_version,strategy_parameters_digest)
+         VALUES('install-one','acct-foreign','same-intent','open','buy',
+                '1','100','manual','3',1,'long',1,'1',0,'USDT',
+                'same-definition','1',?1)",
+        ["a".repeat(64)],
+    );
+    assert!(matches!(
+        bad_parent,
+        Err(rusqlite::Error::SqliteFailure(ref code, _))
+            if code.code == rusqlite::ErrorCode::ConstraintViolation
+    ), "a source child cannot link a foreign-account parent");
+    assert_eq!(
+        db.query_row::<String,_,_>(
+            "PRAGMA integrity_check",[],|r|r.get(0)
+        ).unwrap(),
+        "ok"
+    );
+    let mut stmt=db.prepare("PRAGMA foreign_key_check").unwrap();
+    assert!(stmt.query([]).unwrap().next().unwrap().is_none());
+}
