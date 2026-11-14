@@ -910,3 +910,125 @@ fn risk_book_contract_unified_full_original_47_tables_have_scoped_identity() {
     let mut stmt = db.prepare("PRAGMA foreign_key_check").unwrap();
     assert!(stmt.query([]).unwrap().next().unwrap().is_none());
 }
+
+#[test]
+fn risk_book_contract_unified_full_legacy_triggers_and_campaign_scope() {
+    let fixture = Fixture::new("original-triggers-and-campaigns");
+    let db = connection(&fixture.path);
+    db.execute_batch(include_str!("../../../schema/finance-unified-v1.sql"))
+        .unwrap();
+    for account in ["acct-A", "acct-B"] {
+        db.execute(
+            "INSERT INTO account_meta(
+                installation_id,account_key,singleton,schema_version,initialized_at,
+                opening_source,initialize_operation_id,release_id)
+             VALUES('install-one',?1,1,2,1,'verified-source',?2,'test-release')",
+            params![account,format!("init-{account}")],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO campaign_source_epoch(
+                installation_id,account_key,id,revision)
+             VALUES('install-one',?1,1,0)",
+            [account],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO campaign_late_head_epoch(
+                installation_id,account_key,id,revision)
+             VALUES('install-one',?1,1,0)",
+            [account],
+        ).unwrap();
+    }
+    // Real derived trigger must not invalidate the other account's source
+    // frontier just because both account-local singleton IDs equal 1.
+    db.execute(
+        "INSERT INTO bills(
+            installation_id,account_key,bill_id,kind,time,amount,currency,economic_event_key)
+         VALUES('install-one','acct-A','same-venue-bill','trade',7,'1','USDT','event-7')",
+        [],
+    ).unwrap();
+    let a_rev: i64 = db.query_row(
+        "SELECT revision FROM campaign_source_epoch
+         WHERE installation_id='install-one' AND account_key='acct-A' AND id=1",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    let b_rev: i64 = db.query_row(
+        "SELECT revision FROM campaign_source_epoch
+         WHERE installation_id='install-one' AND account_key='acct-B' AND id=1",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!((a_rev,b_rev),(1,0), "source invalidation must be account-local");
+    assert!(db.execute(
+        "DELETE FROM bills WHERE installation_id='install-one'
+         AND account_key='acct-A' AND bill_id='same-venue-bill'",
+        [],
+    ).is_err(), "original immutable bill trigger must survive the rewrite");
+
+    for campaign in ["campaign-X","campaign-Y"] {
+        db.execute(
+            "INSERT INTO risk_meta(
+                installation_id,campaign_id,singleton,policy_revision,generation,
+                book_sequence,legacy_fenced,global_limit_usdt,global_reserved_usdt,
+                loss_limit_usd,loss_consumed_usd,loss_reserved_usd,entry_limit_usd,
+                entry_consumed_usd,entry_opening_consumed_usd,entry_reserved_usd,
+                entry_bound_breach_usd)
+             VALUES('install-one',?1,1,1,7,0,1,'200','0','20','0','0',
+                    '200','0','0','0','0')",
+            [campaign],
+        ).unwrap();
+    }
+    let campaigns: i64 = db.query_row(
+        "SELECT COUNT(*) FROM risk_meta
+         WHERE installation_id='install-one' AND singleton=1",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(campaigns,2, "the old risk_meta singleton is now campaign-local");
+    db.execute(
+        "INSERT INTO risk_account_occupied(
+           installation_id,campaign_id,account_key,reserved_usdt)
+         VALUES('install-one','campaign-X','acct-A','0')",
+        [],
+    ).unwrap();
+    db.execute(
+        "INSERT INTO risk_policy_account(
+           installation_id,campaign_id,account_key,
+           limit_usdt,order_limit_usdt,entry_limit_usd)
+         VALUES('install-one','campaign-X','acct-A','200','100','200')",
+        [],
+    ).unwrap();
+    let foreign = db.execute(
+        "INSERT INTO risk_loss_source(
+           installation_id,campaign_id,account_key,cumulative_loss_usd,source_digest)
+         VALUES('install-one','campaign-Y','acct-A','1',?1)",
+        ["c".repeat(64)],
+    );
+    assert!(matches!(
+        foreign,
+        Err(rusqlite::Error::SqliteFailure(ref code, _))
+            if code.code == rusqlite::ErrorCode::ConstraintViolation
+    ), "a campaign cannot inherit another campaign's account policy");
+    assert_eq!(
+        db.query_row::<String,_,_>(
+            "PRAGMA integrity_check", [], |r|r.get(0)
+        ).unwrap(), "ok"
+    );
+    let mut stmt = db.prepare("PRAGMA foreign_key_check").unwrap();
+    assert!(stmt.query([]).unwrap().next().unwrap().is_none());
+    let index_count: i64 = db.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type='index' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    let trigger_count: i64 = db.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'",
+        [],
+        |r|r.get(0),
+    ).unwrap();
+    assert_eq!(index_count,21,"preserve the original scoped read indexes");
+    assert_eq!(trigger_count,48,"preserve original immutable and source triggers");
+    let version: i64 = db.pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();
+    assert_eq!(version,6);
+}
