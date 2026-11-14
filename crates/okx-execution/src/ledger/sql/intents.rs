@@ -3066,7 +3066,14 @@ impl AccountStore {
                 "UPDATE intents SET state=?2,exchange_order_id=COALESCE(exchange_order_id,?3),
                  updated_at=?4,revision=revision+1
                  WHERE intent_id=?1 AND installation_id=?5 AND account_key=?6",
-                params![id, state.as_str(), exchange_order_id, now, installation, account],
+                params![
+                    id,
+                    state.as_str(),
+                    exchange_order_id,
+                    now,
+                    installation,
+                    account
+                ],
             )?,
             None => tx.execute(
                 "UPDATE intents SET state=?2,exchange_order_id=COALESCE(exchange_order_id,?3),
@@ -3108,14 +3115,17 @@ impl AccountStore {
             let operation = format!("terminal:{id}");
             match scope {
                 Some((installation, account)) => {
-                    let previous: Option<(String, String, String)> = tx.query_row(
-                        "SELECT kind,request_hash,result_ref FROM operation_receipts
+                    let previous: Option<(String, String, String)> = tx
+                        .query_row(
+                            "SELECT kind,request_hash,result_ref FROM operation_receipts
                          WHERE installation_id=?1 AND account_key=?2 AND operation_id=?3",
-                        params![installation, account, operation],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                    ).optional()?;
+                            params![installation, account, operation],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                        )
+                        .optional()?;
                     if let Some((kind, hash, result)) = previous {
-                        if kind != "TERMINAL" || hash != original.request_hash || result != evidence {
+                        if kind != "TERMINAL" || hash != original.request_hash || result != evidence
+                        {
                             return Err(StoreError::Invalid("UNIFIED_TERMINAL_RECEIPT_CONFLICT"));
                         }
                     } else {
