@@ -800,11 +800,16 @@ impl RiskBookStore {
             "SELECT limit_usdt FROM risk_policy_strategy WHERE account_key=?1 AND strategy_id=?2"
         };
         let values = reserve_scope_values(
-            vec![Value::Text(account_key.clone()), Value::Text(input.strategy_id.clone())],
+            vec![
+                Value::Text(account_key.clone()),
+                Value::Text(input.strategy_id.clone()),
+            ],
             scope,
         );
         let strategy_limit: String = tx
-            .query_row(query, rusqlite::params_from_iter(values.iter()), |r| r.get(0))
+            .query_row(query, rusqlite::params_from_iter(values.iter()), |r| {
+                r.get(0)
+            })
             .optional()?
             .ok_or(RiskStoreError::Invalid("STRATEGY_NOT_ENABLED_FOR_ACCOUNT"))?;
         let query = if scope.is_some() {
@@ -813,11 +818,10 @@ impl RiskBookStore {
         } else {
             "SELECT reserved_usdt FROM risk_strategy_occupied WHERE account_key=?1 AND strategy_id=?2"
         };
-        let reserved_strategy: String = tx.query_row(
-            query,
-            rusqlite::params_from_iter(values.iter()),
-            |r| r.get(0),
-        )?;
+        let reserved_strategy: String =
+            tx.query_row(query, rusqlite::params_from_iter(values.iter()), |r| {
+                r.get(0)
+            })?;
         // Persist monotonic native loss before evaluating new capacity.
         // An ordinary budget denial still commits this independent observation.
         apply_census_loss_for_scope(tx, &mut meta, census, scope)?;
@@ -850,7 +854,9 @@ impl RiskBookStore {
             .optional()?;
         if let Some((existing, state)) = prior {
             if existing != digest {
-                return Ok(ReserveDecision::Rejected(RiskStoreError::IdempotencyConflict));
+                return Ok(ReserveDecision::Rejected(
+                    RiskStoreError::IdempotencyConflict,
+                ));
             }
             if state != "HELD" {
                 return Ok(ReserveDecision::Rejected(RiskStoreError::AlreadyResolved));
@@ -870,14 +876,18 @@ impl RiskBookStore {
             "SELECT plan_sha256 FROM risk_no_reserve WHERE reservation_key=?1"
         };
         let fence: Option<String> = tx
-            .query_row(fence_sql, rusqlite::params_from_iter(values.iter()), |r| r.get(0))
+            .query_row(fence_sql, rusqlite::params_from_iter(values.iter()), |r| {
+                r.get(0)
+            })
             .optional()?;
         if let Some(original) = fence {
-            return Ok(ReserveDecision::Rejected(if original == input.plan_sha256 {
-                RiskStoreError::AlreadyResolved
-            } else {
-                RiskStoreError::IdempotencyConflict
-            }));
+            return Ok(ReserveDecision::Rejected(
+                if original == input.plan_sha256 {
+                    RiskStoreError::AlreadyResolved
+                } else {
+                    RiskStoreError::IdempotencyConflict
+                },
+            ));
         }
         let mut source_total = RiskAmount::zero();
         for occupied in census.occupied.values() {
@@ -1029,7 +1039,10 @@ impl RiskBookStore {
                 Value::Text(new_global),
                 Value::Text(new_loss),
                 Value::Text(new_entry),
-                Value::Integer(i64::try_from(meta.sequence).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?),
+                Value::Integer(
+                    i64::try_from(meta.sequence)
+                        .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
+                ),
                 Value::Integer(policy_i64),
             ],
             scope,
