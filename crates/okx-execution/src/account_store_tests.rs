@@ -12052,3 +12052,70 @@ fn risk_book_contract_full_original_import_os_kill_before_after_commit() {
         "commit never grants live trading authority"
     );
 }
+
+#[test]
+fn risk_book_contract_scoped_original_risk_aggregate_checker_is_campaign_isolated() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let x = path();
+    let y = path();
+    unified_original_campaign_fixture(
+        &x, "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    unified_original_campaign_fixture(
+        &y, "campaign-Y",
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sx = Connection::open_with_flags(&x, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sy = Connection::open_with_flags(&y, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let expected = super::sql::unified_financial::importer::ExpectedFinanceInventory {
+        installation: "installation",
+        accounts: &["acct-A", "acct-B"],
+        campaigns: &["campaign-X", "campaign-Y"],
+    };
+    super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+        &mut target, &expected, &[&sa, &sb], &[&sx, &sy],
+    ).unwrap();
+    {
+        let tx = target.transaction().unwrap();
+        crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
+        crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-Y").unwrap();
+        assert!(crate::risk::verify_unified_import_campaign(
+            &tx, "foreign-installation", "campaign-X",
+        ).is_err(), "wrong installation can never inspect a campaign");
+        tx.rollback().unwrap();
+    }
+    // Out-of-band damage in only campaign Y must not contaminate X's
+    // legitimate obligations or silently pass Y's primary-vs-cache proof.
+    target.execute(
+        "UPDATE risk_account_occupied SET reserved_usdt='3'
+         WHERE installation_id='installation' AND campaign_id='campaign-Y'
+           AND account_key='acct-B'",
+        [],
+    ).unwrap();
+    let tx = target.transaction().unwrap();
+    crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
+    assert!(crate::risk::verify_unified_import_campaign(
+        &tx, "installation", "campaign-Y",
+    ).is_err());
+    tx.rollback().unwrap();
+    assert!(super::sql::unified_financial::importer::inspect_stopped_finance_import(
+        &target, &expected,
+    ).is_err(), "cold readback must detect changed reserves");
+}
