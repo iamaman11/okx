@@ -6334,6 +6334,13 @@ fn intent(s: &mut AccountStore) -> StoredIntent {
     intent_with_plan_hash(s, "plan")
 }
 fn intent_with_plan_hash(s: &mut AccountStore, plan_hash: &str) -> StoredIntent {
+    intent_with_plan_hash_and_id(s, plan_hash, "intent")
+}
+fn intent_with_plan_hash_and_id(
+    s: &mut AccountStore,
+    plan_hash: &str,
+    intent_id: &str,
+) -> StoredIntent {
     let definition = s.ensure_manual_instance(1).unwrap();
     let d = Decision {
         decision_id: "decision".into(),
@@ -6362,7 +6369,7 @@ fn intent_with_plan_hash(s: &mut AccountStore, plan_hash: &str) -> StoredIntent 
             planned_loss_usd: Decimal::from(5),
             source_generation: 1,
         },
-        intent_id: "intent".into(),
+        intent_id: intent_id.into(),
         idempotency_key: "request".into(),
         request_hash: "body".into(),
         client_order_id: "stableclient".into(),
@@ -12757,8 +12764,8 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     let original_plan = "a".repeat(64);
     let mut a = store_with_account_campaign(&a_key, "campaign-X");
     let mut b = store_with_account_campaign(&b_key, "campaign-X");
-    let ai = intent_with_plan_hash(&mut a, &original_plan);
-    let bi = intent_with_plan_hash(&mut b, &original_plan);
+    let ai = intent_with_plan_hash_and_id(&mut a, &original_plan, "intent0001");
+    let bi = intent_with_plan_hash_and_id(&mut b, &original_plan, "intent0001");
     let (ap, bp) = (a.path.clone(), b.path.clone());
     let campaign = path();
     unified_original_campaign_fixture(
