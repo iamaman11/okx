@@ -13,8 +13,8 @@ pub(crate) use store::{
 // Original RiskBook operations for the shared finance SQL writer. These are
 // DOMAIN calls on the caller's existing transaction, not a second owner,
 // separate campaign database or bypass around AccountStore source proofs.
-pub(crate) use store::{ReserveInput, VerifiedCensus};
 pub(crate) use store::PostFenceInput;
+pub(crate) use store::{ReserveInput, VerifiedCensus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UnifiedRiskDecision {
@@ -83,8 +83,15 @@ pub(crate) fn reserve_unified_native(
 ) -> Result<UnifiedRiskDecision, &'static str> {
     use store::{ReserveDecision, RiskBookStore};
     match RiskBookStore::reserve_unified_account_transaction(
-        tx, installation, campaign, input, census, receipt,
-    ).map_err(|e| original_finance_error(&e))? {
+        tx,
+        installation,
+        campaign,
+        input,
+        census,
+        receipt,
+    )
+    .map_err(|e| original_finance_error(&e))?
+    {
         ReserveDecision::Held(receipt) => Ok(UnifiedRiskDecision::Reserved {
             reservation_key: receipt.reservation_key,
             book_sequence: receipt.book_sequence,
@@ -127,8 +134,15 @@ pub(crate) fn settle_partial_unified_native(
     generation: u64,
 ) -> Result<UnifiedRiskDecision, &'static str> {
     let receipt = store::RiskBookStore::settle_unified_partial_from_account_sql_transaction(
-        tx, installation, campaign, account, intent, expected_sequence, generation,
-    ).map_err(|e| original_finance_error(&e))?;
+        tx,
+        installation,
+        campaign,
+        account,
+        intent,
+        expected_sequence,
+        generation,
+    )
+    .map_err(|e| original_finance_error(&e))?;
     Ok(UnifiedRiskDecision::EntrySettled {
         reservation_key: receipt.reservation_key,
         book_sequence: receipt.book_sequence,
@@ -147,8 +161,15 @@ pub(crate) fn release_unsent_unified_native(
     generation: u64,
 ) -> Result<UnifiedRiskDecision, &'static str> {
     let receipt = store::RiskBookStore::release_unified_unsent_from_account_sql_transaction(
-        tx, installation, campaign, account, intent, expected_sequence, generation,
-    ).map_err(|e| original_finance_error(&e))?;
+        tx,
+        installation,
+        campaign,
+        account,
+        intent,
+        expected_sequence,
+        generation,
+    )
+    .map_err(|e| original_finance_error(&e))?;
     Ok(UnifiedRiskDecision::UnsentReleased {
         reservation_key: receipt.reservation_key,
         book_sequence: receipt.book_sequence,
@@ -224,9 +245,7 @@ pub(crate) fn test_stage_scoped_begin_post(
             account_reads: reads,
         },
     };
-    match begin_post_unified_native(tx, installation, campaign, &input)
-        .map_err(str::to_owned)?
-    {
+    match begin_post_unified_native(tx, installation, campaign, &input).map_err(str::to_owned)? {
         UnifiedRiskDecision::PostAuthorized { book_sequence, .. } => Ok(book_sequence),
         UnifiedRiskDecision::Denied { reason } => Err(reason),
         _ => Err("UNIFIED_POST_RECEIPT_UNEXPECTED".into()),

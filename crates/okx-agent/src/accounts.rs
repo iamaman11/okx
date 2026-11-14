@@ -7052,8 +7052,11 @@ mod tests {
         let root = root();
         initialize_installation(&root, "installation-test").unwrap();
         std::fs::create_dir_all(root.join("finance")).unwrap();
-        std::fs::write(root.join("finance").join("finance.sqlite"), b"OFFLINE_NOT_AUTHORIZED")
-            .unwrap();
+        std::fs::write(
+            root.join("finance").join("finance.sqlite"),
+            b"OFFLINE_NOT_AUTHORIZED",
+        )
+        .unwrap();
         // Even zero registered accounts cannot produce a legacy sender.
         assert!(matches!(
             AccountRuntimeRegistry::open(&root, RateBudget::new()).await,

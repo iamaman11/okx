@@ -648,7 +648,12 @@ fn apply_original_unified_finance_transaction(
             census,
             receipt,
         } => risk_operation(risk::reserve_unified_native(
-            tx, installation, &campaign, &input, &census, &receipt,
+            tx,
+            installation,
+            &campaign,
+            &input,
+            &census,
+            &receipt,
         )),
         UnifiedFinanceWrite::BeginPost { campaign, input } => risk_operation(
             risk::begin_post_unified_native(tx, installation, &campaign, &input),
@@ -660,8 +665,13 @@ fn apply_original_unified_finance_transaction(
             expected_sequence,
             generation,
         } => risk_operation(risk::settle_partial_unified_native(
-            tx, installation, &campaign, &account, &intent,
-            expected_sequence, generation,
+            tx,
+            installation,
+            &campaign,
+            &account,
+            &intent,
+            expected_sequence,
+            generation,
         )),
         UnifiedFinanceWrite::ReleaseUnsent {
             campaign,
@@ -670,19 +680,25 @@ fn apply_original_unified_finance_transaction(
             expected_sequence,
             generation,
         } => risk_operation(risk::release_unsent_unified_native(
-            tx, installation, &campaign, &account, &intent,
-            expected_sequence, generation,
+            tx,
+            installation,
+            &campaign,
+            &account,
+            &intent,
+            expected_sequence,
+            generation,
         )),
         UnifiedFinanceWrite::RecoverPosting { account, now } => {
             let changed = AccountStore::recover_posting_sql_transaction(
-                tx, Some((installation, &account)), now,
+                tx,
+                Some((installation, &account)),
+                now,
             )?;
             Ok(UnifiedFinanceWriteReceipt::Recovered { changed })
         }
         UnifiedFinanceWrite::RecoverInstallation { now } => {
-            let changed = AccountStore::recover_installation_posting_sql_transaction(
-                tx, installation, now,
-            )?;
+            let changed =
+                AccountStore::recover_installation_posting_sql_transaction(tx, installation, now)?;
             Ok(UnifiedFinanceWriteReceipt::Recovered { changed })
         }
         UnifiedFinanceWrite::RecordOutcome {
@@ -694,8 +710,13 @@ fn apply_original_unified_finance_transaction(
             now,
         } => {
             AccountStore::record_outcome_sql_transaction(
-                tx, Some((installation, &account)), &intent,
-                state, exchange_order_id.as_deref(), &evidence, now,
+                tx,
+                Some((installation, &account)),
+                &intent,
+                state,
+                exchange_order_id.as_deref(),
+                &evidence,
+                now,
             )?;
             Ok(UnifiedFinanceWriteReceipt::OutcomeRecorded)
         }
@@ -1035,7 +1056,10 @@ impl UnifiedFinanceHandle {
         account: String,
         now: i64,
     ) -> StoreResult<usize> {
-        match self.trial_financial_write(UnifiedFinanceWrite::RecoverPosting { account, now }).await? {
+        match self
+            .trial_financial_write(UnifiedFinanceWrite::RecoverPosting { account, now })
+            .await?
+        {
             UnifiedFinanceWriteReceipt::Recovered { changed } => Ok(changed),
             _ => Err(StoreError::Invalid("UNIFIED_RECOVERY_RECEIPT_UNEXPECTED")),
         }
@@ -1046,7 +1070,10 @@ impl UnifiedFinanceHandle {
     /// staged accounts, and the immutable offline import remains unchanged.
     #[cfg(test)]
     pub(crate) async fn trial_original_recover_installation(&self, now: i64) -> StoreResult<usize> {
-        match self.trial_financial_write(UnifiedFinanceWrite::RecoverInstallation { now }).await? {
+        match self
+            .trial_financial_write(UnifiedFinanceWrite::RecoverInstallation { now })
+            .await?
+        {
             UnifiedFinanceWriteReceipt::Recovered { changed } => Ok(changed),
             _ => Err(StoreError::Invalid("UNIFIED_RECOVERY_RECEIPT_UNEXPECTED")),
         }
@@ -1065,9 +1092,17 @@ impl UnifiedFinanceHandle {
         evidence: String,
         now: i64,
     ) -> StoreResult<()> {
-        match self.trial_financial_write(UnifiedFinanceWrite::RecordOutcome {
-            account, intent, state, exchange_order_id, evidence, now,
-        }).await? {
+        match self
+            .trial_financial_write(UnifiedFinanceWrite::RecordOutcome {
+                account,
+                intent,
+                state,
+                exchange_order_id,
+                evidence,
+                now,
+            })
+            .await?
+        {
             UnifiedFinanceWriteReceipt::OutcomeRecorded => Ok(()),
             _ => Err(StoreError::Invalid("UNIFIED_OUTCOME_RECEIPT_UNEXPECTED")),
         }
@@ -1111,15 +1146,22 @@ impl UnifiedFinanceHandle {
         census: crate::risk::VerifiedCensus,
         receipt: crate::CentralReceipt,
     ) -> StoreResult<&'static str> {
-        match self.trial_financial_write(UnifiedFinanceWrite::Reserve {
-            campaign, input, census, receipt,
-        }).await.map_err(|_| StoreError::Invalid("UNIFIED_ORIGINAL_RESERVE_TRIAL_REJECTED"))? {
-            UnifiedFinanceWriteReceipt::Risk(
-                crate::risk::UnifiedRiskDecision::Reserved { .. },
-            ) => Ok("HELD_UNCOMMITTED"),
-            UnifiedFinanceWriteReceipt::Risk(
-                crate::risk::UnifiedRiskDecision::Denied { .. },
-            ) => Ok("REJECTED_UNCOMMITTED"),
+        match self
+            .trial_financial_write(UnifiedFinanceWrite::Reserve {
+                campaign,
+                input,
+                census,
+                receipt,
+            })
+            .await
+            .map_err(|_| StoreError::Invalid("UNIFIED_ORIGINAL_RESERVE_TRIAL_REJECTED"))?
+        {
+            UnifiedFinanceWriteReceipt::Risk(crate::risk::UnifiedRiskDecision::Reserved {
+                ..
+            }) => Ok("HELD_UNCOMMITTED"),
+            UnifiedFinanceWriteReceipt::Risk(crate::risk::UnifiedRiskDecision::Denied {
+                ..
+            }) => Ok("REJECTED_UNCOMMITTED"),
             _ => Err(StoreError::Invalid("UNIFIED_RESERVE_RECEIPT_UNEXPECTED")),
         }
     }
@@ -1137,12 +1179,24 @@ impl UnifiedFinanceHandle {
         expected_sequence: u64,
         generation: u64,
     ) -> StoreResult<(u64, String, bool)> {
-        match self.trial_financial_write(UnifiedFinanceWrite::ReleaseUnsent {
-            campaign, account, intent, expected_sequence, generation,
-        }).await.map_err(|_| StoreError::Invalid("UNIFIED_UNSENT_SOURCE_OR_RISK_DENIED"))? {
-            UnifiedFinanceWriteReceipt::Risk(crate::risk::UnifiedRiskDecision::UnsentReleased {
-                reservation_key, book_sequence, replayed,
-            }) => Ok((book_sequence, reservation_key, replayed)),
+        match self
+            .trial_financial_write(UnifiedFinanceWrite::ReleaseUnsent {
+                campaign,
+                account,
+                intent,
+                expected_sequence,
+                generation,
+            })
+            .await
+            .map_err(|_| StoreError::Invalid("UNIFIED_UNSENT_SOURCE_OR_RISK_DENIED"))?
+        {
+            UnifiedFinanceWriteReceipt::Risk(
+                crate::risk::UnifiedRiskDecision::UnsentReleased {
+                    reservation_key,
+                    book_sequence,
+                    replayed,
+                },
+            ) => Ok((book_sequence, reservation_key, replayed)),
             _ => Err(StoreError::Invalid("UNIFIED_UNSENT_RECEIPT_UNEXPECTED")),
         }
     }
@@ -1159,11 +1213,22 @@ impl UnifiedFinanceHandle {
         expected_sequence: u64,
         generation: u64,
     ) -> StoreResult<(u64, String, bool)> {
-        match self.trial_financial_write(UnifiedFinanceWrite::SettlePartial {
-            campaign, account, intent, expected_sequence, generation,
-        }).await.map_err(|_| StoreError::Invalid("UNIFIED_PARTIAL_SOURCE_OR_RISK_DENIED"))? {
+        match self
+            .trial_financial_write(UnifiedFinanceWrite::SettlePartial {
+                campaign,
+                account,
+                intent,
+                expected_sequence,
+                generation,
+            })
+            .await
+            .map_err(|_| StoreError::Invalid("UNIFIED_PARTIAL_SOURCE_OR_RISK_DENIED"))?
+        {
             UnifiedFinanceWriteReceipt::Risk(crate::risk::UnifiedRiskDecision::EntrySettled {
-                book_sequence, cumulative_entry_usd, replayed, ..
+                book_sequence,
+                cumulative_entry_usd,
+                replayed,
+                ..
             }) => Ok((book_sequence, cumulative_entry_usd, replayed)),
             _ => Err(StoreError::Invalid("UNIFIED_PARTIAL_RECEIPT_UNEXPECTED")),
         }
