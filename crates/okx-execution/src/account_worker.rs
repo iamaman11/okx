@@ -713,6 +713,60 @@ impl UnifiedFinanceHandle {
         })
         .await
     }
+
+    /// The original RiskBook AccountSummary from the same installation
+    /// FIFO/SQLite snapshot, with full campaign+account scope verification.
+    pub(crate) async fn account_summary(
+        &self,
+        campaign: String,
+        account_key: String,
+    ) -> StoreResult<crate::risk::AccountReadback> {
+        if campaign.is_empty() || account_key.is_empty() {
+            return Err(StoreError::Invalid("UNIFIED_FINANCE_ACCOUNT_SCOPE_INVALID"));
+        }
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let readback = crate::risk::read_unified_campaign_account_summary(
+                &tx,
+                &installation,
+                &campaign,
+                &account_key,
+            )
+            .map_err(StoreError::Invalid)?;
+            tx.commit()?;
+            Ok(readback)
+        })
+        .await
+    }
+
+    /// The original RiskBook Inspect returns None for missing/foreign
+    /// reservation or wrong plan. Absence is UNKNOWN, NOT permission to POST.
+    pub(crate) async fn inspect_reservation(
+        &self,
+        campaign: String,
+        reservation_key: String,
+        plan_sha256: String,
+    ) -> StoreResult<Option<crate::risk::ReservationReadback>> {
+        if campaign.is_empty() {
+            return Err(StoreError::Invalid("UNIFIED_FINANCE_CAMPAIGN_EMPTY"));
+        }
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let readback = crate::risk::read_unified_campaign_reservation(
+                &tx,
+                &installation,
+                &campaign,
+                &reservation_key,
+                &plan_sha256,
+            )
+            .map_err(StoreError::Invalid)?;
+            tx.commit()?;
+            Ok(readback)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
