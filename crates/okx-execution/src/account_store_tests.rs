@@ -11213,51 +11213,87 @@ fn risk_book_contract_unified_full_original_account_import_two_accounts() {
     unified.pragma_update(None, "journal_mode", "WAL").unwrap();
     unified.pragma_update(None, "synchronous", "FULL").unwrap();
     unified.pragma_update(None, "foreign_keys", "ON").unwrap();
-    let outcome = super::sql::unified_financial::importer::import_stopped_accounts_into_empty_finance(
-        &mut unified,
-        "installation",
-        &[&sa, &sb],
-    ).unwrap();
+    let outcome =
+        super::sql::unified_financial::importer::import_stopped_accounts_into_empty_finance(
+            &mut unified,
+            "installation",
+            &[&sa, &sb],
+        )
+        .unwrap();
     assert_eq!(outcome.accounts, 2);
     assert_eq!(outcome.tables_per_account, 39);
-    assert!(outcome.imported_rows >= 20, "all original source rows are preserved");
-    for table in ["account_meta", "strategy_instances", "strategy_definition_versions",
-        "decisions", "intents", "account_policy", "operation_receipts",
-        "campaign_source_epoch", "campaign_late_head_epoch", "storage_recovery"
+    assert!(
+        outcome.imported_rows >= 20,
+        "all original source rows are preserved"
+    );
+    for table in [
+        "account_meta",
+        "strategy_instances",
+        "strategy_definition_versions",
+        "decisions",
+        "intents",
+        "account_policy",
+        "operation_receipts",
+        "campaign_source_epoch",
+        "campaign_late_head_epoch",
+        "storage_recovery",
     ] {
-        let target_count: i64 = unified.query_row(
-            &format!("SELECT COUNT(*) FROM {table}"),[],|r|r.get(0),
-        ).unwrap();
-        let originals: i64 = [&sa,&sb].into_iter().map(|source| {
-            source.query_row(
-                &format!("SELECT COUNT(*) FROM {table}"),[],|r|r.get::<_,i64>(0)
-            ).unwrap()
-        }).sum();
-        assert_eq!(target_count,originals,"{table} exactly preserves both source accounts");
+        let target_count: i64 = unified
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        let originals: i64 = [&sa, &sb]
+            .into_iter()
+            .map(|source| {
+                source
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .unwrap()
+            })
+            .sum();
+        assert_eq!(
+            target_count, originals,
+            "{table} exactly preserves both source accounts"
+        );
     }
-    let copied: i64 = unified.query_row(
-        "SELECT COUNT(*) FROM intents WHERE intent_id=?1",
-        [&one.intent_id],|r|r.get(0),
-    ).unwrap();
-    assert_eq!(copied,2,"same source intent can exist on two separate accounts");
-    let snapshot: String=unified.query_row(
-        "SELECT source_ref FROM cash_flows
+    let copied: i64 = unified
+        .query_row(
+            "SELECT COUNT(*) FROM intents WHERE intent_id=?1",
+            [&one.intent_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        copied, 2,
+        "same source intent can exist on two separate accounts"
+    );
+    let snapshot: String = unified
+        .query_row(
+            "SELECT source_ref FROM cash_flows
          WHERE installation_id='installation' AND account_key='acct-B'
            AND event_id='opening:USDT'",
-        [],|r|r.get(0),
-    ).unwrap();
-    assert_eq!(snapshot,"authenticated-flat");
-    let version: i64=unified.pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();
-    assert_eq!(version,6);
-    let mut fk=unified.prepare("PRAGMA foreign_key_check").unwrap();
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(snapshot, "authenticated-flat");
+    let version: i64 = unified
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 6);
+    let mut fk = unified.prepare("PRAGMA foreign_key_check").unwrap();
     assert!(fk.query([]).unwrap().next().unwrap().is_none());
     drop(fk);
     drop(unified);
-    let reopened=Connection::open(&destination).unwrap();
-    let count: i64=reopened.query_row(
-        "SELECT COUNT(*) FROM account_meta
-         WHERE installation_id='installation'",[],|r|r.get(0),
-    ).unwrap();
-    assert_eq!(count,2);
-    let _=std::fs::remove_file(&destination);
+    let reopened = Connection::open(&destination).unwrap();
+    let count: i64 = reopened
+        .query_row(
+            "SELECT COUNT(*) FROM account_meta
+         WHERE installation_id='installation'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2);
+    let _ = std::fs::remove_file(&destination);
 }
