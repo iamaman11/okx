@@ -1,0 +1,2348 @@
+//! Real on-disk SQLite tests. No Cloudflare, simulated exchange or REAL account.
+use super::store::*;
+use okx_kernel::risk::{model::RiskProposal, money::RiskAmount, rules::RiskRuleError};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
+struct Fixture {
+    root: PathBuf,
+    path: PathBuf,
+}
+impl Fixture {
+    fn new(label: &str) -> Self {
+        let number = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "okx-riskbook-{label}-{}-{number}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("risk-book.sqlite");
+        Self { root, path }
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+fn amt(v: &str) -> RiskAmount {
+    RiskAmount::parse(v).unwrap()
+}
+fn uid(first: char) -> String {
+    first.to_string().repeat(64)
+}
+fn account(first: char) -> String {
+    format!("okx:real:{}", uid(first))
+}
+fn opening() -> CampaignOpening {
+    CampaignOpening {
+        installation_id: "test-installation".to_owned(),
+        campaign_id: format!("sha256:{}", uid('c')),
+        policy_revision: 1,
+        generation: 7,
+        global_limit: amt("10"),
+        loss_limit: amt("100"),
+        entry_limit: amt("100"),
+        accounts: ['a', 'b']
+            .into_iter()
+            .map(|letter| AccountPolicy {
+                account_key: account(letter),
+                account_limit: amt("10"),
+                order_limit: amt("8"),
+                entry_limit: amt("10"),
+                strategy_id: "strategy_test".to_owned(),
+                strategy_limit: amt("8"),
+            })
+            .collect(),
+    }
+}
+fn census() -> VerifiedCensus {
+    VerifiedCensus {
+        complete: true,
+        generation: 7,
+        source_digest: uid('d'),
+        generated_at_ms: 10_000,
+        read_floor_ms: 9_995,
+        occupied: BTreeMap::from([(account('a'), amt("0")), (account('b'), amt("0"))]),
+        cumulative_loss_usd: BTreeMap::from([(account('a'), amt("0")), (account('b'), amt("0"))]),
+    }
+}
+fn request(letter: char, intent: &str, loss: &str) -> ReserveInput {
+    ReserveInput {
+        venue: "okx".to_string(),
+        uid: uid(letter),
+        run_id: "run_000001".into(),
+        intent_id: intent.to_owned(),
+        strategy_id: "strategy_test".into(),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        plan_sha256: uid('e'),
+        entry_proof_digest: uid('f'),
+        conversion_digest: uid('a'),
+        conversion_observed_at_ms: 9_999,
+        conversion_rate: amt("1"),
+        native_incarnation: "f".repeat(32),
+        proposal: RiskProposal {
+            loss_usdt: amt(loss),
+            loss_usd: amt(loss),
+            entry_upper_usd: amt("1"),
+        },
+        policy_revision: 1,
+        now_ms: 10_000,
+    }
+}
+fn open(f: &Fixture) -> RiskBookStore {
+    RiskBookStore::open_existing(&f.path, "test-installation", &opening().campaign_id).unwrap()
+}
+#[test]
+fn risk_book_contract_sql_concurrent_accounts_share_one_budget() {
+    let f = Fixture::new("two-accounts");
+    RiskBookStore::initialize_fixture(&f.path, &opening()).unwrap();
+    let mut s = open(&f);
+    let first = s
+        .reserve(&request('a', "intent0001", "6"), &census())
+        .unwrap();
+    assert_eq!(first.book_sequence, 1);
+    assert!(!first.replayed);
+    let second = s.reserve(&request('b', "intent0002", "6"), &census());
+    assert!(matches!(
+        second,
+        Err(RiskStoreError::Denied(
+            RiskRuleError::InsufficientAggregateOrAccountRisk
+        ))
+    ));
+    let read = s.readback().unwrap();
+    assert_eq!(read.global_limit_usdt, "10");
+    assert_eq!(read.global_reserved_usdt, "6");
+    assert_eq!(read.loss_limit_usd, "100");
+    assert_eq!(read.consumed_loss_usd, "0");
+    assert_eq!(read.reserved_loss_usd, "6");
+    assert_eq!(read.remaining_loss_usd, "94");
+    assert_eq!(read.entry_limit_usd, "100");
+    assert_eq!(read.consumed_entry_usd, "0");
+    assert_eq!(read.reserved_entry_usd, "1");
+    assert_eq!(read.entry_bound_breach_usd, "0");
+    assert_eq!(read.remaining_entry_usd, "99");
+    assert_eq!(read.book_sequence, 1);
+    drop(s);
+    let mut recovered = open(&f);
+    assert_eq!(recovered.readback().unwrap(), read);
+    assert_eq!(
+        recovered
+            .reserve(&request('b', "intent0002", "4"), &census())
+            .unwrap()
+            .book_sequence,
+        2
+    );
+}
+#[test]
+fn risk_book_contract_sql_ack_lost_replay_is_read_only() {
+    let f = Fixture::new("replay");
+    RiskBookStore::initialize_fixture(&f.path, &opening()).unwrap();
+    let mut s = open(&f);
+    let input = request('a', "intent0003", "3");
+    let key = input.reservation_key();
+    let first = s.reserve(&input, &census()).unwrap();
+    assert_eq!(first.reservation_key, key);
+    // Simulate a response lost *after* SQLite COMMIT: only persisted state survives.
+    drop(first);
+    drop(s);
+    let mut reopened = open(&f);
+    let replay = reopened.reserve(&input, &census()).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.book_sequence, 1);
+    let altered = request('a', "intent0003", "4");
+    assert!(matches!(
+        reopened.reserve(&altered, &census()),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
+    assert_eq!(reopened.readback().unwrap().global_reserved_usdt, "3");
+}
+#[test]
+fn risk_book_contract_sql_single_writer_and_no_implicit_init() {
+    let f = Fixture::new("lease");
+    assert!(matches!(
+        RiskBookStore::open_existing(&f.path, "test-installation", "missing"),
+        Err(RiskStoreError::Uninitialized)
+    ));
+    RiskBookStore::initialize_fixture(&f.path, &opening()).unwrap();
+    let store = open(&f);
+    assert!(matches!(
+        RiskBookStore::open_existing(&f.path, "test-installation", &opening().campaign_id),
+        Err(RiskStoreError::WriterBusy)
+    ));
+    drop(store);
+    assert!(matches!(
+        RiskBookStore::open_existing(&f.path, "other", &opening().campaign_id),
+        Err(RiskStoreError::IdentityMismatch)
+    ));
+    assert!(open(&f).readback().is_ok());
+    assert!(matches!(
+        RiskBookStore::initialize_fixture(&f.path, &opening()),
+        Err(RiskStoreError::Invalid("EXISTING_RISK_BOOK"))
+    ));
+}
+#[test]
+fn risk_book_contract_sql_unproven_source_and_stale_revision_fail_closed() {
+    let f = Fixture::new("source");
+    RiskBookStore::initialize_fixture(&f.path, &opening()).unwrap();
+    let mut s = open(&f);
+    let input = request('a', "intent0004", "1");
+    let mut incomplete = census();
+    incomplete.occupied.remove(&account('b'));
+    assert!(matches!(
+        s.reserve(&input, &incomplete),
+        Err(RiskStoreError::CensusUnproven)
+    ));
+    let mut untrusted = census();
+    untrusted.complete = false;
+    assert!(matches!(
+        s.reserve(&input, &untrusted),
+        Err(RiskStoreError::CensusUnproven)
+    ));
+    let mut stale = census();
+    stale.generation = 6;
+    assert!(matches!(
+        s.reserve(&input, &stale),
+        Err(RiskStoreError::StaleGeneration)
+    ));
+    let mut revision = input.clone();
+    revision.policy_revision = 2;
+    assert!(matches!(
+        s.reserve(&revision, &census()),
+        Err(RiskStoreError::PolicyConflict)
+    ));
+    let mut stale_clock = input.clone();
+    stale_clock.now_ms = 16_001;
+    stale_clock.conversion_observed_at_ms = 16_000;
+    assert!(matches!(
+        s.reserve(&stale_clock, &census()),
+        Err(RiskStoreError::CensusUnproven)
+    ));
+    assert_eq!(s.readback().unwrap().book_sequence, 0);
+}
+
+#[test]
+fn risk_book_contract_sql_child_post_commit_wait() {
+    let Ok(db) = std::env::var("OKX_510_TEST_KILL_DB") else {
+        return;
+    };
+    let path = PathBuf::from(db);
+    let mut book =
+        RiskBookStore::open_existing(&path, "test-installation", &opening().campaign_id).unwrap();
+    book.reserve(&request('a', "intentkill1", "3"), &census())
+        .unwrap();
+    use std::io::Write;
+    println!("RISK_SQL_COMMITTED_WITHOUT_REPLY");
+    std::io::stdout().flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(60));
+    unreachable!("parent must terminate this OS process after commit");
+}
+
+#[test]
+fn risk_book_contract_sql_os_kill_after_durable_commit() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let fixture = Fixture::new("physical-kill");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "risk_book_contract_sql_child_post_commit_wait",
+            "--nocapture",
+        ])
+        .env("OKX_510_TEST_KILL_DB", &fixture.path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if line
+                .unwrap_or_default()
+                .contains("RISK_SQL_COMMITTED_WITHOUT_REPLY")
+            {
+                let _ = tx.send(());
+                return;
+            }
+        }
+    });
+    let committed = rx.recv_timeout(Duration::from_secs(15));
+    child.kill().unwrap();
+    let _ = child.wait().unwrap();
+    reader.join().unwrap();
+    assert!(
+        committed.is_ok(),
+        "SQLite commit witness not observed before forced kill"
+    );
+    // No simulated task cancellation: the writer OS process was killed while
+    // SQLite and its file lease remained open. WAL must be durable/reopenable.
+    let mut recovered = open(&fixture);
+    assert_eq!(recovered.readback().unwrap().book_sequence, 1);
+    assert_eq!(recovered.readback().unwrap().global_reserved_usdt, "3");
+    let replay = recovered
+        .reserve(&request('a', "intentkill1", "3"), &census())
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(recovered.readback().unwrap().book_sequence, 1);
+}
+
+#[tokio::test]
+async fn risk_book_contract_sql_bounded_owner_serializes_competitors() {
+    use super::owner::RiskBookHandle;
+    use std::time::Duration;
+    let fixture = Fixture::new("tokio-owner");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let owner = RiskBookHandle::open_existing(
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(owner.diagnostic_snapshot().unwrap().book_sequence, 0);
+    let first = owner.clone();
+    let second = owner.clone();
+    let (a, b) = tokio::join!(
+        first.reserve(request('a', "intent0007", "6"), census()),
+        second.reserve(request('b', "intent0008", "6"), census()),
+    );
+    let accepted = [a.as_ref().is_ok(), b.as_ref().is_ok()]
+        .into_iter()
+        .filter(|v| *v)
+        .count();
+    assert_eq!(
+        accepted, 1,
+        "one shared campaign cap; not one cap per account"
+    );
+    assert!(
+        matches!(
+            a,
+            Err(RiskStoreError::Denied(
+                RiskRuleError::InsufficientAggregateOrAccountRisk
+            ))
+        ) || matches!(
+            b,
+            Err(RiskStoreError::Denied(
+                RiskRuleError::InsufficientAggregateOrAccountRisk
+            ))
+        )
+    );
+    assert_eq!(owner.readback().await.unwrap().book_sequence, 1);
+    assert_eq!(owner.diagnostic_snapshot().unwrap().book_sequence, 1);
+    let mut witness = owner.termination_signal();
+    drop(first);
+    drop(second);
+    drop(owner);
+    tokio::time::timeout(Duration::from_secs(2), witness.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(*witness.borrow());
+    let mut reloaded = open(&fixture);
+    assert_eq!(reloaded.readback().unwrap().global_reserved_usdt, "6");
+}
+
+#[test]
+fn risk_book_contract_sql_child_writer_probe() {
+    let Ok(db) = std::env::var("OKX_510_TEST_BUSY_DB") else {
+        return;
+    };
+    let attempt = RiskBookStore::open_existing(
+        &PathBuf::from(db),
+        "test-installation",
+        &opening().campaign_id,
+    );
+    assert!(matches!(attempt, Err(RiskStoreError::WriterBusy)));
+}
+
+#[test]
+fn risk_book_contract_sql_cross_process_exclusive_lease() {
+    let fixture = Fixture::new("cross-process");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let store = open(&fixture);
+    let probe = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["risk_book_contract_sql_child_writer_probe", "--nocapture"])
+        .env("OKX_510_TEST_BUSY_DB", &fixture.path)
+        .output()
+        .unwrap();
+    assert!(
+        probe.status.success() && String::from_utf8_lossy(&probe.stdout).contains("1 passed"),
+        "independent OS writer probe was not executed and passed: stdout={} stderr={}",
+        String::from_utf8_lossy(&probe.stdout),
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    drop(store);
+    assert!(open(&fixture).readback().is_ok());
+}
+
+#[test]
+fn risk_book_contract_sql_external_occupancy_counts_before_reserve() {
+    let fixture = Fixture::new("external");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let mut attested = census();
+    attested.occupied.insert(account('a'), amt("9"));
+    assert!(matches!(
+        store.reserve(&request('b', "intent0099", "2"), &attested),
+        Err(RiskStoreError::Denied(
+            RiskRuleError::InsufficientAggregateOrAccountRisk
+        ))
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 0);
+}
+
+#[test]
+fn risk_book_contract_sql_loss_source_monotonic_even_on_denied_reserve() {
+    let fixture = Fixture::new("loss-monotonic");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let mut source = census();
+    source.cumulative_loss_usd.insert(account('a'), amt("11"));
+    let denied = store.reserve(&request('a', "intentloss1", "95"), &source);
+    assert!(matches!(
+        denied,
+        Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted))
+    ));
+    let state = store.readback().unwrap();
+    assert_eq!(
+        state.book_sequence, 1,
+        "verified loss alone increments sequence"
+    );
+    assert_eq!(state.consumed_loss_usd, "11");
+    assert_eq!(state.remaining_loss_usd, "89");
+    assert_eq!(state.global_reserved_usdt, "0");
+    let accepted = store
+        .reserve(&request('a', "intentloss2", "5"), &source)
+        .unwrap();
+    assert_eq!(accepted.book_sequence, 2);
+    assert_eq!(store.readback().unwrap().consumed_loss_usd, "11");
+    assert_eq!(store.readback().unwrap().remaining_loss_usd, "84");
+    let mut regression = source.clone();
+    regression
+        .cumulative_loss_usd
+        .insert(account('a'), amt("10"));
+    assert!(matches!(
+        store.reserve(&request('b', "intentloss3", "1"), &regression),
+        Err(RiskStoreError::LossRegression)
+    ));
+    drop(store);
+    let mut reopened = open(&fixture);
+    assert_eq!(reopened.readback().unwrap().consumed_loss_usd, "11");
+    assert_eq!(reopened.readback().unwrap().book_sequence, 2);
+}
+
+#[tokio::test]
+async fn risk_book_contract_sql_denied_reserve_refreshes_owner_projection() {
+    use super::owner::RiskBookHandle;
+    let fixture = Fixture::new("loss-projection");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let owner = RiskBookHandle::open_existing(
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    let mut source = census();
+    source.cumulative_loss_usd.insert(account('a'), amt("11"));
+    let denial = owner
+        .reserve(request('a', "intentloss4", "95"), source)
+        .await;
+    assert!(matches!(
+        denial,
+        Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted))
+    ));
+    let visible = owner.diagnostic_snapshot().unwrap();
+    assert_eq!(visible.consumed_loss_usd, "11");
+    assert_eq!(visible.book_sequence, 1);
+    assert_eq!(visible.global_reserved_usdt, "0");
+}
+
+#[test]
+fn risk_book_contract_sql_legacy_identity_and_safe_number_ranges() {
+    let mut input = request('a', "intent0001", "1");
+    assert_eq!(
+        input.reservation_key(),
+        format!("3:okx4:real64:{}10:run_00000110:intent0001", uid('a'))
+    );
+    input.strategy_id = "s1".into();
+    assert!(
+        input.validate().is_ok(),
+        "legacy allows two-character strategy IDs"
+    );
+    input.strategy_id = "1s".into();
+    assert!(matches!(input.validate(), Err(RiskStoreError::Invalid(_))));
+    input.strategy_id = "strategy_test".into();
+    input.policy_revision = 9_007_199_254_740_992;
+    assert!(matches!(input.validate(), Err(RiskStoreError::Invalid(_))));
+    input.policy_revision = 1;
+    input.now_ms = 9_007_199_254_740_992;
+    assert!(matches!(input.validate(), Err(RiskStoreError::Invalid(_))));
+}
+
+#[test]
+fn risk_book_contract_sql_rejects_over_limit_other_account() {
+    let fixture = Fixture::new("cohort-over-limit");
+    let mut policy = opening();
+    policy.global_limit = amt("30");
+    RiskBookStore::initialize_fixture(&fixture.path, &policy).unwrap();
+    let mut store = open(&fixture);
+    let mut source = census();
+    // A already violates its own 10 USDT cap; B's 1 USDT cannot be admitted.
+    // Checking only B and the global 30 USDT cap would incorrectly grant HELD.
+    source.occupied.insert(account('a'), amt("11"));
+    assert!(matches!(
+        store.reserve(&request('b', "intentcohort1", "1"), &source),
+        Err(RiskStoreError::Denied(
+            RiskRuleError::AccountAlreadyOverLimit
+        ))
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 0);
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "0");
+}
+
+#[test]
+fn risk_book_contract_sql_corrupted_reservation_aggregates_reject_reopen() {
+    let fixture = Fixture::new("aggregate-corruption");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    store
+        .reserve(&request('a', "intentcorrupt1", "6"), &census())
+        .unwrap();
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "6");
+    drop(store);
+
+    // Deliberately damage only a materialized total in an isolated test DB.
+    // The primary HELD reservation and account/strategy aggregates remain intact.
+    let connection = rusqlite::Connection::open(&fixture.path).unwrap();
+    connection
+        .execute(
+            "UPDATE risk_meta SET global_reserved_usdt='0' WHERE singleton=1",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        RiskBookStore::open_existing(&fixture.path, "test-installation", &opening().campaign_id),
+        Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"))
+    ));
+}
+
+#[test]
+fn risk_book_contract_sql_release_requires_zero_reservations() {
+    let fixture = Fixture::new("release-check");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let input = request('a', "intentrelease1", "6");
+    let mut store = open(&fixture);
+    store.reserve(&input, &census()).unwrap();
+    drop(store);
+
+    // A terminal label alone must never erase a still-funded obligation.
+    // SQLite rejects the incomplete transition even if a caller bypasses Rust.
+    let connection = rusqlite::Connection::open(&fixture.path).unwrap();
+    let result = connection.execute(
+        "UPDATE risk_entries SET state='RELEASED' WHERE reservation_key=?1",
+        rusqlite::params![input.reservation_key()],
+    );
+    assert!(result.is_err());
+    drop(connection);
+    let mut reopened = open(&fixture);
+    assert_eq!(reopened.readback().unwrap().global_reserved_usdt, "6");
+}
+
+#[test]
+fn risk_book_contract_sql_old_schema_version_is_rejected() {
+    let fixture = Fixture::new("schema-version");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let connection = rusqlite::Connection::open(&fixture.path).unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        RiskBookStore::open_existing(&fixture.path, "test-installation", &opening().campaign_id),
+        Err(RiskStoreError::Corrupt("SCHEMA_OR_JOURNAL"))
+    ));
+}
+
+#[test]
+fn risk_book_contract_sql_account_observation_and_inspect_preserve_revision() {
+    use okx_kernel::risk::model::RiskEntryState;
+    let fixture = Fixture::new("readonly");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+
+    let empty = store.account_readback(&account('b')).unwrap();
+    assert_eq!(empty.active_reservations, 0);
+    assert_eq!(empty.reserved_loss_usdt, "0");
+    assert_eq!(empty.reserved_loss_usd, "0");
+
+    let input = request('a', "intentread1", "6");
+    let held = store.reserve(&input, &census()).unwrap();
+    let account_a = store.account_readback(&account('a')).unwrap();
+    assert_eq!(account_a.active_reservations, 1);
+    assert_eq!(account_a.reserved_loss_usdt, "6");
+    assert_eq!(account_a.reserved_loss_usd, "6");
+    assert_eq!(account_a.cumulative_loss_usd, "0");
+    assert_eq!(account_a.book_sequence, held.book_sequence);
+    assert_eq!(account_a.policy_revision, 1);
+    let account_b = store.account_readback(&account('b')).unwrap();
+    assert_eq!(account_b.book_sequence, held.book_sequence);
+    assert_eq!(account_b.active_reservations, 0);
+    assert_eq!(account_b.reserved_loss_usdt, "0");
+    let found = store
+        .inspect(&input.reservation_key(), &input.plan_sha256)
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.reservation_key, input.reservation_key());
+    assert_eq!(found.plan_sha256, input.plan_sha256);
+    assert_eq!(found.state, RiskEntryState::Held);
+    assert_eq!(found.reservation_sequence, 1);
+    assert_eq!(found.current_book_sequence, 1);
+    assert_eq!(found.policy_revision, 1);
+    assert!(
+        store
+            .inspect(&input.reservation_key(), &uid('b'))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .inspect(
+                &request('b', "intentnever1", "1").reservation_key(),
+                &uid('e')
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        store.account_readback(&account('c')),
+        Err(RiskStoreError::Invalid("ACCOUNT_NOT_ACTIVE"))
+    ));
+    assert!(matches!(
+        store.inspect(&input.reservation_key(), "bad"),
+        Err(RiskStoreError::Invalid("INSPECTION_IDENTITY"))
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 1);
+    drop(store);
+
+    let mut reopened = open(&fixture);
+    assert_eq!(reopened.account_readback(&account('a')).unwrap(), account_a);
+    assert_eq!(
+        reopened
+            .inspect(&input.reservation_key(), &input.plan_sha256)
+            .unwrap(),
+        Some(found)
+    );
+    assert_eq!(reopened.readback().unwrap().book_sequence, 1);
+}
+
+#[test]
+fn risk_book_contract_sql_loss_source_total_and_presence_are_durable() {
+    let fixture = Fixture::new("loss-primary");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let mut source = census();
+    source.cumulative_loss_usd.insert(account('a'), amt("11"));
+    assert!(matches!(
+        store.reserve(&request('a', "intentloss5", "95"), &source),
+        Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted))
+    ));
+    assert_eq!(store.readback().unwrap().consumed_loss_usd, "11");
+    drop(store);
+    let connection = rusqlite::Connection::open(&fixture.path).unwrap();
+    connection
+        .execute(
+            "UPDATE risk_meta SET loss_consumed_usd='0' WHERE singleton=1",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        RiskBookStore::open_existing(&fixture.path, "test-installation", &opening().campaign_id),
+        Err(RiskStoreError::Corrupt("LOSS_SOURCE_AGGREGATES"))
+    ));
+
+    let missing = Fixture::new("loss-row-missing");
+    RiskBookStore::initialize_fixture(&missing.path, &opening()).unwrap();
+    let connection = rusqlite::Connection::open(&missing.path).unwrap();
+    connection
+        .execute(
+            "DELETE FROM risk_loss_source WHERE account_key=?1",
+            rusqlite::params![account('a')],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        RiskBookStore::open_existing(&missing.path, "test-installation", &opening().campaign_id),
+        Err(RiskStoreError::Corrupt("LOSS_SOURCE_AGGREGATES"))
+    ));
+}
+
+#[tokio::test]
+async fn risk_book_contract_sql_bounded_owner_answers_readonly_observations() {
+    use super::owner::RiskBookHandle;
+    use okx_kernel::risk::model::RiskEntryState;
+
+    let fixture = Fixture::new("owner-readonly");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let owner = RiskBookHandle::open_existing(
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    let input = request('a', "intentowner1", "3");
+    owner.reserve(input.clone(), census()).await.unwrap();
+    let observed = owner.account_readback(account('a')).await.unwrap();
+    assert_eq!(observed.active_reservations, 1);
+    assert_eq!(observed.reserved_loss_usdt, "3");
+    let entry = owner
+        .inspect(input.reservation_key(), input.plan_sha256.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.state, RiskEntryState::Held);
+    assert_eq!(owner.readback().await.unwrap().book_sequence, 1);
+}
+
+fn unsent(letter: char, intent: &str) -> UnsentSqlProof {
+    let input = request(letter, intent, "1");
+    UnsentSqlProof {
+        reservation_key: input.reservation_key(),
+        account_key: account(letter),
+        intent_id: intent.to_owned(),
+        plan_sha256: input.plan_sha256,
+        request_hash: uid('b'),
+        reason: "REJECTED_UNSENT".to_owned(),
+        record_digest: uid('d'),
+    }
+}
+
+#[test]
+fn risk_book_contract_sql_durable_no_reserve_tombstone_prevents_future_grant() {
+    use okx_kernel::risk::model::RiskEntryState;
+    let fixture = Fixture::new("negative-fence");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let proof = unsent('a', "intentfence1");
+    assert!(
+        store
+            .inspect(&proof.reservation_key, &proof.plan_sha256)
+            .unwrap()
+            .is_none()
+    );
+    let first = store.release_unsent(&proof, 0, 7).unwrap();
+    assert_eq!(first.book_sequence, 1);
+    assert!(!first.replayed);
+    let fenced = store
+        .inspect(&proof.reservation_key, &proof.plan_sha256)
+        .unwrap()
+        .unwrap();
+    assert_eq!(fenced.state, RiskEntryState::Released);
+    assert_eq!(fenced.reservation_sequence, 1);
+    assert_eq!(fenced.current_book_sequence, 1);
+    assert_eq!(fenced.policy_revision, 1);
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "0");
+    assert_eq!(store.readback().unwrap().reserved_entry_usd, "0");
+    let replay = store.release_unsent(&proof, 1, 7).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.book_sequence, 1);
+    let altered = UnsentSqlProof {
+        record_digest: uid('e'),
+        ..proof.clone()
+    };
+    assert!(matches!(
+        store.release_unsent(&altered, 1, 7),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
+    assert!(matches!(
+        store.reserve(&request('a', "intentfence1", "1"), &census()),
+        Err(RiskStoreError::AlreadyResolved)
+    ));
+    let mut changed_plan = request('a', "intentfence1", "1");
+    changed_plan.plan_sha256 = uid('f');
+    assert!(matches!(
+        store.reserve(&changed_plan, &census()),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 1);
+    drop(store);
+
+    let mut recovered = open(&fixture);
+    assert_eq!(
+        recovered
+            .inspect(&proof.reservation_key, &proof.plan_sha256)
+            .unwrap(),
+        Some(fenced)
+    );
+    assert!(matches!(
+        recovered.reserve(&request('a', "intentfence1", "1"), &census()),
+        Err(RiskStoreError::AlreadyResolved)
+    ));
+    assert_eq!(
+        recovered
+            .reserve(&request('b', "intentother1", "6"), &census())
+            .unwrap()
+            .book_sequence,
+        2
+    );
+    assert_eq!(recovered.readback().unwrap().global_reserved_usdt, "6");
+}
+
+#[test]
+fn risk_book_contract_sql_unsent_held_release_is_exact_and_durable() {
+    use okx_kernel::risk::model::RiskEntryState;
+    let fixture = Fixture::new("unsent-held");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let input = request('a', "intentunsent1", "6");
+    let first = store.reserve(&input, &census()).unwrap();
+    assert_eq!(first.book_sequence, 1);
+    let proof = unsent('a', "intentunsent1");
+    assert!(matches!(
+        store.release_unsent(&proof, 0, 7),
+        Err(RiskStoreError::StaleSequence)
+    ));
+    assert!(matches!(
+        store.release_unsent(&proof, 1, 6),
+        Err(RiskStoreError::StaleGeneration)
+    ));
+    let wrong = UnsentSqlProof {
+        plan_sha256: uid('d'),
+        ..proof.clone()
+    };
+    assert!(matches!(
+        store.release_unsent(&wrong, 1, 7),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "6");
+    let released = store.release_unsent(&proof, 1, 7).unwrap();
+    assert_eq!(released.book_sequence, 2);
+    assert!(!released.replayed);
+    let replay = store.release_unsent(&proof, 2, 7).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.book_sequence, 2);
+    let changed_reason = UnsentSqlProof {
+        reason: "OTHER_SQL_REASON".into(),
+        ..proof.clone()
+    };
+    assert!(matches!(
+        store.release_unsent(&changed_reason, 2, 7),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 2);
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "0");
+    assert_eq!(store.readback().unwrap().reserved_loss_usd, "0");
+    assert_eq!(store.readback().unwrap().reserved_entry_usd, "0");
+    assert_eq!(
+        store
+            .account_readback(&account('a'))
+            .unwrap()
+            .active_reservations,
+        0
+    );
+    let entry = store
+        .inspect(&proof.reservation_key, &proof.plan_sha256)
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.state, RiskEntryState::Released);
+    assert_eq!(entry.reservation_sequence, 1);
+    assert_eq!(entry.current_book_sequence, 2);
+    assert!(matches!(
+        store.reserve(&input, &census()),
+        Err(RiskStoreError::AlreadyResolved)
+    ));
+    drop(store);
+
+    let mut reopened = open(&fixture);
+    assert_eq!(
+        reopened
+            .inspect(&proof.reservation_key, &proof.plan_sha256)
+            .unwrap(),
+        Some(entry)
+    );
+    assert!(reopened.release_unsent(&proof, 2, 7).unwrap().replayed);
+    assert_eq!(reopened.readback().unwrap().global_reserved_usdt, "0");
+    assert_eq!(reopened.readback().unwrap().remaining_loss_usd, "100");
+    assert_eq!(reopened.readback().unwrap().remaining_entry_usd, "100");
+}
+
+#[test]
+fn risk_book_contract_sql_rejects_invalid_no_send_and_conflicting_fence() {
+    let fixture = Fixture::new("negative-corrupt");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let mut proof = unsent('a', "intentnoproof1");
+    proof.reservation_key.push_str("garbage");
+    assert!(matches!(
+        store.release_unsent(&proof, 0, 7),
+        Err(RiskStoreError::Invalid("UNSENT_SQL_PROOF_INVALID"))
+    ));
+    let mut proof = unsent('a', "intentnoproof1");
+    proof.request_hash = "not-a-digest".into();
+    assert!(matches!(
+        store.release_unsent(&proof, 0, 7),
+        Err(RiskStoreError::Invalid("UNSENT_SQL_PROOF_INVALID"))
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 0);
+    store
+        .reserve(&request('a', "intentother2", "4"), &census())
+        .unwrap();
+    drop(store);
+    // Out-of-band corruption must not allow both a positive reservation
+    // and a negative no-reserve fence on the exact same durable identity.
+    let conflict = unsent('a', "intentother2");
+    let db = rusqlite::Connection::open(&fixture.path).unwrap();
+    db.execute(
+        "INSERT INTO risk_no_reserve(
+           reservation_key,account_key,intent_id,plan_sha256,
+           request_hash,record_digest,reason,policy_revision,book_sequence)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,1,2)",
+        rusqlite::params![
+            &conflict.reservation_key,
+            &conflict.account_key,
+            &conflict.intent_id,
+            &conflict.plan_sha256,
+            &conflict.request_hash,
+            &conflict.record_digest,
+            &conflict.reason,
+        ],
+    )
+    .unwrap();
+    drop(db);
+    assert!(matches!(
+        RiskBookStore::open_existing(&fixture.path, "test-installation", &opening().campaign_id),
+        Err(RiskStoreError::Corrupt("NO_RESERVE_FENCE_CONFLICT"))
+    ));
+}
+
+#[tokio::test]
+async fn risk_book_contract_sql_owner_serializes_negative_fence() {
+    use super::owner::RiskBookHandle;
+    let fixture = Fixture::new("owner-unsent");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let owner = RiskBookHandle::open_existing(
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    let proof = unsent('a', "intentowner2");
+    let first = owner.release_unsent(proof.clone(), 0, 7).await.unwrap();
+    assert_eq!(first.book_sequence, 1);
+    let replay = owner.release_unsent(proof.clone(), 1, 7).await.unwrap();
+    assert!(replay.replayed);
+    let observed = owner
+        .inspect(proof.reservation_key.clone(), proof.plan_sha256.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(observed.current_book_sequence, 1);
+    assert_eq!(owner.readback().await.unwrap().global_reserved_usdt, "0");
+}
+
+#[tokio::test]
+async fn risk_book_contract_real_account_sql_unsent_proof_bridges_campaign_owner() {
+    use super::owner::RiskBookHandle;
+    use crate::{
+        AccountMeta, AccountStoreHandle, Decision, IntentPlan, NewIntent, OpeningSnapshot,
+    };
+    use rust_decimal::Decimal;
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new("account-sql-to-campaign");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let account_handle = AccountStoreHandle::initialize_flat(
+        fixture.root.join("account.sqlite"),
+        AccountMeta {
+            account_key: account('a'),
+            installation_id: "test-installation".into(),
+            initialized_at: 1,
+            opening_source: "fixture_flat".into(),
+            initialize_operation_id: "initialize_native_unsent".into(),
+            release_id: "a".repeat(40),
+        },
+        OpeningSnapshot {
+            source_ref: "fixture_flat".into(),
+            observed_at: 1,
+            opening_equity_usd: Decimal::from(100),
+            positions: 0,
+            orders: 0,
+            conditional_orders: 0,
+            liabilities: Decimal::ZERO,
+            balances: vec![("USD".into(), Decimal::from(100))],
+        },
+    )
+    .await
+    .unwrap();
+    let campaign = RiskBookHandle::open_existing(
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    let no_source = campaign
+        .release_unsent_from_account_sql(
+            &account_handle,
+            "intentnative1".into(),
+            0,
+            7,
+            Instant::now() + Duration::from_secs(3),
+        )
+        .await;
+    assert!(matches!(no_source, Err(RiskStoreError::UnsentSqlUnproven)));
+    assert_eq!(campaign.readback().await.unwrap().book_sequence, 0);
+
+    let reservation = request('a', "intentnative1", "3");
+    let key = reservation.reservation_key();
+    let marked_key = key.clone();
+    account_handle
+        .call(Instant::now() + Duration::from_secs(3), move |s| {
+            s.apply_authority_policy(1, false, "campaign_fixture", Decimal::from(100))?;
+            let definition = s.ensure_manual_instance(1)?;
+            s.prepare(
+                &Decision {
+                    decision_id: "decision_native_unsent".into(),
+                    instance_id: None,
+                    decision_at: 2,
+                    input_digest: "d".repeat(64),
+                    policy_revision: 1,
+                    code_version: "fixture".into(),
+                },
+                &NewIntent {
+                    intent_id: "intentnative1".into(),
+                    idempotency_key: "command_native_unsent".into(),
+                    request_hash: "b".repeat(64),
+                    client_order_id: "c".repeat(32),
+                    deadline: 100,
+                    plan_hash: "e".repeat(64),
+                    policy_revision: 1,
+                    risk_increase: true,
+                    instrument_id: "BTC-USDT-SWAP".into(),
+                    plan: IntentPlan {
+                        strategy_definition_id: definition.definition_id,
+                        strategy_definition_version: definition.version,
+                        strategy_parameters_digest: definition.parameters_digest,
+                        operation: "open".into(),
+                        side: "buy".into(),
+                        position_side: "long".into(),
+                        quantity: Decimal::ONE,
+                        limit_price: Decimal::from(5),
+                        stop_price: Some(Decimal::from(4)),
+                        strategy_instance: "manual".into(),
+                        planned_loss_usd: Decimal::ONE,
+                        source_generation: 1,
+                        private_source_generation: 1,
+                        contract_value: Decimal::ONE,
+                        inverse: false,
+                        settlement_currency: "USDT".into(),
+                    },
+                },
+            )?;
+            s.mark_reserve_attempt("intentnative1", &marked_key, 3)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let held = campaign
+        .reserve(reservation.clone(), census())
+        .await
+        .unwrap();
+    assert_eq!(held.book_sequence, 1);
+    // A reserve attempt without the durable SQL terminal reject is NOT
+    // sufficient to return any of the campaign's reserved capacity.
+    assert!(matches!(
+        campaign
+            .release_unsent_from_account_sql(
+                &account_handle,
+                "intentnative1".into(),
+                1,
+                7,
+                Instant::now() + Duration::from_secs(3)
+            )
+            .await,
+        Err(RiskStoreError::UnsentSqlUnproven)
+    ));
+    assert_eq!(campaign.readback().await.unwrap().global_reserved_usdt, "3");
+
+    account_handle
+        .call(Instant::now() + Duration::from_secs(3), |s| {
+            s.reject_unsent("intentnative1", "NO_NATIVE_POST", 4)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let released = campaign
+        .release_unsent_from_account_sql(
+            &account_handle,
+            "intentnative1".into(),
+            1,
+            7,
+            Instant::now() + Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+    assert_eq!(released.book_sequence, 2);
+    assert_eq!(campaign.readback().await.unwrap().global_reserved_usdt, "0");
+    assert_eq!(campaign.readback().await.unwrap().reserved_loss_usd, "0");
+    assert_eq!(campaign.readback().await.unwrap().reserved_entry_usd, "0");
+
+    let original = account_handle
+        .call(Instant::now() + Duration::from_secs(3), |s| {
+            s.unsent_release_receipt("intentnative1")?
+                .ok_or(crate::StoreError::Invalid("SQL_PROOF_MISSING"))
+        })
+        .await
+        .unwrap();
+    let proof = UnsentSqlProof::from_account_receipt(original).unwrap();
+    assert!(
+        campaign
+            .release_unsent_from_account_sql(
+                &account_handle,
+                "intentnative1".into(),
+                2,
+                7,
+                Instant::now() + Duration::from_secs(3)
+            )
+            .await
+            .unwrap()
+            .replayed
+    );
+    assert_eq!(proof.reservation_key, key);
+    let observed = campaign
+        .inspect(key, proof.plan_sha256)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        observed.state,
+        okx_kernel::risk::model::RiskEntryState::Released
+    );
+}
+
+#[test]
+fn risk_book_contract_campaign_db_path_is_installation_scoped() {
+    let fixture = Fixture::new("campaign-path");
+    let campaign = opening().campaign_id;
+    let selected = campaign_db_path(&fixture.root, &campaign).unwrap();
+    assert_eq!(
+        selected,
+        fixture
+            .root
+            .join("risk")
+            .join("campaigns")
+            .join(uid('c'))
+            .join("risk-book.sqlite")
+    );
+    assert!(
+        !selected.exists(),
+        "path derivation must never bootstrap a budget"
+    );
+    assert!(matches!(
+        campaign_db_path(std::path::Path::new("relative"), &campaign),
+        Err(RiskStoreError::Invalid("RUNTIME_ROOT_NOT_ABSOLUTE"))
+    ));
+    assert!(matches!(
+        campaign_db_path(&fixture.root, "sha256:../../another-tenant"),
+        Err(RiskStoreError::Invalid("CAMPAIGN_ID"))
+    ));
+    assert!(matches!(
+        campaign_db_path(&fixture.root, &format!("sha256:{}", "A".repeat(64))),
+        Err(RiskStoreError::Invalid("CAMPAIGN_ID"))
+    ));
+}
+
+fn post_fence(input: &ReserveInput, sequence: u64) -> PostFenceInput {
+    use okx_kernel::risk::model::{PostAccountRead, PostCausalProof};
+    let mut fresh = census();
+    fresh.generated_at_ms = 10_001;
+    fresh.read_floor_ms = 9_996;
+    PostFenceInput {
+        reservation_key: input.reservation_key(),
+        plan_sha256: input.plan_sha256.clone(),
+        policy_revision: input.policy_revision,
+        expected_sequence: sequence,
+        now_ms: 10_002,
+        source_proof_digest: uid('b'),
+        census: fresh,
+        causal: PostCausalProof {
+            reserve_anchor: input.reservation_key(),
+            native_incarnation: input.native_incarnation.clone(),
+            elapsed_to_proof_ms: 2,
+            account_reads: ['a', 'b']
+                .into_iter()
+                .map(|letter| PostAccountRead {
+                    account_key: account(letter),
+                    private_generation: 7,
+                    source_read_id: uid(letter),
+                    content_digest: uid('c'),
+                    started_after_held_ms: 0,
+                    completed_after_held_ms: 1,
+                })
+                .collect(),
+        },
+    }
+}
+
+#[test]
+fn risk_book_contract_sql_post_fence_commits_once() {
+    use okx_kernel::risk::model::RiskEntryState;
+    let fixture = Fixture::new("post-fence");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let input = request('a', "intentpost1", "6");
+    assert_eq!(store.reserve(&input, &census()).unwrap().book_sequence, 1);
+    let post = post_fence(&input, 1);
+    let grant = store.begin_post(&post).unwrap();
+    assert_eq!(grant.reservation_key, input.reservation_key());
+    assert_eq!(grant.book_sequence, 2);
+    assert_eq!(grant.existing_modelled_loss_usdt, "0");
+    let observed = store
+        .inspect(&input.reservation_key(), &input.plan_sha256)
+        .unwrap()
+        .unwrap();
+    assert_eq!(observed.state, RiskEntryState::Posted);
+    assert_eq!(observed.current_book_sequence, 2);
+    assert_eq!(observed.reservation_sequence, 1);
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "6");
+    assert_eq!(store.readback().unwrap().reserved_loss_usd, "6");
+    assert_eq!(store.readback().unwrap().reserved_entry_usd, "1");
+    assert!(matches!(
+        store.begin_post(&post),
+        Err(RiskStoreError::StaleSequence)
+    ));
+    let mut replay = post.clone();
+    replay.expected_sequence = 2;
+    assert!(matches!(
+        store.begin_post(&replay),
+        Err(RiskStoreError::AlreadyResolved)
+    ));
+    assert!(matches!(
+        store.release_unsent(&unsent('a', "intentpost1"), 2, 7),
+        Err(RiskStoreError::AlreadyResolved)
+    ));
+    drop(store);
+    let db = rusqlite::Connection::open(&fixture.path).unwrap();
+    let stored: (String, i64, String, String) = db
+        .query_row(
+            "SELECT state,post_sequence,post_proof_digest,post_source_digest
+         FROM risk_entries WHERE reservation_key=?1",
+            rusqlite::params![input.reservation_key()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, ("POSTED".into(), 2, uid('b'), uid('d')));
+    drop(db);
+    let mut reopened = open(&fixture);
+    assert_eq!(
+        reopened
+            .inspect(&input.reservation_key(), &input.plan_sha256)
+            .unwrap(),
+        Some(observed)
+    );
+    assert!(matches!(
+        reopened.begin_post(&replay),
+        Err(RiskStoreError::AlreadyResolved)
+    ));
+    assert_eq!(reopened.readback().unwrap().book_sequence, 2);
+}
+
+#[test]
+fn risk_book_contract_sql_post_fence_rejects_stale_causal_and_other_account_exposure() {
+    let fixture = Fixture::new("post-negative");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let input = request('a', "intentpost2", "6");
+    store.reserve(&input, &census()).unwrap();
+    let post = post_fence(&input, 1);
+    let mut stale = post.clone();
+    stale.expected_sequence = 0;
+    assert!(matches!(
+        store.begin_post(&stale),
+        Err(RiskStoreError::Invalid("POST_FENCE_IDENTITY"))
+    ));
+    stale.expected_sequence = 2;
+    assert!(matches!(
+        store.begin_post(&stale),
+        Err(RiskStoreError::StaleSequence)
+    ));
+    let mut foreign = post.clone();
+    foreign.plan_sha256 = uid('a');
+    assert!(matches!(
+        store.begin_post(&foreign),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
+    let mut policy = post.clone();
+    policy.policy_revision = 2;
+    assert!(matches!(
+        store.begin_post(&policy),
+        Err(RiskStoreError::PolicyConflict)
+    ));
+    let mut incarnation = post.clone();
+    incarnation.causal.native_incarnation = "e".repeat(32);
+    assert!(matches!(
+        store.begin_post(&incarnation),
+        Err(RiskStoreError::Denied(
+            RiskRuleError::PostCausalProofUnproven
+        ))
+    ));
+    let mut missing = post.clone();
+    missing.causal.account_reads.pop();
+    assert!(matches!(
+        store.begin_post(&missing),
+        Err(RiskStoreError::Denied(
+            RiskRuleError::PostCausalProofUnproven
+        ))
+    ));
+    let mut before_held = post.clone();
+    before_held.census.generated_at_ms = 10_000;
+    assert!(matches!(
+        store.begin_post(&before_held),
+        Err(RiskStoreError::CensusUnproven)
+    ));
+    let mut regressed_source = post.clone();
+    regressed_source.census.read_floor_ms = 9_994;
+    assert!(matches!(
+        store.begin_post(&regressed_source),
+        Err(RiskStoreError::CensusUnproven)
+    ));
+    let mut too_late = post.clone();
+    too_late.now_ms = 15_001;
+    too_late.causal.elapsed_to_proof_ms = 5_001;
+    assert!(matches!(
+        store.begin_post(&too_late),
+        Err(RiskStoreError::CensusUnproven)
+    ));
+    let mut other_over = post.clone();
+    other_over.census.occupied.insert(account('b'), amt("11"));
+    assert!(matches!(
+        store.begin_post(&other_over),
+        Err(RiskStoreError::Denied(
+            RiskRuleError::AccountAlreadyOverLimit
+        ))
+    ));
+    let mut combined_over = post.clone();
+    combined_over.census.occupied.insert(account('b'), amt("5"));
+    assert!(matches!(
+        store.begin_post(&combined_over),
+        Err(RiskStoreError::Denied(
+            RiskRuleError::InsufficientAggregateOrAccountRisk
+        ))
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 1);
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "6");
+    assert_eq!(
+        store
+            .inspect(&input.reservation_key(), &input.plan_sha256)
+            .unwrap()
+            .unwrap()
+            .state,
+        okx_kernel::risk::model::RiskEntryState::Held
+    );
+    let grant = store.begin_post(&post).unwrap();
+    assert_eq!(grant.book_sequence, 2);
+}
+
+#[test]
+fn risk_book_contract_sql_post_loss_high_water_is_durable_on_denial() {
+    let fixture = Fixture::new("post-loss");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let input = request('a', "intentpost3", "6");
+    store.reserve(&input, &census()).unwrap();
+    let mut post = post_fence(&input, 1);
+    post.census
+        .cumulative_loss_usd
+        .insert(account('a'), amt("95"));
+    assert!(matches!(
+        store.begin_post(&post),
+        Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted))
+    ));
+    let read = store.readback().unwrap();
+    assert_eq!(
+        read.book_sequence, 2,
+        "loss source high-water survives POST denial"
+    );
+    assert_eq!(read.consumed_loss_usd, "95");
+    assert_eq!(read.reserved_loss_usd, "6");
+    assert_eq!(read.remaining_loss_usd, "0");
+    assert_eq!(read.global_reserved_usdt, "6");
+    assert_eq!(
+        store
+            .inspect(&input.reservation_key(), &input.plan_sha256)
+            .unwrap()
+            .unwrap()
+            .state,
+        okx_kernel::risk::model::RiskEntryState::Held
+    );
+    drop(store);
+    let mut reopened = open(&fixture);
+    assert_eq!(reopened.readback().unwrap(), read);
+    assert!(matches!(
+        reopened.begin_post(&post),
+        Err(RiskStoreError::StaleSequence)
+    ));
+}
+
+#[test]
+fn risk_book_contract_sql_child_post_fence_committed_without_reply() {
+    let Ok(db) = std::env::var("OKX_510_TEST_POST_KILL_DB") else {
+        return;
+    };
+    let mut store = RiskBookStore::open_existing(
+        &PathBuf::from(db),
+        "test-installation",
+        &opening().campaign_id,
+    )
+    .unwrap();
+    let input = request('a', "intentkillpost1", "3");
+    store.reserve(&input, &census()).unwrap();
+    store.begin_post(&post_fence(&input, 1)).unwrap();
+    use std::io::Write;
+    println!("RISK_POST_FENCE_COMMITTED_WITHOUT_REPLY");
+    std::io::stdout().flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(60));
+    unreachable!("the parent must OS kill this child after post-fence commit");
+}
+
+#[test]
+fn risk_book_contract_sql_os_kill_after_post_fence_never_regrants() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let fixture = Fixture::new("physical-post-fence");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "risk_book_contract_sql_child_post_fence_committed_without_reply",
+            "--nocapture",
+        ])
+        .env("OKX_510_TEST_POST_KILL_DB", &fixture.path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if line
+                .unwrap_or_default()
+                .contains("RISK_POST_FENCE_COMMITTED_WITHOUT_REPLY")
+            {
+                let _ = tx.send(());
+                return;
+            }
+        }
+    });
+    let committed = rx.recv_timeout(Duration::from_secs(15));
+    child.kill().unwrap();
+    assert!(
+        !child.wait().unwrap().success(),
+        "real post-fence writer must be OS-killed"
+    );
+    reader.join().unwrap();
+    assert!(
+        committed.is_ok(),
+        "did not see independently committed post-fence marker"
+    );
+    let mut reopened = open(&fixture);
+    let input = request('a', "intentkillpost1", "3");
+    let observed = reopened
+        .inspect(&input.reservation_key(), &input.plan_sha256)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        observed.state,
+        okx_kernel::risk::model::RiskEntryState::Posted
+    );
+    assert_eq!(observed.current_book_sequence, 2);
+    assert_eq!(reopened.readback().unwrap().global_reserved_usdt, "3");
+    let mut same_post = post_fence(&input, 2);
+    same_post.now_ms = 10_003;
+    assert!(matches!(
+        reopened.begin_post(&same_post),
+        Err(RiskStoreError::AlreadyResolved)
+    ));
+    assert_eq!(reopened.readback().unwrap().book_sequence, 2);
+}
+
+#[tokio::test]
+async fn risk_book_contract_sql_tokio_owner_posts_one_original_grant() {
+    use super::owner::RiskBookHandle;
+    let fixture = Fixture::new("post-tokio");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let owner = RiskBookHandle::open_existing(
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    let input = request('a', "intentpostowner1", "3");
+    owner.reserve(input.clone(), census()).await.unwrap();
+    let first = owner.begin_post(post_fence(&input, 1)).await.unwrap();
+    assert_eq!(first.book_sequence, 2);
+    assert!(matches!(
+        owner.begin_post(post_fence(&input, 2)).await,
+        Err(RiskStoreError::AlreadyResolved)
+    ));
+    assert_eq!(owner.readback().await.unwrap().reserved_entry_usd, "1");
+}
+
+#[test]
+fn risk_book_contract_sql_account_entry_limit_rejects_before_held() {
+    let fixture = Fixture::new("account-entry-cap");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let mut input = request('a', "intententry1", "1");
+    input.proposal.entry_upper_usd = amt("11");
+    assert!(matches!(
+        store.reserve(&input, &census()),
+        Err(RiskStoreError::Denied(
+            RiskRuleError::AccountEntryLimitExceeded
+        ))
+    ));
+    assert_eq!(store.readback().unwrap().book_sequence, 0);
+    assert_eq!(store.readback().unwrap().global_reserved_usdt, "0");
+    assert_eq!(store.readback().unwrap().reserved_entry_usd, "0");
+}
+
+#[test]
+fn risk_book_contract_sql_posted_requires_durable_proof_fields() {
+    let fixture = Fixture::new("post-durable-check");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut store = open(&fixture);
+    let input = request('a', "intentpostcheck1", "3");
+    store.reserve(&input, &census()).unwrap();
+    drop(store);
+    let db = rusqlite::Connection::open(&fixture.path).unwrap();
+    let rejected = db.execute(
+        "UPDATE risk_entries SET state='POSTED' WHERE reservation_key=?1",
+        rusqlite::params![input.reservation_key()],
+    );
+    assert!(
+        rejected.is_err(),
+        "SQLite may not grant POST without a saved source receipt"
+    );
+    drop(db);
+    let mut recovered = open(&fixture);
+    assert_eq!(
+        recovered
+            .inspect(&input.reservation_key(), &input.plan_sha256)
+            .unwrap()
+            .unwrap()
+            .state,
+        okx_kernel::risk::model::RiskEntryState::Held
+    );
+    assert_eq!(recovered.readback().unwrap().book_sequence, 1);
+}
+
+fn partial_proof(
+    input: &ReserveInput,
+    revision: u64,
+    cumulative: &str,
+    digest_letter: char,
+) -> PartialEntrySqlProof {
+    use crate::EntrySettlementEvidence;
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+    PartialEntrySqlProof::from_account_receipt(EntrySettlementEvidence {
+        schema: "okx.entry-partial-settlement/v1".into(),
+        account_key: account('a'),
+        intent_id: input.intent_id.clone(),
+        plan_hash: input.plan_sha256.clone(),
+        reservation_key: input.reservation_key(),
+        venue_order_id: "venue-order-001".into(),
+        venue_update_ms: 11_000,
+        source_covered_through_ms: 11_000,
+        venue_filled_quantity: Decimal::ONE,
+        booked_notional_and_fee_usdt: Decimal::ONE,
+        cumulative_entry_usd: Decimal::from_str(cumulative).unwrap(),
+        settlement_revision: revision,
+        source_digest: uid(digest_letter),
+    })
+    .unwrap()
+}
+
+#[test]
+fn risk_book_contract_sql_partial_entry_consumes_reserved_budget_once() {
+    let fixture = Fixture::new("entry-partial");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut s = open(&fixture);
+    let input = request('a', "intentpartial1", "3");
+    s.reserve(&input, &census()).unwrap();
+    s.begin_post(&post_fence(&input, 1)).unwrap();
+    let revision1 = partial_proof(&input, 1, "0.4", 'b');
+    let r = s.settle_partial_entry(&revision1, 2, 7).unwrap();
+    assert_eq!(r.book_sequence, 3);
+    assert_eq!(r.cumulative_entry_usd, "0.4");
+    assert_eq!(r.entry_bound_breach_usd, "0");
+    assert!(!r.replayed);
+    let b = s.readback().unwrap();
+    assert_eq!(b.consumed_entry_usd, "0.4");
+    assert_eq!(b.reserved_entry_usd, "0.6");
+    assert_eq!(b.remaining_entry_usd, "99");
+    assert_eq!(b.global_reserved_usdt, "3");
+    assert_eq!(b.reserved_loss_usd, "3");
+    // Lost ACK with an original stale sequence must not debit twice.
+    let replay = s.settle_partial_entry(&revision1, 2, 7).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.book_sequence, 3);
+    let changed_digest = partial_proof(&input, 1, "0.4", 'c');
+    assert!(matches!(
+        s.settle_partial_entry(&changed_digest, 3, 7),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
+    let changed_amount = partial_proof(&input, 1, "0.5", 'b');
+    assert!(matches!(
+        s.settle_partial_entry(&changed_amount, 3, 7),
+        Err(RiskStoreError::IdempotencyConflict)
+    ));
+    let revision2 = partial_proof(&input, 2, "0.75", 'c');
+    let r2 = s.settle_partial_entry(&revision2, 3, 7).unwrap();
+    assert_eq!(r2.book_sequence, 4);
+    let b = s.readback().unwrap();
+    assert_eq!(b.consumed_entry_usd, "0.75");
+    assert_eq!(b.reserved_entry_usd, "0.25");
+    assert_eq!(b.global_reserved_usdt, "3");
+    drop(s);
+    let mut reopened = open(&fixture);
+    assert_eq!(reopened.readback().unwrap(), b);
+    assert!(
+        reopened
+            .settle_partial_entry(&revision2, 3, 7)
+            .unwrap()
+            .replayed
+    );
+    assert_eq!(reopened.readback().unwrap().book_sequence, 4);
+    let further = partial_proof(&input, 3, "1", 'd');
+    assert_eq!(
+        reopened
+            .settle_partial_entry(&further, 4, 7)
+            .unwrap()
+            .book_sequence,
+        5
+    );
+    assert_eq!(reopened.readback().unwrap().reserved_entry_usd, "0");
+    assert_eq!(reopened.readback().unwrap().consumed_entry_usd, "1");
+}
+
+#[test]
+fn risk_book_contract_sql_partial_entry_regression_and_breach_fail_closed() {
+    let fixture = Fixture::new("entry-breach");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut s = open(&fixture);
+    let input = request('a', "intentpartial2", "3");
+    s.reserve(&input, &census()).unwrap();
+    s.begin_post(&post_fence(&input, 1)).unwrap();
+    let over = partial_proof(&input, 1, "2", 'b');
+    assert_eq!(
+        s.settle_partial_entry(&over, 2, 7)
+            .unwrap()
+            .entry_bound_breach_usd,
+        "1"
+    );
+    let read = s.readback().unwrap();
+    assert_eq!(read.consumed_entry_usd, "2");
+    assert_eq!(read.reserved_entry_usd, "0");
+    assert_eq!(read.entry_bound_breach_usd, "1");
+    // The modelled loss remains in the same original reservation.
+    assert_eq!(read.global_reserved_usdt, "3");
+    assert!(matches!(
+        s.reserve(&request('b', "intentblocked1", "1"), &census()),
+        Err(RiskStoreError::Denied(RiskRuleError::BoundBreach))
+    ));
+    let regression = partial_proof(&input, 2, "1.5", 'c');
+    assert!(matches!(
+        s.settle_partial_entry(&regression, 3, 7),
+        Err(RiskStoreError::Invalid(
+            "ENTRY_SETTLEMENT_REVISION_CONFLICT"
+        ))
+    ));
+    let skipped = partial_proof(&input, 3, "3", 'd');
+    assert!(matches!(
+        s.settle_partial_entry(&skipped, 3, 7),
+        Err(RiskStoreError::Invalid(
+            "ENTRY_SETTLEMENT_REVISION_CONFLICT"
+        ))
+    ));
+    let wrong_epoch = partial_proof(&input, 2, "2.5", 'c');
+    assert!(matches!(
+        s.settle_partial_entry(&wrong_epoch, 3, 6),
+        Err(RiskStoreError::StaleGeneration)
+    ));
+    assert_eq!(s.readback().unwrap(), read);
+}
+
+#[test]
+fn risk_book_contract_sql_partial_entry_integrity_detects_forged_cache() {
+    let fixture = Fixture::new("entry-integrity");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut s = open(&fixture);
+    let input = request('a', "intentpartial3", "2");
+    s.reserve(&input, &census()).unwrap();
+    s.begin_post(&post_fence(&input, 1)).unwrap();
+    s.settle_partial_entry(&partial_proof(&input, 1, "0.25", 'b'), 2, 7)
+        .unwrap();
+    drop(s);
+    let db = rusqlite::Connection::open(&fixture.path).unwrap();
+    db.execute(
+        "UPDATE risk_meta SET entry_consumed_usd='0' WHERE singleton=1",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    assert!(matches!(
+        RiskBookStore::open_existing(&fixture.path, "test-installation", &opening().campaign_id),
+        Err(RiskStoreError::Corrupt("ENTRY_CONSUMED_AGGREGATES"))
+    ));
+}
+
+#[test]
+fn risk_book_contract_sql_child_partial_entry_debit_commit_wait() {
+    let Ok(db) = std::env::var("OKX_510_TEST_PARTIAL_KILL_DB") else {
+        return;
+    };
+    let mut store = RiskBookStore::open_existing(
+        &PathBuf::from(db),
+        "test-installation",
+        &opening().campaign_id,
+    )
+    .unwrap();
+    let input = request('a', "intentkillentry1", "3");
+    store.reserve(&input, &census()).unwrap();
+    store.begin_post(&post_fence(&input, 1)).unwrap();
+    store
+        .settle_partial_entry(&partial_proof(&input, 1, "0.4", 'b'), 2, 7)
+        .unwrap();
+    use std::io::Write;
+    println!("RISK_ENTRY_DEBIT_COMMITTED_WITHOUT_REPLY");
+    std::io::stdout().flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(60));
+    unreachable!("parent must kill this process after the actual SQLite commit");
+}
+
+#[test]
+fn risk_book_contract_sql_os_kill_after_partial_entry_debit_is_exact() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let fixture = Fixture::new("physical-partial-debit");
+    RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "risk_book_contract_sql_child_partial_entry_debit_commit_wait",
+            "--nocapture",
+        ])
+        .env("OKX_510_TEST_PARTIAL_KILL_DB", &fixture.path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if line
+                .unwrap_or_default()
+                .contains("RISK_ENTRY_DEBIT_COMMITTED_WITHOUT_REPLY")
+            {
+                let _ = tx.send(());
+                return;
+            }
+        }
+    });
+    let committed = rx.recv_timeout(Duration::from_secs(15));
+    child.kill().unwrap();
+    assert!(
+        !child.wait().unwrap().success(),
+        "writer must be physically OS killed"
+    );
+    reader.join().unwrap();
+    assert!(
+        committed.is_ok(),
+        "real partial-entry COMMIT witness missing"
+    );
+    let mut recovered = open(&fixture);
+    let input = request('a', "intentkillentry1", "3");
+    let read = recovered.readback().unwrap();
+    assert_eq!(read.book_sequence, 3);
+    assert_eq!(read.consumed_entry_usd, "0.4");
+    assert_eq!(read.reserved_entry_usd, "0.6");
+    assert_eq!(read.global_reserved_usdt, "3");
+    assert_eq!(read.reserved_loss_usd, "3");
+    let replay = recovered
+        .settle_partial_entry(&partial_proof(&input, 1, "0.4", 'b'), 2, 7)
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.book_sequence, 3);
+    assert_eq!(recovered.readback().unwrap(), read);
+}
+
+async fn source_verified_partial_fixture(
+    label: &str,
+) -> (
+    Fixture,
+    crate::AccountStoreHandle,
+    ReserveInput,
+    crate::EntrySettlementEvidence,
+) {
+    use crate::{
+        AccountMeta, AccountStoreHandle, Bill, CentralReceipt, Decision, EntryAdmissionEvidence,
+        EntryQuoteEvidence, Fill, FinanceEntry, IngestPage, IntentPlan, IntentState, NewIntent,
+        OpeningSnapshot, SourceCursor,
+    };
+    use rust_decimal::Decimal;
+    use sha2::{Digest, Sha256};
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new(label);
+    let mut config = opening();
+    config.entry_limit = amt("200");
+    for account in &mut config.accounts {
+        account.entry_limit = amt("200");
+    }
+    RiskBookStore::initialize_fixture(&fixture.path, &config).unwrap();
+    let mut input = request('a', "intenttwosql1", "3");
+    input.proposal.entry_upper_usd = amt("100.05");
+    {
+        let mut campaign = open(&fixture);
+        campaign.reserve(&input, &census()).unwrap();
+        campaign.begin_post(&post_fence(&input, 1)).unwrap();
+    }
+    let account_owner = AccountStoreHandle::initialize_flat(
+        fixture.root.join("account.sqlite"),
+        AccountMeta {
+            account_key: account('a'),
+            installation_id: "test-installation".into(),
+            initialized_at: 1,
+            opening_source: "fixture_flat".into(),
+            initialize_operation_id: "native-entry-setup".into(),
+            release_id: "a".repeat(40),
+        },
+        OpeningSnapshot {
+            source_ref: "fixture_flat".into(),
+            observed_at: 1,
+            opening_equity_usd: Decimal::from(200),
+            positions: 0,
+            orders: 0,
+            conditional_orders: 0,
+            liabilities: Decimal::ZERO,
+            balances: vec![("USDT".into(), Decimal::from(200))],
+        },
+    )
+    .await
+    .unwrap();
+    let reservation = input.reservation_key();
+    let intent_id = input.intent_id.clone();
+    let plan_hash = input.plan_sha256.clone();
+    let source = account_owner
+        .call(Instant::now() + Duration::from_secs(5), move |s| {
+            s.apply_authority_policy(1, false, "campaign-native-test", Decimal::from(200))?;
+            let definition = s.ensure_manual_instance(1)?;
+            let prepared = s.prepare(
+                &Decision {
+                    decision_id: "decision_native_partial".into(),
+                    instance_id: None,
+                    decision_at: 2,
+                    input_digest: "e".repeat(64),
+                    policy_revision: 1,
+                    code_version: "rust".into(),
+                },
+                &NewIntent {
+                    intent_id: intent_id.clone(),
+                    idempotency_key: "command_native_partial".into(),
+                    request_hash: "b".repeat(64),
+                    client_order_id: "c".repeat(32),
+                    deadline: 100,
+                    plan_hash: plan_hash.clone(),
+                    policy_revision: 1,
+                    risk_increase: true,
+                    instrument_id: "BTC-USDT-SWAP".into(),
+                    plan: IntentPlan {
+                        strategy_definition_id: definition.definition_id,
+                        strategy_definition_version: definition.version,
+                        strategy_parameters_digest: definition.parameters_digest,
+                        contract_value: Decimal::ONE,
+                        inverse: false,
+                        settlement_currency: "USDT".into(),
+                        position_side: "long".into(),
+                        private_source_generation: 1,
+                        operation: "open".into(),
+                        side: "buy".into(),
+                        quantity: Decimal::ONE,
+                        limit_price: Decimal::from(100),
+                        stop_price: Some(Decimal::from(95)),
+                        strategy_instance: "manual".into(),
+                        planned_loss_usd: Decimal::from(3),
+                        source_generation: 1,
+                    },
+                },
+            )?;
+            let quote = EntryQuoteEvidence {
+                schema: "okx.entry-known-quote/v1".into(),
+                account_key: account('a'),
+                installation_id: "test-installation".into(),
+                intent_id: intent_id.clone(),
+                plan_hash: plan_hash.clone(),
+                policy_revision: 1,
+                instrument_id: "BTC-USDT-SWAP".into(),
+                quantity: Decimal::ONE,
+                limit_price: Decimal::from(100),
+                contract_value: Decimal::ONE,
+                fee_rate: Decimal::new(5, 4),
+                maker_rate: "-0.0002".into(),
+                taker_rate: "0.0005".into(),
+                fee_level: "Lv1".into(),
+                fee_exchange_at: 1,
+                usd_per_usdt: Decimal::ONE,
+                notional_usdt: Decimal::from(100),
+                fee_usdt: Decimal::new(5, 2),
+                total_usdt: Decimal::new(10005, 2),
+                total_usd: Decimal::new(10005, 2),
+                fee_generation: format!(
+                    "sha256:{:x}",
+                    Sha256::digest(
+                        serde_json::to_vec(&(
+                            "BTC-USDT-SWAP",
+                            "test_reference",
+                            "Lv1",
+                            "-0.0002",
+                            "0.0005",
+                            true,
+                        ))
+                        .unwrap()
+                    )
+                ),
+                reference_generation: "test_reference".into(),
+                fee_received_at: 1,
+                conversion_digest: "b".repeat(64),
+                conversion_received_at: 1,
+                observed_at: 2,
+            };
+            s.bind_entry_quote(&quote)?;
+            s.bind_entry_admission(&EntryAdmissionEvidence {
+                schema: "okx.entry-admission/v2".into(),
+                account_key: account('a'),
+                installation_id: "test-installation".into(),
+                intent_id: intent_id.clone(),
+                plan_hash: plan_hash.clone(),
+                quote_digest: format!("{:x}", Sha256::digest(serde_json::to_vec(&quote).unwrap())),
+                admission_usd_per_usdt: Decimal::ONE,
+                other_entry_costs_upper_usd: Decimal::ZERO,
+                entry_upper_usd: quote.total_usd,
+                entry_proof_digest: "a".repeat(64),
+                observed_at: quote.observed_at,
+            })?;
+            s.reserve(
+                &CentralReceipt {
+                    reservation_key: reservation,
+                    account_key: account('a'),
+                    installation_id: "test-installation".into(),
+                    instance_id: None,
+                    intent_id: intent_id.clone(),
+                    plan_hash,
+                    policy_revision: 1,
+                    receipt_hash: "f".repeat(64),
+                    requested_loss_usd: Decimal::from(3),
+                    conversion_digest: "b".repeat(64),
+                },
+                3,
+            )?;
+            assert!(s.begin_post(&intent_id, 1, 4)?);
+            s.record_outcome(
+                &intent_id,
+                IntentState::Acknowledged,
+                Some("venue-order"),
+                "native-venue-ack",
+                4,
+            )?;
+            let half = Decimal::new(5, 1);
+            let fee = Decimal::new(-1, 2);
+            let entry = FinanceEntry {
+                entry_id: "bill:partial:FEE".into(),
+                economic_event_key: "bill:partial".into(),
+                component: "FEE".into(),
+                allocation_leg: "account".into(),
+                amount: fee,
+                currency: "USDT".into(),
+                instance_id: None,
+                source_ref: "fill:partial".into(),
+                time: 6,
+                reverses_entry_id: None,
+            };
+            s.ingest_page(&IngestPage {
+                fills: vec![Fill {
+                    fill_id: "partial".into(),
+                    instrument_id: "BTC-USDT-SWAP".into(),
+                    trade_id: "native-trade-partial".into(),
+                    exchange_order_id: "venue-order".into(),
+                    intent_id: Some(intent_id.clone()),
+                    time: 6,
+                    qty: half,
+                    price: Decimal::from(100),
+                    fee,
+                    currency: "USDT".into(),
+                    side: "buy".into(),
+                }],
+                finance: vec![entry.clone()],
+                cursor: Some(SourceCursor {
+                    source: "fills".into(),
+                    stream_partition: "SWAP".into(),
+                    cursor: String::new(),
+                    watermark: 7,
+                    generation: 1,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })?;
+            s.ingest_page(&IngestPage {
+                bills: vec![Bill {
+                    bill_id: "partial".into(),
+                    kind: "1:trade".into(),
+                    time: 7,
+                    amount: fee,
+                    currency: "USDT".into(),
+                    economic_event_key: "bill:partial".into(),
+                }],
+                cursor: Some(SourceCursor {
+                    source: "bills".into(),
+                    stream_partition: "account".into(),
+                    cursor: String::new(),
+                    watermark: 7,
+                    generation: 1,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })?;
+            s.ingest_page(&IngestPage {
+                finance: vec![FinanceEntry {
+                    source_ref: "bill:partial".into(),
+                    time: 7,
+                    ..entry
+                }],
+                ..Default::default()
+            })?;
+            s.record_order_readback(
+                &intent_id,
+                "venue-order",
+                IntentState::PartiallyFilled,
+                half,
+                7,
+            )?;
+            let proof = s.bind_partial_entry_settlement(&intent_id, 7, half, 7)?;
+            assert_eq!(proof.cumulative_entry_usd, Decimal::new(5001, 2));
+            assert_eq!(proof.settlement_revision, 1);
+            assert_eq!(
+                s.partial_entry_settlement_receipt(&intent_id)?,
+                Some(proof.clone())
+            );
+            assert!(s.partial_entry_ack_pending(&intent_id)?);
+            // The native journal only carries one original source-backed value.
+            assert_eq!(prepared.plan_hash, proof.plan_hash);
+            Ok(proof)
+        })
+        .await
+        .unwrap();
+    (fixture, account_owner, input, source)
+}
+
+#[tokio::test]
+async fn risk_book_contract_real_source_two_sql_owners_commit_then_ack_once() {
+    use super::owner::RiskBookHandle;
+    use std::time::{Duration, Instant};
+
+    let (fixture, account, input, source) = source_verified_partial_fixture("two-owner-ack").await;
+    let campaign = RiskBookHandle::open_existing(
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    let missing = campaign
+        .settle_partial_from_account_sql(
+            &account,
+            "not-sourced-intent".into(),
+            2,
+            7,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await;
+    assert!(matches!(missing, Err(RiskStoreError::EntrySqlUnproven)));
+    assert_eq!(campaign.readback().await.unwrap().book_sequence, 2);
+
+    let receipt = campaign
+        .settle_partial_from_account_sql(
+            &account,
+            input.intent_id.clone(),
+            2,
+            7,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert!(!receipt.replayed);
+    assert_eq!(receipt.book_sequence, 3);
+    assert_eq!(receipt.cumulative_entry_usd, "50.01");
+    let read = campaign.readback().await.unwrap();
+    assert_eq!(read.consumed_entry_usd, "50.01");
+    assert_eq!(read.reserved_entry_usd, "50.04");
+    assert_eq!(read.global_reserved_usdt, "3");
+    assert_eq!(read.reserved_loss_usd, "3");
+    assert_eq!(source.reservation_key, input.reservation_key());
+
+    let id = input.intent_id.clone();
+    assert!(
+        !account
+            .call(Instant::now() + Duration::from_secs(5), move |s| {
+                s.partial_entry_ack_pending(&id)
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        campaign
+            .settle_partial_from_account_sql(
+                &account,
+                input.intent_id.clone(),
+                2,
+                7,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+            .replayed
+    );
+    assert_eq!(campaign.readback().await.unwrap(), read);
+}
+
+#[tokio::test]
+async fn risk_book_contract_real_source_two_sql_owners_recover_missing_ack() {
+    use super::owner::RiskBookHandle;
+    use std::time::{Duration, Instant};
+
+    let (fixture, account, input, source) =
+        source_verified_partial_fixture("two-owner-lost-ack").await;
+    let verified = PartialEntrySqlProof::from_account_receipt(source).unwrap();
+    {
+        let mut original = open(&fixture);
+        let accepted = original.settle_partial_entry(&verified, 2, 7).unwrap();
+        assert_eq!(accepted.book_sequence, 3);
+        assert!(!accepted.replayed);
+    }
+    // The campaign commit exists, but the native account ACK has not happened.
+    let pending_id = input.intent_id.clone();
+    assert!(
+        account
+            .call(Instant::now() + Duration::from_secs(5), move |s| {
+                s.partial_entry_ack_pending(&pending_id)
+            })
+            .await
+            .unwrap()
+    );
+    let campaign = RiskBookHandle::open_existing(
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    let before = campaign.readback().await.unwrap();
+    assert_eq!(before.consumed_entry_usd, "50.01");
+    assert_eq!(before.reserved_entry_usd, "50.04");
+    // An earlier book CAS is valid for EXACT committed-source replay only;
+    // the SQL ACK is then written in the original account owner.
+    let recovered = campaign
+        .settle_partial_from_account_sql(
+            &account,
+            input.intent_id.clone(),
+            2,
+            7,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert!(recovered.replayed);
+    assert_eq!(recovered.book_sequence, 3);
+    let id = input.intent_id.clone();
+    assert!(
+        !account
+            .call(Instant::now() + Duration::from_secs(5), move |s| {
+                s.partial_entry_ack_pending(&id)
+            })
+            .await
+            .unwrap()
+    );
+    assert_eq!(campaign.readback().await.unwrap(), before);
+}
+
+#[test]
+fn risk_book_contract_sql_child_two_owner_entry_committed_without_account_ack() {
+    let Ok(campaign_path) = std::env::var("OKX_510_TWO_OWNER_KILL_CAMPAIGN") else {
+        return;
+    };
+    let account_path = std::env::var("OKX_510_TWO_OWNER_KILL_ACCOUNT").unwrap();
+    let account_source = crate::AccountStore::open_existing(
+        PathBuf::from(&account_path),
+        &account('a'),
+        "test-installation",
+    )
+    .unwrap();
+    let original = account_source
+        .partial_entry_settlement_receipt("intenttwosql1")
+        .unwrap()
+        .unwrap();
+    assert!(
+        account_source
+            .partial_entry_ack_pending("intenttwosql1")
+            .unwrap()
+    );
+    let proof = PartialEntrySqlProof::from_account_receipt(original).unwrap();
+    let mut campaign = RiskBookStore::open_existing(
+        &PathBuf::from(campaign_path),
+        "test-installation",
+        &opening().campaign_id,
+    )
+    .unwrap();
+    let accepted = campaign.settle_partial_entry(&proof, 2, 7).unwrap();
+    assert_eq!(accepted.book_sequence, 3);
+    assert!(!accepted.replayed);
+    assert_eq!(campaign.readback().unwrap().consumed_entry_usd, "50.01");
+    // Deliberately NEVER ACK the native source. The parent must crash us
+    // here and recover both original SQLite/WAL files independently.
+    use std::io::Write;
+    println!("TWO_SQL_CAMPAIGN_COMMITTED_ACCOUNT_ACK_PENDING");
+    std::io::stdout().flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(60));
+    unreachable!("real OS kill must interrupt before native ACK");
+}
+
+#[tokio::test]
+async fn risk_book_contract_sql_real_two_owner_os_kill_after_campaign_before_account_ack() {
+    use super::owner::RiskBookHandle;
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let (fixture, account_owner, input, _) =
+        source_verified_partial_fixture("two-sql-os-kill").await;
+    let mut termination = account_owner.termination_signal();
+    drop(account_owner);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !*termination.borrow() {
+            termination.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("original native account writer must close before child opens it");
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "risk_book_contract_sql_child_two_owner_entry_committed_without_account_ack",
+            "--nocapture",
+        ])
+        .env("OKX_510_TWO_OWNER_KILL_CAMPAIGN", &fixture.path)
+        .env(
+            "OKX_510_TWO_OWNER_KILL_ACCOUNT",
+            fixture.root.join("account.sqlite"),
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = child.stdout.take().unwrap();
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if line
+                .unwrap_or_default()
+                .contains("TWO_SQL_CAMPAIGN_COMMITTED_ACCOUNT_ACK_PENDING")
+            {
+                let _ = ready_tx.send(());
+                return;
+            }
+        }
+    });
+    let committed = ready_rx.recv_timeout(Duration::from_secs(15));
+    child.kill().unwrap();
+    assert!(
+        !child.wait().unwrap().success(),
+        "two-SQL source writer must be OS-killed"
+    );
+    reader.join().unwrap();
+    assert!(
+        committed.is_ok(),
+        "child never committed original campaign debit"
+    );
+
+    let reopened_account = crate::AccountStoreHandle::open_existing(
+        fixture.root.join("account.sqlite"),
+        account('a'),
+        "test-installation".into(),
+    )
+    .await
+    .unwrap();
+    let pending_id = input.intent_id.clone();
+    assert!(
+        reopened_account
+            .call(Instant::now() + Duration::from_secs(5), move |s| {
+                s.partial_entry_ack_pending(&pending_id)
+            })
+            .await
+            .unwrap()
+    );
+    let campaign = RiskBookHandle::open_existing(
+        fixture.path.clone(),
+        "test-installation".into(),
+        opening().campaign_id,
+    )
+    .await
+    .unwrap();
+    let before = campaign.readback().await.unwrap();
+    assert_eq!(before.book_sequence, 3);
+    assert_eq!(before.consumed_entry_usd, "50.01");
+    assert_eq!(before.reserved_entry_usd, "50.04");
+    assert_eq!(before.global_reserved_usdt, "3");
+    let accepted = campaign
+        .settle_partial_from_account_sql(
+            &reopened_account,
+            input.intent_id.clone(),
+            2,
+            7,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert!(accepted.replayed);
+    assert_eq!(accepted.book_sequence, 3);
+    let id = input.intent_id.clone();
+    assert!(
+        !reopened_account
+            .call(Instant::now() + Duration::from_secs(5), move |s| {
+                s.partial_entry_ack_pending(&id)
+            })
+            .await
+            .unwrap()
+    );
+    assert_eq!(campaign.readback().await.unwrap(), before);
+}

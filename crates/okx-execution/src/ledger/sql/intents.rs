@@ -855,6 +855,59 @@ impl AccountStore {
         Ok(settlement)
     }
 
+    /// Returns only the original source-linked immutable SQL partial revision.
+    /// No network-supplied settlement can call this without the current native
+    /// AccountStore owner. An independent RiskBook commit still needs an ACK.
+    pub fn partial_entry_settlement_receipt(
+        &self,
+        id: &str,
+    ) -> StoreResult<Option<EntrySettlementEvidence>> {
+        let Some(head) = self.operation(&format!("entry-partial-head:{id}"))? else {
+            return Ok(None);
+        };
+        let proof: EntrySettlementEvidence = serde_json::from_str(&head.result_ref)
+            .map_err(|_| StoreError::Invalid("ENTRY_PARTIAL_HEAD_CORRUPT"))?;
+        let immutable = self
+            .operation(&format!(
+                "entry-partial:{id}:r{}",
+                proof.settlement_revision
+            ))?
+            .ok_or(StoreError::Invalid("ENTRY_PARTIAL_REVISION_MISSING"))?;
+        let intent = self
+            .intent(id)?
+            .ok_or(StoreError::Invalid("ENTRY_PARTIAL_INTENT_MISSING"))?;
+        let reservation = self
+            .central_receipt(id)?
+            .ok_or(StoreError::Invalid("ENTRY_PARTIAL_RESERVATION_MISSING"))?;
+        if proof.schema != "okx.entry-partial-settlement/v1"
+            || proof.account_key != self.meta.account_key
+            || proof.intent_id != id
+            || proof.plan_hash != intent.plan_hash
+            || proof.reservation_key != reservation.reservation_key
+            || proof.account_key != reservation.account_key
+            || proof.venue_order_id.is_empty()
+            || intent.exchange_order_id.as_deref() != Some(proof.venue_order_id.as_str())
+            || proof.settlement_revision == 0
+            || proof.cumulative_entry_usd <= Decimal::ZERO
+            || proof.source_digest.len() != 64
+            || !proof
+                .source_digest
+                .bytes()
+                .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
+            || head.kind != "ENTRY_PARTIAL_HEAD"
+            || head.request_hash != proof.plan_hash
+            || immutable.kind != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
+            || immutable.request_hash != proof.plan_hash
+            || immutable.result_ref != head.result_ref
+        {
+            return Err(StoreError::Invalid("ENTRY_PARTIAL_SOURCE_UNPROVEN"));
+        }
+        // Existing owner checks any previously committed ACK against the
+        // immutable revision. A corrupted ACK can never authorize new spend.
+        self.partial_entry_ack_pending(id)?;
+        Ok(Some(proof))
+    }
+
     /// Read-only check of the latest durable partial settlement. A lost
     /// Worker reply must not let a terminal release overtake the ORIGINAL
     /// immutable SQL revision. No head means no partial claim to reconcile.
@@ -1777,7 +1830,9 @@ impl AccountStore {
                    AND (r.state IN('UNSENT_PENDING_CENTRAL','RELEASED') OR
                         (r.reservation_key IS NULL AND a.result_ref IS NOT NULL))
                    AND o.kind='REJECTED_UNSENT'
-                   AND o.request_hash=i.request_hash AND o.result_ref=i.incident",
+                   AND o.request_hash=i.request_hash AND o.result_ref=i.incident
+                   AND (r.reservation_key IS NULL OR
+                        (r.account_key=?2 AND r.plan_hash=i.plan_hash))",
                 params![id, self.meta.account_key],
                 |r| {
                     Ok(UnsentSqlReceipt {
@@ -2069,7 +2124,51 @@ impl AccountStore {
         .transpose()
     }
     pub(super) fn plan(&self, id: &str) -> StoreResult<IntentPlan> {
-        let (mut p,q,price,stop,loss,cv)=self.connection.query_row("SELECT operation,side,quantity,limit_price,stop_price,strategy_instance,planned_loss_usd,source_generation,position_side,private_source_generation,contract_value,inverse,settlement_currency,strategy_definition_id,strategy_definition_version,strategy_parameters_digest FROM intent_plans WHERE intent_id=?1",[id],|r|Ok((IntentPlan{operation:r.get(0)?,side:r.get(1)?,strategy_instance:r.get(5)?,source_generation:r.get(7)?,position_side:r.get(8)?,private_source_generation:r.get(9)?,inverse:r.get(11)?,settlement_currency:r.get(12)?,strategy_definition_id:r.get(13)?,strategy_definition_version:r.get(14)?,strategy_parameters_digest:r.get(15)?,..Default::default()},r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,String>(6)?,r.get::<_,String>(10)?)))?;
+        Self::plan_sql(&self.connection, None, id)
+    }
+
+    // The original native plan decoder, shared by per-account v2 and scoped v6
+    // SQL. Reserve validates the entire original plan under its caller's lock.
+    fn plan_sql(
+        db: &rusqlite::Connection,
+        scope: Option<(&str, &str)>,
+        id: &str,
+    ) -> StoreResult<IntentPlan> {
+        use rusqlite::{params_from_iter, types::Value};
+        let sql = if scope.is_some() {
+            "SELECT operation,side,quantity,limit_price,stop_price,strategy_instance,planned_loss_usd,source_generation,position_side,private_source_generation,contract_value,inverse,settlement_currency,strategy_definition_id,strategy_definition_version,strategy_parameters_digest FROM intent_plans WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
+        } else {
+            "SELECT operation,side,quantity,limit_price,stop_price,strategy_instance,planned_loss_usd,source_generation,position_side,private_source_generation,contract_value,inverse,settlement_currency,strategy_definition_id,strategy_definition_version,strategy_parameters_digest FROM intent_plans WHERE intent_id=?1"
+        };
+        let mut values = vec![Value::Text(id.to_owned())];
+        if let Some((installation, account)) = scope {
+            values.push(Value::Text(installation.to_owned()));
+            values.push(Value::Text(account.to_owned()));
+        }
+        let (mut p, q, price, stop, loss, cv) =
+            db.query_row(sql, params_from_iter(values.iter()), |r| {
+                Ok((
+                    IntentPlan {
+                        operation: r.get(0)?,
+                        side: r.get(1)?,
+                        strategy_instance: r.get(5)?,
+                        source_generation: r.get(7)?,
+                        position_side: r.get(8)?,
+                        private_source_generation: r.get(9)?,
+                        inverse: r.get(11)?,
+                        settlement_currency: r.get(12)?,
+                        strategy_definition_id: r.get(13)?,
+                        strategy_definition_version: r.get(14)?,
+                        strategy_parameters_digest: r.get(15)?,
+                        ..Default::default()
+                    },
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(10)?,
+                ))
+            })?;
         p.contract_value = decimal(cv)?;
         p.quantity = decimal(q)?;
         p.limit_price = decimal(price)?;
@@ -2077,55 +2176,130 @@ impl AccountStore {
         p.planned_loss_usd = decimal(loss)?;
         Ok(p)
     }
+
     pub fn reserve(&mut self, receipt: &CentralReceipt, now: i64) -> StoreResult<()> {
-        let i = self
-            .intent(&receipt.intent_id)?
-            .ok_or(StoreError::Invalid("INTENT_MISSING"))?;
         if receipt.account_key != self.meta.account_key
             || receipt.installation_id != self.meta.installation_id
-            || receipt.plan_hash != i.plan_hash
-            || receipt.policy_revision != i.policy_revision
+        {
+            return Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::reserve_sql_transaction(&tx, None, receipt, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The ORIGINAL AccountStore receipt, strategy and intent state machine,
+    /// executed by the caller's single SQL transaction for either the
+    /// legacy v2 account database or one scope in the v6 financial database.
+    /// Does not create a Connection, independently COMMIT, or grant venue POST.
+    pub(crate) fn reserve_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        scope: Option<(&str, &str)>,
+        receipt: &CentralReceipt,
+        now: i64,
+    ) -> StoreResult<()> {
+        use rusqlite::{params_from_iter, types::Value};
+        if let Some((installation, account)) = scope {
+            if installation.is_empty()
+                || account.is_empty()
+                || receipt.installation_id != installation
+                || receipt.account_key != account
+            {
+                return Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"));
+            }
+        }
+        let scoped_values = |mut values: Vec<Value>| {
+            if let Some((installation, account)) = scope {
+                values.push(Value::Text(installation.to_owned()));
+                values.push(Value::Text(account.to_owned()));
+            }
+            values
+        };
+        let intent_sql = if scope.is_some() {
+            "SELECT state,plan_hash,policy_revision FROM intents
+             WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
+        } else {
+            "SELECT state,plan_hash,policy_revision FROM intents WHERE intent_id=?1"
+        };
+        let values = scoped_values(vec![Value::Text(receipt.intent_id.clone())]);
+        let original: Option<(String, String, i64)> = tx
+            .query_row(intent_sql, params_from_iter(values.iter()), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .optional()?;
+        let (state, plan_hash, policy_revision) =
+            original.ok_or(StoreError::Invalid("INTENT_MISSING"))?;
+        let state = IntentState::parse(&state)?;
+        let plan = Self::plan_sql(tx, scope, &receipt.intent_id)?;
+        if receipt.plan_hash != plan_hash
+            || receipt.policy_revision != policy_revision
             || receipt.receipt_hash.is_empty()
             || receipt.requested_loss_usd < Decimal::ZERO
             || receipt.conversion_digest.is_empty()
         {
             return Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"));
         }
-        if i.state == IntentState::Reserved {
-            let saved: String = self.connection.query_row(
-                "SELECT receipt_hash FROM risk_receipts WHERE reservation_key=?1",
-                [&receipt.reservation_key],
-                |r| r.get(0),
-            )?;
+        if state == IntentState::Reserved {
+            let hash_sql = if scope.is_some() {
+                "SELECT receipt_hash FROM risk_receipts
+                 WHERE reservation_key=?1 AND installation_id=?2 AND account_key=?3"
+            } else {
+                "SELECT receipt_hash FROM risk_receipts WHERE reservation_key=?1"
+            };
+            let values = scoped_values(vec![Value::Text(receipt.reservation_key.clone())]);
+            let saved: String =
+                tx.query_row(hash_sql, params_from_iter(values.iter()), |r| r.get(0))?;
             return if saved == receipt.receipt_hash {
                 Ok(())
             } else {
                 Err(StoreError::Invalid("CENTRAL_RECEIPT_CONFLICT"))
             };
         }
-        if i.state != IntentState::Prepared {
+        if state != IntentState::Prepared {
             return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
         }
-        let owner: Option<String> = self.connection.query_row(
-            "SELECT instance_id FROM decisions JOIN intents USING(decision_id) WHERE intent_id=?1",
-            [&i.intent_id],
-            |r| r.get(0),
-        )?;
+        let decision_sql = if scope.is_some() {
+            "SELECT d.instance_id FROM decisions d JOIN intents i
+                ON d.decision_id=i.decision_id
+               AND d.installation_id=i.installation_id
+               AND d.account_key=i.account_key
+             WHERE i.intent_id=?1 AND i.installation_id=?2 AND i.account_key=?3"
+        } else {
+            "SELECT d.instance_id FROM decisions d JOIN intents i USING(decision_id)
+             WHERE i.intent_id=?1"
+        };
+        let owner: Option<String> = tx
+            .query_row(decision_sql, params_from_iter(values.iter()), |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .optional()?
+            .flatten();
         if owner != receipt.instance_id
-            || !strategy_owner_matches_plan(owner.as_deref(), &i.plan.strategy_instance)
+            || !strategy_owner_matches_plan(owner.as_deref(), &plan.strategy_instance)
         {
             return Err(StoreError::Invalid("CENTRAL_INSTANCE_MISMATCH"));
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let insert_sql = if scope.is_some() {
+            "INSERT INTO risk_receipts(
+             installation_id,account_key,reservation_key,intent_id,instance_id,plan_hash,
+             policy_revision,receipt_hash,requested_loss_usd,conversion_digest,state)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'HELD')"
+        } else {
+            "INSERT INTO risk_receipts(
+             reservation_key,intent_id,account_key,installation_id,instance_id,plan_hash,
+             policy_revision,receipt_hash,requested_loss_usd,conversion_digest,state)
+             VALUES (?3,?4,?2,?1,?5,?6,?7,?8,?9,?10,'HELD')"
+        };
         tx.execute(
-            "INSERT INTO risk_receipts VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'HELD')",
+            insert_sql,
             params![
+                receipt.installation_id,
+                receipt.account_key,
                 receipt.reservation_key,
                 receipt.intent_id,
-                receipt.account_key,
-                receipt.installation_id,
                 receipt.instance_id,
                 receipt.plan_hash,
                 receipt.policy_revision,
@@ -2134,8 +2308,21 @@ impl AccountStore {
                 receipt.conversion_digest
             ],
         )?;
-        tx.execute("UPDATE intents SET state='RESERVED',revision=revision+1,updated_at=?2 WHERE intent_id=?1 AND state='PREPARED'",params![i.intent_id,now])?;
-        tx.commit()?;
+        let update_sql = if scope.is_some() {
+            "UPDATE intents SET state='RESERVED',revision=revision+1,updated_at=?2
+             WHERE intent_id=?1 AND state='PREPARED'
+               AND installation_id=?3 AND account_key=?4"
+        } else {
+            "UPDATE intents SET state='RESERVED',revision=revision+1,updated_at=?2
+             WHERE intent_id=?1 AND state='PREPARED'"
+        };
+        let values = scoped_values(vec![
+            Value::Text(receipt.intent_id.clone()),
+            Value::Integer(now),
+        ]);
+        if tx.execute(update_sql, params_from_iter(values.iter()))? != 1 {
+            return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
+        }
         Ok(())
     }
     /// Read-only proof of the durable BEGIN_POST fence and its coherent
@@ -2143,18 +2330,51 @@ impl AccountStore {
     /// requiring POSTED *after* that transition would reject a real ACK.
     /// Neither ACK nor OPEN by itself proves that BEGIN_POST was committed.
     pub fn post_fence_evidence(&self, id: &str) -> StoreResult<(i64, String)> {
-        let recorded: Option<(Option<i64>, String, String, Option<String>)> = self
-            .connection
-            .query_row(
-                "SELECT i.begin_post_at,r.state,i.state,i.exchange_order_id
-                 FROM intents i JOIN risk_receipts r
-                   ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
-                  AND r.account_key=?2 AND r.installation_id=?3
-                 WHERE i.intent_id=?1 AND i.risk_increase=1",
-                params![id, self.meta.account_key, self.meta.installation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
+        Self::post_fence_evidence_sql(
+            &self.connection,
+            &self.meta.installation_id,
+            &self.meta.account_key,
+            id,
+            None,
+        )
+    }
+
+    /// Existing ORIGINAL AccountStore durable POST witness for both old
+    /// account-local v2 and unified v6 finance. V6 binds all identity scopes
+    /// including reservation; never infer authorization from a different
+    /// account's identical venue or intent ID.
+    pub(crate) fn post_fence_evidence_sql(
+        db: &rusqlite::Connection,
+        installation: &str,
+        account: &str,
+        id: &str,
+        reservation: Option<&str>,
+    ) -> StoreResult<(i64, String)> {
+        let recorded: Option<(Option<i64>, String, String, Option<String>)> =
+            if let Some(reservation) = reservation {
+                db.query_row(
+                    "SELECT i.begin_post_at,r.state,i.state,i.exchange_order_id
+                     FROM intents i JOIN risk_receipts r
+                       ON r.installation_id=i.installation_id AND r.account_key=i.account_key
+                      AND r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
+                     WHERE i.installation_id=?1 AND i.account_key=?2 AND i.intent_id=?3
+                       AND r.reservation_key=?4 AND i.risk_increase=1",
+                    params![installation, account, id, reservation],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?
+            } else {
+                db.query_row(
+                    "SELECT i.begin_post_at,r.state,i.state,i.exchange_order_id
+                     FROM intents i JOIN risk_receipts r
+                       ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
+                      AND r.account_key=?2 AND r.installation_id=?3
+                     WHERE i.intent_id=?1 AND i.risk_increase=1",
+                    params![id, account, installation],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?
+            };
         match recorded {
             Some((Some(at), state, intent_state, order_id))
                 if verified_durable_post_fence(at, &state, &intent_state, order_id.as_deref()) =>
@@ -2164,69 +2384,194 @@ impl AccountStore {
             _ => Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED")),
         }
     }
-    // Returns true exactly once. The caller must never POST when this returns false/error.
+    // Returns true exactly once. Only the owner commits; neither a queued
+    // result nor an uncommitted RiskBook decision permits venue submission.
     pub fn begin_post(&mut self, id: &str, policy_revision: i64, now: i64) -> StoreResult<bool> {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (state, deadline, revision, increase): (String, i64, i64, bool) = tx.query_row(
-            "SELECT state,deadline,policy_revision,risk_increase FROM intents WHERE intent_id=?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )?;
+        let permitted =
+            Self::begin_post_sql_transaction(&tx, None, id, policy_revision, now, None)?;
+        if permitted {
+            tx.commit()?;
+        }
+        Ok(permitted)
+    }
+
+    /// SAME production AccountStore validation and durable receipt transition
+    /// for v2 single-account and v6 scoped multi-account SQLite.
+    ///
+    /// A caller owns the BEGIN IMMEDIATE/COMMIT; this function never opens
+    /// another connection or transaction. It is NOT venue permission until
+    /// the finance owner has committed *both* account and campaign states.
+    pub(crate) fn begin_post_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        scope: Option<(&str, &str)>,
+        id: &str,
+        policy_revision: i64,
+        now: i64,
+        required_reservation: Option<&str>,
+    ) -> StoreResult<bool> {
+        use rusqlite::{params_from_iter, types::Value};
+
+        // Legacy account-local SQL intentionally has no installation/account
+        // columns. Finance-v6 always requires BOTH original scope keys.
+        fn bind(mut base: Vec<Value>, scope: Option<(&str, &str)>) -> Vec<Value> {
+            if let Some((installation, account)) = scope {
+                base.push(Value::Text(installation.to_owned()));
+                base.push(Value::Text(account.to_owned()));
+            }
+            base
+        }
+        if id.is_empty()
+            || now <= 0
+            || policy_revision <= 0
+            || (scope.is_some()
+                && (required_reservation.is_none()
+                    || scope.is_some_and(|(installation, account)| {
+                        installation.is_empty() || account.is_empty()
+                    })))
+        {
+            return Err(StoreError::Invalid("ACCOUNT_POST_INPUT_INVALID"));
+        }
+        let intent_sql = if scope.is_some() {
+            "SELECT state,deadline,policy_revision,risk_increase FROM intents
+             WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
+        } else {
+            "SELECT state,deadline,policy_revision,risk_increase FROM intents WHERE intent_id=?1"
+        };
+        let intent_bind = bind(vec![Value::Text(id.to_owned())], scope);
+        let (state, deadline, revision, increase): (String, i64, i64, bool) =
+            tx.query_row(intent_sql, params_from_iter(intent_bind.iter()), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?;
         if state != "RESERVED" {
             return Ok(false);
         }
         if now >= deadline {
             return Err(StoreError::Invalid("COMMAND_EXPIRED"));
         }
-        let (current, paused): (i64, bool) = tx.query_row(
-            "SELECT revision,paused FROM account_policy WHERE singleton=1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let policy_sql = if scope.is_some() {
+            "SELECT revision,paused FROM account_policy
+             WHERE singleton=1 AND installation_id=?1 AND account_key=?2"
+        } else {
+            "SELECT revision,paused FROM account_policy WHERE singleton=1"
+        };
+        let scope_bind = bind(Vec::new(), scope);
+        let (current, paused): (i64, bool) =
+            tx.query_row(policy_sql, params_from_iter(scope_bind.iter()), |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
         if revision != policy_revision || current != revision {
             return Err(StoreError::Invalid("POLICY_CHANGED"));
         }
         if increase {
-            let same:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM intent_plans p JOIN strategy_instances i ON i.instance_id=p.strategy_instance WHERE p.intent_id=?1 AND i.definition_id=p.strategy_definition_id AND i.definition_version=p.strategy_definition_version AND i.parameters_digest=p.strategy_parameters_digest AND (i.enabled=1 OR i.instance_id='manual'))",[id],|r|r.get(0))?;
+            let strategy_sql = if scope.is_some() {
+                "SELECT EXISTS(SELECT 1 FROM intent_plans p
+                 JOIN strategy_instances i
+                   ON i.installation_id=p.installation_id
+                  AND i.account_key=p.account_key
+                  AND i.instance_id=p.strategy_instance
+                 WHERE p.intent_id=?1 AND p.installation_id=?2 AND p.account_key=?3
+                   AND i.definition_id=p.strategy_definition_id
+                   AND i.definition_version=p.strategy_definition_version
+                   AND i.parameters_digest=p.strategy_parameters_digest
+                   AND (i.enabled=1 OR i.instance_id='manual'))"
+            } else {
+                "SELECT EXISTS(SELECT 1 FROM intent_plans p
+                 JOIN strategy_instances i ON i.instance_id=p.strategy_instance
+                 WHERE p.intent_id=?1 AND i.definition_id=p.strategy_definition_id
+                   AND i.definition_version=p.strategy_definition_version
+                   AND i.parameters_digest=p.strategy_parameters_digest
+                   AND (i.enabled=1 OR i.instance_id='manual'))"
+            };
+            let same: bool =
+                tx.query_row(strategy_sql, params_from_iter(intent_bind.iter()), |r| {
+                    r.get(0)
+                })?;
             if !same {
                 return Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"));
             }
-            let stops: i64 = tx.query_row(
-                "SELECT count(*) FROM risk_stops WHERE resolution IS NULL",
-                [],
-                |r| r.get(0),
-            )?;
+            let stop_sql = if scope.is_some() {
+                "SELECT COUNT(*) FROM risk_stops WHERE resolution IS NULL
+                 AND installation_id=?1 AND account_key=?2"
+            } else {
+                "SELECT COUNT(*) FROM risk_stops WHERE resolution IS NULL"
+            };
+            let stops: i64 =
+                tx.query_row(stop_sql, params_from_iter(scope_bind.iter()), |r| r.get(0))?;
             if paused || stops > 0 {
                 return Err(StoreError::Invalid("RISK_INCREASE_STOPPED"));
             }
-        }
-        if increase {
+            let recovery_sql = if scope.is_some() {
+                "SELECT requires_reconcile FROM storage_recovery WHERE singleton=1
+                 AND installation_id=?1 AND account_key=?2"
+            } else {
+                "SELECT requires_reconcile FROM storage_recovery"
+            };
             let recovery: bool =
-                tx.query_row("SELECT requires_reconcile FROM storage_recovery", [], |r| {
+                tx.query_row(recovery_sql, params_from_iter(scope_bind.iter()), |r| {
                     r.get(0)
                 })?;
             if recovery {
                 return Err(StoreError::Invalid("STORAGE_RECOVERY_INCOMPLETE"));
             }
-        }
-        if increase {
-            let unknown: i64 = tx.query_row(
-                "SELECT count(*) FROM intents WHERE state IN('POSTING','UNKNOWN')",
-                [],
-                |r| r.get(0),
-            )?;
+            let unknown_sql = if scope.is_some() {
+                "SELECT COUNT(*) FROM intents WHERE state IN('POSTING','UNKNOWN')
+                 AND installation_id=?1 AND account_key=?2"
+            } else {
+                "SELECT COUNT(*) FROM intents WHERE state IN('POSTING','UNKNOWN')"
+            };
+            let unknown: i64 =
+                tx.query_row(unknown_sql, params_from_iter(scope_bind.iter()), |r| {
+                    r.get(0)
+                })?;
             if unknown > 0 {
                 return Err(StoreError::Invalid("ACCOUNT_UNKNOWN_EXPOSURE"));
             }
         }
-        tx.execute("UPDATE intents SET state='POSTING',begin_post_at=?2,updated_at=?2,revision=revision+1 WHERE intent_id=?1 AND state='RESERVED' AND begin_post_at IS NULL",params![id,now])?;
-        tx.execute(
-            "UPDATE risk_receipts SET state='POSTED' WHERE intent_id=?1",
-            [id],
-        )?;
-        tx.commit()?;
+        if let Some(reservation) = required_reservation {
+            // Scoped finance requires the ORIGINAL AccountStore receipt,
+            // never an unattested RiskBook-only HELD row.
+            let sql = "SELECT COUNT(*) FROM risk_receipts
+                       WHERE installation_id=?1 AND account_key=?2
+                         AND intent_id=?3 AND reservation_key=?4 AND state='HELD'
+                         AND plan_hash=(SELECT plan_hash FROM intents
+                           WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3)";
+            let (installation, account) =
+                scope.ok_or(StoreError::Invalid("ACCOUNT_POST_SCOPE_REQUIRED"))?;
+            let count: i64 = tx.query_row(
+                sql,
+                rusqlite::params![installation, account, id, reservation],
+                |r| r.get(0),
+            )?;
+            if count != 1 {
+                return Err(StoreError::Invalid("ACCOUNT_POST_ORIGINAL_RECEIPT_MISSING"));
+            }
+        }
+        let update_sql = if scope.is_some() {
+            "UPDATE intents SET state='POSTING',begin_post_at=?2,updated_at=?2,
+             revision=revision+1 WHERE intent_id=?1 AND state='RESERVED'
+             AND begin_post_at IS NULL AND installation_id=?3 AND account_key=?4"
+        } else {
+            "UPDATE intents SET state='POSTING',begin_post_at=?2,updated_at=?2,
+             revision=revision+1 WHERE intent_id=?1 AND state='RESERVED'
+             AND begin_post_at IS NULL"
+        };
+        let update_bind = bind(vec![Value::Text(id.to_owned()), Value::Integer(now)], scope);
+        if tx.execute(update_sql, params_from_iter(update_bind.iter()))? != 1 {
+            return Err(StoreError::Invalid("ACCOUNT_POST_INTENT_CAS_FAILED"));
+        }
+        let receipt_sql = if scope.is_some() {
+            "UPDATE risk_receipts SET state='POSTED'
+             WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3
+               AND state='HELD'"
+        } else {
+            "UPDATE risk_receipts SET state='POSTED' WHERE intent_id=?1 AND state='HELD'"
+        };
+        if tx.execute(receipt_sql, params_from_iter(intent_bind.iter()))? != 1 {
+            return Err(StoreError::Invalid("ACCOUNT_POST_RECEIPT_CAS_FAILED"));
+        }
         Ok(true)
     }
     // Exchange readback is authoritative; a timeout or negative lookup is UNKNOWN.
