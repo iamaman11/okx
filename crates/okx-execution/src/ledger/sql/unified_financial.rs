@@ -273,26 +273,25 @@ pub(in crate::account_store) fn settle_entry(
         return Err(StoreError::Invalid("UNIFIED_SOURCE_DIGEST_INVALID"));
     }
     let cumulative = money(&source_amount)?;
-    // Legacy-imported rows must carry the byte-exact original AccountStore
-    // proof. Synthetic scope/OS tests use only test-seeded source rows; the
-    // complete production schema must require this native provenance.
-    if !original_json.is_empty() {
-        let original: crate::EntrySettlementEvidence = serde_json::from_str(&original_json)
-            .map_err(|_| StoreError::Invalid("UNIFIED_ORIGINAL_JSON_CORRUPT"))?;
-        let original_amount = money(&original.cumulative_entry_usd.normalize().to_string())?;
-        if original.schema != "okx.entry-partial-settlement/v1"
-            || original.account_key != scope.account
-            || original.intent_id != scope.intent
-            || original.plan_hash != plan
-            || original.reservation_key != scope.reservation
-            || original.venue_order_id != intent_exchange
-            || original.source_digest != source_digest
-            || bill_digest != source_digest
-            || i64::try_from(original.settlement_revision).ok() != Some(scope.source_revision)
-            || original_amount != cumulative
-        {
-            return Err(StoreError::Invalid("UNIFIED_ORIGINAL_RECEIPT_CONFLICT"));
-        }
+    // Every source must carry an original-format financial receipt; even
+    // isolated fixtures exercise the same Rust validation. Producing these
+    // bytes is still restricted to the trusted native AccountStore owner
+    // before this private path can become a production entrypoint.
+    let original: crate::EntrySettlementEvidence = serde_json::from_str(&original_json)
+        .map_err(|_| StoreError::Invalid("UNIFIED_ORIGINAL_JSON_CORRUPT"))?;
+    let original_amount = money(&original.cumulative_entry_usd.normalize().to_string())?;
+    if original.schema != "okx.entry-partial-settlement/v1"
+        || original.account_key != scope.account
+        || original.intent_id != scope.intent
+        || original.plan_hash != plan
+        || original.reservation_key != scope.reservation
+        || original.venue_order_id != intent_exchange
+        || original.source_digest != source_digest
+        || bill_digest != source_digest
+        || i64::try_from(original.settlement_revision).ok() != Some(scope.source_revision)
+        || original_amount != cumulative
+    {
+        return Err(StoreError::Invalid("UNIFIED_ORIGINAL_RECEIPT_CONFLICT"));
     }
     if cumulative.is_zero() {
         return Err(StoreError::Invalid("UNIFIED_SOURCE_EMPTY"));
