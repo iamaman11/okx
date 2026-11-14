@@ -6302,6 +6302,9 @@ fn store() -> AccountStore {
 }
 
 fn store_with_account(account_key: &str) -> AccountStore {
+    store_with_account_campaign(account_key, "campaign-20")
+}
+fn store_with_account_campaign(account_key: &str, campaign: &str) -> AccountStore {
     let p = path();
     let m = AccountMeta {
         initialize_operation_id: "connect-op".into(),
@@ -6322,7 +6325,7 @@ fn store_with_account(account_key: &str) -> AccountStore {
         balances: vec![("USDT".into(), Decimal::from(100))],
     };
     let mut a = AccountStore::initialize_flat(p, m, &s).unwrap();
-    a.apply_authority_policy(1, false, "campaign-20", Decimal::from(20))
+    a.apply_authority_policy(1, false, campaign, Decimal::from(20))
         .unwrap();
     a.ensure_manual_instance(1).unwrap();
     a
@@ -12166,11 +12169,34 @@ fn risk_book_contract_scoped_original_risk_aggregate_checker_is_campaign_isolate
 #[test]
 fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit() {
     use rusqlite::{Connection, OpenFlags};
-    let mut a = store_with_account("acct-A");
-    let mut b = store_with_account("acct-B");
+    let mut a = store_with_account_campaign("acct-A", "campaign-X");
+    let mut b = store_with_account_campaign("acct-B", "campaign-Y");
     // POST causal inputs require an actual 64-hex native plan identity.
     let ai = intent_with_plan_hash(&mut a, &"e".repeat(64));
     let bi = intent_with_plan_hash(&mut b, &"e".repeat(64));
+    for (store, prepared) in [(&mut a, &ai), (&mut b, &bi)] {
+        // Source v2 AccountStore owns these rows and receipts BEFORE import.
+        // There are no handwritten RESERVED states in the combined test.
+        store.connection.execute(
+            "UPDATE intents SET deadline=20000 WHERE intent_id=?1",
+            [&prepared.intent_id],
+        ).unwrap();
+        store.reserve(
+            &CentralReceipt {
+                reservation_key: "same-reservation".into(),
+                account_key: store.meta.account_key.clone(),
+                installation_id: store.meta.installation_id.clone(),
+                instance_id: None,
+                intent_id: prepared.intent_id.clone(),
+                plan_hash: prepared.plan_hash.clone(),
+                policy_revision: 1,
+                receipt_hash: "b".repeat(64),
+                requested_loss_usd: Decimal::ONE,
+                conversion_digest: "c".repeat(64),
+            },
+            3,
+        ).unwrap();
+    }
     let (ap, bp) = (a.path.clone(), b.path.clone());
     let x = path();
     let y = path();
@@ -12211,42 +12237,39 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
     .unwrap();
 
     let cohort = &["acct-A", "acct-B"];
-    // Legacy book alone cannot prove the ORIGINAL account's readiness.
+    // Missing ORIGINAL receipt must reject even when RiskBook is HELD.
     {
         let tx = target.transaction().unwrap();
+        tx.execute(
+            "DELETE FROM risk_receipts WHERE installation_id='installation'
+             AND account_key='acct-A' AND reservation_key='same-reservation'",
+            [],
+        ).unwrap();
+        let denied = crate::risk::test_stage_scoped_begin_post(
+            &tx, "installation", "campaign-X", "same-reservation",
+            &ai.plan_hash, cohort, 2,
+        );
         assert_eq!(
-            crate::risk::test_stage_scoped_begin_post(
-                &tx,
-                "installation",
-                "campaign-X",
-                "same-reservation",
-                &ai.plan_hash,
-                cohort,
-                2,
-            )
-            .unwrap_err(),
-            "DURABLE_ENTRY_SQL_PROOF_MISSING"
+            denied.unwrap_err(),
+            "INVALID_RISK_INPUT: ACCOUNT_POST_ORIGINAL_RECEIPT_MISSING"
         );
         tx.rollback().unwrap();
     }
-    let activated = target
-        .execute(
-            "UPDATE intents SET state='RESERVED'
-         WHERE installation_id='installation' AND account_key='acct-A' AND intent_id=?1",
-            [&ai.intent_id],
-        )
-        .unwrap();
-    assert_eq!(activated, 1);
-    assert_eq!(
-        target
-            .execute(
-                "UPDATE account_policy SET campaign_id='campaign-X'
-             WHERE installation_id='installation' AND account_key='acct-A' AND singleton=1",
-                [],
-            )
-            .unwrap(),
-        1
-    );
+    // Wrong/paused source policy must not consume a campaign reserve.
+    {
+        let tx = target.transaction().unwrap();
+        tx.execute(
+            "UPDATE account_policy SET paused=1 WHERE installation_id='installation'
+             AND account_key='acct-A' AND singleton=1",
+            [],
+        ).unwrap();
+        let denied = crate::risk::test_stage_scoped_begin_post(
+            &tx, "installation", "campaign-X", "same-reservation",
+            &ai.plan_hash, cohort, 2,
+        );
+        assert_eq!(denied.unwrap_err(), "INVALID_RISK_INPUT: RISK_INCREASE_STOPPED");
+        tx.rollback().unwrap();
+    }
 
     // First execute a true ROLLBACK after both RiskBook and native intent
     // changed, proving neither half survives on a shared SQLite file.
@@ -12264,16 +12287,6 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
             )
             .unwrap(),
             3
-        );
-        assert_eq!(
-            tx.execute(
-                "UPDATE intents SET state='POSTING'
-             WHERE installation_id='installation' AND account_key='acct-A'
-               AND intent_id=?1 AND state='RESERVED'",
-                [&ai.intent_id],
-            )
-            .unwrap(),
-            1
         );
         tx.rollback().unwrap();
     }
@@ -12373,7 +12386,7 @@ fn risk_book_contract_child_unified_native_post_os_kill_barrier() {
         return;
     };
     let plan = std::env::var("OKX_510_POST_CHILD_PLAN").unwrap();
-    let intent = std::env::var("OKX_510_POST_CHILD_INTENT").unwrap();
+    let _intent = std::env::var("OKX_510_POST_CHILD_INTENT").unwrap();
     let phase = std::env::var("OKX_510_POST_CHILD_PHASE").unwrap();
     let mut db = Connection::open(path).unwrap();
     db.pragma_update(None, "foreign_keys", "ON").unwrap();
@@ -12392,16 +12405,6 @@ fn risk_book_contract_child_unified_native_post_os_kill_barrier() {
         )
         .unwrap(),
         3
-    );
-    assert_eq!(
-        tx.execute(
-            "UPDATE intents SET state='POSTING'
-         WHERE installation_id='installation' AND account_key='acct-A'
-           AND intent_id=?1 AND state='RESERVED'",
-            [&intent],
-        )
-        .unwrap(),
-        1
     );
     match phase.as_str() {
         "BEFORE_COMMIT" => std::mem::forget(tx),
