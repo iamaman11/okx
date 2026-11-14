@@ -136,6 +136,7 @@ fn begin_post_transaction(
         String,
         String,
         String,
+        String,
         i64,
         i64,
         String,
@@ -145,12 +146,12 @@ fn begin_post_transaction(
     )> = tx
         .query_row(
             if scope.is_some() {
-                "SELECT plan_sha256,state,account_key,held_at_ms,reserve_read_floor_ms,
+                "SELECT plan_sha256,state,account_key,intent_id,held_at_ms,reserve_read_floor_ms,
                             native_incarnation,reserved_usdt,entry_upper_usd,book_sequence
                      FROM risk_entries WHERE reservation_key=?1
                      AND installation_id=?2 AND campaign_id=?3"
             } else {
-                "SELECT plan_sha256,state,account_key,held_at_ms,reserve_read_floor_ms,
+                "SELECT plan_sha256,state,account_key,intent_id,held_at_ms,reserve_read_floor_ms,
                             native_incarnation,reserved_usdt,entry_upper_usd,book_sequence
                      FROM risk_entries WHERE reservation_key=?1"
             },
@@ -171,6 +172,7 @@ fn begin_post_transaction(
                     r.get(6)?,
                     r.get(7)?,
                     r.get(8)?,
+                    r.get(9)?,
                 ))
             },
         )
@@ -179,6 +181,7 @@ fn begin_post_transaction(
         plan,
         state,
         account,
+        intent_id,
         held_at_ms,
         held_read_floor,
         incarnation,
@@ -194,6 +197,30 @@ fn begin_post_transaction(
     }
     if state != "HELD" {
         return Err(RiskStoreError::AlreadyResolved);
+    }
+    if let Some((installation, campaign)) = scope {
+        // Same-file original AccountStore state is mandatory. A standalone
+        // RiskBook HELD row cannot authorize a venue POST before the original
+        // intent and its campaign assignment are durably RESERVED.
+        let source: Option<(String, String, Option<String>, i64)> = tx
+            .query_row(
+                "SELECT i.plan_hash,i.state,p.campaign_id,i.risk_increase
+                 FROM intents i JOIN account_policy p
+                   ON p.installation_id=i.installation_id
+                  AND p.account_key=i.account_key AND p.singleton=1
+                 WHERE i.installation_id=?1 AND i.account_key=?2 AND i.intent_id=?3",
+                rusqlite::params![installation, &account, &intent_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        if !matches!(source,
+            Some((ref plan, ref state, Some(ref assigned), 1))
+                if plan == &request.plan_sha256
+                    && state == "RESERVED"
+                    && assigned == campaign
+        ) {
+            return Err(RiskStoreError::EntrySqlUnproven);
+        }
     }
     if reservation_seq <= 0
         || u64::try_from(reservation_seq)
