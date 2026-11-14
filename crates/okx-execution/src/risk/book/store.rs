@@ -419,11 +419,8 @@ fn apply_census_loss_for_scope(
                 Value::Text(campaign.to_owned()),
             ]);
         }
-        let previous: String = tx.query_row(
-            query,
-            params_from_iter(values.iter()),
-            |row| row.get(0),
-        )?;
+        let previous: String =
+            tx.query_row(query, params_from_iter(values.iter()), |row| row.get(0))?;
         let previous = RiskAmount::parse(&previous)?;
         if observed < &previous {
             return Err(RiskStoreError::LossRegression);
@@ -481,10 +478,13 @@ fn apply_census_loss_for_scope(
     let mut values = vec![
         Value::Text(consumed.canonical()?),
         Value::Integer(new_sequence),
-        Value::Integer(i64::try_from(meta.sequence)
-            .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?),
-        Value::Integer(i64::try_from(meta.policy_revision)
-            .map_err(|_| RiskStoreError::PolicyConflict)?),
+        Value::Integer(
+            i64::try_from(meta.sequence)
+                .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
+        ),
+        Value::Integer(
+            i64::try_from(meta.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?,
+        ),
     ];
     if let Some((installation, campaign)) = scope {
         values.extend([
