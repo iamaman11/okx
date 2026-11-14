@@ -64,6 +64,7 @@ impl RiskBookHandle {
                         let _ = ready_tx.send(Ok(()));
                     }
                     Err(error) => {
+                        store.close();
                         let _ = ready_tx.send(Err(error));
                         let _ = closed_tx.send(true);
                         return;
@@ -72,7 +73,7 @@ impl RiskBookHandle {
                 while let Ok(job) = receiver.recv() {
                     job(&mut store, &observe);
                 }
-                drop(store); // SQLite handles and file lease close BEFORE termination witness.
+                store.close(); // SQLite and explicit lease release BEFORE completion witness.
                 let _ = closed_tx.send(true);
             })?;
         ready_rx
