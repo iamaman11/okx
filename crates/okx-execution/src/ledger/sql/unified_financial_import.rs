@@ -54,6 +54,28 @@ const ORIGINAL_ACCOUNT_TABLES: [&str; 39] = [
     "swap_fill_sources",
 ];
 
+const ORIGINAL_CAMPAIGN_TABLES: [&str; 8] = [
+    "risk_meta",
+    "risk_account_occupied",
+    "risk_policy_account",
+    "risk_loss_source",
+    "risk_policy_strategy",
+    "risk_strategy_occupied",
+    "risk_entries",
+    "risk_no_reserve",
+];
+
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::account_store) struct OriginalFinanceImport {
+    pub accounts: usize,
+    pub campaigns: usize,
+    pub tables_per_account: usize,
+    pub tables_per_campaign: usize,
+    pub account_rows: u64,
+    pub campaign_rows: u64,
+}
+
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::account_store) struct OriginalAccountImport {
     pub accounts: usize,
@@ -78,14 +100,15 @@ fn count_scoped(
     tx: &Transaction<'_>,
     table: &str,
     installation: &str,
-    account: &str,
+    scope_column: &str,
+    scope: &str,
 ) -> StoreResult<i64> {
     Ok(tx.query_row(
         &format!(
-            "SELECT COUNT(*) FROM {} WHERE installation_id=?1 AND account_key=?2",
-            quote(table),
+            "SELECT COUNT(*) FROM {} WHERE installation_id=?1 AND {}=?2",
+            quote(table), quote(scope_column)
         ),
-        params![installation, account],
+        params![installation, scope],
         |r| r.get(0),
     )?)
 }
@@ -129,21 +152,68 @@ fn verify_original_source(source: &Connection, installation: &str) -> StoreResul
     Ok(account)
 }
 
-fn copy_one_account(
+fn verify_original_campaign(source: &Connection, installation: &str) -> StoreResult<String> {
+    let version: i64 = source.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version != 5 {
+        return Err(StoreError::Invalid("UNIFIED_LEGACY_CAMPAIGN_VERSION_INVALID"));
+    }
+    let check: String = source.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    if check != "ok" {
+        return Err(StoreError::Invalid("UNIFIED_LEGACY_CAMPAIGN_INTEGRITY_FAILED"));
+    }
+    let mut fk = source.prepare("PRAGMA foreign_key_check")?;
+    if fk.query([])?.next()?.is_some() {
+        return Err(StoreError::Invalid("UNIFIED_LEGACY_CAMPAIGN_FOREIGN_KEY_FAILED"));
+    }
+    let names: BTreeSet<String> = {
+        let mut stmt = source.prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        )?;
+        stmt.query_map([], |r| r.get(0))?
+            .collect::<Result<BTreeSet<_>, _>>()?
+    };
+    if names
+        != ORIGINAL_CAMPAIGN_TABLES
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    {
+        return Err(StoreError::Invalid("UNIFIED_LEGACY_CAMPAIGN_TABLE_CENSUS_CHANGED"));
+    }
+    let (campaign, owned_installation, fenced): (String, String, i64) = source.query_row(
+        "SELECT campaign_id,installation_id,legacy_fenced FROM risk_meta WHERE singleton=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    if campaign.is_empty() || owned_installation != installation || fenced != 1 {
+        return Err(StoreError::Invalid("UNIFIED_LEGACY_CAMPAIGN_IDENTITY_OR_FENCE"));
+    }
+    // A historical SQLite flag is NOT server-side Cloudflare authority revocation.
+    // The authorized cutover must independently prove that remote mutation is fenced.
+    Ok(campaign)
+}
+
+/// Copy exact original SQLite column values, adding only the missing
+/// installation/account or installation/campaign namespace columns.
+/// SQL foreign keys, immutable monetary values and legacy IDs are preserved.
+fn copy_one_scope(
     source: &Connection,
     tx: &Transaction<'_>,
     installation: &str,
-    account: &str,
+    scope_column: &str,
+    scope: &str,
+    tables: &[&str],
 ) -> StoreResult<u64> {
     let mut imported = 0u64;
-    for table in ORIGINAL_ACCOUNT_TABLES {
+    for &table in tables {
         let source_cols = columns(source, table)?;
         let mut target_cols = source_cols.clone();
         if !target_cols.iter().any(|c| c == "installation_id") {
             target_cols.insert(0, "installation_id".into());
         }
-        if !target_cols.iter().any(|c| c == "account_key") {
-            target_cols.insert(1, "account_key".into());
+        if !target_cols.iter().any(|c| c == scope_column) {
+            target_cols.insert(1, scope_column.into());
         }
         let expected_target = columns(tx, table)?;
         if target_cols.len() != expected_target.len()
@@ -153,25 +223,14 @@ fn copy_one_account(
         }
         let query = format!(
             "SELECT {} FROM {}",
-            source_cols
-                .iter()
-                .map(|c| quote(c))
-                .collect::<Vec<_>>()
-                .join(","),
+            source_cols.iter().map(|c| quote(c)).collect::<Vec<_>>().join(","),
             quote(table),
         );
         let write = format!(
             "INSERT INTO {}({}) VALUES({})",
             quote(table),
-            target_cols
-                .iter()
-                .map(|c| quote(c))
-                .collect::<Vec<_>>()
-                .join(","),
-            (0..target_cols.len())
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(","),
+            target_cols.iter().map(|c| quote(c)).collect::<Vec<_>>().join(","),
+            (0..target_cols.len()).map(|_| "?").collect::<Vec<_>>().join(","),
         );
         let mut reader = source.prepare(&query)?;
         let mut rows = reader.query([])?;
@@ -183,12 +242,10 @@ fn copy_one_account(
                 .collect::<Result<Vec<_>, _>>()?;
             for (column, value) in source_cols.iter().zip(&native_values) {
                 if column == "installation_id" && value != &Value::Text(installation.to_owned()) {
-                    return Err(StoreError::Invalid(
-                        "UNIFIED_LEGACY_ROW_INSTALLATION_MISMATCH",
-                    ));
+                    return Err(StoreError::Invalid("UNIFIED_LEGACY_ROW_INSTALLATION_MISMATCH"));
                 }
-                if column == "account_key" && value != &Value::Text(account.to_owned()) {
-                    return Err(StoreError::Invalid("UNIFIED_LEGACY_ROW_ACCOUNT_MISMATCH"));
+                if column == scope_column && value != &Value::Text(scope.to_owned()) {
+                    return Err(StoreError::Invalid("UNIFIED_LEGACY_ROW_SCOPE_MISMATCH"));
                 }
             }
             let mut values = Vec::with_capacity(target_cols.len());
@@ -197,8 +254,8 @@ fn copy_one_account(
                     values.push(native_values[i].clone());
                 } else if col == "installation_id" {
                     values.push(Value::Text(installation.to_owned()));
-                } else if col == "account_key" {
-                    values.push(Value::Text(account.to_owned()));
+                } else if col == scope_column {
+                    values.push(Value::Text(scope.to_owned()));
                 } else {
                     return Err(StoreError::Invalid("UNIFIED_LEGACY_COLUMN_UNMAPPED"));
                 }
@@ -208,11 +265,12 @@ fn copy_one_account(
             }
             n += 1;
         }
-        let actual: i64 =
-            source.query_row(&format!("SELECT COUNT(*) FROM {}", quote(table)), [], |r| {
-                r.get(0)
-            })?;
-        if n != actual || count_scoped(tx, table, installation, account)? != actual {
+        let actual: i64 = source.query_row(
+            &format!("SELECT COUNT(*) FROM {}", quote(table)),
+            [],
+            |r| r.get(0),
+        )?;
+        if n != actual || count_scoped(tx, table, installation, scope_column, scope)? != actual {
             return Err(StoreError::Invalid("UNIFIED_LEGACY_ROW_PARITY_FAILED"));
         }
         imported = imported
@@ -225,61 +283,69 @@ fn copy_one_account(
     Ok(imported)
 }
 
-/// One owner transaction imports a stopped installation's exact original
-/// account SQL table rows. It does NOT import the 8 campaign authority tables
-/// or revoke Cloudflare. Until those are implemented, never activate this DB.
-/// Sources must be authenticated, stopped and writer-fenced by the caller;
-/// a read-only SQLite connection alone does not prove distributed fencing.
-pub(in crate::account_store) fn import_stopped_accounts_into_empty_finance(
+/// PRIVATE: copies all source account and campaign rows under ONE
+/// BEGIN IMMEDIATE/COMMIT. Caller must supply a complete authenticated
+/// inventory of stopped accounts and campaigns; OS file leases are local
+/// safety only, not proof of Cloudflare fencing or source completeness.
+/// An empty campaign set is permitted ONLY for a historical account-only test.
+fn import_sources(
     target: &mut Connection,
     installation: &str,
-    sources: &[&Connection],
-) -> StoreResult<OriginalAccountImport> {
-    if installation.is_empty() || sources.is_empty() {
+    accounts: &[&Connection],
+    campaigns: &[&Connection],
+) -> StoreResult<OriginalFinanceImport> {
+    if installation.is_empty() || accounts.is_empty() {
         return Err(StoreError::Invalid("UNIFIED_IMPORT_EMPTY_SCOPE"));
     }
     let journal: String = target.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
     let fk: i64 = target.pragma_query_value(None, "foreign_keys", |r| r.get(0))?;
     let sync: i64 = target.pragma_query_value(None, "synchronous", |r| r.get(0))?;
     if journal != "wal" || fk != 1 || sync != 2 {
-        return Err(StoreError::Invalid(
-            "UNIFIED_IMPORT_SQLITE_DURABILITY_INVALID",
-        ));
+        return Err(StoreError::Invalid("UNIFIED_IMPORT_SQLITE_DURABILITY_INVALID"));
     }
-    // Local exclusive OS leases MUST cover the entire copy/verification
-    // transaction. A read-only SQLite handle alone does not prohibit the
-    // original AccountStore writer from changing WAL under our feet.
     let target_path: String = target.query_row(
-        "SELECT file FROM pragma_database_list WHERE name='main'",
-        [],
-        |r| r.get(0),
+        "SELECT file FROM pragma_database_list WHERE name='main'", [], |r| r.get(0)
     )?;
-    let mut original_paths = Vec::new();
-    for source in sources {
+    if target_path.is_empty() {
+        return Err(StoreError::Invalid("UNIFIED_IMPORT_TARGET_PATH_INVALID"));
+    }
+    let target_canonical = Path::new(&target_path).canonicalize()?;
+    // Acquire all original OS locks in canonical path order so a concurrent
+    // native account/campaign writer cannot change a source during import.
+    let mut paths = Vec::new();
+    for source in accounts.iter().chain(campaigns.iter()) {
         let path: String = source.query_row(
-            "SELECT file FROM pragma_database_list WHERE name='main'",
-            [],
-            |r| r.get(0),
+            "SELECT file FROM pragma_database_list WHERE name='main'", [], |r| r.get(0)
         )?;
-        if path.is_empty() || path == target_path {
+        if path.is_empty() {
             return Err(StoreError::Invalid("UNIFIED_IMPORT_SOURCE_PATH_INVALID"));
         }
-        original_paths.push(path);
+        let canonical = Path::new(&path).canonicalize()?;
+        if canonical == target_canonical {
+            return Err(StoreError::Invalid("UNIFIED_IMPORT_SOURCE_PATH_INVALID"));
+        }
+        paths.push(canonical);
     }
-    original_paths.sort();
-    if original_paths.windows(2).any(|paths| paths[0] == paths[1]) {
-        return Err(StoreError::Invalid("UNIFIED_DUPLICATE_ACCOUNT_SOURCE"));
+    paths.sort();
+    if paths.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(StoreError::Invalid("UNIFIED_DUPLICATE_SOURCE_PATH"));
     }
-    let mut _source_leases = Vec::new();
-    for path in &original_paths {
-        _source_leases.push(crate::AccountStore::writer_lease(Path::new(path))?);
+    let mut _leases = Vec::new();
+    for path in &paths {
+        // Both old native owners use <canonical SQLite path>.writer.lock.
+        _leases.push(crate::AccountStore::writer_lease(path)?);
     }
 
-    let mut identities = BTreeSet::new();
-    for source in sources {
-        let account = verify_original_source(source, installation)?;
-        if !identities.insert(account) {
+    let mut account_identities = BTreeSet::new();
+    for source in accounts {
+        if !account_identities.insert(verify_original_source(source, installation)?) {
             return Err(StoreError::Invalid("UNIFIED_DUPLICATE_ACCOUNT_SOURCE"));
+        }
+    }
+    let mut campaign_identities = BTreeSet::new();
+    for source in campaigns {
+        if !campaign_identities.insert(verify_original_campaign(source, installation)?) {
+            return Err(StoreError::Invalid("UNIFIED_DUPLICATE_CAMPAIGN_SOURCE"));
         }
     }
     let existing: i64 = target.query_row(
@@ -294,23 +360,32 @@ pub(in crate::account_store) fn import_stopped_accounts_into_empty_finance(
     let complete = include_str!("../../../schema/finance-unified-v1.sql");
     const MARKER: &str =
         "-- Original immutable-event rules and scoped source-invalidation triggers.";
-    let (tables_and_indexes, trigger_and_version) = complete.split_once(MARKER).ok_or(
-        StoreError::Invalid("UNIFIED_SCHEMA_TRIGGER_BOUNDARY_MISSING"),
-    )?;
+    let (tables_and_indexes, trigger_and_version) = complete
+        .split_once(MARKER)
+        .ok_or(StoreError::Invalid("UNIFIED_SCHEMA_TRIGGER_BOUNDARY_MISSING"))?;
     let tx = target.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch(tables_and_indexes)?;
     tx.pragma_update(None, "defer_foreign_keys", 1)?;
-    let mut total = 0u64;
-    for source in sources {
+    let mut account_rows = 0u64;
+    for source in accounts {
         let account = verify_original_source(source, installation)?;
-        let rows = copy_one_account(source, &tx, installation, &account)?;
-        total = total
-            .checked_add(rows)
+        account_rows = account_rows
+            .checked_add(copy_one_scope(
+                source, &tx, installation, "account_key", &account, &ORIGINAL_ACCOUNT_TABLES
+            )?)
             .ok_or(StoreError::Invalid("UNIFIED_LEGACY_ROW_COUNT_OVERFLOW"))?;
     }
-    // Original event logs are copied with their source IDs untouched BEFORE
-    // triggers are installed. Otherwise INSERT into operation_receipts would
-    // regenerate the same event and double the source proof.
+    let mut campaign_rows = 0u64;
+    for source in campaigns {
+        let campaign = verify_original_campaign(source, installation)?;
+        campaign_rows = campaign_rows
+            .checked_add(copy_one_scope(
+                source, &tx, installation, "campaign_id", &campaign, &ORIGINAL_CAMPAIGN_TABLES
+            )?)
+            .ok_or(StoreError::Invalid("UNIFIED_LEGACY_ROW_COUNT_OVERFLOW"))?;
+    }
+    // Original event logs must precede trigger installation to avoid replaying
+    // immutable operation_receipts as newly emitted source events.
     tx.execute_batch(&format!("{MARKER}{trigger_and_version}"))?;
     let count: i64 = tx.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
@@ -327,9 +402,42 @@ pub(in crate::account_store) fn import_stopped_accounts_into_empty_finance(
     }
     drop(fk_check);
     tx.commit()?;
-    Ok(OriginalAccountImport {
-        accounts: sources.len(),
+    Ok(OriginalFinanceImport {
+        accounts: accounts.len(),
+        campaigns: campaigns.len(),
         tables_per_account: ORIGINAL_ACCOUNT_TABLES.len(),
-        imported_rows: total,
+        tables_per_campaign: ORIGINAL_CAMPAIGN_TABLES.len(),
+        account_rows,
+        campaign_rows,
+    })
+}
+
+/// Offline migration witness only. Not wired into active account/RiskBook
+/// owners until original authority is physically fenced and inventoried.
+pub(in crate::account_store) fn import_stopped_finance_into_empty(
+    target: &mut Connection,
+    installation: &str,
+    accounts: &[&Connection],
+    campaigns: &[&Connection],
+) -> StoreResult<OriginalFinanceImport> {
+    if campaigns.is_empty() {
+        return Err(StoreError::Invalid("UNIFIED_CAMPAIGN_INVENTORY_UNPROVEN"));
+    }
+    import_sources(target, installation, accounts, campaigns)
+}
+
+/// Historical account-only direct test, not a cutover API. It deliberately
+/// does not import campaign obligations and must never activate the target.
+#[cfg(test)]
+pub(in crate::account_store) fn import_stopped_accounts_into_empty_finance(
+    target: &mut Connection,
+    installation: &str,
+    accounts: &[&Connection],
+) -> StoreResult<OriginalAccountImport> {
+    let result = import_sources(target, installation, accounts, &[])?;
+    Ok(OriginalAccountImport {
+        accounts: result.accounts,
+        tables_per_account: result.tables_per_account,
+        imported_rows: result.account_rows,
     })
 }
