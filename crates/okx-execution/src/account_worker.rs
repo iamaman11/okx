@@ -525,6 +525,16 @@ pub(crate) struct UnifiedFinanceInventory {
     pub state: String,
 }
 
+/// Exact original RiskBook projection, not a second financial calculation.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct UnifiedFinanceCampaignSummary {
+    pub campaign: String,
+    pub book_sequence: u64,
+    pub global_reserved_usdt: String,
+    pub remaining_loss_usd: String,
+    pub remaining_entry_usd: String,
+}
+
 impl UnifiedFinanceHandle {
     pub(crate) async fn open_stopped_import(
         runtime_root: PathBuf,
@@ -622,36 +632,16 @@ impl UnifiedFinanceHandle {
         self.owner.terminated.clone()
     }
 
-    /// Read-only installation-scoped diagnostic. No finance mutation API is
-    /// exported while the import marker says OFFLINE_NOT_AUTHORIZED.
-    pub(crate) async fn inventory(&self) -> StoreResult<UnifiedFinanceInventory> {
-        let installation = self.installation.clone();
+    // One FIFO and a single Connection for all future typed account/campaign
+    // calls. Raw SQL jobs remain PRIVATE to this module; callers cannot
+    // bypass the original ledger/RiskBook business owners via this API.
+    async fn submit<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut rusqlite::Connection) -> StoreResult<T> + Send + 'static,
+    ) -> StoreResult<T> {
         let (tx, rx) = oneshot::channel();
         let job: FinanceJob = Box::new(move |db| {
-            let result = (|| -> StoreResult<UnifiedFinanceInventory> {
-                let accounts = db.query_row(
-                    "SELECT COUNT(*) FROM account_meta WHERE installation_id=?1",
-                    [&installation],
-                    |row| row.get(0),
-                )?;
-                let campaigns = db.query_row(
-                    "SELECT COUNT(*) FROM risk_meta WHERE installation_id=?1",
-                    [&installation],
-                    |row| row.get(0),
-                )?;
-                let state = db.query_row(
-                    "SELECT state FROM finance_import_manifest
-                     WHERE singleton=1 AND installation_id=?1",
-                    [&installation],
-                    |row| row.get(0),
-                )?;
-                Ok(UnifiedFinanceInventory {
-                    accounts,
-                    campaigns,
-                    state,
-                })
-            })();
-            let _ = tx.send(result);
+            let _ = tx.send(operation(db));
         });
         self.owner
             .sender
@@ -665,6 +655,65 @@ impl UnifiedFinanceHandle {
         rx.await
             .map_err(|_| StoreError::Invalid("UNIFIED_FINANCE_WORKER_STOPPED"))?
     }
+
+    /// Read-only installation-scoped diagnostic. No finance mutation API is
+    /// exported while the import marker says OFFLINE_NOT_AUTHORIZED.
+    pub(crate) async fn inventory(&self) -> StoreResult<UnifiedFinanceInventory> {
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let accounts = db.query_row(
+                "SELECT COUNT(*) FROM account_meta WHERE installation_id=?1",
+                [&installation],
+                |row| row.get(0),
+            )?;
+            let campaigns = db.query_row(
+                "SELECT COUNT(*) FROM risk_meta WHERE installation_id=?1",
+                [&installation],
+                |row| row.get(0),
+            )?;
+            let state = db.query_row(
+                "SELECT state FROM finance_import_manifest
+                 WHERE singleton=1 AND installation_id=?1",
+                [&installation],
+                |row| row.get(0),
+            )?;
+            Ok(UnifiedFinanceInventory {
+                accounts,
+                campaigns,
+                state,
+            })
+        })
+        .await
+    }
+
+    /// The existing original RiskBook Summary algorithm, executed through
+    /// the installation's sole SQL owner and exact campaign identity scope.
+    /// It is read-only; a Summary cannot issue a venue-send capability.
+    pub(crate) async fn campaign_summary(
+        &self,
+        campaign: String,
+    ) -> StoreResult<UnifiedFinanceCampaignSummary> {
+        if campaign.is_empty() {
+            return Err(StoreError::Invalid("UNIFIED_FINANCE_CAMPAIGN_EMPTY"));
+        }
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let original =
+                crate::risk::read_unified_campaign_summary(&tx, &installation, &campaign)
+                    .map_err(StoreError::Invalid)?;
+            tx.commit()?;
+            Ok(UnifiedFinanceCampaignSummary {
+                campaign,
+                book_sequence: original.book_sequence,
+                global_reserved_usdt: original.global_reserved_usdt,
+                remaining_loss_usd: original.remaining_loss_usd,
+                remaining_entry_usd: original.remaining_entry_usd,
+            })
+        })
+        .await
+    }
+
 }
 
 #[cfg(test)]
