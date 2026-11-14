@@ -12,6 +12,32 @@ pub(crate) use store::{
 #[cfg(test)]
 mod tests;
 
+/// Private-only trial for the installation SQL-owner. It invokes BOTH
+/// original Rust financial subject owners with full typed arguments on the
+/// caller's transaction; the caller MUST roll back this transaction because
+/// an offline immutable import is NOT a cutover or venue authority.
+#[cfg(test)]
+pub(crate) use store::{ReserveInput, VerifiedCensus};
+
+#[cfg(test)]
+pub(crate) fn test_trial_unified_reserve(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    campaign: &str,
+    input: &ReserveInput,
+    census: &VerifiedCensus,
+    receipt: &crate::CentralReceipt,
+) -> Result<&'static str, &'static str> {
+    use store::{ReserveDecision, RiskBookStore};
+    match RiskBookStore::reserve_unified_account_transaction(
+        tx, installation, campaign, input, census, receipt,
+    ) {
+        Ok(ReserveDecision::Held(_)) => Ok("HELD_UNCOMMITTED"),
+        Ok(ReserveDecision::Rejected(_)) => Ok("REJECTED_UNCOMMITTED"),
+        Err(_) => Err("UNIFIED_ORIGINAL_RESERVE_TRIAL_REJECTED"),
+    }
+}
+
 /// Test-only native PostCausalProof constructor for the real v6 SQL
 /// transaction integration witness. Synthetic proof is NEVER compiled into
 /// production and is not an authorization/venue sender.
