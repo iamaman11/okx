@@ -692,6 +692,104 @@ pub(in crate::account_store) fn import_stopped_finance_into_empty(
     )
 }
 
+/// Read-only reopen/recovery witness: the caller can distinguish a COMMIT
+/// whose reply was lost from a rolled-back, partial or mismatched import.
+/// This never turns the offline marker into a live trading authority.
+pub(in crate::account_store) fn inspect_stopped_finance_import(
+    db: &Connection,
+    expected: &ExpectedFinanceInventory<'_>,
+) -> StoreResult<OriginalFinanceImport> {
+    let accounts = inventory_ids(expected.accounts)?;
+    let campaigns = inventory_ids(expected.campaigns)?;
+    if expected.installation.is_empty() {
+        return Err(StoreError::Invalid("UNIFIED_IMPORT_INVENTORY_EMPTY"));
+    }
+    let tx = db.unchecked_transaction()?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version != 6 {
+        return Err(StoreError::Invalid("UNIFIED_IMPORT_TARGET_VERSION_INVALID"));
+    }
+    let count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |r| r.get(0),
+    )?;
+    if count != 48 {
+        return Err(StoreError::Invalid("UNIFIED_COMPLETE_TABLE_CENSUS_INVALID"));
+    }
+    let found_accounts: BTreeSet<String> = {
+        let mut stmt = tx.prepare("SELECT account_key FROM account_meta WHERE installation_id=?1")?;
+        stmt.query_map([expected.installation], |r| r.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    let found_campaigns: BTreeSet<String> = {
+        let mut stmt = tx.prepare("SELECT campaign_id FROM risk_meta WHERE installation_id=?1")?;
+        stmt.query_map([expected.installation], |r| r.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    if found_accounts != accounts || found_campaigns != campaigns {
+        return Err(StoreError::Invalid("UNIFIED_IMPORT_INVENTORY_MISMATCH"));
+    }
+    let marker: Option<(String, String, String, String, i64, i64, i64, i64)> =
+        tx.query_row(
+            "SELECT installation_id,inventory_sha256,content_sha256,state,
+                    account_count,campaign_count,account_rows,campaign_rows
+             FROM finance_import_manifest WHERE singleton=1",
+            [],
+            |r| Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
+                r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?
+            )),
+        ).optional()?;
+    let (installation, inventory_sha256, content_sha256, state,
+         account_count, campaign_count, account_rows, campaign_rows) =
+        marker.ok_or(StoreError::Invalid("UNIFIED_IMPORT_COMMIT_MARKER_MISSING"))?;
+    if installation != expected.installation || state != "OFFLINE_NOT_AUTHORIZED"
+        || account_count != i64::try_from(accounts.len())
+            .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?
+        || campaign_count != i64::try_from(campaigns.len())
+            .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?
+        || hash_inventory(expected.installation, &accounts, &campaigns) != inventory_sha256
+    {
+        return Err(StoreError::Invalid("UNIFIED_IMPORT_COMMIT_MARKER_CONFLICT"));
+    }
+    let (actual_account_rows, actual_campaign_rows) =
+        target_row_totals(&tx, expected.installation, &accounts, &campaigns)?;
+    if i64::try_from(actual_account_rows)
+        .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))? != account_rows
+        || i64::try_from(actual_campaign_rows)
+            .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))? != campaign_rows
+    {
+        return Err(StoreError::Invalid("UNIFIED_IMPORT_COMMIT_MARKER_CONFLICT"));
+    }
+    let actual_digest =
+        target_content_digest(&tx, expected.installation, &accounts, &campaigns)?;
+    if actual_digest != content_sha256 {
+        return Err(StoreError::Invalid("UNIFIED_IMPORT_CONTENT_DIGEST_MISMATCH"));
+    }
+    let integrity: String = tx.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    if integrity != "ok" {
+        return Err(StoreError::Invalid("UNIFIED_IMPORT_INTEGRITY_FAILED"));
+    }
+    let mut fk_check = tx.prepare("PRAGMA foreign_key_check")?;
+    if fk_check.query([])?.next()?.is_some() {
+        return Err(StoreError::Invalid("UNIFIED_IMPORT_FOREIGN_KEY_FAILED"));
+    }
+    drop(fk_check);
+    tx.commit()?;
+    Ok(OriginalFinanceImport {
+        accounts: accounts.len(),
+        campaigns: campaigns.len(),
+        tables_per_account: ORIGINAL_ACCOUNT_TABLES.len(),
+        tables_per_campaign: ORIGINAL_CAMPAIGN_TABLES.len(),
+        account_rows: actual_account_rows,
+        campaign_rows: actual_campaign_rows,
+        inventory_sha256,
+        content_sha256,
+    })
+}
+
 /// Historical account-only direct test, not a cutover API. It deliberately
 /// does not import campaign obligations and must never activate the target.
 #[cfg(test)]
