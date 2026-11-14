@@ -1,6 +1,15 @@
 # Trade acceptance evidence map — #448 / #449 / #501
 
-## Latest #510 r4.0 offline manifest, exact roster and OS-kill witness — 71 direct tests PASS (14 Nov 2026)
+## Latest #510 r4: scoped ORIGINAL RiskBook invariant + read-only Summary in ONE finance transaction — 72 direct tests (14 Nov 2026)
+
+**Verified code SHA `05ac22a9a346536be244aed48e28fdb5c5040f0e`**, [GitHub CI #43621761540](https://github.com/iamaman11/okx/actions/runs/43621761540) **SUCCESS**: 65/65 filtered `okx-execution` RiskBook contracts, 6/6 kernel, 1/1 original AccountStore source, architecture guard/negative tests, rustfmt PASS. Filtered Rust tests ~1.08+0.00+0.11 seconds after build on Linux; **NOT** Windows/RB01–16/T09/T10 acceptance.
+
+The ORIGINAL native `risk::book::store::integrity::verify_reservation_aggregates` now delegates to **one shared money-invariant implementation** that accepts either legacy v5 single-campaign SQL or fully scoped `installation_id`/`campaign_id` finance v6 SQL. Its risk entries, occupancy, strategy occupancy, loss sources, immutable no-reserve contradiction check, consumed amount and debt high-water queries all restrict the complete campaign identity; same historical reservation key can exist in two campaigns. The ORIGINAL RiskBook `BookMeta` decoder and `BookReadback` budget projection are also reused. A new private `read_unified_campaign_summary(&Transaction,...)` computes exact per-campaign read-only Summary without opening a connection or writer and refuses corrupted native reserves. The **existing finance importer calls this exact original invariant** inside the SAME account+campaign SQLite COMMIT, and cold readback calls it again. Two-campaign tests prove independent unchanged X summary, correct remaining budget and refusal of corrupted Y. All older native v5 tests still pass.
+
+**Still NO-GO / Draft:** This is a **private scoped invariant and read-only Summary**, NOT a production `TradeService::Summary` route or grant; seven? remaining mutation operations have NOT been cut over, and none of the nine production callers currently owns unified SQL. The original AccountStore worker still opens account-local v2 SQL, and RiskBook owner still opens a separate campaign v5 SQL in production. Cloudflare server-side fence/owner epoch, authenticated full census, scoped original account write paths, all nine live actions, terminal/late/UNKNOWN, Windows RB01–16/T09/T10 26/26 are outstanding. The offline import marker remains `OFFLINE_NOT_AUTHORIZED`. **No merge/deploy/trade/Windows changes.**
+
+
+## Previous #510 r4.0 offline manifest and OS-kill witness — 71 direct tests (historical)
 
 **Verified code SHA `31b0438ee7a4c0febb39a66f544b61122603f12f`**, [GitHub CI #43620387365](https://github.com/iamaman11/okx/actions/runs/43620387365) **SUCCESS**: 64/64 filtered `okx-execution` + 6/6 `okx-kernel` + 1/1 original AccountStore fill/bill = **71 direct Rust cases**; architecture guard/negative self-tests and rustfmt PASS. Linux test execution after build ~0.90+0.00+0.07s, not full native Windows acceptance.
 
