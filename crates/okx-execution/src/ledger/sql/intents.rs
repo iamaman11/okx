@@ -2229,7 +2229,8 @@ impl AccountStore {
                        AND r.reservation_key=?4 AND i.risk_increase=1",
                     params![installation, account, id, reservation],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                ).optional()?
+                )
+                .optional()?
             } else {
                 db.query_row(
                     "SELECT i.begin_post_at,r.state,i.state,i.exchange_order_id
@@ -2239,7 +2240,8 @@ impl AccountStore {
                      WHERE i.intent_id=?1 AND i.risk_increase=1",
                     params![id, account, installation],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                ).optional()?
+                )
+                .optional()?
             };
         match recorded {
             Some((Some(at), state, intent_state, order_id))
