@@ -7,8 +7,8 @@ pub use stops::*;
 mod book;
 pub(crate) use book::{
     AccountReadback, ReservationReadback, read_unified_campaign_account_summary,
-    read_unified_campaign_reservation, read_unified_campaign_summary,
-    verify_legacy_import_source, verify_unified_import_campaign,
+    read_unified_campaign_reservation, read_unified_campaign_summary, verify_legacy_import_source,
+    verify_unified_import_campaign,
 };
 
 #[cfg(test)]
