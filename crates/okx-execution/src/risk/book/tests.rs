@@ -143,7 +143,9 @@ fn risk_book_contract_sql_concurrent_accounts_share_one_budget() {
         .write(true)
         .open(lease_path)
         .unwrap();
-    probe.try_lock().expect("former RiskBook writer still owns the lease");
+    probe
+        .try_lock()
+        .expect("former RiskBook writer still owns the lease");
     probe.unlock().unwrap();
     drop(probe);
     let mut recovered = open(&f);
@@ -2850,8 +2852,11 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
              WHERE installation_id=?1 AND campaign_id=?2
                AND reservation_key=?3 AND state='HELD'",
                 rusqlite::params![
-                    "test-installation", &campaign, original.reservation_key(),
-                    uid('a'), uid('b')
+                    "test-installation",
+                    &campaign,
+                    original.reservation_key(),
+                    uid('a'),
+                    uid('b')
                 ],
             )
             .unwrap(),
