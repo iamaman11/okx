@@ -12567,7 +12567,6 @@ fn kill_unified_native_post_at_commit(
     );
 }
 
-
 #[test]
 fn risk_book_contract_scoped_original_account_reserve_is_atomic_and_replay_exact() {
     use rusqlite::{Connection, OpenFlags};
@@ -12612,20 +12611,10 @@ fn risk_book_contract_scoped_original_account_reserve_is_atomic_and_replay_exact
     // Staged rows are invisible after rollback: neither account is reserved.
     {
         let tx = db.transaction().unwrap();
-        AccountStore::reserve_sql_transaction(
-            &tx,
-            Some(("installation", "acct-A")),
-            &ra,
-            3,
-        )
-        .unwrap();
-        AccountStore::reserve_sql_transaction(
-            &tx,
-            Some(("installation", "acct-B")),
-            &rb,
-            3,
-        )
-        .unwrap();
+        AccountStore::reserve_sql_transaction(&tx, Some(("installation", "acct-A")), &ra, 3)
+            .unwrap();
+        AccountStore::reserve_sql_transaction(&tx, Some(("installation", "acct-B")), &rb, 3)
+            .unwrap();
         tx.rollback().unwrap();
     }
     let count: i64 = db
@@ -12635,20 +12624,10 @@ fn risk_book_contract_scoped_original_account_reserve_is_atomic_and_replay_exact
     // One caller-owned commit covers both scoped original account receipts.
     {
         let tx = db.transaction().unwrap();
-        AccountStore::reserve_sql_transaction(
-            &tx,
-            Some(("installation", "acct-A")),
-            &ra,
-            3,
-        )
-        .unwrap();
-        AccountStore::reserve_sql_transaction(
-            &tx,
-            Some(("installation", "acct-B")),
-            &rb,
-            3,
-        )
-        .unwrap();
+        AccountStore::reserve_sql_transaction(&tx, Some(("installation", "acct-A")), &ra, 3)
+            .unwrap();
+        AccountStore::reserve_sql_transaction(&tx, Some(("installation", "acct-B")), &rb, 3)
+            .unwrap();
         tx.commit().unwrap();
     }
     assert_eq!(
@@ -12681,20 +12660,10 @@ fn risk_book_contract_scoped_original_account_reserve_is_atomic_and_replay_exact
     reopened.pragma_update(None, "foreign_keys", "ON").unwrap();
     {
         let tx = reopened.transaction().unwrap();
-        AccountStore::reserve_sql_transaction(
-            &tx,
-            Some(("installation", "acct-A")),
-            &ra,
-            4,
-        )
-        .unwrap(); // Exact lost ACK returns the original receipt.
+        AccountStore::reserve_sql_transaction(&tx, Some(("installation", "acct-A")), &ra, 4)
+            .unwrap(); // Exact lost ACK returns the original receipt.
         assert!(matches!(
-            AccountStore::reserve_sql_transaction(
-                &tx,
-                Some(("installation", "acct-B")),
-                &ra,
-                4
-            ),
+            AccountStore::reserve_sql_transaction(&tx, Some(("installation", "acct-B")), &ra, 4),
             Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"))
         ));
         let mut altered = ra.clone();
@@ -12711,15 +12680,14 @@ fn risk_book_contract_scoped_original_account_reserve_is_atomic_and_replay_exact
         tx.rollback().unwrap();
     }
     assert_eq!(
-        reopened.query_row::<i64, _, _>(
-            "SELECT COUNT(*) FROM risk_receipts",
-            [],
-            |r| r.get(0)
-        ).unwrap(),
+        reopened
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_receipts", [], |r| r.get(0))
+            .unwrap(),
         2
     );
     assert_eq!(
-        reopened.query_row::<String, _, _>("PRAGMA integrity_check", [], |r| r.get(0))
+        reopened
+            .query_row::<String, _, _>("PRAGMA integrity_check", [], |r| r.get(0))
             .unwrap(),
         "ok"
     );
