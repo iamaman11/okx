@@ -96,7 +96,10 @@ pub(in crate::risk::book) fn begin_unified_post_and_account_transaction(
          WHERE installation_id=?1 AND campaign_id=?2 AND reservation_key=?3
            AND state='POSTED' AND plan_sha256=?4",
         rusqlite::params![
-            installation, campaign, request.reservation_key, request.plan_sha256
+            installation,
+            campaign,
+            request.reservation_key,
+            request.plan_sha256
         ],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
