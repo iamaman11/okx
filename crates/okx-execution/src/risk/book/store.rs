@@ -316,42 +316,53 @@ fn read_meta_for_scope(
     tx: &rusqlite::Transaction<'_>,
     scope: Option<(&str, &str)>,
 ) -> Result<BookMeta> {
-    let query = "SELECT policy_revision,generation,book_sequence,global_limit_usdt,global_reserved_usdt,
+    let query =
+        "SELECT policy_revision,generation,book_sequence,global_limit_usdt,global_reserved_usdt,
         loss_limit_usd,loss_consumed_usd,loss_reserved_usd,entry_limit_usd,
         entry_consumed_usd,entry_opening_consumed_usd,entry_reserved_usd,entry_bound_breach_usd
         FROM risk_meta WHERE singleton=1";
-    let scoped_query = "SELECT policy_revision,generation,book_sequence,global_limit_usdt,global_reserved_usdt,
+    let scoped_query =
+        "SELECT policy_revision,generation,book_sequence,global_limit_usdt,global_reserved_usdt,
         loss_limit_usd,loss_consumed_usd,loss_reserved_usd,entry_limit_usd,
         entry_consumed_usd,entry_opening_consumed_usd,entry_reserved_usd,entry_bound_breach_usd
         FROM risk_meta WHERE singleton=1 AND installation_id=?1 AND campaign_id=?2";
-    let args = scope.map(|(installation, campaign)| vec![installation, campaign])
+    let args = scope
+        .map(|(installation, campaign)| vec![installation, campaign])
         .unwrap_or_default();
     // Choose the scoped query only when its two identity arguments are present.
     // The legacy v5 source retains the original, singleton-only SQL.
     let query = if scope.is_some() { scoped_query } else { query };
     let row: (
-        i64,i64,i64,String,String,String,String,String,String,String,String,String,String
-    ) = tx.query_row(
-        query,
-        rusqlite::params_from_iter(args.iter()),
-        |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-                r.get(7)?,
-                r.get(8)?,
-                r.get(9)?,
-                r.get(10)?,
-                r.get(11)?,
-                r.get(12)?,
-            ))
-        },
-    )?;
+        i64,
+        i64,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = tx.query_row(query, rusqlite::params_from_iter(args.iter()), |r| {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+            r.get(6)?,
+            r.get(7)?,
+            r.get(8)?,
+            r.get(9)?,
+            r.get(10)?,
+            r.get(11)?,
+            r.get(12)?,
+        ))
+    })?;
     Ok(BookMeta {
         policy_revision: u64::try_from(row.0)
             .map_err(|_| RiskStoreError::Corrupt("POLICY_REVISION"))?,
@@ -455,8 +466,7 @@ pub(crate) fn verify_unified_import_campaign(
     }
     let scope = Some((installation, campaign));
     let meta = read_meta_for_scope(tx, scope).map_err(|_| INVALID)?;
-    integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope)
-        .map_err(|_| INVALID)
+    integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope).map_err(|_| INVALID)
 }
 
 pub(crate) fn verify_legacy_import_source(
