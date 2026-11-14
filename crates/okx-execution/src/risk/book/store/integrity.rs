@@ -1,8 +1,8 @@
 //! Verifies that cached capacities match exact, durable primary obligations.
 //! Called in a SQLite transaction before readback or authorization; no independent writer.
 use super::{BookMeta, Result, RiskAmount, RiskStoreError, amount};
-use std::collections::BTreeMap;
 use rusqlite::params_from_iter;
+use std::collections::BTreeMap;
 
 // The risk_entries rows carry the primary remaining obligations. Cached totals
 // never authorize a grant unless they agree with those exact-decimal records.
@@ -24,7 +24,8 @@ pub(super) fn verify_reservation_aggregates_for_scope(
     meta: &BookMeta,
     scope: Option<(&str, &str)>,
 ) -> Result<()> {
-    let scoped_args = scope.map(|(installation, campaign)| vec![installation, campaign])
+    let scoped_args = scope
+        .map(|(installation, campaign)| vec![installation, campaign])
         .unwrap_or_default();
     let mut accounts: BTreeMap<String, RiskAmount> = BTreeMap::new();
     let mut strategies: BTreeMap<(String, String), RiskAmount> = BTreeMap::new();
@@ -256,7 +257,9 @@ pub(super) fn verify_reservation_aggregates_for_scope(
              WHERE entry_settlement_revision > 0"
         };
         let mut stmt = tx.prepare(query)?;
-        let rows = stmt.query_map(params_from_iter(scoped_args.iter()), |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map(params_from_iter(scoped_args.iter()), |r| {
+            r.get::<_, String>(0)
+        })?;
         for row in rows {
             consumed_from_receipts = consumed_from_receipts.checked_add(&amount(row?)?)?;
         }
@@ -297,11 +300,10 @@ pub(super) fn verify_reservation_aggregates_for_scope(
     } else {
         "SELECT COUNT(*) FROM risk_loss_source"
     };
-    let source_count: i64 = tx.query_row(
-        source_query,
-        params_from_iter(scoped_args.iter()),
-        |r| r.get(0),
-    )?;
+    let source_count: i64 =
+        tx.query_row(source_query, params_from_iter(scoped_args.iter()), |r| {
+            r.get(0)
+        })?;
     let source_count = u64::try_from(source_count)
         .map_err(|_| RiskStoreError::Corrupt("LOSS_SOURCE_AGGREGATES"))?;
     if cumulative != meta.loss_consumed || source_count != policy_count {
