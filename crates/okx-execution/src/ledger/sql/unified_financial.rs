@@ -265,13 +265,11 @@ pub(in crate::account_store) fn settle_entry(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let Some((source_digest, source_amount, bill_digest, original_json, fill_order)) = source else {
+    let Some((source_digest, source_amount, bill_digest, original_json, fill_order)) = source
+    else {
         return Err(StoreError::Invalid("UNIFIED_ORIGINAL_SOURCE_MISSING"));
     };
-    if !digest_ok(&source_digest)
-        || !digest_ok(&bill_digest)
-        || fill_order != intent_exchange
-    {
+    if !digest_ok(&source_digest) || !digest_ok(&bill_digest) || fill_order != intent_exchange {
         return Err(StoreError::Invalid("UNIFIED_SOURCE_DIGEST_INVALID"));
     }
     let cumulative = money(&source_amount)?;
