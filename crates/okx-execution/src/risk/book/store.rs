@@ -431,6 +431,20 @@ fn apply_census_loss(
     Ok(())
 }
 
+/// Validate a stopped v5 campaign using its ORIGINAL RiskBook owner rules.
+/// Read-only source transaction; never grants authority, alters policy, or
+/// recomputes financial budgets in the migration layer.
+pub(crate) fn verify_legacy_import_source(
+    source: &Connection,
+) -> std::result::Result<(), &'static str> {
+    const INVALID: &str = "UNIFIED_LEGACY_CAMPAIGN_AGGREGATES_INVALID";
+    let tx = source.unchecked_transaction().map_err(|_| INVALID)?;
+    let meta = read_meta(&tx).map_err(|_| INVALID)?;
+    verify_reservation_aggregates(&tx, &meta).map_err(|_| INVALID)?;
+    tx.rollback().map_err(|_| INVALID)?;
+    Ok(())
+}
+
 pub(super) struct RiskBookStore {
     connection: Connection,
     _lease: File,
