@@ -12566,3 +12566,161 @@ fn kill_unified_native_post_at_commit(
         "original account + RiskBook child never reached {phase}"
     );
 }
+
+
+#[test]
+fn risk_book_contract_scoped_original_account_reserve_is_atomic_and_replay_exact() {
+    use rusqlite::{Connection, OpenFlags};
+
+    // Two genuine native v2 account producers use the SAME raw intent ID.
+    // Transfer their original rows into one unactivated v6 finance SQLite.
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let file = path();
+    let mut db = Connection::open(&file).unwrap();
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    db.pragma_update(None, "synchronous", "FULL").unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    super::sql::unified_financial::importer::import_stopped_accounts_into_empty_finance(
+        &mut db,
+        "installation",
+        &[&sa, &sb],
+    )
+    .unwrap();
+
+    let receipt = |account: &str, prepared: &StoredIntent| CentralReceipt {
+        reservation_key: "same-key".into(),
+        account_key: account.into(),
+        installation_id: "installation".into(),
+        instance_id: None,
+        intent_id: prepared.intent_id.clone(),
+        plan_hash: prepared.plan_hash.clone(),
+        policy_revision: 1,
+        receipt_hash: "b".repeat(64),
+        requested_loss_usd: Decimal::ONE,
+        conversion_digest: "c".repeat(64),
+    };
+    let ra = receipt("acct-A", &ai);
+    let rb = receipt("acct-B", &bi);
+    // Staged rows are invisible after rollback: neither account is reserved.
+    {
+        let tx = db.transaction().unwrap();
+        AccountStore::reserve_sql_transaction(
+            &tx,
+            Some(("installation", "acct-A")),
+            &ra,
+            3,
+        )
+        .unwrap();
+        AccountStore::reserve_sql_transaction(
+            &tx,
+            Some(("installation", "acct-B")),
+            &rb,
+            3,
+        )
+        .unwrap();
+        tx.rollback().unwrap();
+    }
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM risk_receipts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    // One caller-owned commit covers both scoped original account receipts.
+    {
+        let tx = db.transaction().unwrap();
+        AccountStore::reserve_sql_transaction(
+            &tx,
+            Some(("installation", "acct-A")),
+            &ra,
+            3,
+        )
+        .unwrap();
+        AccountStore::reserve_sql_transaction(
+            &tx,
+            Some(("installation", "acct-B")),
+            &rb,
+            3,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    assert_eq!(
+        db.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM risk_receipts WHERE reservation_key='same-key'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap(),
+        2,
+        "same venue-side IDs may coexist in distinct account scopes"
+    );
+    for account in ["acct-A", "acct-B"] {
+        let state: (String, String, i64) = db
+            .query_row(
+                "SELECT i.state,r.state,i.revision FROM intents i
+                 JOIN risk_receipts r ON i.installation_id=r.installation_id
+                   AND i.account_key=r.account_key AND i.intent_id=r.intent_id
+                 WHERE i.installation_id='installation' AND i.account_key=?1",
+                [account],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state.0, "RESERVED");
+        assert_eq!(state.1, "HELD");
+        assert_eq!(state.2, 1);
+    }
+    drop(db);
+    let mut reopened = Connection::open(&file).unwrap();
+    reopened.pragma_update(None, "foreign_keys", "ON").unwrap();
+    {
+        let tx = reopened.transaction().unwrap();
+        AccountStore::reserve_sql_transaction(
+            &tx,
+            Some(("installation", "acct-A")),
+            &ra,
+            4,
+        )
+        .unwrap(); // Exact lost ACK returns the original receipt.
+        assert!(matches!(
+            AccountStore::reserve_sql_transaction(
+                &tx,
+                Some(("installation", "acct-B")),
+                &ra,
+                4
+            ),
+            Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"))
+        ));
+        let mut altered = ra.clone();
+        altered.receipt_hash = "d".repeat(64);
+        assert!(matches!(
+            AccountStore::reserve_sql_transaction(
+                &tx,
+                Some(("installation", "acct-A")),
+                &altered,
+                4
+            ),
+            Err(StoreError::Invalid("CENTRAL_RECEIPT_CONFLICT"))
+        ));
+        tx.rollback().unwrap();
+    }
+    assert_eq!(
+        reopened.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM risk_receipts",
+            [],
+            |r| r.get(0)
+        ).unwrap(),
+        2
+    );
+    assert_eq!(
+        reopened.query_row::<String, _, _>("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap(),
+        "ok"
+    );
+}
