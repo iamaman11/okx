@@ -725,7 +725,27 @@ CREATE INDEX idx_risk_entries_active_account ON risk_entries(installation_id,cam
 CREATE INDEX idx_risk_entries_active_balance ON risk_entries(installation_id,campaign_id,state)
  WHERE state <> 'RELEASED';
 
+-- One offline migration receipt. This is NOT a financial ledger or proof
+-- that Cloudflare revoked the former authority; no runtime grants from it.
+-- The 47 original financial tables remain unchanged in number.
+CREATE TABLE finance_import_manifest(
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+ installation_id TEXT NOT NULL CHECK(length(installation_id)>0),
+ inventory_sha256 TEXT NOT NULL CHECK(length(inventory_sha256)=64),
+ content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+ account_count INTEGER NOT NULL CHECK(account_count>0),
+ campaign_count INTEGER NOT NULL CHECK(campaign_count>0),
+ account_rows INTEGER NOT NULL CHECK(account_rows>=0),
+ campaign_rows INTEGER NOT NULL CHECK(campaign_rows>=0),
+ state TEXT NOT NULL CHECK(state='OFFLINE_NOT_AUTHORIZED')
+) STRICT;
+
 -- Original immutable-event rules and scoped source-invalidation triggers.
+CREATE TRIGGER immutable_finance_import_manifest_update BEFORE UPDATE ON finance_import_manifest
+ BEGIN SELECT RAISE(ABORT,'IMMUTABLE_FINANCE_IMPORT'); END;
+CREATE TRIGGER immutable_finance_import_manifest_delete BEFORE DELETE ON finance_import_manifest
+ BEGIN SELECT RAISE(ABORT,'IMMUTABLE_FINANCE_IMPORT'); END;
+
 CREATE TRIGGER immutable_identity BEFORE UPDATE ON account_meta BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ACCOUNT_IDENTITY'); END;
 CREATE TRIGGER immutable_identity_delete BEFORE DELETE ON account_meta BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ACCOUNT_IDENTITY'); END;
 CREATE TRIGGER immutable_strategy_definition_update BEFORE UPDATE ON strategy_definition_versions BEGIN SELECT RAISE(ABORT,'IMMUTABLE_STRATEGY_DEFINITION'); END;
