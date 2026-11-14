@@ -275,7 +275,7 @@ pub(super) struct HeldReceipt {
     pub replayed: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct BookReadback {
+pub(crate) struct BookReadback {
     pub book_sequence: u64,
     pub policy_revision: u64,
     pub global_limit_usdt: String,
