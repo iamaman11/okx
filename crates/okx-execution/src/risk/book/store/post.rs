@@ -5,14 +5,14 @@
 //! policy epoch and legacy Worker fence are proven.
 use super::{
     LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, VerifiedCensus, amount,
-    apply_census_loss, read_meta, safe_integer, valid_digest, verify_reservation_aggregates,
+    apply_census_loss_for_scope, read_meta_for_scope, safe_integer, valid_digest,
 };
 use okx_kernel::risk::{
     model::PostCausalProof,
     money::RiskAmount,
     rules::{RiskRuleError, validate_account_occupancy, validate_post_causality},
 };
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params_from_iter, types::Value};
 
 #[derive(Debug, Clone)]
 pub(in crate::risk::book) struct PostFenceInput {
@@ -34,13 +34,57 @@ pub(in crate::risk::book) struct PostAuthorized {
     pub existing_modelled_loss_usdt: String,
 }
 
+/// Before the caller's COMMIT, Authorized is an SQL transition proposal,
+/// NOT permission to send an exchange order.
+#[derive(Debug)]
+pub(in crate::risk::book) enum PostDecision {
+    Authorized(PostAuthorized),
+    Denied(RiskRuleError),
+}
+
 impl RiskBookStore {
-    /// Private until Native authenticated evidence and durable policy epoch
-    /// are wired. This operation never submits a venue order.
+    /// Legacy v5 and scoped v6 run ONE Rust policy/monotonic-loss algorithm.
+    /// Only the legacy owner commits here; v6 callers own their transaction.
     pub(in crate::risk::book) fn begin_post(
         &mut self,
         request: &PostFenceInput,
     ) -> Result<PostAuthorized> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result = begin_post_transaction(&tx, request, None)?;
+        tx.commit()?;
+        match result {
+            PostDecision::Authorized(grant) => Ok(grant),
+            PostDecision::Denied(reason) => Err(RiskStoreError::Denied(reason)),
+        }
+    }
+}
+
+/// PRIVATE, no TradeService entrypoint, no post permission.
+pub(in crate::risk::book) fn begin_unified_post_transaction(
+    tx: &Transaction<'_>,
+    installation: &str,
+    campaign: &str,
+    request: &PostFenceInput,
+) -> Result<PostDecision> {
+    if installation.is_empty() || campaign.is_empty() {
+        return Err(RiskStoreError::Invalid("UNIFIED_POST_SCOPE_INVALID"));
+    }
+    begin_post_transaction(tx, request, Some((installation, campaign)))
+}
+
+fn scope_values(scope: Option<(&str, &str)>) -> Vec<Value> {
+    if let Some((installation, campaign)) = scope {
+        vec![Value::Text(installation.to_owned()), Value::Text(campaign.to_owned())]
+    } else {
+        Vec::new()
+    }
+}
+
+fn begin_post_transaction(
+    tx: &Transaction<'_>,
+    request: &PostFenceInput,
+    scope: Option<(&str, &str)>,
+) -> Result<PostDecision> {
         if request.reservation_key.is_empty()
             || request.reservation_key.len() > 512
             || !valid_digest(&request.plan_sha256)
@@ -69,11 +113,8 @@ impl RiskBookStore {
         {
             return Err(RiskStoreError::CensusUnproven);
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut meta = read_meta(&tx)?;
-        verify_reservation_aggregates(&tx, &meta)?;
+        let mut meta = read_meta_for_scope(tx, scope)?;
+        super::integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope)?;
         if meta.policy_revision != request.policy_revision {
             return Err(RiskStoreError::PolicyConflict);
         }
@@ -96,10 +137,20 @@ impl RiskBookStore {
             i64,
         )> = tx
             .query_row(
-                "SELECT plan_sha256,state,account_key,held_at_ms,reserve_read_floor_ms,
-                        native_incarnation,reserved_usdt,entry_upper_usd,book_sequence
-                 FROM risk_entries WHERE reservation_key=?1",
-                params![&request.reservation_key],
+                if scope.is_some() {
+                    "SELECT plan_sha256,state,account_key,held_at_ms,reserve_read_floor_ms,
+                            native_incarnation,reserved_usdt,entry_upper_usd,book_sequence
+                     FROM risk_entries WHERE reservation_key=?1
+                     AND installation_id=?2 AND campaign_id=?3"
+                } else {
+                    "SELECT plan_sha256,state,account_key,held_at_ms,reserve_read_floor_ms,
+                            native_incarnation,reserved_usdt,entry_upper_usd,book_sequence
+                     FROM risk_entries WHERE reservation_key=?1"
+                },
+                params_from_iter(
+                    std::iter::once(Value::Text(request.reservation_key.clone()))
+                        .chain(scope_values(scope)).collect::<Vec<_>>().iter()
+                ),
                 |r| {
                     Ok((
                         r.get(0)?,
@@ -153,13 +204,23 @@ impl RiskBookStore {
         }
         let mut policies = Vec::new();
         {
-            let mut query = tx.prepare(
+            let query = if scope.is_some() {
+                "SELECT p.account_key,p.limit_usdt,p.entry_limit_usd,o.reserved_usdt
+                 FROM risk_policy_account p
+                 JOIN risk_account_occupied o
+                   ON p.installation_id=o.installation_id
+                  AND p.campaign_id=o.campaign_id AND p.account_key=o.account_key
+                 WHERE p.installation_id=?1 AND p.campaign_id=?2
+                 ORDER BY p.account_key"
+            } else {
                 "SELECT p.account_key,p.limit_usdt,p.entry_limit_usd,o.reserved_usdt
                  FROM risk_policy_account p
                  JOIN risk_account_occupied o USING(account_key)
-                 ORDER BY p.account_key",
-            )?;
-            let rows = query.query_map([], |r| {
+                 ORDER BY p.account_key"
+            };
+            let mut query = tx.prepare(query)?;
+            let args = scope_values(scope);
+            let rows = query.query_map(params_from_iter(args.iter()), |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -219,20 +280,18 @@ impl RiskBookStore {
         // A complete native financial observation may advance the cumulative
         // loss high-water. It is persisted even when the refreshed budget
         // subsequently blocks POST; the SQL transaction owns this mutation.
-        apply_census_loss(&tx, &mut meta, census)?;
+        apply_census_loss_for_scope(tx, &mut meta, census, scope)?;
         if RiskAmount::sum_exceeds(
             &[&meta.loss_consumed, &meta.loss_reserved],
             &meta.loss_limit,
         ) {
-            tx.commit()?;
-            return Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted));
+            return Ok(PostDecision::Denied(RiskRuleError::LossBudgetExhausted));
         }
         if RiskAmount::sum_exceeds(
             &[&meta.entry_consumed, &meta.entry_reserved],
             &meta.entry_limit,
         ) {
-            tx.commit()?;
-            return Err(RiskStoreError::Denied(RiskRuleError::EntryBudgetExhausted));
+            return Ok(PostDecision::Denied(RiskRuleError::EntryBudgetExhausted));
         }
 
         let next_seq = meta
@@ -243,48 +302,64 @@ impl RiskBookStore {
         let next_seq_sql =
             i64::try_from(next_seq).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
         let existing = total.checked_sub(&amount(reserved_usdt)?)?.canonical()?;
-        let changed = tx.execute(
+        let sql = if scope.is_some() {
             "UPDATE risk_entries SET state='POSTED',
                     post_authorized_at_ms=?1,post_sequence=?2,
                     post_proof_digest=?3,post_source_digest=?4,
                     post_existing_occupied_usdt=?5
              WHERE reservation_key=?6 AND state='HELD' AND plan_sha256=?7
-               AND policy_revision=?8 AND book_sequence=?9",
-            params![
-                request.now_ms,
-                next_seq_sql,
-                &request.source_proof_digest,
-                &census.source_digest,
-                &existing,
-                &request.reservation_key,
-                &request.plan_sha256,
-                i64::try_from(request.policy_revision)
-                    .map_err(|_| RiskStoreError::PolicyConflict)?,
-                reservation_seq,
-            ],
-        )?;
+               AND policy_revision=?8 AND book_sequence=?9
+               AND installation_id=?10 AND campaign_id=?11"
+        } else {
+            "UPDATE risk_entries SET state='POSTED',
+                    post_authorized_at_ms=?1,post_sequence=?2,
+                    post_proof_digest=?3,post_source_digest=?4,
+                    post_existing_occupied_usdt=?5
+             WHERE reservation_key=?6 AND state='HELD' AND plan_sha256=?7
+               AND policy_revision=?8 AND book_sequence=?9"
+        };
+        let mut args = vec![
+            Value::Integer(request.now_ms),
+            Value::Integer(next_seq_sql),
+            Value::Text(request.source_proof_digest.clone()),
+            Value::Text(census.source_digest.clone()),
+            Value::Text(existing.clone()),
+            Value::Text(request.reservation_key.clone()),
+            Value::Text(request.plan_sha256.clone()),
+            Value::Integer(i64::try_from(request.policy_revision)
+                .map_err(|_| RiskStoreError::PolicyConflict)?),
+            Value::Integer(reservation_seq),
+        ];
+        args.extend(scope_values(scope));
+        let changed = tx.execute(sql, params_from_iter(args.iter()))?;
         if changed != 1 {
             return Err(RiskStoreError::StaleSequence);
         }
-        let changed = tx.execute(
+        let sql = if scope.is_some() {
             "UPDATE risk_meta SET book_sequence=?1
-             WHERE singleton=1 AND book_sequence=?2 AND policy_revision=?3 AND generation=?4",
-            params![
-                next_seq_sql,
-                i64::try_from(meta.sequence)
-                    .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
-                i64::try_from(meta.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?,
-                i64::try_from(meta.generation).map_err(|_| RiskStoreError::StaleGeneration)?,
-            ],
-        )?;
+             WHERE singleton=1 AND book_sequence=?2 AND policy_revision=?3 AND generation=?4
+               AND installation_id=?5 AND campaign_id=?6"
+        } else {
+            "UPDATE risk_meta SET book_sequence=?1
+             WHERE singleton=1 AND book_sequence=?2 AND policy_revision=?3 AND generation=?4"
+        };
+        let mut args = vec![
+            Value::Integer(next_seq_sql),
+            Value::Integer(i64::try_from(meta.sequence)
+                .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?),
+            Value::Integer(i64::try_from(meta.policy_revision)
+                .map_err(|_| RiskStoreError::PolicyConflict)?),
+            Value::Integer(i64::try_from(meta.generation)
+                .map_err(|_| RiskStoreError::StaleGeneration)?),
+        ];
+        args.extend(scope_values(scope));
+        let changed = tx.execute(sql, params_from_iter(args.iter()))?;
         if changed != 1 {
             return Err(RiskStoreError::StaleSequence);
         }
-        tx.commit()?;
-        Ok(PostAuthorized {
+        Ok(PostDecision::Authorized(PostAuthorized {
             reservation_key: request.reservation_key.clone(),
             book_sequence: next_seq,
             existing_modelled_loss_usdt: existing,
-        })
-    }
+        }))
 }
