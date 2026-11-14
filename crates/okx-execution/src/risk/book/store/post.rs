@@ -76,6 +76,49 @@ pub(in crate::risk::book) fn begin_unified_post_transaction(
     begin_post_transaction(tx, request, Some((installation, campaign)))
 }
 
+/// Full native account + RiskBook BEGIN_POST under ONE caller-owned v6 SQL
+/// transaction. No independent writer and no venue POST. Do not interpret
+/// Authorized as venue capability until the caller has committed this tx and
+/// authenticated live source/owner epoch outside this private draft.
+pub(in crate::risk::book) fn begin_unified_post_and_account_transaction(
+    tx: &Transaction<'_>,
+    installation: &str,
+    campaign: &str,
+    request: &PostFenceInput,
+) -> Result<PostDecision> {
+    let decision = begin_unified_post_transaction(tx, installation, campaign, request)?;
+    let PostDecision::Authorized(_) = &decision else {
+        // Preserve the original high-water observation on ordinary denial.
+        return Ok(decision);
+    };
+    let (account, intent): (String, String) = tx.query_row(
+        "SELECT account_key,intent_id FROM risk_entries
+         WHERE installation_id=?1 AND campaign_id=?2 AND reservation_key=?3
+           AND state='POSTED' AND plan_sha256=?4",
+        rusqlite::params![
+            installation, campaign, request.reservation_key, request.plan_sha256
+        ],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let updated = crate::account_store::AccountStore::begin_post_sql_transaction(
+        tx,
+        Some((installation, &account)),
+        &intent,
+        i64::try_from(request.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?,
+        request.now_ms,
+        Some(&request.reservation_key),
+    )
+    .map_err(|error| match error {
+        crate::account_store::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),
+        crate::account_store::StoreError::Sql(error) => RiskStoreError::Sql(error),
+        crate::account_store::StoreError::Io(error) => RiskStoreError::Io(error),
+    })?;
+    if !updated {
+        return Err(RiskStoreError::AlreadyResolved);
+    }
+    Ok(decision)
+}
+
 fn scope_values(scope: Option<(&str, &str)>) -> Vec<Value> {
     if let Some((installation, campaign)) = scope {
         vec![
