@@ -602,3 +602,99 @@ fn risk_book_contract_single_finance_sqlite_rejects_forged_primary_receipt_proje
         .is_err()
     );
 }
+
+#[test]
+fn risk_book_contract_unified_receipt_rejects_wrong_account_source_and_digest() {
+    let fixture = Fixture::new("receipt-fk-isolation");
+    let mut db = connection(&fixture.path);
+    seed(&db);
+    // Before the fix, these two independent FKs could both be satisfied:
+    // a reservation owned by account A, but a source owned by account B.
+    // The true one-to-one FK must include reservation, account AND intent.
+    let wrong_account = db.execute(
+        "INSERT INTO finance_entry_receipts(
+           installation_id,campaign_id,reservation_key,account_key,intent_id,
+           settlement_revision,source_digest,cumulative_entry_usd,book_sequence)
+         VALUES('install-one','campaign-X','reserve-acct-A',
+                'acct-B','intent-1',1,?1,'4',1)",
+        ["b".repeat(64)],
+    );
+    assert!(matches!(
+        wrong_account,
+        Err(rusqlite::Error::SqliteFailure(ref code, _))
+            if code.code == rusqlite::ErrorCode::ConstraintViolation
+    ), "receipt may NEVER borrow another account's original source");
+
+    let wrong_digest = db.execute(
+        "INSERT INTO finance_entry_receipts(
+           installation_id,campaign_id,reservation_key,account_key,intent_id,
+           settlement_revision,source_digest,cumulative_entry_usd,book_sequence)
+         VALUES('install-one','campaign-X','reserve-acct-A',
+                'acct-A','intent-1',1,?1,'6',1)",
+        ["b".repeat(64)],
+    );
+    assert!(matches!(
+        wrong_digest,
+        Err(rusqlite::Error::SqliteFailure(ref code, _))
+            if code.code == rusqlite::ErrorCode::ConstraintViolation
+    ), "receipt digest must identify the SAME immutable source revision");
+    assert_eq!(receipt_count(&db), 0);
+    assert_eq!(
+        campaign(&db, "campaign-X"),
+        (0, "0".into(), "20".into(), "0".into())
+    );
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    assert_eq!(settle_entry(&tx, &entry_a()).unwrap().cumulative_entry_usd, "6");
+    tx.commit().unwrap();
+    assert_eq!(receipt_count(&db), 1);
+}
+
+#[test]
+fn risk_book_contract_unified_rejects_missing_or_fake_native_receipt() {
+    let fixture = Fixture::new("native-evidence-mandatory");
+    let mut db = connection(&fixture.path);
+    seed(&db);
+    // No source row can be created with a NULL/empty missing producer
+    // receipt and then used to increase consumed risk.
+    let missing = db.execute(
+        "INSERT INTO finance_entry_sources(
+           installation_id,account_key,intent_id,settlement_revision,
+           fill_id,bill_id,source_digest,cumulative_entry_usd)
+         VALUES('install-one','acct-A','intent-1',2,
+                'fill-same','bill-same',?1,'7')",
+        ["c".repeat(64)],
+    );
+    assert!(matches!(
+        missing,
+        Err(rusqlite::Error::SqliteFailure(ref code, _))
+            if code.code == rusqlite::ErrorCode::ConstraintViolation
+    ));
+
+    // A nonempty but non-EntrySettlementEvidence JSON value is not a
+    // substitute for the original account financial producer.
+    let digest = "c".repeat(64);
+    db.execute(
+        "INSERT INTO finance_bills VALUES(
+           'install-one','acct-A','bill-invalid','fill-same',?1)",
+        [&digest],
+    ).unwrap();
+    db.execute(
+        "INSERT INTO finance_entry_sources(
+           installation_id,account_key,intent_id,settlement_revision,
+           fill_id,bill_id,source_digest,cumulative_entry_usd,original_receipt_json)
+         VALUES('install-one','acct-A','intent-1',2,
+                'fill-same','bill-invalid',?1,'7',?2)",
+        params![digest, r#""not-an-original-receipt""#],
+    ).unwrap();
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    assert!(matches!(
+        settle_entry(&tx, &EntryRef {source_revision: 2, ..entry_a()}),
+        Err(StoreError::Invalid("UNIFIED_ORIGINAL_JSON_CORRUPT"))
+    ));
+    tx.rollback().unwrap();
+    assert_eq!(receipt_count(&db), 0);
+    assert_eq!(
+        campaign(&db, "campaign-X"),
+        (0, "0".into(), "20".into(), "0".into())
+    );
+}
