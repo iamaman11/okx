@@ -652,7 +652,10 @@ fn risk_book_contract_sql_account_observation_and_inspect_preserve_revision() {
         Err(RiskStoreError::Invalid("INSPECTION_IDENTITY"))
     ));
     assert_eq!(store.readback().unwrap().book_sequence, 1);
-    drop(store);
+    // This exercises the original owner's explicitly ordered production
+    // shutdown: close SQLite first, then unlock the exact native writer
+    // lease before allowing the next owner to open. No retry or sleep.
+    store.close();
 
     let mut reopened = open(&fixture);
     assert_eq!(reopened.account_readback(&account('a')).unwrap(), account_a);
