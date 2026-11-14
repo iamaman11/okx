@@ -7,7 +7,7 @@ use crate::{StoreError, StoreResult};
 use rusqlite::{
     Connection, Transaction, TransactionBehavior, params, params_from_iter, types::Value,
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, path::Path};
 
 /// Same 29 canonical account-v2 tables plus 10 source-owned derived tables.
 /// Compare against the physical old source on EVERY import: new unlisted
@@ -181,6 +181,16 @@ fn copy_one_account(
             let native_values = (0..source_cols.len())
                 .map(|i| row.get::<_, Value>(i))
                 .collect::<Result<Vec<_>, _>>()?;
+            for (column, value) in source_cols.iter().zip(&native_values) {
+                if column == "installation_id"
+                    && value != &Value::Text(installation.to_owned())
+                {
+                    return Err(StoreError::Invalid("UNIFIED_LEGACY_ROW_INSTALLATION_MISMATCH"));
+                }
+                if column == "account_key" && value != &Value::Text(account.to_owned()) {
+                    return Err(StoreError::Invalid("UNIFIED_LEGACY_ROW_ACCOUNT_MISMATCH"));
+                }
+            }
             let mut values = Vec::with_capacity(target_cols.len());
             for col in &target_cols {
                 if let Some(i) = source_cols.iter().position(|c| c == col) {
@@ -236,6 +246,33 @@ pub(in crate::account_store) fn import_stopped_accounts_into_empty_finance(
             "UNIFIED_IMPORT_SQLITE_DURABILITY_INVALID",
         ));
     }
+    // Local exclusive OS leases MUST cover the entire copy/verification
+    // transaction. A read-only SQLite handle alone does not prohibit the
+    // original AccountStore writer from changing WAL under our feet.
+    let target_path: String = target.query_row(
+        "SELECT file FROM pragma_database_list WHERE name='main'", [],
+        |r| r.get(0),
+    )?;
+    let mut original_paths = Vec::new();
+    for source in sources {
+        let path: String = source.query_row(
+            "SELECT file FROM pragma_database_list WHERE name='main'", [],
+            |r| r.get(0),
+        )?;
+        if path.is_empty() || path == target_path {
+            return Err(StoreError::Invalid("UNIFIED_IMPORT_SOURCE_PATH_INVALID"));
+        }
+        original_paths.push(path);
+    }
+    original_paths.sort();
+    if original_paths.windows(2).any(|paths| paths[0] == paths[1]) {
+        return Err(StoreError::Invalid("UNIFIED_DUPLICATE_ACCOUNT_SOURCE"));
+    }
+    let mut _source_leases = Vec::new();
+    for path in &original_paths {
+        _source_leases.push(crate::AccountStore::writer_lease(Path::new(path))?);
+    }
+
     let mut identities = BTreeSet::new();
     for source in sources {
         let account = verify_original_source(source, installation)?;
