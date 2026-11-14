@@ -28,7 +28,10 @@ pub(crate) fn test_stage_scoped_begin_post(
         money::RiskAmount,
     };
     use std::collections::BTreeMap;
-    use store::{PostDecision, PostFenceInput, VerifiedCensus, begin_unified_post_transaction};
+    use store::{
+        PostDecision, PostFenceInput, VerifiedCensus,
+        begin_unified_post_and_account_transaction,
+    };
     let zero = RiskAmount::zero();
     let reads = cohort
         .iter()
@@ -71,7 +74,7 @@ pub(crate) fn test_stage_scoped_begin_post(
             account_reads: reads,
         },
     };
-    match begin_unified_post_transaction(tx, installation, campaign, &input)
+    match begin_unified_post_and_account_transaction(tx, installation, campaign, &input)
         .map_err(|e| e.to_string())?
     {
         PostDecision::Authorized(staged) => Ok(staged.book_sequence),
