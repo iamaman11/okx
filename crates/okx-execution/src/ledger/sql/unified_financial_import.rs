@@ -167,7 +167,12 @@ fn target_content_digest(
     frame(&mut hash, installation.as_bytes());
     for (kind, names, scope_column, tables) in [
         (b'A', accounts, "account_key", &ORIGINAL_ACCOUNT_TABLES[..]),
-        (b'C', campaigns, "campaign_id", &ORIGINAL_CAMPAIGN_TABLES[..]),
+        (
+            b'C',
+            campaigns,
+            "campaign_id",
+            &ORIGINAL_CAMPAIGN_TABLES[..],
+        ),
     ] {
         for name in names {
             hash.update([kind]);
@@ -185,7 +190,8 @@ fn target_content_digest(
                 let query = format!(
                     "SELECT {projected} FROM {} WHERE installation_id=?1 AND {}=?2
                      ORDER BY {projected}",
-                    quote(table), quote(scope_column)
+                    quote(table),
+                    quote(scope_column)
                 );
                 let mut stmt = db.prepare(&query)?;
                 let mut rows = stmt.query(params![installation, name])?;
@@ -216,17 +222,29 @@ fn target_row_totals(
 ) -> StoreResult<(u64, u64)> {
     let mut totals = [0_u64, 0_u64];
     for (index, names, scope, tables) in [
-        (0_usize, accounts, "account_key", &ORIGINAL_ACCOUNT_TABLES[..]),
-        (1_usize, campaigns, "campaign_id", &ORIGINAL_CAMPAIGN_TABLES[..]),
+        (
+            0_usize,
+            accounts,
+            "account_key",
+            &ORIGINAL_ACCOUNT_TABLES[..],
+        ),
+        (
+            1_usize,
+            campaigns,
+            "campaign_id",
+            &ORIGINAL_CAMPAIGN_TABLES[..],
+        ),
     ] {
         for &table in tables {
-            let total: i64 = db.query_row(
-                &format!("SELECT COUNT(*) FROM {}", quote(table)),
-                [],
-                |r| r.get(0),
-            )?;
+            let total: i64 =
+                db.query_row(&format!("SELECT COUNT(*) FROM {}", quote(table)), [], |r| {
+                    r.get(0)
+                })?;
             let scoped: i64 = db.query_row(
-                &format!("SELECT COUNT(*) FROM {} WHERE installation_id=?1", quote(table)),
+                &format!(
+                    "SELECT COUNT(*) FROM {} WHERE installation_id=?1",
+                    quote(table)
+                ),
                 [installation],
                 |r| r.get(0),
             )?;
@@ -238,20 +256,24 @@ fn target_row_totals(
                 let count: i64 = db.query_row(
                     &format!(
                         "SELECT COUNT(*) FROM {} WHERE installation_id=?1 AND {}=?2",
-                        quote(table), quote(scope)
+                        quote(table),
+                        quote(scope)
                     ),
                     params![installation, name],
                     |r| r.get(0),
                 )?;
-                names_total = names_total.checked_add(count)
+                names_total = names_total
+                    .checked_add(count)
                     .ok_or(StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?;
             }
             if total != names_total {
                 return Err(StoreError::Invalid("UNIFIED_IMPORT_EXTRA_SCOPE"));
             }
             totals[index] = totals[index]
-                .checked_add(u64::try_from(total)
-                    .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?)
+                .checked_add(
+                    u64::try_from(total)
+                        .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?,
+                )
                 .ok_or(StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?;
         }
     }
@@ -688,7 +710,11 @@ pub(in crate::account_store) fn import_stopped_finance_into_empty(
         return Err(StoreError::Invalid("UNIFIED_CAMPAIGN_INVENTORY_UNPROVEN"));
     }
     import_sources(
-        target, expected.installation, accounts, campaigns, Some(expected),
+        target,
+        expected.installation,
+        accounts,
+        campaigns,
+        Some(expected),
     )
 }
 
@@ -719,7 +745,8 @@ pub(in crate::account_store) fn inspect_stopped_finance_import(
         return Err(StoreError::Invalid("UNIFIED_COMPLETE_TABLE_CENSUS_INVALID"));
     }
     let found_accounts: BTreeSet<String> = {
-        let mut stmt = tx.prepare("SELECT account_key FROM account_meta WHERE installation_id=?1")?;
+        let mut stmt =
+            tx.prepare("SELECT account_key FROM account_meta WHERE installation_id=?1")?;
         stmt.query_map([expected.installation], |r| r.get(0))?
             .collect::<Result<_, _>>()?
     };
@@ -731,25 +758,44 @@ pub(in crate::account_store) fn inspect_stopped_finance_import(
     if found_accounts != accounts || found_campaigns != campaigns {
         return Err(StoreError::Invalid("UNIFIED_IMPORT_INVENTORY_MISMATCH"));
     }
-    let marker: Option<(String, String, String, String, i64, i64, i64, i64)> =
-        tx.query_row(
+    let marker: Option<(String, String, String, String, i64, i64, i64, i64)> = tx
+        .query_row(
             "SELECT installation_id,inventory_sha256,content_sha256,state,
                     account_count,campaign_count,account_rows,campaign_rows
              FROM finance_import_manifest WHERE singleton=1",
             [],
-            |r| Ok((
-                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
-                r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?
-            )),
-        ).optional()?;
-    let (installation, inventory_sha256, content_sha256, state,
-         account_count, campaign_count, account_rows, campaign_rows) =
-        marker.ok_or(StoreError::Invalid("UNIFIED_IMPORT_COMMIT_MARKER_MISSING"))?;
-    if installation != expected.installation || state != "OFFLINE_NOT_AUTHORIZED"
-        || account_count != i64::try_from(accounts.len())
-            .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?
-        || campaign_count != i64::try_from(campaigns.len())
-            .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (
+        installation,
+        inventory_sha256,
+        content_sha256,
+        state,
+        account_count,
+        campaign_count,
+        account_rows,
+        campaign_rows,
+    ) = marker.ok_or(StoreError::Invalid("UNIFIED_IMPORT_COMMIT_MARKER_MISSING"))?;
+    if installation != expected.installation
+        || state != "OFFLINE_NOT_AUTHORIZED"
+        || account_count
+            != i64::try_from(accounts.len())
+                .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?
+        || campaign_count
+            != i64::try_from(campaigns.len())
+                .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?
         || hash_inventory(expected.installation, &accounts, &campaigns) != inventory_sha256
     {
         return Err(StoreError::Invalid("UNIFIED_IMPORT_COMMIT_MARKER_CONFLICT"));
@@ -757,16 +803,19 @@ pub(in crate::account_store) fn inspect_stopped_finance_import(
     let (actual_account_rows, actual_campaign_rows) =
         target_row_totals(&tx, expected.installation, &accounts, &campaigns)?;
     if i64::try_from(actual_account_rows)
-        .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))? != account_rows
+        .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?
+        != account_rows
         || i64::try_from(actual_campaign_rows)
-            .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))? != campaign_rows
+            .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?
+            != campaign_rows
     {
         return Err(StoreError::Invalid("UNIFIED_IMPORT_COMMIT_MARKER_CONFLICT"));
     }
-    let actual_digest =
-        target_content_digest(&tx, expected.installation, &accounts, &campaigns)?;
+    let actual_digest = target_content_digest(&tx, expected.installation, &accounts, &campaigns)?;
     if actual_digest != content_sha256 {
-        return Err(StoreError::Invalid("UNIFIED_IMPORT_CONTENT_DIGEST_MISMATCH"));
+        return Err(StoreError::Invalid(
+            "UNIFIED_IMPORT_CONTENT_DIGEST_MISMATCH",
+        ));
     }
     let integrity: String = tx.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
     if integrity != "ok" {
