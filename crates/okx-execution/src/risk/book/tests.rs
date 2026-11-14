@@ -2815,4 +2815,102 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             .unwrap(),
         1
     );
+    // Exercise two more ORIGINAL RiskBook financial operations against the
+    // same installation-wide v6 SQL. The test explicitly stages POSTED in
+    // its own uncommitted transaction; this is NOT a causal proof or an
+    // authenticated production producer. Only the original arithmetic,
+    // scope, CAS, replay and rollback are being proved here.
+    let scope = Some(("test-installation", campaign.as_str()));
+    {
+        let tx = db.transaction().unwrap();
+        assert_eq!(tx.execute(
+            "UPDATE risk_entries SET state='POSTED' WHERE installation_id=?1
+             AND campaign_id=?2 AND reservation_key=?3 AND state='HELD'",
+            rusqlite::params!["test-installation", &campaign, original.reservation_key()],
+        ).unwrap(), 1);
+        let proof = partial_proof(&original, 1, "0.4", 'b');
+        let first = RiskBookStore::settle_partial_entry_sql_transaction(
+            &tx, scope, &proof, 2, 7,
+        ).unwrap();
+        assert_eq!(first.book_sequence, 3);
+        assert_eq!(first.cumulative_entry_usd, "0.4");
+        assert!(!first.replayed);
+        let repeated = RiskBookStore::settle_partial_entry_sql_transaction(
+            &tx, scope, &proof, 2, 7,
+        ).unwrap();
+        assert!(repeated.replayed);
+        assert_eq!(repeated.book_sequence, 3);
+        let changed = partial_proof(&original, 1, "0.5", 'b');
+        assert!(matches!(
+            RiskBookStore::settle_partial_entry_sql_transaction(
+                &tx, scope, &changed, 3, 7,
+            ),
+            Err(RiskStoreError::IdempotencyConflict)
+        ));
+        assert!(
+            RiskBookStore::settle_partial_entry_sql_transaction(
+                &tx, Some(("test-installation", "foreign-campaign")), &proof, 2, 7,
+            ).is_err(),
+            "a second campaign cannot debit the original campaign's entry"
+        );
+        let (consumed, reserved): (String, String) = tx.query_row(
+            "SELECT entry_consumed_usd,entry_reserved_usd FROM risk_meta
+             WHERE installation_id=?1 AND campaign_id=?2",
+            rusqlite::params!["test-installation", &campaign],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!((consumed.as_str(), reserved.as_str()), ("0.4", "0.6"));
+        tx.rollback().unwrap();
+    }
+    assert_eq!(read(&db), ("6".into(), "1".into(), 2));
+    assert_eq!(
+        db.query_row::<String, _, _>(
+            "SELECT state FROM risk_entries WHERE installation_id=?1
+             AND campaign_id=?2 AND reservation_key=?3",
+            rusqlite::params!["test-installation", &campaign, original.reservation_key()],
+            |r| r.get(0),
+        ).unwrap(),
+        "HELD",
+        "no POSTED/settlement proof escaped the caller-owned transaction"
+    );
+
+    // An original native no-send address for B (no B risk entry exists)
+    // must create exactly one scoped tombstone and replay it idempotently.
+    // The private scoped method accepts only original-typed proof; an
+    // authenticated AccountStore REJECTED_UNSENT source is a separate
+    // production gate that remains intentionally disconnected here.
+    let no_send = unsent('b', "intentB0001");
+    {
+        let tx = db.transaction().unwrap();
+        let first = RiskBookStore::release_unsent_sql_transaction(
+            &tx, scope, &no_send, 2, 7,
+        ).unwrap();
+        assert_eq!(first.book_sequence, 3);
+        assert!(!first.replayed);
+        let repeated = RiskBookStore::release_unsent_sql_transaction(
+            &tx, scope, &no_send, 3, 7,
+        ).unwrap();
+        assert!(repeated.replayed);
+        let observed = tx.query_row(
+            "SELECT record_digest FROM risk_no_reserve
+             WHERE installation_id=?1 AND campaign_id=?2 AND reservation_key=?3",
+            rusqlite::params!["test-installation", &campaign, &no_send.reservation_key],
+            |r| r.get::<_, String>(0),
+        ).unwrap();
+        assert_eq!(observed, no_send.record_digest);
+        assert!(
+            RiskBookStore::release_unsent_sql_transaction(
+                &tx, Some(("test-installation", "foreign-campaign")), &no_send, 2, 7,
+            ).is_err(),
+            "no other campaign can grant or replay B's no-send fence"
+        );
+        tx.rollback().unwrap();
+    }
+    assert_eq!(read(&db), ("6".into(), "1".into(), 2));
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_no_reserve", [], |r| r.get(0))
+            .unwrap(),
+        0,
+        "test-only proof cannot persist without a trusted source and COMMIT"
+    );
 }

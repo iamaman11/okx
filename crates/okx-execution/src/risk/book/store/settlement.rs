@@ -3,12 +3,12 @@
 //! economic facts are produced and sealed by the existing AccountStore owner.
 //! No arbitrary network settlement, late fee or terminal release is accepted.
 use super::{
-    LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, amount, read_meta,
-    valid_digest, verify_reservation_aggregates,
+    LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, amount, integrity,
+    read_meta_for_scope, reserve_scope_values, valid_digest,
 };
 use crate::account_store::EntrySettlementEvidence;
 use okx_kernel::risk::money::RiskAmount;
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params_from_iter, types::Value};
 
 #[derive(Debug, Clone)]
 pub(in crate::risk::book) struct PartialEntrySqlProof {
@@ -82,17 +82,46 @@ impl RiskBookStore {
         expected_sequence: u64,
         generation: u64,
     ) -> Result<EntrySettlementReceipt> {
-        if expected_sequence == 0 || expected_sequence > LEGACY_MAX_SAFE_INTEGER {
-            return Err(RiskStoreError::StaleSequence);
-        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let meta = read_meta(&tx)?;
-        verify_reservation_aggregates(&tx, &meta)?;
+        let result = Self::settle_partial_entry_sql_transaction(
+            &tx, None, proof, expected_sequence, generation,
+        )?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// The ORIGINAL partial-entry arithmetic shared between v5 and scoped v6.
+    /// The caller owns one transaction/COMMIT, never a parallel SQL writer.
+    pub(in crate::risk::book) fn settle_partial_entry_sql_transaction(
+        tx: &Transaction<'_>,
+        scope: Option<(&str, &str)>,
+        proof: &PartialEntrySqlProof,
+        expected_sequence: u64,
+        generation: u64,
+    ) -> Result<EntrySettlementReceipt> {
+        if expected_sequence == 0 || expected_sequence > LEGACY_MAX_SAFE_INTEGER {
+            return Err(RiskStoreError::StaleSequence);
+        }
+        let meta = read_meta_for_scope(tx, scope)?;
+        integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope)?;
         if generation != meta.generation {
             return Err(RiskStoreError::StaleGeneration);
         }
+        let read_sql = if scope.is_some() {
+            "SELECT account_key,plan_sha256,state,entry_upper_usd,
+                    reserved_entry_usd,entry_settled_usd,entry_settlement_revision,
+                    entry_settlement_digest,entry_bound_breach_usd
+             FROM risk_entries WHERE reservation_key=?1
+               AND installation_id=?2 AND campaign_id=?3"
+        } else {
+            "SELECT account_key,plan_sha256,state,entry_upper_usd,
+                    reserved_entry_usd,entry_settled_usd,entry_settlement_revision,
+                    entry_settlement_digest,entry_bound_breach_usd
+             FROM risk_entries WHERE reservation_key=?1"
+        };
+        let read_args = reserve_scope_values(vec![Value::Text(proof.reservation_key.clone())], scope);
         let entry: Option<(
             String,
             String,
@@ -105,11 +134,8 @@ impl RiskBookStore {
             String,
         )> = tx
             .query_row(
-                "SELECT account_key,plan_sha256,state,entry_upper_usd,
-                        reserved_entry_usd,entry_settled_usd,entry_settlement_revision,
-                        entry_settlement_digest,entry_bound_breach_usd
-                 FROM risk_entries WHERE reservation_key=?1",
-                params![&proof.reservation_key],
+                read_sql,
+                params_from_iter(read_args.iter()),
                 |r| {
                     Ok((
                         r.get(0)?,
@@ -230,38 +256,54 @@ impl RiskBookStore {
             .ok_or(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
         let next_i64 =
             i64::try_from(next).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
-        let changed = tx.execute(
+        let entry_update = if scope.is_some() {
             "UPDATE risk_entries SET reserved_entry_usd=?1,entry_settled_usd=?2,
                     entry_settlement_revision=?3,entry_settlement_digest=?4,entry_bound_breach_usd=?5
-             WHERE reservation_key=?6 AND state='POSTED' AND entry_settlement_revision=?7",
-            params![
-                remaining_after.canonical()?,proof.cumulative_usd.canonical()?,
-                i64::try_from(proof.revision).map_err(|_| RiskStoreError::Invalid("ENTRY_REVISION_RANGE"))?,
-                &proof.source_digest,current_over.canonical()?,&proof.reservation_key,
-                i64::try_from(prior_revision).map_err(|_| RiskStoreError::Corrupt("ENTRY_REVISION_RANGE"))?,
-            ],
-        )?;
+             WHERE reservation_key=?6 AND state='POSTED' AND entry_settlement_revision=?7
+               AND installation_id=?8 AND campaign_id=?9"
+        } else {
+            "UPDATE risk_entries SET reserved_entry_usd=?1,entry_settled_usd=?2,
+                    entry_settlement_revision=?3,entry_settlement_digest=?4,entry_bound_breach_usd=?5
+             WHERE reservation_key=?6 AND state='POSTED' AND entry_settlement_revision=?7"
+        };
+        let entry_args = reserve_scope_values(vec![
+            Value::Text(remaining_after.canonical()?),
+            Value::Text(proof.cumulative_usd.canonical()?),
+            Value::Integer(i64::try_from(proof.revision)
+                .map_err(|_| RiskStoreError::Invalid("ENTRY_REVISION_RANGE"))?),
+            Value::Text(proof.source_digest.clone()),
+            Value::Text(current_over.canonical()?),
+            Value::Text(proof.reservation_key.clone()),
+            Value::Integer(i64::try_from(prior_revision)
+                .map_err(|_| RiskStoreError::Corrupt("ENTRY_REVISION_RANGE"))?),
+        ], scope);
+        let changed = tx.execute(entry_update, params_from_iter(entry_args.iter()))?;
         if changed != 1 {
             return Err(RiskStoreError::StaleSequence);
         }
-        let changed = tx.execute(
+        let meta_update = if scope.is_some() {
             "UPDATE risk_meta SET book_sequence=?1,entry_consumed_usd=?2,
                     entry_reserved_usd=?3,entry_bound_breach_usd=?4
-             WHERE singleton=1 AND book_sequence=?5 AND generation=?6",
-            params![
-                next_i64,
-                consumed_after.canonical()?,
-                reserved_after.canonical()?,
-                breach_after.canonical()?,
-                i64::try_from(meta.sequence)
-                    .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_RANGE"))?,
-                i64::try_from(meta.generation).map_err(|_| RiskStoreError::StaleGeneration)?,
-            ],
-        )?;
+             WHERE singleton=1 AND book_sequence=?5 AND generation=?6
+               AND installation_id=?7 AND campaign_id=?8"
+        } else {
+            "UPDATE risk_meta SET book_sequence=?1,entry_consumed_usd=?2,
+                    entry_reserved_usd=?3,entry_bound_breach_usd=?4
+             WHERE singleton=1 AND book_sequence=?5 AND generation=?6"
+        };
+        let meta_args = reserve_scope_values(vec![
+            Value::Integer(next_i64),
+            Value::Text(consumed_after.canonical()?),
+            Value::Text(reserved_after.canonical()?),
+            Value::Text(breach_after.canonical()?),
+            Value::Integer(i64::try_from(meta.sequence)
+                .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_RANGE"))?),
+            Value::Integer(i64::try_from(meta.generation).map_err(|_| RiskStoreError::StaleGeneration)?),
+        ], scope);
+        let changed = tx.execute(meta_update, params_from_iter(meta_args.iter()))?;
         if changed != 1 {
             return Err(RiskStoreError::StaleSequence);
         }
-        tx.commit()?;
         Ok(EntrySettlementReceipt {
             reservation_key: proof.reservation_key.clone(),
             book_sequence: next,

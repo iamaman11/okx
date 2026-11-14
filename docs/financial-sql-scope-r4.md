@@ -1,5 +1,32 @@
 # #510 r4 — source-derived SQL scope inventory and first physical single-file slice
 
+## Current code slice: original RiskBook SettleEntry + ReleaseUnsent reuse one caller-owned scoped SQL transaction
+
+The existing **original Rust** `RiskBookStore::settle_partial_entry` and
+`RiskBookStore::release_unsent` now delegate to their exact original
+financial rules in `*_sql_transaction(&Transaction, scope, ...)`. Legacy v5
+continues to own its own COMMIT; scoped v6 accepts the SAME installation /
+campaign composite identity for reads, row updates and meta CAS. No duplicate
+amount arithmetic, SQL owner, or second risk balance is introduced. A scoped
+no-send replay cannot read or mutate a different campaign's identical key.
+Scoped mutation requires one affected campaign meta CAS and both occupancy
+rows on RELEASED. These methods remain **private to risk::book**, not a
+production `RiskCommandAction`/venue capability.
+
+The extended original v6 two-account Reserve fixture stages a POSTED source
+state and a no-send proof **inside explicitly rolled-back test transactions**
+to check settlement, exact replay, foreign campaign rejection, budget math,
+and rollback of both changes. This test-only source is **not** trusted live
+AccountStore evidence. Production must still bind authenticated original
+partial-entry SQL receipts and original durable `REJECTED_UNSENT` evidence in
+the SAME installation-owned SQL before allowing commits, plus verify the
+Cloudflare old-owner fence/epoch. The existing immutable offline import
+remains `OFFLINE_NOT_AUTHORIZED`; **no code in this slice activates it**.
+
+The final Draft CI result for this exact candidate must be recorded from
+GitHub before claiming a PASS; Windows RB01–16 / T09/T10 26/26 still require
+physical acceptance.
+
 ### Scope/authority correction after the first joint proof
 
 **Code SHA `47b53099a442b10002a2e6a7eef76769ef0e7771`**, [CI #43632385416](https://github.com/iamaman11/okx/actions/runs/43632385416) **SUCCESS** (69 execution, 6 kernel, 1 original source; 239 full execution PASS, 3 ignored). The private joint Reserve now additionally verifies original account intent `risk_increase=1`, original `account_policy.campaign_id` exactly matches the requested RiskBook campaign, source revision matches the receipt, and account is not paused, **inside the same transaction before staging RiskBook**. Negative tests fail closed on foreign campaign/stale revision/paused/neutral intent; old v2/v5 public semantics and live owners remain unchanged. Not a production authority or a Windows proof.
