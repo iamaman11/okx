@@ -11192,3 +11192,72 @@ async fn sql_job_timing_is_returned_with_its_own_result() {
     assert_eq!(first, account);
     assert_eq!(counters.last_sql_owner_ms, timing.sql_owner_ms);
 }
+
+#[test]
+fn risk_book_contract_unified_full_original_account_import_two_accounts() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let one = intent(&mut a);
+    let two = intent(&mut b);
+    assert_eq!(one.intent_id, two.intent_id);
+    assert_eq!(one.plan_hash, two.plan_hash);
+    let a_path = a.path.clone();
+    let b_path = b.path.clone();
+    drop(a);
+    drop(b); // Both original account writer leases closed before import.
+    let sa = Connection::open_with_flags(&a_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&b_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut unified = Connection::open(&destination).unwrap();
+    unified.pragma_update(None, "journal_mode", "WAL").unwrap();
+    unified.pragma_update(None, "synchronous", "FULL").unwrap();
+    unified.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let outcome = super::sql::unified_financial::importer::import_stopped_accounts_into_empty_finance(
+        &mut unified,
+        "installation",
+        &[&sa, &sb],
+    ).unwrap();
+    assert_eq!(outcome.accounts, 2);
+    assert_eq!(outcome.tables_per_account, 39);
+    assert!(outcome.imported_rows >= 20, "all original source rows are preserved");
+    for table in ["account_meta", "strategy_instances", "strategy_definition_versions",
+        "decisions", "intents", "account_policy", "operation_receipts",
+        "campaign_source_epoch", "campaign_late_head_epoch", "storage_recovery"
+    ] {
+        let target_count: i64 = unified.query_row(
+            &format!("SELECT COUNT(*) FROM {table}"),[],|r|r.get(0),
+        ).unwrap();
+        let originals: i64 = [&sa,&sb].into_iter().map(|source| {
+            source.query_row(
+                &format!("SELECT COUNT(*) FROM {table}"),[],|r|r.get::<_,i64>(0)
+            ).unwrap()
+        }).sum();
+        assert_eq!(target_count,originals,"{table} exactly preserves both source accounts");
+    }
+    let copied: i64 = unified.query_row(
+        "SELECT COUNT(*) FROM intents WHERE intent_id=?1",
+        [&one.intent_id],|r|r.get(0),
+    ).unwrap();
+    assert_eq!(copied,2,"same source intent can exist on two separate accounts");
+    let snapshot: String=unified.query_row(
+        "SELECT source_ref FROM cash_flows
+         WHERE installation_id='installation' AND account_key='acct-B'
+           AND event_id='opening:USDT'",
+        [],|r|r.get(0),
+    ).unwrap();
+    assert_eq!(snapshot,"authenticated-flat");
+    let version: i64=unified.pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();
+    assert_eq!(version,6);
+    let mut fk=unified.prepare("PRAGMA foreign_key_check").unwrap();
+    assert!(fk.query([]).unwrap().next().unwrap().is_none());
+    drop(fk);
+    drop(unified);
+    let reopened=Connection::open(&destination).unwrap();
+    let count: i64=reopened.query_row(
+        "SELECT COUNT(*) FROM account_meta
+         WHERE installation_id='installation'",[],|r|r.get(0),
+    ).unwrap();
+    assert_eq!(count,2);
+    let _=std::fs::remove_file(&destination);
+}
