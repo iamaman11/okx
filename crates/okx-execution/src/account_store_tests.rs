@@ -12177,25 +12177,30 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
     for (store, prepared) in [(&mut a, &ai), (&mut b, &bi)] {
         // Source v2 AccountStore owns these rows and receipts BEFORE import.
         // There are no handwritten RESERVED states in the combined test.
-        store.connection.execute(
-            "UPDATE intents SET deadline=20000 WHERE intent_id=?1",
-            [&prepared.intent_id],
-        ).unwrap();
-        store.reserve(
-            &CentralReceipt {
-                reservation_key: "same-reservation".into(),
-                account_key: store.meta.account_key.clone(),
-                installation_id: store.meta.installation_id.clone(),
-                instance_id: None,
-                intent_id: prepared.intent_id.clone(),
-                plan_hash: prepared.plan_hash.clone(),
-                policy_revision: 1,
-                receipt_hash: "b".repeat(64),
-                requested_loss_usd: Decimal::ONE,
-                conversion_digest: "c".repeat(64),
-            },
-            3,
-        ).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE intents SET deadline=20000 WHERE intent_id=?1",
+                [&prepared.intent_id],
+            )
+            .unwrap();
+        store
+            .reserve(
+                &CentralReceipt {
+                    reservation_key: "same-reservation".into(),
+                    account_key: store.meta.account_key.clone(),
+                    installation_id: store.meta.installation_id.clone(),
+                    instance_id: None,
+                    intent_id: prepared.intent_id.clone(),
+                    plan_hash: prepared.plan_hash.clone(),
+                    policy_revision: 1,
+                    receipt_hash: "b".repeat(64),
+                    requested_loss_usd: Decimal::ONE,
+                    conversion_digest: "c".repeat(64),
+                },
+                3,
+            )
+            .unwrap();
     }
     let (ap, bp) = (a.path.clone(), b.path.clone());
     let x = path();
@@ -12244,10 +12249,16 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
             "DELETE FROM risk_receipts WHERE installation_id='installation'
              AND account_key='acct-A' AND reservation_key='same-reservation'",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         let denied = crate::risk::test_stage_scoped_begin_post(
-            &tx, "installation", "campaign-X", "same-reservation",
-            &ai.plan_hash, cohort, 2,
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &ai.plan_hash,
+            cohort,
+            2,
         );
         assert_eq!(
             denied.unwrap_err(),
@@ -12262,12 +12273,21 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
             "UPDATE account_policy SET paused=1 WHERE installation_id='installation'
              AND account_key='acct-A' AND singleton=1",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         let denied = crate::risk::test_stage_scoped_begin_post(
-            &tx, "installation", "campaign-X", "same-reservation",
-            &ai.plan_hash, cohort, 2,
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &ai.plan_hash,
+            cohort,
+            2,
         );
-        assert_eq!(denied.unwrap_err(), "INVALID_RISK_INPUT: RISK_INCREASE_STOPPED");
+        assert_eq!(
+            denied.unwrap_err(),
+            "INVALID_RISK_INPUT: RISK_INCREASE_STOPPED"
+        );
         tx.rollback().unwrap();
     }
 
