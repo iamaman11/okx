@@ -105,6 +105,51 @@ fn open(f: &Fixture) -> RiskBookStore {
     RiskBookStore::open_existing(&f.path, "test-installation", &opening().campaign_id).unwrap()
 }
 #[test]
+fn risk_book_contract_real_legacy_campaign_cannot_overlap_unified_finance_mode() {
+    let fixture = Fixture::new("installation-mode");
+    let root = fixture.root.join("runtime");
+    let campaign = root
+        .join("risk")
+        .join("campaigns")
+        .join(uid('c'))
+        .join("risk-book.sqlite");
+    std::fs::create_dir_all(campaign.parent().unwrap()).unwrap();
+    RiskBookStore::initialize_fixture(&campaign, &opening()).unwrap();
+    let mut store = RiskBookStore::open_existing(
+        &campaign,
+        "test-installation",
+        &opening().campaign_id,
+    ).unwrap();
+    assert_eq!(store.readback().unwrap().book_sequence, 0);
+    assert!(matches!(
+        crate::finance_owner_gate::unified_mode_for(&root),
+        Err(crate::finance_owner_gate::AuthorityModeError::Busy)
+    ));
+    store.close();
+    let unified = crate::finance_owner_gate::unified_mode_for(&root).unwrap();
+    assert!(matches!(
+        RiskBookStore::open_existing(
+            &campaign,
+            "test-installation",
+            &opening().campaign_id
+        ),
+        Err(RiskStoreError::Invalid("FINANCE_INSTALLATION_WRITER_BUSY"))
+    ));
+    drop(unified);
+    // Staging the unified financial file is already a hard stop for the
+    // original campaign, even before any authority/venue grant is enabled.
+    std::fs::write(root.join("finance").join("finance.sqlite"), b"offline").unwrap();
+    assert!(matches!(
+        RiskBookStore::open_existing(
+            &campaign,
+            "test-installation",
+            &opening().campaign_id
+        ),
+        Err(RiskStoreError::Invalid("LEGACY_FINANCE_OWNER_DISABLED"))
+    ));
+}
+
+#[test]
 fn risk_book_contract_sql_concurrent_accounts_share_one_budget() {
     let f = Fixture::new("two-accounts");
     RiskBookStore::initialize_fixture(&f.path, &opening()).unwrap();

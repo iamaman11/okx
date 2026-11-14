@@ -1,6 +1,7 @@
 //! One bounded blocking worker per account. No SQLite calls on the async reactor.
 use crate::{
     AccountMeta, AccountStore, OpeningSnapshot, StoreError, StoreResult, WalMaintenanceObservation,
+    finance_owner_gate::{self, AuthorityModeError, AuthorityModeLease},
 };
 use std::{
     collections::VecDeque,
@@ -163,6 +164,7 @@ struct PendingBackup {
 fn finish_owner(
     store: AccountStore,
     pending_backup: Option<PendingBackup>,
+    mode_lease: Option<AuthorityModeLease>,
     terminated: watch::Sender<bool>,
 ) {
     if let Some(backup) = pending_backup {
@@ -179,6 +181,9 @@ fn finish_owner(
     // Completion means owned resources closed, not a successful backup. A caller
     // may time out waiting, but must then keep shutdown explicitly unproven.
     drop(store);
+    // Completion witnesses close the old SQL writer AND mode lease before
+    // allowing the new installation-wide owner to acquire exclusive access.
+    drop(mode_lease);
     let _ = terminated.send(true);
 }
 #[derive(Clone)]
@@ -196,17 +201,26 @@ impl AccountStoreHandle {
         account_key: String,
         installation_id: String,
     ) -> StoreResult<Self> {
-        Self::start(move || AccountStore::open_existing(path, &account_key, &installation_id)).await
+        let legacy_path = path.clone();
+        Self::start(
+            move || AccountStore::open_existing(path, &account_key, &installation_id),
+            legacy_path,
+        ).await
     }
     pub async fn initialize_flat(
         path: PathBuf,
         meta: AccountMeta,
         snapshot: OpeningSnapshot,
     ) -> StoreResult<Self> {
-        Self::start(move || AccountStore::initialize_or_inspect_exact(path, meta, &snapshot)).await
+        let legacy_path = path.clone();
+        Self::start(
+            move || AccountStore::initialize_or_inspect_exact(path, meta, &snapshot),
+            legacy_path,
+        ).await
     }
     async fn start(
         factory: impl FnOnce() -> StoreResult<AccountStore> + Send + 'static,
+        legacy_path: PathBuf,
     ) -> StoreResult<Self> {
         let (sender, receiver) = sync_channel::<Job>(128);
         let timings = Arc::new(SqlTimingCounters::default());
@@ -219,6 +233,25 @@ impl AccountStoreHandle {
         std::thread::Builder::new()
             .name("okx-account-sql".into())
             .spawn(move || {
+                // Old account/campaign owners may share a mode lease; the
+                // installation's unified finance owner requires EXCLUSIVE.
+                // A staged/active finance.sqlite prohibits any old opener.
+                let mode_lease = match finance_owner_gate::legacy_mode_for(&legacy_path) {
+                    Ok(lease) => lease,
+                    Err(error) => {
+                        let reason = match error {
+                            AuthorityModeError::Io(error) => StoreError::Io(error),
+                            AuthorityModeError::Busy => {
+                                StoreError::Invalid("FINANCE_INSTALLATION_WRITER_BUSY")
+                            }
+                            AuthorityModeError::FinancePresent => {
+                                StoreError::Invalid("LEGACY_FINANCE_OWNER_DISABLED")
+                            }
+                        };
+                        let _ = ready_tx.send(Err(reason));
+                        return;
+                    }
+                };
                 let mut store = match factory() {
                     Ok(s) => {
                         let _ = ready_tx.send(Ok(()));
@@ -332,7 +365,7 @@ impl AccountStoreHandle {
                         }
                     }
                 }
-                finish_owner(store, pending_backup, terminated_tx);
+                finish_owner(store, pending_backup, mode_lease, terminated_tx);
             })?;
         ready_rx
             .await
@@ -576,6 +609,7 @@ impl UnifiedFinanceHandle {
             return Err(StoreError::Invalid("UNIFIED_FINANCE_IMPORT_NOT_FOUND"));
         }
         let path = path.canonicalize()?;
+        let runtime_root = runtime_root.canonicalize()?;
         let (sender, receiver) = sync_channel::<FinanceJob>(128);
         let (ready_tx, ready_rx) = oneshot::channel();
         let (terminated_tx, terminated_rx) = watch::channel(false);
@@ -583,8 +617,20 @@ impl UnifiedFinanceHandle {
         std::thread::Builder::new()
             .name("okx-finance-sql".into())
             .spawn(move || {
-                let startup = (|| -> StoreResult<(rusqlite::Connection, std::fs::File)> {
+                let startup = (|| -> StoreResult<(rusqlite::Connection, std::fs::File, AuthorityModeLease)> {
                     use std::fs::OpenOptions;
+                    // Exclusive across ALL legacy accounts/campaigns, not just
+                    // other openers of this particular finance.sqlite file.
+                    let mode_lease = finance_owner_gate::unified_mode_for(&runtime_root)
+                        .map_err(|error| match error {
+                            AuthorityModeError::Io(error) => StoreError::Io(error),
+                            AuthorityModeError::Busy => {
+                                StoreError::Invalid("FINANCE_INSTALLATION_WRITER_BUSY")
+                            }
+                            AuthorityModeError::FinancePresent => {
+                                StoreError::Invalid("UNIFIED_FINANCE_MODE_INVALID")
+                            }
+                        })?;
                     let lease = OpenOptions::new()
                         .read(true)
                         .write(true)
@@ -615,9 +661,9 @@ impl UnifiedFinanceHandle {
                         &accounts.iter().map(String::as_str).collect::<Vec<_>>(),
                         &campaigns.iter().map(String::as_str).collect::<Vec<_>>(),
                     )?;
-                    Ok((db, lease))
+                    Ok((db, lease, mode_lease))
                 })();
-                let (mut db, lease) = match startup {
+                let (mut db, lease, mode_lease) = match startup {
                     Ok(resources) => resources,
                     Err(error) => {
                         let _ = ready_tx.send(Err(error));
@@ -633,6 +679,7 @@ impl UnifiedFinanceHandle {
                 drop(db);
                 let _ = lease.unlock();
                 drop(lease);
+                drop(mode_lease);
                 let _ = terminated_tx.send(true);
             })?;
         ready_rx
@@ -1017,6 +1064,82 @@ mod diagnostic_fault_tests {
     use super::*;
 
     #[tokio::test]
+    async fn real_account_worker_holds_shared_installation_mode_until_close() {
+        use rust_decimal::Decimal;
+        static NEXT_MODE: AtomicU64 = AtomicU64::new(1);
+        let nonce = NEXT_MODE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "okx-510-account-mode-{}-{}",
+            std::process::id(),
+            nonce,
+        ));
+        let path = root
+            .join("accounts")
+            .join("a".repeat(64))
+            .join("account.sqlite");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let meta = AccountMeta {
+            initialize_operation_id: "mode-test-connect".into(),
+            release_id: "test".into(),
+            account_key: format!("okx:real:{}", "a".repeat(64)),
+            installation_id: "installation-test".into(),
+            initialized_at: 1,
+            opening_source: "verified-test-snapshot".into(),
+        };
+        let opening = OpeningSnapshot {
+            opening_equity_usd: Decimal::from(100),
+            source_ref: meta.opening_source.clone(),
+            observed_at: 1,
+            positions: 0,
+            orders: 0,
+            conditional_orders: 0,
+            liabilities: Decimal::ZERO,
+            balances: vec![("USDT".into(), Decimal::from(100))],
+        };
+        let owner = AccountStoreHandle::initialize_flat(path.clone(), meta.clone(), opening)
+            .await
+            .unwrap();
+        assert!(matches!(
+            finance_owner_gate::unified_mode_for(&root),
+            Err(AuthorityModeError::Busy)
+        ));
+        let mut terminated = owner.termination_signal();
+        drop(owner);
+        // Completion is a native observable worker close, not a sleep.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !*terminated.borrow() {
+                terminated.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let unified = finance_owner_gate::unified_mode_for(&root).unwrap();
+        assert!(matches!(
+            AccountStoreHandle::open_existing(
+                path.clone(),
+                meta.account_key.clone(),
+                meta.installation_id.clone(),
+            )
+            .await,
+            Err(StoreError::Invalid("FINANCE_INSTALLATION_WRITER_BUSY"))
+        ));
+        drop(unified);
+        // The full finance file may still be OFFLINE_NOT_AUTHORIZED: the
+        // legacy worker must NOT reopen over a staged financial import.
+        std::fs::write(root.join("finance").join("finance.sqlite"), b"offline").unwrap();
+        assert!(matches!(
+            AccountStoreHandle::open_existing(
+                path,
+                meta.account_key,
+                meta.installation_id,
+            )
+            .await,
+            Err(StoreError::Invalid("LEGACY_FINANCE_OWNER_DISABLED"))
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn failed_accepted_sql_job_still_invokes_timing_observer() {
         use rust_decimal::Decimal;
         static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -1194,6 +1317,7 @@ mod shutdown_tests {
                     handle: backup,
                     started: Instant::now(),
                 }),
+                None,
                 terminated_tx,
             );
             done_tx.send(()).unwrap();

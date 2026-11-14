@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 use thiserror::Error;
+use crate::finance_owner_gate::{self, AuthorityModeError, AuthorityModeLease};
 mod integrity;
 mod post;
 mod queries;
@@ -610,6 +611,7 @@ pub(crate) fn verify_legacy_import_source(
 pub(super) struct RiskBookStore {
     connection: Connection,
     _lease: File,
+    _mode_lease: Option<AuthorityModeLease>,
 }
 
 #[derive(Debug)]
@@ -643,10 +645,16 @@ impl RiskBookStore {
     /// may the bounded worker publish its termination witness. This is NOT
     /// another writer or a parallel finance authority.
     pub(super) fn close(self) {
-        let Self { connection, _lease } = self;
+        let Self {
+            connection,
+            _lease,
+            _mode_lease,
+        } = self;
         drop(connection);
         let _ = _lease.unlock();
         drop(_lease);
+        // Last release: legacy shared installation mode, after all SQL work.
+        drop(_mode_lease);
     }
 
     pub(super) fn open_existing(path: &Path, installation: &str, campaign: &str) -> Result<Self> {
@@ -654,6 +662,17 @@ impl RiskBookStore {
             return Err(RiskStoreError::Uninitialized);
         }
         let canonical = path.canonicalize()?;
+        let mode_lease = finance_owner_gate::legacy_mode_for(&canonical).map_err(|error| {
+            match error {
+                AuthorityModeError::Io(error) => RiskStoreError::Io(error),
+                AuthorityModeError::Busy => {
+                    RiskStoreError::Invalid("FINANCE_INSTALLATION_WRITER_BUSY")
+                }
+                AuthorityModeError::FinancePresent => {
+                    RiskStoreError::Invalid("LEGACY_FINANCE_OWNER_DISABLED")
+                }
+            }
+        })?;
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -695,6 +714,7 @@ impl RiskBookStore {
         Ok(Self {
             connection,
             _lease: lock,
+            _mode_lease: mode_lease,
         })
     }
     pub(super) fn readback(&mut self) -> Result<BookReadback> {

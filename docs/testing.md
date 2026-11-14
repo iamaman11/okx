@@ -18,6 +18,34 @@
 **Evidence format:** exact SHA, legacy endpoint negative mutation request/response and final readback, source roster/digests/financial totals, target SQLite receipt, before/after-kill reopen, replay, error diagnostics. RB09 is separate from the fast Rust direct target; do not repeat the 90-kill historical Native/Worker matrix. Record **NOT_PROVEN** while old Cloudflare financial code still accepts operations in the deployed legacy environment. Actual installed migration will be executed separately after code acceptance.
 
 ---
+## #510 r4.1 — installation authority mode OS lock (Draft / exact CI pending)
+
+**New native architecture check:** `finance_owner_gate.rs` owns the single
+`runtime_root/finance/authority-mode.lock` file; the original
+`AccountStoreHandle` and `RiskBookStore` open their canonical
+account/campaign DB while holding SHARED installation-mode leases.
+`UnifiedFinanceHandle::open_stopped_import` holds an EXCLUSIVE
+installation-mode lease and its existing SQLite writer lock.
+The old account closure witness releases its shared mode lease only
+AFTER the SQL writer and outstanding backup have completed; RiskBook
+`close` releases original SQL lock and then mode. Existing
+`finance.sqlite`, including `OFFLINE_NOT_AUTHORIZED`, blocks a fresh
+legacy writer. All failures are immediate, fail-closed, with no sleep,
+retry, implicit promotion, or Cloudflare RPC.
+
+**Physical native tests:** two simultaneous old shared leases versus
+exclusive new; exclusive new versus old; staging finance.sqlite
+refuses old; actual `AccountStoreHandle::initialize_flat` and
+`RiskBookStore::open_existing` use the same gate and preserve shutdown
+ordering. Native child test obtains the old shared OS lock then parent
+kills it and immediately proves the exclusive lock can open. These
+are tests of **the new Rust version's local authority-mode exclusion**,
+not an assertion that old deployed Cloudflare or an older legacy native
+binary honors this lock. RB09 server-disable and exact source
+import/empty proof remain separate one-time physical checks, and the
+installed user environment is NOT migrated here. Draft CI / Windows
+26/26 acceptance are still required.
+
 ## #510 r4.1 — installation-wide POSTING recovery under one SQL writer (unverified until CI)
 
 **Code:** `AccountStore::recover_installation_posting_sql_transaction`

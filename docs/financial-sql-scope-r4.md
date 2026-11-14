@@ -18,6 +18,14 @@ See [Issue #510 r4.1](https://github.com/iamaman11/okx/issues/510). **This secti
 
 ---
 
+## Production owner-mode exclusion across old account/campaign and new finance SQLite (15 Nov 2026)
+
+A single **local** Rust OS file lock, `runtime_root/finance/authority-mode.lock`, now implements mode exclusivity for this code version without Cloudflare coordination: original account and campaign SQL writers in the canonical installation directory each hold a **shared** mode lease for their whole lifetime; `UnifiedFinanceHandle` holds an **exclusive** mode lease in addition to its existing `finance.sqlite.writer.lock`. Legacy mode may have many account/campaign writers, but no unified writer simultaneously. Both legacy and unified fail immediately (no polling/retry) on incompatible mode.
+
+Canonical source layouts are `runtime_root/accounts/<key-hash>/account.sqlite` and `runtime_root/risk/campaigns/<campaign-hash>/risk-book.sqlite`. A legacy opener also refuses if `runtime_root/finance/finance.sqlite` exists, **even when it is OFFLINE_NOT_AUTHORIZED**: a staged target cannot coexist with a newly reopened old financial writer. An old worker's completion witness comes only AFTER native SQL and the mode lease have been released. The shared/exclusive OS locks use one canonical installation directory; standalone independent test-source fixtures outside these production layouts are not treated as installed financial authorities.
+
+Native regression includes multiple simultaneous old owners, both exclusive/old conflict directions, blocked restart after staged SQLite, real source AccountStore/RiskBook open, one child OS kill and immediate mode recover, and bounded queue lifecycle. This is a **local exclusivity gate for newly built Rust binaries**, not a substitute for **one-time RB09** stop and server-disable of an already deployed legacy Cloudflare Worker or older native binaries that do not acquire this new lock. No recurring Cloudflare owner epoch, lease renewal, network handshake or second financial engine is implemented. The single SQL-owner remains OFFLINE_NOT_AUTHORIZED until authenticated sources, migration and all nine production finance operations are accepted.
+
 ## One installation-wide recovery COMMIT across all accounts (15 Nov 2026)
 
 `AccountStore::recover_installation_posting_sql_transaction` derives the
