@@ -1,5 +1,9 @@
 # Trade acceptance evidence map — #448 / #449 / #501
 
+### Subsequent exact-source campaign/epoch guard — verified on final Reserve code
+
+**Code SHA `47b53099a442b10002a2e6a7eef76769ef0e7771`**, [Draft CI #43632385416](https://github.com/iamaman11/okx/actions/runs/43632385416) **SUCCESS**: 69 execution + 6 kernel + 1 original AccountStore direct, full execution library 239 passed/0 failed/3 ignored, rustfmt/architecture PASS. Before RiskBook can stage a scoped reserve, `RiskBookStore::reserve_unified_account_transaction` now requires same-file original `intents.risk_increase=1` and matching `account_policy.campaign_id`, `account_policy.revision`, `paused=0` under the SAME SQLite transaction. Existing original RiskBook capacity and legacy per-campaign behavior are unchanged. Negative SQL witness mutates campaign, revision, pause, or risk-increase independently and checks fail-closed `UNIFIED_ACCOUNT_CAMPAIGN_POLICY_UNPROVEN` without budget changes. This is test-only v6 finance source, **not** authenticated production cutover or Cloudflare fencing.
+
 ## 14 Nov 2026 — #510 r4 ORIGINAL Reserve + RiskBook in one PRIVATE SQLite transaction (Draft PASS)
 
 **Exact source SHA `2395bb7aa8600234890d9e3354b83ac303edb004`**, [Draft CI #43631998537](https://github.com/iamaman11/okx/actions/runs/43631998537) **SUCCESS**: `riskbook-draft-rust` performed architecture guard/negative self-test and rustfmt PASS; **69/69** direct `okx-execution` RiskBook cases, **6/6** `okx-kernel`, **1/1** original AccountStore source, complete `cargo test --locked -p okx-execution --lib` **239 passed, 0 failed, 3 ignored**. Three ignored tests are not accepted. Full Windows, Cloudflare and T09/T10 jobs were **SKIPPED** on Draft; this is **not** RB01–16 / 26/26 acceptance.
