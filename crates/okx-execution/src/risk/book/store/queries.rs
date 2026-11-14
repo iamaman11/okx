@@ -95,9 +95,7 @@ pub(super) fn account_readback(
              WHERE account_key=?1 AND state <> 'RELEASED'"
         };
         let mut stmt = tx.prepare(entries_sql)?;
-        let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
-            r.get::<_, String>(0)
-        })?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |r| r.get::<_, String>(0))?;
         for row in rows {
             usd = usd.checked_add(&amount(row?)?)?;
             count = count
