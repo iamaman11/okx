@@ -123,7 +123,7 @@ pub(super) fn verify_reservation_aggregates_for_scope(
                         && post_time >= held_time
                         && super::valid_digest(&post_proof_digest)
                         && super::valid_digest(&post_source_digest)
-                        && amount(post_existing).is_ok() => {}
+                        && RiskAmount::parse(&post_existing).is_ok() => {}
                 "HELD" | "POSTED" | "UNKNOWN" => {
                     return Err(RiskStoreError::Corrupt("POST_FENCE_INTEGRITY"));
                 }
