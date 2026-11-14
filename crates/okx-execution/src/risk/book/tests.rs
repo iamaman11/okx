@@ -2487,7 +2487,7 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
     let second = request('b', "intentB0001", "6");
     let account_receipt = |input: &ReserveInput| crate::CentralReceipt {
         reservation_key: input.reservation_key(),
-        account_key: input.account_key(),
+        account_key: format!("{}:real:{}", input.venue, input.uid),
         installation_id: "test-installation".into(),
         instance_id: Some("strategy_test".into()),
         intent_id: input.intent_id.clone(),
