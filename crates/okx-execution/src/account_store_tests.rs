@@ -12767,6 +12767,25 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         (&a_key, &ai.intent_id, &ai.plan_hash),
         (&b_key, &bi.intent_id, &bi.plan_hash),
     );
+    // The legacy campaign fixture was written with strategy_test, whereas
+    // genuine native AccountStore::prepare uses the original "manual"
+    // instance. For this offline witness, translate the TEST campaign policy
+    // before source import so both ORIGINAL owners agree on strategy identity.
+    // Do not silently translate real migration data in production.
+    {
+        let source = Connection::open(&campaign).unwrap();
+        source
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE risk_entries SET strategy_id='manual';
+                 UPDATE risk_strategy_occupied SET strategy_id='manual';
+                 UPDATE risk_policy_strategy SET strategy_id='manual';
+                 COMMIT;",
+            )
+            .unwrap();
+        let mut fk = source.prepare("PRAGMA foreign_key_check").unwrap();
+        assert!(fk.query([]).unwrap().next().unwrap().is_none());
+    }
     drop(a);
     drop(b);
     let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
@@ -12816,6 +12835,88 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert_eq!(summary.global_reserved_usdt, "1");
     assert_eq!(summary.remaining_loss_usd, "99");
     assert_eq!(summary.remaining_entry_usd, "98");
+
+    // PROVE that the existing original joint Reserve is exercised by the
+    // installation's single bounded FIFO and one BEGIN IMMEDIATE. No
+    // authenticated census producer or Cloudflare epoch exists yet, so this
+    // test-only operation ALWAYS ROLLS BACK and must preserve the offline
+    // import manifest across cold reopen.
+    let zero = okx_kernel::risk::money::RiskAmount::zero();
+    let five = okx_kernel::risk::money::RiskAmount::parse("5").unwrap();
+    let mut source_occupied = std::collections::BTreeMap::new();
+    let mut source_loss = std::collections::BTreeMap::new();
+    for key in [&a_key, &b_key] {
+        source_occupied.insert(key.clone(), zero.clone());
+        source_loss.insert(key.clone(), zero.clone());
+    }
+    let census = crate::risk::VerifiedCensus {
+        complete: true,
+        generation: 7,
+        source_digest: "d".repeat(64),
+        generated_at_ms: 3,
+        read_floor_ms: 2,
+        occupied: source_occupied,
+        cumulative_loss_usd: source_loss,
+    };
+    let input = crate::risk::ReserveInput {
+        venue: "okx".into(),
+        uid: "b".repeat(64),
+        run_id: "trial001".into(),
+        intent_id: bi.intent_id.clone(),
+        strategy_id: "manual".into(),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        plan_sha256: bi.plan_hash.clone(),
+        entry_proof_digest: "b".repeat(64),
+        conversion_digest: "c".repeat(64),
+        conversion_observed_at_ms: 3,
+        conversion_rate: okx_kernel::risk::money::RiskAmount::parse("1").unwrap(),
+        native_incarnation: "f".repeat(32),
+        proposal: okx_kernel::risk::model::RiskProposal {
+            loss_usdt: five.clone(),
+            loss_usd: five.clone(),
+            entry_upper_usd: okx_kernel::risk::money::RiskAmount::parse("1").unwrap(),
+        },
+        policy_revision: 1,
+        now_ms: 4,
+    };
+    let receipt = CentralReceipt {
+        reservation_key: input.reservation_key(),
+        account_key: b_key.clone(),
+        installation_id: "installation".into(),
+        instance_id: None,
+        intent_id: bi.intent_id.clone(),
+        plan_hash: bi.plan_hash.clone(),
+        policy_revision: 1,
+        receipt_hash: "e".repeat(64),
+        requested_loss_usd: Decimal::from(5),
+        conversion_digest: input.conversion_digest.clone(),
+    };
+    assert_eq!(
+        owner
+            .trial_original_reserve(
+                "campaign-X".into(),
+                input.clone(),
+                census.clone(),
+                receipt.clone(),
+            )
+            .await
+            .unwrap(),
+        "HELD_UNCOMMITTED"
+    );
+    let mut wrong_strategy = input.clone();
+    wrong_strategy.strategy_id = "strategy_test".into();
+    assert!(matches!(
+        owner
+            .trial_original_reserve(
+                "campaign-X".into(),
+                wrong_strategy,
+                census.clone(),
+                receipt.clone(),
+            )
+            .await,
+        Err(StoreError::Invalid("UNIFIED_ORIGINAL_RESERVE_TRIAL_REJECTED"))
+    ));
+    assert_eq!(owner.campaign_summary("campaign-X".into()).await.unwrap(), summary);
 
     // The ORIGINAL RiskBook AccountSummary SQL must distinguish these two
     // canonical account identities inside the shared campaign scope.
@@ -12956,6 +13057,11 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     // genuine close and complete 47-table/manifest re-verification.
     let reopened = open().await.unwrap();
     assert_eq!(reopened.inventory().await.unwrap(), inventory);
+    assert_eq!(
+        reopened.campaign_summary("campaign-X".into()).await.unwrap(),
+        summary,
+        "staged Reserve cannot alter the original immutable import on reopen"
+    );
     let mut finished = reopened.termination_signal();
     drop(reopened);
     tokio::time::timeout(Duration::from_secs(2), finished.changed())
