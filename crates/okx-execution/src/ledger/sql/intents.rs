@@ -2124,7 +2124,54 @@ impl AccountStore {
         .transpose()
     }
     pub(super) fn plan(&self, id: &str) -> StoreResult<IntentPlan> {
-        let (mut p,q,price,stop,loss,cv)=self.connection.query_row("SELECT operation,side,quantity,limit_price,stop_price,strategy_instance,planned_loss_usd,source_generation,position_side,private_source_generation,contract_value,inverse,settlement_currency,strategy_definition_id,strategy_definition_version,strategy_parameters_digest FROM intent_plans WHERE intent_id=?1",[id],|r|Ok((IntentPlan{operation:r.get(0)?,side:r.get(1)?,strategy_instance:r.get(5)?,source_generation:r.get(7)?,position_side:r.get(8)?,private_source_generation:r.get(9)?,inverse:r.get(11)?,settlement_currency:r.get(12)?,strategy_definition_id:r.get(13)?,strategy_definition_version:r.get(14)?,strategy_parameters_digest:r.get(15)?,..Default::default()},r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,String>(6)?,r.get::<_,String>(10)?)))?;
+        Self::plan_sql(&self.connection, None, id)
+    }
+
+    // The original native plan decoder, shared by per-account v2 and scoped v6
+    // SQL. Reserve validates the entire original plan under its caller's lock.
+    fn plan_sql(
+        db: &rusqlite::Connection,
+        scope: Option<(&str, &str)>,
+        id: &str,
+    ) -> StoreResult<IntentPlan> {
+        use rusqlite::{params_from_iter, types::Value};
+        let sql = if scope.is_some() {
+            "SELECT operation,side,quantity,limit_price,stop_price,strategy_instance,planned_loss_usd,source_generation,position_side,private_source_generation,contract_value,inverse,settlement_currency,strategy_definition_id,strategy_definition_version,strategy_parameters_digest FROM intent_plans WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
+        } else {
+            "SELECT operation,side,quantity,limit_price,stop_price,strategy_instance,planned_loss_usd,source_generation,position_side,private_source_generation,contract_value,inverse,settlement_currency,strategy_definition_id,strategy_definition_version,strategy_parameters_digest FROM intent_plans WHERE intent_id=?1"
+        };
+        let mut values = vec![Value::Text(id.to_owned())];
+        if let Some((installation, account)) = scope {
+            values.push(Value::Text(installation.to_owned()));
+            values.push(Value::Text(account.to_owned()));
+        }
+        let (mut p, q, price, stop, loss, cv) = db.query_row(
+            sql,
+            params_from_iter(values.iter()),
+            |r| {
+                Ok((
+                    IntentPlan {
+                        operation: r.get(0)?,
+                        side: r.get(1)?,
+                        strategy_instance: r.get(5)?,
+                        source_generation: r.get(7)?,
+                        position_side: r.get(8)?,
+                        private_source_generation: r.get(9)?,
+                        inverse: r.get(11)?,
+                        settlement_currency: r.get(12)?,
+                        strategy_definition_id: r.get(13)?,
+                        strategy_definition_version: r.get(14)?,
+                        strategy_parameters_digest: r.get(15)?,
+                        ..Default::default()
+                    },
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(10)?,
+                ))
+            },
+        )?;
         p.contract_value = decimal(cv)?;
         p.quantity = decimal(q)?;
         p.limit_price = decimal(price)?;
@@ -2132,24 +2179,83 @@ impl AccountStore {
         p.planned_loss_usd = decimal(loss)?;
         Ok(p)
     }
+
     pub fn reserve(&mut self, receipt: &CentralReceipt, now: i64) -> StoreResult<()> {
-        let i = self
-            .intent(&receipt.intent_id)?
-            .ok_or(StoreError::Invalid("INTENT_MISSING"))?;
         if receipt.account_key != self.meta.account_key
             || receipt.installation_id != self.meta.installation_id
-            || receipt.plan_hash != i.plan_hash
-            || receipt.policy_revision != i.policy_revision
+        {
+            return Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::reserve_sql_transaction(&tx, None, receipt, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The ORIGINAL AccountStore receipt, strategy and intent state machine,
+    /// executed by the caller's single SQL transaction for either the
+    /// legacy v2 account database or one scope in the v6 financial database.
+    /// Does not create a Connection, independently COMMIT, or grant venue POST.
+    pub(crate) fn reserve_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        scope: Option<(&str, &str)>,
+        receipt: &CentralReceipt,
+        now: i64,
+    ) -> StoreResult<()> {
+        use rusqlite::{params_from_iter, types::Value};
+        if let Some((installation, account)) = scope {
+            if installation.is_empty()
+                || account.is_empty()
+                || receipt.installation_id != installation
+                || receipt.account_key != account
+            {
+                return Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"));
+            }
+        }
+        let scoped_values = |mut values: Vec<Value>| {
+            if let Some((installation, account)) = scope {
+                values.push(Value::Text(installation.to_owned()));
+                values.push(Value::Text(account.to_owned()));
+            }
+            values
+        };
+        let intent_sql = if scope.is_some() {
+            "SELECT state,plan_hash,policy_revision FROM intents
+             WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
+        } else {
+            "SELECT state,plan_hash,policy_revision FROM intents WHERE intent_id=?1"
+        };
+        let values = scoped_values(vec![Value::Text(receipt.intent_id.clone())]);
+        let original: Option<(String, String, i64)> = tx
+            .query_row(intent_sql, params_from_iter(values.iter()), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .optional()?;
+        let (state, plan_hash, policy_revision) =
+            original.ok_or(StoreError::Invalid("INTENT_MISSING"))?;
+        let state = IntentState::parse(&state)?;
+        let plan = Self::plan_sql(tx, scope, &receipt.intent_id)?;
+        if receipt.plan_hash != plan_hash
+            || receipt.policy_revision != policy_revision
             || receipt.receipt_hash.is_empty()
             || receipt.requested_loss_usd < Decimal::ZERO
             || receipt.conversion_digest.is_empty()
         {
             return Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"));
         }
-        if i.state == IntentState::Reserved {
-            let saved: String = self.connection.query_row(
-                "SELECT receipt_hash FROM risk_receipts WHERE reservation_key=?1",
-                [&receipt.reservation_key],
+        if state == IntentState::Reserved {
+            let hash_sql = if scope.is_some() {
+                "SELECT receipt_hash FROM risk_receipts
+                 WHERE reservation_key=?1 AND installation_id=?2 AND account_key=?3"
+            } else {
+                "SELECT receipt_hash FROM risk_receipts WHERE reservation_key=?1"
+            };
+            let values = scoped_values(vec![Value::Text(receipt.reservation_key.clone())]);
+            let saved: String = tx.query_row(
+                hash_sql,
+                params_from_iter(values.iter()),
                 |r| r.get(0),
             )?;
             return if saved == receipt.receipt_hash {
@@ -2158,29 +2264,48 @@ impl AccountStore {
                 Err(StoreError::Invalid("CENTRAL_RECEIPT_CONFLICT"))
             };
         }
-        if i.state != IntentState::Prepared {
+        if state != IntentState::Prepared {
             return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
         }
-        let owner: Option<String> = self.connection.query_row(
-            "SELECT instance_id FROM decisions JOIN intents USING(decision_id) WHERE intent_id=?1",
-            [&i.intent_id],
-            |r| r.get(0),
-        )?;
+        let decision_sql = if scope.is_some() {
+            "SELECT d.instance_id FROM decisions d JOIN intents i
+                ON d.decision_id=i.decision_id
+               AND d.installation_id=i.installation_id
+               AND d.account_key=i.account_key
+             WHERE i.intent_id=?1 AND i.installation_id=?2 AND i.account_key=?3"
+        } else {
+            "SELECT d.instance_id FROM decisions d JOIN intents i USING(decision_id)
+             WHERE i.intent_id=?1"
+        };
+        let owner: Option<String> = tx
+            .query_row(decision_sql, params_from_iter(values.iter()), |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .optional()?
+            .flatten();
         if owner != receipt.instance_id
-            || !strategy_owner_matches_plan(owner.as_deref(), &i.plan.strategy_instance)
+            || !strategy_owner_matches_plan(owner.as_deref(), &plan.strategy_instance)
         {
             return Err(StoreError::Invalid("CENTRAL_INSTANCE_MISMATCH"));
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let insert_sql = if scope.is_some() {
+            "INSERT INTO risk_receipts(
+             installation_id,account_key,reservation_key,intent_id,instance_id,plan_hash,
+             policy_revision,receipt_hash,requested_loss_usd,conversion_digest,state)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'HELD')"
+        } else {
+            "INSERT INTO risk_receipts(
+             reservation_key,intent_id,account_key,installation_id,instance_id,plan_hash,
+             policy_revision,receipt_hash,requested_loss_usd,conversion_digest,state)
+             VALUES (?3,?4,?2,?1,?5,?6,?7,?8,?9,?10,'HELD')"
+        };
         tx.execute(
-            "INSERT INTO risk_receipts VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'HELD')",
+            insert_sql,
             params![
+                receipt.installation_id,
+                receipt.account_key,
                 receipt.reservation_key,
                 receipt.intent_id,
-                receipt.account_key,
-                receipt.installation_id,
                 receipt.instance_id,
                 receipt.plan_hash,
                 receipt.policy_revision,
@@ -2189,8 +2314,21 @@ impl AccountStore {
                 receipt.conversion_digest
             ],
         )?;
-        tx.execute("UPDATE intents SET state='RESERVED',revision=revision+1,updated_at=?2 WHERE intent_id=?1 AND state='PREPARED'",params![i.intent_id,now])?;
-        tx.commit()?;
+        let update_sql = if scope.is_some() {
+            "UPDATE intents SET state='RESERVED',revision=revision+1,updated_at=?2
+             WHERE intent_id=?1 AND state='PREPARED'
+               AND installation_id=?3 AND account_key=?4"
+        } else {
+            "UPDATE intents SET state='RESERVED',revision=revision+1,updated_at=?2
+             WHERE intent_id=?1 AND state='PREPARED'"
+        };
+        let values = scoped_values(vec![
+            Value::Text(receipt.intent_id.clone()),
+            Value::Integer(now),
+        ]);
+        if tx.execute(update_sql, params_from_iter(values.iter()))? != 1 {
+            return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
+        }
         Ok(())
     }
     /// Read-only proof of the durable BEGIN_POST fence and its coherent
