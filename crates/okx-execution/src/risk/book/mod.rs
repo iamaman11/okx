@@ -30,7 +30,12 @@ pub(crate) fn test_trial_unified_reserve(
 ) -> Result<&'static str, &'static str> {
     use store::{ReserveDecision, RiskBookStore};
     match RiskBookStore::reserve_unified_account_transaction(
-        tx, installation, campaign, input, census, receipt,
+        tx,
+        installation,
+        campaign,
+        input,
+        census,
+        receipt,
     ) {
         Ok(ReserveDecision::Held(_)) => Ok("HELD_UNCOMMITTED"),
         Ok(ReserveDecision::Rejected(_)) => Ok("REJECTED_UNCOMMITTED"),
