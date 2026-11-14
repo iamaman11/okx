@@ -1,5 +1,13 @@
 # Trade acceptance evidence map — #448 / #449 / #501
 
+### #510 r4.0 source-authentic partial migration — verified original AccountStore producer
+
+**Actual Rust code SHA `a1660565771a5e805f2c03d347840284b5a8d60f`**; [CI #43531489964](https://github.com/iamaman11/okx/actions/runs/43531489964) **SUCCESS**: 49/49 filtered execution Rust contracts + 6/6 kernel + 1/1 **real native AccountStore** `e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted` (extended to exercise legacy original-source import), formatting, architecture guard and negative self-tests PASS.
+
+**New evidence:** within the real original AccountStore test, `inspect_legacy_partial_source` verifies the existing native `bind_partial_entry_settlement` and its original fill/bill/fee links. It imports original immutable `EntrySettlementEvidence` bytes and source identities into the scoped **one-file** finance schema. A single destination `Transaction` imports source + risk reservation and commits the original 50.01 USD as one campaign debit from the 100.05 upper bound, preserving remaining 50.04 and the original receipt. Exact reimport/replay and reopened SQLite do not double count. No second fee/FX logic. Checked original account order identity and stored source/bill digests on settlement.
+
+**Limit:** this validates **one immutable partial source during isolated offline legacy migration**, not an authenticated production operation running on the fully normalized new ledger. The original AccountStore DB is still a **separate source file** in this migration test; the remaining 47-table schema/actual owner cutover, multi-fill/late/terminal imports, authority epoch and Cloudflare fencing are **NOT_PROVEN**. Historic two-file live authority remains unmodified; #510 r4 RB07/RB08/full source migration stay NOT_PROVEN. Detailed table map and accepted/blocked scope: [financial-sql-scope-r4.md](financial-sql-scope-r4.md).
+
 ### #510 r4.0 first scoped SQL commit — testable subset, NOT production accepted
 
 [Source-defined 47-table scope inventory and schema/transaction index](financial-sql-scope-r4.md). Verified direct code SHA `941b24129697cd1399687c0736019f8a247721f7`, [Linux GitHub CI #43529137651](https://github.com/iamaman11/okx/actions/runs/43529137651) **SUCCESS**, original `risk_book_contract` filtered tests **49/49 okx-execution + 6/6 okx-kernel**, plus **1/1 original AccountStore fill/bill receipt** = **56** filtered cases (including subprocess entrypoints). Actual execution after build 0.44s + 0.00s + 0.11s. Architecture guard including negative self-tests and Rust formatting PASS.
