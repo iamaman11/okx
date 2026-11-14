@@ -39,7 +39,12 @@ pub(crate) fn test_trial_unified_reserve(
     ) {
         Ok(ReserveDecision::Held(_)) => Ok("HELD_UNCOMMITTED"),
         Ok(ReserveDecision::Rejected(_)) => Ok("REJECTED_UNCOMMITTED"),
-        Err(_) => Err("UNIFIED_ORIGINAL_RESERVE_TRIAL_REJECTED"),
+        Err(error) => {
+            // Test-only diagnostic: identify the exact ORIGINAL Rust rule
+            // owner that refused the trial, never a production bypass.
+            eprintln!("UNIFIED_RESERVE_TRIAL_ORIGINAL_REASON={error}");
+            Err("UNIFIED_ORIGINAL_RESERVE_TRIAL_REJECTED")
+        }
     }
 }
 
