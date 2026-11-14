@@ -12693,7 +12693,6 @@ fn risk_book_contract_scoped_original_account_reserve_is_atomic_and_replay_exact
     );
 }
 
-
 #[tokio::test]
 async fn risk_book_contract_one_installation_finance_owner_reuses_original_import_and_lock() {
     use rusqlite::{Connection, OpenFlags};
@@ -12767,7 +12766,10 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         .await
         .unwrap()
         .unwrap();
-    assert!(*closed.borrow(), "owner closed all SQLite and lease handles");
+    assert!(
+        *closed.borrow(),
+        "owner closed all SQLite and lease handles"
+    );
 
     // A new owner can reopen the same original finance SQLite only after
     // genuine close and complete 47-table/manifest re-verification.
