@@ -12692,3 +12692,105 @@ fn risk_book_contract_scoped_original_account_reserve_is_atomic_and_replay_exact
         "ok"
     );
 }
+
+
+#[tokio::test]
+async fn risk_book_contract_one_installation_finance_owner_reuses_original_import_and_lock() {
+    use rusqlite::{Connection, OpenFlags};
+    use std::time::Duration;
+
+    // These are genuine original v2 account writers and the existing RiskBook
+    // campaign fixture. Nothing here mints a live owner epoch or trade permit.
+    let mut a = store_with_account_campaign("acct-A", "campaign-X");
+    let mut b = store_with_account_campaign("acct-B", "campaign-X");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let campaign = path();
+    unified_original_campaign_fixture(
+        &campaign,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sc = Connection::open_with_flags(&campaign, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let root = path().with_extension("finance-owner-root");
+    std::fs::create_dir_all(root.join("finance")).unwrap();
+    let finance = root.join("finance").join("finance.sqlite");
+    let mut target = Connection::open(&finance).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+        &mut target,
+        &super::sql::unified_financial::importer::ExpectedFinanceInventory {
+            installation: "installation",
+            accounts: &["acct-A", "acct-B"],
+            campaigns: &["campaign-X"],
+        },
+        &[&sa, &sb],
+        &[&sc],
+    )
+    .unwrap();
+    drop(target);
+    drop(sa);
+    drop(sb);
+    drop(sc);
+
+    let open = || {
+        crate::account_worker::UnifiedFinanceHandle::open_stopped_import(
+            root.clone(),
+            "installation".into(),
+            vec!["acct-A".into(), "acct-B".into()],
+            vec!["campaign-X".into()],
+        )
+    };
+    let owner = open().await.unwrap();
+    let inventory = owner.inventory().await.unwrap();
+    assert_eq!(inventory.accounts, 2);
+    assert_eq!(inventory.campaigns, 1);
+    assert_eq!(inventory.state, "OFFLINE_NOT_AUTHORIZED");
+
+    // The same installation cannot spawn a second simultaneous SQL owner,
+    // even when both handles present the exact same complete import roster.
+    assert!(matches!(
+        open().await,
+        Err(StoreError::Invalid("UNIFIED_FINANCE_WRITER_BUSY"))
+    ));
+    let mut closed = owner.termination_signal();
+    drop(owner);
+    tokio::time::timeout(Duration::from_secs(2), closed.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(*closed.borrow(), "owner closed all SQLite and lease handles");
+
+    // A new owner can reopen the same original finance SQLite only after
+    // genuine close and complete 47-table/manifest re-verification.
+    let reopened = open().await.unwrap();
+    assert_eq!(reopened.inventory().await.unwrap(), inventory);
+    let mut finished = reopened.termination_signal();
+    drop(reopened);
+    tokio::time::timeout(Duration::from_secs(2), finished.changed())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The owner's startup roster is mandatory; no "scan installed IDs"
+    // shortcut can silently omit a finance account.
+    assert!(matches!(
+        crate::account_worker::UnifiedFinanceHandle::open_stopped_import(
+            root.clone(),
+            "installation".into(),
+            vec!["acct-A".into()],
+            vec!["campaign-X".into()],
+        )
+        .await,
+        Err(StoreError::Invalid("UNIFIED_IMPORT_INVENTORY_MISMATCH"))
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+}
