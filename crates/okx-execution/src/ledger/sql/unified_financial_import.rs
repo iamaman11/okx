@@ -494,6 +494,7 @@ fn import_sources(
     installation: &str,
     accounts: &[&Connection],
     campaigns: &[&Connection],
+    expected: Option<&ExpectedFinanceInventory<'_>>,
 ) -> StoreResult<OriginalFinanceImport> {
     if installation.is_empty() || accounts.is_empty() {
         return Err(StoreError::Invalid("UNIFIED_IMPORT_EMPTY_SCOPE"));
@@ -555,6 +556,19 @@ fn import_sources(
             return Err(StoreError::Invalid("UNIFIED_DUPLICATE_CAMPAIGN_SOURCE"));
         }
     }
+    // A caller-supplied inventory is an exact source-set contract, NOT a
+    // trusted export or proof of the old Cloudflare owner being revoked.
+    // Compare its complete canonical identities BEFORE touching target SQL.
+    if let Some(inventory) = expected {
+        let allowed_accounts = inventory_ids(inventory.accounts)?;
+        let allowed_campaigns = inventory_ids(inventory.campaigns)?;
+        if inventory.installation != installation
+            || account_identities != allowed_accounts
+            || campaign_identities != allowed_campaigns
+        {
+            return Err(StoreError::Invalid("UNIFIED_IMPORT_INVENTORY_MISMATCH"));
+        }
+    }
     let existing: i64 = target.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
          AND name NOT LIKE 'sqlite_%'",
@@ -610,8 +624,39 @@ fn import_sources(
         [],
         |r| r.get(0),
     )?;
-    if count != 47 {
+    if count != 48 {
         return Err(StoreError::Invalid("UNIFIED_COMPLETE_TABLE_CENSUS_INVALID"));
+    }
+    let (recorded_account_rows, recorded_campaign_rows) =
+        target_row_totals(&tx, installation, &account_identities, &campaign_identities)?;
+    if (recorded_account_rows, recorded_campaign_rows) != (account_rows, campaign_rows) {
+        return Err(StoreError::Invalid("UNIFIED_IMPORT_ROW_PARITY_FAILED"));
+    }
+    let inventory_sha256 = hash_inventory(installation, &account_identities, &campaign_identities);
+    let content_sha256 =
+        target_content_digest(&tx, installation, &account_identities, &campaign_identities)?;
+    if expected.is_some() {
+        // The immutable marker is part of this SAME data transaction.
+        // OFFLINE_NOT_AUTHORIZED explicitly cannot grant any finance capability.
+        tx.execute(
+            "INSERT INTO finance_import_manifest
+             (singleton,installation_id,inventory_sha256,content_sha256,
+              account_count,campaign_count,account_rows,campaign_rows,state)
+             VALUES(1,?1,?2,?3,?4,?5,?6,?7,'OFFLINE_NOT_AUTHORIZED')",
+            params![
+                installation,
+                &inventory_sha256,
+                &content_sha256,
+                i64::try_from(account_identities.len())
+                    .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?,
+                i64::try_from(campaign_identities.len())
+                    .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?,
+                i64::try_from(account_rows)
+                    .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?,
+                i64::try_from(campaign_rows)
+                    .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?,
+            ],
+        )?;
     }
     let mut fk_check = tx.prepare("PRAGMA foreign_key_check")?;
     if fk_check.query([])?.next()?.is_some() {
@@ -626,6 +671,8 @@ fn import_sources(
         tables_per_campaign: ORIGINAL_CAMPAIGN_TABLES.len(),
         account_rows,
         campaign_rows,
+        inventory_sha256,
+        content_sha256,
     })
 }
 
@@ -633,14 +680,16 @@ fn import_sources(
 /// owners until original authority is physically fenced and inventoried.
 pub(in crate::account_store) fn import_stopped_finance_into_empty(
     target: &mut Connection,
-    installation: &str,
+    expected: &ExpectedFinanceInventory<'_>,
     accounts: &[&Connection],
     campaigns: &[&Connection],
 ) -> StoreResult<OriginalFinanceImport> {
-    if campaigns.is_empty() {
+    if campaigns.is_empty() || expected.campaigns.is_empty() {
         return Err(StoreError::Invalid("UNIFIED_CAMPAIGN_INVENTORY_UNPROVEN"));
     }
-    import_sources(target, installation, accounts, campaigns)
+    import_sources(
+        target, expected.installation, accounts, campaigns, Some(expected),
+    )
 }
 
 /// Historical account-only direct test, not a cutover API. It deliberately
@@ -651,7 +700,7 @@ pub(in crate::account_store) fn import_stopped_accounts_into_empty_finance(
     installation: &str,
     accounts: &[&Connection],
 ) -> StoreResult<OriginalAccountImport> {
-    let result = import_sources(target, installation, accounts, &[])?;
+    let result = import_sources(target, installation, accounts, &[], None)?;
     Ok(OriginalAccountImport {
         accounts: result.accounts,
         tables_per_account: result.tables_per_account,
