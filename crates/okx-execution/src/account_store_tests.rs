@@ -11918,7 +11918,10 @@ fn risk_book_contract_child_full_original_import_os_boundary() {
     // The importer itself blocks at an actual SQLite transaction boundary.
     // A return before the injected point is a broken test, not a success.
     super::sql::unified_financial::importer::import_stopped_finance_into_empty(
-        &mut target, &expected, &[&sa, &sb], &[&sc],
+        &mut target,
+        &expected,
+        &[&sa, &sb],
+        &[&sc],
     )
     .expect("the child must be killed at the actual SQL commit barrier");
     panic!("OS kill fault injection was not reached");
@@ -12000,17 +12003,21 @@ fn risk_book_contract_full_original_import_os_kill_before_after_commit() {
     let rolled_back = path();
     full_import_os_kill(&rolled_back, &ap, &bp, &campaign, "BEFORE_COMMIT");
     let db = Connection::open(&rolled_back).unwrap();
-    let table_count: i64 = db.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+    let table_count: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
          AND name NOT LIKE 'sqlite_%'",
-        [],
-        |r| r.get(0),
-    ).unwrap();
-    assert_eq!(table_count, 0, "kill before COMMIT must roll back all 47 financial tables");
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        table_count, 0,
+        "kill before COMMIT must roll back all 47 financial tables"
+    );
     assert!(
-        super::sql::unified_financial::importer::inspect_stopped_finance_import(
-            &db, &expected,
-        ).is_err(),
+        super::sql::unified_financial::importer::inspect_stopped_finance_import(&db, &expected,)
+            .is_err(),
         "a partial import cannot appear committed"
     );
     drop(db);
@@ -12018,23 +12025,30 @@ fn risk_book_contract_full_original_import_os_kill_before_after_commit() {
     let durable = path();
     full_import_os_kill(&durable, &ap, &bp, &campaign, "AFTER_COMMIT");
     let db = Connection::open(&durable).unwrap();
-    let verified = super::sql::unified_financial::importer::inspect_stopped_finance_import(
-        &db, &expected,
-    ).unwrap();
+    let verified =
+        super::sql::unified_financial::importer::inspect_stopped_finance_import(&db, &expected)
+            .unwrap();
     assert_eq!((verified.accounts, verified.campaigns), (2, 1));
     assert!(verified.account_rows >= 20);
     assert_eq!(verified.campaign_rows, 1 + 2 * 5 + 1 + 1);
-    let (remaining_entry, reserved_loss): (String, String) = db.query_row(
-        "SELECT entry_reserved_usd,loss_reserved_usd FROM risk_meta
+    let (remaining_entry, reserved_loss): (String, String) = db
+        .query_row(
+            "SELECT entry_reserved_usd,loss_reserved_usd FROM risk_meta
          WHERE installation_id='installation' AND campaign_id='campaign-X'",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ).unwrap();
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
     assert_eq!((remaining_entry, reserved_loss), ("2".into(), "1".into()));
-    let status: String = db.query_row(
-        "SELECT state FROM finance_import_manifest WHERE singleton=1",
-        [],
-        |r| r.get(0),
-    ).unwrap();
-    assert_eq!(status, "OFFLINE_NOT_AUTHORIZED", "commit never grants live trading authority");
+    let status: String = db
+        .query_row(
+            "SELECT state FROM finance_import_manifest WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        status, "OFFLINE_NOT_AUTHORIZED",
+        "commit never grants live trading authority"
+    );
 }
