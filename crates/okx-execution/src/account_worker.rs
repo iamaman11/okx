@@ -740,6 +740,47 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    /// TEST ONLY: full ORIGINAL account+RiskBook Reserve under this exact
+    /// installation's bounded SQL owner. The immutable offline import must
+    /// remain byte-for-byte recoverable: ALWAYS rollback even after HELD.
+    /// This is not a staging grant, production Reserve, or cutover switch.
+    #[cfg(test)]
+    pub(crate) async fn trial_original_reserve(
+        &self,
+        campaign: String,
+        input: crate::risk::ReserveInput,
+        census: crate::risk::VerifiedCensus,
+        receipt: crate::CentralReceipt,
+    ) -> StoreResult<&'static str> {
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let marker: String = tx.query_row(
+                "SELECT state FROM finance_import_manifest
+                 WHERE singleton=1 AND installation_id=?1",
+                [&installation],
+                |r| r.get(0),
+            )?;
+            if marker != "OFFLINE_NOT_AUTHORIZED" {
+                return Err(StoreError::Invalid("UNIFIED_TRIAL_REQUIRES_OFFLINE_IMPORT"));
+            }
+            let result = crate::risk::test_trial_unified_reserve(
+                &tx,
+                &installation,
+                &campaign,
+                &input,
+                &census,
+                &receipt,
+            );
+            // No financial mutation may outlive this test; the original
+            // immutable import's manifest digest and old owner fencing must
+            // stay exactly as imported, even for an internally staged HELD.
+            tx.rollback()?;
+            result.map_err(StoreError::Invalid)
+        })
+        .await
+    }
+
     /// The original RiskBook Inspect returns None for missing/foreign
     /// reservation or wrong plan. Absence is UNKNOWN, NOT permission to POST.
     pub(crate) async fn inspect_reservation(
