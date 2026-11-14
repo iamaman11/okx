@@ -724,6 +724,29 @@ impl RiskBookStore {
                 "UNIFIED_ACCOUNT_RISK_RECEIPT_CONFLICT",
             ));
         }
+        // The original account owner must actually assign this risk-increase
+        // intent to THIS campaign at the requested policy revision. Mere
+        // presence in a risk_policy_account cohort cannot transfer money
+        // from another campaign, even on a private offline finance SQLite.
+        let source: Option<(i64, String, i64, i64)> = tx
+            .query_row(
+                "SELECT i.risk_increase,p.campaign_id,p.revision,p.paused
+                 FROM intents i JOIN account_policy p
+                   ON p.installation_id=i.installation_id
+                  AND p.account_key=i.account_key AND p.singleton=1
+                 WHERE i.installation_id=?1 AND i.account_key=?2 AND i.intent_id=?3",
+                params![installation, &receipt.account_key, &receipt.intent_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if !matches!(source,
+            Some((1, ref assigned, revision, 0))
+                if assigned == campaign && revision == policy_revision
+        ) {
+            return Err(RiskStoreError::Invalid(
+                "UNIFIED_ACCOUNT_CAMPAIGN_POLICY_UNPROVEN",
+            ));
+        }
         let decision =
             Self::reserve_sql_transaction(tx, Some((installation, campaign)), input, census)?;
         if let ReserveDecision::Held(_) = &decision {
