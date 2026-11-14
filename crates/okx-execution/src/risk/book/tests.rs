@@ -1703,6 +1703,65 @@ fn risk_book_contract_sql_partial_entry_consumes_reserved_budget_once() {
     assert_eq!(reopened.readback().unwrap().consumed_entry_usd, "1");
 }
 
+
+#[test]
+fn risk_book_contract_sql_account_outcome_open_and_unknown_keep_entry_debit_atomic() {
+    // Each state has exactly the same existing RiskBook monetary owner:
+    // post-ACK OPEN and lost-ACK UNKNOWN preserve the original reservation.
+    // The verified ORIGINAL AccountStore receipt is represented by the
+    // existing typed domain proof; this fixture does not grant venue POST.
+    for (state, letter) in [("OPEN", 'o'), ("UNKNOWN", 'u')] {
+        let fixture = Fixture::new("entry-after-outcome");
+        RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
+        let input = request('a', &format!("intentafter{letter}"), "3");
+        let mut owner = open(&fixture);
+        owner.reserve(&input, &census()).unwrap();
+        owner.begin_post(&post_fence(&input, 1)).unwrap();
+        owner.close();
+        {
+            let db = rusqlite::Connection::open(&fixture.path).unwrap();
+            db.execute(
+                "UPDATE risk_entries SET state=?1 WHERE reservation_key=?2
+                   AND state='POSTED'",
+                rusqlite::params![state, input.reservation_key()],
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE risk_meta SET book_sequence=3 WHERE singleton=1
+                 AND book_sequence=2",
+                [],
+            )
+            .unwrap();
+        }
+        let mut owner = open(&fixture);
+        let initial = owner.readback().unwrap();
+        assert_eq!(initial.global_reserved_usdt, "3");
+        assert_eq!(initial.reserved_entry_usd, "1");
+        assert_eq!(initial.book_sequence, 3);
+        let proof = partial_proof(&input, 1, "0.4", 'b');
+        let accepted = owner.settle_partial_entry(&proof, 3, 7).unwrap();
+        assert_eq!(accepted.book_sequence, 4);
+        assert_eq!(accepted.cumulative_entry_usd, "0.4");
+        assert_eq!(owner.readback().unwrap().entry_bound_breach_usd, "0");
+        owner.close();
+        let mut recovered = open(&fixture);
+        assert_eq!(recovered.readback().unwrap().book_sequence, 4);
+        assert_eq!(recovered.readback().unwrap().global_reserved_usdt, "3");
+        assert_eq!(recovered.readback().unwrap().reserved_entry_usd, "0.6");
+        assert_eq!(recovered.readback().unwrap().consumed_entry_usd, "0.4");
+        let replay = recovered.settle_partial_entry(&proof, 3, 7).unwrap();
+        assert!(replay.replayed);
+        assert_eq!(recovered.readback().unwrap().book_sequence, 4);
+        let next = partial_proof(&input, 2, "0.8", 'c');
+        assert_eq!(
+            recovered.settle_partial_entry(&next, 4, 7).unwrap().book_sequence,
+            5
+        );
+        assert_eq!(recovered.readback().unwrap().reserved_entry_usd, "0.2");
+        assert_eq!(recovered.readback().unwrap().consumed_entry_usd, "0.8");
+    }
+}
+
 #[test]
 fn risk_book_contract_sql_partial_entry_regression_and_breach_fail_closed() {
     let fixture = Fixture::new("entry-breach");

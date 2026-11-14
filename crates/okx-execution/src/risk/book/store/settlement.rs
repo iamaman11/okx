@@ -1,4 +1,6 @@
-//! One campaign-side partial entry debit per original native SQL revision.
+//! One campaign-side entry debit per original native SQL revision.
+ //! The original AccountStore proves fill/bill/FX economics, never the
+ //! target reservation's transitional POSTED/UNKNOWN/OPEN label.
 //! This module does NOT calculate fill, bill, fee, FX or venue facts; those
 //! economic facts are produced and sealed by the existing AccountStore owner.
 //! No arbitrary network settlement, late fee or terminal release is accepted.
@@ -241,7 +243,11 @@ impl RiskBookStore {
         if account != proof.account_key || plan != proof.plan_sha256 {
             return Err(RiskStoreError::IdempotencyConflict);
         }
-        if state != "POSTED" {
+        // The original AccountStore can prove partial fills while a venue
+        // ACK is lost (UNKNOWN) or after the same SQL owner has acknowledged
+        // the order (OPEN). These states retain the SAME held money. A
+        // RELEASED/HELD reservation may never use this partial debit path.
+        if !matches!(state.as_str(), "POSTED" | "UNKNOWN" | "OPEN") {
             return Err(RiskStoreError::AlreadyResolved);
         }
         let prior_revision = u64::try_from(prior_revision)
@@ -332,12 +338,12 @@ impl RiskBookStore {
         let entry_update = if scope.is_some() {
             "UPDATE risk_entries SET reserved_entry_usd=?1,entry_settled_usd=?2,
                     entry_settlement_revision=?3,entry_settlement_digest=?4,entry_bound_breach_usd=?5
-             WHERE reservation_key=?6 AND state='POSTED' AND entry_settlement_revision=?7
+             WHERE reservation_key=?6 AND state IN ('POSTED','UNKNOWN','OPEN') AND entry_settlement_revision=?7
                AND installation_id=?8 AND campaign_id=?9"
         } else {
             "UPDATE risk_entries SET reserved_entry_usd=?1,entry_settled_usd=?2,
                     entry_settlement_revision=?3,entry_settlement_digest=?4,entry_bound_breach_usd=?5
-             WHERE reservation_key=?6 AND state='POSTED' AND entry_settlement_revision=?7"
+             WHERE reservation_key=?6 AND state IN ('POSTED','UNKNOWN','OPEN') AND entry_settlement_revision=?7"
         };
         let entry_args = reserve_scope_values(
             vec![
