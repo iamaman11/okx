@@ -11297,3 +11297,33 @@ fn risk_book_contract_unified_full_original_account_import_two_accounts() {
     assert_eq!(count, 2);
     let _ = std::fs::remove_file(&destination);
 }
+
+#[test]
+fn risk_book_contract_unified_offline_import_rejects_active_native_writer() {
+    use rusqlite::{Connection, OpenFlags};
+    let source_owner = store();
+    let source = Connection::open_with_flags(
+        &source_owner.path, OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    assert!(matches!(
+        super::sql::unified_financial::importer::import_stopped_accounts_into_empty_finance(
+            &mut target, "installation", &[&source],
+        ),
+        Err(StoreError::Invalid("ACCOUNT_WRITER_ALREADY_RUNNING"))
+    ), "original native AccountStore writer must close BEFORE any source import");
+    let count: i64 = target.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+         AND name NOT LIKE 'sqlite_%'",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(count,0,"refused import must not initialize even one new table");
+    drop(source);
+    drop(source_owner);
+    drop(target);
+    let _ = std::fs::remove_file(destination);
+}
