@@ -29,8 +29,7 @@ pub(crate) fn test_stage_scoped_begin_post(
     };
     use std::collections::BTreeMap;
     use store::{
-        PostDecision, PostFenceInput, VerifiedCensus,
-        begin_unified_post_and_account_transaction,
+        PostDecision, PostFenceInput, VerifiedCensus, begin_unified_post_and_account_transaction,
     };
     let zero = RiskAmount::zero();
     let reads = cohort
