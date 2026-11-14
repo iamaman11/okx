@@ -699,6 +699,28 @@ pub use storage_snapshot::{
 };
 
 impl AccountStore {
+    /// An existing, stopped r4 finance import must pass the SAME original
+    /// 47-table ledger/RiskBook verification before a shared SQL owner can
+    /// even open it. This never grants cutover or venue authority.
+    pub(crate) fn inspect_offline_finance_import(
+        db: &Connection,
+        installation: &str,
+        accounts: &[&str],
+        campaigns: &[&str],
+    ) -> StoreResult<()> {
+        sql::unified_financial::importer::inspect_stopped_finance_import(
+            db,
+            &sql::unified_financial::importer::ExpectedFinanceInventory {
+                installation,
+                accounts,
+                campaigns,
+            },
+        )?;
+        Ok(())
+    }
+}
+
+impl AccountStore {
     pub(crate) fn run_before_deadline<T>(
         &mut self,
         deadline: std::time::Instant,
