@@ -12669,21 +12669,28 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
                  WHERE e.campaign_id='campaign-X'
                    AND e.reservation_key='same-reservation'",
                 [],
-                |row| Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                )),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(
             observed,
-            ("OPEN".into(), "ACKNOWLEDGED".into(), "OPEN".into(), 5, "1".into())
+            (
+                "OPEN".into(),
+                "ACKNOWLEDGED".into(),
+                "OPEN".into(),
+                5,
+                "1".into()
+            )
         );
-        crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X")
-            .unwrap();
+        crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
         if commit {
             tx.commit().unwrap();
         } else {
@@ -12706,7 +12713,8 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
                AND e.reservation_key='same-reservation'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        ).unwrap(),
+        )
+        .unwrap(),
         ("OPEN".into(), "OPEN".into(), 5, "1".into())
     );
     assert_eq!(
@@ -12725,20 +12733,24 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         .unwrap(),
         UnifiedFinanceWriteReceipt::OutcomeRecorded
     );
-    let exact_replay_seq: i64 = tx.query_row(
-        "SELECT book_sequence FROM risk_meta
+    let exact_replay_seq: i64 = tx
+        .query_row(
+            "SELECT book_sequence FROM risk_meta
          WHERE installation_id='installation' AND campaign_id='campaign-X'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(exact_replay_seq, 5);
-    let foreign: (String, i64) = tx.query_row(
-        "SELECT e.state,m.book_sequence FROM risk_entries e JOIN risk_meta m
+    let foreign: (String, i64) = tx
+        .query_row(
+            "SELECT e.state,m.book_sequence FROM risk_entries e JOIN risk_meta m
          ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
          WHERE e.campaign_id='campaign-Y' AND e.reservation_key='same-reservation'",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).unwrap();
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(foreign, ("HELD".into(), 2));
     tx.rollback().unwrap();
 }

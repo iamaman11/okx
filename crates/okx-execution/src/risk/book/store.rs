@@ -1235,7 +1235,6 @@ impl RiskBookStore {
         }))
     }
 
-
     /// Project a source-accepted AccountStore venue outcome into the original
     /// RiskBook under the SAME installation SQL COMMIT. This never authorizes
     /// an additional POST or a budget release. AccountStore alone owns source
@@ -1285,7 +1284,11 @@ impl RiskBookStore {
             // An outcome retry after RELEASE must never resurrect a paid
             // reservation by restoring its terminal-pending account receipt.
             "RELEASED" => return Err(RiskStoreError::AlreadyResolved),
-            _ => return Err(RiskStoreError::Invalid("UNIFIED_OUTCOME_RECEIPT_STATE_INVALID")),
+            _ => {
+                return Err(RiskStoreError::Invalid(
+                    "UNIFIED_OUTCOME_RECEIPT_STATE_INVALID",
+                ));
+            }
         };
         let scope = Some((installation, campaign.as_str()));
         let meta = read_meta_for_scope(tx, scope)?;
@@ -1297,17 +1300,30 @@ impl RiskBookStore {
                  FROM risk_entries WHERE installation_id=?1 AND campaign_id=?2
                    AND reservation_key=?3",
                 params![installation, campaign, reservation],
-                |row| Ok((
-                    row.get(0)?, row.get(1)?, row.get(2)?,
-                    row.get(3)?, row.get(4)?, row.get(5)?
-                )),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
             .optional()?;
-        let stored = recorded.ok_or(RiskStoreError::Invalid("UNIFIED_OUTCOME_RISK_ENTRY_MISSING"))?;
-        if stored.0 != account || stored.1 != intent || stored.2 != original.1
-            || stored.3 != original.2 || stored.5 <= 0
+        let stored = recorded.ok_or(RiskStoreError::Invalid(
+            "UNIFIED_OUTCOME_RISK_ENTRY_MISSING",
+        ))?;
+        if stored.0 != account
+            || stored.1 != intent
+            || stored.2 != original.1
+            || stored.3 != original.2
+            || stored.5 <= 0
         {
-            return Err(RiskStoreError::Invalid("UNIFIED_OUTCOME_RISK_IDENTITY_MISMATCH"));
+            return Err(RiskStoreError::Invalid(
+                "UNIFIED_OUTCOME_RISK_IDENTITY_MISMATCH",
+            ));
         }
         if stored.4 == target {
             // Exact replay does not advance a RiskBook revision or free budget.
@@ -1317,7 +1333,9 @@ impl RiskBookStore {
             (stored.4.as_str(), target),
             ("POSTED", "UNKNOWN") | ("POSTED", "OPEN") | ("UNKNOWN", "OPEN")
         ) {
-            return Err(RiskStoreError::Invalid("UNIFIED_OUTCOME_RISK_TRANSITION_DENIED"));
+            return Err(RiskStoreError::Invalid(
+                "UNIFIED_OUTCOME_RISK_TRANSITION_DENIED",
+            ));
         }
         let next = meta
             .sequence
@@ -1330,8 +1348,15 @@ impl RiskBookStore {
                AND reservation_key=?4 AND account_key=?5 AND intent_id=?6
                AND plan_sha256=?7 AND policy_revision=?8 AND state=?9",
             params![
-                target, installation, campaign, reservation, account, intent,
-                original.1, original.2, stored.4
+                target,
+                installation,
+                campaign,
+                reservation,
+                account,
+                intent,
+                original.1,
+                original.2,
+                stored.4
             ],
         )?;
         if changed != 1 {
@@ -1342,14 +1367,12 @@ impl RiskBookStore {
              WHERE singleton=1 AND installation_id=?2 AND campaign_id=?3
                AND book_sequence=?4 AND policy_revision=?5",
             params![
-                i64::try_from(next)
-                    .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
+                i64::try_from(next).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
                 installation,
                 campaign,
                 i64::try_from(meta.sequence)
                     .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
-                i64::try_from(meta.policy_revision)
-                    .map_err(|_| RiskStoreError::PolicyConflict)?,
+                i64::try_from(meta.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?,
             ],
         )?;
         if changed != 1 {
