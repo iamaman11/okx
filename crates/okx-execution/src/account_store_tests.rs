@@ -12314,15 +12314,24 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         let tx = target.transaction().unwrap();
         assert_eq!(tx.execute(sql, []).unwrap(), 1);
         let denied = crate::risk::test_stage_scoped_begin_post(
-            &tx, "installation", "campaign-X", "same-reservation",
-            &ai.plan_hash, cohort, 2,
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &ai.plan_hash,
+            cohort,
+            2,
         );
         assert_eq!(denied.unwrap_err(), expected_reason);
         tx.rollback().unwrap();
     }
     assert!(matches!(
         AccountStore::post_fence_evidence_sql(
-            &target, "installation", "acct-A", &ai.intent_id, Some("same-reservation")
+            &target,
+            "installation",
+            "acct-A",
+            &ai.intent_id,
+            Some("same-reservation")
         ),
         Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED"))
     ));
@@ -12399,21 +12408,31 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
     // one exact durable begin_post_at and one original POSTED receipt.
     assert_eq!(
         AccountStore::post_fence_evidence_sql(
-            &recovered, "installation", "acct-A", &ai.intent_id,
+            &recovered,
+            "installation",
+            "acct-A",
+            &ai.intent_id,
             Some("same-reservation")
-        ).unwrap(),
+        )
+        .unwrap(),
         (10_002, "POSTED".into()),
     );
     assert!(matches!(
         AccountStore::post_fence_evidence_sql(
-            &recovered, "installation", "acct-B", &bi.intent_id,
+            &recovered,
+            "installation",
+            "acct-B",
+            &bi.intent_id,
             Some("same-reservation")
         ),
         Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED"))
     ));
     assert!(matches!(
         AccountStore::post_fence_evidence_sql(
-            &recovered, "installation", "acct-A", &ai.intent_id,
+            &recovered,
+            "installation",
+            "acct-A",
+            &ai.intent_id,
             Some("wrong-reservation")
         ),
         Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED"))
