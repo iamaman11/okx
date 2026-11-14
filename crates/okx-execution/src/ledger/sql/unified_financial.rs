@@ -243,9 +243,10 @@ pub(in crate::account_store) fn settle_entry(
     // All joins are scoped by BOTH installation and source account. Even
     // identical venue order/fill/bill IDs on a different account cannot
     // become a source for this risk reservation.
-    let source: Option<(String, String, String, String)> = tx
+    let source: Option<(String, String, String, String, String)> = tx
         .query_row(
-            "SELECT s.source_digest,s.cumulative_entry_usd,b.source_digest,s.original_receipt_json
+            "SELECT s.source_digest,s.cumulative_entry_usd,b.source_digest,s.original_receipt_json,
+                    f.exchange_order_id
              FROM finance_entry_sources s
              JOIN finance_fills f
                ON f.installation_id=s.installation_id AND f.account_key=s.account_key
@@ -261,13 +262,16 @@ pub(in crate::account_store) fn settle_entry(
                 scope.intent,
                 scope.source_revision
             ],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let Some((source_digest, source_amount, bill_digest, original_json)) = source else {
+    let Some((source_digest, source_amount, bill_digest, original_json, fill_order)) = source else {
         return Err(StoreError::Invalid("UNIFIED_ORIGINAL_SOURCE_MISSING"));
     };
-    if !digest_ok(&source_digest) || !digest_ok(&bill_digest) {
+    if !digest_ok(&source_digest)
+        || !digest_ok(&bill_digest)
+        || fill_order != intent_exchange
+    {
         return Err(StoreError::Invalid("UNIFIED_SOURCE_DIGEST_INVALID"));
     }
     let cumulative = money(&source_amount)?;
@@ -620,9 +624,10 @@ pub(in crate::account_store) fn import_legacy_partial_source(
         String,
         String,
         String,
+        String,
     ) = tx.query_row(
         "SELECT i.plan_sha256,i.exchange_order_id,f.trade_id,f.instrument_id,
-                f.fill_id,b.bill_id,b.source_digest,s.cumulative_entry_usd,s.original_receipt_json
+                f.fill_id,b.bill_id,b.source_digest,s.source_digest,s.cumulative_entry_usd,s.original_receipt_json
          FROM finance_intents i
          JOIN finance_entry_sources s ON s.installation_id=i.installation_id
            AND s.account_key=i.account_key AND s.intent_id=i.intent_id
@@ -650,6 +655,7 @@ pub(in crate::account_store) fn import_legacy_partial_source(
                 r.get(6)?,
                 r.get(7)?,
                 r.get(8)?,
+                r.get(9)?,
             ))
         },
     )?;
@@ -661,6 +667,7 @@ pub(in crate::account_store) fn import_legacy_partial_source(
             source.instrument_id.clone(),
             source.fill_id.clone(),
             source.bill_id.clone(),
+            proof.source_digest.clone(),
             proof.source_digest.clone(),
             canonical(&original_amount)?,
             original_json,
