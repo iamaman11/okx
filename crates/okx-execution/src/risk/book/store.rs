@@ -307,26 +307,33 @@ struct BookMeta {
     entry_breach: RiskAmount,
 }
 fn read_meta(tx: &rusqlite::Transaction<'_>) -> Result<BookMeta> {
-    let row: (
-        i64,
-        i64,
-        i64,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-    ) = tx.query_row(
-        "SELECT policy_revision,generation,book_sequence,global_limit_usdt,global_reserved_usdt,
+    read_meta_for_scope(tx, None)
+}
+
+/// Read the exact campaign from a multi-campaign finance transaction,
+/// preserving the original RiskBook money parsing and policy checks.
+fn read_meta_for_scope(
+    tx: &rusqlite::Transaction<'_>,
+    scope: Option<(&str, &str)>,
+) -> Result<BookMeta> {
+    let query = "SELECT policy_revision,generation,book_sequence,global_limit_usdt,global_reserved_usdt,
         loss_limit_usd,loss_consumed_usd,loss_reserved_usd,entry_limit_usd,
         entry_consumed_usd,entry_opening_consumed_usd,entry_reserved_usd,entry_bound_breach_usd
-        FROM risk_meta WHERE singleton=1",
-        [],
+        FROM risk_meta WHERE singleton=1";
+    let scoped_query = "SELECT policy_revision,generation,book_sequence,global_limit_usdt,global_reserved_usdt,
+        loss_limit_usd,loss_consumed_usd,loss_reserved_usd,entry_limit_usd,
+        entry_consumed_usd,entry_opening_consumed_usd,entry_reserved_usd,entry_bound_breach_usd
+        FROM risk_meta WHERE singleton=1 AND installation_id=?1 AND campaign_id=?2";
+    let args = scope.map(|(installation, campaign)| vec![installation, campaign])
+        .unwrap_or_default();
+    // Choose the scoped query only when its two identity arguments are present.
+    // The legacy v5 source retains the original, singleton-only SQL.
+    let query = if scope.is_some() { scoped_query } else { query };
+    let row: (
+        i64,i64,i64,String,String,String,String,String,String,String,String,String,String
+    ) = tx.query_row(
+        query,
+        rusqlite::params_from_iter(args.iter()),
         |r| {
             Ok((
                 r.get(0)?,
@@ -434,6 +441,24 @@ fn apply_census_loss(
 /// Validate a stopped v5 campaign using its ORIGINAL RiskBook owner rules.
 /// Read-only source transaction; never grants authority, alters policy, or
 /// recomputes financial budgets in the migration layer.
+/// Read-only scoped v6 RiskBook invariant proof, executed under the SAME
+/// AccountStore-owned SQLite Transaction that owns original ledger/fill facts.
+/// This emits no grants or trading permission and creates no SQL writer.
+pub(crate) fn verify_unified_import_campaign(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    campaign: &str,
+) -> std::result::Result<(), &'static str> {
+    const INVALID: &str = "UNIFIED_CAMPAIGN_PRIMARY_AGGREGATES_INVALID";
+    if installation.is_empty() || campaign.is_empty() {
+        return Err(INVALID);
+    }
+    let scope = Some((installation, campaign));
+    let meta = read_meta_for_scope(tx, scope).map_err(|_| INVALID)?;
+    integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope)
+        .map_err(|_| INVALID)
+}
+
 pub(crate) fn verify_legacy_import_source(
     source: &Connection,
 ) -> std::result::Result<(), &'static str> {
