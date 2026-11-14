@@ -3115,8 +3115,7 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
                     .unwrap();
                 super::sql::unified_financial::import_legacy_partial_source(&tx, &migration)
                     .unwrap();
-                tx
-                .execute(
+                tx.execute(
                     "INSERT INTO finance_risk_entries(
                    installation_id,campaign_id,reservation_key,account_key,
                    intent_id,plan_sha256,state,entry_upper_usd,reserved_entry_usd)
