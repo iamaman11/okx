@@ -781,6 +781,75 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    /// TEST ONLY: both the ORIGINAL AccountStore no-send source and the
+    /// RiskBook no-reserve mutation are checked on the same installation
+    /// SQL worker/transaction. The offline import is ALWAYS rolled back,
+    /// even after an internally accepted tombstone or HELD release.
+    #[cfg(test)]
+    pub(crate) async fn trial_original_unsent_from_account(
+        &self,
+        campaign: String,
+        account: String,
+        intent: String,
+        expected_sequence: u64,
+        generation: u64,
+    ) -> StoreResult<(u64, String, bool)> {
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let state: String = tx.query_row(
+                "SELECT state FROM finance_import_manifest
+                 WHERE singleton=1 AND installation_id=?1",
+                [&installation],
+                |row| row.get(0),
+            )?;
+            if state != "OFFLINE_NOT_AUTHORIZED" {
+                return Err(StoreError::Invalid("UNIFIED_TRIAL_REQUIRES_OFFLINE_IMPORT"));
+            }
+            let result = crate::risk::test_trial_unified_unsent_from_account(
+                &tx, &installation, &campaign, &account, &intent,
+                expected_sequence, generation,
+            );
+            tx.rollback()?;
+            result.map_err(StoreError::Invalid)
+        })
+        .await
+    }
+
+    /// TEST ONLY: the original AccountStore entry-partial source is read
+    /// and settled in the SAME owned installation SQL transaction. All
+    /// mutations are rolled back, since offline import is not authorized.
+    #[cfg(test)]
+    pub(crate) async fn trial_original_partial_from_account(
+        &self,
+        campaign: String,
+        account: String,
+        intent: String,
+        expected_sequence: u64,
+        generation: u64,
+    ) -> StoreResult<(u64, String, bool)> {
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let state: String = tx.query_row(
+                "SELECT state FROM finance_import_manifest
+                 WHERE singleton=1 AND installation_id=?1",
+                [&installation],
+                |row| row.get(0),
+            )?;
+            if state != "OFFLINE_NOT_AUTHORIZED" {
+                return Err(StoreError::Invalid("UNIFIED_TRIAL_REQUIRES_OFFLINE_IMPORT"));
+            }
+            let result = crate::risk::test_trial_unified_partial_from_account(
+                &tx, &installation, &campaign, &account, &intent,
+                expected_sequence, generation,
+            );
+            tx.rollback()?;
+            result.map_err(StoreError::Invalid)
+        })
+        .await
+    }
+
     /// The original RiskBook Inspect returns None for missing/foreign
     /// reservation or wrong plan. Absence is UNKNOWN, NOT permission to POST.
     pub(crate) async fn inspect_reservation(

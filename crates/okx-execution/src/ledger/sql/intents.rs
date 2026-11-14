@@ -855,57 +855,194 @@ impl AccountStore {
         Ok(settlement)
     }
 
-    /// Returns only the original source-linked immutable SQL partial revision.
-    /// No network-supplied settlement can call this without the current native
-    /// AccountStore owner. An independent RiskBook commit still needs an ACK.
+    /// Existing original AccountStore partial-entry receipt. v5 and v6
+    /// share the same verification rule, with the exact owner identity
+    /// selected by the source SQLite scope.
     pub fn partial_entry_settlement_receipt(
         &self,
         id: &str,
     ) -> StoreResult<Option<EntrySettlementEvidence>> {
-        let Some(head) = self.operation(&format!("entry-partial-head:{id}"))? else {
+        let result = Self::partial_entry_settlement_receipt_sql(
+            &self.connection, None, &self.meta.account_key, id,
+        )?;
+        if result.is_some() {
+            self.partial_entry_ack_pending(id)?;
+        }
+        Ok(result)
+    }
+
+    /// Original immutable entry/fee/fill source-linked revision readback,
+    /// performed ON THE CALLER'S SQLite transaction for installation v6.
+    /// Every join and operation ID is scoped to both installation+account:
+    /// external IDs/intent IDs from a second account can never authorize
+    /// settlement in this one. Read-only; source receipts are constructed
+    /// by the original AccountStore fill/bill producer, never by caller flags.
+    pub(crate) fn partial_entry_settlement_receipt_sql(
+        db: &rusqlite::Connection,
+        installation: Option<&str>,
+        account: &str,
+        id: &str,
+    ) -> StoreResult<Option<EntrySettlementEvidence>> {
+        use rusqlite::{params_from_iter, types::Value};
+        if account.is_empty() || id.is_empty() || installation.is_some_and(str::is_empty) {
+            return Err(StoreError::Invalid("ENTRY_PARTIAL_SQL_SOURCE_SCOPE_INVALID"));
+        }
+        let read_operation = |operation_id: String| -> StoreResult<Option<(String, String, String)>> {
+            let mut args = vec![Value::Text(operation_id)];
+            if let Some(scope) = installation {
+                args.push(Value::Text(scope.to_owned()));
+                args.push(Value::Text(account.to_owned()));
+            }
+            db.query_row(
+                if installation.is_some() {
+                    "SELECT kind,request_hash,result_ref FROM operation_receipts
+                     WHERE operation_id=?1 AND installation_id=?2 AND account_key=?3"
+                } else {
+                    "SELECT kind,request_hash,result_ref FROM operation_receipts
+                     WHERE operation_id=?1"
+                },
+                params_from_iter(args.iter()),
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            )
+            .optional()
+            .map_err(StoreError::from)
+        };
+        let Some(head) = read_operation(format!("entry-partial-head:{id}"))? else {
             return Ok(None);
         };
-        let proof: EntrySettlementEvidence = serde_json::from_str(&head.result_ref)
+        let proof: EntrySettlementEvidence = serde_json::from_str(&head.2)
             .map_err(|_| StoreError::Invalid("ENTRY_PARTIAL_HEAD_CORRUPT"))?;
-        let immutable = self
-            .operation(&format!(
-                "entry-partial:{id}:r{}",
-                proof.settlement_revision
-            ))?
-            .ok_or(StoreError::Invalid("ENTRY_PARTIAL_REVISION_MISSING"))?;
-        let intent = self
-            .intent(id)?
-            .ok_or(StoreError::Invalid("ENTRY_PARTIAL_INTENT_MISSING"))?;
-        let reservation = self
-            .central_receipt(id)?
-            .ok_or(StoreError::Invalid("ENTRY_PARTIAL_RESERVATION_MISSING"))?;
+        let immutable = read_operation(format!(
+            "entry-partial:{id}:r{}", proof.settlement_revision,
+        ))?
+        .ok_or(StoreError::Invalid("ENTRY_PARTIAL_REVISION_MISSING"))?;
+        let mut args = vec![Value::Text(id.to_owned())];
+        if let Some(scope) = installation {
+            args.extend([Value::Text(scope.to_owned()),Value::Text(account.to_owned())]);
+        }
+        let intent: Option<(String, Option<String>)> = db.query_row(
+            if installation.is_some() {
+                "SELECT plan_hash,exchange_order_id FROM intents
+                 WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
+            } else {
+                "SELECT plan_hash,exchange_order_id FROM intents WHERE intent_id=?1"
+            },
+            params_from_iter(args.iter()),
+            |row| Ok((row.get(0)?,row.get(1)?)),
+        ).optional()?;
+        let (plan, order_id) =
+            intent.ok_or(StoreError::Invalid("ENTRY_PARTIAL_INTENT_MISSING"))?;
+        let reservation: Option<(String,String)> = db.query_row(
+            if installation.is_some() {
+                "SELECT reservation_key,account_key FROM risk_receipts
+                 WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
+            } else {
+                "SELECT reservation_key,account_key FROM risk_receipts WHERE intent_id=?1"
+            },
+            params_from_iter(args.iter()),
+            |row| Ok((row.get(0)?,row.get(1)?)),
+        ).optional()?;
+        let (reservation_key, reservation_account) =
+            reservation.ok_or(StoreError::Invalid("ENTRY_PARTIAL_RESERVATION_MISSING"))?;
         if proof.schema != "okx.entry-partial-settlement/v1"
-            || proof.account_key != self.meta.account_key
+            || proof.account_key != account
             || proof.intent_id != id
-            || proof.plan_hash != intent.plan_hash
-            || proof.reservation_key != reservation.reservation_key
-            || proof.account_key != reservation.account_key
+            || proof.plan_hash != plan
+            || proof.reservation_key != reservation_key
+            || proof.account_key != reservation_account
             || proof.venue_order_id.is_empty()
-            || intent.exchange_order_id.as_deref() != Some(proof.venue_order_id.as_str())
+            || order_id.as_deref() != Some(proof.venue_order_id.as_str())
             || proof.settlement_revision == 0
             || proof.cumulative_entry_usd <= Decimal::ZERO
             || proof.source_digest.len() != 64
-            || !proof
-                .source_digest
-                .bytes()
-                .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
-            || head.kind != "ENTRY_PARTIAL_HEAD"
-            || head.request_hash != proof.plan_hash
-            || immutable.kind != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
-            || immutable.request_hash != proof.plan_hash
-            || immutable.result_ref != head.result_ref
+            || !proof.source_digest.bytes().all(|v|
+                v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
+            || head.0 != "ENTRY_PARTIAL_HEAD"
+            || head.1 != proof.plan_hash
+            || immutable.0 != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
+            || immutable.1 != proof.plan_hash
+            || immutable.2 != head.2
         {
             return Err(StoreError::Invalid("ENTRY_PARTIAL_SOURCE_UNPROVEN"));
         }
-        // Existing owner checks any previously committed ACK against the
-        // immutable revision. A corrupted ACK can never authorize new spend.
-        self.partial_entry_ack_pending(id)?;
+        // An ACK is not required for a first financial debit, but a
+        // conflicting or forged ACK can never authorize an additional debit.
+        if let Some(ack) = read_operation(format!(
+            "entry-partial-settled:{id}:r{}", proof.settlement_revision,
+        ))? {
+            if ack.0 != "ENTRY_PARTIAL_SETTLED"
+                || ack.1 != proof.plan_hash
+                || ack.2 != proof.source_digest
+            {
+                return Err(StoreError::Invalid("PARTIAL_ENTRY_ACK_CONFLICT"));
+            }
+        }
         Ok(Some(proof))
+    }
+
+    /// The ORIGINAL AccountStore ACK is written in the SAME installation
+    /// SQL transaction as the RiskBook budget debit. The existing immutable
+    /// source/head/intent/receipt verification is rerun on this same snapshot,
+    /// and any ACK conflict fails the entire caller-owned transaction.
+    /// The legacy two-SQL method remains only for the pre-cutover owner.
+    pub(crate) fn acknowledge_unified_partial_entry_sql(
+        tx: &rusqlite::Transaction<'_>,
+        installation: &str,
+        account: &str,
+        accepted: &EntrySettlementEvidence,
+    ) -> StoreResult<()> {
+        if installation.is_empty() || account.is_empty() || accepted.account_key != account {
+            return Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_IDENTITY_INVALID"));
+        }
+        let stored = Self::partial_entry_settlement_receipt_sql(
+            tx, Some(installation), account, &accepted.intent_id,
+        )?
+        .ok_or(StoreError::Invalid("UNIFIED_PARTIAL_ACK_SOURCE_MISSING"))?;
+        if stored != *accepted || stored.reservation_key.starts_with("local:") {
+            return Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_SOURCE_MISMATCH"));
+        }
+        let state: Option<String> = tx.query_row(
+            "SELECT state FROM risk_receipts
+             WHERE installation_id=?1 AND account_key=?2
+               AND intent_id=?3 AND plan_hash=?4 AND reservation_key=?5",
+            rusqlite::params![
+                installation, account, &accepted.intent_id,
+                &accepted.plan_hash, &accepted.reservation_key,
+            ],
+            |row| row.get(0),
+        ).optional()?;
+        if !matches!(state.as_deref(), Some("OPEN" | "POSTED")) {
+            return Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_RESERVATION_STATE"));
+        }
+        let operation = format!(
+            "entry-partial-settled:{}:r{}",
+            accepted.intent_id, accepted.settlement_revision,
+        );
+        tx.execute(
+            "INSERT INTO operation_receipts(
+                 installation_id,account_key,operation_id,kind,
+                 request_hash,result_ref,committed_at)
+             VALUES(?1,?2,?3,'ENTRY_PARTIAL_SETTLED',?4,?5,?6)
+             ON CONFLICT(installation_id,account_key,operation_id) DO NOTHING",
+            rusqlite::params![
+                installation,account,&operation,&accepted.plan_hash,
+                &accepted.source_digest,wall_time_ms(),
+            ],
+        )?;
+        let ack: (String, String, String) = tx.query_row(
+            "SELECT kind,request_hash,result_ref FROM operation_receipts
+             WHERE installation_id=?1 AND account_key=?2 AND operation_id=?3",
+            rusqlite::params![installation,account,&operation],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        )?;
+        if ack != (
+            "ENTRY_PARTIAL_SETTLED".to_owned(),
+            accepted.plan_hash.clone(),
+            accepted.source_digest.clone(),
+        ) {
+            return Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_CONFLICT"));
+        }
+        Ok(())
     }
 
     /// Read-only check of the latest durable partial settlement. A lost
@@ -1811,13 +1948,33 @@ impl AccountStore {
         tx.commit()?;
         Ok(first)
     }
-    /// A no-send release requires the existing durable rejection receipt,
-    /// matching the original request, with no committed post claim.
-    /// A gateway timeout or venue rejection can never produce this witness.
+    /// A no-send release requires the ORIGINAL durable rejection receipt,
+    /// matching the request with no committed POST claim. The same query
+    /// and rule now support both the legacy single-account v2 DB and the
+    /// installation-wide v6 account scope. Caller data is NEVER a receipt.
     pub fn unsent_release_receipt(&self, id: &str) -> StoreResult<Option<UnsentSqlReceipt>> {
-        self.connection
-            .query_row(
-                "SELECT COALESCE(r.reservation_key,a.result_ref),
+        Self::unsent_release_receipt_sql(
+            &self.connection,
+            None,
+            &self.meta.account_key,
+            id,
+        )
+    }
+
+    /// Read the original AccountStore proof from the SAME caller-owned SQL
+    /// snapshot. v6 must bind installation+account on every joined table,
+    /// not simply filter the final row by intent_id.
+    pub(crate) fn unsent_release_receipt_sql(
+        db: &rusqlite::Connection,
+        installation: Option<&str>,
+        account: &str,
+        id: &str,
+    ) -> StoreResult<Option<UnsentSqlReceipt>> {
+        use rusqlite::{params_from_iter, types::Value};
+        if account.is_empty() || id.is_empty() || installation.is_some_and(str::is_empty) {
+            return Err(StoreError::Invalid("UNSENT_SQL_SOURCE_SCOPE_INVALID"));
+        }
+        let original_sql = "SELECT COALESCE(r.reservation_key,a.result_ref),
                         COALESCE(r.account_key,?2),
                         i.intent_id,i.plan_hash,i.request_hash,i.incident
                  FROM intents i
@@ -1832,21 +1989,50 @@ impl AccountStore {
                    AND o.kind='REJECTED_UNSENT'
                    AND o.request_hash=i.request_hash AND o.result_ref=i.incident
                    AND (r.reservation_key IS NULL OR
-                        (r.account_key=?2 AND r.plan_hash=i.plan_hash))",
-                params![id, self.meta.account_key],
-                |r| {
-                    Ok(UnsentSqlReceipt {
-                        reservation_key: r.get(0)?,
-                        account_key: r.get(1)?,
-                        intent_id: r.get(2)?,
-                        plan_hash: r.get(3)?,
-                        request_hash: r.get(4)?,
-                        reason: r.get(5)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(StoreError::from)
+                        (r.account_key=?2 AND r.plan_hash=i.plan_hash))";
+        let scoped_sql = "SELECT COALESCE(r.reservation_key,a.result_ref),
+                        COALESCE(r.account_key,?2),
+                        i.intent_id,i.plan_hash,i.request_hash,i.incident
+                 FROM intents i
+                 LEFT JOIN risk_receipts r
+                   ON r.intent_id=i.intent_id
+                  AND r.installation_id=i.installation_id AND r.account_key=i.account_key
+                 LEFT JOIN operation_receipts a
+                   ON a.operation_id='risk-reserve:'||i.intent_id
+                  AND a.installation_id=i.installation_id AND a.account_key=i.account_key
+                  AND a.kind='RISK_RESERVE_ATTEMPT' AND a.request_hash=i.request_hash
+                 JOIN operation_receipts o
+                   ON o.operation_id='terminal:'||i.intent_id
+                  AND o.installation_id=i.installation_id AND o.account_key=i.account_key
+                 WHERE i.intent_id=?1 AND i.account_key=?2 AND i.installation_id=?3
+                   AND i.state='REJECTED'
+                   AND i.begin_post_at IS NULL AND i.exchange_order_id IS NULL
+                   AND (r.state IN('UNSENT_PENDING_CENTRAL','RELEASED') OR
+                        (r.reservation_key IS NULL AND a.result_ref IS NOT NULL))
+                   AND o.kind='REJECTED_UNSENT'
+                   AND o.request_hash=i.request_hash AND o.result_ref=i.incident
+                   AND (r.reservation_key IS NULL OR
+                        (r.account_key=?2 AND r.plan_hash=i.plan_hash))";
+        let mut args = vec![Value::Text(id.to_owned()), Value::Text(account.to_owned())];
+        if let Some(installation) = installation {
+            args.push(Value::Text(installation.to_owned()));
+        }
+        db.query_row(
+            if installation.is_some() { scoped_sql } else { original_sql },
+            params_from_iter(args.iter()),
+            |r| {
+                Ok(UnsentSqlReceipt {
+                    reservation_key: r.get(0)?,
+                    account_key: r.get(1)?,
+                    intent_id: r.get(2)?,
+                    plan_hash: r.get(3)?,
+                    request_hash: r.get(4)?,
+                    reason: r.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::from)
     }
     pub fn central_receipt(&self, id: &str) -> StoreResult<Option<CentralReceipt>> {
         let row=self.connection.query_row("SELECT reservation_key,account_key,installation_id,instance_id,plan_hash,policy_revision,receipt_hash,requested_loss_usd,conversion_digest FROM risk_receipts WHERE intent_id=?1",[id],|r|Ok((CentralReceipt{reservation_key:r.get(0)?,account_key:r.get(1)?,installation_id:r.get(2)?,instance_id:r.get(3)?,intent_id:id.into(),plan_hash:r.get(4)?,policy_revision:r.get(5)?,receipt_hash:r.get(6)?,requested_loss_usd:Decimal::ZERO,conversion_digest:r.get(8)?},r.get::<_,String>(7)?))).optional()?;

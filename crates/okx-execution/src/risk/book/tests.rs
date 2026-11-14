@@ -774,7 +774,9 @@ fn risk_book_contract_sql_durable_no_reserve_tombstone_prevents_future_grant() {
     assert_eq!(fenced.policy_revision, 1);
     assert_eq!(store.readback().unwrap().global_reserved_usdt, "0");
     assert_eq!(store.readback().unwrap().reserved_entry_usd, "0");
-    let replay = store.release_unsent(&proof, 1, 7).unwrap();
+    // The first response may be lost. Repeating the ORIGINAL request/sequence
+    // after COMMIT must return its receipt, not a spurious stale-CAS error.
+    let replay = store.release_unsent(&proof, 0, 7).unwrap();
     assert!(replay.replayed);
     assert_eq!(replay.book_sequence, 1);
     let altered = UnsentSqlProof {
@@ -849,7 +851,7 @@ fn risk_book_contract_sql_unsent_held_release_is_exact_and_durable() {
     let released = store.release_unsent(&proof, 1, 7).unwrap();
     assert_eq!(released.book_sequence, 2);
     assert!(!released.replayed);
-    let replay = store.release_unsent(&proof, 2, 7).unwrap();
+    let replay = store.release_unsent(&proof, 1, 7).unwrap();
     assert!(replay.replayed);
     assert_eq!(replay.book_sequence, 2);
     let changed_reason = UnsentSqlProof {
@@ -2862,15 +2864,78 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             .unwrap(),
             1
         );
-        let proof = partial_proof(&original, 1, "0.4", 'b');
-        let first =
-            RiskBookStore::settle_partial_entry_sql_transaction(&tx, scope, &proof, 2, 7).unwrap();
+        // The caller cannot mint entry consumption: a correct POSTED risk
+        // row alone is NOT a durable AccountStore fill/fee revision.
+        assert!(matches!(
+            RiskBookStore::settle_unified_partial_from_account_sql_transaction(
+                &tx, "test-installation", &campaign, &account('a'),
+                &original.intent_id, 2, 7,
+            ),
+            Err(RiskStoreError::EntrySqlUnproven)
+        ));
+        // Test-only staged AccountStore format: the original real producer is
+        // exercised separately by source_verified_partial_fixture. Here all
+        // v6 scoped JOINS, immutable revision, single TX and ACK are tested.
+        let source = crate::EntrySettlementEvidence {
+            schema: "okx.entry-partial-settlement/v1".into(),
+            account_key: account('a'),
+            intent_id: original.intent_id.clone(),
+            plan_hash: original.plan_sha256.clone(),
+            reservation_key: original.reservation_key(),
+            venue_order_id: "venue-order-001".into(),
+            venue_update_ms: 11_000,
+            source_covered_through_ms: 11_000,
+            venue_filled_quantity: rust_decimal::Decimal::ONE,
+            booked_notional_and_fee_usdt: rust_decimal::Decimal::ONE,
+            cumulative_entry_usd: rust_decimal::Decimal::new(4, 1),
+            settlement_revision: 1,
+            source_digest: uid('b'),
+        };
+        tx.execute(
+            "UPDATE intents SET state='PARTIALLY_FILLED',begin_post_at=10001,
+             exchange_order_id=?4 WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
+            rusqlite::params!["test-installation", account('a'), &original.intent_id,
+                &source.venue_order_id],
+        ).unwrap();
+        tx.execute(
+            "UPDATE risk_receipts SET state='POSTED' WHERE
+             installation_id=?1 AND account_key=?2 AND intent_id=?3",
+            rusqlite::params!["test-installation", account('a'), &original.intent_id],
+        ).unwrap();
+        let bytes = serde_json::to_string(&source).unwrap();
+        for (id, kind) in [
+            (format!("entry-partial-head:{}", source.intent_id), "ENTRY_PARTIAL_HEAD"),
+            (format!("entry-partial:{}:r1", source.intent_id), "ENTRY_PARTIAL_SETTLEMENT_PROVEN"),
+        ] {
+            tx.execute(
+                "INSERT INTO operation_receipts(
+                   installation_id,account_key,operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,11000)",
+                rusqlite::params!["test-installation",account('a'),id,kind,
+                    &source.plan_hash,&bytes],
+            ).unwrap();
+        }
+        let first = RiskBookStore::settle_unified_partial_from_account_sql_transaction(
+            &tx,"test-installation",&campaign,&account('a'),&original.intent_id,2,7,
+        ).unwrap();
         assert_eq!(first.book_sequence, 3);
         assert_eq!(first.cumulative_entry_usd, "0.4");
         assert!(!first.replayed);
-        let repeated =
-            RiskBookStore::settle_partial_entry_sql_transaction(&tx, scope, &proof, 2, 7).unwrap();
+        let repeated = RiskBookStore::settle_unified_partial_from_account_sql_transaction(
+            &tx,"test-installation",&campaign,&account('a'),&original.intent_id,2,7,
+        ).unwrap();
         assert!(repeated.replayed);
+        let ack: String = tx.query_row(
+            "SELECT kind FROM operation_receipts WHERE
+             installation_id=?1 AND account_key=?2 AND operation_id=?3",
+            rusqlite::params![
+                "test-installation",account('a'),
+                format!("entry-partial-settled:{}:r1", source.intent_id),
+            ],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(ack, "ENTRY_PARTIAL_SETTLED");
+        let proof = PartialEntrySqlProof::from_account_receipt(source.clone()).unwrap();
         assert_eq!(repeated.book_sequence, 3);
         let changed = partial_proof(&original, 1, "0.5", 'b');
         assert!(matches!(
@@ -2912,20 +2977,45 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         "no POSTED/settlement proof escaped the caller-owned transaction"
     );
 
-    // An original native no-send address for B (no B risk entry exists)
-    // must create exactly one scoped tombstone and replay it idempotently.
-    // The private scoped method accepts only original-typed proof; an
-    // authenticated AccountStore REJECTED_UNSENT source is a separate
-    // production gate that remains intentionally disconnected here.
+    // A no-send release must originate in the ORIGINAL AccountStore SQL,
+    // not a fabricated caller proof. The synthetic receipt rows below are
+    // scoped test fixtures: the real native REJECTED_UNSENT producer is
+    // separately tested in the original account library. Nothing commits.
     let no_send = unsent('b', "intentB0001");
     {
         let tx = db.transaction().unwrap();
-        let first =
-            RiskBookStore::release_unsent_sql_transaction(&tx, scope, &no_send, 2, 7).unwrap();
+        assert!(matches!(
+            RiskBookStore::release_unified_unsent_from_account_sql_transaction(
+                &tx,"test-installation",&campaign,&account('b'),"intentB0001",2,7,
+            ),
+            Err(RiskStoreError::UnsentSqlUnproven)
+        ));
+        tx.execute(
+            "UPDATE intents SET state='REJECTED',incident='REJECTED_UNSENT'
+             WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
+            rusqlite::params!["test-installation",account('b'),"intentB0001"],
+        ).unwrap();
+        for (id,kind,result) in [
+            ("risk-reserve:intentB0001","RISK_RESERVE_ATTEMPT",no_send.reservation_key.as_str()),
+            ("terminal:intentB0001","REJECTED_UNSENT","REJECTED_UNSENT"),
+        ] {
+            tx.execute(
+                "INSERT INTO operation_receipts(
+                  installation_id,account_key,operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,11000)",
+                rusqlite::params![
+                    "test-installation",account('b'),id,kind,uid('c'),result,
+                ],
+            ).unwrap();
+        }
+        let first = RiskBookStore::release_unified_unsent_from_account_sql_transaction(
+            &tx,"test-installation",&campaign,&account('b'),"intentB0001",2,7,
+        ).unwrap();
         assert_eq!(first.book_sequence, 3);
         assert!(!first.replayed);
-        let repeated =
-            RiskBookStore::release_unsent_sql_transaction(&tx, scope, &no_send, 3, 7).unwrap();
+        let repeated = RiskBookStore::release_unified_unsent_from_account_sql_transaction(
+            &tx,"test-installation",&campaign,&account('b'),"intentB0001",2,7,
+        ).unwrap();
         assert!(repeated.replayed);
         let observed = tx
             .query_row(
@@ -2935,14 +3025,11 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
                 |r| r.get::<_, String>(0),
             )
             .unwrap();
-        assert_eq!(observed, no_send.record_digest);
+        assert_eq!(observed.len(), 64);
+        assert_ne!(observed, no_send.record_digest);
         assert!(
-            RiskBookStore::release_unsent_sql_transaction(
-                &tx,
-                Some(("test-installation", "foreign-campaign")),
-                &no_send,
-                2,
-                7,
+            RiskBookStore::release_unified_unsent_from_account_sql_transaction(
+                &tx,"test-installation","foreign-campaign",&account('b'),"intentB0001",2,7,
             )
             .is_err(),
             "no other campaign can grant or replay B's no-send fence"

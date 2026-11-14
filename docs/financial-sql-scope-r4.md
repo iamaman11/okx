@@ -1,5 +1,38 @@
 # #510 r4 — source-derived SQL scope inventory and first physical single-file slice
 
+## Next code slice: EXACT original AccountStore source + RiskBook receipt in one local transaction (15 Nov 2026)
+
+The new installation transaction methods:
+- `AccountStore::partial_entry_settlement_receipt_sql` checks ORIGINAL
+  immutable head/revision, intent order+plan, reserve receipt, source digest
+  and any existing ACK; each SQL read scopes installation+account in v6.
+  `acknowledge_unified_partial_entry_sql` records exactly the ORIGINAL
+  account ACK **in the same local commit** as original RiskBook partial-budget
+  debit and refuses bad original source/ACK. Old v2 methods delegate to the
+  same readback semantics; no duplicate financial arithmetic.
+- `AccountStore::unsent_release_receipt_sql` reads only original durable
+  `REJECTED_UNSENT` and native reserve-attempt proofs, joined on the
+  installation/account. `RiskBookStore::release_unified_unsent_from_account_sql_transaction`
+  proves campaign assignment and derives the original negative-tombstone
+  digest from the SQL source in that SAME transaction.
+- Original RiskBook no-send replay checks matching committed tombstone or
+  matching RELEASED source *before* applying the current book-sequence CAS.
+  A lost reply is read-only/idempotent even when the client repeats the
+  previous expected sequence. Any **new** release/negative fence must still
+  pass generation+sequence and original RiskBook integrity checks.
+- `UnifiedFinanceHandle` exposes these only via `#[cfg(test)]`,
+  from the one bounded FIFO with mandatory `ROLLBACK` while the import is
+  `OFFLINE_NOT_AUTHORIZED`. Existing source v2 import is tested to reject
+  absent financial evidence; a separate v6 scoped test exercises exact
+  signed-shape record relationships and an atomic ACK, but its source bytes
+  are staged only as **test fixture SQL**, not a live venue producer.
+
+This is still **not** a production trade authority, authenticated external
+source, server-side Cloudflare fence, full terminal/late fee support, or a
+TradeService cutover. No initial import is silently activated; no venue POST.
+CI results must be attached for an exact SHA, not presumed from an earlier
+green result.
+
 ## Current code slice: original RiskBook SettleEntry + ReleaseUnsent reuse one caller-owned scoped SQL transaction
 
 The existing **original Rust** `RiskBookStore::settle_partial_entry` and

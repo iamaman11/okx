@@ -48,6 +48,51 @@ pub(crate) fn test_trial_unified_reserve(
     }
 }
 
+/// The ONLY original AccountStore-source-derived no-send operation for
+/// scoped v6, invoked under the installation's owned SQL transaction.
+/// Test-gated here because real Cloudflare fencing/epoch is not yet accepted.
+#[cfg(test)]
+pub(crate) fn test_trial_unified_unsent_from_account(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    campaign: &str,
+    account: &str,
+    intent: &str,
+    expected_sequence: u64,
+    generation: u64,
+) -> Result<(u64, String, bool), &'static str> {
+    let receipt = store::RiskBookStore::release_unified_unsent_from_account_sql_transaction(
+        tx, installation, campaign, account, intent, expected_sequence, generation,
+    )
+    .map_err(|error| {
+        eprintln!("UNIFIED_UNSENT_ORIGINAL_REASON={error}");
+        "UNIFIED_UNSENT_SOURCE_OR_RISK_DENIED"
+    })?;
+    Ok((receipt.book_sequence, receipt.reservation_key, receipt.replayed))
+}
+
+/// TEST-ONLY trial of original source-backed partial settlement in ONE
+/// finance transaction; no commit/venue grant is possible on offline import.
+#[cfg(test)]
+pub(crate) fn test_trial_unified_partial_from_account(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    campaign: &str,
+    account: &str,
+    intent: &str,
+    expected_sequence: u64,
+    generation: u64,
+) -> Result<(u64, String, bool), &'static str> {
+    let receipt = store::RiskBookStore::settle_unified_partial_from_account_sql_transaction(
+        tx, installation, campaign, account, intent, expected_sequence, generation,
+    )
+    .map_err(|error| {
+        eprintln!("UNIFIED_PARTIAL_ORIGINAL_REASON={error}");
+        "UNIFIED_PARTIAL_SOURCE_OR_RISK_DENIED"
+    })?;
+    Ok((receipt.book_sequence, receipt.cumulative_entry_usd, receipt.replayed))
+}
+
 /// Test-only native PostCausalProof constructor for the real v6 SQL
 /// transaction integration witness. Synthetic proof is NEVER compiled into
 /// production and is not an authorization/venue sender.

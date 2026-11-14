@@ -98,6 +98,60 @@ impl RiskBookStore {
         Ok(result)
     }
 
+    /// Original AccountStore SQL financial-source proof and original RiskBook
+    /// entry-budget debit inside ONE installation-owned SQLite transaction.
+    /// The source is queried from the very SAME snapshot, not reconstructed
+    /// from caller-provided money, flags or network JSON. No COMMIT here.
+    pub(in crate::risk::book) fn settle_unified_partial_from_account_sql_transaction(
+        tx: &Transaction<'_>,
+        installation: &str,
+        campaign: &str,
+        account_key: &str,
+        intent_id: &str,
+        expected_sequence: u64,
+        generation: u64,
+    ) -> Result<EntrySettlementReceipt> {
+        if installation.is_empty() || campaign.is_empty()
+            || account_key.is_empty() || intent_id.is_empty()
+        {
+            return Err(RiskStoreError::Invalid("UNIFIED_ENTRY_SOURCE_SCOPE_INVALID"));
+        }
+        let assigned: Option<String> = tx.query_row(
+            "SELECT campaign_id FROM account_policy
+             WHERE installation_id=?1 AND account_key=?2 AND singleton=1",
+            rusqlite::params![installation, account_key],
+            |row| row.get(0),
+        ).optional()?;
+        if assigned.as_deref() != Some(campaign) {
+            return Err(RiskStoreError::EntrySqlUnproven);
+        }
+        let original = crate::account_store::AccountStore::partial_entry_settlement_receipt_sql(
+            tx, Some(installation), account_key, intent_id,
+        )
+        .map_err(|error| match error {
+            crate::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),
+            crate::StoreError::Sql(error) => RiskStoreError::Sql(error),
+            crate::StoreError::Io(error) => RiskStoreError::Io(error),
+        })?
+        .ok_or(RiskStoreError::EntrySqlUnproven)?;
+        let proof = PartialEntrySqlProof::from_account_receipt(original)?;
+        if proof.account_key != account_key {
+            return Err(RiskStoreError::EntrySqlUnproven);
+        }
+        let accepted = Self::settle_partial_entry_sql_transaction(
+            tx, Some((installation, campaign)), &proof, expected_sequence, generation,
+        )?;
+        crate::account_store::AccountStore::acknowledge_unified_partial_entry_sql(
+            tx, installation, account_key, &original,
+        )
+        .map_err(|error| match error {
+            crate::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),
+            crate::StoreError::Sql(error) => RiskStoreError::Sql(error),
+            crate::StoreError::Io(error) => RiskStoreError::Io(error),
+        })?;
+        Ok(accepted)
+    }
+
     /// The ORIGINAL partial-entry arithmetic shared between v5 and scoped v6.
     /// The caller owns one transaction/COMMIT, never a parallel SQL writer.
     pub(in crate::risk::book) fn settle_partial_entry_sql_transaction(

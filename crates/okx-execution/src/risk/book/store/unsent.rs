@@ -114,6 +114,54 @@ impl RiskBookStore {
         Ok(result)
     }
 
+    /// V6 joint no-send operation: obtain the ORIGINAL AccountStore
+    /// REJECTED_UNSENT/attempt receipt from this same SQLite transaction,
+    /// then apply the ORIGINAL RiskBook no-reserve/release rule. There is
+    /// exactly one caller-owned COMMIT, no caller-minted source flag and
+    /// no separate account/campaign connection.
+    pub(in crate::risk::book) fn release_unified_unsent_from_account_sql_transaction(
+        tx: &Transaction<'_>,
+        installation: &str,
+        campaign: &str,
+        account_key: &str,
+        intent_id: &str,
+        expected_sequence: u64,
+        generation: u64,
+    ) -> Result<UnsentReceipt> {
+        if installation.is_empty() || campaign.is_empty()
+            || account_key.is_empty() || intent_id.is_empty()
+        {
+            return Err(RiskStoreError::Invalid("UNIFIED_UNSENT_SCOPE_INVALID"));
+        }
+        // The source account must belong to THIS campaign, not merely be
+        // present in the same installation (A/B may share intent IDs).
+        let source_campaign: Option<String> = tx.query_row(
+            "SELECT campaign_id FROM account_policy
+             WHERE installation_id=?1 AND account_key=?2 AND singleton=1",
+            rusqlite::params![installation, account_key],
+            |row| row.get(0),
+        ).optional()?;
+        if source_campaign.as_deref() != Some(campaign) {
+            return Err(RiskStoreError::UnsentSqlUnproven);
+        }
+        let original = crate::account_store::AccountStore::unsent_release_receipt_sql(
+            tx, Some(installation), account_key, intent_id,
+        )
+        .map_err(|error| match error {
+            crate::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),
+            crate::StoreError::Sql(error) => RiskStoreError::Sql(error),
+            crate::StoreError::Io(error) => RiskStoreError::Io(error),
+        })?
+        .ok_or(RiskStoreError::UnsentSqlUnproven)?;
+        let verified = UnsentSqlProof::from_account_receipt(original)?;
+        if verified.account_key != account_key || verified.intent_id != intent_id {
+            return Err(RiskStoreError::UnsentSqlUnproven);
+        }
+        Self::release_unsent_sql_transaction(
+            tx, Some((installation, campaign)), &verified, expected_sequence, generation,
+        )
+    }
+
     /// Exact ORIGINAL native no-send settlement, shared with installation-v6.
     /// The caller has to supply an independently verified original AccountStore
     /// rejection receipt. No raw user/Cloudflare proof is an authority.
@@ -131,9 +179,9 @@ impl RiskBookStore {
         if generation != meta.generation {
             return Err(RiskStoreError::StaleGeneration);
         }
-        if expected_sequence != meta.sequence {
-            return Err(RiskStoreError::StaleSequence);
-        }
+        // A completed, matching operation may be replayed with its ORIGINAL
+        // expected sequence after a committed reply was lost. Only a NEW
+        // mutation is subject to current campaign-sequence CAS.
         let existing_sql = if scope.is_some() {
             "SELECT account_key,intent_id,plan_sha256,request_hash,record_digest,reason
              FROM risk_no_reserve WHERE reservation_key=?1
@@ -250,6 +298,11 @@ impl RiskBookStore {
                     book_sequence: meta.sequence,
                     replayed: true,
                 });
+            }
+            // A completed release can replay after a different campaign
+            // sequence was committed; new mutations still use exact CAS.
+            if expected_sequence != meta.sequence {
+                return Err(RiskStoreError::StaleSequence);
             }
             // A POSTED fence is not a venue no-send witness. The existing
             // AccountStore source-binding for that state must be proven first.
@@ -412,6 +465,9 @@ impl RiskBookStore {
                 return Err(RiskStoreError::StaleSequence);
             }
         } else {
+            if expected_sequence != meta.sequence {
+                return Err(RiskStoreError::StaleSequence);
+            }
             let account_sql = if scope.is_some() {
                 "SELECT 1 FROM risk_policy_account WHERE account_key=?1
                  AND installation_id=?2 AND campaign_id=?3"

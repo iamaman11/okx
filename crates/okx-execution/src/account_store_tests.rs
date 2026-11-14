@@ -12931,6 +12931,29 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         summary
     );
 
+    // Source-linked settlement and no-send cannot proceed from a merely
+    // imported historical row or a caller flag. Both original SQL source
+    // receipts are absent in this REAL account-v2 import: fail closed under
+    // the one installation FIFO, with no durable ledger/risk mutation.
+    assert!(matches!(
+        owner
+            .trial_original_partial_from_account(
+                "campaign-X".into(), a_key.clone(), ai.intent_id.clone(), 2, 7,
+            )
+            .await,
+        Err(StoreError::Invalid("UNIFIED_PARTIAL_SOURCE_OR_RISK_DENIED"))
+    ));
+    assert!(matches!(
+        owner
+            .trial_original_unsent_from_account(
+                "campaign-X".into(), b_key.clone(), bi.intent_id.clone(), 2, 7,
+            )
+            .await,
+        Err(StoreError::Invalid("UNIFIED_UNSENT_SOURCE_OR_RISK_DENIED"))
+    ));
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
+    assert_eq!(owner.campaign_summary("campaign-X".into()).await.unwrap(), summary);
+
     // The ORIGINAL RiskBook AccountSummary SQL must distinguish these two
     // canonical account identities inside the shared campaign scope.
     let a_read = owner
