@@ -1273,18 +1273,17 @@ impl RiskBookStore {
                    AND r.state='POSTED'
                  ORDER BY p.campaign_id,r.reservation_key",
             )?;
-            query
-                .query_map(params![installation, account], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, Option<i64>>(5)?,
-                    ))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?
+            let rows = query.query_map(params![installation, account], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
         if i64::try_from(candidates.len()).ok() != Some(pending) {
             return Err(RiskStoreError::Invalid("UNIFIED_RISK_RECOVERY_SOURCE_UNPROVEN"));

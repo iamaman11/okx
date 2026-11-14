@@ -12586,7 +12586,8 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
          JOIN risk_meta m ON m.installation_id=e.installation_id
            AND m.campaign_id=e.campaign_id
          WHERE e.campaign_id='campaign-X' AND e.reservation_key='same-reservation'",
-        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     ).unwrap();
     assert_eq!(joint, ("UNKNOWN".into(), "UNKNOWN".into(), "UNKNOWN".into(), 4));
     assert_eq!(
@@ -12610,7 +12611,8 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         "SELECT e.state,m.book_sequence FROM risk_entries e JOIN risk_meta m
          ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
          WHERE e.campaign_id='campaign-Y' AND e.reservation_key='same-reservation'",
-        [], |row| Ok((row.get(0)?, row.get(1)?)
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
     ).unwrap();
     assert_eq!(foreign, ("HELD".into(), 2));
     tx.rollback().unwrap();
