@@ -2509,7 +2509,7 @@ impl AccountStore {
             args.push(rusqlite::types::Value::Text(account.to_owned()));
         }
         let raw = db
-            .query_row(&sql, params_from_iter(args.iter()), |r| {
+            .query_row(&sql, rusqlite::params_from_iter(args.iter()), |r| {
                 Ok((
                     StoredIntent {
                         plan: IntentPlan::default(),
