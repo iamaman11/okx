@@ -572,6 +572,158 @@ pub(crate) struct UnifiedFinanceHandle {
     installation: String,
 }
 
+/// Exactly one Rust SQL writer for the account and RiskBook parts of
+/// native financial commands. Typed inputs are produced by the existing
+/// domain/source owners, never by arbitrary JSON or Cloudflare budget code.
+/// The *same* dispatch is used for rollback-only offline contract tests.
+#[derive(Debug, Clone)]
+pub(crate) enum UnifiedFinanceWrite {
+    Reserve {
+        campaign: String,
+        input: crate::risk::ReserveInput,
+        census: crate::risk::VerifiedCensus,
+        receipt: crate::CentralReceipt,
+    },
+    BeginPost {
+        campaign: String,
+        input: crate::risk::PostFenceInput,
+    },
+    SettlePartial {
+        campaign: String,
+        account: String,
+        intent: String,
+        expected_sequence: u64,
+        generation: u64,
+    },
+    ReleaseUnsent {
+        campaign: String,
+        account: String,
+        intent: String,
+        expected_sequence: u64,
+        generation: u64,
+    },
+    RecoverPosting {
+        account: String,
+        now: i64,
+    },
+    RecoverInstallation {
+        now: i64,
+    },
+    RecordOutcome {
+        account: String,
+        intent: String,
+        state: crate::IntentState,
+        exchange_order_id: Option<String>,
+        evidence: String,
+        now: i64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UnifiedFinanceWriteReceipt {
+    Risk(crate::risk::UnifiedRiskDecision),
+    Recovered { changed: usize },
+    OutcomeRecorded,
+}
+
+/// The original SQL owners share this one transaction; no secondary
+/// AccountStore/RiskBook handle, independent COMMIT or RPC can participate.
+/// The only caller that may commit this change is the installation SQL FIFO.
+/// For offline tests this very same function runs inside a ROLLBACK.
+fn apply_original_unified_finance_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    command: UnifiedFinanceWrite,
+) -> StoreResult<UnifiedFinanceWriteReceipt> {
+    use crate::risk;
+    let risk_operation = |outcome: Result<risk::UnifiedRiskDecision, &'static str>| {
+        outcome
+            .map(UnifiedFinanceWriteReceipt::Risk)
+            .map_err(StoreError::Invalid)
+    };
+    match command {
+        UnifiedFinanceWrite::Reserve {
+            campaign,
+            input,
+            census,
+            receipt,
+        } => risk_operation(risk::reserve_unified_native(
+            tx, installation, &campaign, &input, &census, &receipt,
+        )),
+        UnifiedFinanceWrite::BeginPost { campaign, input } => risk_operation(
+            risk::begin_post_unified_native(tx, installation, &campaign, &input),
+        ),
+        UnifiedFinanceWrite::SettlePartial {
+            campaign,
+            account,
+            intent,
+            expected_sequence,
+            generation,
+        } => risk_operation(risk::settle_partial_unified_native(
+            tx, installation, &campaign, &account, &intent,
+            expected_sequence, generation,
+        )),
+        UnifiedFinanceWrite::ReleaseUnsent {
+            campaign,
+            account,
+            intent,
+            expected_sequence,
+            generation,
+        } => risk_operation(risk::release_unsent_unified_native(
+            tx, installation, &campaign, &account, &intent,
+            expected_sequence, generation,
+        )),
+        UnifiedFinanceWrite::RecoverPosting { account, now } => {
+            let changed = AccountStore::recover_posting_sql_transaction(
+                tx, Some((installation, &account)), now,
+            )?;
+            Ok(UnifiedFinanceWriteReceipt::Recovered { changed })
+        }
+        UnifiedFinanceWrite::RecoverInstallation { now } => {
+            let changed = AccountStore::recover_installation_posting_sql_transaction(
+                tx, installation, now,
+            )?;
+            Ok(UnifiedFinanceWriteReceipt::Recovered { changed })
+        }
+        UnifiedFinanceWrite::RecordOutcome {
+            account,
+            intent,
+            state,
+            exchange_order_id,
+            evidence,
+            now,
+        } => {
+            AccountStore::record_outcome_sql_transaction(
+                tx, Some((installation, &account)), &intent,
+                state, exchange_order_id.as_deref(), &evidence, now,
+            )?;
+            Ok(UnifiedFinanceWriteReceipt::OutcomeRecorded)
+        }
+    }
+}
+
+/// The stopped source manifest is deliberately immutable: a valid import
+/// digest is NOT evidence that the old Cloudflare financial endpoint was
+/// server-disabled and all outstanding obligations were inventoried.
+/// Production financial COMMIT stays disabled until RB09 supplies a new,
+/// separately verified local activation receipt. This code NEVER promotes
+/// OFFLINE_NOT_AUTHORIZED by itself and never calls Cloudflare on a hot path.
+fn require_verified_live_finance_authority(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+) -> StoreResult<()> {
+    let state: String = tx.query_row(
+        "SELECT state FROM finance_import_manifest
+         WHERE singleton=1 AND installation_id=?1",
+        [installation],
+        |row| row.get(0),
+    )?;
+    if state == "OFFLINE_NOT_AUTHORIZED" {
+        return Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"));
+    }
+    Err(StoreError::Invalid("FINANCE_AUTHORITY_STATE_UNVERIFIED"))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct UnifiedFinanceInventory {
     pub accounts: i64,
@@ -724,6 +876,46 @@ impl UnifiedFinanceHandle {
             .map_err(|_| StoreError::Invalid("UNIFIED_FINANCE_WORKER_STOPPED"))?
     }
 
+    /// This is the ONLY future production financial COMMIT entrypoint.
+    /// It uses the very same original AccountStore/RiskBook transaction
+    /// functions as the offline physical tests. In the current schema the
+    /// sealed import is strictly OFFLINE_NOT_AUTHORIZED, so this method
+    /// fails BEFORE applying any financial rule or source mutation.
+    /// RB09 must be accepted before a real activation receipt exists.
+    pub(crate) async fn apply_financial_write(
+        &self,
+        command: UnifiedFinanceWrite,
+    ) -> StoreResult<UnifiedFinanceWriteReceipt> {
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            require_verified_live_finance_authority(&tx, &installation)?;
+            let result = apply_original_unified_finance_transaction(&tx, &installation, command)?;
+            tx.commit()?;
+            Ok(result)
+        })
+        .await
+    }
+
+    /// The SAME real Rust domain dispatch for direct contract witnesses.
+    /// Only the immutable stopped import may be used; the caller never
+    /// commits a staged grant, ACK, reserve, loss or release.
+    #[cfg(test)]
+    async fn trial_financial_write(
+        &self,
+        command: UnifiedFinanceWrite,
+    ) -> StoreResult<UnifiedFinanceWriteReceipt> {
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            require_offline_finance_trial(&tx, &installation)?;
+            let result = apply_original_unified_finance_transaction(&tx, &installation, command);
+            tx.rollback()?;
+            result
+        })
+        .await
+    }
+
     /// Read-only installation-scoped diagnostic. No finance mutation API is
     /// exported while the import marker says OFFLINE_NOT_AUTHORIZED.
     pub(crate) async fn inventory(&self) -> StoreResult<UnifiedFinanceInventory> {
@@ -843,19 +1035,10 @@ impl UnifiedFinanceHandle {
         account: String,
         now: i64,
     ) -> StoreResult<usize> {
-        let installation = self.installation.clone();
-        self.submit(move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_offline_finance_trial(&tx, &installation)?;
-            let recovered = AccountStore::recover_posting_sql_transaction(
-                &tx,
-                Some((&installation, &account)),
-                now,
-            )?;
-            tx.rollback()?;
-            Ok(recovered)
-        })
-        .await
+        match self.trial_financial_write(UnifiedFinanceWrite::RecoverPosting { account, now }).await? {
+            UnifiedFinanceWriteReceipt::Recovered { changed } => Ok(changed),
+            _ => Err(StoreError::Invalid("UNIFIED_RECOVERY_RECEIPT_UNEXPECTED")),
+        }
     }
 
     /// TEST ONLY: exercise installation-wide native UNKNOWN recovery on
@@ -863,19 +1046,10 @@ impl UnifiedFinanceHandle {
     /// staged accounts, and the immutable offline import remains unchanged.
     #[cfg(test)]
     pub(crate) async fn trial_original_recover_installation(&self, now: i64) -> StoreResult<usize> {
-        let installation = self.installation.clone();
-        self.submit(move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_offline_finance_trial(&tx, &installation)?;
-            let recovered = AccountStore::recover_installation_posting_sql_transaction(
-                &tx,
-                &installation,
-                now,
-            )?;
-            tx.rollback()?;
-            Ok(recovered)
-        })
-        .await
+        match self.trial_financial_write(UnifiedFinanceWrite::RecoverInstallation { now }).await? {
+            UnifiedFinanceWriteReceipt::Recovered { changed } => Ok(changed),
+            _ => Err(StoreError::Invalid("UNIFIED_RECOVERY_RECEIPT_UNEXPECTED")),
+        }
     }
 
     /// TEST ONLY: check the original venue readback/ACK/terminal source
@@ -891,23 +1065,12 @@ impl UnifiedFinanceHandle {
         evidence: String,
         now: i64,
     ) -> StoreResult<()> {
-        let installation = self.installation.clone();
-        self.submit(move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_offline_finance_trial(&tx, &installation)?;
-            AccountStore::record_outcome_sql_transaction(
-                &tx,
-                Some((&installation, &account)),
-                &intent,
-                state,
-                exchange_order_id.as_deref(),
-                &evidence,
-                now,
-            )?;
-            tx.rollback()?;
-            Ok(())
-        })
-        .await
+        match self.trial_financial_write(UnifiedFinanceWrite::RecordOutcome {
+            account, intent, state, exchange_order_id, evidence, now,
+        }).await? {
+            UnifiedFinanceWriteReceipt::OutcomeRecorded => Ok(()),
+            _ => Err(StoreError::Invalid("UNIFIED_OUTCOME_RECEIPT_UNEXPECTED")),
+        }
     }
 
     /// TEST ONLY: the same ORIGINAL AccountStore PREPARE transaction on the
@@ -948,25 +1111,17 @@ impl UnifiedFinanceHandle {
         census: crate::risk::VerifiedCensus,
         receipt: crate::CentralReceipt,
     ) -> StoreResult<&'static str> {
-        let installation = self.installation.clone();
-        self.submit(move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_offline_finance_trial(&tx, &installation)?;
-            let result = crate::risk::test_trial_unified_reserve(
-                &tx,
-                &installation,
-                &campaign,
-                &input,
-                &census,
-                &receipt,
-            );
-            // No financial mutation may outlive this test; the original
-            // immutable import's manifest digest and old owner fencing must
-            // stay exactly as imported, even for an internally staged HELD.
-            tx.rollback()?;
-            result.map_err(StoreError::Invalid)
-        })
-        .await
+        match self.trial_financial_write(UnifiedFinanceWrite::Reserve {
+            campaign, input, census, receipt,
+        }).await.map_err(|_| StoreError::Invalid("UNIFIED_ORIGINAL_RESERVE_TRIAL_REJECTED"))? {
+            UnifiedFinanceWriteReceipt::Risk(
+                crate::risk::UnifiedRiskDecision::Reserved { .. },
+            ) => Ok("HELD_UNCOMMITTED"),
+            UnifiedFinanceWriteReceipt::Risk(
+                crate::risk::UnifiedRiskDecision::Denied { .. },
+            ) => Ok("REJECTED_UNCOMMITTED"),
+            _ => Err(StoreError::Invalid("UNIFIED_RESERVE_RECEIPT_UNEXPECTED")),
+        }
     }
 
     /// TEST ONLY: both the ORIGINAL AccountStore no-send source and the
@@ -982,23 +1137,14 @@ impl UnifiedFinanceHandle {
         expected_sequence: u64,
         generation: u64,
     ) -> StoreResult<(u64, String, bool)> {
-        let installation = self.installation.clone();
-        self.submit(move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_offline_finance_trial(&tx, &installation)?;
-            let result = crate::risk::test_trial_unified_unsent_from_account(
-                &tx,
-                &installation,
-                &campaign,
-                &account,
-                &intent,
-                expected_sequence,
-                generation,
-            );
-            tx.rollback()?;
-            result.map_err(StoreError::Invalid)
-        })
-        .await
+        match self.trial_financial_write(UnifiedFinanceWrite::ReleaseUnsent {
+            campaign, account, intent, expected_sequence, generation,
+        }).await.map_err(|_| StoreError::Invalid("UNIFIED_UNSENT_SOURCE_OR_RISK_DENIED"))? {
+            UnifiedFinanceWriteReceipt::Risk(crate::risk::UnifiedRiskDecision::UnsentReleased {
+                reservation_key, book_sequence, replayed,
+            }) => Ok((book_sequence, reservation_key, replayed)),
+            _ => Err(StoreError::Invalid("UNIFIED_UNSENT_RECEIPT_UNEXPECTED")),
+        }
     }
 
     /// TEST ONLY: the original AccountStore entry-partial source is read
@@ -1013,23 +1159,14 @@ impl UnifiedFinanceHandle {
         expected_sequence: u64,
         generation: u64,
     ) -> StoreResult<(u64, String, bool)> {
-        let installation = self.installation.clone();
-        self.submit(move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_offline_finance_trial(&tx, &installation)?;
-            let result = crate::risk::test_trial_unified_partial_from_account(
-                &tx,
-                &installation,
-                &campaign,
-                &account,
-                &intent,
-                expected_sequence,
-                generation,
-            );
-            tx.rollback()?;
-            result.map_err(StoreError::Invalid)
-        })
-        .await
+        match self.trial_financial_write(UnifiedFinanceWrite::SettlePartial {
+            campaign, account, intent, expected_sequence, generation,
+        }).await.map_err(|_| StoreError::Invalid("UNIFIED_PARTIAL_SOURCE_OR_RISK_DENIED"))? {
+            UnifiedFinanceWriteReceipt::Risk(crate::risk::UnifiedRiskDecision::EntrySettled {
+                book_sequence, cumulative_entry_usd, replayed, ..
+            }) => Ok((book_sequence, cumulative_entry_usd, replayed)),
+            _ => Err(StoreError::Invalid("UNIFIED_PARTIAL_RECEIPT_UNEXPECTED")),
+        }
     }
 
     /// The original RiskBook Inspect returns None for missing/foreign

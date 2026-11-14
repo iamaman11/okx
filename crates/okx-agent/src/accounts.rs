@@ -198,6 +198,25 @@ pub fn initialize_installation(root: &Path, installation_id: &str) -> AgentResul
 
 impl AccountRuntimeRegistry {
     pub async fn open(root: &Path, rate_budget: RateBudget) -> AgentResult<Self> {
+        // #510: A stopped unified finance import is NOT trading authority.
+        // The old account registry must not start its per-account writers or
+        // the Cloudflare financial command route over a staged finance.sqlite,
+        // even when the catalog is empty (no legacy account worker to lock).
+        // Checking metadata, not is_file(), also fails closed for symlinks
+        // and partially created targets. There is no Cloudflare lease RPC.
+        match std::fs::symlink_metadata(root.join("finance").join("finance.sqlite")) {
+            Ok(_) => {
+                return Err(AgentError::FinancialCaptureTask(
+                    "FINANCE_CUTOVER_NOT_ACCEPTED".into(),
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(AgentError::FinancialCaptureTask(
+                    "FINANCE_AUTHORITY_STATUS_UNAVAILABLE".into(),
+                ));
+            }
+        }
         let catalog = account_catalog_proto::promote_existing_once(root, |catalog| {
             for account in &catalog.accounts {
                 let path = root
@@ -7026,6 +7045,23 @@ mod tests {
             .expect("SQL owner not closed");
         }
         std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn finance_staged_import_never_falls_back_to_old_trade_or_cloudflare_finance() {
+        let root = root();
+        initialize_installation(&root, "installation-test").unwrap();
+        std::fs::create_dir_all(root.join("finance")).unwrap();
+        std::fs::write(root.join("finance").join("finance.sqlite"), b"OFFLINE_NOT_AUTHORIZED")
+            .unwrap();
+        // Even zero registered accounts cannot produce a legacy sender.
+        assert!(matches!(
+            AccountRuntimeRegistry::open(&root, RateBudget::new()).await,
+            Err(AgentError::FinancialCaptureTask(reason))
+                if reason == "FINANCE_CUTOVER_NOT_ACCEPTED"
+        ));
+        assert!(!root.join("accounts").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

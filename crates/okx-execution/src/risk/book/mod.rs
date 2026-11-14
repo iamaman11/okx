@@ -9,82 +9,115 @@ pub(crate) use store::{
     read_unified_campaign_reservation, read_unified_campaign_summary, verify_legacy_import_source,
     verify_unified_import_campaign,
 };
-#[cfg(test)]
-mod tests;
 
-/// Private-only trial for the installation SQL-owner. It invokes BOTH
-/// original Rust financial subject owners with full typed arguments on the
-/// caller's transaction; the caller MUST roll back this transaction because
-/// an offline immutable import is NOT a cutover or venue authority.
-#[cfg(test)]
+// Original RiskBook operations for the shared finance SQL writer. These are
+// DOMAIN calls on the caller's existing transaction, not a second owner,
+// separate campaign database or bypass around AccountStore source proofs.
 pub(crate) use store::{ReserveInput, VerifiedCensus};
+pub(crate) use store::PostFenceInput;
 
-#[cfg(test)]
-pub(crate) fn test_trial_unified_reserve(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UnifiedRiskDecision {
+    Reserved {
+        reservation_key: String,
+        book_sequence: u64,
+        replayed: bool,
+    },
+    Denied {
+        reason: String,
+    },
+    PostAuthorized {
+        reservation_key: String,
+        book_sequence: u64,
+        existing_modelled_loss_usdt: String,
+    },
+    EntrySettled {
+        reservation_key: String,
+        book_sequence: u64,
+        cumulative_entry_usd: String,
+        replayed: bool,
+    },
+    UnsentReleased {
+        reservation_key: String,
+        book_sequence: u64,
+        replayed: bool,
+    },
+}
+
+/// Preserve exact public error identity for scope, source, CAS and policy
+/// refusals without leaking raw SQLite or transport errors into a grant.
+fn original_finance_error(error: &store::RiskStoreError) -> &'static str {
+    use store::RiskStoreError as E;
+    match error {
+        E::Invalid(reason) | E::Corrupt(reason) => reason,
+        E::StaleSequence => "STALE_SESSION_OR_BOOK_SEQUENCE",
+        E::StaleGeneration => "STALE_RUNTIME_GENERATION",
+        E::PolicyConflict => "POLICY_SNAPSHOT_NOT_AUTHORITATIVE",
+        E::CensusUnproven => "COMPLETE_ACCOUNT_CENSUS_UNPROVEN",
+        E::EntrySqlUnproven => "DURABLE_ENTRY_SQL_PROOF_MISSING",
+        E::EntrySqlUnavailable => "ENTRY_SQL_PROOF_UNAVAILABLE",
+        E::UnsentSqlUnproven => "DURABLE_UNSENT_SQL_PROOF_MISSING",
+        E::UnsentSqlUnavailable => "UNSENT_SQL_PROOF_UNAVAILABLE",
+        E::LossRegression => "CUMULATIVE_LOSS_SOURCE_REGRESSION",
+        E::IdempotencyConflict => "IDEMPOTENCY_CONFLICT",
+        E::AlreadyResolved => "INTENT_ALREADY_POSTED_OR_RESOLVED",
+        E::WriterBusy => "RISK_WRITER_ALREADY_RUNNING",
+        E::QueueFull => "RISK_OWNER_QUEUE_FULL",
+        E::WorkerStopped => "RISK_OWNER_STOPPED",
+        E::OutcomeUnknown => "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY",
+        E::IdentityMismatch => "RISK_BOOK_IDENTITY_MISMATCH",
+        E::Uninitialized => "RISK_BOOK_UNINITIALIZED",
+        E::Denied(_) => "RISK_RULE_DENIED",
+        E::Money(_) => "RISK_MONEY_INVALID",
+        E::Sql(_) | E::Io(_) | E::Encode(_) => "RISK_STORAGE_UNAVAILABLE",
+    }
+}
+
+pub(crate) fn reserve_unified_native(
     tx: &rusqlite::Transaction<'_>,
     installation: &str,
     campaign: &str,
     input: &ReserveInput,
     census: &VerifiedCensus,
     receipt: &crate::CentralReceipt,
-) -> Result<&'static str, &'static str> {
+) -> Result<UnifiedRiskDecision, &'static str> {
     use store::{ReserveDecision, RiskBookStore};
     match RiskBookStore::reserve_unified_account_transaction(
-        tx,
-        installation,
-        campaign,
-        input,
-        census,
-        receipt,
-    ) {
-        Ok(ReserveDecision::Held(_)) => Ok("HELD_UNCOMMITTED"),
-        Ok(ReserveDecision::Rejected(_)) => Ok("REJECTED_UNCOMMITTED"),
-        Err(error) => {
-            // Test-only diagnostic: identify the exact ORIGINAL Rust rule
-            // owner that refused the trial, never a production bypass.
-            eprintln!("UNIFIED_RESERVE_TRIAL_ORIGINAL_REASON={error}");
-            Err("UNIFIED_ORIGINAL_RESERVE_TRIAL_REJECTED")
-        }
+        tx, installation, campaign, input, census, receipt,
+    ).map_err(|e| original_finance_error(&e))? {
+        ReserveDecision::Held(receipt) => Ok(UnifiedRiskDecision::Reserved {
+            reservation_key: receipt.reservation_key,
+            book_sequence: receipt.book_sequence,
+            replayed: receipt.replayed,
+        }),
+        ReserveDecision::Rejected(reason) => Ok(UnifiedRiskDecision::Denied {
+            reason: reason.to_string(),
+        }),
     }
 }
 
-/// The ONLY original AccountStore-source-derived no-send operation for
-/// scoped v6, invoked under the installation's owned SQL transaction.
-/// Test-gated here because real Cloudflare fencing/epoch is not yet accepted.
-#[cfg(test)]
-pub(crate) fn test_trial_unified_unsent_from_account(
+pub(crate) fn begin_post_unified_native(
     tx: &rusqlite::Transaction<'_>,
     installation: &str,
     campaign: &str,
-    account: &str,
-    intent: &str,
-    expected_sequence: u64,
-    generation: u64,
-) -> Result<(u64, String, bool), &'static str> {
-    let receipt = store::RiskBookStore::release_unified_unsent_from_account_sql_transaction(
-        tx,
-        installation,
-        campaign,
-        account,
-        intent,
-        expected_sequence,
-        generation,
-    )
-    .map_err(|error| {
-        eprintln!("UNIFIED_UNSENT_ORIGINAL_REASON={error}");
-        "UNIFIED_UNSENT_SOURCE_OR_RISK_DENIED"
-    })?;
-    Ok((
-        receipt.book_sequence,
-        receipt.reservation_key,
-        receipt.replayed,
-    ))
+    input: &PostFenceInput,
+) -> Result<UnifiedRiskDecision, &'static str> {
+    use store::{PostDecision, begin_unified_post_and_account_transaction};
+    match begin_unified_post_and_account_transaction(tx, installation, campaign, input)
+        .map_err(|e| original_finance_error(&e))?
+    {
+        PostDecision::Authorized(receipt) => Ok(UnifiedRiskDecision::PostAuthorized {
+            reservation_key: receipt.reservation_key,
+            book_sequence: receipt.book_sequence,
+            existing_modelled_loss_usdt: receipt.existing_modelled_loss_usdt,
+        }),
+        PostDecision::Denied(reason) => Ok(UnifiedRiskDecision::Denied {
+            reason: reason.to_string(),
+        }),
+    }
 }
 
-/// TEST-ONLY trial of original source-backed partial settlement in ONE
-/// finance transaction; no commit/venue grant is possible on offline import.
-#[cfg(test)]
-pub(crate) fn test_trial_unified_partial_from_account(
+pub(crate) fn settle_partial_unified_native(
     tx: &rusqlite::Transaction<'_>,
     installation: &str,
     campaign: &str,
@@ -92,26 +125,43 @@ pub(crate) fn test_trial_unified_partial_from_account(
     intent: &str,
     expected_sequence: u64,
     generation: u64,
-) -> Result<(u64, String, bool), &'static str> {
+) -> Result<UnifiedRiskDecision, &'static str> {
     let receipt = store::RiskBookStore::settle_unified_partial_from_account_sql_transaction(
-        tx,
-        installation,
-        campaign,
-        account,
-        intent,
-        expected_sequence,
-        generation,
-    )
-    .map_err(|error| {
-        eprintln!("UNIFIED_PARTIAL_ORIGINAL_REASON={error}");
-        "UNIFIED_PARTIAL_SOURCE_OR_RISK_DENIED"
-    })?;
-    Ok((
-        receipt.book_sequence,
-        receipt.cumulative_entry_usd,
-        receipt.replayed,
-    ))
+        tx, installation, campaign, account, intent, expected_sequence, generation,
+    ).map_err(|e| original_finance_error(&e))?;
+    Ok(UnifiedRiskDecision::EntrySettled {
+        reservation_key: receipt.reservation_key,
+        book_sequence: receipt.book_sequence,
+        cumulative_entry_usd: receipt.cumulative_entry_usd,
+        replayed: receipt.replayed,
+    })
 }
+
+pub(crate) fn release_unsent_unified_native(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    campaign: &str,
+    account: &str,
+    intent: &str,
+    expected_sequence: u64,
+    generation: u64,
+) -> Result<UnifiedRiskDecision, &'static str> {
+    let receipt = store::RiskBookStore::release_unified_unsent_from_account_sql_transaction(
+        tx, installation, campaign, account, intent, expected_sequence, generation,
+    ).map_err(|e| original_finance_error(&e))?;
+    Ok(UnifiedRiskDecision::UnsentReleased {
+        reservation_key: receipt.reservation_key,
+        book_sequence: receipt.book_sequence,
+        replayed: receipt.replayed,
+    })
+}
+
+#[cfg(test)]
+mod tests;
+
+// Offline contractual trials and the eventual native SQL FIFO now invoke
+// the SAME typed original Rust operations above, never parallel test-only
+// Reserve/Settle/Unsent algorithms with a different transaction boundary.
 
 /// Test-only native PostCausalProof constructor for the real v6 SQL
 /// transaction integration witness. Synthetic proof is NEVER compiled into
@@ -131,9 +181,7 @@ pub(crate) fn test_stage_scoped_begin_post(
         money::RiskAmount,
     };
     use std::collections::BTreeMap;
-    use store::{
-        PostDecision, PostFenceInput, VerifiedCensus, begin_unified_post_and_account_transaction,
-    };
+    use store::{PostFenceInput, VerifiedCensus};
     let zero = RiskAmount::zero();
     let reads = cohort
         .iter()
@@ -176,10 +224,11 @@ pub(crate) fn test_stage_scoped_begin_post(
             account_reads: reads,
         },
     };
-    match begin_unified_post_and_account_transaction(tx, installation, campaign, &input)
-        .map_err(|e| e.to_string())?
+    match begin_post_unified_native(tx, installation, campaign, &input)
+        .map_err(str::to_owned)?
     {
-        PostDecision::Authorized(staged) => Ok(staged.book_sequence),
-        PostDecision::Denied(reason) => Err(reason.to_string()),
+        UnifiedRiskDecision::PostAuthorized { book_sequence, .. } => Ok(book_sequence),
+        UnifiedRiskDecision::Denied { reason } => Err(reason),
+        _ => Err("UNIFIED_POST_RECEIPT_UNEXPECTED".into()),
     }
 }

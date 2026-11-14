@@ -1,5 +1,38 @@
 # Trade acceptance evidence map — #448 / #449 / #501
 
+## #510 — original finance domain dispatch and legacy-route hard stop (candidate)
+
+**Proof target on the exact candidate SHA, pending CI:** the original
+AccountStore/RiskBook native operations now share one typed transaction
+dispatcher (`apply_original_unified_finance_transaction`) for reserve,
+begin-post, source-backed partial settlement, no-send release, outcome
+recording and account/installation recovery. The old test-only
+Reserve/Partial/Unsent rule wrappers were deleted. The existing
+two-account same-ID original SQL witnesses now execute those same
+domain entrypoints under rollback and preserve the imported original
+47-table source.
+
+**Mandatory negative:** `UnifiedFinanceHandle::apply_financial_write`
+is denied `FINANCE_CUTOVER_NOT_ACCEPTED` on a verified
+`OFFLINE_NOT_AUTHORIZED` import even for posting recovery and outcome,
+with identical inventory/manifest after refusal. No grant, COMMIT or
+second writer may follow. Independently,
+`accounts::tests::finance_staged_import_never_falls_back_to_old_trade_or_cloudflare_finance`
+must prove a zero-account old registry refuses a staged finance DB;
+this test is included in the existing Draft Rust CI job, not a new
+workflow.
+
+**NOT_PROVEN remains:** authenticated production risk source,
+`InstallEntryOpening`, complete `Resolve`, terminal and late fee
+settlement under one COMMIT, all nine TradeService routes, RB09 server
+finance-disable and verified imported-state activation, physical
+Windows RB01–16/T09/T10 26/26, native direct P95. No old
+Cloudflare finance mutators are disabled yet. Do not count this
+test-passed candidate as completion.
+
+---
+
+
 ## #510 r4.1 — RB09 one-time stopped legacy-finance transition; NOT a continuous Cloudflare gate
 
 **Current acceptance definition supersedes previous owner-epoch/fencing wording below; historical SHA-specific records are preserved as historical evidence.** The new Rust financial path never calls Cloudflare to reserve funds, grant POST, settle, release or check a permanent owner lease. Cloudflare MCP, authorization and routing remain.

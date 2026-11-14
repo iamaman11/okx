@@ -12836,6 +12836,31 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert_eq!(inventory.accounts, 2);
     assert_eq!(inventory.campaigns, 1);
     assert_eq!(inventory.state, "OFFLINE_NOT_AUTHORIZED");
+    // The new production-shaped unified finance dispatcher is the exact
+    // SAME single writer and domain transaction as the offline witnesses.
+    // An immutable 47-table stopped import may NEVER become a venue/finance
+    // grant merely because its contents and account roster are valid.
+    for action in [
+        crate::account_worker::UnifiedFinanceWrite::RecoverInstallation { now: 100 },
+        crate::account_worker::UnifiedFinanceWrite::RecoverPosting {
+            account: a_key.clone(),
+            now: 100,
+        },
+        crate::account_worker::UnifiedFinanceWrite::RecordOutcome {
+            account: a_key.clone(),
+            intent: ai.intent_id.clone(),
+            state: IntentState::Acknowledged,
+            exchange_order_id: Some("unauthorized-venue-order".into()),
+            evidence: "not-a-verified-source".into(),
+            now: 100,
+        },
+    ] {
+        assert!(matches!(
+            owner.apply_financial_write(action).await,
+            Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
+        ));
+    }
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
     // Read the original RiskBook summary through that very same owner.
     // No copied risk formulas or independently opened campaign SQL handle.
     let summary = owner.campaign_summary("campaign-X".into()).await.unwrap();

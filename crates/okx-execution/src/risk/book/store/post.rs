@@ -17,7 +17,7 @@ use rusqlite::{
 };
 
 #[derive(Debug, Clone)]
-pub(in crate::risk::book) struct PostFenceInput {
+pub(crate) struct PostFenceInput {
     pub reservation_key: String,
     pub plan_sha256: String,
     pub policy_revision: u64,

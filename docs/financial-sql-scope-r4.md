@@ -1,5 +1,49 @@
 # #510 r4.1 — one Rust financial SQLite; one-time stopped legacy cutover
 
+## One shared original finance command implementation (candidate, awaiting exact CI)
+
+The Rust account SQL worker now provides one typed
+`UnifiedFinanceWrite` transaction implementation, backed by the ORIGINAL
+AccountStore and RiskBook domain functions, not copies of budgeting rules.
+The domain entrypoints for `Reserve`, `BeginPost`, source-backed
+`SettlePartial` and `ReleaseUnsent` invoke the original
+`reserve_unified_account_transaction`,
+`begin_unified_post_and_account_transaction`,
+`settle_unified_partial_from_account_sql_transaction` and
+`release_unified_unsent_from_account_sql_transaction`.
+`RecoverPosting`, `RecoverInstallation` and `RecordOutcome`
+also use the original AccountStore implementation. These seven
+account/risk write forms have **one** bounded installation FIFO,
+one `BEGIN IMMEDIATE`, one `COMMIT`, and typed replies; the source
+checks and scope/sequence policy are not reimplemented in the agent.
+
+The previous dedicated test-only Reserve/Partial/Unsent wrappers were
+removed. Offline integration witnesses now run through the SAME normal
+Rust domain dispatch in `trial_financial_write`, then always ROLLBACK.
+`apply_financial_write` is the only intended shared production SQL
+commit ingress but **cannot presently authorize any mutation**:
+`finance_import_manifest.state` is immutable
+`OFFLINE_NOT_AUTHORIZED`, and the guard refuses
+`FINANCE_CUTOVER_NOT_ACCEPTED` before the domain action. The code
+does not synthesize a Cloudflare-disabled proof, activate a staged import,
+or allow a test grant to reach the exchange.
+
+The legacy AccountRuntimeRegistry also refuses startup when
+`runtime_root/finance/finance.sqlite` exists, including a symlink or
+partially created target, preventing the old Cloudflare finance route
+from running over a staged new DB even with an empty account catalog.
+Legacy production remains otherwise unchanged pending RB09.
+
+**Not complete:** authenticated live source producer, terminal and
+late fee `SettleEntry`, original RiskBook `Resolve`, opening/limit
+installation, active finance authorization after an actual one-time
+Cloudflare legacy disable + readback, all nine production TradeService
+actions and actual native Windows/26×T09/T10 acceptance. This is a
+single consolidated code candidate, **not** a release or RB01 PASS.
+
+---
+
+
 ## Canonical Cloudflare responsibility boundary — accepted 15 Nov 2026
 
 See [Issue #510 r4.1](https://github.com/iamaman11/okx/issues/510). **This section supersedes any older references below to a permanent Cloudflare owner epoch/fencing protocol.** Those older paragraphs are chronological evidence of former Draft expectations, not current requirements.
