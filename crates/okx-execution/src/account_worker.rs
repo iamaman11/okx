@@ -512,6 +512,25 @@ struct FinanceWorkerOwner {
     terminated: watch::Receiver<bool>,
 }
 
+/// Test-only assertion against the immutable, independently verified
+/// stopped-import marker. A trial cannot create a live finance grant.
+#[cfg(test)]
+fn require_offline_finance_trial(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+) -> StoreResult<()> {
+    let marker: String = tx.query_row(
+        "SELECT state FROM finance_import_manifest
+         WHERE singleton=1 AND installation_id=?1",
+        [installation],
+        |row| row.get(0),
+    )?;
+    if marker != "OFFLINE_NOT_AUTHORIZED" {
+        return Err(StoreError::Invalid("UNIFIED_TRIAL_REQUIRES_OFFLINE_IMPORT"));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub(crate) struct UnifiedFinanceHandle {
     owner: Arc<FinanceWorkerOwner>,
@@ -740,6 +759,88 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    /// Read-only original AccountStore intent (and immutable full plan)
+    /// via the installation's single SQL FIFO. Raw venue IDs are scoped by
+    /// account; no second account store, mutable SQL or venue capability.
+    pub(crate) async fn account_intent(
+        &self,
+        account: String,
+        intent: String,
+    ) -> StoreResult<Option<crate::StoredIntent>> {
+        if account.is_empty() || intent.is_empty() {
+            return Err(StoreError::Invalid("UNIFIED_FINANCE_INTENT_SCOPE_INVALID"));
+        }
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let found = AccountStore::find_intent_sql(
+                &tx,
+                Some((&installation, &account)),
+                "intent_id",
+                &intent,
+            )?;
+            tx.commit()?;
+            Ok(found)
+        })
+        .await
+    }
+
+    /// TEST ONLY: exercise original durable POSTING -> UNKNOWN recovery
+    /// through the same bounded worker. The source import stays immutable:
+    /// every staged receipt/intent change is rolled back on this endpoint.
+    #[cfg(test)]
+    pub(crate) async fn trial_original_recover_posting(
+        &self,
+        account: String,
+        now: i64,
+    ) -> StoreResult<usize> {
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            require_offline_finance_trial(&tx, &installation)?;
+            let recovered = AccountStore::recover_posting_sql_transaction(
+                &tx,
+                Some((&installation, &account)),
+                now,
+            )?;
+            tx.rollback()?;
+            Ok(recovered)
+        })
+        .await
+    }
+
+    /// TEST ONLY: check the original venue readback/ACK/terminal source
+    /// transition on the same installation owner without persisting a
+    /// synthetic exchange response to the immutable import.
+    #[cfg(test)]
+    pub(crate) async fn trial_original_record_outcome(
+        &self,
+        account: String,
+        intent: String,
+        state: crate::IntentState,
+        exchange_order_id: Option<String>,
+        evidence: String,
+        now: i64,
+    ) -> StoreResult<()> {
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            require_offline_finance_trial(&tx, &installation)?;
+            AccountStore::record_outcome_sql_transaction(
+                &tx,
+                Some((&installation, &account)),
+                &intent,
+                state,
+                exchange_order_id.as_deref(),
+                &evidence,
+                now,
+            )?;
+            tx.rollback()?;
+            Ok(())
+        })
+        .await
+    }
+
     /// TEST ONLY: the same ORIGINAL AccountStore PREPARE transaction on the
     /// installation's one bounded writer. The offline source manifest is
     /// immutable and ALL staged decision/intent/plan writes roll back.
@@ -753,15 +854,7 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit(move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let state: String = tx.query_row(
-                "SELECT state FROM finance_import_manifest
-                 WHERE singleton=1 AND installation_id=?1",
-                [&installation],
-                |row| row.get(0),
-            )?;
-            if state != "OFFLINE_NOT_AUTHORIZED" {
-                return Err(StoreError::Invalid("UNIFIED_TRIAL_REQUIRES_OFFLINE_IMPORT"));
-            }
+            require_offline_finance_trial(&tx, &installation)?;
             let staged = AccountStore::prepare_sql_transaction(
                 &tx,
                 Some((&installation, &account)),
@@ -789,15 +882,7 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit(move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let marker: String = tx.query_row(
-                "SELECT state FROM finance_import_manifest
-                 WHERE singleton=1 AND installation_id=?1",
-                [&installation],
-                |r| r.get(0),
-            )?;
-            if marker != "OFFLINE_NOT_AUTHORIZED" {
-                return Err(StoreError::Invalid("UNIFIED_TRIAL_REQUIRES_OFFLINE_IMPORT"));
-            }
+            require_offline_finance_trial(&tx, &installation)?;
             let result = crate::risk::test_trial_unified_reserve(
                 &tx,
                 &installation,
@@ -831,15 +916,7 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit(move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let state: String = tx.query_row(
-                "SELECT state FROM finance_import_manifest
-                 WHERE singleton=1 AND installation_id=?1",
-                [&installation],
-                |row| row.get(0),
-            )?;
-            if state != "OFFLINE_NOT_AUTHORIZED" {
-                return Err(StoreError::Invalid("UNIFIED_TRIAL_REQUIRES_OFFLINE_IMPORT"));
-            }
+            require_offline_finance_trial(&tx, &installation)?;
             let result = crate::risk::test_trial_unified_unsent_from_account(
                 &tx,
                 &installation,
@@ -870,15 +947,7 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit(move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let state: String = tx.query_row(
-                "SELECT state FROM finance_import_manifest
-                 WHERE singleton=1 AND installation_id=?1",
-                [&installation],
-                |row| row.get(0),
-            )?;
-            if state != "OFFLINE_NOT_AUTHORIZED" {
-                return Err(StoreError::Invalid("UNIFIED_TRIAL_REQUIRES_OFFLINE_IMPORT"));
-            }
+            require_offline_finance_trial(&tx, &installation)?;
             let result = crate::risk::test_trial_unified_partial_from_account(
                 &tx,
                 &installation,

@@ -12844,6 +12844,41 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert_eq!(summary.global_reserved_usdt, "1");
     assert_eq!(summary.remaining_loss_usd, "99");
     assert_eq!(summary.remaining_entry_usd, "98");
+    // AccountStore intent/plan readback uses this same installation SQL FIFO.
+    // A/B original intent IDs may coincide, but a third account cannot read
+    // either row and no read provides a budget/venue write capability.
+    for (account, prepared) in [(&a_key, &ai), (&b_key, &bi)] {
+        let observed = owner
+            .account_intent(account.clone(), prepared.intent_id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.intent_id, prepared.intent_id);
+        assert_eq!(observed.plan, prepared.plan);
+    }
+    assert!(owner
+        .account_intent("foreign-account".into(), ai.intent_id.clone())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        owner.account_intent(a_key.clone(), "".into()).await,
+        Err(StoreError::Invalid("UNIFIED_FINANCE_INTENT_SCOPE_INVALID"))
+    ));
+    assert_eq!(
+        owner.trial_original_recover_posting(a_key.clone(), 10)
+            .await.unwrap(),
+        0,
+        "a PREPARED original intent cannot be recovered as POSTING"
+    );
+    assert!(matches!(
+        owner.trial_original_record_outcome(
+            a_key.clone(), ai.intent_id.clone(),
+            IntentState::Acknowledged, Some("unverified-order".into()),
+            "not-a-real-venue-readback".into(), 10,
+        ).await,
+        Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"))
+    ));
 
     // The ORIGINAL PREPARE decision+intent+plan algorithm now executes
     // through this same installation FIFO, with exact A/B composite scopes.
@@ -13512,6 +13547,46 @@ fn risk_book_contract_unified_original_prepare_is_scoped_atomic_and_idempotent()
             )
             .unwrap();
     }
+    // Fail-closed recovery: POSTING is not enough. The original native
+    // durable POST fence and matching account risk receipt must be present
+    // before changing either SQL state. Faults never mint budget headroom.
+    for corrupt_sql in [
+        "DELETE FROM risk_receipts WHERE installation_id='installation' AND account_key='acct-A'",
+        "UPDATE risk_receipts SET state='OPEN' WHERE installation_id='installation' AND account_key='acct-A'",
+        "UPDATE risk_receipts SET plan_hash='foreign-plan' WHERE installation_id='installation' AND account_key='acct-A'",
+        "UPDATE risk_receipts SET policy_revision=2 WHERE installation_id='installation' AND account_key='acct-A'",
+        "UPDATE intents SET begin_post_at=NULL WHERE installation_id='installation' AND account_key='acct-A'",
+    ] {
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute_batch(corrupt_sql).unwrap();
+        assert!(matches!(
+            AccountStore::recover_posting_sql_transaction(
+                &tx, Some(("installation", "acct-A")), 5
+            ),
+            Err(StoreError::Invalid("UNIFIED_RECOVERY_ORIGINAL_POST_UNPROVEN"))
+        ));
+        let unchanged: String = tx.query_row(
+            "SELECT state FROM intents WHERE installation_id='installation' AND account_key='acct-A'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(unchanged, "POSTING");
+        tx.rollback().unwrap();
+    }
+    // A foreign account cannot recover A/B, even if its raw venue IDs match.
+    {
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(
+            AccountStore::recover_posting_sql_transaction(
+                &tx, Some(("installation", "foreign-account")), 5
+            ).unwrap(),
+            0
+        );
+        tx.rollback().unwrap();
+    }
     {
         let tx = reopened
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -13627,6 +13702,22 @@ fn risk_book_contract_unified_original_prepare_is_scoped_atomic_and_idempotent()
             11,
         )
         .unwrap();
+        tx.commit().unwrap();
+    }
+    // Exact recovery replay cannot overwrite terminal receipt or consume
+    // another account's POSTING fence after both are resolved.
+    {
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        for account in ["acct-A", "acct-B"] {
+            assert_eq!(
+                AccountStore::recover_posting_sql_transaction(
+                    &tx, Some(("installation", account)), 12
+                ).unwrap(),
+                0,
+            );
+        }
         tx.commit().unwrap();
     }
     assert_eq!(

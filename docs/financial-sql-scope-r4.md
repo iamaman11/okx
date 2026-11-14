@@ -18,6 +18,31 @@ See [Issue #510 r4.1](https://github.com/iamaman11/okx/issues/510). **This secti
 
 ---
 
+## Fail-closed scoped POST recovery under ONE original Rust owner (15 Nov 2026)
+
+`AccountStore::recover_posting_sql_transaction` on unified v6 now requires
+every original `POSTING` risk-increasing intent to have a positive durable
+`begin_post_at`, and a matching account-scoped native `risk_receipts`
+row in `POSTED` with the exact plan hash and policy revision.
+The same caller-owned transaction changes only those receipts and
+intents to `UNKNOWN` with exact scoped CAS. Missing or altered proof,
+missing receipt and mismatch of updated receipt count abort the entire
+transaction; no new available headroom or silent release.
+Old v2 account-local recovery behavior remains unchanged until cutover.
+
+`UnifiedFinanceHandle` now serves typed `account_intent` through the same
+bounded FIFO, using the original AccountStore full intent/plan decoder.
+Test-only `trial_original_recover_posting` and
+`trial_original_record_outcome` use the original scoped methods under
+the same physical FIFO but ALWAYS roll back against
+`OFFLINE_NOT_AUTHORIZED`. Repeated marker validation is centralized in
+one test-only helper. Direct SQLite tests stage same-ID two-account
+POSTING rows and verify fail-closed mismatched/missing ORIGINAL receipts
+plus unchanged foreign/terminal states. There is still no production
+source attestation, permission to POST or live activation; RB09 is the
+ONE stopped Cloudflare financial-disable/transfer proof, **not a
+continuous Cloudflare fencing/epoch requirement**.
+
 ## Next account lifecycle slice — original OUTCOME and UNKNOWN recovery on one scoped SQL (15 Nov 2026)
 
 The original native `AccountStore::record_outcome` and

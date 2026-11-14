@@ -18,6 +18,32 @@
 **Evidence format:** exact SHA, legacy endpoint negative mutation request/response and final readback, source roster/digests/financial totals, target SQLite receipt, before/after-kill reopen, replay, error diagnostics. RB09 is separate from the fast Rust direct target; do not repeat the 90-kill historical Native/Worker matrix. Record **NOT_PROVEN** while old Cloudflare financial code still accepts operations in the deployed legacy environment. Actual installed migration will be executed separately after code acceptance.
 
 ---
+## #510 r4.1 — one-owner recovery source and scoped readback regression (unverified until CI)
+
+**Primary production-symbol boundary:** the original
+`AccountStore::recover_posting_sql_transaction` now requires real
+original `POSTING` fence + source receipt prior to applying
+`POSTING→UNKNOWN`. Receipt `POSTED→UNKNOWN` and intent change
+are one scoped transaction. Existing `UNKNOWN` or terminal receipts
+cannot be silently overwritten by another recovery.
+
+**Direct SQL witness:** the existing
+`risk_book_contract_unified_original_prepare_is_scoped_atomic_and_idempotent`
+checks full 47-table schema, two same-ID accounts, negative missing
+receipt, altered receipt state/plan/revision, invalid durable
+`begin_post_at`, cross-account exclusion, no-op recovery replay,
+and subsequent original outcome/terminal receipt state.
+
+**One installation writer witness:** the existing
+`risk_book_contract_one_installation_finance_owner_reuses_original_import_and_lock`
+now reads original intent/plan through
+`UnifiedFinanceHandle::account_intent` and invokes test-only
+scoped recovery and outcome in the same bounded owner. These
+operations always roll back and preserve the verified 39+8
+offline-source checksum. This is NOT authenticated source readback,
+a production Rust financial grant, an actual Cloudflare stop or
+Windows 26/26 acceptance. Post-run exact SHA/CI is required.
+
 ## #510 r4 — original combined Reserve passes through ONE installation FIFO, strictly rollback-only (14 Nov 2026)
 
 **Verified code SHA `8b4d177b6f7f9ae798953768616c0da23ea73813`**, [Draft CI #43638259025](https://github.com/iamaman11/okx/actions/runs/43638259025) **SUCCESS**: architecture guard and rustfmt PASS, direct RiskBook 72/72, kernel 6/6, original AccountStore source 1/1, complete `okx-execution --lib` **242 PASS / 0 FAIL / 3 ignored**; the direct selections overlap the complete library run, not unique extra cases. Windows RB01–RB16, T09/T10 26/26 and Cloudflare remote fencing jobs are SKIPPED, **NOT ACCEPTED**.

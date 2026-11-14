@@ -3162,8 +3162,10 @@ impl AccountStore {
     }
 
     /// Native recovery: only POSTING rows under the requested account become
-    /// UNKNOWN; the original RiskBook source receipt is updated in the SAME
-    /// transaction. No blind venue resend or implicit terminal release.
+    /// UNKNOWN. Verify the ORIGINAL durable POST fence and matching source
+    /// receipt BEFORE any change. Never treat a missing/corrupt receipt as
+    /// empty budget or silently overwrite an older UNKNOWN/terminal receipt.
+    /// The ledger intent and original receipt transition in ONE SQL COMMIT.
     pub(crate) fn recover_posting_sql_transaction(
         tx: &rusqlite::Transaction<'_>,
         scope: Option<(&str, &str)>,
@@ -3174,38 +3176,72 @@ impl AccountStore {
                 if installation.is_empty() || account.is_empty() {
                     return Err(StoreError::Invalid("UNIFIED_RECOVERY_SCOPE_INVALID"));
                 }
+                // A POSTING intent means there was exactly one potential
+                // exchange POST. A missing SQL fence or original receipt is
+                // an incident, not permission to recover/release the budget.
+                let broken: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM intents i
+                     LEFT JOIN risk_receipts r
+                       ON r.installation_id=i.installation_id
+                      AND r.account_key=i.account_key
+                      AND r.intent_id=i.intent_id
+                     WHERE i.installation_id=?1 AND i.account_key=?2
+                       AND i.state='POSTING'
+                       AND (i.begin_post_at IS NULL OR i.begin_post_at<=0
+                         OR (i.risk_increase=1 AND (
+                              r.intent_id IS NULL OR r.state!='POSTED'
+                              OR r.plan_hash!=i.plan_hash
+                              OR r.policy_revision!=i.policy_revision)))",
+                    params![installation, account],
+                    |r| r.get(0),
+                )?;
+                if broken != 0 {
+                    return Err(StoreError::Invalid("UNIFIED_RECOVERY_ORIGINAL_POST_UNPROVEN"));
+                }
+                let originals: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM intents WHERE installation_id=?1
+                     AND account_key=?2 AND state='POSTING' AND risk_increase=1",
+                    params![installation, account],
+                    |r| r.get(0),
+                )?;
+                // Only receipts for intents that are CURRENTLY POSTING may
+                // transition. Previously UNKNOWN/terminal entries retain
+                // their exact durable evidence; repeated recovery is no-op.
+                let updated_receipts = tx.execute(
+                    "UPDATE risk_receipts SET state='UNKNOWN'
+                     WHERE installation_id=?1 AND account_key=?2 AND state='POSTED'
+                       AND intent_id IN (
+                         SELECT intent_id FROM intents
+                         WHERE installation_id=?1 AND account_key=?2
+                           AND state='POSTING' AND risk_increase=1
+                       )",
+                    params![installation, account],
+                )?;
+                if i64::try_from(updated_receipts).ok() != Some(originals) {
+                    return Err(StoreError::Invalid("UNIFIED_RECOVERY_RECEIPT_CAS_FAILED"));
+                }
                 tx.execute(
                     "UPDATE intents SET state='UNKNOWN',updated_at=?1,revision=revision+1
                      WHERE state='POSTING' AND installation_id=?2 AND account_key=?3",
                     params![now, installation, account],
                 )?
             }
-            None => tx.execute(
-                "UPDATE intents SET state='UNKNOWN',updated_at=?1,revision=revision+1
-                 WHERE state='POSTING'",
-                [now],
-            )?,
-        };
-        match scope {
-            Some((installation, account)) => {
-                tx.execute(
-                    "UPDATE risk_receipts SET state='UNKNOWN'
-                     WHERE installation_id=?1 AND account_key=?2
-                       AND intent_id IN (
-                           SELECT intent_id FROM intents
-                           WHERE state='UNKNOWN' AND installation_id=?1 AND account_key=?2
-                       )",
-                    params![installation, account],
-                )?;
-            }
             None => {
+                // Keep the exact existing account-v2 algorithm until cutover.
+                // Its SQL owner contains only one account and uses local IDs.
+                let n = tx.execute(
+                    "UPDATE intents SET state='UNKNOWN',updated_at=?1,revision=revision+1
+                     WHERE state='POSTING'",
+                    [now],
+                )?;
                 tx.execute(
                     "UPDATE risk_receipts SET state='UNKNOWN'
                      WHERE intent_id IN(SELECT intent_id FROM intents WHERE state='UNKNOWN')",
                     [],
                 )?;
+                n
             }
-        }
+        };
         Ok(changed)
     }
 
