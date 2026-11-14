@@ -752,11 +752,14 @@ fn risk_book_contract_unified_one_original_intent_one_campaign_and_original_plan
                 'acct-A','intent-1',?1,'POSTED','1','1')",
         ["e".repeat(64)],
     );
-    assert!(matches!(
-        duplicate,
-        Err(rusqlite::Error::SqliteFailure(ref code, _))
-            if code.code == rusqlite::ErrorCode::ConstraintViolation
-    ), "one original account+intent must have one budget owner across all campaigns");
+    assert!(
+        matches!(
+            duplicate,
+            Err(rusqlite::Error::SqliteFailure(ref code, _))
+                if code.code == rusqlite::ErrorCode::ConstraintViolation
+        ),
+        "one original account+intent must have one budget owner across all campaigns"
+    );
 
     // A different account+intent can be allocated independently, but the
     // plan hash MUST match the original immutable native intent.
@@ -768,12 +771,21 @@ fn risk_book_contract_unified_one_original_intent_one_campaign_and_original_plan
                 'acct-A','intent-Y',?1,'POSTED','1','1')",
         ["d".repeat(64)],
     );
-    assert!(matches!(
-        wrong_plan,
-        Err(rusqlite::Error::SqliteFailure(ref code, _))
-            if code.code == rusqlite::ErrorCode::ConstraintViolation
-    ), "the native source plan and the budget reservation must have identical identity");
+    assert!(
+        matches!(
+            wrong_plan,
+            Err(rusqlite::Error::SqliteFailure(ref code, _))
+                if code.code == rusqlite::ErrorCode::ConstraintViolation
+        ),
+        "the native source plan and the budget reservation must have identical identity"
+    );
     assert_eq!(receipt_count(&db), 0);
-    assert_eq!(campaign(&db, "campaign-X"), (0, "0".into(), "20".into(), "0".into()));
-    assert_eq!(campaign(&db, "campaign-Y"), (0, "0".into(), "3".into(), "0".into()));
+    assert_eq!(
+        campaign(&db, "campaign-X"),
+        (0, "0".into(), "20".into(), "0".into())
+    );
+    assert_eq!(
+        campaign(&db, "campaign-Y"),
+        (0, "0".into(), "3".into(), "0".into())
+    );
 }
