@@ -13492,6 +13492,126 @@ fn risk_book_contract_unified_original_prepare_is_scoped_atomic_and_idempotent()
         );
         tx.rollback().unwrap();
     }
+    // Source-only v6 recovery test: these are explicitly synthetic SQL
+    // POSTING fixtures, not an authenticated venue POST or authority epoch.
+    // This checks that a shared intent_id cannot cause cross-account UNKNOWN,
+    // ACK, terminal receipt or revision changes in the real finance schema.
+    for account in ["acct-A", "acct-B"] {
+        reopened.execute(
+            "INSERT INTO risk_receipts(
+             reservation_key,intent_id,account_key,installation_id,instance_id,
+             plan_hash,policy_revision,receipt_hash,requested_loss_usd,conversion_digest,state)
+             VALUES('same-reservation','same-intent',?1,'installation',NULL,?2,1,'receipt','1','conversion','POSTED')",
+            params![account, intent.plan_hash],
+        ).unwrap();
+        reopened.execute(
+            "UPDATE intents SET state='POSTING',begin_post_at=4
+             WHERE installation_id='installation' AND account_key=?1 AND intent_id='same-intent'",
+            [account],
+        ).unwrap();
+    }
+    {
+        let tx = reopened.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        assert_eq!(
+            AccountStore::recover_posting_sql_transaction(
+                &tx, Some(("installation", "acct-A")), 5
+            ).unwrap(),
+            1
+        );
+        AccountStore::record_outcome_sql_transaction(
+            &tx, Some(("installation", "acct-A")), "same-intent",
+            IntentState::Acknowledged, Some("venue-order"), "venue-readback", 6,
+        ).unwrap();
+        let mut foreign = AccountStore::find_intent_sql(
+            &tx, Some(("installation", "foreign-account")), "intent_id", "same-intent"
+        ).unwrap();
+        assert!(foreign.take().is_none());
+        assert!(matches!(
+            AccountStore::record_outcome_sql_transaction(
+                &tx, Some(("installation", "foreign-account")), "same-intent",
+                IntentState::Acknowledged, Some("venue-order"), "venue-readback", 6,
+            ),
+            Err(StoreError::Invalid("INTENT_MISSING"))
+        ));
+        tx.commit().unwrap();
+    }
+    assert_eq!(
+        reopened.query_row::<String, _, _>(
+            "SELECT state FROM intents WHERE installation_id='installation' AND account_key='acct-B'",
+            [], |r| r.get(0),
+        ).unwrap(),
+        "POSTING",
+        "B's identical intent cannot be recovered by A's transaction"
+    );
+    assert_eq!(
+        reopened.query_row::<String, _, _>(
+            "SELECT state FROM risk_receipts WHERE installation_id='installation' AND account_key='acct-B'",
+            [], |r| r.get(0),
+        ).unwrap(),
+        "POSTED",
+        "B's RiskBook-linked original receipt remains untouched"
+    );
+    {
+        let tx = reopened.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        assert!(matches!(
+            AccountStore::record_outcome_sql_transaction(
+                &tx, Some(("installation", "acct-A")), "same-intent",
+                IntentState::Acknowledged, Some("foreign-venue-id"), "venue-readback", 7,
+            ),
+            Err(StoreError::Invalid("EXCHANGE_ID_CONFLICT"))
+        ));
+        AccountStore::record_outcome_sql_transaction(
+            &tx, Some(("installation", "acct-A")), "same-intent",
+            IntentState::Filled, Some("venue-order"), "terminal-proof", 8,
+        ).unwrap();
+        tx.commit().unwrap();
+    }
+    {
+        let tx = reopened.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        assert_eq!(
+            AccountStore::recover_posting_sql_transaction(
+                &tx, Some(("installation", "acct-B")), 9,
+            ).unwrap(),
+            1
+        );
+        AccountStore::record_outcome_sql_transaction(
+            &tx, Some(("installation", "acct-B")), "same-intent",
+            IntentState::Acknowledged, Some("venue-order"), "venue-readback", 10,
+        ).unwrap();
+        AccountStore::record_outcome_sql_transaction(
+            &tx, Some(("installation", "acct-B")), "same-intent",
+            IntentState::Filled, Some("venue-order"), "terminal-proof", 11,
+        ).unwrap();
+        tx.commit().unwrap();
+    }
+    assert_eq!(
+        reopened.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM operation_receipts
+             WHERE operation_id='terminal:same-intent' AND kind='TERMINAL'",
+            [], |r| r.get(0),
+        ).unwrap(),
+        2,
+        "A/B identical durable terminal receipt IDs must coexist"
+    );
+    {
+        let tx = reopened.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        assert!(matches!(
+            AccountStore::record_outcome_sql_transaction(
+                &tx, Some(("installation", "acct-A")), "same-intent",
+                IntentState::Filled, Some("venue-order"), "altered-terminal-proof", 12,
+            ),
+            Err(StoreError::Invalid("UNIFIED_TERMINAL_RECEIPT_CONFLICT"))
+        ));
+        tx.rollback().unwrap();
+    }
+    for account in ["acct-A", "acct-B"] {
+        let terminal: (String, String) = reopened.query_row(
+            "SELECT state,exchange_order_id FROM intents
+             WHERE installation_id='installation' AND account_key=?1",
+            [account], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(terminal, ("FILLED".into(), "venue-order".into()));
+    }
     let mut fk = reopened.prepare("PRAGMA foreign_key_check").unwrap();
     assert!(
         fk.query([]).unwrap().next().unwrap().is_none(),

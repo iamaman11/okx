@@ -1,5 +1,26 @@
 # #510 r4 — source-derived SQL scope inventory and first physical single-file slice
 
+## Next account lifecycle slice — original OUTCOME and UNKNOWN recovery on one scoped SQL (15 Nov 2026)
+
+The original native `AccountStore::record_outcome` and
+`recover_posting` now reuse transaction-scoped counterparts. Shared
+`find_intent_sql` decodes the complete ORIGINAL stored intent+plan for v2
+and v6 rather than accepting a partial client status. The v6 write path
+scope-checks the AccountStore intent and risk receipt, treats missing
+original risk evidence as FAIL, and writes account terminal receipts with
+the full installation/account identity under the same transaction.
+Terminal replay with altered original evidence refuses the mutation.
+
+`recover_posting_sql_transaction` changes only POSTING from the requested
+installation+account to UNKNOWN; no venue resend, no foreign-account
+receipt updates and no implicit release. The physical v6 schema direct
+test stages test-only POSTING rows for A/B with identical raw IDs, checks
+selective recovery, readback, ACK, per-account immutable terminal receipt,
+rollback/conflict and FK integrity. These synthetic fixtures are scoped
+SQL contracts, **NOT authenticated venue/source evidence**. This slice
+has not switched the installed TradeService, and Cloudflare server-side
+fencing/owner epoch remain mandatory before any live COMMIT.
+
 ## Current #510 next code slice — original PREPARE on the one scoped financial transaction (15 Nov 2026)
 
 The original `AccountStore::prepare` now delegates to the SAME

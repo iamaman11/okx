@@ -2471,12 +2471,45 @@ impl AccountStore {
             .ok_or(StoreError::Invalid("OPERATION_MISSING"))
     }
     pub(super) fn find_intent(&self, column: &str, key: &str) -> StoreResult<Option<StoredIntent>> {
-        let sql = format!(
-            "SELECT intent_id,idempotency_key,request_hash,client_order_id,state,revision,deadline,plan_hash,policy_revision,risk_increase,instrument_id,exchange_order_id,incident FROM intents WHERE {column}=?1"
-        );
-        let raw = self
-            .connection
-            .query_row(&sql, [key], |r| {
+        Self::find_intent_sql(&self.connection, None, column, key)
+    }
+
+    /// Decode the ORIGINAL stored intent and its full original SQL plan,
+    /// under the same v2 or v6 account scope as the caller's transaction.
+    /// A partial row projection is not sufficient for an outcome/POST fence.
+    pub(crate) fn find_intent_sql(
+        db: &rusqlite::Connection,
+        scope: Option<(&str, &str)>,
+        column: &str,
+        key: &str,
+    ) -> StoreResult<Option<StoredIntent>> {
+        if !matches!(
+            column,
+            "intent_id" | "idempotency_key" | "client_order_id" | "exchange_order_id"
+        ) {
+            return Err(StoreError::Invalid("INTENT_IDENTITY_COLUMN_INVALID"));
+        }
+        let sql = if scope.is_some() {
+            format!(
+                "SELECT intent_id,idempotency_key,request_hash,client_order_id,state,revision,deadline,plan_hash,policy_revision,risk_increase,instrument_id,exchange_order_id,incident
+                 FROM intents WHERE {column}=?1 AND installation_id=?2 AND account_key=?3"
+            )
+        } else {
+            format!(
+                "SELECT intent_id,idempotency_key,request_hash,client_order_id,state,revision,deadline,plan_hash,policy_revision,risk_increase,instrument_id,exchange_order_id,incident
+                 FROM intents WHERE {column}=?1"
+            )
+        };
+        let mut args = vec![rusqlite::types::Value::Text(key.to_owned())];
+        if let Some((installation, account)) = scope {
+            if installation.is_empty() || account.is_empty() {
+                return Err(StoreError::Invalid("UNIFIED_INTENT_SCOPE_INVALID"));
+            }
+            args.push(rusqlite::types::Value::Text(installation.to_owned()));
+            args.push(rusqlite::types::Value::Text(account.to_owned()));
+        }
+        let raw = db
+            .query_row(&sql, params_from_iter(args.iter()), |r| {
                 Ok((
                     StoredIntent {
                         plan: IntentPlan::default(),
@@ -2498,10 +2531,10 @@ impl AccountStore {
                 ))
             })
             .optional()?;
-        raw.map(|(mut i, s)| {
-            i.state = IntentState::parse(&s)?;
-            i.plan = self.plan(&i.intent_id)?;
-            Ok(i)
+        raw.map(|(mut intent, state)| {
+            intent.state = IntentState::parse(&state)?;
+            intent.plan = Self::plan_sql(db, scope, &intent.intent_id)?;
+            Ok(intent)
         })
         .transpose()
     }
@@ -2965,10 +2998,37 @@ impl AccountStore {
         evidence: &str,
         now: i64,
     ) -> StoreResult<()> {
-        let i = self
-            .intent(id)?
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::record_outcome_sql_transaction(
+            &tx,
+            None,
+            id,
+            state,
+            exchange_order_id,
+            evidence,
+            now,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Original state transition + venue readback + terminal receipt, using
+    /// the same typed source decoder and ONE caller-owned SQL COMMIT.
+    /// Scope every SQL row on installation-v6; no venue call occurs here.
+    pub(crate) fn record_outcome_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        scope: Option<(&str, &str)>,
+        id: &str,
+        state: IntentState,
+        exchange_order_id: Option<&str>,
+        evidence: &str,
+        now: i64,
+    ) -> StoreResult<()> {
+        let original = Self::find_intent_sql(tx, scope, "intent_id", id)?
             .ok_or(StoreError::Invalid("INTENT_MISSING"))?;
-        let allowed = match i.state {
+        let allowed = match original.state {
             IntentState::Posting | IntentState::Unknown => matches!(
                 state,
                 IntentState::Unknown
@@ -2989,53 +3049,156 @@ impl AccountStore {
                 state,
                 IntentState::PartiallyFilled | IntentState::Filled | IntentState::Cancelled
             ),
-            _ => i.state == state,
+            _ => original.state == state,
         };
         if !allowed || evidence.is_empty() {
             return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
         }
-        if i.exchange_order_id
+        if original
+            .exchange_order_id
             .as_deref()
             .is_some_and(|old| Some(old) != exchange_order_id)
         {
             return Err(StoreError::Invalid("EXCHANGE_ID_CONFLICT"));
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("UPDATE intents SET state=?2,exchange_order_id=COALESCE(exchange_order_id,?3),updated_at=?4,revision=revision+1 WHERE intent_id=?1",params![id,state.as_str(),exchange_order_id,now])?;
-        tx.execute(
-            "UPDATE risk_receipts SET state=?2 WHERE intent_id=?1",
-            params![
-                id,
-                if state == IntentState::Unknown {
-                    "UNKNOWN"
-                } else if i.risk_increase
-                    && matches!(state, IntentState::Filled | IntentState::PartiallyFilled)
-                {
-                    "OPEN"
-                } else if state.terminal() {
-                    "TERMINAL_PENDING_CENTRAL"
-                } else {
-                    "OPEN"
-                }
-            ],
-        )?;
-        if state.terminal() {
-            tx.execute("INSERT INTO operation_receipts VALUES(?1,'TERMINAL',?2,?3,?4) ON CONFLICT(operation_id) DO NOTHING",params![format!("terminal:{id}"),i.request_hash,evidence,now])?;
+        let changed = match scope {
+            Some((installation, account)) => tx.execute(
+                "UPDATE intents SET state=?2,exchange_order_id=COALESCE(exchange_order_id,?3),
+                 updated_at=?4,revision=revision+1
+                 WHERE intent_id=?1 AND installation_id=?5 AND account_key=?6",
+                params![id, state.as_str(), exchange_order_id, now, installation, account],
+            )?,
+            None => tx.execute(
+                "UPDATE intents SET state=?2,exchange_order_id=COALESCE(exchange_order_id,?3),
+                 updated_at=?4,revision=revision+1 WHERE intent_id=?1",
+                params![id, state.as_str(), exchange_order_id, now],
+            )?,
+        };
+        if changed != 1 {
+            return Err(StoreError::Invalid("ACCOUNT_OUTCOME_INTENT_CAS_FAILED"));
         }
-        tx.commit()?;
+        let risk_state = if state == IntentState::Unknown {
+            "UNKNOWN"
+        } else if original.risk_increase
+            && matches!(state, IntentState::Filled | IntentState::PartiallyFilled)
+        {
+            "OPEN"
+        } else if state.terminal() {
+            "TERMINAL_PENDING_CENTRAL"
+        } else {
+            "OPEN"
+        };
+        let risk_rows = match scope {
+            Some((installation, account)) => tx.execute(
+                "UPDATE risk_receipts SET state=?2
+                 WHERE intent_id=?1 AND installation_id=?3 AND account_key=?4",
+                params![id, risk_state, installation, account],
+            )?,
+            None => tx.execute(
+                "UPDATE risk_receipts SET state=?2 WHERE intent_id=?1",
+                params![id, risk_state],
+            )?,
+        };
+        // A v6 increase with no ORIGINAL AccountStore risk receipt must never
+        // acknowledge an order while the campaign budget is unproven.
+        if scope.is_some() && original.risk_increase && risk_rows != 1 {
+            return Err(StoreError::Invalid("UNIFIED_OUTCOME_RISK_RECEIPT_MISSING"));
+        }
+        if state.terminal() {
+            let operation = format!("terminal:{id}");
+            match scope {
+                Some((installation, account)) => {
+                    let previous: Option<(String, String, String)> = tx.query_row(
+                        "SELECT kind,request_hash,result_ref FROM operation_receipts
+                         WHERE installation_id=?1 AND account_key=?2 AND operation_id=?3",
+                        params![installation, account, operation],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    ).optional()?;
+                    if let Some((kind, hash, result)) = previous {
+                        if kind != "TERMINAL" || hash != original.request_hash || result != evidence {
+                            return Err(StoreError::Invalid("UNIFIED_TERMINAL_RECEIPT_CONFLICT"));
+                        }
+                    } else {
+                        tx.execute(
+                            "INSERT INTO operation_receipts(
+                             installation_id,account_key,operation_id,kind,request_hash,result_ref,committed_at)
+                             VALUES(?1,?2,?3,'TERMINAL',?4,?5,?6)",
+                            params![
+                                installation, account, operation,
+                                original.request_hash, evidence, now
+                            ],
+                        )?;
+                    }
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO operation_receipts VALUES(?1,'TERMINAL',?2,?3,?4)
+                         ON CONFLICT(operation_id) DO NOTHING",
+                        params![operation, original.request_hash, evidence, now],
+                    )?;
+                }
+            }
+        }
         Ok(())
     }
+
     pub fn recover_posting(&mut self, now: i64) -> StoreResult<usize> {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let n=tx.execute("UPDATE intents SET state='UNKNOWN',updated_at=?1,revision=revision+1 WHERE state='POSTING'",[now])?;
-        tx.execute("UPDATE risk_receipts SET state='UNKNOWN' WHERE intent_id IN(SELECT intent_id FROM intents WHERE state='UNKNOWN')",[])?;
+        let recovered = Self::recover_posting_sql_transaction(&tx, None, now)?;
         tx.commit()?;
-        Ok(n)
+        Ok(recovered)
     }
+
+    /// Native recovery: only POSTING rows under the requested account become
+    /// UNKNOWN; the original RiskBook source receipt is updated in the SAME
+    /// transaction. No blind venue resend or implicit terminal release.
+    pub(crate) fn recover_posting_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        scope: Option<(&str, &str)>,
+        now: i64,
+    ) -> StoreResult<usize> {
+        let changed = match scope {
+            Some((installation, account)) => {
+                if installation.is_empty() || account.is_empty() {
+                    return Err(StoreError::Invalid("UNIFIED_RECOVERY_SCOPE_INVALID"));
+                }
+                tx.execute(
+                    "UPDATE intents SET state='UNKNOWN',updated_at=?1,revision=revision+1
+                     WHERE state='POSTING' AND installation_id=?2 AND account_key=?3",
+                    params![now, installation, account],
+                )?
+            }
+            None => tx.execute(
+                "UPDATE intents SET state='UNKNOWN',updated_at=?1,revision=revision+1
+                 WHERE state='POSTING'",
+                [now],
+            )?,
+        };
+        match scope {
+            Some((installation, account)) => {
+                tx.execute(
+                    "UPDATE risk_receipts SET state='UNKNOWN'
+                     WHERE installation_id=?1 AND account_key=?2
+                       AND intent_id IN (
+                           SELECT intent_id FROM intents
+                           WHERE state='UNKNOWN' AND installation_id=?1 AND account_key=?2
+                       )",
+                    params![installation, account],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "UPDATE risk_receipts SET state='UNKNOWN'
+                     WHERE intent_id IN(SELECT intent_id FROM intents WHERE state='UNKNOWN')",
+                    [],
+                )?;
+            }
+        }
+        Ok(changed)
+    }
+
     /// Bounded combined local account obligations, including terminal
     /// intents whose RiskBook reservations have NOT yet been released.
     pub fn risk_census_intents(
