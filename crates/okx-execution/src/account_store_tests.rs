@@ -11692,7 +11692,9 @@ fn risk_book_contract_unified_offline_import_rejects_corrupt_legacy_risk_aggrega
             &[&sa, &sb],
             &[&sc],
         ),
-        Err(StoreError::Invalid("UNIFIED_LEGACY_CAMPAIGN_AGGREGATES_INVALID"))
+        Err(StoreError::Invalid(
+            "UNIFIED_LEGACY_CAMPAIGN_AGGREGATES_INVALID"
+        ))
     ));
     let tables: i64 = target
         .query_row(
@@ -11702,5 +11704,8 @@ fn risk_book_contract_unified_offline_import_rejects_corrupt_legacy_risk_aggrega
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(tables, 0, "corrupt source must not initialize the unified database");
+    assert_eq!(
+        tables, 0,
+        "corrupt source must not initialize the unified database"
+    );
 }
