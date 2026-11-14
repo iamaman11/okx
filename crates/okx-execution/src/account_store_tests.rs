@@ -12760,6 +12760,24 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         open().await,
         Err(StoreError::Invalid("UNIFIED_FINANCE_WRITER_BUSY"))
     ));
+    // A separate OS process, not a second Tokio task, must also be unable
+    // to take this exact installation's finance writer lease.
+    let child_probe = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "risk_book_contract_one_installation_finance_owner_child",
+            "--nocapture",
+        ])
+        .env("OKX_510_FINANCE_OWNER_ROOT", &root)
+        .env("OKX_510_FINANCE_OWNER_MODE", "PROBE")
+        .output()
+        .unwrap();
+    assert!(
+        child_probe.status.success()
+            && String::from_utf8_lossy(&child_probe.stdout).contains("1 passed"),
+        "independent OS finance owner contention failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&child_probe.stdout),
+        String::from_utf8_lossy(&child_probe.stderr)
+    );
     let mut closed = owner.termination_signal();
     drop(owner);
     tokio::time::timeout(Duration::from_secs(2), closed.changed())
@@ -12794,5 +12812,86 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         .await,
         Err(StoreError::Invalid("UNIFIED_IMPORT_INVENTORY_MISMATCH"))
     ));
+    // The kernel, not an orderly handle drop, must free the same exclusive
+    // writer lease after an actual OS kill. A cold owner re-verifies every
+    // original financial table and the immutable offline manifest.
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    let mut killed = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "risk_book_contract_one_installation_finance_owner_child",
+            "--nocapture",
+        ])
+        .env("OKX_510_FINANCE_OWNER_ROOT", &root)
+        .env("OKX_510_FINANCE_OWNER_MODE", "HOLD")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stream = killed.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stream).lines() {
+            if line
+                .unwrap_or_default()
+                .contains("FINANCE_510_EXCLUSIVE_LEASE_HELD")
+            {
+                let _ = sender.send(());
+                return;
+            }
+        }
+    });
+    let saw_lease = receiver.recv_timeout(Duration::from_secs(15));
+    let kill_result = killed.kill();
+    let exit = killed.wait().unwrap();
+    reader.join().unwrap();
+    assert!(saw_lease.is_ok(), "child did not own original finance SQLite");
+    assert!(
+        kill_result.is_ok() && !exit.success(),
+        "failed to physically kill finance SQL owner"
+    );
+    let after_kill = open().await.unwrap();
+    assert_eq!(after_kill.inventory().await.unwrap(), inventory);
+    let mut terminated = after_kill.termination_signal();
+    drop(after_kill);
+    tokio::time::timeout(Duration::from_secs(2), terminated.changed())
+        .await
+        .unwrap()
+        .unwrap();
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn risk_book_contract_one_installation_finance_owner_child() {
+    let Ok(root) = std::env::var("OKX_510_FINANCE_OWNER_ROOT") else {
+        return;
+    };
+    let mode = std::env::var("OKX_510_FINANCE_OWNER_MODE").unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(
+        crate::account_worker::UnifiedFinanceHandle::open_stopped_import(
+            std::path::PathBuf::from(root),
+            "installation".into(),
+            vec!["acct-A".into(), "acct-B".into()],
+            vec!["campaign-X".into()],
+        ),
+    );
+    if mode == "PROBE" {
+        assert!(matches!(
+            result,
+            Err(StoreError::Invalid("UNIFIED_FINANCE_WRITER_BUSY"))
+        ));
+        return;
+    }
+    assert_eq!(mode, "HOLD");
+    let _owner = result.unwrap();
+    use std::io::Write;
+    println!("FINANCE_510_EXCLUSIVE_LEASE_HELD");
+    std::io::stdout().flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(60));
+    unreachable!("the parent must OS-kill this live finance writer")
 }
