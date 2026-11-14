@@ -12168,8 +12168,9 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
     use rusqlite::{Connection, OpenFlags};
     let mut a = store_with_account("acct-A");
     let mut b = store_with_account("acct-B");
-    let ai = intent(&mut a);
-    let bi = intent(&mut b);
+    // POST causal inputs require an actual 64-hex native plan identity.
+    let ai = intent_with_plan_hash(&mut a, &"e".repeat(64));
+    let bi = intent_with_plan_hash(&mut b, &"e".repeat(64));
     let (ap, bp) = (a.path.clone(), b.path.clone());
     let x = path();
     let y = path();
