@@ -499,7 +499,6 @@ impl AccountStoreHandle {
     }
 }
 
-
 // #510 r4: the intended one installation-wide SQL owner. It currently
 // accepts ONLY a fully verified stopped, offline import; no production
 // TradeService, trading capability, account writer or Cloudflare cutover
@@ -654,10 +653,15 @@ impl UnifiedFinanceHandle {
             })();
             let _ = tx.send(result);
         });
-        self.owner.sender.try_send(job).map_err(|error| match error {
-            TrySendError::Full(_) => StoreError::Invalid("UNIFIED_FINANCE_QUEUE_FULL"),
-            TrySendError::Disconnected(_) => StoreError::Invalid("UNIFIED_FINANCE_WORKER_STOPPED"),
-        })?;
+        self.owner
+            .sender
+            .try_send(job)
+            .map_err(|error| match error {
+                TrySendError::Full(_) => StoreError::Invalid("UNIFIED_FINANCE_QUEUE_FULL"),
+                TrySendError::Disconnected(_) => {
+                    StoreError::Invalid("UNIFIED_FINANCE_WORKER_STOPPED")
+                }
+            })?;
         rx.await
             .map_err(|_| StoreError::Invalid("UNIFIED_FINANCE_WORKER_STOPPED"))?
     }
