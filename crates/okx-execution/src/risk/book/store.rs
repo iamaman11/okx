@@ -1,6 +1,7 @@
 //! One campaign's SQLite transaction owner, no account ledger duplication.
 //! Only trusted native evidence may enter reserve; this WIP exposes no
 //! production bootstrap, venue POST authorization or legacy transfer.
+use crate::finance_owner_gate::{self, AuthorityModeError, AuthorityModeLease};
 use okx_kernel::risk::{
     model::{CampaignCapacity, RiskProposal, ScopeCapacity},
     money::{MoneyError, RiskAmount},
@@ -18,7 +19,6 @@ use std::{
     time::Duration,
 };
 use thiserror::Error;
-use crate::finance_owner_gate::{self, AuthorityModeError, AuthorityModeLease};
 mod integrity;
 mod post;
 mod queries;
@@ -662,8 +662,8 @@ impl RiskBookStore {
             return Err(RiskStoreError::Uninitialized);
         }
         let canonical = path.canonicalize()?;
-        let mode_lease = finance_owner_gate::legacy_mode_for(&canonical).map_err(|error| {
-            match error {
+        let mode_lease =
+            finance_owner_gate::legacy_mode_for(&canonical).map_err(|error| match error {
                 AuthorityModeError::Io(error) => RiskStoreError::Io(error),
                 AuthorityModeError::Busy => {
                     RiskStoreError::Invalid("FINANCE_INSTALLATION_WRITER_BUSY")
@@ -671,8 +671,7 @@ impl RiskBookStore {
                 AuthorityModeError::FinancePresent => {
                     RiskStoreError::Invalid("LEGACY_FINANCE_OWNER_DISABLED")
                 }
-            }
-        })?;
+            })?;
         let lock = OpenOptions::new()
             .read(true)
             .write(true)

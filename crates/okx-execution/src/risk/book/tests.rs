@@ -115,11 +115,9 @@ fn risk_book_contract_real_legacy_campaign_cannot_overlap_unified_finance_mode()
         .join("risk-book.sqlite");
     std::fs::create_dir_all(campaign.parent().unwrap()).unwrap();
     RiskBookStore::initialize_fixture(&campaign, &opening()).unwrap();
-    let mut store = RiskBookStore::open_existing(
-        &campaign,
-        "test-installation",
-        &opening().campaign_id,
-    ).unwrap();
+    let mut store =
+        RiskBookStore::open_existing(&campaign, "test-installation", &opening().campaign_id)
+            .unwrap();
     assert_eq!(store.readback().unwrap().book_sequence, 0);
     assert!(matches!(
         crate::finance_owner_gate::unified_mode_for(&root),
@@ -128,11 +126,7 @@ fn risk_book_contract_real_legacy_campaign_cannot_overlap_unified_finance_mode()
     store.close();
     let unified = crate::finance_owner_gate::unified_mode_for(&root).unwrap();
     assert!(matches!(
-        RiskBookStore::open_existing(
-            &campaign,
-            "test-installation",
-            &opening().campaign_id
-        ),
+        RiskBookStore::open_existing(&campaign, "test-installation", &opening().campaign_id),
         Err(RiskStoreError::Invalid("FINANCE_INSTALLATION_WRITER_BUSY"))
     ));
     drop(unified);
@@ -140,11 +134,7 @@ fn risk_book_contract_real_legacy_campaign_cannot_overlap_unified_finance_mode()
     // original campaign, even before any authority/venue grant is enabled.
     std::fs::write(root.join("finance").join("finance.sqlite"), b"offline").unwrap();
     assert!(matches!(
-        RiskBookStore::open_existing(
-            &campaign,
-            "test-installation",
-            &opening().campaign_id
-        ),
+        RiskBookStore::open_existing(&campaign, "test-installation", &opening().campaign_id),
         Err(RiskStoreError::Invalid("LEGACY_FINANCE_OWNER_DISABLED"))
     ));
 }

@@ -119,15 +119,11 @@ pub(crate) fn legacy_mode_for(
 /// The existing exact-path `finance.sqlite.writer.lock` is an independent
 /// defense against two openers for the same SQLite, not a second authority.
 /// The old per-account/per-campaign writer cannot overlap this mode.
-pub(crate) fn unified_mode_for(
-    root: &Path,
-) -> Result<AuthorityModeLease, AuthorityModeError> {
+pub(crate) fn unified_mode_for(root: &Path) -> Result<AuthorityModeLease, AuthorityModeError> {
     let (_directory, file) = gate(root)?;
     match file.try_lock() {
         Ok(()) => Ok(AuthorityModeLease { file }),
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-            Err(AuthorityModeError::Busy)
-        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(AuthorityModeError::Busy),
         Err(error) => Err(error.into()),
     }
 }
@@ -147,7 +143,10 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
         let root = std::env::temp_dir().join(name);
-        let account = root.join("accounts").join("a".repeat(64)).join("account.sqlite");
+        let account = root
+            .join("accounts")
+            .join("a".repeat(64))
+            .join("account.sqlite");
         let campaign = root
             .join("risk")
             .join("campaigns")
@@ -186,7 +185,11 @@ mod tests {
         drop(old);
         // Once import created the new finance authority file, the OLD
         // writer never restarts, even if nobody currently holds the lock.
-        fs::write(root.join("finance").join("finance.sqlite"), b"not-authorized").unwrap();
+        fs::write(
+            root.join("finance").join("finance.sqlite"),
+            b"not-authorized",
+        )
+        .unwrap();
         assert!(matches!(
             legacy_mode_for(&account),
             Err(AuthorityModeError::FinancePresent)
@@ -248,7 +251,10 @@ mod tests {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let reader = std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
-                if line.unwrap_or_default().contains("OKX_510_NATIVE_MODE_CHILD_LOCKED") {
+                if line
+                    .unwrap_or_default()
+                    .contains("OKX_510_NATIVE_MODE_CHILD_LOCKED")
+                {
                     let _ = ready_tx.send(());
                     return;
                 }

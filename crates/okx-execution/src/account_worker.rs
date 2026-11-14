@@ -205,7 +205,8 @@ impl AccountStoreHandle {
         Self::start(
             move || AccountStore::open_existing(path, &account_key, &installation_id),
             legacy_path,
-        ).await
+        )
+        .await
     }
     pub async fn initialize_flat(
         path: PathBuf,
@@ -216,7 +217,8 @@ impl AccountStoreHandle {
         Self::start(
             move || AccountStore::initialize_or_inspect_exact(path, meta, &snapshot),
             legacy_path,
-        ).await
+        )
+        .await
     }
     async fn start(
         factory: impl FnOnce() -> StoreResult<AccountStore> + Send + 'static,
@@ -1128,12 +1130,7 @@ mod diagnostic_fault_tests {
         // legacy worker must NOT reopen over a staged financial import.
         std::fs::write(root.join("finance").join("finance.sqlite"), b"offline").unwrap();
         assert!(matches!(
-            AccountStoreHandle::open_existing(
-                path,
-                meta.account_key,
-                meta.installation_id,
-            )
-            .await,
+            AccountStoreHandle::open_existing(path, meta.account_key, meta.installation_id,).await,
             Err(StoreError::Invalid("LEGACY_FINANCE_OWNER_DISABLED"))
         ));
         std::fs::remove_dir_all(root).unwrap();
