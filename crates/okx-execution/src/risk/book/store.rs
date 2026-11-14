@@ -581,6 +581,32 @@ pub(super) struct RiskBookStore {
     connection: Connection,
     _lease: File,
 }
+
+#[derive(Debug)]
+pub(in crate::risk::book) enum ReserveDecision {
+    Held(HeldReceipt),
+    Rejected(RiskStoreError),
+}
+impl ReserveDecision {
+    fn into_result(self) -> Result<HeldReceipt> {
+        match self {
+            Self::Held(receipt) => Ok(receipt),
+            Self::Rejected(error) => Err(error),
+        }
+    }
+}
+
+fn reserve_scope_values(
+    mut values: Vec<rusqlite::types::Value>,
+    scope: Option<(&str, &str)>,
+) -> Vec<rusqlite::types::Value> {
+    if let Some((installation, campaign)) = scope {
+        values.push(rusqlite::types::Value::Text(installation.to_owned()));
+        values.push(rusqlite::types::Value::Text(campaign.to_owned()));
+    }
+    values
+}
+
 impl RiskBookStore {
     pub(super) fn open_existing(path: &Path, installation: &str, campaign: &str) -> Result<Self> {
         if !path.is_file() {
@@ -676,6 +702,26 @@ impl RiskBookStore {
         input: &ReserveInput,
         census: &VerifiedCensus,
     ) -> Result<HeldReceipt> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let decision = Self::reserve_sql_transaction(&tx, None, input, census)?;
+        tx.commit()?;
+        decision.into_result()
+    }
+
+    /// Exactly the original RiskBook capacity and high-water algorithm.
+    /// Scope selects original v5 or multi-campaign v6 SQL, not a new money rule.
+    /// Returns an ordinary rejection as a VALUE so observed monotonic loss is
+    /// still committed by the caller; a genuine SQL/error aborts the transaction.
+    /// PRIVATE until original trusted census, owner epoch and callers are wired.
+    pub(in crate::risk::book) fn reserve_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        scope: Option<(&str, &str)>,
+        input: &ReserveInput,
+        census: &VerifiedCensus,
+    ) -> Result<ReserveDecision> {
+        use rusqlite::types::Value;
         input.validate()?;
         if !census.complete
             || census.generation == 0
@@ -691,11 +737,8 @@ impl RiskBookStore {
         {
             return Err(RiskStoreError::CensusUnproven);
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut meta = read_meta(&tx)?;
-        verify_reservation_aggregates(&tx, &meta)?;
+        let mut meta = read_meta_for_scope(tx, scope)?;
+        integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope)?;
         if meta.policy_revision != input.policy_revision {
             return Err(RiskStoreError::PolicyConflict);
         }
@@ -704,13 +747,21 @@ impl RiskBookStore {
         }
         let mut policies = BTreeMap::new();
         {
-            let mut stmt = tx.prepare(
+            let sql = if scope.is_some() {
+                "SELECT p.account_key,p.limit_usdt,p.order_limit_usdt,p.entry_limit_usd,o.reserved_usdt
+                 FROM risk_policy_account p JOIN risk_account_occupied o
+                   ON p.installation_id=o.installation_id
+                  AND p.campaign_id=o.campaign_id AND p.account_key=o.account_key
+                 WHERE p.installation_id=?1 AND p.campaign_id=?2 ORDER BY p.account_key"
+            } else {
                 "SELECT p.account_key,p.limit_usdt,p.order_limit_usdt,p.entry_limit_usd,o.reserved_usdt
                  FROM risk_policy_account p
                  JOIN risk_account_occupied o USING(account_key)
-                 ORDER BY p.account_key",
-            )?;
-            let iter = stmt.query_map([], |r| {
+                 ORDER BY p.account_key"
+            };
+            let values = reserve_scope_values(Vec::new(), scope);
+            let mut stmt = tx.prepare(sql)?;
+            let iter = stmt.query_map(rusqlite::params_from_iter(values.iter()), |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -742,72 +793,91 @@ impl RiskBookStore {
         let (account_limit, order_limit, account_entry_limit, account_reserved) = policies
             .get(&account_key)
             .ok_or(RiskStoreError::Invalid("ACCOUNT_NOT_ACTIVE"))?;
-        let strategy_limit:String=tx.query_row(
-            "SELECT limit_usdt FROM risk_policy_strategy WHERE account_key=?1 AND strategy_id=?2",
-            params![&account_key,&input.strategy_id],|r|r.get(0))
-            .optional()?.ok_or(RiskStoreError::Invalid("STRATEGY_NOT_ENABLED_FOR_ACCOUNT"))?;
-        let reserved_strategy:String=tx.query_row(
-            "SELECT reserved_usdt FROM risk_strategy_occupied WHERE account_key=?1 AND strategy_id=?2",
-            params![&account_key,&input.strategy_id],|r|r.get(0))?;
+        let query = if scope.is_some() {
+            "SELECT limit_usdt FROM risk_policy_strategy
+             WHERE account_key=?1 AND strategy_id=?2 AND installation_id=?3 AND campaign_id=?4"
+        } else {
+            "SELECT limit_usdt FROM risk_policy_strategy WHERE account_key=?1 AND strategy_id=?2"
+        };
+        let values = reserve_scope_values(
+            vec![Value::Text(account_key.clone()), Value::Text(input.strategy_id.clone())],
+            scope,
+        );
+        let strategy_limit: String = tx
+            .query_row(query, rusqlite::params_from_iter(values.iter()), |r| r.get(0))
+            .optional()?
+            .ok_or(RiskStoreError::Invalid("STRATEGY_NOT_ENABLED_FOR_ACCOUNT"))?;
+        let query = if scope.is_some() {
+            "SELECT reserved_usdt FROM risk_strategy_occupied
+             WHERE account_key=?1 AND strategy_id=?2 AND installation_id=?3 AND campaign_id=?4"
+        } else {
+            "SELECT reserved_usdt FROM risk_strategy_occupied WHERE account_key=?1 AND strategy_id=?2"
+        };
+        let reserved_strategy: String = tx.query_row(
+            query,
+            rusqlite::params_from_iter(values.iter()),
+            |r| r.get(0),
+        )?;
         // Persist monotonic native loss before evaluating new capacity.
         // An ordinary budget denial still commits this independent observation.
-        apply_census_loss(&tx, &mut meta, census)?;
+        apply_census_loss_for_scope(tx, &mut meta, census, scope)?;
         // Check every policy cohort member, not only the requesting account.
         // Apply observed cumulative loss first, even on an ordinary cap denial.
         for (member, (limit, _, _, reserved)) in &policies {
             let occupied = census.occupied[member].checked_add(reserved)?;
             if let Err(reason) = validate_account_occupancy(limit, &occupied) {
-                tx.commit()?;
-                return Err(RiskStoreError::Denied(reason));
+                return Ok(ReserveDecision::Rejected(RiskStoreError::Denied(reason)));
             }
         }
         if &input.proposal.entry_upper_usd > account_entry_limit {
-            tx.commit()?;
-            return Err(RiskStoreError::Denied(
+            return Ok(ReserveDecision::Rejected(RiskStoreError::Denied(
                 RiskRuleError::AccountEntryLimitExceeded,
-            ));
+            )));
         }
         let key = input.reservation_key();
         let digest = input.digest()?;
+        let prior_sql = if scope.is_some() {
+            "SELECT request_digest,state FROM risk_entries
+             WHERE reservation_key=?1 AND installation_id=?2 AND campaign_id=?3"
+        } else {
+            "SELECT request_digest,state FROM risk_entries WHERE reservation_key=?1"
+        };
+        let values = reserve_scope_values(vec![Value::Text(key.clone())], scope);
         let prior: Option<(String, String)> = tx
-            .query_row(
-                "SELECT request_digest,state FROM risk_entries WHERE reservation_key=?1",
-                params![&key],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .query_row(prior_sql, rusqlite::params_from_iter(values.iter()), |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .optional()?;
         if let Some((existing, state)) = prior {
             if existing != digest {
-                tx.commit()?;
-                return Err(RiskStoreError::IdempotencyConflict);
+                return Ok(ReserveDecision::Rejected(RiskStoreError::IdempotencyConflict));
             }
             if state != "HELD" {
-                tx.commit()?;
-                return Err(RiskStoreError::AlreadyResolved);
+                return Ok(ReserveDecision::Rejected(RiskStoreError::AlreadyResolved));
             }
-            tx.commit()?;
-            return Ok(HeldReceipt {
+            return Ok(ReserveDecision::Held(HeldReceipt {
                 reservation_key: key,
                 book_sequence: meta.sequence,
                 replayed: true,
-            });
+            }));
         }
         // A durable SQL rejection is final even when no reservation row
         // was ever created. Absence alone never means no previous attempt.
+        let fence_sql = if scope.is_some() {
+            "SELECT plan_sha256 FROM risk_no_reserve
+             WHERE reservation_key=?1 AND installation_id=?2 AND campaign_id=?3"
+        } else {
+            "SELECT plan_sha256 FROM risk_no_reserve WHERE reservation_key=?1"
+        };
         let fence: Option<String> = tx
-            .query_row(
-                "SELECT plan_sha256 FROM risk_no_reserve WHERE reservation_key=?1",
-                params![&key],
-                |r| r.get(0),
-            )
+            .query_row(fence_sql, rusqlite::params_from_iter(values.iter()), |r| r.get(0))
             .optional()?;
         if let Some(original) = fence {
-            tx.commit()?;
-            return Err(if original == input.plan_sha256 {
+            return Ok(ReserveDecision::Rejected(if original == input.plan_sha256 {
                 RiskStoreError::AlreadyResolved
             } else {
                 RiskStoreError::IdempotencyConflict
-            });
+            }));
         }
         let mut source_total = RiskAmount::zero();
         for occupied in census.occupied.values() {
@@ -830,8 +900,7 @@ impl RiskBookStore {
             &input.proposal,
         );
         if let Err(reason) = campaign_decision {
-            tx.commit()?;
-            return Err(RiskStoreError::Denied(reason));
+            return Ok(ReserveDecision::Rejected(RiskStoreError::Denied(reason)));
         }
         let scope_decision = evaluate_scope_capacity(
             &ScopeCapacity {
@@ -846,8 +915,7 @@ impl RiskBookStore {
             &input.proposal,
         );
         if let Err(reason) = scope_decision {
-            tx.commit()?;
-            return Err(RiskStoreError::Denied(reason));
+            return Ok(ReserveDecision::Rejected(RiskStoreError::Denied(reason)));
         }
         let next_sequence = meta
             .sequence
@@ -878,53 +946,103 @@ impl RiskBookStore {
             .canonical()?;
         let policy_i64 =
             i64::try_from(input.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?;
-        tx.execute(
+        let insert = if scope.is_some() {
+            "INSERT INTO risk_entries(
+            installation_id,campaign_id,reservation_key,account_key,strategy_id,intent_id,
+            plan_sha256,request_digest,policy_revision,state,loss_usdt,loss_usd,entry_upper_usd,
+            reserved_usdt,reserved_loss_usd,reserved_entry_usd,entry_proof_digest,
+            source_digest,book_sequence,held_at_ms,reserve_read_floor_ms,native_incarnation)
+            VALUES (?17,?18,?1,?2,?3,?4,?5,?6,?7,'HELD',?8,?9,?10,?8,?9,?10,?11,?12,?13,?14,?15,?16)"
+        } else {
             "INSERT INTO risk_entries(
             reservation_key,account_key,strategy_id,intent_id,plan_sha256,request_digest,
             policy_revision,state,loss_usdt,loss_usd,entry_upper_usd,
             reserved_usdt,reserved_loss_usd,reserved_entry_usd,entry_proof_digest,
             source_digest,book_sequence,held_at_ms,reserve_read_floor_ms,native_incarnation)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,'HELD',?8,?9,?10,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
-            params![
-                &key,
-                &account_key,
-                &input.strategy_id,
-                &input.intent_id,
-                &input.plan_sha256,
-                digest,
-                policy_i64,
-                input.proposal.loss_usdt.canonical()?,
-                input.proposal.loss_usd.canonical()?,
-                input.proposal.entry_upper_usd.canonical()?,
-                &input.entry_proof_digest,
-                &census.source_digest,
-                next_sequence_i64,
-                input.now_ms,
-                census.read_floor_ms,
-                &input.native_incarnation
+            VALUES (?1,?2,?3,?4,?5,?6,?7,'HELD',?8,?9,?10,?8,?9,?10,?11,?12,?13,?14,?15,?16)"
+        };
+        let values = reserve_scope_values(
+            vec![
+                Value::Text(key.clone()),
+                Value::Text(account_key.clone()),
+                Value::Text(input.strategy_id.clone()),
+                Value::Text(input.intent_id.clone()),
+                Value::Text(input.plan_sha256.clone()),
+                Value::Text(digest),
+                Value::Integer(policy_i64),
+                Value::Text(input.proposal.loss_usdt.canonical()?),
+                Value::Text(input.proposal.loss_usd.canonical()?),
+                Value::Text(input.proposal.entry_upper_usd.canonical()?),
+                Value::Text(input.entry_proof_digest.clone()),
+                Value::Text(census.source_digest.clone()),
+                Value::Integer(next_sequence_i64),
+                Value::Integer(input.now_ms),
+                Value::Integer(census.read_floor_ms),
+                Value::Text(input.native_incarnation.clone()),
             ],
-        )?;
-        tx.execute(
-            "UPDATE risk_account_occupied SET reserved_usdt=?1 WHERE account_key=?2",
-            params![new_account, &account_key],
-        )?;
-        tx.execute("UPDATE risk_strategy_occupied SET reserved_usdt=?1 WHERE account_key=?2 AND strategy_id=?3",
-            params![new_strategy,&account_key,&input.strategy_id])?;
-        let changed=tx.execute(
-            "UPDATE risk_meta SET book_sequence=?1,global_reserved_usdt=?2,loss_reserved_usd=?3,entry_reserved_usd=?4
-             WHERE singleton=1 AND book_sequence=?5 AND policy_revision=?6",
-            params![next_sequence_i64,new_global,new_loss,new_entry,
-                i64::try_from(meta.sequence).map_err(|_|RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
-                policy_i64])?;
+            scope,
+        );
+        tx.execute(insert, rusqlite::params_from_iter(values.iter()))?;
+        let account_update = if scope.is_some() {
+            "UPDATE risk_account_occupied SET reserved_usdt=?1
+             WHERE account_key=?2 AND installation_id=?3 AND campaign_id=?4"
+        } else {
+            "UPDATE risk_account_occupied SET reserved_usdt=?1 WHERE account_key=?2"
+        };
+        let values = reserve_scope_values(
+            vec![Value::Text(new_account), Value::Text(account_key.clone())],
+            scope,
+        );
+        if tx.execute(account_update, rusqlite::params_from_iter(values.iter()))? != 1 {
+            return Err(RiskStoreError::Corrupt("MISSING_ACCOUNT_OCCUPANCY"));
+        }
+        let strategy_update = if scope.is_some() {
+            "UPDATE risk_strategy_occupied SET reserved_usdt=?1
+             WHERE account_key=?2 AND strategy_id=?3 AND installation_id=?4 AND campaign_id=?5"
+        } else {
+            "UPDATE risk_strategy_occupied SET reserved_usdt=?1 WHERE account_key=?2 AND strategy_id=?3"
+        };
+        let values = reserve_scope_values(
+            vec![
+                Value::Text(new_strategy),
+                Value::Text(account_key.clone()),
+                Value::Text(input.strategy_id.clone()),
+            ],
+            scope,
+        );
+        if tx.execute(strategy_update, rusqlite::params_from_iter(values.iter()))? != 1 {
+            return Err(RiskStoreError::Corrupt("MISSING_STRATEGY_OCCUPANCY"));
+        }
+        let meta_update = if scope.is_some() {
+            "UPDATE risk_meta SET book_sequence=?1,global_reserved_usdt=?2,
+                loss_reserved_usd=?3,entry_reserved_usd=?4
+             WHERE singleton=1 AND book_sequence=?5 AND policy_revision=?6
+               AND installation_id=?7 AND campaign_id=?8"
+        } else {
+            "UPDATE risk_meta SET book_sequence=?1,global_reserved_usdt=?2,
+                loss_reserved_usd=?3,entry_reserved_usd=?4
+             WHERE singleton=1 AND book_sequence=?5 AND policy_revision=?6"
+        };
+        let values = reserve_scope_values(
+            vec![
+                Value::Integer(next_sequence_i64),
+                Value::Text(new_global),
+                Value::Text(new_loss),
+                Value::Text(new_entry),
+                Value::Integer(i64::try_from(meta.sequence).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?),
+                Value::Integer(policy_i64),
+            ],
+            scope,
+        );
+        let changed = tx.execute(meta_update, rusqlite::params_from_iter(values.iter()))?;
         if changed != 1 {
             return Err(RiskStoreError::PolicyConflict);
         }
-        tx.commit()?;
-        Ok(HeldReceipt {
+        Ok(ReserveDecision::Held(HeldReceipt {
             reservation_key: key,
             book_sequence: next_sequence,
             replayed: false,
-        })
+        }))
     }
 
     #[cfg(test)]
