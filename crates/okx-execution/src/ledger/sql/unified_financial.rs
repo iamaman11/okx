@@ -675,6 +675,9 @@ pub(in crate::account_store) fn import_legacy_partial_source(
     Ok(())
 }
 
+#[path = "unified_financial_import.rs"]
+pub(in crate::account_store) mod importer;
+
 #[cfg(test)]
 #[path = "unified_financial_tests.rs"]
 mod tests;
