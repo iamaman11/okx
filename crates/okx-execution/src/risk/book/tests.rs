@@ -2346,3 +2346,198 @@ async fn risk_book_contract_sql_real_two_owner_os_kill_after_campaign_before_acc
     );
     assert_eq!(campaign.readback().await.unwrap(), before);
 }
+
+
+#[test]
+fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_denial() {
+    use rusqlite::{Connection, params};
+    let f = Fixture::new("finance-scoped-reserve");
+    let mut db = Connection::open(&f.path).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    db.pragma_update(None, "synchronous", "FULL").unwrap();
+    db.execute_batch(include_str!("../../../schema/finance-unified-v1.sql"))
+        .unwrap();
+    let campaign = opening().campaign_id;
+    // Test-only source fixtures: original schema + FK-backed policy rows.
+    // They are NOT an authenticated producer or permission for live trading.
+    {
+        let tx = db.transaction().unwrap();
+        for letter in ['a', 'b'] {
+            let key = account(letter);
+            let intent = format!("intent{}", letter.to_ascii_uppercase());
+            tx.execute(
+                "INSERT INTO account_meta(
+                installation_id,account_key,singleton,schema_version,initialized_at,
+                opening_source,initialize_operation_id,release_id)
+                VALUES('test-installation',?1,1,2,1,'test-only',?2,'release')",
+                params![&key, format!("init-{letter}")],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO decisions(
+                installation_id,account_key,decision_id,instance_id,
+                decision_at,input_digest,policy_revision,code_version)
+                VALUES('test-installation',?1,?2,NULL,1,?3,1,'rust')",
+                params![&key, format!("decision-{letter}"), uid('b')],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO intents(
+                installation_id,account_key,intent_id,idempotency_key,request_hash,
+                decision_id,state,revision,client_order_id,deadline,plan_hash,
+                policy_revision,risk_increase,instrument_id,created_at,updated_at)
+                VALUES('test-installation',?1,?2,?3,?4,?5,'PREPARED',0,
+                ?6,100000,?7,1,1,'BTC-USDT-SWAP',1,1)",
+                params![
+                    &key,
+                    &intent,
+                    format!("request-{letter}"),
+                    uid('c'),
+                    format!("decision-{letter}"),
+                    format!("client-{letter}"),
+                    uid('e')
+                ],
+            )
+            .unwrap();
+        }
+        tx.execute(
+            "INSERT INTO risk_meta(
+            singleton,campaign_id,installation_id,policy_revision,generation,
+            book_sequence,legacy_fenced,global_limit_usdt,global_reserved_usdt,
+            loss_limit_usd,loss_consumed_usd,loss_reserved_usd,entry_limit_usd,
+            entry_consumed_usd,entry_opening_consumed_usd,entry_reserved_usd,
+            entry_bound_breach_usd)
+            VALUES(1,?1,'test-installation',1,7,0,1,'10','0',
+            '100','0','0','100','0','0','0','0')",
+            [&campaign],
+        )
+        .unwrap();
+        for letter in ['a', 'b'] {
+            let key = account(letter);
+            tx.execute(
+                "INSERT INTO risk_account_occupied(
+                installation_id,campaign_id,account_key,reserved_usdt)
+                VALUES('test-installation',?1,?2,'0')",
+                params![&campaign, &key],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO risk_policy_account(
+                installation_id,campaign_id,account_key,limit_usdt,order_limit_usdt,
+                entry_limit_usd)
+                VALUES('test-installation',?1,?2,'10','8','10')",
+                params![&campaign, &key],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO risk_loss_source(
+                installation_id,campaign_id,account_key,cumulative_loss_usd,source_digest)
+                VALUES('test-installation',?1,?2,'0',?3)",
+                params![&campaign, &key, uid('d')],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO risk_policy_strategy(
+                installation_id,campaign_id,account_key,strategy_id,limit_usdt)
+                VALUES('test-installation',?1,?2,'strategy_test','8')",
+                params![&campaign, &key],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO risk_strategy_occupied(
+                installation_id,campaign_id,account_key,strategy_id,reserved_usdt)
+                VALUES('test-installation',?1,?2,'strategy_test','0')",
+                params![&campaign, &key],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let original = request('a', "intentA", "6");
+    // The first uncommitted reserve is a real v6 SQL mutation: rollback must
+    // eliminate both the reservation and all associated budget/cache writes.
+    {
+        let tx = db.transaction().unwrap();
+        assert!(matches!(
+            RiskBookStore::reserve_sql_transaction(
+                &tx,
+                Some(("test-installation", &campaign)),
+                &original,
+                &census()
+            ).unwrap(),
+            ReserveDecision::Held(_)
+        ));
+        tx.rollback().unwrap();
+    }
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_entries", [], |r| r.get(0))
+            .unwrap(),
+        0
+    );
+    {
+        let tx = db.transaction().unwrap();
+        assert!(matches!(
+            RiskBookStore::reserve_sql_transaction(
+                &tx,
+                Some(("test-installation", &campaign)),
+                &original,
+                &census()
+            ).unwrap(),
+            ReserveDecision::Held(HeldReceipt { replayed: false, .. })
+        ));
+        tx.commit().unwrap();
+    }
+    let read = |db: &Connection| {
+        db.query_row(
+            "SELECT global_reserved_usdt,loss_consumed_usd,book_sequence FROM risk_meta
+             WHERE installation_id='test-installation' AND campaign_id=?1",
+            [&campaign],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(read(&db), ("6".into(), "0".into(), 1));
+    // B is denied by the SAME cohort budget; its newer observed loss must
+    // still be durable even though no second reservation can be created.
+    let mut fresh = census();
+    fresh.cumulative_loss_usd.insert(account('b'), amt("1"));
+    {
+        let tx = db.transaction().unwrap();
+        assert!(matches!(
+            RiskBookStore::reserve_sql_transaction(
+                &tx,
+                Some(("test-installation", &campaign)),
+                &request('b', "intentB", "6"),
+                &fresh
+            ).unwrap(),
+            ReserveDecision::Rejected(RiskStoreError::Denied(
+                RiskRuleError::InsufficientAggregateOrAccountRisk
+            ))
+        ));
+        tx.commit().unwrap();
+    }
+    assert_eq!(read(&db), ("6".into(), "1".into(), 2));
+    drop(db);
+    let mut db = Connection::open(&f.path).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    {
+        let tx = db.transaction().unwrap();
+        assert!(matches!(
+            RiskBookStore::reserve_sql_transaction(
+                &tx,
+                Some(("test-installation", &campaign)),
+                &original,
+                &fresh
+            ).unwrap(),
+            ReserveDecision::Held(HeldReceipt { replayed: true, .. })
+        ));
+        tx.rollback().unwrap();
+    }
+    assert_eq!(read(&db), ("6".into(), "1".into(), 2));
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_entries", [], |r| r.get(0))
+            .unwrap(),
+        1
+    );
+}
