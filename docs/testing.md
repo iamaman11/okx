@@ -1,5 +1,23 @@
 # Trade acceptance evidence map — #448 / #449 / #501
 
+## #510 r4.1 — RB09 one-time stopped legacy-finance transition; NOT a continuous Cloudflare gate
+
+**Current acceptance definition supersedes previous owner-epoch/fencing wording below; historical SHA-specific records are preserved as historical evidence.** The new Rust financial path never calls Cloudflare to reserve funds, grant POST, settle, release or check a permanent owner lease. Cloudflare MCP, authorization and routing remain.
+
+**RB09 acceptance table (isolated infrastructure, not an installed-environment migration):**
+
+| Boundary | Positive expected | Negative expected / hard stop |
+|---|---|---|
+| Stop/disable previous finance authority | Old executors stopped; old Cloudflare financial mutators/POST grants return explicit refusal, including after allowed restart/rollback; MCP/auth/transport continue | Any accepted old financial mutation → NO-GO |
+| Final source census | Exact installation/account/campaign roster; reserves, consumption, fees, revisions, UNKNOWN and receipts reconciled | Unknown source, missing snapshot, hidden obligations, unproven empty state → NO-GO |
+| Empty-state fast path | Evidence of no historical financial obligation permits empty unified SQLite bootstrap | Absence inferred merely from non-production use or missing files → NO-GO |
+| Nonempty-state import | Original facts/IDs/budgets/receipts preserved under one SQLite COMMIT, verified on reopen | Incomplete or corrupt transfer, wrong identities, altered totals → NO-GO |
+| Kill / lost import reply | Pre-COMMIT no partial target authority; post-COMMIT all old obligations present; exact retry does not mint headroom | Two live financial owners or extra reserve after retry → NO-GO |
+| New Rust activation | Production finance writer becomes available only after stop + verified snapshot + exact import/EMPTY proof | `OFFLINE_NOT_AUTHORIZED` or any unproved gate → NO-GO |
+
+**Evidence format:** exact SHA, legacy endpoint negative mutation request/response and final readback, source roster/digests/financial totals, target SQLite receipt, before/after-kill reopen, replay, error diagnostics. RB09 is separate from the fast Rust direct target; do not repeat the 90-kill historical Native/Worker matrix. Record **NOT_PROVEN** while old Cloudflare financial code still accepts operations in the deployed legacy environment. Actual installed migration will be executed separately after code acceptance.
+
+---
 ## #510 r4 — original combined Reserve passes through ONE installation FIFO, strictly rollback-only (14 Nov 2026)
 
 **Verified code SHA `8b4d177b6f7f9ae798953768616c0da23ea73813`**, [Draft CI #43638259025](https://github.com/iamaman11/okx/actions/runs/43638259025) **SUCCESS**: architecture guard and rustfmt PASS, direct RiskBook 72/72, kernel 6/6, original AccountStore source 1/1, complete `okx-execution --lib` **242 PASS / 0 FAIL / 3 ignored**; the direct selections overlap the complete library run, not unique extra cases. Windows RB01–RB16, T09/T10 26/26 and Cloudflare remote fencing jobs are SKIPPED, **NOT ACCEPTED**.

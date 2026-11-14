@@ -1,4 +1,22 @@
-# #510 r4 — source-derived SQL scope inventory and first physical single-file slice
+# #510 r4.1 — one Rust financial SQLite; one-time stopped legacy cutover
+
+## Canonical Cloudflare responsibility boundary — accepted 15 Nov 2026
+
+See [Issue #510 r4.1](https://github.com/iamaman11/okx/issues/510). **This section supersedes any older references below to a permanent Cloudflare owner epoch/fencing protocol.** Those older paragraphs are chronological evidence of former Draft expectations, not current requirements.
+
+**During normal Rust execution:** the existing native `okx-execution` SQL owner owns all account ledger facts, RiskBook budgets, grants, settlements, releases and durable receipts in **one** `runtime_root/finance/finance.sqlite`. `okx-agent::TradeService` supplies authenticated source/policy information and dispatches typed operations. Local SQL policy/source revisions, monotone sequences, scoped CAS, file lock, durable BEGIN_POST/UNKNOWN and venue readback remain essential **native** checks. No Cloudflare financial authority, recurring `owner_epoch`/fencing RPC, backup ledger, second budget writer or WSS financial fallback may be introduced.
+
+**Cloudflare stays:** `cloudflare/okx-mcp/src/mcp.ts` and the supported authentication/transport/routing/permission responsibilities remain. Existing legacy financial execution is concentrated in `cloudflare/okx-mcp/src/risk_authority.ts` and `risk_book.ts`, invoked from `runtime_session.ts`; these old financial grant, Reserve, BeginPost, SettleEntry, ReleaseUnsent, Resolve and budget-write routes must be **disabled and removed from the new active financial path after cutover**, without deleting MCP/auth/routing. Keep the old finance endpoint server-disabled across authorized restart/rollback; a client-side flag or old SQLite marker is not sufficient.
+
+**RB09 is one bounded stopped-transition witness, not an online synchronization protocol:**
+1. Stop old executors; on the legacy Cloudflare side block all old financial mutations/POST grants while leaving the MCP/auth/transport path available. Send negative mutation probes before/after restart and supported rollback and independently read the old budget to verify no mutations occurred.
+2. Snapshot and verify the *complete* account/campaign/legacy budget inventory after writes are stopped. Prove absent obligations (zero reserve/consumed/late/terminal/UNKNOWN and no hidden account/campaign) before EMPTY bootstrap; otherwise preserve original IDs, source/policy revisions, ledger, reservations, spent budgets, UNKNOWN and immutable receipts.
+3. Import nonempty source state in one atomic scoped SQLite transaction with lossless parity, manifest and readback. Crash before commit leaves no live partial allocation; crash after commit but before reply retains every original obligation. No Rust write grants until the verified stop + readback + import/empty proof have succeeded.
+4. Test this on **isolated real-format account/campaign source files and a controlled legacy Cloudflare endpoint**, with positive/negative/restart/replay evidence and final exact SHA. Actual migration and shutdown of the *installed user's* environment is a **separate post-development deployment operation**, not part of the #510 Draft code cut. Do **not** rerun the whole historical Native/Worker campaign or require permanent Cloudflare checks on every Rust financial operation.
+
+**Current state:** PR #511 is Draft/NO-GO. The legacy TS financial code and WSS route still exist and must not be removed before a functioning Rust replacement plus RB09 gate. The existing `UnifiedFinanceHandle` currently opens `OFFLINE_NOT_AUTHORIZED` imports and exposes test-only rollback trials; no trade authority is activated by this documentation change.
+
+---
 
 ## Next account lifecycle slice — original OUTCOME and UNKNOWN recovery on one scoped SQL (15 Nov 2026)
 
@@ -18,8 +36,9 @@ test stages test-only POSTING rows for A/B with identical raw IDs, checks
 selective recovery, readback, ACK, per-account immutable terminal receipt,
 rollback/conflict and FK integrity. These synthetic fixtures are scoped
 SQL contracts, **NOT authenticated venue/source evidence**. This slice
-has not switched the installed TradeService, and Cloudflare server-side
-fencing/owner epoch remain mandatory before any live COMMIT.
+has not switched the installed TradeService; before actual activation the
+one-time RB09 stopped legacy-finance disable and state proof must pass. No
+recurring Cloudflare fencing/epoch is required in Rust's financial hot path.
 
 ## Current #510 next code slice — original PREPARE on the one scoped financial transaction (15 Nov 2026)
 
@@ -37,11 +56,11 @@ The `UnifiedFinanceHandle::trial_original_prepare` routes the exact new
 account mutation through the existing installation-wide bounded FIFO but
 **always rolls back**, because the import manifest remains
 `OFFLINE_NOT_AUTHORIZED`. This is NOT a production PREPARE/TradeService
-cutover, authenticated Cloudflare epoch, permission to post or a source
-producer switch. Added scoped A/B same-request collision, policy/version,
+cutover, verified RB09 stopped-transition receipt, permission to post or a
+source producer switch. Added scoped A/B same-request collision, policy/version,
 rollback, idempotency and foreign-scope witnesses. Do not turn this trial
-into a live mutation until actual authority fencing and all other account
-producer operations run on the same file.
+into a live mutation until the one-time legacy financial-disable and verified
+source-state gate pass and all account producers run on the same file.
 
 ## Next code slice: EXACT original AccountStore source + RiskBook receipt in one local transaction (15 Nov 2026)
 
@@ -71,8 +90,8 @@ The new installation transaction methods:
   are staged only as **test fixture SQL**, not a live venue producer.
 
 This is still **not** a production trade authority, authenticated external
-source, server-side Cloudflare fence, full terminal/late fee support, or a
-TradeService cutover. No initial import is silently activated; no venue POST.
+source, one-time stopped legacy transition RB09, full terminal/late fee support,
+or a TradeService cutover. No initial import is silently activated; no venue POST.
 CI results must be attached for an exact SHA, not presumed from an earlier
 green result.
 
@@ -96,7 +115,7 @@ and rollback of both changes. This test-only source is **not** trusted live
 AccountStore evidence. Production must still bind authenticated original
 partial-entry SQL receipts and original durable `REJECTED_UNSENT` evidence in
 the SAME installation-owned SQL before allowing commits, plus verify the
-Cloudflare old-owner fence/epoch. The existing immutable offline import
+one-time RB09 stop/legacy finance disable. The existing immutable offline import
 remains `OFFLINE_NOT_AUTHORIZED`; **no code in this slice activates it**.
 
 The final Draft CI result for this exact candidate must be recorded from
