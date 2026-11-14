@@ -12100,12 +12100,29 @@ fn risk_book_contract_scoped_original_risk_aggregate_checker_is_campaign_isolate
     .unwrap();
     {
         let tx = target.transaction().unwrap();
-        let x = crate::risk::read_unified_campaign_summary(&tx, "installation", "campaign-X").unwrap();
-        let y = crate::risk::read_unified_campaign_summary(&tx, "installation", "campaign-Y").unwrap();
+        let x =
+            crate::risk::read_unified_campaign_summary(&tx, "installation", "campaign-X").unwrap();
+        let y =
+            crate::risk::read_unified_campaign_summary(&tx, "installation", "campaign-Y").unwrap();
         assert_eq!((x.book_sequence, y.book_sequence), (2, 2));
-        assert_eq!((x.global_reserved_usdt.as_str(), y.global_reserved_usdt.as_str()), ("1", "1"));
-        assert_eq!((x.reserved_loss_usd.as_str(), y.reserved_loss_usd.as_str()), ("1", "1"));
-        assert_eq!((x.remaining_entry_usd.as_str(), y.remaining_entry_usd.as_str()), ("98", "98"));
+        assert_eq!(
+            (
+                x.global_reserved_usdt.as_str(),
+                y.global_reserved_usdt.as_str()
+            ),
+            ("1", "1")
+        );
+        assert_eq!(
+            (x.reserved_loss_usd.as_str(), y.reserved_loss_usd.as_str()),
+            ("1", "1")
+        );
+        assert_eq!(
+            (
+                x.remaining_entry_usd.as_str(),
+                y.remaining_entry_usd.as_str()
+            ),
+            ("98", "98")
+        );
         crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
         crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-Y").unwrap();
         assert!(
@@ -12129,12 +12146,14 @@ fn risk_book_contract_scoped_original_risk_aggregate_checker_is_campaign_isolate
     crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
     assert_eq!(
         crate::risk::read_unified_campaign_summary(&tx, "installation", "campaign-X")
-            .unwrap().global_reserved_usdt,
+            .unwrap()
+            .global_reserved_usdt,
         "1"
     );
-    assert!(crate::risk::read_unified_campaign_summary(
-        &tx, "installation", "campaign-Y",
-    ).is_err(), "a corrupt campaign cannot expose a misleading summary");
+    assert!(
+        crate::risk::read_unified_campaign_summary(&tx, "installation", "campaign-Y",).is_err(),
+        "a corrupt campaign cannot expose a misleading summary"
+    );
     assert!(
         crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-Y",).is_err()
     );
