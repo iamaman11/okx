@@ -11893,3 +11893,148 @@ fn risk_book_contract_unified_manifest_detects_modified_financial_fact_after_reo
         ))
     ));
 }
+
+#[test]
+fn risk_book_contract_child_full_original_import_os_boundary() {
+    use rusqlite::{Connection, OpenFlags};
+    let Ok(destination) = std::env::var("OKX_510_FULL_IMPORT_TARGET") else {
+        return;
+    };
+    let a = std::env::var("OKX_510_FULL_IMPORT_ACCOUNT_A").unwrap();
+    let b = std::env::var("OKX_510_FULL_IMPORT_ACCOUNT_B").unwrap();
+    let campaign = std::env::var("OKX_510_FULL_IMPORT_CAMPAIGN").unwrap();
+    let sa = Connection::open_with_flags(&a, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&b, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sc = Connection::open_with_flags(&campaign, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let expected = super::sql::unified_financial::importer::ExpectedFinanceInventory {
+        installation: "installation",
+        accounts: &["acct-A", "acct-B"],
+        campaigns: &["campaign-X"],
+    };
+    // The importer itself blocks at an actual SQLite transaction boundary.
+    // A return before the injected point is a broken test, not a success.
+    super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+        &mut target, &expected, &[&sa, &sb], &[&sc],
+    )
+    .expect("the child must be killed at the actual SQL commit barrier");
+    panic!("OS kill fault injection was not reached");
+}
+
+fn full_import_os_kill(
+    destination: &std::path::Path,
+    a: &std::path::Path,
+    b: &std::path::Path,
+    campaign: &std::path::Path,
+    phase: &str,
+) {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+        sync::mpsc,
+        time::Duration,
+    };
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "risk_book_contract_child_full_original_import_os_boundary",
+            "--nocapture",
+        ])
+        .env("OKX_510_FULL_IMPORT_TARGET", destination)
+        .env("OKX_510_FULL_IMPORT_ACCOUNT_A", a)
+        .env("OKX_510_FULL_IMPORT_ACCOUNT_B", b)
+        .env("OKX_510_FULL_IMPORT_CAMPAIGN", campaign)
+        .env("OKX_510_FULL_IMPORT_FAULT", phase)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = child.stdout.take().unwrap();
+    let marker = format!("OKX_510_FULL_IMPORT_REACHED_{phase}");
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if line.unwrap_or_default().contains(&marker) {
+                let _ = sender.send(());
+                return;
+            }
+        }
+    });
+    let observed = receiver.recv_timeout(Duration::from_secs(15));
+    child.kill().unwrap();
+    assert!(
+        !child.wait().unwrap().success(),
+        "child must physically terminate abnormally"
+    );
+    reader.join().unwrap();
+    assert!(
+        observed.is_ok(),
+        "full SQL importer did not reach requested physical COMMIT barrier {phase}"
+    );
+}
+
+#[test]
+fn risk_book_contract_full_original_import_os_kill_before_after_commit() {
+    use rusqlite::Connection;
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let campaign = path();
+    unified_original_campaign_fixture(
+        &campaign,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let expected = super::sql::unified_financial::importer::ExpectedFinanceInventory {
+        installation: "installation",
+        accounts: &["acct-A", "acct-B"],
+        campaigns: &["campaign-X"],
+    };
+    let rolled_back = path();
+    full_import_os_kill(&rolled_back, &ap, &bp, &campaign, "BEFORE_COMMIT");
+    let db = Connection::open(&rolled_back).unwrap();
+    let table_count: i64 = db.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+         AND name NOT LIKE 'sqlite_%'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(table_count, 0, "kill before COMMIT must roll back all 47 financial tables");
+    assert!(
+        super::sql::unified_financial::importer::inspect_stopped_finance_import(
+            &db, &expected,
+        ).is_err(),
+        "a partial import cannot appear committed"
+    );
+    drop(db);
+
+    let durable = path();
+    full_import_os_kill(&durable, &ap, &bp, &campaign, "AFTER_COMMIT");
+    let db = Connection::open(&durable).unwrap();
+    let verified = super::sql::unified_financial::importer::inspect_stopped_finance_import(
+        &db, &expected,
+    ).unwrap();
+    assert_eq!((verified.accounts, verified.campaigns), (2, 1));
+    assert!(verified.account_rows >= 20);
+    assert_eq!(verified.campaign_rows, 1 + 2 * 5 + 1 + 1);
+    let (remaining_entry, reserved_loss): (String, String) = db.query_row(
+        "SELECT entry_reserved_usd,loss_reserved_usd FROM risk_meta
+         WHERE installation_id='installation' AND campaign_id='campaign-X'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert_eq!((remaining_entry, reserved_loss), ("2".into(), "1".into()));
+    let status: String = db.query_row(
+        "SELECT state FROM finance_import_manifest WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(status, "OFFLINE_NOT_AUTHORIZED", "commit never grants live trading authority");
+}
