@@ -12914,9 +12914,14 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
                 receipt.clone(),
             )
             .await,
-        Err(StoreError::Invalid("UNIFIED_ORIGINAL_RESERVE_TRIAL_REJECTED"))
+        Err(StoreError::Invalid(
+            "UNIFIED_ORIGINAL_RESERVE_TRIAL_REJECTED"
+        ))
     ));
-    assert_eq!(owner.campaign_summary("campaign-X".into()).await.unwrap(), summary);
+    assert_eq!(
+        owner.campaign_summary("campaign-X".into()).await.unwrap(),
+        summary
+    );
 
     // The ORIGINAL RiskBook AccountSummary SQL must distinguish these two
     // canonical account identities inside the shared campaign scope.
@@ -13058,7 +13063,10 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     let reopened = open().await.unwrap();
     assert_eq!(reopened.inventory().await.unwrap(), inventory);
     assert_eq!(
-        reopened.campaign_summary("campaign-X".into()).await.unwrap(),
+        reopened
+            .campaign_summary("campaign-X".into())
+            .await
+            .unwrap(),
         summary,
         "staged Reserve cannot alter the original immutable import on reopen"
     );
