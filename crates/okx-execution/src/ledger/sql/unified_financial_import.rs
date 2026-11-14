@@ -106,7 +106,8 @@ fn count_scoped(
     Ok(tx.query_row(
         &format!(
             "SELECT COUNT(*) FROM {} WHERE installation_id=?1 AND {}=?2",
-            quote(table), quote(scope_column)
+            quote(table),
+            quote(scope_column)
         ),
         params![installation, scope],
         |r| r.get(0),
@@ -155,15 +156,21 @@ fn verify_original_source(source: &Connection, installation: &str) -> StoreResul
 fn verify_original_campaign(source: &Connection, installation: &str) -> StoreResult<String> {
     let version: i64 = source.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version != 5 {
-        return Err(StoreError::Invalid("UNIFIED_LEGACY_CAMPAIGN_VERSION_INVALID"));
+        return Err(StoreError::Invalid(
+            "UNIFIED_LEGACY_CAMPAIGN_VERSION_INVALID",
+        ));
     }
     let check: String = source.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
     if check != "ok" {
-        return Err(StoreError::Invalid("UNIFIED_LEGACY_CAMPAIGN_INTEGRITY_FAILED"));
+        return Err(StoreError::Invalid(
+            "UNIFIED_LEGACY_CAMPAIGN_INTEGRITY_FAILED",
+        ));
     }
     let mut fk = source.prepare("PRAGMA foreign_key_check")?;
     if fk.query([])?.next()?.is_some() {
-        return Err(StoreError::Invalid("UNIFIED_LEGACY_CAMPAIGN_FOREIGN_KEY_FAILED"));
+        return Err(StoreError::Invalid(
+            "UNIFIED_LEGACY_CAMPAIGN_FOREIGN_KEY_FAILED",
+        ));
     }
     let names: BTreeSet<String> = {
         let mut stmt = source.prepare(
@@ -179,7 +186,9 @@ fn verify_original_campaign(source: &Connection, installation: &str) -> StoreRes
             .map(str::to_owned)
             .collect()
     {
-        return Err(StoreError::Invalid("UNIFIED_LEGACY_CAMPAIGN_TABLE_CENSUS_CHANGED"));
+        return Err(StoreError::Invalid(
+            "UNIFIED_LEGACY_CAMPAIGN_TABLE_CENSUS_CHANGED",
+        ));
     }
     let (campaign, owned_installation, fenced): (String, String, i64) = source.query_row(
         "SELECT campaign_id,installation_id,legacy_fenced FROM risk_meta WHERE singleton=1",
@@ -187,7 +196,9 @@ fn verify_original_campaign(source: &Connection, installation: &str) -> StoreRes
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     if campaign.is_empty() || owned_installation != installation || fenced != 1 {
-        return Err(StoreError::Invalid("UNIFIED_LEGACY_CAMPAIGN_IDENTITY_OR_FENCE"));
+        return Err(StoreError::Invalid(
+            "UNIFIED_LEGACY_CAMPAIGN_IDENTITY_OR_FENCE",
+        ));
     }
     // A historical SQLite flag is NOT server-side Cloudflare authority revocation.
     // The authorized cutover must independently prove that remote mutation is fenced.
@@ -223,14 +234,25 @@ fn copy_one_scope(
         }
         let query = format!(
             "SELECT {} FROM {}",
-            source_cols.iter().map(|c| quote(c)).collect::<Vec<_>>().join(","),
+            source_cols
+                .iter()
+                .map(|c| quote(c))
+                .collect::<Vec<_>>()
+                .join(","),
             quote(table),
         );
         let write = format!(
             "INSERT INTO {}({}) VALUES({})",
             quote(table),
-            target_cols.iter().map(|c| quote(c)).collect::<Vec<_>>().join(","),
-            (0..target_cols.len()).map(|_| "?").collect::<Vec<_>>().join(","),
+            target_cols
+                .iter()
+                .map(|c| quote(c))
+                .collect::<Vec<_>>()
+                .join(","),
+            (0..target_cols.len())
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(","),
         );
         let mut reader = source.prepare(&query)?;
         let mut rows = reader.query([])?;
@@ -242,7 +264,9 @@ fn copy_one_scope(
                 .collect::<Result<Vec<_>, _>>()?;
             for (column, value) in source_cols.iter().zip(&native_values) {
                 if column == "installation_id" && value != &Value::Text(installation.to_owned()) {
-                    return Err(StoreError::Invalid("UNIFIED_LEGACY_ROW_INSTALLATION_MISMATCH"));
+                    return Err(StoreError::Invalid(
+                        "UNIFIED_LEGACY_ROW_INSTALLATION_MISMATCH",
+                    ));
                 }
                 if column == scope_column && value != &Value::Text(scope.to_owned()) {
                     return Err(StoreError::Invalid("UNIFIED_LEGACY_ROW_SCOPE_MISMATCH"));
@@ -265,11 +289,10 @@ fn copy_one_scope(
             }
             n += 1;
         }
-        let actual: i64 = source.query_row(
-            &format!("SELECT COUNT(*) FROM {}", quote(table)),
-            [],
-            |r| r.get(0),
-        )?;
+        let actual: i64 =
+            source.query_row(&format!("SELECT COUNT(*) FROM {}", quote(table)), [], |r| {
+                r.get(0)
+            })?;
         if n != actual || count_scoped(tx, table, installation, scope_column, scope)? != actual {
             return Err(StoreError::Invalid("UNIFIED_LEGACY_ROW_PARITY_FAILED"));
         }
@@ -301,10 +324,14 @@ fn import_sources(
     let fk: i64 = target.pragma_query_value(None, "foreign_keys", |r| r.get(0))?;
     let sync: i64 = target.pragma_query_value(None, "synchronous", |r| r.get(0))?;
     if journal != "wal" || fk != 1 || sync != 2 {
-        return Err(StoreError::Invalid("UNIFIED_IMPORT_SQLITE_DURABILITY_INVALID"));
+        return Err(StoreError::Invalid(
+            "UNIFIED_IMPORT_SQLITE_DURABILITY_INVALID",
+        ));
     }
     let target_path: String = target.query_row(
-        "SELECT file FROM pragma_database_list WHERE name='main'", [], |r| r.get(0)
+        "SELECT file FROM pragma_database_list WHERE name='main'",
+        [],
+        |r| r.get(0),
     )?;
     if target_path.is_empty() {
         return Err(StoreError::Invalid("UNIFIED_IMPORT_TARGET_PATH_INVALID"));
@@ -315,7 +342,9 @@ fn import_sources(
     let mut paths = Vec::new();
     for source in accounts.iter().chain(campaigns.iter()) {
         let path: String = source.query_row(
-            "SELECT file FROM pragma_database_list WHERE name='main'", [], |r| r.get(0)
+            "SELECT file FROM pragma_database_list WHERE name='main'",
+            [],
+            |r| r.get(0),
         )?;
         if path.is_empty() {
             return Err(StoreError::Invalid("UNIFIED_IMPORT_SOURCE_PATH_INVALID"));
@@ -360,9 +389,9 @@ fn import_sources(
     let complete = include_str!("../../../schema/finance-unified-v1.sql");
     const MARKER: &str =
         "-- Original immutable-event rules and scoped source-invalidation triggers.";
-    let (tables_and_indexes, trigger_and_version) = complete
-        .split_once(MARKER)
-        .ok_or(StoreError::Invalid("UNIFIED_SCHEMA_TRIGGER_BOUNDARY_MISSING"))?;
+    let (tables_and_indexes, trigger_and_version) = complete.split_once(MARKER).ok_or(
+        StoreError::Invalid("UNIFIED_SCHEMA_TRIGGER_BOUNDARY_MISSING"),
+    )?;
     let tx = target.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch(tables_and_indexes)?;
     tx.pragma_update(None, "defer_foreign_keys", 1)?;
@@ -371,7 +400,12 @@ fn import_sources(
         let account = verify_original_source(source, installation)?;
         account_rows = account_rows
             .checked_add(copy_one_scope(
-                source, &tx, installation, "account_key", &account, &ORIGINAL_ACCOUNT_TABLES
+                source,
+                &tx,
+                installation,
+                "account_key",
+                &account,
+                &ORIGINAL_ACCOUNT_TABLES,
             )?)
             .ok_or(StoreError::Invalid("UNIFIED_LEGACY_ROW_COUNT_OVERFLOW"))?;
     }
@@ -380,7 +414,12 @@ fn import_sources(
         let campaign = verify_original_campaign(source, installation)?;
         campaign_rows = campaign_rows
             .checked_add(copy_one_scope(
-                source, &tx, installation, "campaign_id", &campaign, &ORIGINAL_CAMPAIGN_TABLES
+                source,
+                &tx,
+                installation,
+                "campaign_id",
+                &campaign,
+                &ORIGINAL_CAMPAIGN_TABLES,
             )?)
             .ok_or(StoreError::Invalid("UNIFIED_LEGACY_ROW_COUNT_OVERFLOW"))?;
     }
