@@ -5,7 +5,7 @@
 //! this helper until the campaign import and cross-host authority cutover.
 use crate::{StoreError, StoreResult};
 use rusqlite::{
-    Connection, OpenFlags, Transaction, TransactionBehavior, params, params_from_iter,
+    Connection, Transaction, TransactionBehavior, params, params_from_iter,
     types::Value,
 };
 use std::collections::BTreeSet;
@@ -56,7 +56,7 @@ const ORIGINAL_ACCOUNT_TABLES: [&str; 39] = [
 ];
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct OriginalAccountImport {
+pub(in crate::account_store) struct OriginalAccountImport {
     pub accounts: usize,
     pub tables_per_account: usize,
     pub imported_rows: u64,
@@ -201,7 +201,7 @@ fn copy_one_account(
 /// or revoke Cloudflare. Until those are implemented, never activate this DB.
 /// Sources must be authenticated, stopped and writer-fenced by the caller;
 /// a read-only SQLite connection alone does not prove distributed fencing.
-pub(super) fn import_stopped_accounts_into_empty_finance(
+pub(in crate::account_store) fn import_stopped_accounts_into_empty_finance(
     target: &mut Connection,
     installation: &str,
     sources: &[&Connection],
