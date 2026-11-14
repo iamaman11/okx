@@ -1,12 +1,12 @@
 //! Read-only RiskBook observations within the existing SQLite owner.
 //! No absent row means "safe to send": no-reserve fencing is a separate
 //! durable operation, not a conclusion that an INSPECT caller can invent.
-use super::{BookMeta, Result, RiskStoreError, amount, valid_digest};
+use super::{BookMeta, Result, RiskStoreError, amount, reserve_scope_values, valid_digest};
 use okx_kernel::risk::{model::RiskEntryState, money::RiskAmount};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params_from_iter, types::Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::risk::book) struct AccountReadback {
+pub(crate) struct AccountReadback {
     pub account_key: String,
     pub policy_revision: u64,
     pub book_sequence: u64,
@@ -17,7 +17,7 @@ pub(in crate::risk::book) struct AccountReadback {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::risk::book) struct ReservationReadback {
+pub(crate) struct ReservationReadback {
     pub reservation_key: String,
     pub plan_sha256: String,
     pub state: RiskEntryState,
@@ -30,6 +30,7 @@ pub(super) fn account_readback(
     tx: &Transaction<'_>,
     meta: &BookMeta,
     account_key: &str,
+    scope: Option<(&str, &str)>,
 ) -> Result<AccountReadback> {
     if !account_key
         .strip_prefix("okx:real:")
@@ -37,38 +38,66 @@ pub(super) fn account_readback(
     {
         return Err(RiskStoreError::Invalid("ACCOUNT_IDENTITY"));
     }
+    // The same original RiskBook exact-money projection now accepts the
+    // installation/campaign namespace of v6, never joining another
+    // campaign's policy, occupation or loss by account_key alone.
+    let values = reserve_scope_values(vec![Value::Text(account_key.to_owned())], scope);
+    let policy_sql = if scope.is_some() {
+        "SELECT 1 FROM risk_policy_account WHERE account_key=?1
+         AND installation_id=?2 AND campaign_id=?3"
+    } else {
+        "SELECT 1 FROM risk_policy_account WHERE account_key=?1"
+    };
     let registered = tx
-        .query_row(
-            "SELECT 1 FROM risk_policy_account WHERE account_key=?1",
-            params![account_key],
-            |row| row.get::<_, i64>(0),
-        )
+        .query_row(policy_sql, params_from_iter(values.iter()), |row| {
+            row.get::<_, i64>(0)
+        })
         .optional()?
         .is_some();
     if !registered {
         return Err(RiskStoreError::Invalid("ACCOUNT_NOT_ACTIVE"));
     }
+    let aggregate_sql = if scope.is_some() {
+        "SELECT o.reserved_usdt,l.cumulative_loss_usd
+         FROM risk_policy_account p
+         JOIN risk_account_occupied o
+           ON o.account_key=p.account_key
+          AND o.installation_id=p.installation_id
+          AND o.campaign_id=p.campaign_id
+         JOIN risk_loss_source l
+           ON l.account_key=p.account_key
+          AND l.installation_id=p.installation_id
+          AND l.campaign_id=p.campaign_id
+         WHERE p.account_key=?1
+           AND p.installation_id=?2 AND p.campaign_id=?3"
+    } else {
+        "SELECT o.reserved_usdt,l.cumulative_loss_usd
+         FROM risk_policy_account p
+         JOIN risk_account_occupied o USING(account_key)
+         JOIN risk_loss_source l USING(account_key)
+         WHERE p.account_key=?1"
+    };
     let (reserved, cumulative): (String, String) = tx
-        .query_row(
-            "SELECT o.reserved_usdt,l.cumulative_loss_usd
-             FROM risk_policy_account p
-             JOIN risk_account_occupied o USING(account_key)
-             JOIN risk_loss_source l USING(account_key)
-             WHERE p.account_key=?1",
-            params![account_key],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+        .query_row(aggregate_sql, params_from_iter(values.iter()), |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
         .optional()?
         .ok_or(RiskStoreError::Corrupt("MISSING_ACCOUNT_AGGREGATE"))?;
 
     let mut count = 0_u64;
     let mut usd = RiskAmount::zero();
     {
-        let mut stmt = tx.prepare(
+        let entries_sql = if scope.is_some() {
+            "SELECT loss_usd FROM risk_entries WHERE account_key=?1
+             AND installation_id=?2 AND campaign_id=?3 AND state <> 'RELEASED'"
+        } else {
             "SELECT loss_usd FROM risk_entries
-             WHERE account_key=?1 AND state <> 'RELEASED'",
-        )?;
-        let rows = stmt.query_map(params![account_key], |r| r.get::<_, String>(0))?;
+             WHERE account_key=?1 AND state <> 'RELEASED'"
+        };
+        let mut stmt = tx.prepare(entries_sql)?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
+            r.get::<_, String>(0)
+        })?;
         for row in rows {
             usd = usd.checked_add(&amount(row?)?)?;
             count = count
@@ -92,28 +121,40 @@ pub(super) fn inspect(
     meta: &BookMeta,
     reservation_key: &str,
     plan_sha256: &str,
+    scope: Option<(&str, &str)>,
 ) -> Result<Option<ReservationReadback>> {
     if reservation_key.is_empty() || reservation_key.len() > 512 || !valid_digest(plan_sha256) {
         return Err(RiskStoreError::Invalid("INSPECTION_IDENTITY"));
     }
+    let values = reserve_scope_values(vec![Value::Text(reservation_key.to_owned())], scope);
+    let entries_sql = if scope.is_some() {
+        "SELECT plan_sha256,state,book_sequence,policy_revision
+         FROM risk_entries WHERE reservation_key=?1
+           AND installation_id=?2 AND campaign_id=?3"
+    } else {
+        "SELECT plan_sha256,state,book_sequence,policy_revision
+         FROM risk_entries WHERE reservation_key=?1"
+    };
     let row: Option<(String, String, i64, i64)> = tx
-        .query_row(
-            "SELECT plan_sha256,state,book_sequence,policy_revision
-             FROM risk_entries WHERE reservation_key=?1",
-            params![reservation_key],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
+        .query_row(entries_sql, params_from_iter(values.iter()), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
         .optional()?;
     let Some((stored_plan, state, entry_seq, revision)) = row else {
         // A committed negative fence is an explicit terminal observation.
         // Without either durable row, absence is UNKNOWN, not no-send proof.
+        let fence_sql = if scope.is_some() {
+            "SELECT plan_sha256,book_sequence,policy_revision
+             FROM risk_no_reserve WHERE reservation_key=?1
+               AND installation_id=?2 AND campaign_id=?3"
+        } else {
+            "SELECT plan_sha256,book_sequence,policy_revision
+             FROM risk_no_reserve WHERE reservation_key=?1"
+        };
         let fence: Option<(String, i64, i64)> = tx
-            .query_row(
-                "SELECT plan_sha256,book_sequence,policy_revision
-                 FROM risk_no_reserve WHERE reservation_key=?1",
-                params![reservation_key],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
+            .query_row(fence_sql, params_from_iter(values.iter()), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
             .optional()?;
         let Some((stored_plan, sequence, revision)) = fence else {
             return Ok(None);
