@@ -26,7 +26,7 @@ mod unsent;
 use integrity::verify_reservation_aggregates;
 pub(super) use post::{PostAuthorized, PostFenceInput};
 pub(in crate::risk::book) use post::{PostDecision, begin_unified_post_and_account_transaction};
-pub(super) use queries::{AccountReadback, ReservationReadback};
+pub(crate) use queries::{AccountReadback, ReservationReadback};
 pub(super) use settlement::{EntrySettlementReceipt, PartialEntrySqlProof};
 pub(super) use unsent::{UnsentReceipt, UnsentSqlProof};
 
@@ -557,6 +557,44 @@ pub(crate) fn read_unified_campaign_summary(
     book_readback_from_meta(&meta).map_err(|_| INVALID)
 }
 
+/// Scoped r4 AccountSummary using the ORIGINAL RiskBook query and exact
+/// money rules. The source cohort and identity remain bound to the caller's
+/// single finance SQL transaction. No grants and no independent connection.
+pub(crate) fn read_unified_campaign_account_summary(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    campaign: &str,
+    account_key: &str,
+) -> std::result::Result<AccountReadback, &'static str> {
+    const INVALID: &str = "UNIFIED_ACCOUNT_RISK_READBACK_INVALID";
+    if installation.is_empty() || campaign.is_empty() {
+        return Err(INVALID);
+    }
+    let scope = Some((installation, campaign));
+    let meta = read_meta_for_scope(tx, scope).map_err(|_| INVALID)?;
+    integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope).map_err(|_| INVALID)?;
+    queries::account_readback(tx, &meta, account_key, scope).map_err(|_| INVALID)
+}
+
+/// Scoped r4 Inspect retains the original exact-plan visibility rule.
+/// None is UNKNOWN, never proof that no venue POST occurred.
+pub(crate) fn read_unified_campaign_reservation(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    campaign: &str,
+    reservation_key: &str,
+    plan_sha256: &str,
+) -> std::result::Result<Option<ReservationReadback>, &'static str> {
+    const INVALID: &str = "UNIFIED_RESERVATION_READBACK_INVALID";
+    if installation.is_empty() || campaign.is_empty() {
+        return Err(INVALID);
+    }
+    let scope = Some((installation, campaign));
+    let meta = read_meta_for_scope(tx, scope).map_err(|_| INVALID)?;
+    integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope).map_err(|_| INVALID)?;
+    queries::inspect(tx, &meta, reservation_key, plan_sha256, scope).map_err(|_| INVALID)
+}
+
 /// Validate stopped v5 source with the ORIGINAL invariant checker.
 pub(crate) fn verify_legacy_import_source(
     source: &Connection,
@@ -665,7 +703,7 @@ impl RiskBookStore {
             .transaction_with_behavior(TransactionBehavior::Deferred)?;
         let meta = read_meta(&tx)?;
         verify_reservation_aggregates(&tx, &meta)?;
-        let result = queries::account_readback(&tx, &meta, account_key)?;
+        let result = queries::account_readback(&tx, &meta, account_key, None)?;
         tx.commit()?;
         Ok(result)
     }
@@ -682,7 +720,7 @@ impl RiskBookStore {
             .transaction_with_behavior(TransactionBehavior::Deferred)?;
         let meta = read_meta(&tx)?;
         verify_reservation_aggregates(&tx, &meta)?;
-        let result = queries::inspect(&tx, &meta, reservation_key, plan_sha256)?;
+        let result = queries::inspect(&tx, &meta, reservation_key, plan_sha256, None)?;
         tx.commit()?;
         Ok(result)
     }
