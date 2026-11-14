@@ -186,6 +186,11 @@ jobs:
         run: cargo test --locked -p okx-kernel -p okx-execution --lib risk_book_contract -- --nocapture
       - name: Verify original AccountStore fill/bill source partial receipt
         run: cargo test --locked -p okx-execution --lib e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted -- --nocapture
+      # The full original AccountStore API (including begin_post) is touched
+      # by #510. One reusable compilation, same job and same draft gate;
+      # 74 filtered risk contracts alone cannot prove zero regressions.
+      - name: Regression of complete original execution Rust library
+        run: cargo test --locked -p okx-execution --lib
 
   architecture:
     name: architecture
