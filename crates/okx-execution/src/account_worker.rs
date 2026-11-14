@@ -747,7 +747,8 @@ pub(crate) fn apply_original_unified_finance_transaction(
                     "SELECT account_key FROM account_meta
                      WHERE installation_id=?1 ORDER BY account_key",
                 )?;
-                query.query_map([installation], |row| row.get::<_, String>(0))?
+                query
+                    .query_map([installation], |row| row.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?
             };
             if accounts.is_empty() {

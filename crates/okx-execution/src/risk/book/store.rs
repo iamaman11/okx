@@ -1247,7 +1247,9 @@ impl RiskBookStore {
         account: &str,
     ) -> Result<usize> {
         if installation.is_empty() || account.is_empty() {
-            return Err(RiskStoreError::Invalid("UNIFIED_RISK_RECOVERY_SCOPE_INVALID"));
+            return Err(RiskStoreError::Invalid(
+                "UNIFIED_RISK_RECOVERY_SCOPE_INVALID",
+            ));
         }
         let pending: i64 = tx.query_row(
             "SELECT COUNT(*) FROM intents
@@ -1286,11 +1288,15 @@ impl RiskBookStore {
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
         if i64::try_from(candidates.len()).ok() != Some(pending) {
-            return Err(RiskStoreError::Invalid("UNIFIED_RISK_RECOVERY_SOURCE_UNPROVEN"));
+            return Err(RiskStoreError::Invalid(
+                "UNIFIED_RISK_RECOVERY_SOURCE_UNPROVEN",
+            ));
         }
         for (campaign, reservation, intent, plan, policy, begin_post_at) in &candidates {
             if begin_post_at.is_none_or(|at| at <= 0) {
-                return Err(RiskStoreError::Invalid("UNIFIED_RISK_RECOVERY_POST_FENCE_MISSING"));
+                return Err(RiskStoreError::Invalid(
+                    "UNIFIED_RISK_RECOVERY_POST_FENCE_MISSING",
+                ));
             }
             let scope = Some((installation, campaign.as_str()));
             let meta = read_meta_for_scope(tx, scope)?;
@@ -1318,14 +1324,24 @@ impl RiskBookStore {
             let Some((saved_account, saved_intent, saved_plan, saved_policy, state, post_at)) =
                 recorded
             else {
-                return Err(RiskStoreError::Invalid("UNIFIED_RISK_RECOVERY_ENTRY_MISSING"));
+                return Err(RiskStoreError::Invalid(
+                    "UNIFIED_RISK_RECOVERY_ENTRY_MISSING",
+                ));
             };
-            if saved_account != account || saved_intent != *intent || saved_plan != *plan
-                || saved_policy != *policy || state != "POSTED" || post_at <= 0
+            if saved_account != account
+                || saved_intent != *intent
+                || saved_plan != *plan
+                || saved_policy != *policy
+                || state != "POSTED"
+                || post_at <= 0
             {
-                return Err(RiskStoreError::Invalid("UNIFIED_RISK_RECOVERY_IDENTITY_MISMATCH"));
+                return Err(RiskStoreError::Invalid(
+                    "UNIFIED_RISK_RECOVERY_IDENTITY_MISMATCH",
+                ));
             }
-            let next = meta.sequence.checked_add(1)
+            let next = meta
+                .sequence
+                .checked_add(1)
                 .filter(|sequence| *sequence <= LEGACY_MAX_SAFE_INTEGER)
                 .ok_or(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
             let changed = tx.execute(
@@ -1333,7 +1349,15 @@ impl RiskBookStore {
                  WHERE installation_id=?1 AND campaign_id=?2
                    AND reservation_key=?3 AND account_key=?4 AND intent_id=?5
                    AND plan_sha256=?6 AND policy_revision=?7 AND state='POSTED'",
-                params![installation, campaign, reservation, account, intent, plan, policy],
+                params![
+                    installation,
+                    campaign,
+                    reservation,
+                    account,
+                    intent,
+                    plan,
+                    policy
+                ],
             )?;
             if changed != 1 {
                 return Err(RiskStoreError::StaleSequence);
@@ -1343,10 +1367,12 @@ impl RiskBookStore {
                  WHERE singleton=1 AND installation_id=?2 AND campaign_id=?3
                    AND book_sequence=?4",
                 params![
-                    i64::try_from(next).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
+                    i64::try_from(next)
+                        .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
                     installation,
                     campaign,
-                    i64::try_from(meta.sequence).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?
+                    i64::try_from(meta.sequence)
+                        .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?
                 ],
             )?;
             if changed != 1 {

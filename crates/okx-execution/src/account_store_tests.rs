@@ -12536,8 +12536,7 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
     // dispatch, first with a real rollback and then with one COMMIT.
     // Neither path can authorize another venue POST or refund any reserve.
     use crate::account_worker::{
-        UnifiedFinanceWrite, UnifiedFinanceWriteReceipt,
-        apply_original_unified_finance_transaction,
+        UnifiedFinanceWrite, UnifiedFinanceWriteReceipt, apply_original_unified_finance_transaction,
     };
     for commit in [false, true] {
         let tx = recovered
@@ -12552,7 +12551,10 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
             },
         )
         .unwrap();
-        assert_eq!(receipt, UnifiedFinanceWriteReceipt::Recovered { changed: 1 });
+        assert_eq!(
+            receipt,
+            UnifiedFinanceWriteReceipt::Recovered { changed: 1 }
+        );
         let state: (String, String, String, i64) = tx
             .query_row(
                 "SELECT e.state,i.state,r.state,m.book_sequence
@@ -12569,15 +12571,23 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        assert_eq!(state, ("UNKNOWN".into(), "UNKNOWN".into(), "UNKNOWN".into(), 4));
+        assert_eq!(
+            state,
+            ("UNKNOWN".into(), "UNKNOWN".into(), "UNKNOWN".into(), 4)
+        );
         crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
-        if commit { tx.commit().unwrap(); } else { tx.rollback().unwrap(); }
+        if commit {
+            tx.commit().unwrap();
+        } else {
+            tx.rollback().unwrap();
+        }
     }
     drop(recovered);
     let mut recovered = Connection::open(&destination).unwrap();
     recovered.pragma_update(None, "foreign_keys", "ON").unwrap();
-    let joint: (String, String, String, i64) = recovered.query_row(
-        "SELECT e.state,i.state,r.state,m.book_sequence
+    let joint: (String, String, String, i64) = recovered
+        .query_row(
+            "SELECT e.state,i.state,r.state,m.book_sequence
          FROM risk_entries e JOIN intents i
            ON e.installation_id=i.installation_id
           AND e.account_key=i.account_key AND e.intent_id=i.intent_id
@@ -12586,10 +12596,14 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
          JOIN risk_meta m ON m.installation_id=e.installation_id
            AND m.campaign_id=e.campaign_id
          WHERE e.campaign_id='campaign-X' AND e.reservation_key='same-reservation'",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    ).unwrap();
-    assert_eq!(joint, ("UNKNOWN".into(), "UNKNOWN".into(), "UNKNOWN".into(), 4));
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        joint,
+        ("UNKNOWN".into(), "UNKNOWN".into(), "UNKNOWN".into(), 4)
+    );
     assert_eq!(
         apply_original_unified_finance_transaction(
             &recovered.transaction().unwrap(),
@@ -12607,13 +12621,15 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
     for campaign in ["campaign-X", "campaign-Y"] {
         crate::risk::verify_unified_import_campaign(&tx, "installation", campaign).unwrap();
     }
-    let foreign: (String, i64) = tx.query_row(
-        "SELECT e.state,m.book_sequence FROM risk_entries e JOIN risk_meta m
+    let foreign: (String, i64) = tx
+        .query_row(
+            "SELECT e.state,m.book_sequence FROM risk_entries e JOIN risk_meta m
          ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
          WHERE e.campaign_id='campaign-Y' AND e.reservation_key='same-reservation'",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).unwrap();
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(foreign, ("HELD".into(), 2));
     tx.rollback().unwrap();
 }
