@@ -12295,16 +12295,18 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
     // during a coupled original AccountStore + native RiskBook transaction.
     // The installed Windows witness remains separate/NOT_PROVEN.
     kill_unified_native_post_at_commit(&destination, &ai.plan_hash, &ai.intent_id, "BEFORE_COMMIT");
-    let rolled_back: (String, String, i64) = target.query_row(
-        "SELECT e.state,i.state,m.book_sequence
+    let rolled_back: (String, String, i64) = target
+        .query_row(
+            "SELECT e.state,i.state,m.book_sequence
          FROM risk_entries e JOIN intents i
            ON e.installation_id=i.installation_id AND e.account_key=i.account_key
           AND e.intent_id=i.intent_id JOIN risk_meta m
            ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
          WHERE e.campaign_id='campaign-X' AND e.reservation_key='same-reservation'",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).unwrap();
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
     assert_eq!(rolled_back, ("HELD".into(), "RESERVED".into(), 2));
 
     kill_unified_native_post_at_commit(&destination, &ai.plan_hash, &ai.intent_id, "AFTER_COMMIT");
@@ -12375,7 +12377,9 @@ fn risk_book_contract_child_unified_native_post_os_kill_barrier() {
     let phase = std::env::var("OKX_510_POST_CHILD_PHASE").unwrap();
     let mut db = Connection::open(path).unwrap();
     db.pragma_update(None, "foreign_keys", "ON").unwrap();
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
     assert_eq!(
         crate::risk::test_stage_scoped_begin_post(
             &tx,
@@ -12385,14 +12389,20 @@ fn risk_book_contract_child_unified_native_post_os_kill_barrier() {
             &plan,
             &["acct-A", "acct-B"],
             2,
-        ).unwrap(), 3
+        )
+        .unwrap(),
+        3
     );
-    assert_eq!(tx.execute(
-        "UPDATE intents SET state='POSTING'
+    assert_eq!(
+        tx.execute(
+            "UPDATE intents SET state='POSTING'
          WHERE installation_id='installation' AND account_key='acct-A'
            AND intent_id=?1 AND state='RESERVED'",
-        [&intent],
-    ).unwrap(), 1);
+            [&intent],
+        )
+        .unwrap(),
+        1
+    );
     match phase.as_str() {
         "BEFORE_COMMIT" => std::mem::forget(tx),
         "AFTER_COMMIT" => tx.commit().unwrap(),
@@ -12418,7 +12428,10 @@ fn kill_unified_native_post_at_commit(
         time::Duration,
     };
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["risk_book_contract_child_unified_native_post_os_kill_barrier", "--nocapture"])
+        .args([
+            "risk_book_contract_child_unified_native_post_os_kill_barrier",
+            "--nocapture",
+        ])
         .env("OKX_510_POST_CHILD_SQLITE", destination)
         .env("OKX_510_POST_CHILD_PLAN", plan)
         .env("OKX_510_POST_CHILD_INTENT", intent)
@@ -12440,7 +12453,13 @@ fn kill_unified_native_post_at_commit(
     });
     let observed = receiver.recv_timeout(Duration::from_secs(15));
     child.kill().unwrap();
-    assert!(!child.wait().unwrap().success(), "actual native Rust subprocess must OS-exit");
+    assert!(
+        !child.wait().unwrap().success(),
+        "actual native Rust subprocess must OS-exit"
+    );
     reader.join().unwrap();
-    assert!(observed.is_ok(), "original account + RiskBook child never reached {phase}");
+    assert!(
+        observed.is_ok(),
+        "original account + RiskBook child never reached {phase}"
+    );
 }
