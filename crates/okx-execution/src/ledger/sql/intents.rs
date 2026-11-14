@@ -2198,18 +2198,49 @@ impl AccountStore {
     /// requiring POSTED *after* that transition would reject a real ACK.
     /// Neither ACK nor OPEN by itself proves that BEGIN_POST was committed.
     pub fn post_fence_evidence(&self, id: &str) -> StoreResult<(i64, String)> {
-        let recorded: Option<(Option<i64>, String, String, Option<String>)> = self
-            .connection
-            .query_row(
-                "SELECT i.begin_post_at,r.state,i.state,i.exchange_order_id
-                 FROM intents i JOIN risk_receipts r
-                   ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
-                  AND r.account_key=?2 AND r.installation_id=?3
-                 WHERE i.intent_id=?1 AND i.risk_increase=1",
-                params![id, self.meta.account_key, self.meta.installation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
+        Self::post_fence_evidence_sql(
+            &self.connection,
+            &self.meta.installation_id,
+            &self.meta.account_key,
+            id,
+            None,
+        )
+    }
+
+    /// Existing ORIGINAL AccountStore durable POST witness for both old
+    /// account-local v2 and unified v6 finance. V6 binds all identity scopes
+    /// including reservation; never infer authorization from a different
+    /// account's identical venue or intent ID.
+    pub(crate) fn post_fence_evidence_sql(
+        db: &rusqlite::Connection,
+        installation: &str,
+        account: &str,
+        id: &str,
+        reservation: Option<&str>,
+    ) -> StoreResult<(i64, String)> {
+        let recorded: Option<(Option<i64>, String, String, Option<String>)> =
+            if let Some(reservation) = reservation {
+                db.query_row(
+                    "SELECT i.begin_post_at,r.state,i.state,i.exchange_order_id
+                     FROM intents i JOIN risk_receipts r
+                       ON r.installation_id=i.installation_id AND r.account_key=i.account_key
+                      AND r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
+                     WHERE i.installation_id=?1 AND i.account_key=?2 AND i.intent_id=?3
+                       AND r.reservation_key=?4 AND i.risk_increase=1",
+                    params![installation, account, id, reservation],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                ).optional()?
+            } else {
+                db.query_row(
+                    "SELECT i.begin_post_at,r.state,i.state,i.exchange_order_id
+                     FROM intents i JOIN risk_receipts r
+                       ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
+                      AND r.account_key=?2 AND r.installation_id=?3
+                     WHERE i.intent_id=?1 AND i.risk_increase=1",
+                    params![id, account, installation],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                ).optional()?
+            };
         match recorded {
             Some((Some(at), state, intent_state, order_id))
                 if verified_durable_post_fence(at, &state, &intent_state, order_id.as_deref()) =>
