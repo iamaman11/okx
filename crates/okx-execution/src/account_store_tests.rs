@@ -12291,6 +12291,42 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         tx.rollback().unwrap();
     }
 
+    // Original deadline, policy revision and SQL recovery fences must
+    // reject a transition without any persistent RiskBook POST or account ACK.
+    for (sql, expected_reason) in [
+        (
+            "UPDATE intents SET deadline=10002
+             WHERE installation_id='installation' AND account_key='acct-A'
+               AND intent_id='intent'",
+            "INVALID_RISK_INPUT: COMMAND_EXPIRED",
+        ),
+        (
+            "UPDATE account_policy SET revision=2
+             WHERE installation_id='installation' AND account_key='acct-A'",
+            "INVALID_RISK_INPUT: POLICY_CHANGED",
+        ),
+        (
+            "UPDATE storage_recovery SET requires_reconcile=1
+             WHERE installation_id='installation' AND account_key='acct-A'",
+            "INVALID_RISK_INPUT: STORAGE_RECOVERY_INCOMPLETE",
+        ),
+    ] {
+        let tx = target.transaction().unwrap();
+        assert_eq!(tx.execute(sql, []).unwrap(), 1);
+        let denied = crate::risk::test_stage_scoped_begin_post(
+            &tx, "installation", "campaign-X", "same-reservation",
+            &ai.plan_hash, cohort, 2,
+        );
+        assert_eq!(denied.unwrap_err(), expected_reason);
+        tx.rollback().unwrap();
+    }
+    assert!(matches!(
+        AccountStore::post_fence_evidence_sql(
+            &target, "installation", "acct-A", &ai.intent_id, Some("same-reservation")
+        ),
+        Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED"))
+    ));
+
     // First execute a true ROLLBACK after both RiskBook and native intent
     // changed, proving neither half survives on a shared SQLite file.
     {
@@ -12358,6 +12394,31 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         )
         .unwrap();
     assert_eq!(state, ("POSTED".into(), "POSTING".into(), 3));
+    // Verify the *original* AccountStore acknowledgement witness too, not
+    // only a changed intent enum or RiskBook sequence. A lost ACK recovers
+    // one exact durable begin_post_at and one original POSTED receipt.
+    assert_eq!(
+        AccountStore::post_fence_evidence_sql(
+            &recovered, "installation", "acct-A", &ai.intent_id,
+            Some("same-reservation")
+        ).unwrap(),
+        (10_002, "POSTED".into()),
+    );
+    assert!(matches!(
+        AccountStore::post_fence_evidence_sql(
+            &recovered, "installation", "acct-B", &bi.intent_id,
+            Some("same-reservation")
+        ),
+        Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED"))
+    ));
+    assert!(matches!(
+        AccountStore::post_fence_evidence_sql(
+            &recovered, "installation", "acct-A", &ai.intent_id,
+            Some("wrong-reservation")
+        ),
+        Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED"))
+    ));
+
     let foreign: (String, i64) = recovered
         .query_row(
             "SELECT e.state,m.book_sequence FROM risk_entries e JOIN risk_meta m
