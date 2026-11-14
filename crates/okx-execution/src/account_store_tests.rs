@@ -11468,7 +11468,11 @@ fn risk_book_contract_unified_offline_import_all_47_original_tables_and_obligati
     target.pragma_update(None, "foreign_keys", "ON").unwrap();
     let report = super::sql::unified_financial::importer::import_stopped_finance_into_empty(
         &mut target,
-        "installation",
+        &super::sql::unified_financial::importer::ExpectedFinanceInventory {
+            installation: "installation",
+            accounts: &["acct-A", "acct-B"],
+            campaigns: &["campaign-X", "campaign-Y"],
+        },
         &[&sa, &sb],
         &[&sx, &sy],
     )
@@ -11582,7 +11586,11 @@ fn risk_book_contract_unified_offline_import_rejects_live_campaign_writer() {
     assert!(matches!(
         super::sql::unified_financial::importer::import_stopped_finance_into_empty(
             &mut target,
-            "installation",
+            &super::sql::unified_financial::importer::ExpectedFinanceInventory {
+                installation: "installation",
+                accounts: &["acct-A", "acct-B"],
+                campaigns: &["campaign-X"],
+            },
             &[&sa, &sb],
             &[&sc],
         ),
@@ -11632,7 +11640,11 @@ fn risk_book_contract_unified_offline_import_bad_campaign_plan_rolls_back() {
     assert!(
         super::sql::unified_financial::importer::import_stopped_finance_into_empty(
             &mut target,
-            "installation",
+            &super::sql::unified_financial::importer::ExpectedFinanceInventory {
+                installation: "installation",
+                accounts: &["acct-A", "acct-B"],
+                campaigns: &["campaign-X"],
+            },
             &[&sa, &sb],
             &[&sc],
         )
@@ -11688,7 +11700,11 @@ fn risk_book_contract_unified_offline_import_rejects_corrupt_legacy_risk_aggrega
     assert!(matches!(
         super::sql::unified_financial::importer::import_stopped_finance_into_empty(
             &mut target,
-            "installation",
+            &super::sql::unified_financial::importer::ExpectedFinanceInventory {
+                installation: "installation",
+                accounts: &["acct-A", "acct-B"],
+                campaigns: &["campaign-X"],
+            },
             &[&sa, &sb],
             &[&sc],
         ),
