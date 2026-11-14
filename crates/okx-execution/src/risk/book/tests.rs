@@ -2567,12 +2567,14 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             .unwrap(),
         1
     );
-    let a_state: String = db.query_row(
-        "SELECT state FROM intents WHERE installation_id='test-installation'
+    let a_state: String = db
+        .query_row(
+            "SELECT state FROM intents WHERE installation_id='test-installation'
          AND account_key=?1 AND intent_id='intentA0001'",
-        [account('a')],
-        |r| r.get(0),
-    ).unwrap();
+            [account('a')],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(a_state, "RESERVED");
     // B is denied by the SAME cohort budget; its newer observed loss must
     // still be durable even though no second reservation can be created.
@@ -2597,12 +2599,14 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         tx.commit().unwrap();
     }
     assert_eq!(read(&db), ("6".into(), "1".into(), 2));
-    let b_state: String = db.query_row(
-        "SELECT state FROM intents WHERE installation_id='test-installation'
+    let b_state: String = db
+        .query_row(
+            "SELECT state FROM intents WHERE installation_id='test-installation'
          AND account_key=?1 AND intent_id='intentB0001'",
-        [account('b')],
-        |r| r.get(0),
-    ).unwrap();
+            [account('b')],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(b_state, "PREPARED");
     drop(db);
     let mut db = Connection::open(&f.path).unwrap();
