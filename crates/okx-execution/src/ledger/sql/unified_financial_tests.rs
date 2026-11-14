@@ -805,7 +805,7 @@ fn risk_book_contract_unified_full_original_47_tables_have_scoped_identity() {
         )
         .unwrap();
     assert_eq!(
-        total, 47,
+        total, 48,
         "all 39 original AccountStore and 8 RiskBook tables"
     );
     for account in ["acct-A", "acct-B"] {
