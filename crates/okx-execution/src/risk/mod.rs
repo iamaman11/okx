@@ -12,4 +12,6 @@ pub(crate) use book::{
 };
 
 #[cfg(test)]
-pub(crate) use book::test_stage_scoped_begin_post;
+pub(crate) use book::{
+    ReserveInput, VerifiedCensus, test_stage_scoped_begin_post, test_trial_unified_reserve,
+};
