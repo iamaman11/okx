@@ -2537,6 +2537,28 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         ));
         tx.rollback().unwrap();
     }
+    // The original account plan, not a caller-selected alternate RiskBook
+    // strategy bucket, owns this reservation. Reject before touching any risk
+    // high-water/cache, even when account and campaign identities are valid.
+    {
+        let mut wrong_bucket = original.clone();
+        wrong_bucket.strategy_id = "strategy_other".into();
+        let tx = db.transaction().unwrap();
+        assert!(matches!(
+            RiskBookStore::reserve_unified_account_transaction(
+                &tx,
+                "test-installation",
+                &campaign,
+                &wrong_bucket,
+                &census(),
+                &receipt_a,
+            ),
+            Err(RiskStoreError::Invalid(
+                "UNIFIED_ACCOUNT_STRATEGY_OWNER_UNPROVEN"
+            ))
+        ));
+        tx.rollback().unwrap();
+    }
     // The AccountStore check runs AFTER RiskBook has staged a HELD reservation.
     // If the original owner proof disagrees, the caller must roll back BOTH
     // writes, not commit a risk-only reservation with no native receipt.
