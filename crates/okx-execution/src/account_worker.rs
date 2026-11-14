@@ -627,7 +627,7 @@ impl UnifiedFinanceHandle {
                         .map_err(|error| match error {
                             AuthorityModeError::Io(error) => StoreError::Io(error),
                             AuthorityModeError::Busy => {
-                                StoreError::Invalid("FINANCE_INSTALLATION_WRITER_BUSY")
+                                StoreError::Invalid("UNIFIED_FINANCE_WRITER_BUSY")
                             }
                             AuthorityModeError::FinancePresent => {
                                 StoreError::Invalid("UNIFIED_FINANCE_MODE_INVALID")
