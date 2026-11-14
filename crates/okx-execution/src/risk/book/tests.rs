@@ -2347,7 +2347,6 @@ async fn risk_book_contract_sql_real_two_owner_os_kill_after_campaign_before_acc
     assert_eq!(campaign.readback().await.unwrap(), before);
 }
 
-
 #[test]
 fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_denial() {
     use rusqlite::{Connection, params};
@@ -2465,7 +2464,8 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
                 Some(("test-installation", &campaign)),
                 &original,
                 &census()
-            ).unwrap(),
+            )
+            .unwrap(),
             ReserveDecision::Held(_)
         ));
         tx.rollback().unwrap();
@@ -2483,8 +2483,12 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
                 Some(("test-installation", &campaign)),
                 &original,
                 &census()
-            ).unwrap(),
-            ReserveDecision::Held(HeldReceipt { replayed: false, .. })
+            )
+            .unwrap(),
+            ReserveDecision::Held(HeldReceipt {
+                replayed: false,
+                ..
+            })
         ));
         tx.commit().unwrap();
     }
@@ -2493,7 +2497,13 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             "SELECT global_reserved_usdt,loss_consumed_usd,book_sequence FROM risk_meta
              WHERE installation_id='test-installation' AND campaign_id=?1",
             [&campaign],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
         )
         .unwrap()
     };
@@ -2510,7 +2520,8 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
                 Some(("test-installation", &campaign)),
                 &request('b', "intentB", "6"),
                 &fresh
-            ).unwrap(),
+            )
+            .unwrap(),
             ReserveDecision::Rejected(RiskStoreError::Denied(
                 RiskRuleError::InsufficientAggregateOrAccountRisk
             ))
@@ -2529,8 +2540,12 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
                 Some(("test-installation", &campaign)),
                 &original,
                 &fresh
-            ).unwrap(),
-            ReserveDecision::Held(HeldReceipt { replayed: true, .. })
+            )
+            .unwrap(),
+            ReserveDecision::Held(HeldReceipt {
+                replayed: true,
+                ..
+            })
         ));
         tx.rollback().unwrap();
     }
