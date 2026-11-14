@@ -11549,11 +11549,14 @@ fn risk_book_contract_unified_offline_import_all_47_original_tables_and_obligati
         accounts: &["acct-B", "acct-A"],
         campaigns: &["campaign-Y", "campaign-X"],
     };
-    let recovered =
-        super::sql::unified_financial::importer::inspect_stopped_finance_import(
-            &reopened, &expected,
-        ).unwrap();
-    assert_eq!(recovered, report, "ACK lost after COMMIT is a read-only recovery");
+    let recovered = super::sql::unified_financial::importer::inspect_stopped_finance_import(
+        &reopened, &expected,
+    )
+    .unwrap();
+    assert_eq!(
+        recovered, report,
+        "ACK lost after COMMIT is a read-only recovery"
+    );
     assert_eq!(recovered.inventory_sha256.len(), 64);
     assert_eq!(recovered.content_sha256.len(), 64);
 }
@@ -11783,13 +11786,18 @@ fn risk_book_contract_unified_manifest_refuses_missing_account_or_campaign_befor
             campaigns: &campaigns,
         };
         assert!(importer(&mut target, &expected, &[&sa, &sb], &[&sx, &sy]).is_err());
-        let count: i64 = target.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+        let count: i64 = target
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
              AND name NOT LIKE 'sqlite_%'",
-            [],
-            |r| r.get(0),
-        ).unwrap();
-        assert_eq!(count, 0, "incomplete/duplicate inventory must not create target schema");
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "incomplete/duplicate inventory must not create target schema"
+        );
     }
 }
 
@@ -11824,8 +11832,12 @@ fn risk_book_contract_unified_manifest_detects_modified_financial_fact_after_reo
         campaigns: &["campaign-X"],
     };
     let import = super::sql::unified_financial::importer::import_stopped_finance_into_empty(
-        &mut target, &expected, &[&sa, &sb], &[&sc],
-    ).unwrap();
+        &mut target,
+        &expected,
+        &[&sa, &sb],
+        &[&sc],
+    )
+    .unwrap();
     assert_eq!(
         super::sql::unified_financial::importer::inspect_stopped_finance_import(
             &target, &expected,
@@ -11835,34 +11847,49 @@ fn risk_book_contract_unified_manifest_detects_modified_financial_fact_after_reo
     // A retry must not overwrite a committed source inventory or duplicate debt.
     assert!(matches!(
         super::sql::unified_financial::importer::import_stopped_finance_into_empty(
-            &mut target, &expected, &[&sa, &sb], &[&sc],
+            &mut target,
+            &expected,
+            &[&sa, &sb],
+            &[&sc],
         ),
         Err(StoreError::Invalid("UNIFIED_IMPORT_TARGET_NOT_EMPTY"))
     ));
-    assert!(target.execute(
-        "UPDATE finance_import_manifest SET content_sha256=?1",
-        ["0".repeat(64)]
-    ).is_err(), "completed offline marker is immutable");
+    assert!(
+        target
+            .execute(
+                "UPDATE finance_import_manifest SET content_sha256=?1",
+                ["0".repeat(64)]
+            )
+            .is_err(),
+        "completed offline marker is immutable"
+    );
     drop(target);
     let reopened = Connection::open(&destination).unwrap();
     assert_eq!(
         super::sql::unified_financial::importer::inspect_stopped_finance_import(
             &reopened, &expected,
-        ).unwrap(),
+        )
+        .unwrap(),
         import
     );
     // SQL integrity, FKs and schema version remain valid, but financial
     // content is no longer what the single committed import recorded.
-    reopened.execute(
-        "UPDATE risk_meta SET global_limit_usdt='11' WHERE campaign_id='campaign-X'",
-        [],
-    ).unwrap();
-    let check: String = reopened.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+    reopened
+        .execute(
+            "UPDATE risk_meta SET global_limit_usdt='11' WHERE campaign_id='campaign-X'",
+            [],
+        )
+        .unwrap();
+    let check: String = reopened
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(check, "ok");
     assert!(matches!(
         super::sql::unified_financial::importer::inspect_stopped_finance_import(
             &reopened, &expected,
         ),
-        Err(StoreError::Invalid("UNIFIED_IMPORT_CONTENT_DIGEST_MISMATCH"))
+        Err(StoreError::Invalid(
+            "UNIFIED_IMPORT_CONTENT_DIGEST_MISMATCH"
+        ))
     ));
 }
