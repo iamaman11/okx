@@ -7,7 +7,9 @@ use super::{
     read_meta_for_scope, reserve_scope_values, valid_digest, valid_token,
 };
 use crate::account_store::UnsentSqlReceipt;
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params_from_iter, types::Value};
+use rusqlite::{
+    OptionalExtension, Transaction, TransactionBehavior, params_from_iter, types::Value,
+};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,9 +108,8 @@ impl RiskBookStore {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let result = Self::release_unsent_sql_transaction(
-            &tx, None, proof, expected_sequence, generation,
-        )?;
+        let result =
+            Self::release_unsent_sql_transaction(&tx, None, proof, expected_sequence, generation)?;
         tx.commit()?;
         Ok(result)
     }
@@ -141,22 +142,19 @@ impl RiskBookStore {
             "SELECT account_key,intent_id,plan_sha256,request_hash,record_digest,reason
              FROM risk_no_reserve WHERE reservation_key=?1"
         };
-        let entry_address = reserve_scope_values(vec![Value::Text(proof.reservation_key.clone())], scope);
+        let entry_address =
+            reserve_scope_values(vec![Value::Text(proof.reservation_key.clone())], scope);
         let existing: Option<(String, String, String, String, String, String)> = tx
-            .query_row(
-                existing_sql,
-                params_from_iter(entry_address.iter()),
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                    ))
-                },
-            )
+            .query_row(existing_sql, params_from_iter(entry_address.iter()), |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
             .optional()?;
         if let Some(row) = existing {
             if row
@@ -187,14 +185,35 @@ impl RiskBookStore {
                     reserved_usdt,reserved_loss_usd,release_proof_digest,release_request_hash,release_reason
              FROM risk_entries WHERE reservation_key=?1"
         };
-        let entry: Option<(String, String, String, String, String, String, String, String, String, String)> = tx
+        let entry: Option<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        )> = tx
             .query_row(
                 risk_entry_sql,
                 params_from_iter(entry_address.iter()),
-                |r| Ok((
-                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                    r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?
-                )),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                    ))
+                },
             )
             .optional()?;
         let new_sequence = next_sequence(meta.sequence)?;
@@ -243,11 +262,10 @@ impl RiskBookStore {
             } else {
                 "SELECT reserved_entry_usd FROM risk_entries WHERE reservation_key=?1"
             };
-            let held: String = tx.query_row(
-                held_sql,
-                params_from_iter(entry_address.iter()),
-                |r| r.get(0),
-            )?;
+            let held: String =
+                tx.query_row(held_sql, params_from_iter(entry_address.iter()), |r| {
+                    r.get(0)
+                })?;
             let reserved_usdt = amount(remaining_usdt)?;
             let reserved_loss = amount(remaining_loss)?;
             let reserved_entry = amount(held)?;
@@ -258,11 +276,10 @@ impl RiskBookStore {
                 "SELECT reserved_usdt FROM risk_account_occupied WHERE account_key=?1"
             };
             let account_address = reserve_scope_values(vec![Value::Text(account.clone())], scope);
-            let account_total: String = tx.query_row(
-                account_sql,
-                params_from_iter(account_address.iter()),
-                |r| r.get(0),
-            )?;
+            let account_total: String =
+                tx.query_row(account_sql, params_from_iter(account_address.iter()), |r| {
+                    r.get(0)
+                })?;
             let strategy_sql = if scope.is_some() {
                 "SELECT reserved_usdt FROM risk_strategy_occupied
                  WHERE account_key=?1 AND strategy_id=?2
@@ -272,7 +289,8 @@ impl RiskBookStore {
                  WHERE account_key=?1 AND strategy_id=?2"
             };
             let strategy_address = reserve_scope_values(
-                vec![Value::Text(account.clone()), Value::Text(strategy.clone())], scope,
+                vec![Value::Text(account.clone()), Value::Text(strategy.clone())],
+                scope,
             );
             let strategy_total: String = tx.query_row(
                 strategy_sql,
@@ -309,13 +327,17 @@ impl RiskBookStore {
                        release_proof_digest=?2,release_request_hash=?3,release_reason=?4
                  WHERE reservation_key=?1 AND state='HELD'"
             };
-            let update_entry_args = reserve_scope_values(vec![
-                Value::Text(proof.reservation_key.clone()),
-                Value::Text(proof.record_digest.clone()),
-                Value::Text(proof.request_hash.clone()),
-                Value::Text(proof.reason.clone()),
-            ], scope);
-            let updated = tx.execute(update_entry_sql, params_from_iter(update_entry_args.iter()))?;
+            let update_entry_args = reserve_scope_values(
+                vec![
+                    Value::Text(proof.reservation_key.clone()),
+                    Value::Text(proof.record_digest.clone()),
+                    Value::Text(proof.request_hash.clone()),
+                    Value::Text(proof.reason.clone()),
+                ],
+                scope,
+            );
+            let updated =
+                tx.execute(update_entry_sql, params_from_iter(update_entry_args.iter()))?;
             if updated != 1 {
                 return Err(RiskStoreError::StaleSequence);
             }
@@ -326,10 +348,12 @@ impl RiskBookStore {
                 "UPDATE risk_account_occupied SET reserved_usdt=?1 WHERE account_key=?2"
             };
             let account_update_args = reserve_scope_values(
-                vec![Value::Text(account_remaining), Value::Text(account.clone())], scope,
+                vec![Value::Text(account_remaining), Value::Text(account.clone())],
+                scope,
             );
             let account_updates = tx.execute(
-                account_update_sql, params_from_iter(account_update_args.iter()),
+                account_update_sql,
+                params_from_iter(account_update_args.iter()),
             )?;
             let strategy_update_sql = if scope.is_some() {
                 "UPDATE risk_strategy_occupied SET reserved_usdt=?1
@@ -339,13 +363,17 @@ impl RiskBookStore {
                 "UPDATE risk_strategy_occupied SET reserved_usdt=?1
                  WHERE account_key=?2 AND strategy_id=?3"
             };
-            let strategy_update_args = reserve_scope_values(vec![
-                Value::Text(strategy_remaining),
-                Value::Text(account),
-                Value::Text(strategy),
-            ], scope);
+            let strategy_update_args = reserve_scope_values(
+                vec![
+                    Value::Text(strategy_remaining),
+                    Value::Text(account),
+                    Value::Text(strategy),
+                ],
+                scope,
+            );
             let strategy_updates = tx.execute(
-                strategy_update_sql, params_from_iter(strategy_update_args.iter()),
+                strategy_update_sql,
+                params_from_iter(strategy_update_args.iter()),
             )?;
             if scope.is_some() && (account_updates != 1 || strategy_updates != 1) {
                 return Err(RiskStoreError::Corrupt("UNIFIED_UNSENT_OCCUPANCY_MISSING"));
@@ -368,14 +396,18 @@ impl RiskBookStore {
             ];
             if scope.is_some() {
                 meta_update_args.extend([
-                    Value::Integer(i64::try_from(meta.sequence).map_err(|_| RiskStoreError::StaleSequence)?),
-                    Value::Integer(i64::try_from(meta.generation).map_err(|_| RiskStoreError::StaleGeneration)?),
+                    Value::Integer(
+                        i64::try_from(meta.sequence).map_err(|_| RiskStoreError::StaleSequence)?,
+                    ),
+                    Value::Integer(
+                        i64::try_from(meta.generation)
+                            .map_err(|_| RiskStoreError::StaleGeneration)?,
+                    ),
                 ]);
             }
             let meta_update_args = reserve_scope_values(meta_update_args, scope);
-            let meta_updates = tx.execute(
-                meta_update_sql, params_from_iter(meta_update_args.iter()),
-            )?;
+            let meta_updates =
+                tx.execute(meta_update_sql, params_from_iter(meta_update_args.iter()))?;
             if scope.is_some() && meta_updates != 1 {
                 return Err(RiskStoreError::StaleSequence);
             }
@@ -386,15 +418,12 @@ impl RiskBookStore {
             } else {
                 "SELECT 1 FROM risk_policy_account WHERE account_key=?1"
             };
-            let account_args = reserve_scope_values(
-                vec![Value::Text(proof.account_key.clone())], scope,
-            );
+            let account_args =
+                reserve_scope_values(vec![Value::Text(proof.account_key.clone())], scope);
             let account: Option<i64> = tx
-                .query_row(
-                    account_sql,
-                    params_from_iter(account_args.iter()),
-                    |r| r.get(0),
-                )
+                .query_row(account_sql, params_from_iter(account_args.iter()), |r| {
+                    r.get(0)
+                })
                 .optional()?;
             if account.is_none() {
                 return Err(RiskStoreError::Invalid("ACCOUNT_NOT_ACTIVE"));
@@ -411,18 +440,23 @@ impl RiskBookStore {
                    request_hash,record_digest,reason,policy_revision,book_sequence)
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)"
             };
-            let insert_args = reserve_scope_values(vec![
-                Value::Text(proof.reservation_key.clone()),
-                Value::Text(proof.account_key.clone()),
-                Value::Text(proof.intent_id.clone()),
-                Value::Text(proof.plan_sha256.clone()),
-                Value::Text(proof.request_hash.clone()),
-                Value::Text(proof.record_digest.clone()),
-                Value::Text(proof.reason.clone()),
-                Value::Integer(i64::try_from(meta.policy_revision)
-                    .map_err(|_| RiskStoreError::PolicyConflict)?),
-                Value::Integer(new_sequence),
-            ], scope);
+            let insert_args = reserve_scope_values(
+                vec![
+                    Value::Text(proof.reservation_key.clone()),
+                    Value::Text(proof.account_key.clone()),
+                    Value::Text(proof.intent_id.clone()),
+                    Value::Text(proof.plan_sha256.clone()),
+                    Value::Text(proof.request_hash.clone()),
+                    Value::Text(proof.record_digest.clone()),
+                    Value::Text(proof.reason.clone()),
+                    Value::Integer(
+                        i64::try_from(meta.policy_revision)
+                            .map_err(|_| RiskStoreError::PolicyConflict)?,
+                    ),
+                    Value::Integer(new_sequence),
+                ],
+                scope,
+            );
             tx.execute(insert_sql, params_from_iter(insert_args.iter()))?;
             let meta_update_sql = if scope.is_some() {
                 "UPDATE risk_meta SET book_sequence=?1 WHERE singleton=1
@@ -434,8 +468,13 @@ impl RiskBookStore {
             let mut meta_update_args = vec![Value::Integer(new_sequence)];
             if scope.is_some() {
                 meta_update_args.extend([
-                    Value::Integer(i64::try_from(meta.sequence).map_err(|_| RiskStoreError::StaleSequence)?),
-                    Value::Integer(i64::try_from(meta.generation).map_err(|_| RiskStoreError::StaleGeneration)?),
+                    Value::Integer(
+                        i64::try_from(meta.sequence).map_err(|_| RiskStoreError::StaleSequence)?,
+                    ),
+                    Value::Integer(
+                        i64::try_from(meta.generation)
+                            .map_err(|_| RiskStoreError::StaleGeneration)?,
+                    ),
                 ]);
             }
             let meta_update_args = reserve_scope_values(meta_update_args, scope);

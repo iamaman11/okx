@@ -8,7 +8,9 @@ use super::{
 };
 use crate::account_store::EntrySettlementEvidence;
 use okx_kernel::risk::money::RiskAmount;
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params_from_iter, types::Value};
+use rusqlite::{
+    OptionalExtension, Transaction, TransactionBehavior, params_from_iter, types::Value,
+};
 
 #[derive(Debug, Clone)]
 pub(in crate::risk::book) struct PartialEntrySqlProof {
@@ -86,7 +88,11 @@ impl RiskBookStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let result = Self::settle_partial_entry_sql_transaction(
-            &tx, None, proof, expected_sequence, generation,
+            &tx,
+            None,
+            proof,
+            expected_sequence,
+            generation,
         )?;
         tx.commit()?;
         Ok(result)
@@ -121,7 +127,8 @@ impl RiskBookStore {
                     entry_settlement_digest,entry_bound_breach_usd
              FROM risk_entries WHERE reservation_key=?1"
         };
-        let read_args = reserve_scope_values(vec![Value::Text(proof.reservation_key.clone())], scope);
+        let read_args =
+            reserve_scope_values(vec![Value::Text(proof.reservation_key.clone())], scope);
         let entry: Option<(
             String,
             String,
@@ -133,23 +140,19 @@ impl RiskBookStore {
             String,
             String,
         )> = tx
-            .query_row(
-                read_sql,
-                params_from_iter(read_args.iter()),
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                        r.get(7)?,
-                        r.get(8)?,
-                    ))
-                },
-            )
+            .query_row(read_sql, params_from_iter(read_args.iter()), |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            })
             .optional()?;
         let Some((
             account,
@@ -266,17 +269,24 @@ impl RiskBookStore {
                     entry_settlement_revision=?3,entry_settlement_digest=?4,entry_bound_breach_usd=?5
              WHERE reservation_key=?6 AND state='POSTED' AND entry_settlement_revision=?7"
         };
-        let entry_args = reserve_scope_values(vec![
-            Value::Text(remaining_after.canonical()?),
-            Value::Text(proof.cumulative_usd.canonical()?),
-            Value::Integer(i64::try_from(proof.revision)
-                .map_err(|_| RiskStoreError::Invalid("ENTRY_REVISION_RANGE"))?),
-            Value::Text(proof.source_digest.clone()),
-            Value::Text(current_over.canonical()?),
-            Value::Text(proof.reservation_key.clone()),
-            Value::Integer(i64::try_from(prior_revision)
-                .map_err(|_| RiskStoreError::Corrupt("ENTRY_REVISION_RANGE"))?),
-        ], scope);
+        let entry_args = reserve_scope_values(
+            vec![
+                Value::Text(remaining_after.canonical()?),
+                Value::Text(proof.cumulative_usd.canonical()?),
+                Value::Integer(
+                    i64::try_from(proof.revision)
+                        .map_err(|_| RiskStoreError::Invalid("ENTRY_REVISION_RANGE"))?,
+                ),
+                Value::Text(proof.source_digest.clone()),
+                Value::Text(current_over.canonical()?),
+                Value::Text(proof.reservation_key.clone()),
+                Value::Integer(
+                    i64::try_from(prior_revision)
+                        .map_err(|_| RiskStoreError::Corrupt("ENTRY_REVISION_RANGE"))?,
+                ),
+            ],
+            scope,
+        );
         let changed = tx.execute(entry_update, params_from_iter(entry_args.iter()))?;
         if changed != 1 {
             return Err(RiskStoreError::StaleSequence);
@@ -291,15 +301,22 @@ impl RiskBookStore {
                     entry_reserved_usd=?3,entry_bound_breach_usd=?4
              WHERE singleton=1 AND book_sequence=?5 AND generation=?6"
         };
-        let meta_args = reserve_scope_values(vec![
-            Value::Integer(next_i64),
-            Value::Text(consumed_after.canonical()?),
-            Value::Text(reserved_after.canonical()?),
-            Value::Text(breach_after.canonical()?),
-            Value::Integer(i64::try_from(meta.sequence)
-                .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_RANGE"))?),
-            Value::Integer(i64::try_from(meta.generation).map_err(|_| RiskStoreError::StaleGeneration)?),
-        ], scope);
+        let meta_args = reserve_scope_values(
+            vec![
+                Value::Integer(next_i64),
+                Value::Text(consumed_after.canonical()?),
+                Value::Text(reserved_after.canonical()?),
+                Value::Text(breach_after.canonical()?),
+                Value::Integer(
+                    i64::try_from(meta.sequence)
+                        .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_RANGE"))?,
+                ),
+                Value::Integer(
+                    i64::try_from(meta.generation).map_err(|_| RiskStoreError::StaleGeneration)?,
+                ),
+            ],
+            scope,
+        );
         let changed = tx.execute(meta_update, params_from_iter(meta_args.iter()))?;
         if changed != 1 {
             return Err(RiskStoreError::StaleSequence);
