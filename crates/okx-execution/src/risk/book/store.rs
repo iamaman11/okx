@@ -720,7 +720,9 @@ impl RiskBookStore {
             || receipt.conversion_digest != input.conversion_digest
             || requested_loss != input.proposal.loss_usd
         {
-            return Err(RiskStoreError::Invalid("UNIFIED_ACCOUNT_RISK_RECEIPT_CONFLICT"));
+            return Err(RiskStoreError::Invalid(
+                "UNIFIED_ACCOUNT_RISK_RECEIPT_CONFLICT",
+            ));
         }
         let decision =
             Self::reserve_sql_transaction(tx, Some((installation, campaign)), input, census)?;
