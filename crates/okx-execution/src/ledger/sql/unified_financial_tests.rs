@@ -35,6 +35,35 @@ fn connection(path: &Path) -> Connection {
     db.busy_timeout(std::time::Duration::ZERO).unwrap();
     db
 }
+fn fixture_original_receipt(
+    account: &str,
+    intent: &str,
+    reservation: &str,
+    order: &str,
+    source_digest: &str,
+    value: &str,
+    revision: u64,
+) -> String {
+    // Structurally valid original *format* from isolated test inputs, NOT an
+    // authenticated venue producer. Real-source migration is separately
+    // proven by the native AccountStore producer test.
+    let usd: rust_decimal::Decimal = value.parse().unwrap();
+    serde_json::to_string(&crate::EntrySettlementEvidence {
+        schema: "okx.entry-partial-settlement/v1".into(),
+        account_key: account.into(),
+        intent_id: intent.into(),
+        plan_hash: "e".repeat(64),
+        reservation_key: reservation.into(),
+        venue_order_id: order.into(),
+        venue_update_ms: 7,
+        source_covered_through_ms: 7,
+        venue_filled_quantity: rust_decimal::Decimal::ONE,
+        booked_notional_and_fee_usdt: usd,
+        cumulative_entry_usd: usd,
+        settlement_revision: revision,
+        source_digest: source_digest.into(),
+    }).unwrap()
+}
 fn seed(db: &Connection) {
     db.execute_batch(CORE_SCHEMA).unwrap();
     db.execute(
@@ -60,26 +89,33 @@ fn seed(db: &Connection) {
             [account],
         )
         .unwrap();
+        let source_digest = if account == "acct-A" {
+            "a".repeat(64)
+        } else {
+            "b".repeat(64)
+        };
+        let amount = if account == "acct-A" { "6" } else { "4" };
         db.execute(
             "INSERT INTO finance_bills VALUES(
                 'install-one',?1,'bill-same','fill-same',?2)",
-            params![account, "f".repeat(64)],
+            params![account, &source_digest],
         )
         .unwrap();
+        let original = fixture_original_receipt(
+            account,
+            "intent-1",
+            &format!("reserve-{account}"),
+            "order-same",
+            &source_digest,
+            amount,
+            1,
+        );
         db.execute(
             "INSERT INTO finance_entry_sources(
                  installation_id,account_key,intent_id,settlement_revision,
-                 fill_id,bill_id,source_digest,cumulative_entry_usd) VALUES(
-                'install-one',?1,'intent-1',1,'fill-same','bill-same',?2,?3)",
-            params![
-                account,
-                if account == "acct-A" {
-                    "a".repeat(64)
-                } else {
-                    "b".repeat(64)
-                },
-                if account == "acct-A" { "6" } else { "4" },
-            ],
+                 fill_id,bill_id,source_digest,cumulative_entry_usd,original_receipt_json) VALUES(
+                'install-one',?1,'intent-1',1,'fill-same','bill-same',?2,?3,?4)",
+            params![account, &source_digest, amount, &original],
         )
         .unwrap();
     }
@@ -246,14 +282,18 @@ fn risk_book_contract_single_finance_sqlite_scopes_identical_venue_ids() {
 
     // Same venue bill ID on B is not a permitted A-source when it has no
     // matching A fill. This is enforced by composite SQL FOREIGN KEY, not UI.
+    let original = fixture_original_receipt(
+        "acct-A", "intent-1", "reserve-acct-A", "order-same", &"d".repeat(64), "7", 2,
+    );
     let foreign = db.execute(
         "INSERT INTO finance_entry_sources(
                  installation_id,account_key,intent_id,settlement_revision,
-                 fill_id,bill_id,source_digest,cumulative_entry_usd) VALUES(
-            'install-one','acct-A','intent-1',2,'fill-b-only','bill-same',?1,'7')",
-        ["d".repeat(64)],
+                 fill_id,bill_id,source_digest,cumulative_entry_usd,original_receipt_json) VALUES(
+            'install-one','acct-A','intent-1',2,'fill-b-only','bill-same',?1,'7',?2)",
+        params!["d".repeat(64), original],
     );
-    assert!(foreign.is_err());
+    assert!(matches!(foreign, Err(rusqlite::Error::SqliteFailure(_, _))),
+        "invalid account/intent/source FK must fail, not the evidence requirement");
 }
 
 #[test]
@@ -358,14 +398,22 @@ fn risk_book_contract_single_finance_sqlite_rejects_stale_revision_corrupt_cache
         },
         Err(StoreError::Invalid("UNIFIED_RECEIPT_REPLAY_CONFLICT"))
     ));
+    let second_digest = "d".repeat(64);
+    db.execute(
+        "INSERT INTO finance_bills VALUES(
+             'install-one','acct-A','bill-next','fill-same',?1)",
+        [&second_digest],
+    ).unwrap();
+    let later = fixture_original_receipt(
+        "acct-A","intent-1","reserve-acct-A","order-same",&second_digest,"5",2,
+    );
     db.execute(
         "INSERT INTO finance_entry_sources(
                  installation_id,account_key,intent_id,settlement_revision,
-                 fill_id,bill_id,source_digest,cumulative_entry_usd) VALUES(
-         'install-one','acct-A','intent-1',2,'fill-same','bill-same',?1,'5')",
-        ["d".repeat(64)],
-    )
-    .unwrap();
+                 fill_id,bill_id,source_digest,cumulative_entry_usd,original_receipt_json) VALUES(
+         'install-one','acct-A','intent-1',2,'fill-same','bill-next',?1,'5',?2)",
+        params![second_digest,later],
+    ).unwrap();
     {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
