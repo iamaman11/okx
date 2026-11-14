@@ -765,24 +765,44 @@ impl RiskBookStore {
                 "UNIFIED_ACCOUNT_STRATEGY_OWNER_UNPROVEN",
             ));
         }
-        let decision =
-            Self::reserve_sql_transaction(tx, Some((installation, campaign)), input, census)?;
-        if let ReserveDecision::Held(_) = &decision {
-            // The SAME original AccountStore reserve state/plan/receipt rules.
-            // A failure rejects this uncommitted joint transition (no ACK).
-            crate::account_store::AccountStore::reserve_sql_transaction(
-                tx,
-                Some((installation, &receipt.account_key)),
-                receipt,
-                input.now_ms,
-            )
-            .map_err(|error| match error {
-                crate::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),
-                crate::StoreError::Sql(error) => RiskStoreError::Sql(error),
-                crate::StoreError::Io(error) => RiskStoreError::Io(error),
-            })?;
+        // A native SQLite savepoint is NOT a second transaction or writer.
+        // It makes a later original AccountStore failure rollback the staged
+        // RiskBook HELD row even if the caller accidentally commits the outer
+        // transaction after receiving Err. Ordinary budget Denied remains Ok
+        // and still permits the caller to commit independently observed loss.
+        tx.execute_batch("SAVEPOINT okx_joint_original_reserve")?;
+        let attempt = (|| -> Result<ReserveDecision> {
+            let decision =
+                Self::reserve_sql_transaction(tx, Some((installation, campaign)), input, census)?;
+            if let ReserveDecision::Held(_) = &decision {
+                // The SAME original AccountStore reserve state/plan/receipt rules.
+                crate::account_store::AccountStore::reserve_sql_transaction(
+                    tx,
+                    Some((installation, &receipt.account_key)),
+                    receipt,
+                    input.now_ms,
+                )
+                .map_err(|error| match error {
+                    crate::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),
+                    crate::StoreError::Sql(error) => RiskStoreError::Sql(error),
+                    crate::StoreError::Io(error) => RiskStoreError::Io(error),
+                })?;
+            }
+            Ok(decision)
+        })();
+        match attempt {
+            Ok(decision) => {
+                tx.execute_batch("RELEASE SAVEPOINT okx_joint_original_reserve")?;
+                Ok(decision)
+            }
+            Err(error) => {
+                tx.execute_batch(
+                    "ROLLBACK TO SAVEPOINT okx_joint_original_reserve;
+                     RELEASE SAVEPOINT okx_joint_original_reserve",
+                )?;
+                Err(error)
+            }
         }
-        Ok(decision)
     }
 
     pub(super) fn reserve(
