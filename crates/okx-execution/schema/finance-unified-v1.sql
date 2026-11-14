@@ -699,3 +699,125 @@ CREATE TABLE risk_no_reserve(
  FOREIGN KEY(installation_id,account_key) REFERENCES account_meta(installation_id,account_key),
  FOREIGN KEY(installation_id,account_key,intent_id,plan_sha256) REFERENCES intents(installation_id,account_key,intent_id,plan_hash)
 ) STRICT;
+
+-- Original query acceleration, prefixed with the exact identity scope.
+CREATE INDEX idx_intents_active ON intents(installation_id,account_key,state,updated_at,intent_id);
+CREATE INDEX idx_orders_intent ON orders(installation_id,account_key,intent_id);
+CREATE INDEX idx_orders_active ON orders(installation_id,account_key,state,order_id);
+CREATE INDEX idx_fills_intent ON fills(installation_id,account_key,intent_id,fill_id);
+CREATE INDEX idx_fills_time ON fills(installation_id,account_key,time,fill_id);
+CREATE INDEX idx_fills_instrument_time ON fills(installation_id,account_key,instrument_id,time,fill_id);
+CREATE INDEX idx_bills_time ON bills(installation_id,account_key,time,bill_id);
+CREATE INDEX idx_allocations_instance ON allocations(installation_id,account_key,instance_id,time,event_id);
+CREATE INDEX idx_lots_active ON position_lots(installation_id,account_key,instrument_id,side,instance_id,opened_at,lot_id) WHERE remaining_qty<>'0';
+CREATE INDEX idx_finance_time ON finance_entries(installation_id,account_key,time,entry_id);
+CREATE INDEX idx_finance_instance ON finance_entries(installation_id,account_key,instance_id,time,entry_id);
+CREATE INDEX idx_finance_source_component ON finance_entries(installation_id,account_key,source_ref,component);
+CREATE INDEX idx_finance_links_source ON finance_source_links(installation_id,account_key,source_ref,entry_id);
+CREATE INDEX idx_nav_scope_version_time ON nav_points(installation_id,account_key,scope_id,source_version,time);
+CREATE INDEX idx_stops_unresolved ON risk_stops(installation_id,account_key,scope,resolution);
+CREATE INDEX idx_risk_receipts_active ON risk_receipts(installation_id,account_key,state,intent_id);
+CREATE INDEX idx_lots_instance_active ON position_lots(installation_id,account_key,instance_id,instrument_id,side,opened_at,lot_id) WHERE remaining_qty<>'0';
+CREATE INDEX idx_campaign_native_receipt_scan ON operation_receipts(installation_id,account_key,kind,committed_at,operation_id);
+CREATE INDEX idx_bill_order_sources_order ON bill_order_sources(installation_id,account_key,exchange_order_id,bill_id);
+CREATE INDEX idx_risk_entries_active_account ON risk_entries(installation_id,campaign_id,account_key,state);
+CREATE INDEX idx_risk_entries_active_balance ON risk_entries(installation_id,campaign_id,state)
+ WHERE state <> 'RELEASED';
+
+-- Original immutable-event rules and scoped source-invalidation triggers.
+CREATE TRIGGER immutable_identity BEFORE UPDATE ON account_meta BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ACCOUNT_IDENTITY'); END;
+CREATE TRIGGER immutable_identity_delete BEFORE DELETE ON account_meta BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ACCOUNT_IDENTITY'); END;
+CREATE TRIGGER immutable_strategy_definition_update BEFORE UPDATE ON strategy_definition_versions BEGIN SELECT RAISE(ABORT,'IMMUTABLE_STRATEGY_DEFINITION'); END;
+CREATE TRIGGER immutable_strategy_definition_delete BEFORE DELETE ON strategy_definition_versions BEGIN SELECT RAISE(ABORT,'IMMUTABLE_STRATEGY_DEFINITION'); END;
+CREATE TRIGGER immutable_entry_quote_update BEFORE UPDATE ON operation_receipts WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END;
+CREATE TRIGGER immutable_entry_quote_delete BEFORE DELETE ON operation_receipts WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END;
+CREATE TRIGGER immutable_fill_update BEFORE UPDATE ON fills BEGIN SELECT RAISE(ABORT,'IMMUTABLE_FILL'); END;
+CREATE TRIGGER immutable_fill_delete BEFORE DELETE ON fills BEGIN SELECT RAISE(ABORT,'IMMUTABLE_FILL'); END;
+CREATE TRIGGER immutable_bill_update BEFORE UPDATE ON bills BEGIN SELECT RAISE(ABORT,'IMMUTABLE_BILL'); END;
+CREATE TRIGGER immutable_bill_delete BEFORE DELETE ON bills BEGIN SELECT RAISE(ABORT,'IMMUTABLE_BILL'); END;
+CREATE TRIGGER immutable_finance_update BEFORE UPDATE ON finance_entries BEGIN SELECT RAISE(ABORT,'IMMUTABLE_FINANCE_ENTRY'); END;
+CREATE TRIGGER immutable_finance_delete BEFORE DELETE ON finance_entries BEGIN SELECT RAISE(ABORT,'IMMUTABLE_FINANCE_ENTRY'); END;
+CREATE TRIGGER immutable_plan_update BEFORE UPDATE ON intent_plans BEGIN SELECT RAISE(ABORT,'IMMUTABLE_INTENT_PLAN'); END;
+CREATE TRIGGER immutable_plan_delete BEFORE DELETE ON intent_plans BEGIN SELECT RAISE(ABORT,'IMMUTABLE_INTENT_PLAN'); END;
+CREATE TRIGGER immutable_decision_update BEFORE UPDATE ON decisions BEGIN SELECT RAISE(ABORT,'IMMUTABLE_DECISION'); END;
+CREATE TRIGGER immutable_decision_delete BEFORE DELETE ON decisions BEGIN SELECT RAISE(ABORT,'IMMUTABLE_DECISION'); END;
+CREATE TRIGGER immutable_cashflow_update BEFORE UPDATE ON cash_flows BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CASH_FLOW'); END;
+CREATE TRIGGER immutable_cashflow_delete BEFORE DELETE ON cash_flows BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CASH_FLOW'); END;
+CREATE TRIGGER immutable_allocation_update BEFORE UPDATE ON allocations BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ALLOCATION'); END;
+CREATE TRIGGER immutable_allocation_delete BEFORE DELETE ON allocations BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ALLOCATION'); END;
+CREATE TRIGGER strategy_parameters_insert BEFORE INSERT ON strategy_instances WHEN NEW.parameters <> (SELECT parameters FROM strategy_definition_versions WHERE installation_id=NEW.installation_id AND account_key=NEW.account_key AND definition_id=NEW.definition_id AND version=NEW.definition_version) BEGIN SELECT RAISE(ABORT,'STRATEGY_PARAMETERS_VERSION_MISMATCH'); END;
+CREATE TRIGGER strategy_parameters_update BEFORE UPDATE ON strategy_instances WHEN NEW.parameters <> (SELECT parameters FROM strategy_definition_versions WHERE installation_id=NEW.installation_id AND account_key=NEW.account_key AND definition_id=NEW.definition_id AND version=NEW.definition_version) BEGIN SELECT RAISE(ABORT,'STRATEGY_PARAMETERS_VERSION_MISMATCH'); END;
+CREATE TRIGGER campaign_fill_invalidates_ready AFTER INSERT ON fills
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1 AND installation_id=NEW.installation_id AND account_key=NEW.account_key; END;
+CREATE TRIGGER campaign_bill_invalidates_ready AFTER INSERT ON bills
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1 AND installation_id=NEW.installation_id AND account_key=NEW.account_key; END;
+CREATE TRIGGER campaign_finance_invalidates_ready AFTER INSERT ON finance_entries
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1 AND installation_id=NEW.installation_id AND account_key=NEW.account_key; END;
+CREATE TRIGGER campaign_flow_invalidates_ready AFTER INSERT ON cash_flows
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1 AND installation_id=NEW.installation_id AND account_key=NEW.account_key; END;
+CREATE TRIGGER campaign_settlement_invalidates_ready AFTER INSERT ON operation_receipts
+WHEN NEW.kind IN(
+    'ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
+    'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED',
+    'ENTRY_PARTIAL_SETTLED',
+    'ENTRY_BILL_ORDER_SOURCE','ENTRY_ORDER_FEE_INDEX')
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1 AND installation_id=NEW.installation_id AND account_key=NEW.account_key; END;
+CREATE TRIGGER campaign_late_update_invalidates_ready AFTER UPDATE OF result_ref ON operation_receipts
+WHEN NEW.kind='ENTRY_LATE_HEAD' AND NEW.result_ref!=OLD.result_ref
+BEGIN
+UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1 AND installation_id=NEW.installation_id AND account_key=NEW.account_key;
+UPDATE campaign_late_head_epoch SET revision=revision+1 WHERE id=1 AND installation_id=NEW.installation_id AND account_key=NEW.account_key;
+END;
+CREATE TRIGGER campaign_receipt_event_insert AFTER INSERT ON operation_receipts
+WHEN NEW.kind IN ('ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
+                  'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED',
+                  'ENTRY_PARTIAL_SETTLED')
+BEGIN
+    INSERT INTO campaign_receipt_events(installation_id,account_key,operation_id,kind) VALUES(NEW.installation_id,NEW.account_key,NEW.operation_id,NEW.kind);
+END;
+CREATE TRIGGER campaign_receipt_event_head_change AFTER UPDATE OF result_ref ON operation_receipts
+WHEN NEW.kind='ENTRY_LATE_HEAD' AND OLD.result_ref!=NEW.result_ref
+BEGIN
+    INSERT INTO campaign_receipt_events(installation_id,account_key,operation_id,kind) VALUES(NEW.installation_id,NEW.account_key,NEW.operation_id,NEW.kind);
+END;
+CREATE TRIGGER immutable_campaign_entry_applied_update BEFORE UPDATE ON campaign_entry_applied
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_APPLIED'); END;
+CREATE TRIGGER immutable_campaign_entry_applied_delete BEFORE DELETE ON campaign_entry_applied
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_APPLIED'); END;
+CREATE TRIGGER immutable_campaign_entry_window_proof_update BEFORE UPDATE ON campaign_entry_window_proofs
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_WINDOW_PROOF'); END;
+CREATE TRIGGER immutable_campaign_entry_window_proof_delete BEFORE DELETE ON campaign_entry_window_proofs
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_WINDOW_PROOF'); END;
+CREATE TRIGGER immutable_campaign_opening_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;
+CREATE TRIGGER immutable_campaign_opening_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;
+CREATE TRIGGER immutable_bill_order_source_update BEFORE UPDATE ON bill_order_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_BILL_ORDER_SOURCE'); END;
+CREATE TRIGGER immutable_bill_order_source_delete BEFORE DELETE ON bill_order_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_BILL_ORDER_SOURCE'); END;
+CREATE TRIGGER immutable_swap_fill_source_update BEFORE UPDATE ON swap_fill_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_SWAP_FILL_SOURCE'); END;
+CREATE TRIGGER immutable_swap_fill_source_delete BEFORE DELETE ON swap_fill_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_SWAP_FILL_SOURCE'); END;
+CREATE TRIGGER immutable_entry_admission_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_ADMISSION_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_ADMISSION'); END;
+CREATE TRIGGER immutable_entry_admission_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_ADMISSION_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_ADMISSION'); END;
+CREATE TRIGGER immutable_entry_partial_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_PARTIAL_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_PARTIAL_ENTRY'); END;
+CREATE TRIGGER immutable_entry_partial_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_PARTIAL_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_PARTIAL_ENTRY'); END;
+CREATE TRIGGER immutable_entry_partial_ack_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_PARTIAL_SETTLED' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_PARTIAL_ACK'); END;
+CREATE TRIGGER immutable_entry_partial_ack_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_PARTIAL_SETTLED' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_PARTIAL_ACK'); END;
+CREATE TRIGGER immutable_entry_settlement_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_SETTLEMENT'); END;
+CREATE TRIGGER immutable_entry_settlement_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_SETTLEMENT'); END;
+
+-- One new file version covers original account v2 and campaign fixture v5.
+PRAGMA user_version=6;
