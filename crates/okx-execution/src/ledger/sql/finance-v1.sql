@@ -44,6 +44,7 @@ CREATE TABLE finance_intents (
  exchange_order_id TEXT NOT NULL,
  PRIMARY KEY(installation_id,account_key,intent_id),
  UNIQUE(installation_id,account_key,exchange_order_id),
+ UNIQUE(installation_id,account_key,intent_id,plan_sha256),
  FOREIGN KEY(installation_id,account_key)
    REFERENCES finance_accounts(installation_id,account_key)
 ) STRICT;
@@ -113,9 +114,11 @@ CREATE TABLE finance_risk_entries (
  UNIQUE(installation_id,campaign_id,reservation_key,account_key,intent_id),
  FOREIGN KEY(installation_id,campaign_id,account_key)
    REFERENCES finance_campaign_accounts(installation_id,campaign_id,account_key),
- FOREIGN KEY(installation_id,account_key,intent_id)
-   REFERENCES finance_intents(installation_id,account_key,intent_id),
- UNIQUE(installation_id,campaign_id,account_key,intent_id)
+ FOREIGN KEY(installation_id,account_key,intent_id,plan_sha256)
+   REFERENCES finance_intents(installation_id,account_key,intent_id,plan_sha256),
+ UNIQUE(installation_id,campaign_id,account_key,intent_id),
+ -- A native order is charged to exactly one campaign, never two budgets.
+ UNIQUE(installation_id,account_key,intent_id)
 ) STRICT;
 CREATE TABLE finance_entry_receipts (
  installation_id TEXT NOT NULL,
