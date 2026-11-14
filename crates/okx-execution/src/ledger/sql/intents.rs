@@ -2090,22 +2090,59 @@ impl AccountStore {
     pub fn by_exchange_order_id(&self, key: &str) -> StoreResult<Option<StoredIntent>> {
         self.find_intent("exchange_order_id", key)
     }
-    pub fn prepare(
-        &mut self,
+    /// The ORIGINAL AccountStore PREPARE rules, on either legacy account-v2
+    /// or the installation-wide v6 finance transaction. All original intent,
+    /// decision, plan and strategy-version reads/writes share the caller's
+    /// snapshot. In v6 every lookup and key is scoped to this exact account.
+    /// This method never opens a second connection or commits a transaction.
+    pub(crate) fn prepare_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        scope: Option<(&str, &str)>,
         decision: &Decision,
         intent: &NewIntent,
-    ) -> StoreResult<StoredIntent> {
+    ) -> StoreResult<bool> {
         if intent.plan.contract_value <= Decimal::ZERO
             || intent.plan.settlement_currency.is_empty()
             || !matches!(intent.plan.position_side.as_str(), "long" | "short")
         {
             return Err(StoreError::Invalid("INVALID_CONTRACT_MECHANICS"));
         }
-        if let Some(existing) = self.by_idempotency(&intent.idempotency_key)? {
-            if existing.request_hash != intent.request_hash {
+        if let Some((installation, account)) = scope {
+            if installation.is_empty() || account.is_empty() {
+                return Err(StoreError::Invalid("UNIFIED_PREPARE_SCOPE_INVALID"));
+            }
+            let known: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM account_meta
+                 WHERE installation_id=?1 AND account_key=?2)",
+                params![installation, account],
+                |row| row.get(0),
+            )?;
+            if !known {
+                return Err(StoreError::Invalid("UNIFIED_PREPARE_ACCOUNT_MISSING"));
+            }
+        }
+        let existing: Option<String> = match scope {
+            Some((installation, account)) => tx
+                .query_row(
+                    "SELECT request_hash FROM intents
+                     WHERE installation_id=?1 AND account_key=?2 AND idempotency_key=?3",
+                    params![installation, account, intent.idempotency_key],
+                    |row| row.get(0),
+                )
+                .optional()?,
+            None => tx
+                .query_row(
+                    "SELECT request_hash FROM intents WHERE idempotency_key=?1",
+                    [&intent.idempotency_key],
+                    |row| row.get(0),
+                )
+                .optional()?,
+        };
+        if let Some(hash) = existing {
+            if hash != intent.request_hash {
                 return Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
             }
-            return Ok(existing);
+            return Ok(false);
         }
         if intent.deadline <= decision.decision_at
             || intent.policy_revision != decision.policy_revision
@@ -2120,10 +2157,33 @@ impl AccountStore {
         {
             return Err(StoreError::Invalid("INVALID_INTENT_PLAN"));
         }
-        let definition = self.strategy_definition(&intent.plan.strategy_instance)?;
-        if definition.definition_id != intent.plan.strategy_definition_id
-            || definition.version != intent.plan.strategy_definition_version
-            || definition.parameters_digest != intent.plan.strategy_parameters_digest
+        let definition: (String, String, String) = match scope {
+            Some((installation, account)) => tx.query_row(
+                "SELECT v.definition_id,v.version,v.parameters_digest
+                 FROM strategy_instances i JOIN strategy_definition_versions v
+                   ON v.installation_id=i.installation_id
+                  AND v.account_key=i.account_key
+                  AND v.definition_id=i.definition_id
+                  AND v.version=i.definition_version
+                  AND v.parameters_digest=i.parameters_digest
+                 WHERE i.installation_id=?1 AND i.account_key=?2 AND i.instance_id=?3",
+                params![installation, account, intent.plan.strategy_instance],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?,
+            None => tx.query_row(
+                "SELECT v.definition_id,v.version,v.parameters_digest
+                 FROM strategy_instances i JOIN strategy_definition_versions v
+                   ON v.definition_id=i.definition_id
+                  AND v.version=i.definition_version
+                  AND v.parameters_digest=i.parameters_digest
+                 WHERE i.instance_id=?1",
+                [&intent.plan.strategy_instance],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?,
+        };
+        if definition.0 != intent.plan.strategy_definition_id
+            || definition.1 != intent.plan.strategy_definition_version
+            || definition.2 != intent.plan.strategy_parameters_digest
         {
             return Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"));
         }
@@ -2133,21 +2193,21 @@ impl AccountStore {
         ) {
             return Err(StoreError::Invalid("STRATEGY_OWNER_MISMATCH"));
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Manual commands insert their decision with the intent. Autonomous
-        // strategies instead reuse the exact pending SQL decision already
-        // durably claimed before planning; no second decision is permitted.
         let claimed_strategy = decision.decision_id.starts_with("strategy:");
         if claimed_strategy {
-            let prior: Option<(Option<String>, String, i64)> = tx
-                .query_row(
+            let prior: Option<(Option<String>, String, i64)> = match scope {
+                Some((installation, account)) => tx.query_row(
+                    "SELECT instance_id,input_digest,policy_revision FROM decisions
+                     WHERE installation_id=?1 AND account_key=?2 AND decision_id=?3",
+                    params![installation, account, decision.decision_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                ).optional()?,
+                None => tx.query_row(
                     "SELECT instance_id,input_digest,policy_revision FROM decisions WHERE decision_id=?1",
                     [&decision.decision_id],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?;
+                ).optional()?,
+            };
             let (owner, digest, revision) =
                 prior.ok_or(StoreError::Invalid("STRATEGY_CLAIM_MISSING"))?;
             if owner != decision.instance_id
@@ -2156,60 +2216,143 @@ impl AccountStore {
             {
                 return Err(StoreError::Invalid("STRATEGY_CLAIM_MISMATCH"));
             }
-            let already_bound: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM intents WHERE decision_id=?1)",
-                [&decision.decision_id],
-                |r| r.get(0),
-            )?;
+            let already_bound: bool = match scope {
+                Some((installation, account)) => tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM intents
+                     WHERE installation_id=?1 AND account_key=?2 AND decision_id=?3)",
+                    params![installation, account, decision.decision_id],
+                    |r| r.get(0),
+                )?,
+                None => tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM intents WHERE decision_id=?1)",
+                    [&decision.decision_id],
+                    |r| r.get(0),
+                )?,
+            };
             if already_bound {
                 return Err(StoreError::Invalid("STRATEGY_DECISION_ALREADY_BOUND"));
             }
         } else {
-            tx.execute(
-                "INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,?6)",
-                params![
-                    decision.decision_id,
-                    decision.instance_id,
-                    decision.decision_at,
-                    decision.input_digest,
-                    decision.policy_revision,
-                    decision.code_version
-                ],
-            )?;
+            match scope {
+                Some((installation, account)) => {
+                    tx.execute(
+                        "INSERT INTO decisions(installation_id,account_key,decision_id,instance_id,decision_at,input_digest,policy_revision,code_version)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                        params![
+                            installation, account, decision.decision_id, decision.instance_id,
+                            decision.decision_at, decision.input_digest,
+                            decision.policy_revision, decision.code_version
+                        ],
+                    )?;
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,?6)",
+                        params![
+                            decision.decision_id, decision.instance_id, decision.decision_at,
+                            decision.input_digest, decision.policy_revision, decision.code_version
+                        ],
+                    )?;
+                }
+            }
         }
-        tx.execute("INSERT INTO intents(intent_id,idempotency_key,request_hash,decision_id,state,revision,client_order_id,deadline,plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at) VALUES(?1,?2,?3,?4,'PREPARED',0,?5,?6,?7,?8,?9,?10,?11,?11)",params![intent.intent_id,intent.idempotency_key,intent.request_hash,decision.decision_id,intent.client_order_id,intent.deadline,intent.plan_hash,intent.policy_revision,intent.risk_increase,intent.instrument_id,decision.decision_at])?;
-        tx.execute(
-            "INSERT INTO intent_plans VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
-            params![
-                intent.intent_id,
-                intent.plan.operation,
-                intent.plan.side,
-                exact(intent.plan.quantity),
-                exact(intent.plan.limit_price),
-                intent.plan.stop_price.map(exact),
-                intent.plan.strategy_instance,
-                exact(intent.plan.planned_loss_usd),
-                intent.plan.source_generation,
-                intent.plan.position_side,
-                intent.plan.private_source_generation,
-                exact(intent.plan.contract_value),
-                intent.plan.inverse,
-                intent.plan.settlement_currency,
-                intent.plan.strategy_definition_id, intent.plan.strategy_definition_version,intent.plan.strategy_parameters_digest
-            ],
-        )?;
+        match scope {
+            Some((installation, account)) => {
+                tx.execute(
+                    "INSERT INTO intents(
+                     installation_id,account_key,intent_id,idempotency_key,request_hash,decision_id,
+                     state,revision,client_order_id,deadline,plan_hash,policy_revision,
+                     risk_increase,instrument_id,created_at,updated_at)
+                     VALUES(?1,?2,?3,?4,?5,?6,'PREPARED',0,?7,?8,?9,?10,?11,?12,?13,?13)",
+                    params![
+                        installation, account, intent.intent_id, intent.idempotency_key,
+                        intent.request_hash, decision.decision_id, intent.client_order_id,
+                        intent.deadline, intent.plan_hash, intent.policy_revision,
+                        intent.risk_increase, intent.instrument_id, decision.decision_at
+                    ],
+                )?;
+                tx.execute(
+                    "INSERT INTO intent_plans VALUES(
+                     ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                    params![
+                        installation, account, intent.intent_id, intent.plan.operation,
+                        intent.plan.side, exact(intent.plan.quantity), exact(intent.plan.limit_price),
+                        intent.plan.stop_price.map(exact), intent.plan.strategy_instance,
+                        exact(intent.plan.planned_loss_usd), intent.plan.source_generation,
+                        intent.plan.position_side, intent.plan.private_source_generation,
+                        exact(intent.plan.contract_value), intent.plan.inverse,
+                        intent.plan.settlement_currency, intent.plan.strategy_definition_id,
+                        intent.plan.strategy_definition_version, intent.plan.strategy_parameters_digest
+                    ],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO intents(intent_id,idempotency_key,request_hash,decision_id,state,revision,client_order_id,deadline,plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at)
+                     VALUES(?1,?2,?3,?4,'PREPARED',0,?5,?6,?7,?8,?9,?10,?11,?11)",
+                    params![
+                        intent.intent_id, intent.idempotency_key, intent.request_hash,
+                        decision.decision_id, intent.client_order_id, intent.deadline,
+                        intent.plan_hash, intent.policy_revision, intent.risk_increase,
+                        intent.instrument_id, decision.decision_at
+                    ],
+                )?;
+                tx.execute(
+                    "INSERT INTO intent_plans VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                    params![
+                        intent.intent_id, intent.plan.operation, intent.plan.side,
+                        exact(intent.plan.quantity), exact(intent.plan.limit_price),
+                        intent.plan.stop_price.map(exact), intent.plan.strategy_instance,
+                        exact(intent.plan.planned_loss_usd), intent.plan.source_generation,
+                        intent.plan.position_side, intent.plan.private_source_generation,
+                        exact(intent.plan.contract_value), intent.plan.inverse,
+                        intent.plan.settlement_currency, intent.plan.strategy_definition_id,
+                        intent.plan.strategy_definition_version, intent.plan.strategy_parameters_digest
+                    ],
+                )?;
+            }
+        }
         if claimed_strategy {
-            // Binding and bar completion are one transaction. A crash before
-            // commit leaves a retriable claim; after commit the intent itself
-            // is the unique persisted decision outcome.
-            tx.execute(
-                "UPDATE strategy_instances SET last_decision_key=?2 WHERE instance_id=?1",
-                params![intent.plan.strategy_instance, intent.idempotency_key],
-            )?;
+            match scope {
+                Some((installation, account)) => {
+                    tx.execute(
+                        "UPDATE strategy_instances SET last_decision_key=?4
+                         WHERE installation_id=?1 AND account_key=?2 AND instance_id=?3",
+                        params![
+                            installation, account, intent.plan.strategy_instance,
+                            intent.idempotency_key
+                        ],
+                    )?;
+                }
+                None => {
+                    tx.execute(
+                        "UPDATE strategy_instances SET last_decision_key=?2 WHERE instance_id=?1",
+                        params![intent.plan.strategy_instance, intent.idempotency_key],
+                    )?;
+                }
+            }
         }
+        Ok(true)
+    }
+
+    pub fn prepare(
+        &mut self,
+        decision: &Decision,
+        intent: &NewIntent,
+    ) -> StoreResult<StoredIntent> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let inserted = Self::prepare_sql_transaction(&tx, None, decision, intent)?;
         tx.commit()?;
-        self.intent(&intent.intent_id)?
-            .ok_or(StoreError::Invalid("INTENT_MISSING"))
+        // The original idempotency contract returns the FIRST stored intent,
+        // even when a repeated request uses a different proposed intent_id.
+        if inserted {
+            self.intent(&intent.intent_id)?
+        } else {
+            self.by_idempotency(&intent.idempotency_key)?
+        }
+        .ok_or(StoreError::Invalid("INTENT_MISSING"))
     }
     pub fn intent(&self, id: &str) -> StoreResult<Option<StoredIntent>> {
         self.find_intent("intent_id", id)

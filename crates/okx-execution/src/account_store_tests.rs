@@ -12766,6 +12766,7 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     let mut b = store_with_account_campaign(&b_key, "campaign-X");
     let ai = intent_with_plan_hash_and_id(&mut a, &original_plan, "intent0001");
     let bi = intent_with_plan_hash_and_id(&mut b, &original_plan, "intent0001");
+    let original_manual_definition = a.strategy_definition("manual").unwrap();
     let (ap, bp) = (a.path.clone(), b.path.clone());
     let campaign = path();
     unified_original_campaign_fixture(
@@ -12843,6 +12844,63 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert_eq!(summary.global_reserved_usdt, "1");
     assert_eq!(summary.remaining_loss_usd, "99");
     assert_eq!(summary.remaining_entry_usd, "98");
+
+    // The ORIGINAL PREPARE decision+intent+plan algorithm now executes
+    // through this same installation FIFO, with exact A/B composite scopes.
+    // This is an offline trial; every mutation MUST roll back.
+    let trial_decision = Decision {
+        decision_id: "trial-decision".into(),
+        instance_id: None,
+        decision_at: 2,
+        input_digest: "trial-input".into(),
+        policy_revision: 1,
+        code_version: "test".into(),
+    };
+    let trial_intent = NewIntent {
+        plan: IntentPlan {
+            strategy_definition_id: original_manual_definition.definition_id,
+            strategy_definition_version: original_manual_definition.version,
+            strategy_parameters_digest: original_manual_definition.parameters_digest,
+            contract_value: Decimal::ONE,
+            inverse: false,
+            settlement_currency: "USDT".into(),
+            position_side: "long".into(),
+            private_source_generation: 1,
+            operation: "open".into(),
+            side: "buy".into(),
+            quantity: Decimal::ONE,
+            limit_price: Decimal::from(100),
+            stop_price: Some(Decimal::from(95)),
+            strategy_instance: "manual".into(),
+            planned_loss_usd: Decimal::from(5),
+            source_generation: 1,
+        },
+        intent_id: "trial-intent".into(),
+        idempotency_key: "trial-request".into(),
+        request_hash: "trial-body".into(),
+        client_order_id: "trial-client".into(),
+        deadline: 100,
+        plan_hash: original_plan.clone(),
+        policy_revision: 1,
+        risk_increase: true,
+        instrument_id: "BTC-USDT-SWAP".into(),
+    };
+    for account in [&a_key, &b_key] {
+        assert!(owner
+            .trial_original_prepare(account.clone(), trial_decision.clone(), trial_intent.clone())
+            .await
+            .unwrap());
+    }
+    assert!(matches!(
+        owner.trial_original_prepare(
+            "foreign-account".into(),
+            trial_decision.clone(),
+            trial_intent.clone(),
+        ).await,
+        Err(StoreError::Invalid("UNIFIED_PREPARE_ACCOUNT_MISSING"))
+    ));
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
+    assert_eq!(owner.campaign_summary("campaign-X".into()).await.unwrap(), summary);
 
     // PROVE that the existing original joint Reserve is exercised by the
     // installation's single bounded FIFO and one BEGIN IMMEDIATE. No
@@ -13226,4 +13284,148 @@ fn risk_book_contract_one_installation_finance_owner_child() {
     std::io::stdout().flush().unwrap();
     std::thread::sleep(std::time::Duration::from_secs(60));
     unreachable!("the parent must OS-kill this live finance writer")
+}
+
+
+#[test]
+fn risk_book_contract_unified_original_prepare_is_scoped_atomic_and_idempotent() {
+    use rusqlite::{Connection, TransactionBehavior, params};
+    let file = path();
+    let mut db = Connection::open(&file).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    db.pragma_update(None, "synchronous", "FULL").unwrap();
+    // The real 47-table installation schema, not the old 10-table pilot.
+    db.execute_batch(include_str!("../schema/finance-unified-v1.sql"))
+        .unwrap();
+    for account in ["acct-A", "acct-B"] {
+        db.execute(
+            "INSERT INTO account_meta VALUES(1,?1,'installation',2,1,'source','init','release')",
+            [account],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO strategy_definition_versions VALUES(
+             'installation',?1,'manual','v1','{}','immutable-digest',1)",
+            [account],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO strategy_instances VALUES(
+             'installation',?1,'manual','manual','v1','{}',1,1,'100',NULL,'immutable-digest')",
+            [account],
+        ).unwrap();
+    }
+    let decision = Decision {
+        decision_id: "same-decision".into(),
+        instance_id: None,
+        decision_at: 2,
+        input_digest: "same-input".into(),
+        policy_revision: 1,
+        code_version: "native".into(),
+    };
+    let intent = NewIntent {
+        plan: IntentPlan {
+            strategy_definition_id: "manual".into(),
+            strategy_definition_version: "v1".into(),
+            strategy_parameters_digest: "immutable-digest".into(),
+            contract_value: Decimal::ONE,
+            inverse: false,
+            settlement_currency: "USDT".into(),
+            position_side: "long".into(),
+            private_source_generation: 1,
+            operation: "open".into(),
+            side: "buy".into(),
+            quantity: Decimal::ONE,
+            limit_price: Decimal::from(100),
+            stop_price: Some(Decimal::from(95)),
+            strategy_instance: "manual".into(),
+            planned_loss_usd: Decimal::from(5),
+            source_generation: 1,
+        },
+        intent_id: "same-intent".into(),
+        idempotency_key: "same-request".into(),
+        request_hash: "same-body".into(),
+        client_order_id: "same-client".into(),
+        deadline: 100,
+        plan_hash: "a".repeat(64),
+        policy_revision: 1,
+        risk_increase: true,
+        instrument_id: "BTC-USDT-SWAP".into(),
+    };
+    // Both original account actions stage against ONE physical writer and
+    // transaction. Identical IDs are unique only within account scope.
+    {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        for account in ["acct-A", "acct-B"] {
+            assert!(AccountStore::prepare_sql_transaction(
+                &tx, Some(("installation", account)), &decision, &intent
+            ).unwrap());
+            assert!(!AccountStore::prepare_sql_transaction(
+                &tx, Some(("installation", account)), &decision, &intent
+            ).unwrap());
+        }
+        let mut conflict = intent.clone();
+        conflict.request_hash = "altered-body".into();
+        assert!(matches!(
+            AccountStore::prepare_sql_transaction(
+                &tx, Some(("installation", "acct-A")), &decision, &conflict
+            ),
+            Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"))
+        ));
+        let mut stale_definition = intent.clone();
+        stale_definition.intent_id = "different-intent".into();
+        stale_definition.idempotency_key = "different-request".into();
+        stale_definition.client_order_id = "different-client".into();
+        stale_definition.plan.strategy_definition_version = "nonexistent".into();
+        assert!(matches!(
+            AccountStore::prepare_sql_transaction(
+                &tx, Some(("installation", "acct-A")), &decision, &stale_definition
+            ),
+            Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"))
+        ));
+        assert!(matches!(
+            AccountStore::prepare_sql_transaction(
+                &tx, Some(("installation", "foreign-account")), &decision, &intent
+            ),
+            Err(StoreError::Invalid("UNIFIED_PREPARE_ACCOUNT_MISSING"))
+        ));
+        assert_eq!(
+            tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM intents WHERE intent_id='same-intent'", [], |r| r.get(0)).unwrap(),
+            2
+        );
+        tx.rollback().unwrap();
+    }
+    assert_eq!(
+        db.query_row::<i64,_,_>("SELECT COUNT(*) FROM intents WHERE intent_id='same-intent'", [], |r| r.get(0)).unwrap(),
+        0,
+        "rollback removes BOTH accounts' decision/intent/plan rows"
+    );
+    {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        for account in ["acct-A", "acct-B"] {
+            assert!(AccountStore::prepare_sql_transaction(
+                &tx, Some(("installation", account)), &decision, &intent
+            ).unwrap());
+        }
+        tx.commit().unwrap();
+    }
+    drop(db);
+    let mut reopened = Connection::open(&file).unwrap();
+    reopened.pragma_update(None, "foreign_keys", "ON").unwrap();
+    for account in ["acct-A", "acct-B"] {
+        for table in ["decisions", "intents", "intent_plans"] {
+            let sql = format!("SELECT COUNT(*) FROM {table} WHERE installation_id=?1 AND account_key=?2");
+            let count: i64 = reopened.query_row(&sql, params!["installation", account], |r| r.get(0)).unwrap();
+            assert_eq!(count, 1, "original {table} account scope must survive cold reopen");
+        }
+        let tx = reopened.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        assert!(!AccountStore::prepare_sql_transaction(
+            &tx, Some(("installation", account)), &decision, &intent
+        ).unwrap(), "exact replay cannot create a second decision");
+        tx.rollback().unwrap();
+    }
+    let mut fk = reopened.prepare("PRAGMA foreign_key_check").unwrap();
+    assert!(
+        fk.query([]).unwrap().next().unwrap().is_none(),
+        "all 47-table scoped FK remain valid"
+    );
 }

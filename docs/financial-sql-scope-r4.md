@@ -1,5 +1,27 @@
 # #510 r4 — source-derived SQL scope inventory and first physical single-file slice
 
+## Current #510 next code slice — original PREPARE on the one scoped financial transaction (15 Nov 2026)
+
+The original `AccountStore::prepare` now delegates to the SAME
+`prepare_sql_transaction(&Transaction, scope, decision, intent)` used on the
+installation's v6 SQLite. This keeps original business validation (mechanics,
+idempotency, deadline/policy, strategy version, strategy decision claim and plan
+ownership) in ONE existing source owner, while scoped SQL uniquely binds
+`installation_id + account_key` for every decision, intent, strategy read,
+plan and last-decision update. The single caller owns COMMIT; no nested SQL
+owner or new financial calculations. The legacy v2 API retains its original
+readback shape.
+
+The `UnifiedFinanceHandle::trial_original_prepare` routes the exact new
+account mutation through the existing installation-wide bounded FIFO but
+**always rolls back**, because the import manifest remains
+`OFFLINE_NOT_AUTHORIZED`. This is NOT a production PREPARE/TradeService
+cutover, authenticated Cloudflare epoch, permission to post or a source
+producer switch. Added scoped A/B same-request collision, policy/version,
+rollback, idempotency and foreign-scope witnesses. Do not turn this trial
+into a live mutation until actual authority fencing and all other account
+producer operations run on the same file.
+
 ## Next code slice: EXACT original AccountStore source + RiskBook receipt in one local transaction (15 Nov 2026)
 
 The new installation transaction methods:

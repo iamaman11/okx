@@ -740,6 +740,40 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    /// TEST ONLY: the same ORIGINAL AccountStore PREPARE transaction on the
+    /// installation's one bounded writer. The offline source manifest is
+    /// immutable and ALL staged decision/intent/plan writes roll back.
+    #[cfg(test)]
+    pub(crate) async fn trial_original_prepare(
+        &self,
+        account: String,
+        decision: crate::Decision,
+        intent: crate::NewIntent,
+    ) -> StoreResult<bool> {
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let state: String = tx.query_row(
+                "SELECT state FROM finance_import_manifest
+                 WHERE singleton=1 AND installation_id=?1",
+                [&installation],
+                |row| row.get(0),
+            )?;
+            if state != "OFFLINE_NOT_AUTHORIZED" {
+                return Err(StoreError::Invalid("UNIFIED_TRIAL_REQUIRES_OFFLINE_IMPORT"));
+            }
+            let staged = AccountStore::prepare_sql_transaction(
+                &tx,
+                Some((&installation, &account)),
+                &decision,
+                &intent,
+            )?;
+            tx.rollback()?;
+            Ok(staged)
+        })
+        .await
+    }
+
     /// TEST ONLY: full ORIGINAL account+RiskBook Reserve under this exact
     /// installation's bounded SQL owner. The immutable offline import must
     /// remain byte-for-byte recoverable: ALWAYS rollback even after HELD.
