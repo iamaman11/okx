@@ -12319,10 +12319,7 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
             cohort,
             2,
         );
-        assert_eq!(
-            denied.unwrap_err(),
-            "ACCOUNT_POST_ORIGINAL_RECEIPT_MISSING"
-        );
+        assert_eq!(denied.unwrap_err(), "ACCOUNT_POST_ORIGINAL_RECEIPT_MISSING");
         tx.rollback().unwrap();
     }
     // Wrong/paused source policy must not consume a campaign reserve.
@@ -12343,10 +12340,7 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
             cohort,
             2,
         );
-        assert_eq!(
-            denied.unwrap_err(),
-            "RISK_INCREASE_STOPPED"
-        );
+        assert_eq!(denied.unwrap_err(), "RISK_INCREASE_STOPPED");
         tx.rollback().unwrap();
     }
 
