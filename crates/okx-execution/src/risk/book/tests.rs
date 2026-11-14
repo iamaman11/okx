@@ -2374,6 +2374,14 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             )
             .unwrap();
             tx.execute(
+                "INSERT INTO account_policy(
+                installation_id,account_key,singleton,revision,paused,
+                campaign_id,campaign_limit,campaign_loss)
+                VALUES('test-installation',?1,1,1,0,?2,'10','0')",
+                params![&key, &campaign],
+            )
+            .unwrap();
+            tx.execute(
                 "INSERT INTO strategy_definition_versions(
                 installation_id,account_key,definition_id,version,parameters,
                 parameters_digest,created_at)
@@ -2499,6 +2507,36 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
     };
     let receipt_a = account_receipt(&original);
     let receipt_b = account_receipt(&second);
+    // Original account policy is the source of campaign ownership. Its
+    // campaign, revision, paused flag and intent risk-increase must all agree
+    // BEFORE staging risk capacity in this same SQL transaction.
+    for mutation in [
+        "UPDATE account_policy SET campaign_id='foreign-campaign'
+         WHERE installation_id='test-installation' AND account_key=?1",
+        "UPDATE account_policy SET revision=2
+         WHERE installation_id='test-installation' AND account_key=?1",
+        "UPDATE account_policy SET paused=1
+         WHERE installation_id='test-installation' AND account_key=?1",
+        "UPDATE intents SET risk_increase=0
+         WHERE installation_id='test-installation' AND account_key=?1",
+    ] {
+        let tx = db.transaction().unwrap();
+        assert_eq!(tx.execute(mutation, [account('a')]).unwrap(), 1);
+        assert!(matches!(
+            RiskBookStore::reserve_unified_account_transaction(
+                &tx,
+                "test-installation",
+                &campaign,
+                &original,
+                &census(),
+                &receipt_a
+            ),
+            Err(RiskStoreError::Invalid(
+                "UNIFIED_ACCOUNT_CAMPAIGN_POLICY_UNPROVEN"
+            ))
+        ));
+        tx.rollback().unwrap();
+    }
     // The AccountStore check runs AFTER RiskBook has staged a HELD reservation.
     // If the original owner proof disagrees, the caller must roll back BOTH
     // writes, not commit a risk-only reservation with no native receipt.
