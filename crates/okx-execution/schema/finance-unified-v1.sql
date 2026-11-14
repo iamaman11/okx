@@ -468,9 +468,10 @@ CREATE TABLE campaign_late_head_epoch(
 CREATE TABLE campaign_receipt_events(
  installation_id TEXT NOT NULL CHECK(length(installation_id)>0),
  account_key TEXT NOT NULL CHECK(length(account_key)>0),
- event_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+ event_seq INTEGER NOT NULL CHECK(event_seq>0),
  operation_id TEXT NOT NULL,
  kind TEXT NOT NULL,
+ PRIMARY KEY(installation_id,account_key,event_seq),
  FOREIGN KEY(installation_id,account_key) REFERENCES account_meta(installation_id,account_key)
 ) STRICT;
 
@@ -773,12 +774,20 @@ WHEN NEW.kind IN ('ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
                   'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED',
                   'ENTRY_PARTIAL_SETTLED')
 BEGIN
-    INSERT INTO campaign_receipt_events(installation_id,account_key,operation_id,kind) VALUES(NEW.installation_id,NEW.account_key,NEW.operation_id,NEW.kind);
+    INSERT INTO campaign_receipt_events(installation_id,account_key,event_seq,operation_id,kind)
+    VALUES(NEW.installation_id,NEW.account_key,
+        (SELECT COALESCE(MAX(event_seq),0)+1 FROM campaign_receipt_events
+         WHERE installation_id=NEW.installation_id AND account_key=NEW.account_key),
+        NEW.operation_id,NEW.kind);
 END;
 CREATE TRIGGER campaign_receipt_event_head_change AFTER UPDATE OF result_ref ON operation_receipts
 WHEN NEW.kind='ENTRY_LATE_HEAD' AND OLD.result_ref!=NEW.result_ref
 BEGIN
-    INSERT INTO campaign_receipt_events(installation_id,account_key,operation_id,kind) VALUES(NEW.installation_id,NEW.account_key,NEW.operation_id,NEW.kind);
+    INSERT INTO campaign_receipt_events(installation_id,account_key,event_seq,operation_id,kind)
+    VALUES(NEW.installation_id,NEW.account_key,
+        (SELECT COALESCE(MAX(event_seq),0)+1 FROM campaign_receipt_events
+         WHERE installation_id=NEW.installation_id AND account_key=NEW.account_key),
+        NEW.operation_id,NEW.kind);
 END;
 CREATE TRIGGER immutable_campaign_entry_applied_update BEFORE UPDATE ON campaign_entry_applied
     BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_APPLIED'); END;
