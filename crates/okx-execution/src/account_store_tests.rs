@@ -12174,12 +12174,14 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
     let x = path();
     let y = path();
     unified_original_campaign_fixture(
-        &x, "campaign-X",
+        &x,
+        "campaign-X",
         ("acct-A", &ai.intent_id, &ai.plan_hash),
         ("acct-B", &bi.intent_id, &bi.plan_hash),
     );
     unified_original_campaign_fixture(
-        &y, "campaign-Y",
+        &y,
+        "campaign-Y",
         ("acct-B", &bi.intent_id, &bi.plan_hash),
         ("acct-A", &ai.intent_id, &ai.plan_hash),
     );
@@ -12200,8 +12202,12 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         campaigns: &["campaign-X", "campaign-Y"],
     };
     super::sql::unified_financial::importer::import_stopped_finance_into_empty(
-        &mut target, &expected, &[&sa, &sb], &[&sx, &sy],
-    ).unwrap();
+        &mut target,
+        &expected,
+        &[&sa, &sb],
+        &[&sx, &sy],
+    )
+    .unwrap();
 
     let cohort = &["acct-A", "acct-B"];
     // Legacy book alone cannot prove the ORIGINAL account's readiness.
@@ -12209,25 +12215,36 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         let tx = target.transaction().unwrap();
         assert_eq!(
             crate::risk::test_stage_scoped_begin_post(
-                &tx, "installation", "campaign-X",
-                "same-reservation", &ai.plan_hash, cohort, 2,
-            ).unwrap_err(),
+                &tx,
+                "installation",
+                "campaign-X",
+                "same-reservation",
+                &ai.plan_hash,
+                cohort,
+                2,
+            )
+            .unwrap_err(),
             "DURABLE_ENTRY_SQL_PROOF_MISSING"
         );
         tx.rollback().unwrap();
     }
-    let activated = target.execute(
-        "UPDATE intents SET state='RESERVED'
+    let activated = target
+        .execute(
+            "UPDATE intents SET state='RESERVED'
          WHERE installation_id='installation' AND account_key='acct-A' AND intent_id=?1",
-        [&ai.intent_id],
-    ).unwrap();
+            [&ai.intent_id],
+        )
+        .unwrap();
     assert_eq!(activated, 1);
     assert_eq!(
-        target.execute(
-            "UPDATE account_policy SET campaign_id='campaign-X'
+        target
+            .execute(
+                "UPDATE account_policy SET campaign_id='campaign-X'
              WHERE installation_id='installation' AND account_key='acct-A' AND singleton=1",
-            [],
-        ).unwrap(), 1
+                [],
+            )
+            .unwrap(),
+        1
     );
 
     // First execute a true ROLLBACK after both RiskBook and native intent
@@ -12236,84 +12253,127 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         let tx = target.transaction().unwrap();
         assert_eq!(
             crate::risk::test_stage_scoped_begin_post(
-                &tx, "installation", "campaign-X",
-                "same-reservation", &ai.plan_hash, cohort, 2,
-            ).unwrap(), 3
+                &tx,
+                "installation",
+                "campaign-X",
+                "same-reservation",
+                &ai.plan_hash,
+                cohort,
+                2,
+            )
+            .unwrap(),
+            3
         );
-        assert_eq!(tx.execute(
-            "UPDATE intents SET state='POSTING'
+        assert_eq!(
+            tx.execute(
+                "UPDATE intents SET state='POSTING'
              WHERE installation_id='installation' AND account_key='acct-A'
                AND intent_id=?1 AND state='RESERVED'",
-            [&ai.intent_id],
-        ).unwrap(), 1);
+                [&ai.intent_id],
+            )
+            .unwrap(),
+            1
+        );
         tx.rollback().unwrap();
     }
-    let before: (String, String, i64) = target.query_row(
-        "SELECT e.state,i.state,m.book_sequence
+    let before: (String, String, i64) = target
+        .query_row(
+            "SELECT e.state,i.state,m.book_sequence
          FROM risk_entries e JOIN intents i
            ON e.installation_id=i.installation_id AND e.account_key=i.account_key
           AND e.intent_id=i.intent_id JOIN risk_meta m
            ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
          WHERE e.campaign_id='campaign-X' AND e.reservation_key='same-reservation'",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).unwrap();
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
     assert_eq!(before, ("HELD".into(), "RESERVED".into(), 2));
 
     // The next retry uses ONE BEGIN IMMEDIATE and one COMMIT for BOTH
     // original AccountStore intent and the native RiskBook POST fence.
     {
         use rusqlite::TransactionBehavior;
-        let tx = target.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        let tx = target
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
         assert_eq!(
             crate::risk::test_stage_scoped_begin_post(
-                &tx, "installation", "campaign-X",
-                "same-reservation", &ai.plan_hash, cohort, 2,
-            ).unwrap(), 3
+                &tx,
+                "installation",
+                "campaign-X",
+                "same-reservation",
+                &ai.plan_hash,
+                cohort,
+                2,
+            )
+            .unwrap(),
+            3
         );
-        assert_eq!(tx.execute(
-            "UPDATE intents SET state='POSTING'
+        assert_eq!(
+            tx.execute(
+                "UPDATE intents SET state='POSTING'
              WHERE installation_id='installation' AND account_key='acct-A'
                AND intent_id=?1 AND state='RESERVED'",
-            [&ai.intent_id],
-        ).unwrap(), 1);
+                [&ai.intent_id],
+            )
+            .unwrap(),
+            1
+        );
         tx.commit().unwrap();
     }
     drop(target);
     let mut recovered = Connection::open(&destination).unwrap();
-    let state: (String, String, i64) = recovered.query_row(
-        "SELECT e.state,i.state,m.book_sequence
+    let state: (String, String, i64) = recovered
+        .query_row(
+            "SELECT e.state,i.state,m.book_sequence
          FROM risk_entries e JOIN intents i
            ON e.installation_id=i.installation_id AND e.account_key=i.account_key
           AND e.intent_id=i.intent_id JOIN risk_meta m
            ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
          WHERE e.campaign_id='campaign-X' AND e.reservation_key='same-reservation'",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).unwrap();
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
     assert_eq!(state, ("POSTED".into(), "POSTING".into(), 3));
-    let foreign: (String, i64) = recovered.query_row(
-        "SELECT e.state,m.book_sequence FROM risk_entries e JOIN risk_meta m
+    let foreign: (String, i64) = recovered
+        .query_row(
+            "SELECT e.state,m.book_sequence FROM risk_entries e JOIN risk_meta m
            ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
          WHERE e.campaign_id='campaign-Y' AND e.reservation_key='same-reservation'",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ).unwrap();
-    assert_eq!(foreign, ("HELD".into(), 2), "same reservation key in Y is untouched");
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        foreign,
+        ("HELD".into(), 2),
+        "same reservation key in Y is untouched"
+    );
     {
         let tx = recovered.transaction().unwrap();
         crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
         crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-Y").unwrap();
         let retry = crate::risk::test_stage_scoped_begin_post(
-            &tx, "installation", "campaign-X",
-            "same-reservation", &ai.plan_hash, cohort, 3,
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &ai.plan_hash,
+            cohort,
+            3,
         );
         assert_eq!(retry.unwrap_err(), "INTENT_ALREADY_POSTED_OR_RESOLVED");
         tx.rollback().unwrap();
     }
-    let count: i64 = recovered.query_row(
-        "SELECT COUNT(*) FROM risk_entries
-         WHERE campaign_id='campaign-X' AND state='POSTED'", [], |r| r.get(0),
-    ).unwrap();
+    let count: i64 = recovered
+        .query_row(
+            "SELECT COUNT(*) FROM risk_entries
+         WHERE campaign_id='campaign-X' AND state='POSTED'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 1, "lost ACK must never create a second POST grant");
 }
