@@ -2347,6 +2347,103 @@ async fn risk_book_contract_sql_real_two_owner_os_kill_after_campaign_before_acc
     assert_eq!(campaign.readback().await.unwrap(), before);
 }
 
+// One original account receipt constructor for the joint SQL/OS-kill witness.
+// Test-only fixed inputs; production proofs are deliberately not fabricated.
+fn unified_reserve_account_receipt(input: &ReserveInput) -> crate::CentralReceipt {
+    crate::CentralReceipt {
+        reservation_key: input.reservation_key(),
+        account_key: format!("{}:real:{}", input.venue, input.uid),
+        installation_id: "test-installation".into(),
+        instance_id: Some("strategy_test".into()),
+        intent_id: input.intent_id.clone(),
+        plan_hash: input.plan_sha256.clone(),
+        policy_revision: 1,
+        receipt_hash: uid('b'),
+        requested_loss_usd: rust_decimal::Decimal::from(6),
+        conversion_digest: input.conversion_digest.clone(),
+    }
+}
+
+#[test]
+fn risk_book_contract_unified_reserve_child_commit_boundary() {
+    let Ok(file) = std::env::var("OKX_510_UNIFIED_RESERVE_KILL_DB") else {
+        return;
+    };
+    let phase = std::env::var("OKX_510_UNIFIED_RESERVE_KILL_PHASE").unwrap();
+    let mut db = rusqlite::Connection::open(file).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let input = request('a', "intentA0001", "6");
+    let receipt = unified_reserve_account_receipt(&input);
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    assert!(matches!(
+        RiskBookStore::reserve_unified_account_transaction(
+            &tx,
+            "test-installation",
+            &opening().campaign_id,
+            &input,
+            &census(),
+            &receipt,
+        )
+        .unwrap(),
+        ReserveDecision::Held(HeldReceipt {
+            replayed: false,
+            ..
+        })
+    ));
+    match phase.as_str() {
+        "BEFORE_COMMIT" => {} // Hold the live uncommitted original account + risk updates.
+        "AFTER_COMMIT" => tx.commit().unwrap(),
+        _ => panic!("unexpected physical Reserve kill boundary"),
+    }
+    use std::io::Write;
+    println!("UNIFIED_RESERVE_510_{phase}_READY");
+    std::io::stdout().flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(60));
+    unreachable!("the parent must kill this actual Rust OS process")
+}
+
+fn unified_reserve_os_kill(path: &std::path::Path, phase: &str) {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+        sync::mpsc,
+        time::Duration,
+    };
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "risk_book_contract_unified_reserve_child_commit_boundary",
+            "--nocapture",
+        ])
+        .env("OKX_510_UNIFIED_RESERVE_KILL_DB", path)
+        .env("OKX_510_UNIFIED_RESERVE_KILL_PHASE", phase)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stream = child.stdout.take().unwrap();
+    let expected = format!("UNIFIED_RESERVE_510_{phase}_READY");
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stream).lines() {
+            if line.unwrap_or_default().contains(&expected) {
+                let _ = sender.send(());
+                return;
+            }
+        }
+    });
+    let marker = receiver.recv_timeout(Duration::from_secs(15));
+    let killed = child.kill();
+    let exit = child.wait().unwrap();
+    reader.join().unwrap();
+    assert!(
+        marker.is_ok(),
+        "joint original AccountStore+RiskBook {phase} SQL witness not reached"
+    );
+    assert!(killed.is_ok() && !exit.success(), "physical child kill failed");
+}
+
 #[test]
 fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_denial() {
     use rusqlite::{Connection, params};
@@ -2493,20 +2590,8 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
     }
     let original = request('a', "intentA0001", "6");
     let second = request('b', "intentB0001", "6");
-    let account_receipt = |input: &ReserveInput| crate::CentralReceipt {
-        reservation_key: input.reservation_key(),
-        account_key: format!("{}:real:{}", input.venue, input.uid),
-        installation_id: "test-installation".into(),
-        instance_id: Some("strategy_test".into()),
-        intent_id: input.intent_id.clone(),
-        plan_hash: input.plan_sha256.clone(),
-        policy_revision: 1,
-        receipt_hash: uid('b'),
-        requested_loss_usd: rust_decimal::Decimal::from(6),
-        conversion_digest: input.conversion_digest.clone(),
-    };
-    let receipt_a = account_receipt(&original);
-    let receipt_b = account_receipt(&second);
+    let receipt_a = unified_reserve_account_receipt(&original);
+    let receipt_b = unified_reserve_account_receipt(&second);
     // Original account policy is the source of campaign ownership. Its
     // campaign, revision, paused flag and intent risk-increase must all agree
     // BEFORE staging risk capacity in this same SQL transaction.
@@ -2617,25 +2702,22 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             .unwrap(),
         0
     );
-    {
-        let tx = db.transaction().unwrap();
-        assert!(matches!(
-            RiskBookStore::reserve_unified_account_transaction(
-                &tx,
-                "test-installation",
-                &campaign,
-                &original,
-                &census(),
-                &receipt_a
-            )
+    // Kill the REAL Rust writer process with BOTH original Reserve changes
+    // staged but not committed. A cold process must observe no half-reserve.
+    unified_reserve_os_kill(&f.path, "BEFORE_COMMIT");
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_entries", [], |r| r.get(0))
             .unwrap(),
-            ReserveDecision::Held(HeldReceipt {
-                replayed: false,
-                ..
-            })
-        ));
-        tx.commit().unwrap();
-    }
+        0
+    );
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_receipts", [], |r| r.get(0))
+            .unwrap(),
+        0
+    );
+    // After the SAME single COMMIT, kill before the caller receives an ACK.
+    // The original AccountStore and RiskBook receipt must recover together.
+    unified_reserve_os_kill(&f.path, "AFTER_COMMIT");
     let read = |db: &Connection| {
         db.query_row(
             "SELECT global_reserved_usdt,loss_consumed_usd,book_sequence FROM risk_meta
