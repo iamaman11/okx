@@ -391,12 +391,36 @@ fn apply_census_loss(
     meta: &mut BookMeta,
     census: &VerifiedCensus,
 ) -> Result<()> {
+    apply_census_loss_for_scope(tx, meta, census, None)
+}
+
+/// The SAME monotonic-loss algorithm for single-campaign v5 and scoped v6.
+fn apply_census_loss_for_scope(
+    tx: &rusqlite::Transaction<'_>,
+    meta: &mut BookMeta,
+    census: &VerifiedCensus,
+    scope: Option<(&str, &str)>,
+) -> Result<()> {
+    use rusqlite::{params_from_iter, types::Value};
     let mut delta = RiskAmount::zero();
     let mut updates = Vec::new();
     for (account, observed) in &census.cumulative_loss_usd {
+        let query = if scope.is_some() {
+            "SELECT cumulative_loss_usd FROM risk_loss_source
+             WHERE account_key=?1 AND installation_id=?2 AND campaign_id=?3"
+        } else {
+            "SELECT cumulative_loss_usd FROM risk_loss_source WHERE account_key=?1"
+        };
+        let mut values = vec![Value::Text(account.clone())];
+        if let Some((installation, campaign)) = scope {
+            values.extend([
+                Value::Text(installation.to_owned()),
+                Value::Text(campaign.to_owned()),
+            ]);
+        }
         let previous: String = tx.query_row(
-            "SELECT cumulative_loss_usd FROM risk_loss_source WHERE account_key=?1",
-            params![account],
+            query,
+            params_from_iter(values.iter()),
             |row| row.get(0),
         )?;
         let previous = RiskAmount::parse(&previous)?;
@@ -422,25 +446,52 @@ fn apply_census_loss(
     let new_sequence =
         i64::try_from(sequence).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
     for (account, observed) in updates {
-        let updated=tx.execute(
-            "UPDATE risk_loss_source SET cumulative_loss_usd=?1,source_digest=?2 WHERE account_key=?3",
-            params![observed.canonical()?, &census.source_digest, account]
-        )?;
+        let query = if scope.is_some() {
+            "UPDATE risk_loss_source SET cumulative_loss_usd=?1,source_digest=?2
+             WHERE account_key=?3 AND installation_id=?4 AND campaign_id=?5"
+        } else {
+            "UPDATE risk_loss_source SET cumulative_loss_usd=?1,source_digest=?2
+             WHERE account_key=?3"
+        };
+        let mut values = vec![
+            Value::Text(observed.canonical()?),
+            Value::Text(census.source_digest.clone()),
+            Value::Text(account.clone()),
+        ];
+        if let Some((installation, campaign)) = scope {
+            values.extend([
+                Value::Text(installation.to_owned()),
+                Value::Text(campaign.to_owned()),
+            ]);
+        }
+        let updated = tx.execute(query, params_from_iter(values.iter()))?;
         if updated != 1 {
             return Err(RiskStoreError::Corrupt("MISSING_LOSS_SOURCE"));
         }
     }
-    let updated = tx.execute(
+    let query = if scope.is_some() {
         "UPDATE risk_meta SET loss_consumed_usd=?1,book_sequence=?2
-         WHERE singleton=1 AND book_sequence=?3 AND policy_revision=?4",
-        params![
-            consumed.canonical()?,
-            new_sequence,
-            i64::try_from(meta.sequence)
-                .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
-            i64::try_from(meta.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?
-        ],
-    )?;
+         WHERE singleton=1 AND book_sequence=?3 AND policy_revision=?4
+           AND installation_id=?5 AND campaign_id=?6"
+    } else {
+        "UPDATE risk_meta SET loss_consumed_usd=?1,book_sequence=?2
+         WHERE singleton=1 AND book_sequence=?3 AND policy_revision=?4"
+    };
+    let mut values = vec![
+        Value::Text(consumed.canonical()?),
+        Value::Integer(new_sequence),
+        Value::Integer(i64::try_from(meta.sequence)
+            .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?),
+        Value::Integer(i64::try_from(meta.policy_revision)
+            .map_err(|_| RiskStoreError::PolicyConflict)?),
+    ];
+    if let Some((installation, campaign)) = scope {
+        values.extend([
+            Value::Text(installation.to_owned()),
+            Value::Text(campaign.to_owned()),
+        ]);
+    }
+    let updated = tx.execute(query, params_from_iter(values.iter()))?;
     if updated != 1 {
         return Err(RiskStoreError::PolicyConflict);
     }
