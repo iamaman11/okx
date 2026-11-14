@@ -499,6 +499,170 @@ impl AccountStoreHandle {
     }
 }
 
+
+// #510 r4: the intended one installation-wide SQL owner. It currently
+// accepts ONLY a fully verified stopped, offline import; no production
+// TradeService, trading capability, account writer or Cloudflare cutover
+// is routed here. Unlike the historical AccountStoreHandle, its Connection
+// has no fixed per-account identity and can address all scoped accounts and
+// campaigns in one file. Do not give this owner a second finance ledger.
+type FinanceJob = Box<dyn FnOnce(&mut rusqlite::Connection) + Send + 'static>;
+
+struct FinanceWorkerOwner {
+    sender: SyncSender<FinanceJob>,
+    terminated: watch::Receiver<bool>,
+}
+
+#[derive(Clone)]
+pub(crate) struct UnifiedFinanceHandle {
+    owner: Arc<FinanceWorkerOwner>,
+    installation: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct UnifiedFinanceInventory {
+    pub accounts: i64,
+    pub campaigns: i64,
+    pub state: String,
+}
+
+impl UnifiedFinanceHandle {
+    pub(crate) async fn open_stopped_import(
+        runtime_root: PathBuf,
+        installation: String,
+        accounts: Vec<String>,
+        campaigns: Vec<String>,
+    ) -> StoreResult<Self> {
+        if !runtime_root.is_absolute()
+            || installation.is_empty()
+            || accounts.is_empty()
+            || campaigns.is_empty()
+        {
+            return Err(StoreError::Invalid("UNIFIED_FINANCE_OWNER_SCOPE_INVALID"));
+        }
+        // This exact path is the only future installation finance authority.
+        // No auto-create or re-initialization: all original source tables and
+        // immutable manifest must already exist and verify in the same file.
+        let path = runtime_root.join("finance").join("finance.sqlite");
+        if !path.is_file() {
+            return Err(StoreError::Invalid("UNIFIED_FINANCE_IMPORT_NOT_FOUND"));
+        }
+        let path = path.canonicalize()?;
+        let (sender, receiver) = sync_channel::<FinanceJob>(128);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (terminated_tx, terminated_rx) = watch::channel(false);
+        let startup_installation = installation.clone();
+        std::thread::Builder::new()
+            .name("okx-finance-sql".into())
+            .spawn(move || {
+                let startup = (|| -> StoreResult<(rusqlite::Connection, std::fs::File)> {
+                    use std::fs::OpenOptions;
+                    let lease = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .truncate(false)
+                        .open(format!("{}.writer.lock", path.display()))?;
+                    match lease.try_lock() {
+                        Ok(()) => {}
+                        Err(std::fs::TryLockError::WouldBlock) => {
+                            return Err(StoreError::Invalid("UNIFIED_FINANCE_WRITER_BUSY"));
+                        }
+                        Err(std::fs::TryLockError::Error(error)) => {
+                            return Err(StoreError::Io(error));
+                        }
+                    }
+                    let db = rusqlite::Connection::open_with_flags(
+                        &path,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+                    )?;
+                    db.busy_timeout(Duration::from_millis(250))?;
+                    db.pragma_update(None, "foreign_keys", "ON")?;
+                    // Must not silently alter WAL mode or repair an unknown
+                    // source. The original finance importer proves schema,
+                    // 47 tables, identity, digest, integrity and all FKs.
+                    AccountStore::inspect_offline_finance_import(
+                        &db,
+                        &startup_installation,
+                        &accounts.iter().map(String::as_str).collect::<Vec<_>>(),
+                        &campaigns.iter().map(String::as_str).collect::<Vec<_>>(),
+                    )?;
+                    Ok((db, lease))
+                })();
+                let (mut db, lease) = match startup {
+                    Ok(resources) => resources,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                };
+                let _ = ready_tx.send(Ok(()));
+                while let Ok(job) = receiver.recv() {
+                    job(&mut db);
+                }
+                // Publish shutdown only AFTER the sole writer, WAL handles
+                // and exclusive cross-process lease have been released.
+                drop(db);
+                let _ = lease.unlock();
+                drop(lease);
+                let _ = terminated_tx.send(true);
+            })?;
+        ready_rx
+            .await
+            .map_err(|_| StoreError::Invalid("UNIFIED_FINANCE_WORKER_STOPPED"))??;
+        Ok(Self {
+            owner: Arc::new(FinanceWorkerOwner {
+                sender,
+                terminated: terminated_rx,
+            }),
+            installation,
+        })
+    }
+
+    pub(crate) fn termination_signal(&self) -> watch::Receiver<bool> {
+        self.owner.terminated.clone()
+    }
+
+    /// Read-only installation-scoped diagnostic. No finance mutation API is
+    /// exported while the import marker says OFFLINE_NOT_AUTHORIZED.
+    pub(crate) async fn inventory(&self) -> StoreResult<UnifiedFinanceInventory> {
+        let installation = self.installation.clone();
+        let (tx, rx) = oneshot::channel();
+        let job: FinanceJob = Box::new(move |db| {
+            let result = (|| -> StoreResult<UnifiedFinanceInventory> {
+                let accounts = db.query_row(
+                    "SELECT COUNT(*) FROM account_meta WHERE installation_id=?1",
+                    [&installation],
+                    |row| row.get(0),
+                )?;
+                let campaigns = db.query_row(
+                    "SELECT COUNT(*) FROM risk_meta WHERE installation_id=?1",
+                    [&installation],
+                    |row| row.get(0),
+                )?;
+                let state = db.query_row(
+                    "SELECT state FROM finance_import_manifest
+                     WHERE singleton=1 AND installation_id=?1",
+                    [&installation],
+                    |row| row.get(0),
+                )?;
+                Ok(UnifiedFinanceInventory {
+                    accounts,
+                    campaigns,
+                    state,
+                })
+            })();
+            let _ = tx.send(result);
+        });
+        self.owner.sender.try_send(job).map_err(|error| match error {
+            TrySendError::Full(_) => StoreError::Invalid("UNIFIED_FINANCE_QUEUE_FULL"),
+            TrySendError::Disconnected(_) => StoreError::Invalid("UNIFIED_FINANCE_WORKER_STOPPED"),
+        })?;
+        rx.await
+            .map_err(|_| StoreError::Invalid("UNIFIED_FINANCE_WORKER_STOPPED"))?
+    }
+}
+
 #[cfg(test)]
 mod diagnostic_fault_tests {
     use super::*;
