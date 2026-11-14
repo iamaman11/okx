@@ -12846,7 +12846,10 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     let kill_result = killed.kill();
     let exit = killed.wait().unwrap();
     reader.join().unwrap();
-    assert!(saw_lease.is_ok(), "child did not own original finance SQLite");
+    assert!(
+        saw_lease.is_ok(),
+        "child did not own original finance SQLite"
+    );
     assert!(
         kill_result.is_ok() && !exit.success(),
         "failed to physically kill finance SQL owner"
