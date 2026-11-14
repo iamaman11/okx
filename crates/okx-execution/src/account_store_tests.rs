@@ -12700,17 +12700,20 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
 
     // These are genuine original v2 account writers and the existing RiskBook
     // campaign fixture. Nothing here mints a live owner epoch or trade permit.
-    let mut a = store_with_account_campaign("acct-A", "campaign-X");
-    let mut b = store_with_account_campaign("acct-B", "campaign-X");
-    let ai = intent(&mut a);
-    let bi = intent(&mut b);
+    let a_key = format!("okx:real:{}", "a".repeat(64));
+    let b_key = format!("okx:real:{}", "b".repeat(64));
+    let original_plan = "a".repeat(64);
+    let mut a = store_with_account_campaign(&a_key, "campaign-X");
+    let mut b = store_with_account_campaign(&b_key, "campaign-X");
+    let ai = intent_with_plan_hash(&mut a, &original_plan);
+    let bi = intent_with_plan_hash(&mut b, &original_plan);
     let (ap, bp) = (a.path.clone(), b.path.clone());
     let campaign = path();
     unified_original_campaign_fixture(
         &campaign,
         "campaign-X",
-        ("acct-A", &ai.intent_id, &ai.plan_hash),
-        ("acct-B", &bi.intent_id, &bi.plan_hash),
+        (&a_key, &ai.intent_id, &ai.plan_hash),
+        (&b_key, &bi.intent_id, &bi.plan_hash),
     );
     drop(a);
     drop(b);
@@ -12728,7 +12731,7 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         &mut target,
         &super::sql::unified_financial::importer::ExpectedFinanceInventory {
             installation: "installation",
-            accounts: &["acct-A", "acct-B"],
+            accounts: &[&a_key, &b_key],
             campaigns: &["campaign-X"],
         },
         &[&sa, &sb],
@@ -12744,7 +12747,7 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         crate::account_worker::UnifiedFinanceHandle::open_stopped_import(
             root.clone(),
             "installation".into(),
-            vec!["acct-A".into(), "acct-B".into()],
+            vec![a_key.clone(), b_key.clone()],
             vec!["campaign-X".into()],
         )
     };
@@ -12761,6 +12764,73 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert_eq!(summary.global_reserved_usdt, "1");
     assert_eq!(summary.remaining_loss_usd, "99");
     assert_eq!(summary.remaining_entry_usd, "98");
+
+    // The ORIGINAL RiskBook AccountSummary SQL must distinguish these two
+    // canonical account identities inside the shared campaign scope.
+    let a_read = owner
+        .account_summary("campaign-X".into(), a_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(a_read.account_key, a_key);
+    assert_eq!(a_read.book_sequence, 2);
+    assert_eq!(a_read.active_reservations, 1);
+    assert_eq!(a_read.reserved_loss_usdt, "1");
+    assert_eq!(a_read.reserved_loss_usd, "1");
+    let b_read = owner
+        .account_summary("campaign-X".into(), b_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(b_read.account_key, b_key);
+    assert_eq!(b_read.active_reservations, 0);
+    assert_eq!(b_read.reserved_loss_usdt, "0");
+    assert_eq!(b_read.reserved_loss_usd, "0");
+    assert!(matches!(
+        owner.account_summary("campaign-X".into(), "acct-A".into()).await,
+        Err(StoreError::Invalid("UNIFIED_ACCOUNT_RISK_READBACK_INVALID"))
+    ));
+    assert!(matches!(
+        owner.account_summary("campaign-Y".into(), a_key.clone()).await,
+        Err(StoreError::Invalid("UNIFIED_ACCOUNT_RISK_READBACK_INVALID"))
+    ));
+
+    // One original immutable RiskBook HELD and one no-send tombstone.
+    // An absent row/foreign campaign/wrong plan never grants permission.
+    let held = owner
+        .inspect_reservation(
+            "campaign-X".into(),
+            "same-reservation".into(),
+            ai.plan_hash.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.state, okx_kernel::risk::model::RiskEntryState::Held);
+    assert_eq!(held.reservation_sequence, 1);
+    assert_eq!(held.current_book_sequence, 2);
+    let unsent = owner
+        .inspect_reservation("campaign-X".into(), "same-unsent".into(), bi.plan_hash.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unsent.state, okx_kernel::risk::model::RiskEntryState::Released);
+    assert_eq!(unsent.reservation_sequence, 2);
+    assert!(owner
+        .inspect_reservation("campaign-X".into(), "same-reservation".into(), "b".repeat(64))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(owner
+        .inspect_reservation("campaign-X".into(), "not-recorded".into(), ai.plan_hash.clone())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        owner
+            .inspect_reservation("campaign-Y".into(), "same-reservation".into(), ai.plan_hash.clone())
+            .await,
+        Err(StoreError::Invalid("UNIFIED_RESERVATION_READBACK_INVALID"))
+    ));
+
     assert!(matches!(
         owner.campaign_summary("campaign-Y".into()).await,
         Err(StoreError::Invalid(
@@ -12820,7 +12890,7 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         crate::account_worker::UnifiedFinanceHandle::open_stopped_import(
             root.clone(),
             "installation".into(),
-            vec!["acct-A".into()],
+            vec![a_key.clone()],
             vec!["campaign-X".into()],
         )
         .await,
@@ -12900,7 +12970,10 @@ fn risk_book_contract_one_installation_finance_owner_child() {
         crate::account_worker::UnifiedFinanceHandle::open_stopped_import(
             std::path::PathBuf::from(root),
             "installation".into(),
-            vec!["acct-A".into(), "acct-B".into()],
+            vec![
+                format!("okx:real:{}", "a".repeat(64)),
+                format!("okx:real:{}", "b".repeat(64)),
+            ],
             vec!["campaign-X".into()],
         ),
     );
