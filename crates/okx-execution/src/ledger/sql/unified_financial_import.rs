@@ -200,6 +200,9 @@ fn verify_original_campaign(source: &Connection, installation: &str) -> StoreRes
             "UNIFIED_LEGACY_CAMPAIGN_IDENTITY_OR_FENCE",
         ));
     }
+    // Reuse the ORIGINAL RiskBook invariant checker, not duplicate budget
+    // arithmetic in the migration layer or trust mutable cached totals.
+    crate::risk::verify_legacy_import_source(source).map_err(StoreError::Invalid)?;
     // A historical SQLite flag is NOT server-side Cloudflare authority revocation.
     // The authorized cutover must independently prove that remote mutation is fenced.
     Ok(campaign)
