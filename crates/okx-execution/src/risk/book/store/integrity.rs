@@ -2,6 +2,7 @@
 //! Called in a SQLite transaction before readback or authorization; no independent writer.
 use super::{BookMeta, Result, RiskAmount, RiskStoreError, amount};
 use std::collections::BTreeMap;
+use rusqlite::params_from_iter;
 
 // The risk_entries rows carry the primary remaining obligations. Cached totals
 // never authorize a grant unless they agree with those exact-decimal records.
@@ -13,6 +14,18 @@ pub(super) fn verify_reservation_aggregates(
     tx: &rusqlite::Transaction<'_>,
     meta: &BookMeta,
 ) -> Result<()> {
+    verify_reservation_aggregates_for_scope(tx, meta, None)
+}
+
+/// One original RiskBook mathematical owner for both legacy single-campaign
+/// v5 SQL and the scoped v6 multi-campaign finance.sqlite.
+pub(super) fn verify_reservation_aggregates_for_scope(
+    tx: &rusqlite::Transaction<'_>,
+    meta: &BookMeta,
+    scope: Option<(&str, &str)>,
+) -> Result<()> {
+    let scoped_args = scope.map(|(installation, campaign)| vec![installation, campaign])
+        .unwrap_or_default();
     let mut accounts: BTreeMap<String, RiskAmount> = BTreeMap::new();
     let mut strategies: BTreeMap<(String, String), RiskAmount> = BTreeMap::new();
     let mut global = RiskAmount::zero();
@@ -20,16 +33,26 @@ pub(super) fn verify_reservation_aggregates(
     let mut entry = RiskAmount::zero();
 
     {
-        let mut stmt = tx.prepare(
+        let query = if scope.is_some() {
             "SELECT account_key,strategy_id,state,loss_usdt,loss_usd,entry_upper_usd,
                     reserved_usdt,reserved_loss_usd,reserved_entry_usd,
                     book_sequence,post_sequence,post_proof_digest,post_source_digest,
                     post_authorized_at_ms,held_at_ms,post_existing_occupied_usdt,
                     entry_settled_usd,entry_settlement_revision,entry_settlement_digest,
                     entry_bound_breach_usd
-             FROM risk_entries WHERE state <> 'RELEASED'",
-        )?;
-        let rows = stmt.query_map([], |row| {
+             FROM risk_entries
+             WHERE installation_id=?1 AND campaign_id=?2 AND state <> 'RELEASED'"
+        } else {
+            "SELECT account_key,strategy_id,state,loss_usdt,loss_usd,entry_upper_usd,
+                    reserved_usdt,reserved_loss_usd,reserved_entry_usd,
+                    book_sequence,post_sequence,post_proof_digest,post_source_digest,
+                    post_authorized_at_ms,held_at_ms,post_existing_occupied_usdt,
+                    entry_settled_usd,entry_settlement_revision,entry_settlement_digest,
+                    entry_bound_breach_usd
+             FROM risk_entries WHERE state <> 'RELEASED'"
+        };
+        let mut stmt = tx.prepare(query)?;
+        let rows = stmt.query_map(params_from_iter(scoped_args.iter()), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -150,8 +173,16 @@ pub(super) fn verify_reservation_aggregates(
         return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
     }
     {
-        let mut stmt = tx.prepare("SELECT account_key,reserved_usdt FROM risk_account_occupied")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let query = if scope.is_some() {
+            "SELECT account_key,reserved_usdt FROM risk_account_occupied
+             WHERE installation_id=?1 AND campaign_id=?2"
+        } else {
+            "SELECT account_key,reserved_usdt FROM risk_account_occupied"
+        };
+        let mut stmt = tx.prepare(query)?;
+        let rows = stmt.query_map(params_from_iter(scoped_args.iter()), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
         for row in rows {
             let (account, stored) = row?;
             let expected = accounts.remove(&account).unwrap_or_else(RiskAmount::zero);
@@ -164,9 +195,14 @@ pub(super) fn verify_reservation_aggregates(
         return Err(RiskStoreError::Corrupt("RESERVATION_AGGREGATES"));
     }
     {
-        let mut stmt =
-            tx.prepare("SELECT account_key,strategy_id,reserved_usdt FROM risk_strategy_occupied")?;
-        let rows = stmt.query_map([], |r| {
+        let query = if scope.is_some() {
+            "SELECT account_key,strategy_id,reserved_usdt FROM risk_strategy_occupied
+             WHERE installation_id=?1 AND campaign_id=?2"
+        } else {
+            "SELECT account_key,strategy_id,reserved_usdt FROM risk_strategy_occupied"
+        };
+        let mut stmt = tx.prepare(query)?;
+        let rows = stmt.query_map(params_from_iter(scoped_args.iter()), |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -188,10 +224,19 @@ pub(super) fn verify_reservation_aggregates(
     }
     // A negative SQL fence and an actual reservation for the same address
     // must never coexist, even if an out-of-band writer damaged the DB.
-    let contradictory: i64 = tx.query_row(
+    let contradictory_query = if scope.is_some() {
         "SELECT COUNT(*) FROM risk_no_reserve f
-         JOIN risk_entries e USING(reservation_key)",
-        [],
+         JOIN risk_entries e
+           ON e.installation_id=f.installation_id AND e.campaign_id=f.campaign_id
+          AND e.reservation_key=f.reservation_key
+         WHERE f.installation_id=?1 AND f.campaign_id=?2"
+    } else {
+        "SELECT COUNT(*) FROM risk_no_reserve f
+         JOIN risk_entries e USING(reservation_key)"
+    };
+    let contradictory: i64 = tx.query_row(
+        contradictory_query,
+        params_from_iter(scoped_args.iter()),
         |r| r.get(0),
     )?;
     if contradictory != 0 {
@@ -202,11 +247,16 @@ pub(super) fn verify_reservation_aggregates(
     // increased or reduced without a corresponding durable native receipt.
     let mut consumed_from_receipts = meta.entry_opening_consumed.clone();
     {
-        let mut stmt = tx.prepare(
+        let query = if scope.is_some() {
             "SELECT entry_settled_usd FROM risk_entries
-             WHERE entry_settlement_revision > 0",
-        )?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+             WHERE installation_id=?1 AND campaign_id=?2
+               AND entry_settlement_revision > 0"
+        } else {
+            "SELECT entry_settled_usd FROM risk_entries
+             WHERE entry_settlement_revision > 0"
+        };
+        let mut stmt = tx.prepare(query)?;
+        let rows = stmt.query_map(params_from_iter(scoped_args.iter()), |r| r.get::<_, String>(0))?;
         for row in rows {
             consumed_from_receipts = consumed_from_receipts.checked_add(&amount(row?)?)?;
         }
@@ -219,12 +269,20 @@ pub(super) fn verify_reservation_aggregates(
     let mut cumulative = RiskAmount::zero();
     let mut policy_count = 0_u64;
     {
-        let mut stmt = tx.prepare(
+        let query = if scope.is_some() {
             "SELECT p.account_key, l.cumulative_loss_usd
              FROM risk_policy_account p
-             LEFT JOIN risk_loss_source l USING(account_key)",
-        )?;
-        let rows = stmt.query_map([], |r| {
+             LEFT JOIN risk_loss_source l
+               ON l.installation_id=p.installation_id AND l.campaign_id=p.campaign_id
+              AND l.account_key=p.account_key
+             WHERE p.installation_id=?1 AND p.campaign_id=?2"
+        } else {
+            "SELECT p.account_key, l.cumulative_loss_usd
+             FROM risk_policy_account p
+             LEFT JOIN risk_loss_source l USING(account_key)"
+        };
+        let mut stmt = tx.prepare(query)?;
+        let rows = stmt.query_map(params_from_iter(scoped_args.iter()), |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
         })?;
         for row in rows {
@@ -234,8 +292,16 @@ pub(super) fn verify_reservation_aggregates(
             policy_count += 1;
         }
     }
-    let source_count: i64 =
-        tx.query_row("SELECT COUNT(*) FROM risk_loss_source", [], |r| r.get(0))?;
+    let source_query = if scope.is_some() {
+        "SELECT COUNT(*) FROM risk_loss_source WHERE installation_id=?1 AND campaign_id=?2"
+    } else {
+        "SELECT COUNT(*) FROM risk_loss_source"
+    };
+    let source_count: i64 = tx.query_row(
+        source_query,
+        params_from_iter(scoped_args.iter()),
+        |r| r.get(0),
+    )?;
     let source_count = u64::try_from(source_count)
         .map_err(|_| RiskStoreError::Corrupt("LOSS_SOURCE_AGGREGATES"))?;
     if cumulative != meta.loss_consumed || source_count != policy_count {
