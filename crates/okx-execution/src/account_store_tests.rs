@@ -12321,7 +12321,7 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         );
         assert_eq!(
             denied.unwrap_err(),
-            "INVALID_RISK_INPUT: ACCOUNT_POST_ORIGINAL_RECEIPT_MISSING"
+            "ACCOUNT_POST_ORIGINAL_RECEIPT_MISSING"
         );
         tx.rollback().unwrap();
     }
@@ -12345,7 +12345,7 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         );
         assert_eq!(
             denied.unwrap_err(),
-            "INVALID_RISK_INPUT: RISK_INCREASE_STOPPED"
+            "RISK_INCREASE_STOPPED"
         );
         tx.rollback().unwrap();
     }
@@ -12357,17 +12357,17 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
             "UPDATE intents SET deadline=10002
              WHERE installation_id='installation' AND account_key='acct-A'
                AND intent_id='intent'",
-            "INVALID_RISK_INPUT: COMMAND_EXPIRED",
+            "COMMAND_EXPIRED",
         ),
         (
             "UPDATE account_policy SET revision=2
              WHERE installation_id='installation' AND account_key='acct-A'",
-            "INVALID_RISK_INPUT: POLICY_CHANGED",
+            "POLICY_CHANGED",
         ),
         (
             "UPDATE storage_recovery SET requires_reconcile=1
              WHERE installation_id='installation' AND account_key='acct-A'",
-            "INVALID_RISK_INPUT: STORAGE_RECOVERY_INCOMPLETE",
+            "STORAGE_RECOVERY_INCOMPLETE",
         ),
     ] {
         let tx = target.transaction().unwrap();
