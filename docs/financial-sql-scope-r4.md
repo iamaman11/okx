@@ -18,6 +18,21 @@ See [Issue #510 r4.1](https://github.com/iamaman11/okx/issues/510). **This secti
 
 ---
 
+## One installation-wide recovery COMMIT across all accounts (15 Nov 2026)
+
+`AccountStore::recover_installation_posting_sql_transaction` derives the
+account roster from ORIGINAL `account_meta` in the same one physical
+SQLite (not a separate Cloudflare census). It runs the original scoped
+`recover_posting_sql_transaction` per account in deterministic order
+under the caller's **one BEGIN IMMEDIATE/COMMIT**, returning the exact
+number of changed POSTING intents. One nested SQLite SAVEPOINT guarantees
+that even if the caller mistakenly commits after an account-B source
+failure, earlier account-A mutations are already rolled back; it does
+not add a second writer or COMMIT. No expired/missing risk receipt
+releases budget. The existing installation FIFO exposes this operation
+only as an offline/test rollback trial until RB09 and genuine producers
+are verified. Current account-v2 legacy worker is not changed.
+
 ## Fail-closed scoped POST recovery under ONE original Rust owner (15 Nov 2026)
 
 `AccountStore::recover_posting_sql_transaction` on unified v6 now requires

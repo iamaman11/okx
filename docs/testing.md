@@ -18,6 +18,28 @@
 **Evidence format:** exact SHA, legacy endpoint negative mutation request/response and final readback, source roster/digests/financial totals, target SQLite receipt, before/after-kill reopen, replay, error diagnostics. RB09 is separate from the fast Rust direct target; do not repeat the 90-kill historical Native/Worker matrix. Record **NOT_PROVEN** while old Cloudflare financial code still accepts operations in the deployed legacy environment. Actual installed migration will be executed separately after code acceptance.
 
 ---
+## #510 r4.1 — installation-wide POSTING recovery under one SQL writer (unverified until CI)
+
+**Code:** `AccountStore::recover_installation_posting_sql_transaction`
+selects every account from the original scope-keyed `account_meta`
+inventory and applies fail-closed source-checked recovery to all in
+ONE caller-owned transaction. A nested native SQLite SAVEPOINT rolls
+back prior account mutations on a later account error before the caller
+returns; it does not introduce another DB or independent COMMIT.
+The single `UnifiedFinanceHandle` FIFO exposes a test-only,
+always-rollback installation recovery trial on an offline import.
+
+**Direct physical witness:** extended same-ID A/B full 47-table
+`risk_book_contract_unified_original_prepare_is_scoped_atomic_and_idempotent`
+creates two new native original intents and POSTED receipts, makes B's
+source contradictory after A has staged, verifies A and its receipt
+already reverted by the SAVEPOINT, then commits the successful two-account
+batch exactly once, replays as zero and reopens original WAL to prove
+both `UNKNOWN` with previous terminal intents intact. The full
+source-import owner test also exercises rollback-only roster recovery.
+This remains Draft/NO-GO pending exact SHA CI; no real venue or
+Cloudflare authority action has been undertaken.
+
 ## #510 r4.1 — one-owner recovery source and scoped readback regression (unverified until CI)
 
 **Primary production-symbol boundary:** the original

@@ -3247,6 +3247,63 @@ impl AccountStore {
         Ok(changed)
     }
 
+    /// Recover every installed account in ONE financial SQLite transaction.
+    /// Installation scope comes from the ORIGINAL account_meta inventory in
+    /// the same DB, never from caller-provided account lists or Cloudflare.
+    /// Any invalid original POST fence fails the entire installation batch:
+    /// the caller's one transaction rollback preserves every other account.
+    pub(crate) fn recover_installation_posting_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        installation: &str,
+        now: i64,
+    ) -> StoreResult<usize> {
+        if installation.is_empty() {
+            return Err(StoreError::Invalid("UNIFIED_RECOVERY_SCOPE_INVALID"));
+        }
+        // Savepoint is within the ONE existing BEGIN IMMEDIATE, not another
+        // database or commit. On account B's failure, even a caller that
+        // mistakenly commits its outer transaction cannot persist A's
+        // recovery or partially clear the original budget receipt.
+        tx.execute_batch("SAVEPOINT okx_installation_post_recovery")?;
+        let attempted = (|| -> StoreResult<usize> {
+            let mut query = tx.prepare(
+                "SELECT account_key FROM account_meta
+                 WHERE installation_id=?1 ORDER BY account_key",
+            )?;
+            let accounts = query
+                .query_map([installation], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(query);
+            if accounts.is_empty() {
+                return Err(StoreError::Invalid("UNIFIED_RECOVERY_ACCOUNT_ROSTER_EMPTY"));
+            }
+            let mut total = 0_usize;
+            for account in accounts {
+                total = total
+                    .checked_add(Self::recover_posting_sql_transaction(
+                        tx,
+                        Some((installation, &account)),
+                        now,
+                    )?)
+                    .ok_or(StoreError::Invalid("UNIFIED_RECOVERY_COUNT_OVERFLOW"))?;
+            }
+            Ok(total)
+        })();
+        match attempted {
+            Ok(total) => {
+                tx.execute_batch("RELEASE SAVEPOINT okx_installation_post_recovery")?;
+                Ok(total)
+            }
+            Err(error) => {
+                tx.execute_batch(
+                    "ROLLBACK TO SAVEPOINT okx_installation_post_recovery;
+                     RELEASE SAVEPOINT okx_installation_post_recovery",
+                )?;
+                Err(error)
+            }
+        }
+    }
+
     /// Bounded combined local account obligations, including terminal
     /// intents whose RiskBook reservations have NOT yet been released.
     pub fn risk_census_intents(

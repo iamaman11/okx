@@ -809,6 +809,29 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    /// TEST ONLY: exercise installation-wide native UNKNOWN recovery on
+    /// the existing single SQL FIFO; any account failure rolls back all
+    /// staged accounts, and the immutable offline import remains unchanged.
+    #[cfg(test)]
+    pub(crate) async fn trial_original_recover_installation(
+        &self,
+        now: i64,
+    ) -> StoreResult<usize> {
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            require_offline_finance_trial(&tx, &installation)?;
+            let recovered = AccountStore::recover_installation_posting_sql_transaction(
+                &tx,
+                &installation,
+                now,
+            )?;
+            tx.rollback()?;
+            Ok(recovered)
+        })
+        .await
+    }
+
     /// TEST ONLY: check the original venue readback/ACK/terminal source
     /// transition on the same installation owner without persisting a
     /// synthetic exchange response to the immutable import.

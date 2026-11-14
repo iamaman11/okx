@@ -12875,6 +12875,12 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         0,
         "a PREPARED original intent cannot be recovered as POSTING"
     );
+    assert_eq!(
+        owner.trial_original_recover_installation(10)
+            .await.unwrap(),
+        0,
+        "no unfinished POSTING in the imported two-account source"
+    );
     assert!(matches!(
         owner
             .trial_original_record_outcome(
@@ -13775,6 +13781,109 @@ fn risk_book_contract_unified_original_prepare_is_scoped_atomic_and_idempotent()
             )
             .unwrap();
         assert_eq!(terminal, ("FILLED".into(), "venue-order".into()));
+    }
+    // Installation-wide recovery must be all-or-nothing even if account B's
+    // source is broken AFTER account A has already been staged in the batch.
+    // The original decision/intent creation code is shared with account-v2.
+    let mut batch_decision = decision.clone();
+    batch_decision.decision_id = "batch-decision".into();
+    let mut batch_intent = intent.clone();
+    batch_intent.intent_id = "batch-intent".into();
+    batch_intent.idempotency_key = "batch-idempotency".into();
+    batch_intent.client_order_id = "batch-client".into();
+    {
+        let tx = reopened.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        for account in ["acct-A", "acct-B"] {
+            assert!(AccountStore::prepare_sql_transaction(
+                &tx, Some(("installation", account)), &batch_decision, &batch_intent
+            ).unwrap());
+            tx.execute(
+                "INSERT INTO risk_receipts(
+                 reservation_key,intent_id,account_key,installation_id,instance_id,
+                 plan_hash,policy_revision,receipt_hash,requested_loss_usd,
+                 conversion_digest,state)
+                 VALUES('batch-reservation','batch-intent',?1,'installation',
+                 NULL,?2,1,'batch-receipt','1','conversion','POSTED')",
+                params![account, batch_intent.plan_hash],
+            ).unwrap();
+            tx.execute(
+                "UPDATE intents SET state='POSTING',begin_post_at=14
+                 WHERE installation_id='installation' AND account_key=?1
+                   AND intent_id='batch-intent'",
+                [account],
+            ).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    {
+        let tx = reopened.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        tx.execute(
+            "UPDATE risk_receipts SET state='OPEN'
+             WHERE installation_id='installation' AND account_key='acct-B'
+               AND intent_id='batch-intent'", [],
+        ).unwrap();
+        assert!(matches!(
+            AccountStore::recover_installation_posting_sql_transaction(&tx, "installation", 15),
+            Err(StoreError::Invalid("UNIFIED_RECOVERY_ORIGINAL_POST_UNPROVEN"))
+        ));
+        // The helper's SAVEPOINT undid A already; the caller can still
+        // explicitly roll back this deliberately corrupted B source.
+        assert_eq!(
+            tx.query_row::<String,_,_>(
+                "SELECT state FROM intents WHERE installation_id='installation'
+                   AND account_key='acct-A' AND intent_id='batch-intent'",
+                [], |r| r.get(0)
+            ).unwrap(),
+            "POSTING"
+        );
+        assert_eq!(
+            tx.query_row::<String,_,_>(
+                "SELECT state FROM risk_receipts WHERE installation_id='installation'
+                   AND account_key='acct-A' AND intent_id='batch-intent'",
+                [], |r| r.get(0)
+            ).unwrap(),
+            "POSTED"
+        );
+        tx.rollback().unwrap();
+    }
+    {
+        let tx = reopened.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        assert_eq!(
+            AccountStore::recover_installation_posting_sql_transaction(
+                &tx, "installation", 16
+            ).unwrap(),
+            2
+        );
+        assert_eq!(
+            AccountStore::recover_installation_posting_sql_transaction(
+                &tx, "installation", 17
+            ).unwrap(),
+            0
+        );
+        tx.commit().unwrap();
+    }
+    drop(reopened);
+    let reopened = Connection::open(&file).unwrap();
+    for account in ["acct-A", "acct-B"] {
+        assert_eq!(
+            reopened.query_row::<(String,String),_,_>(
+                "SELECT i.state,r.state FROM intents i JOIN risk_receipts r
+                 ON r.installation_id=i.installation_id AND r.account_key=i.account_key
+                 AND r.intent_id=i.intent_id
+                 WHERE i.installation_id='installation' AND i.account_key=?1
+                   AND i.intent_id='batch-intent'",
+                [account], |r| Ok((r.get(0)?,r.get(1)?))
+            ).unwrap(),
+            ("UNKNOWN".into(), "UNKNOWN".into())
+        );
+        assert_eq!(
+            reopened.query_row::<String,_,_>(
+                "SELECT state FROM intents WHERE installation_id='installation'
+                   AND account_key=?1 AND intent_id='same-intent'",
+                [account], |r| r.get(0)
+            ).unwrap(),
+            "FILLED"
+        );
     }
     let mut fk = reopened.prepare("PRAGMA foreign_key_check").unwrap();
     assert!(
