@@ -11441,8 +11441,8 @@ fn risk_book_contract_unified_offline_import_all_47_original_tables_and_obligati
     use rusqlite::{Connection, OpenFlags};
     let mut a = store_with_account("acct-A");
     let mut b = store_with_account("acct-B");
-    let ai = intent(&mut a);
-    let bi = intent(&mut b);
+    let ai = intent_with_plan_hash(&mut a, &"a".repeat(64));
+    let bi = intent_with_plan_hash(&mut b, &"b".repeat(64));
     let (ap, bp) = (a.path.clone(), b.path.clone());
     let x = path();
     let y = path();
@@ -11529,6 +11529,58 @@ fn risk_book_contract_unified_offline_import_all_47_original_tables_and_obligati
         shared_keys, 2,
         "same historical key must remain campaign-scoped"
     );
+    // Original scoped INSPECT reads both identical historical reservation
+    // keys separately; a foreign campaign's plan is never disclosed.
+    {
+        let tx = target.unchecked_transaction().unwrap();
+        let x = crate::risk::read_unified_campaign_reservation(
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &ai.plan_hash,
+        )
+        .unwrap()
+        .unwrap();
+        let y = crate::risk::read_unified_campaign_reservation(
+            &tx,
+            "installation",
+            "campaign-Y",
+            "same-reservation",
+            &bi.plan_hash,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(x.state, okx_kernel::risk::model::RiskEntryState::Held);
+        assert_eq!(y.state, okx_kernel::risk::model::RiskEntryState::Held);
+        assert_eq!(x.reservation_sequence, 1);
+        assert_eq!(y.reservation_sequence, 1);
+        assert_eq!(x.plan_sha256, ai.plan_hash);
+        assert_eq!(y.plan_sha256, bi.plan_hash);
+        assert!(
+            crate::risk::read_unified_campaign_reservation(
+                &tx,
+                "installation",
+                "campaign-X",
+                "same-reservation",
+                &bi.plan_hash,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            crate::risk::read_unified_campaign_reservation(
+                &tx,
+                "installation",
+                "campaign-Y",
+                "same-reservation",
+                &ai.plan_hash,
+            )
+            .unwrap()
+            .is_none()
+        );
+        tx.commit().unwrap();
+    }
     let mut fk = target.prepare("PRAGMA foreign_key_check").unwrap();
     assert!(fk.query([]).unwrap().next().unwrap().is_none());
     drop(fk);
