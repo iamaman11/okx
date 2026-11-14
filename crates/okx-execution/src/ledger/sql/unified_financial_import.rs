@@ -5,8 +5,10 @@
 //! this helper until the campaign import and cross-host authority cutover.
 use crate::{StoreError, StoreResult};
 use rusqlite::{
-    Connection, Transaction, TransactionBehavior, params, params_from_iter, types::Value,
+    Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
+    types::Value,
 };
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, path::Path};
 
 /// Same 29 canonical account-v2 tables plus 10 source-owned derived tables.
@@ -65,6 +67,15 @@ const ORIGINAL_CAMPAIGN_TABLES: [&str; 8] = [
     "risk_no_reserve",
 ];
 
+/// Expected source IDs from an OUT-OF-BAND inventory. These names do not
+/// authenticate themselves or constitute distributed owner fencing.
+#[derive(Debug)]
+pub(in crate::account_store) struct ExpectedFinanceInventory<'a> {
+    pub installation: &'a str,
+    pub accounts: &'a [&'a str],
+    pub campaigns: &'a [&'a str],
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::account_store) struct OriginalFinanceImport {
     pub accounts: usize,
@@ -73,6 +84,8 @@ pub(in crate::account_store) struct OriginalFinanceImport {
     pub tables_per_campaign: usize,
     pub account_rows: u64,
     pub campaign_rows: u64,
+    pub inventory_sha256: String,
+    pub content_sha256: String,
 }
 
 #[cfg(test)]
@@ -81,6 +94,168 @@ pub(in crate::account_store) struct OriginalAccountImport {
     pub accounts: usize,
     pub tables_per_account: usize,
     pub imported_rows: u64,
+}
+
+fn inventory_ids(ids: &[&str]) -> StoreResult<BTreeSet<String>> {
+    if ids.is_empty() || ids.iter().any(|id| id.is_empty()) {
+        return Err(StoreError::Invalid("UNIFIED_IMPORT_INVENTORY_EMPTY"));
+    }
+    let unique: BTreeSet<String> = ids.iter().map(|id| (*id).to_owned()).collect();
+    if unique.len() != ids.len() {
+        return Err(StoreError::Invalid("UNIFIED_IMPORT_INVENTORY_DUPLICATE"));
+    }
+    Ok(unique)
+}
+
+fn frame(hash: &mut Sha256, bytes: &[u8]) {
+    hash.update((bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
+}
+
+fn hash_inventory(
+    installation: &str,
+    accounts: &BTreeSet<String>,
+    campaigns: &BTreeSet<String>,
+) -> String {
+    let mut hash = Sha256::new();
+    frame(&mut hash, b"okx-finance-source-inventory-r4-v1");
+    frame(&mut hash, installation.as_bytes());
+    for (kind, names) in [(b'A', accounts), (b'C', campaigns)] {
+        hash.update([kind]);
+        hash.update((names.len() as u64).to_be_bytes());
+        for name in names {
+            frame(&mut hash, name.as_bytes());
+        }
+    }
+    format!("{:x}", hash.finalize())
+}
+
+fn hash_value(hash: &mut Sha256, value: Value) {
+    match value {
+        Value::Null => hash.update([0]),
+        Value::Integer(v) => {
+            hash.update([1]);
+            hash.update(v.to_be_bytes());
+        }
+        Value::Real(v) => {
+            hash.update([2]);
+            hash.update(v.to_bits().to_be_bytes());
+        }
+        Value::Text(v) => {
+            hash.update([3]);
+            frame(hash, v.as_bytes());
+        }
+        Value::Blob(v) => {
+            hash.update([4]);
+            frame(hash, &v);
+        }
+    }
+}
+
+/// Canonical logical-row hash across ALL original target tables, each scope
+/// and every SQLite value (NULL, integer, REAL, text or blob). Does not
+/// hash physical SQLite pages or WAL checkpoints and remains stable on reopen.
+/// Uses the 47 ORIGINAL tables; the extra offline marker never hashes itself.
+fn target_content_digest(
+    db: &Connection,
+    installation: &str,
+    accounts: &BTreeSet<String>,
+    campaigns: &BTreeSet<String>,
+) -> StoreResult<String> {
+    let mut hash = Sha256::new();
+    frame(&mut hash, b"okx-finance-content-r4-v1");
+    frame(&mut hash, installation.as_bytes());
+    for (kind, names, scope_column, tables) in [
+        (b'A', accounts, "account_key", &ORIGINAL_ACCOUNT_TABLES[..]),
+        (b'C', campaigns, "campaign_id", &ORIGINAL_CAMPAIGN_TABLES[..]),
+    ] {
+        for name in names {
+            hash.update([kind]);
+            frame(&mut hash, name.as_bytes());
+            for table in tables {
+                frame(&mut hash, table.as_bytes());
+                let cols = columns(db, table)?;
+                hash.update((cols.len() as u64).to_be_bytes());
+                for col in &cols {
+                    frame(&mut hash, col.as_bytes());
+                }
+                let projected = cols.iter().map(|c| quote(c)).collect::<Vec<_>>().join(",");
+                // Order by the COMPLETE row, rather than rowid, to ignore
+                // SQLite page allocation and retain duplicate rows.
+                let query = format!(
+                    "SELECT {projected} FROM {} WHERE installation_id=?1 AND {}=?2
+                     ORDER BY {projected}",
+                    quote(table), quote(scope_column)
+                );
+                let mut stmt = db.prepare(&query)?;
+                let mut rows = stmt.query(params![installation, name])?;
+                let mut row_count = 0_u64;
+                while let Some(row) = rows.next()? {
+                    hash.update([0x52]);
+                    for index in 0..cols.len() {
+                        hash_value(&mut hash, row.get::<_, Value>(index)?);
+                    }
+                    row_count = row_count
+                        .checked_add(1)
+                        .ok_or(StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?;
+                }
+                hash.update(row_count.to_be_bytes());
+            }
+        }
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+/// Includes every original account/campaign table, and refuses extra
+/// unrecognized installed scopes or extra target rows in other installations.
+fn target_row_totals(
+    db: &Connection,
+    installation: &str,
+    accounts: &BTreeSet<String>,
+    campaigns: &BTreeSet<String>,
+) -> StoreResult<(u64, u64)> {
+    let mut totals = [0_u64, 0_u64];
+    for (index, names, scope, tables) in [
+        (0_usize, accounts, "account_key", &ORIGINAL_ACCOUNT_TABLES[..]),
+        (1_usize, campaigns, "campaign_id", &ORIGINAL_CAMPAIGN_TABLES[..]),
+    ] {
+        for &table in tables {
+            let total: i64 = db.query_row(
+                &format!("SELECT COUNT(*) FROM {}", quote(table)),
+                [],
+                |r| r.get(0),
+            )?;
+            let scoped: i64 = db.query_row(
+                &format!("SELECT COUNT(*) FROM {} WHERE installation_id=?1", quote(table)),
+                [installation],
+                |r| r.get(0),
+            )?;
+            if total != scoped {
+                return Err(StoreError::Invalid("UNIFIED_IMPORT_FOREIGN_INSTALLATION"));
+            }
+            let mut names_total = 0_i64;
+            for name in names {
+                let count: i64 = db.query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {} WHERE installation_id=?1 AND {}=?2",
+                        quote(table), quote(scope)
+                    ),
+                    params![installation, name],
+                    |r| r.get(0),
+                )?;
+                names_total = names_total.checked_add(count)
+                    .ok_or(StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?;
+            }
+            if total != names_total {
+                return Err(StoreError::Invalid("UNIFIED_IMPORT_EXTRA_SCOPE"));
+            }
+            totals[index] = totals[index]
+                .checked_add(u64::try_from(total)
+                    .map_err(|_| StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?)
+                .ok_or(StoreError::Invalid("UNIFIED_IMPORT_ROW_COUNT_OVERFLOW"))?;
+        }
+    }
+    Ok((totals[0], totals[1]))
 }
 
 fn columns(db: &Connection, name: &str) -> StoreResult<Vec<String>> {
