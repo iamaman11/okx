@@ -511,6 +511,19 @@ fn copy_one_scope(
 /// inventory of stopped accounts and campaigns; OS file leases are local
 /// safety only, not proof of Cloudflare fencing or source completeness.
 /// An empty campaign set is permitted ONLY for a historical account-only test.
+#[cfg(test)]
+fn stop_at_os_import_witness(phase: &str) {
+    // Isolated child-process test only. The parent issues a REAL OS kill
+    // after observing the commit boundary; this is not a simulated rollback.
+    if std::env::var("OKX_510_FULL_IMPORT_FAULT").as_deref() == Ok(phase) {
+        use std::io::Write;
+        println!("OKX_510_FULL_IMPORT_REACHED_{phase}");
+        std::io::stdout().flush().unwrap();
+        std::thread::park();
+        unreachable!("parent must OS-kill the paused importer");
+    }
+}
+
 fn import_sources(
     target: &mut Connection,
     installation: &str,
@@ -685,7 +698,11 @@ fn import_sources(
         return Err(StoreError::Invalid("UNIFIED_IMPORT_FOREIGN_KEY_FAILED"));
     }
     drop(fk_check);
+    #[cfg(test)]
+    stop_at_os_import_witness("BEFORE_COMMIT");
     tx.commit()?;
+    #[cfg(test)]
+    stop_at_os_import_witness("AFTER_COMMIT");
     Ok(OriginalFinanceImport {
         accounts: accounts.len(),
         campaigns: campaigns.len(),
