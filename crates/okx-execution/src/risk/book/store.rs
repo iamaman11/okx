@@ -126,7 +126,7 @@ pub(super) struct CampaignOpening {
     pub accounts: Vec<AccountPolicy>,
 }
 #[derive(Debug, Clone)]
-pub(super) struct VerifiedCensus {
+pub(crate) struct VerifiedCensus {
     pub complete: bool,
     pub generation: u64,
     pub source_digest: String,
@@ -136,7 +136,7 @@ pub(super) struct VerifiedCensus {
     pub cumulative_loss_usd: BTreeMap<String, RiskAmount>,
 }
 #[derive(Debug, Clone)]
-pub(super) struct ReserveInput {
+pub(crate) struct ReserveInput {
     pub venue: String,
     pub uid: String,
     pub run_id: String,
@@ -158,7 +158,7 @@ impl ReserveInput {
     fn account_key(&self) -> String {
         format!("{}:real:{}", self.venue, self.uid)
     }
-    pub(super) fn reservation_key(&self) -> String {
+    pub(crate) fn reservation_key(&self) -> String {
         // Same length-prefixed key as legacy TS riskKey; no delimiter collision.
         [
             self.venue.as_str(),
