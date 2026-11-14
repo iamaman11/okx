@@ -82,9 +82,11 @@ CREATE TABLE finance_entry_sources (
  source_digest TEXT NOT NULL CHECK(length(source_digest)=64),
  cumulative_entry_usd TEXT NOT NULL,
  -- Preserves original verified AccountStore receipt bytes during legacy import.
- -- Synthetic first-slice fixtures do not possess an original receipt.
- original_receipt_json TEXT NOT NULL DEFAULT '',
+ -- Fixtures must provide structurally valid original-format receipts too;
+ -- only a trusted native AccountStore source producer proves their authenticity.
+ original_receipt_json TEXT NOT NULL CHECK(length(original_receipt_json)>0),
  PRIMARY KEY(installation_id,account_key,intent_id,settlement_revision),
+ UNIQUE(installation_id,account_key,intent_id,settlement_revision,source_digest),
  FOREIGN KEY(installation_id,account_key,intent_id)
    REFERENCES finance_intents(installation_id,account_key,intent_id),
  FOREIGN KEY(installation_id,account_key,fill_id,intent_id)
@@ -108,6 +110,7 @@ CREATE TABLE finance_risk_entries (
  CHECK(state <> 'RELEASED' OR reserved_entry_usd='0'),
  CHECK(state <> 'HELD' OR (entry_settled_usd='0' AND settlement_revision=0)),
  PRIMARY KEY(installation_id,campaign_id,reservation_key),
+ UNIQUE(installation_id,campaign_id,reservation_key,account_key,intent_id),
  FOREIGN KEY(installation_id,campaign_id,account_key)
    REFERENCES finance_campaign_accounts(installation_id,campaign_id,account_key),
  FOREIGN KEY(installation_id,account_key,intent_id)
@@ -125,10 +128,10 @@ CREATE TABLE finance_entry_receipts (
  cumulative_entry_usd TEXT NOT NULL,
  book_sequence INTEGER NOT NULL CHECK(book_sequence>0),
  PRIMARY KEY(installation_id,campaign_id,reservation_key,settlement_revision),
- FOREIGN KEY(installation_id,campaign_id,reservation_key)
-   REFERENCES finance_risk_entries(installation_id,campaign_id,reservation_key),
- FOREIGN KEY(installation_id,account_key,intent_id,settlement_revision)
-   REFERENCES finance_entry_sources(installation_id,account_key,intent_id,settlement_revision)
+ FOREIGN KEY(installation_id,campaign_id,reservation_key,account_key,intent_id)
+   REFERENCES finance_risk_entries(installation_id,campaign_id,reservation_key,account_key,intent_id),
+ FOREIGN KEY(installation_id,account_key,intent_id,settlement_revision,source_digest)
+   REFERENCES finance_entry_sources(installation_id,account_key,intent_id,settlement_revision,source_digest)
 ) STRICT;
 CREATE TRIGGER finance_immutable_fill_update BEFORE UPDATE ON finance_fills
  BEGIN SELECT RAISE(ABORT,'IMMUTABLE_FILL'); END;
