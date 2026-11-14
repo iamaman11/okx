@@ -2145,10 +2145,8 @@ impl AccountStore {
             values.push(Value::Text(installation.to_owned()));
             values.push(Value::Text(account.to_owned()));
         }
-        let (mut p, q, price, stop, loss, cv) = db.query_row(
-            sql,
-            params_from_iter(values.iter()),
-            |r| {
+        let (mut p, q, price, stop, loss, cv) =
+            db.query_row(sql, params_from_iter(values.iter()), |r| {
                 Ok((
                     IntentPlan {
                         operation: r.get(0)?,
@@ -2170,8 +2168,7 @@ impl AccountStore {
                     r.get::<_, String>(6)?,
                     r.get::<_, String>(10)?,
                 ))
-            },
-        )?;
+            })?;
         p.contract_value = decimal(cv)?;
         p.quantity = decimal(q)?;
         p.limit_price = decimal(price)?;
@@ -2253,11 +2250,8 @@ impl AccountStore {
                 "SELECT receipt_hash FROM risk_receipts WHERE reservation_key=?1"
             };
             let values = scoped_values(vec![Value::Text(receipt.reservation_key.clone())]);
-            let saved: String = tx.query_row(
-                hash_sql,
-                params_from_iter(values.iter()),
-                |r| r.get(0),
-            )?;
+            let saved: String =
+                tx.query_row(hash_sql, params_from_iter(values.iter()), |r| r.get(0))?;
             return if saved == receipt.receipt_hash {
                 Ok(())
             } else {
