@@ -1,8 +1,19 @@
 # #510 r4 — source-derived SQL scope inventory and first physical single-file slice
 
+## Latest #510 r4.0 offline manifest, exact roster and OS-kill witness — 71 direct tests PASS (14 Nov 2026)
+
+**Verified code SHA `31b0438ee7a4c0febb39a66f544b61122603f12f`**, [GitHub CI #43620387365](https://github.com/iamaman11/okx/actions/runs/43620387365) **SUCCESS**: 64/64 filtered `okx-execution` + 6/6 `okx-kernel` + 1/1 original AccountStore fill/bill = **71 direct Rust cases**; architecture guard/negative self-tests and rustfmt PASS. Linux test execution after build ~0.90+0.00+0.07s, not full native Windows acceptance.
+
+**One actual 39+8 offline import transaction now carries its own durable recovery witness.** The private importer requires `ExpectedFinanceInventory` containing the exact installation, account IDs and campaign IDs; missing/duplicate/foreign identities reject *before initializing target tables*. It copies the 47 original financial tables into the candidate finance SQLite under one `BEGIN IMMEDIATE/COMMIT`, calculates a deterministic scope+all-row SHA-256 across original values and writes a single `finance_import_manifest` receipt in that **same COMMIT**. Target schema now has **47 original finance tables + 1 migration metadata table (48 total)** and **48 original triggers + 2 immutable marker triggers (50 total)**. The extra table is *not* a second financial ledger.
+
+`inspect_stopped_finance_import` verifies the exact expected roster, version, table census, original row totals, marker, full persisted content digest, SQLite integrity and FK in a read-only snapshot after reopen. A missing ACK is recovered by **readback**, not a second import; replay on nonempty target is rejected. Negative tests deny incomplete/duplicate manifest, altered financial facts despite valid SQLite integrity, and marker mutation. A real native child process physically imports all 47 original finance tables while parent **OS-kills before and after one SQLite COMMIT**. Before: no tables/debts survive; after: original account history, held debt, risk reserves and offline marker survive exact reopen/readback. Parent verifies actual child exit and boundary markers; no simulated failure is counted as a physical witness.
+
+**Boundary:** This roster is supplied to the private importer and is **not an authenticated complete census from the production owner**. Its SHA-256 is a snapshot consistency proof, **not** Cloudflare server-side mutation revocation, a trusted source signature or an owner epoch. The stored marker's state is `OFFLINE_NOT_AUTHORIZED` and cannot grant a trading capability. No production AccountStore or RiskBook writer has been switched; all nine live RiskCommandAction callers, terminal/late/UNKNOWN, Cloudflare legacy server-side fencing/epoch, actual Windows RB01–16 and T09/T10 26/26 remain **NOT_PROVEN**. PR #511 stays **Draft / NO-GO**; no installed app, account or Cloudflare runtime changed.
+
+
 **Date:** 14 November 2026. **Canonical architecture:** [Issue #510 r4.0](https://github.com/iamaman11/okx/issues/510). **Code:** [Draft PR #511](https://github.com/iamaman11/okx/pull/511). No production authorization, migration, Cloudflare cutover, Windows installation or trading follows from this first slice.
 
-## Latest #510 r4.0: complete *offline source-set* 39+8 import (14 Nov 2026)
+## Previous #510 r4.0: 39+8 offline source rows before manifest and OS-kill (historical)
 
 **Verified CODE HEAD `7519caa78c343d496d677d6dbcd24848b69eaed9`**, [GitHub CI #43615452874](https://github.com/iamaman11/okx/actions/runs/43615452874) **SUCCESS**: 60/60 direct execution-crate risk contracts, 6/6 kernel, and 1/1 original AccountStore fill/bill source (67 cases); architecture guard, negative self-tests and rustfmt PASS. Linux execution after build ~0.75 + 0.00 + 0.11 seconds. Not the full Windows/RB/T09/T10 acceptance.
 
