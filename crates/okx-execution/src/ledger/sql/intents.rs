@@ -2225,9 +2225,8 @@ impl AccountStore {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let permitted = Self::begin_post_sql_transaction(
-            &tx, None, id, policy_revision, now, None,
-        )?;
+        let permitted =
+            Self::begin_post_sql_transaction(&tx, None, id, policy_revision, now, None)?;
         if permitted {
             tx.commit()?;
         }
@@ -2259,10 +2258,14 @@ impl AccountStore {
             }
             base
         }
-        if id.is_empty() || now <= 0 || policy_revision <= 0
-            || (scope.is_some() && (required_reservation.is_none()
-                || scope.is_some_and(|(installation, account)|
-                    installation.is_empty() || account.is_empty())))
+        if id.is_empty()
+            || now <= 0
+            || policy_revision <= 0
+            || (scope.is_some()
+                && (required_reservation.is_none()
+                    || scope.is_some_and(|(installation, account)| {
+                        installation.is_empty() || account.is_empty()
+                    })))
         {
             return Err(StoreError::Invalid("ACCOUNT_POST_INPUT_INVALID"));
         }
@@ -2274,8 +2277,9 @@ impl AccountStore {
         };
         let intent_bind = bind(vec![Value::Text(id.to_owned())], scope);
         let (state, deadline, revision, increase): (String, i64, i64, bool) =
-            tx.query_row(intent_sql, params_from_iter(intent_bind.iter()),
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+            tx.query_row(intent_sql, params_from_iter(intent_bind.iter()), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?;
         if state != "RESERVED" {
             return Ok(false);
         }
@@ -2289,10 +2293,10 @@ impl AccountStore {
             "SELECT revision,paused FROM account_policy WHERE singleton=1"
         };
         let scope_bind = bind(Vec::new(), scope);
-        let (current, paused): (i64, bool) = tx.query_row(
-            policy_sql, params_from_iter(scope_bind.iter()),
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (current, paused): (i64, bool) =
+            tx.query_row(policy_sql, params_from_iter(scope_bind.iter()), |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
         if revision != policy_revision || current != revision {
             return Err(StoreError::Invalid("POLICY_CHANGED"));
         }
@@ -2316,9 +2320,10 @@ impl AccountStore {
                    AND i.parameters_digest=p.strategy_parameters_digest
                    AND (i.enabled=1 OR i.instance_id='manual'))"
             };
-            let same: bool = tx.query_row(
-                strategy_sql, params_from_iter(intent_bind.iter()), |r| r.get(0),
-            )?;
+            let same: bool =
+                tx.query_row(strategy_sql, params_from_iter(intent_bind.iter()), |r| {
+                    r.get(0)
+                })?;
             if !same {
                 return Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"));
             }
@@ -2328,9 +2333,8 @@ impl AccountStore {
             } else {
                 "SELECT COUNT(*) FROM risk_stops WHERE resolution IS NULL"
             };
-            let stops: i64 = tx.query_row(
-                stop_sql, params_from_iter(scope_bind.iter()), |r| r.get(0),
-            )?;
+            let stops: i64 =
+                tx.query_row(stop_sql, params_from_iter(scope_bind.iter()), |r| r.get(0))?;
             if paused || stops > 0 {
                 return Err(StoreError::Invalid("RISK_INCREASE_STOPPED"));
             }
@@ -2340,9 +2344,10 @@ impl AccountStore {
             } else {
                 "SELECT requires_reconcile FROM storage_recovery"
             };
-            let recovery: bool = tx.query_row(
-                recovery_sql, params_from_iter(scope_bind.iter()), |r| r.get(0),
-            )?;
+            let recovery: bool =
+                tx.query_row(recovery_sql, params_from_iter(scope_bind.iter()), |r| {
+                    r.get(0)
+                })?;
             if recovery {
                 return Err(StoreError::Invalid("STORAGE_RECOVERY_INCOMPLETE"));
             }
@@ -2352,9 +2357,10 @@ impl AccountStore {
             } else {
                 "SELECT COUNT(*) FROM intents WHERE state IN('POSTING','UNKNOWN')"
             };
-            let unknown: i64 = tx.query_row(
-                unknown_sql, params_from_iter(scope_bind.iter()), |r| r.get(0),
-            )?;
+            let unknown: i64 =
+                tx.query_row(unknown_sql, params_from_iter(scope_bind.iter()), |r| {
+                    r.get(0)
+                })?;
             if unknown > 0 {
                 return Err(StoreError::Invalid("ACCOUNT_UNKNOWN_EXPOSURE"));
             }
@@ -2367,10 +2373,11 @@ impl AccountStore {
                          AND intent_id=?3 AND reservation_key=?4 AND state='HELD'
                          AND plan_hash=(SELECT plan_hash FROM intents
                            WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3)";
-            let (installation, account) = scope
-                .ok_or(StoreError::Invalid("ACCOUNT_POST_SCOPE_REQUIRED"))?;
+            let (installation, account) =
+                scope.ok_or(StoreError::Invalid("ACCOUNT_POST_SCOPE_REQUIRED"))?;
             let count: i64 = tx.query_row(
-                sql, rusqlite::params![installation, account, id, reservation],
+                sql,
+                rusqlite::params![installation, account, id, reservation],
                 |r| r.get(0),
             )?;
             if count != 1 {
