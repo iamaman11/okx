@@ -2249,8 +2249,12 @@ impl AccountStore {
                     tx.execute(
                         "INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,?6)",
                         params![
-                            decision.decision_id, decision.instance_id, decision.decision_at,
-                            decision.input_digest, decision.policy_revision, decision.code_version
+                            decision.decision_id,
+                            decision.instance_id,
+                            decision.decision_at,
+                            decision.input_digest,
+                            decision.policy_revision,
+                            decision.code_version
                         ],
                     )?;
                 }
@@ -2265,24 +2269,44 @@ impl AccountStore {
                      risk_increase,instrument_id,created_at,updated_at)
                      VALUES(?1,?2,?3,?4,?5,?6,'PREPARED',0,?7,?8,?9,?10,?11,?12,?13,?13)",
                     params![
-                        installation, account, intent.intent_id, intent.idempotency_key,
-                        intent.request_hash, decision.decision_id, intent.client_order_id,
-                        intent.deadline, intent.plan_hash, intent.policy_revision,
-                        intent.risk_increase, intent.instrument_id, decision.decision_at
+                        installation,
+                        account,
+                        intent.intent_id,
+                        intent.idempotency_key,
+                        intent.request_hash,
+                        decision.decision_id,
+                        intent.client_order_id,
+                        intent.deadline,
+                        intent.plan_hash,
+                        intent.policy_revision,
+                        intent.risk_increase,
+                        intent.instrument_id,
+                        decision.decision_at
                     ],
                 )?;
                 tx.execute(
                     "INSERT INTO intent_plans VALUES(
                      ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                     params![
-                        installation, account, intent.intent_id, intent.plan.operation,
-                        intent.plan.side, exact(intent.plan.quantity), exact(intent.plan.limit_price),
-                        intent.plan.stop_price.map(exact), intent.plan.strategy_instance,
-                        exact(intent.plan.planned_loss_usd), intent.plan.source_generation,
-                        intent.plan.position_side, intent.plan.private_source_generation,
-                        exact(intent.plan.contract_value), intent.plan.inverse,
-                        intent.plan.settlement_currency, intent.plan.strategy_definition_id,
-                        intent.plan.strategy_definition_version, intent.plan.strategy_parameters_digest
+                        installation,
+                        account,
+                        intent.intent_id,
+                        intent.plan.operation,
+                        intent.plan.side,
+                        exact(intent.plan.quantity),
+                        exact(intent.plan.limit_price),
+                        intent.plan.stop_price.map(exact),
+                        intent.plan.strategy_instance,
+                        exact(intent.plan.planned_loss_usd),
+                        intent.plan.source_generation,
+                        intent.plan.position_side,
+                        intent.plan.private_source_generation,
+                        exact(intent.plan.contract_value),
+                        intent.plan.inverse,
+                        intent.plan.settlement_currency,
+                        intent.plan.strategy_definition_id,
+                        intent.plan.strategy_definition_version,
+                        intent.plan.strategy_parameters_digest
                     ],
                 )?;
             }
@@ -2319,7 +2343,9 @@ impl AccountStore {
                         "UPDATE strategy_instances SET last_decision_key=?4
                          WHERE installation_id=?1 AND account_key=?2 AND instance_id=?3",
                         params![
-                            installation, account, intent.plan.strategy_instance,
+                            installation,
+                            account,
+                            intent.plan.strategy_instance,
                             intent.idempotency_key
                         ],
                     )?;
