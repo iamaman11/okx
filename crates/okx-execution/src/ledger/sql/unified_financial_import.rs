@@ -5,8 +5,7 @@
 //! this helper until the campaign import and cross-host authority cutover.
 use crate::{StoreError, StoreResult};
 use rusqlite::{
-    Connection, Transaction, TransactionBehavior, params, params_from_iter,
-    types::Value,
+    Connection, Transaction, TransactionBehavior, params, params_from_iter, types::Value,
 };
 use std::collections::BTreeSet;
 
@@ -111,7 +110,12 @@ fn verify_original_source(source: &Connection, installation: &str) -> StoreResul
         stmt.query_map([], |r| r.get(0))?
             .collect::<Result<BTreeSet<_>, _>>()?
     };
-    if names != ORIGINAL_ACCOUNT_TABLES.into_iter().map(str::to_owned).collect() {
+    if names
+        != ORIGINAL_ACCOUNT_TABLES
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    {
         return Err(StoreError::Invalid("UNIFIED_LEGACY_TABLE_CENSUS_CHANGED"));
     }
     let (account, owned_installation): (String, String) = source.query_row(
@@ -149,30 +153,41 @@ fn copy_one_account(
         }
         let query = format!(
             "SELECT {} FROM {}",
-            source_cols.iter().map(|c| quote(c)).collect::<Vec<_>>().join(","),
+            source_cols
+                .iter()
+                .map(|c| quote(c))
+                .collect::<Vec<_>>()
+                .join(","),
             quote(table),
         );
         let write = format!(
             "INSERT INTO {}({}) VALUES({})",
             quote(table),
-            target_cols.iter().map(|c| quote(c)).collect::<Vec<_>>().join(","),
-            (0..target_cols.len()).map(|_| "?").collect::<Vec<_>>().join(","),
+            target_cols
+                .iter()
+                .map(|c| quote(c))
+                .collect::<Vec<_>>()
+                .join(","),
+            (0..target_cols.len())
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(","),
         );
         let mut reader = source.prepare(&query)?;
         let mut rows = reader.query([])?;
         let mut statement = tx.prepare(&write)?;
-        let mut n=0i64;
-        while let Some(row)=rows.next()? {
+        let mut n = 0i64;
+        while let Some(row) = rows.next()? {
             let native_values = (0..source_cols.len())
                 .map(|i| row.get::<_, Value>(i))
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut values=Vec::with_capacity(target_cols.len());
+            let mut values = Vec::with_capacity(target_cols.len());
             for col in &target_cols {
-                if let Some(i)=source_cols.iter().position(|c| c==col) {
+                if let Some(i) = source_cols.iter().position(|c| c == col) {
                     values.push(native_values[i].clone());
-                } else if col=="installation_id" {
+                } else if col == "installation_id" {
                     values.push(Value::Text(installation.to_owned()));
-                } else if col=="account_key" {
+                } else if col == "account_key" {
                     values.push(Value::Text(account.to_owned()));
                 } else {
                     return Err(StoreError::Invalid("UNIFIED_LEGACY_COLUMN_UNMAPPED"));
@@ -181,16 +196,20 @@ fn copy_one_account(
             if statement.execute(params_from_iter(values.iter()))? != 1 {
                 return Err(StoreError::Invalid("UNIFIED_LEGACY_ROW_NOT_IMPORTED"));
             }
-            n+=1;
+            n += 1;
         }
-        let actual: i64=source.query_row(
-            &format!("SELECT COUNT(*) FROM {}",quote(table)),[],|r|r.get(0),
-        )?;
-        if n!=actual || count_scoped(tx,table,installation,account)?!=actual {
+        let actual: i64 =
+            source.query_row(&format!("SELECT COUNT(*) FROM {}", quote(table)), [], |r| {
+                r.get(0)
+            })?;
+        if n != actual || count_scoped(tx, table, installation, account)? != actual {
             return Err(StoreError::Invalid("UNIFIED_LEGACY_ROW_PARITY_FAILED"));
         }
-        imported=imported.checked_add(u64::try_from(n)
-            .map_err(|_| StoreError::Invalid("UNIFIED_LEGACY_ROW_COUNT_OVERFLOW"))?)
+        imported = imported
+            .checked_add(
+                u64::try_from(n)
+                    .map_err(|_| StoreError::Invalid("UNIFIED_LEGACY_ROW_COUNT_OVERFLOW"))?,
+            )
             .ok_or(StoreError::Invalid("UNIFIED_LEGACY_ROW_COUNT_OVERFLOW"))?;
     }
     Ok(imported)
@@ -213,7 +232,9 @@ pub(in crate::account_store) fn import_stopped_accounts_into_empty_finance(
     let fk: i64 = target.pragma_query_value(None, "foreign_keys", |r| r.get(0))?;
     let sync: i64 = target.pragma_query_value(None, "synchronous", |r| r.get(0))?;
     if journal != "wal" || fk != 1 || sync != 2 {
-        return Err(StoreError::Invalid("UNIFIED_IMPORT_SQLITE_DURABILITY_INVALID"));
+        return Err(StoreError::Invalid(
+            "UNIFIED_IMPORT_SQLITE_DURABILITY_INVALID",
+        ));
     }
     let mut identities = BTreeSet::new();
     for source in sources {
@@ -224,16 +245,19 @@ pub(in crate::account_store) fn import_stopped_accounts_into_empty_finance(
     }
     let existing: i64 = target.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
-         AND name NOT LIKE 'sqlite_%'", [], |r|r.get(0),
+         AND name NOT LIKE 'sqlite_%'",
+        [],
+        |r| r.get(0),
     )?;
     if existing != 0 {
         return Err(StoreError::Invalid("UNIFIED_IMPORT_TARGET_NOT_EMPTY"));
     }
     let complete = include_str!("../../../schema/finance-unified-v1.sql");
-    const MARKER: &str = "-- Original immutable-event rules and scoped source-invalidation triggers.";
-    let (tables_and_indexes, trigger_and_version) = complete
-        .split_once(MARKER)
-        .ok_or(StoreError::Invalid("UNIFIED_SCHEMA_TRIGGER_BOUNDARY_MISSING"))?;
+    const MARKER: &str =
+        "-- Original immutable-event rules and scoped source-invalidation triggers.";
+    let (tables_and_indexes, trigger_and_version) = complete.split_once(MARKER).ok_or(
+        StoreError::Invalid("UNIFIED_SCHEMA_TRIGGER_BOUNDARY_MISSING"),
+    )?;
     let tx = target.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch(tables_and_indexes)?;
     tx.pragma_update(None, "defer_foreign_keys", 1)?;
@@ -241,7 +265,9 @@ pub(in crate::account_store) fn import_stopped_accounts_into_empty_finance(
     for source in sources {
         let account = verify_original_source(source, installation)?;
         let rows = copy_one_account(source, &tx, installation, &account)?;
-        total=total.checked_add(rows).ok_or(StoreError::Invalid("UNIFIED_LEGACY_ROW_COUNT_OVERFLOW"))?;
+        total = total
+            .checked_add(rows)
+            .ok_or(StoreError::Invalid("UNIFIED_LEGACY_ROW_COUNT_OVERFLOW"))?;
     }
     // Original event logs are copied with their source IDs untouched BEFORE
     // triggers are installed. Otherwise INSERT into operation_receipts would
@@ -249,7 +275,9 @@ pub(in crate::account_store) fn import_stopped_accounts_into_empty_finance(
     tx.execute_batch(&format!("{MARKER}{trigger_and_version}"))?;
     let count: i64 = tx.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
-         AND name NOT LIKE 'sqlite_%'", [], |r|r.get(0),
+         AND name NOT LIKE 'sqlite_%'",
+        [],
+        |r| r.get(0),
     )?;
     if count != 47 {
         return Err(StoreError::Invalid("UNIFIED_COMPLETE_TABLE_CENSUS_INVALID"));
@@ -261,7 +289,8 @@ pub(in crate::account_store) fn import_stopped_accounts_into_empty_finance(
     drop(fk_check);
     tx.commit()?;
     Ok(OriginalAccountImport {
-        accounts: sources.len(), tables_per_account: ORIGINAL_ACCOUNT_TABLES.len(),
+        accounts: sources.len(),
+        tables_per_account: ORIGINAL_ACCOUNT_TABLES.len(),
         imported_rows: total,
     })
 }
