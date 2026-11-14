@@ -128,24 +128,31 @@ impl RiskBookStore {
         expected_sequence: u64,
         generation: u64,
     ) -> Result<UnsentReceipt> {
-        if installation.is_empty() || campaign.is_empty()
-            || account_key.is_empty() || intent_id.is_empty()
+        if installation.is_empty()
+            || campaign.is_empty()
+            || account_key.is_empty()
+            || intent_id.is_empty()
         {
             return Err(RiskStoreError::Invalid("UNIFIED_UNSENT_SCOPE_INVALID"));
         }
         // The source account must belong to THIS campaign, not merely be
         // present in the same installation (A/B may share intent IDs).
-        let source_campaign: Option<String> = tx.query_row(
-            "SELECT campaign_id FROM account_policy
+        let source_campaign: Option<String> = tx
+            .query_row(
+                "SELECT campaign_id FROM account_policy
              WHERE installation_id=?1 AND account_key=?2 AND singleton=1",
-            rusqlite::params![installation, account_key],
-            |row| row.get(0),
-        ).optional()?;
+                rusqlite::params![installation, account_key],
+                |row| row.get(0),
+            )
+            .optional()?;
         if source_campaign.as_deref() != Some(campaign) {
             return Err(RiskStoreError::UnsentSqlUnproven);
         }
         let original = crate::account_store::AccountStore::unsent_release_receipt_sql(
-            tx, Some(installation), account_key, intent_id,
+            tx,
+            Some(installation),
+            account_key,
+            intent_id,
         )
         .map_err(|error| match error {
             crate::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),
@@ -158,7 +165,11 @@ impl RiskBookStore {
             return Err(RiskStoreError::UnsentSqlUnproven);
         }
         Self::release_unsent_sql_transaction(
-            tx, Some((installation, campaign)), &verified, expected_sequence, generation,
+            tx,
+            Some((installation, campaign)),
+            &verified,
+            expected_sequence,
+            generation,
         )
     }
 

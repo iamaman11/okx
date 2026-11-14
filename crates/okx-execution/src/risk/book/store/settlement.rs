@@ -111,22 +111,31 @@ impl RiskBookStore {
         expected_sequence: u64,
         generation: u64,
     ) -> Result<EntrySettlementReceipt> {
-        if installation.is_empty() || campaign.is_empty()
-            || account_key.is_empty() || intent_id.is_empty()
+        if installation.is_empty()
+            || campaign.is_empty()
+            || account_key.is_empty()
+            || intent_id.is_empty()
         {
-            return Err(RiskStoreError::Invalid("UNIFIED_ENTRY_SOURCE_SCOPE_INVALID"));
+            return Err(RiskStoreError::Invalid(
+                "UNIFIED_ENTRY_SOURCE_SCOPE_INVALID",
+            ));
         }
-        let assigned: Option<String> = tx.query_row(
-            "SELECT campaign_id FROM account_policy
+        let assigned: Option<String> = tx
+            .query_row(
+                "SELECT campaign_id FROM account_policy
              WHERE installation_id=?1 AND account_key=?2 AND singleton=1",
-            rusqlite::params![installation, account_key],
-            |row| row.get(0),
-        ).optional()?;
+                rusqlite::params![installation, account_key],
+                |row| row.get(0),
+            )
+            .optional()?;
         if assigned.as_deref() != Some(campaign) {
             return Err(RiskStoreError::EntrySqlUnproven);
         }
         let original = crate::account_store::AccountStore::partial_entry_settlement_receipt_sql(
-            tx, Some(installation), account_key, intent_id,
+            tx,
+            Some(installation),
+            account_key,
+            intent_id,
         )
         .map_err(|error| match error {
             crate::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),
@@ -139,10 +148,17 @@ impl RiskBookStore {
             return Err(RiskStoreError::EntrySqlUnproven);
         }
         let accepted = Self::settle_partial_entry_sql_transaction(
-            tx, Some((installation, campaign)), &proof, expected_sequence, generation,
+            tx,
+            Some((installation, campaign)),
+            &proof,
+            expected_sequence,
+            generation,
         )?;
         crate::account_store::AccountStore::acknowledge_unified_partial_entry_sql(
-            tx, installation, account_key, &original,
+            tx,
+            installation,
+            account_key,
+            &original,
         )
         .map_err(|error| match error {
             crate::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),

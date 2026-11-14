@@ -2868,8 +2868,13 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         // row alone is NOT a durable AccountStore fill/fee revision.
         assert!(matches!(
             RiskBookStore::settle_unified_partial_from_account_sql_transaction(
-                &tx, "test-installation", &campaign, &account('a'),
-                &original.intent_id, 2, 7,
+                &tx,
+                "test-installation",
+                &campaign,
+                &account('a'),
+                &original.intent_id,
+                2,
+                7,
             ),
             Err(RiskStoreError::EntrySqlUnproven)
         ));
@@ -2894,18 +2899,30 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         tx.execute(
             "UPDATE intents SET state='PARTIALLY_FILLED',begin_post_at=10001,
              exchange_order_id=?4 WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
-            rusqlite::params!["test-installation", account('a'), &original.intent_id,
-                &source.venue_order_id],
-        ).unwrap();
+            rusqlite::params![
+                "test-installation",
+                account('a'),
+                &original.intent_id,
+                &source.venue_order_id
+            ],
+        )
+        .unwrap();
         tx.execute(
             "UPDATE risk_receipts SET state='POSTED' WHERE
              installation_id=?1 AND account_key=?2 AND intent_id=?3",
             rusqlite::params!["test-installation", account('a'), &original.intent_id],
-        ).unwrap();
+        )
+        .unwrap();
         let bytes = serde_json::to_string(&source).unwrap();
         for (id, kind) in [
-            (format!("entry-partial-head:{}", source.intent_id), "ENTRY_PARTIAL_HEAD"),
-            (format!("entry-partial:{}:r1", source.intent_id), "ENTRY_PARTIAL_SETTLEMENT_PROVEN"),
+            (
+                format!("entry-partial-head:{}", source.intent_id),
+                "ENTRY_PARTIAL_HEAD",
+            ),
+            (
+                format!("entry-partial:{}:r1", source.intent_id),
+                "ENTRY_PARTIAL_SETTLEMENT_PROVEN",
+            ),
         ] {
             tx.execute(
                 "INSERT INTO operation_receipts(
@@ -2916,24 +2933,41 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             ).unwrap();
         }
         let first = RiskBookStore::settle_unified_partial_from_account_sql_transaction(
-            &tx,"test-installation",&campaign,&account('a'),&original.intent_id,2,7,
-        ).unwrap();
+            &tx,
+            "test-installation",
+            &campaign,
+            &account('a'),
+            &original.intent_id,
+            2,
+            7,
+        )
+        .unwrap();
         assert_eq!(first.book_sequence, 3);
         assert_eq!(first.cumulative_entry_usd, "0.4");
         assert!(!first.replayed);
         let repeated = RiskBookStore::settle_unified_partial_from_account_sql_transaction(
-            &tx,"test-installation",&campaign,&account('a'),&original.intent_id,2,7,
-        ).unwrap();
+            &tx,
+            "test-installation",
+            &campaign,
+            &account('a'),
+            &original.intent_id,
+            2,
+            7,
+        )
+        .unwrap();
         assert!(repeated.replayed);
-        let ack: String = tx.query_row(
-            "SELECT kind FROM operation_receipts WHERE
+        let ack: String = tx
+            .query_row(
+                "SELECT kind FROM operation_receipts WHERE
              installation_id=?1 AND account_key=?2 AND operation_id=?3",
-            rusqlite::params![
-                "test-installation",account('a'),
-                format!("entry-partial-settled:{}:r1", source.intent_id),
-            ],
-            |r| r.get(0),
-        ).unwrap();
+                rusqlite::params![
+                    "test-installation",
+                    account('a'),
+                    format!("entry-partial-settled:{}:r1", source.intent_id),
+                ],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(ack, "ENTRY_PARTIAL_SETTLED");
         let proof = PartialEntrySqlProof::from_account_receipt(source.clone()).unwrap();
         assert_eq!(repeated.book_sequence, 3);
@@ -2986,18 +3020,29 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         let tx = db.transaction().unwrap();
         assert!(matches!(
             RiskBookStore::release_unified_unsent_from_account_sql_transaction(
-                &tx,"test-installation",&campaign,&account('b'),"intentB0001",2,7,
+                &tx,
+                "test-installation",
+                &campaign,
+                &account('b'),
+                "intentB0001",
+                2,
+                7,
             ),
             Err(RiskStoreError::UnsentSqlUnproven)
         ));
         tx.execute(
             "UPDATE intents SET state='REJECTED',incident='REJECTED_UNSENT'
              WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
-            rusqlite::params!["test-installation",account('b'),"intentB0001"],
-        ).unwrap();
-        for (id,kind,result) in [
-            ("risk-reserve:intentB0001","RISK_RESERVE_ATTEMPT",no_send.reservation_key.as_str()),
-            ("terminal:intentB0001","REJECTED_UNSENT","REJECTED_UNSENT"),
+            rusqlite::params!["test-installation", account('b'), "intentB0001"],
+        )
+        .unwrap();
+        for (id, kind, result) in [
+            (
+                "risk-reserve:intentB0001",
+                "RISK_RESERVE_ATTEMPT",
+                no_send.reservation_key.as_str(),
+            ),
+            ("terminal:intentB0001", "REJECTED_UNSENT", "REJECTED_UNSENT"),
         ] {
             tx.execute(
                 "INSERT INTO operation_receipts(
@@ -3009,13 +3054,27 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             ).unwrap();
         }
         let first = RiskBookStore::release_unified_unsent_from_account_sql_transaction(
-            &tx,"test-installation",&campaign,&account('b'),"intentB0001",2,7,
-        ).unwrap();
+            &tx,
+            "test-installation",
+            &campaign,
+            &account('b'),
+            "intentB0001",
+            2,
+            7,
+        )
+        .unwrap();
         assert_eq!(first.book_sequence, 3);
         assert!(!first.replayed);
         let repeated = RiskBookStore::release_unified_unsent_from_account_sql_transaction(
-            &tx,"test-installation",&campaign,&account('b'),"intentB0001",2,7,
-        ).unwrap();
+            &tx,
+            "test-installation",
+            &campaign,
+            &account('b'),
+            "intentB0001",
+            2,
+            7,
+        )
+        .unwrap();
         assert!(repeated.replayed);
         let observed = tx
             .query_row(
@@ -3029,7 +3088,13 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         assert_ne!(observed, no_send.record_digest);
         assert!(
             RiskBookStore::release_unified_unsent_from_account_sql_transaction(
-                &tx,"test-installation","foreign-campaign",&account('b'),"intentB0001",2,7,
+                &tx,
+                "test-installation",
+                "foreign-campaign",
+                &account('b'),
+                "intentB0001",
+                2,
+                7,
             )
             .is_err(),
             "no other campaign can grant or replay B's no-send fence"

@@ -13,6 +13,7 @@ pub(crate) use book::{
 
 #[cfg(test)]
 pub(crate) use book::{
-    ReserveInput, VerifiedCensus, test_stage_scoped_begin_post, test_trial_unified_reserve,
-    test_trial_unified_partial_from_account, test_trial_unified_unsent_from_account,
+    ReserveInput, VerifiedCensus, test_stage_scoped_begin_post,
+    test_trial_unified_partial_from_account, test_trial_unified_reserve,
+    test_trial_unified_unsent_from_account,
 };

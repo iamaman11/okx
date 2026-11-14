@@ -863,7 +863,10 @@ impl AccountStore {
         id: &str,
     ) -> StoreResult<Option<EntrySettlementEvidence>> {
         let result = Self::partial_entry_settlement_receipt_sql(
-            &self.connection, None, &self.meta.account_key, id,
+            &self.connection,
+            None,
+            &self.meta.account_key,
+            id,
         )?;
         if result.is_some() {
             self.partial_entry_ack_pending(id)?;
@@ -885,63 +888,71 @@ impl AccountStore {
     ) -> StoreResult<Option<EntrySettlementEvidence>> {
         use rusqlite::{params_from_iter, types::Value};
         if account.is_empty() || id.is_empty() || installation.is_some_and(str::is_empty) {
-            return Err(StoreError::Invalid("ENTRY_PARTIAL_SQL_SOURCE_SCOPE_INVALID"));
+            return Err(StoreError::Invalid(
+                "ENTRY_PARTIAL_SQL_SOURCE_SCOPE_INVALID",
+            ));
         }
-        let read_operation = |operation_id: String| -> StoreResult<Option<(String, String, String)>> {
-            let mut args = vec![Value::Text(operation_id)];
-            if let Some(scope) = installation {
-                args.push(Value::Text(scope.to_owned()));
-                args.push(Value::Text(account.to_owned()));
-            }
-            db.query_row(
-                if installation.is_some() {
-                    "SELECT kind,request_hash,result_ref FROM operation_receipts
+        let read_operation =
+            |operation_id: String| -> StoreResult<Option<(String, String, String)>> {
+                let mut args = vec![Value::Text(operation_id)];
+                if let Some(scope) = installation {
+                    args.push(Value::Text(scope.to_owned()));
+                    args.push(Value::Text(account.to_owned()));
+                }
+                db.query_row(
+                    if installation.is_some() {
+                        "SELECT kind,request_hash,result_ref FROM operation_receipts
                      WHERE operation_id=?1 AND installation_id=?2 AND account_key=?3"
-                } else {
-                    "SELECT kind,request_hash,result_ref FROM operation_receipts
+                    } else {
+                        "SELECT kind,request_hash,result_ref FROM operation_receipts
                      WHERE operation_id=?1"
-                },
-                params_from_iter(args.iter()),
-                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
-            )
-            .optional()
-            .map_err(StoreError::from)
-        };
+                    },
+                    params_from_iter(args.iter()),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(StoreError::from)
+            };
         let Some(head) = read_operation(format!("entry-partial-head:{id}"))? else {
             return Ok(None);
         };
         let proof: EntrySettlementEvidence = serde_json::from_str(&head.2)
             .map_err(|_| StoreError::Invalid("ENTRY_PARTIAL_HEAD_CORRUPT"))?;
-        let immutable = read_operation(format!(
-            "entry-partial:{id}:r{}", proof.settlement_revision,
-        ))?
-        .ok_or(StoreError::Invalid("ENTRY_PARTIAL_REVISION_MISSING"))?;
+        let immutable =
+            read_operation(format!("entry-partial:{id}:r{}", proof.settlement_revision,))?
+                .ok_or(StoreError::Invalid("ENTRY_PARTIAL_REVISION_MISSING"))?;
         let mut args = vec![Value::Text(id.to_owned())];
         if let Some(scope) = installation {
-            args.extend([Value::Text(scope.to_owned()),Value::Text(account.to_owned())]);
+            args.extend([
+                Value::Text(scope.to_owned()),
+                Value::Text(account.to_owned()),
+            ]);
         }
-        let intent: Option<(String, Option<String>)> = db.query_row(
-            if installation.is_some() {
-                "SELECT plan_hash,exchange_order_id FROM intents
+        let intent: Option<(String, Option<String>)> = db
+            .query_row(
+                if installation.is_some() {
+                    "SELECT plan_hash,exchange_order_id FROM intents
                  WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
-            } else {
-                "SELECT plan_hash,exchange_order_id FROM intents WHERE intent_id=?1"
-            },
-            params_from_iter(args.iter()),
-            |row| Ok((row.get(0)?,row.get(1)?)),
-        ).optional()?;
-        let (plan, order_id) =
-            intent.ok_or(StoreError::Invalid("ENTRY_PARTIAL_INTENT_MISSING"))?;
-        let reservation: Option<(String,String)> = db.query_row(
-            if installation.is_some() {
-                "SELECT reservation_key,account_key FROM risk_receipts
+                } else {
+                    "SELECT plan_hash,exchange_order_id FROM intents WHERE intent_id=?1"
+                },
+                params_from_iter(args.iter()),
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (plan, order_id) = intent.ok_or(StoreError::Invalid("ENTRY_PARTIAL_INTENT_MISSING"))?;
+        let reservation: Option<(String, String)> = db
+            .query_row(
+                if installation.is_some() {
+                    "SELECT reservation_key,account_key FROM risk_receipts
                  WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
-            } else {
-                "SELECT reservation_key,account_key FROM risk_receipts WHERE intent_id=?1"
-            },
-            params_from_iter(args.iter()),
-            |row| Ok((row.get(0)?,row.get(1)?)),
-        ).optional()?;
+                } else {
+                    "SELECT reservation_key,account_key FROM risk_receipts WHERE intent_id=?1"
+                },
+                params_from_iter(args.iter()),
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
         let (reservation_key, reservation_account) =
             reservation.ok_or(StoreError::Invalid("ENTRY_PARTIAL_RESERVATION_MISSING"))?;
         if proof.schema != "okx.entry-partial-settlement/v1"
@@ -955,8 +966,10 @@ impl AccountStore {
             || proof.settlement_revision == 0
             || proof.cumulative_entry_usd <= Decimal::ZERO
             || proof.source_digest.len() != 64
-            || !proof.source_digest.bytes().all(|v|
-                v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
+            || !proof
+                .source_digest
+                .bytes()
+                .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
             || head.0 != "ENTRY_PARTIAL_HEAD"
             || head.1 != proof.plan_hash
             || immutable.0 != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
@@ -968,7 +981,8 @@ impl AccountStore {
         // An ACK is not required for a first financial debit, but a
         // conflicting or forged ACK can never authorize an additional debit.
         if let Some(ack) = read_operation(format!(
-            "entry-partial-settled:{id}:r{}", proof.settlement_revision,
+            "entry-partial-settled:{id}:r{}",
+            proof.settlement_revision,
         ))? {
             if ack.0 != "ENTRY_PARTIAL_SETTLED"
                 || ack.1 != proof.plan_hash
@@ -995,22 +1009,30 @@ impl AccountStore {
             return Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_IDENTITY_INVALID"));
         }
         let stored = Self::partial_entry_settlement_receipt_sql(
-            tx, Some(installation), account, &accepted.intent_id,
+            tx,
+            Some(installation),
+            account,
+            &accepted.intent_id,
         )?
         .ok_or(StoreError::Invalid("UNIFIED_PARTIAL_ACK_SOURCE_MISSING"))?;
         if stored != *accepted || stored.reservation_key.starts_with("local:") {
             return Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_SOURCE_MISMATCH"));
         }
-        let state: Option<String> = tx.query_row(
-            "SELECT state FROM risk_receipts
+        let state: Option<String> = tx
+            .query_row(
+                "SELECT state FROM risk_receipts
              WHERE installation_id=?1 AND account_key=?2
                AND intent_id=?3 AND plan_hash=?4 AND reservation_key=?5",
-            rusqlite::params![
-                installation, account, &accepted.intent_id,
-                &accepted.plan_hash, &accepted.reservation_key,
-            ],
-            |row| row.get(0),
-        ).optional()?;
+                rusqlite::params![
+                    installation,
+                    account,
+                    &accepted.intent_id,
+                    &accepted.plan_hash,
+                    &accepted.reservation_key,
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
         if !matches!(state.as_deref(), Some("OPEN" | "POSTED")) {
             return Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_RESERVATION_STATE"));
         }
@@ -1025,21 +1047,27 @@ impl AccountStore {
              VALUES(?1,?2,?3,'ENTRY_PARTIAL_SETTLED',?4,?5,?6)
              ON CONFLICT(installation_id,account_key,operation_id) DO NOTHING",
             rusqlite::params![
-                installation,account,&operation,&accepted.plan_hash,
-                &accepted.source_digest,wall_time_ms(),
+                installation,
+                account,
+                &operation,
+                &accepted.plan_hash,
+                &accepted.source_digest,
+                wall_time_ms(),
             ],
         )?;
         let ack: (String, String, String) = tx.query_row(
             "SELECT kind,request_hash,result_ref FROM operation_receipts
              WHERE installation_id=?1 AND account_key=?2 AND operation_id=?3",
-            rusqlite::params![installation,account,&operation],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            rusqlite::params![installation, account, &operation],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        if ack != (
-            "ENTRY_PARTIAL_SETTLED".to_owned(),
-            accepted.plan_hash.clone(),
-            accepted.source_digest.clone(),
-        ) {
+        if ack
+            != (
+                "ENTRY_PARTIAL_SETTLED".to_owned(),
+                accepted.plan_hash.clone(),
+                accepted.source_digest.clone(),
+            )
+        {
             return Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_CONFLICT"));
         }
         Ok(())
@@ -1953,12 +1981,7 @@ impl AccountStore {
     /// and rule now support both the legacy single-account v2 DB and the
     /// installation-wide v6 account scope. Caller data is NEVER a receipt.
     pub fn unsent_release_receipt(&self, id: &str) -> StoreResult<Option<UnsentSqlReceipt>> {
-        Self::unsent_release_receipt_sql(
-            &self.connection,
-            None,
-            &self.meta.account_key,
-            id,
-        )
+        Self::unsent_release_receipt_sql(&self.connection, None, &self.meta.account_key, id)
     }
 
     /// Read the original AccountStore proof from the SAME caller-owned SQL
@@ -2018,7 +2041,11 @@ impl AccountStore {
             args.push(Value::Text(installation.to_owned()));
         }
         db.query_row(
-            if installation.is_some() { scoped_sql } else { original_sql },
+            if installation.is_some() {
+                scoped_sql
+            } else {
+                original_sql
+            },
             params_from_iter(args.iter()),
             |r| {
                 Ok(UnsentSqlReceipt {

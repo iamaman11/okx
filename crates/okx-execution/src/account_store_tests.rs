@@ -12938,7 +12938,11 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert!(matches!(
         owner
             .trial_original_partial_from_account(
-                "campaign-X".into(), a_key.clone(), ai.intent_id.clone(), 2, 7,
+                "campaign-X".into(),
+                a_key.clone(),
+                ai.intent_id.clone(),
+                2,
+                7,
             )
             .await,
         Err(StoreError::Invalid("UNIFIED_PARTIAL_SOURCE_OR_RISK_DENIED"))
@@ -12946,13 +12950,20 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert!(matches!(
         owner
             .trial_original_unsent_from_account(
-                "campaign-X".into(), b_key.clone(), bi.intent_id.clone(), 2, 7,
+                "campaign-X".into(),
+                b_key.clone(),
+                bi.intent_id.clone(),
+                2,
+                7,
             )
             .await,
         Err(StoreError::Invalid("UNIFIED_UNSENT_SOURCE_OR_RISK_DENIED"))
     ));
     assert_eq!(owner.inventory().await.unwrap(), inventory);
-    assert_eq!(owner.campaign_summary("campaign-X".into()).await.unwrap(), summary);
+    assert_eq!(
+        owner.campaign_summary("campaign-X".into()).await.unwrap(),
+        summary
+    );
 
     // The ORIGINAL RiskBook AccountSummary SQL must distinguish these two
     // canonical account identities inside the shared campaign scope.

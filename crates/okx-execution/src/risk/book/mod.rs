@@ -62,13 +62,23 @@ pub(crate) fn test_trial_unified_unsent_from_account(
     generation: u64,
 ) -> Result<(u64, String, bool), &'static str> {
     let receipt = store::RiskBookStore::release_unified_unsent_from_account_sql_transaction(
-        tx, installation, campaign, account, intent, expected_sequence, generation,
+        tx,
+        installation,
+        campaign,
+        account,
+        intent,
+        expected_sequence,
+        generation,
     )
     .map_err(|error| {
         eprintln!("UNIFIED_UNSENT_ORIGINAL_REASON={error}");
         "UNIFIED_UNSENT_SOURCE_OR_RISK_DENIED"
     })?;
-    Ok((receipt.book_sequence, receipt.reservation_key, receipt.replayed))
+    Ok((
+        receipt.book_sequence,
+        receipt.reservation_key,
+        receipt.replayed,
+    ))
 }
 
 /// TEST-ONLY trial of original source-backed partial settlement in ONE
@@ -84,13 +94,23 @@ pub(crate) fn test_trial_unified_partial_from_account(
     generation: u64,
 ) -> Result<(u64, String, bool), &'static str> {
     let receipt = store::RiskBookStore::settle_unified_partial_from_account_sql_transaction(
-        tx, installation, campaign, account, intent, expected_sequence, generation,
+        tx,
+        installation,
+        campaign,
+        account,
+        intent,
+        expected_sequence,
+        generation,
     )
     .map_err(|error| {
         eprintln!("UNIFIED_PARTIAL_ORIGINAL_REASON={error}");
         "UNIFIED_PARTIAL_SOURCE_OR_RISK_DENIED"
     })?;
-    Ok((receipt.book_sequence, receipt.cumulative_entry_usd, receipt.replayed))
+    Ok((
+        receipt.book_sequence,
+        receipt.cumulative_entry_usd,
+        receipt.replayed,
+    ))
 }
 
 /// Test-only native PostCausalProof constructor for the real v6 SQL

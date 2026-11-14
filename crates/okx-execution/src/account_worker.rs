@@ -807,8 +807,13 @@ impl UnifiedFinanceHandle {
                 return Err(StoreError::Invalid("UNIFIED_TRIAL_REQUIRES_OFFLINE_IMPORT"));
             }
             let result = crate::risk::test_trial_unified_unsent_from_account(
-                &tx, &installation, &campaign, &account, &intent,
-                expected_sequence, generation,
+                &tx,
+                &installation,
+                &campaign,
+                &account,
+                &intent,
+                expected_sequence,
+                generation,
             );
             tx.rollback()?;
             result.map_err(StoreError::Invalid)
@@ -841,8 +846,13 @@ impl UnifiedFinanceHandle {
                 return Err(StoreError::Invalid("UNIFIED_TRIAL_REQUIRES_OFFLINE_IMPORT"));
             }
             let result = crate::risk::test_trial_unified_partial_from_account(
-                &tx, &installation, &campaign, &account, &intent,
-                expected_sequence, generation,
+                &tx,
+                &installation,
+                &campaign,
+                &account,
+                &intent,
+                expected_sequence,
+                generation,
             );
             tx.rollback()?;
             result.map_err(StoreError::Invalid)
