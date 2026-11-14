@@ -813,10 +813,7 @@ impl UnifiedFinanceHandle {
     /// the existing single SQL FIFO; any account failure rolls back all
     /// staged accounts, and the immutable offline import remains unchanged.
     #[cfg(test)]
-    pub(crate) async fn trial_original_recover_installation(
-        &self,
-        now: i64,
-    ) -> StoreResult<usize> {
+    pub(crate) async fn trial_original_recover_installation(&self, now: i64) -> StoreResult<usize> {
         let installation = self.installation.clone();
         self.submit(move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
