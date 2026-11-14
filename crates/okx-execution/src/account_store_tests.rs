@@ -12777,6 +12777,7 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         source
             .execute_batch(
                 "BEGIN IMMEDIATE;
+                 PRAGMA defer_foreign_keys=ON;
                  UPDATE risk_entries SET strategy_id='manual';
                  UPDATE risk_strategy_occupied SET strategy_id='manual';
                  UPDATE risk_policy_strategy SET strategy_id='manual';
