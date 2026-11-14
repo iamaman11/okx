@@ -103,10 +103,10 @@ pub(crate) fn legacy_mode_for(
     // between the check and the legacy connection startup.
     match file.try_lock_shared() {
         Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+        Err(fs::TryLockError::WouldBlock) => {
             return Err(AuthorityModeError::Busy);
         }
-        Err(error) => return Err(error.into()),
+        Err(fs::TryLockError::Error(error)) => return Err(error.into()),
     }
     if finance_file_present(&directory)? {
         let _ = file.unlock();
@@ -123,8 +123,8 @@ pub(crate) fn unified_mode_for(root: &Path) -> Result<AuthorityModeLease, Author
     let (_directory, file) = gate(root)?;
     match file.try_lock() {
         Ok(()) => Ok(AuthorityModeLease { file }),
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(AuthorityModeError::Busy),
-        Err(error) => Err(error.into()),
+        Err(fs::TryLockError::WouldBlock) => Err(AuthorityModeError::Busy),
+        Err(fs::TryLockError::Error(error)) => Err(error.into()),
     }
 }
 
