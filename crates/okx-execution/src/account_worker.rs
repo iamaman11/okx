@@ -779,6 +779,8 @@ pub(crate) fn apply_original_unified_finance_transaction(
                 &evidence,
                 now,
             )?;
+            risk::reconcile_outcome_unified_native(tx, installation, &account, &intent)
+                .map_err(StoreError::Invalid)?;
             Ok(UnifiedFinanceWriteReceipt::OutcomeRecorded)
         }
     }

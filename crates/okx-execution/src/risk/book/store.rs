@@ -1235,6 +1235,131 @@ impl RiskBookStore {
         }))
     }
 
+
+    /// Project a source-accepted AccountStore venue outcome into the original
+    /// RiskBook under the SAME installation SQL COMMIT. This never authorizes
+    /// an additional POST or a budget release. AccountStore alone owns source
+    /// validation and the durable venue-result transition.
+    pub(in crate::risk::book) fn reconcile_unified_outcome_from_account_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        installation: &str,
+        account: &str,
+        intent: &str,
+    ) -> Result<()> {
+        if installation.is_empty() || account.is_empty() || intent.is_empty() {
+            return Err(RiskStoreError::Invalid("UNIFIED_OUTCOME_SCOPE_INVALID"));
+        }
+        let original: (i64, String, i64, Option<i64>) = tx.query_row(
+            "SELECT risk_increase,plan_hash,policy_revision,begin_post_at
+             FROM intents
+             WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
+            params![installation, account, intent],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        if original.0 == 0 {
+            return Ok(());
+        }
+        if original.0 != 1 || original.3.is_none_or(|time| time <= 0) {
+            return Err(RiskStoreError::Invalid("UNIFIED_OUTCOME_POST_UNPROVEN"));
+        }
+        let receipt: Option<(String, String, String, String)> = tx
+            .query_row(
+                "SELECT p.campaign_id,r.reservation_key,r.plan_hash,r.state
+                 FROM risk_receipts r JOIN account_policy p
+                   ON p.installation_id=r.installation_id
+                  AND p.account_key=r.account_key AND p.singleton=1
+                 WHERE r.installation_id=?1 AND r.account_key=?2
+                   AND r.intent_id=?3",
+                params![installation, account, intent],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let (campaign, reservation, receipt_plan, receipt_state) =
+            receipt.ok_or(RiskStoreError::Invalid("UNIFIED_OUTCOME_RECEIPT_MISSING"))?;
+        if receipt_plan != original.1 {
+            return Err(RiskStoreError::IdempotencyConflict);
+        }
+        let target = match receipt_state.as_str() {
+            "UNKNOWN" => "UNKNOWN",
+            "OPEN" | "TERMINAL_PENDING_CENTRAL" => "OPEN",
+            // An outcome retry after RELEASE must never resurrect a paid
+            // reservation by restoring its terminal-pending account receipt.
+            "RELEASED" => return Err(RiskStoreError::AlreadyResolved),
+            _ => return Err(RiskStoreError::Invalid("UNIFIED_OUTCOME_RECEIPT_STATE_INVALID")),
+        };
+        let scope = Some((installation, campaign.as_str()));
+        let meta = read_meta_for_scope(tx, scope)?;
+        integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope)?;
+        let recorded: Option<(String, String, String, i64, String, i64)> = tx
+            .query_row(
+                "SELECT account_key,intent_id,plan_sha256,policy_revision,
+                        state,post_authorized_at_ms
+                 FROM risk_entries WHERE installation_id=?1 AND campaign_id=?2
+                   AND reservation_key=?3",
+                params![installation, campaign, reservation],
+                |row| Ok((
+                    row.get(0)?, row.get(1)?, row.get(2)?,
+                    row.get(3)?, row.get(4)?, row.get(5)?
+                )),
+            )
+            .optional()?;
+        let stored = recorded.ok_or(RiskStoreError::Invalid("UNIFIED_OUTCOME_RISK_ENTRY_MISSING"))?;
+        if stored.0 != account || stored.1 != intent || stored.2 != original.1
+            || stored.3 != original.2 || stored.5 <= 0
+        {
+            return Err(RiskStoreError::Invalid("UNIFIED_OUTCOME_RISK_IDENTITY_MISMATCH"));
+        }
+        if stored.4 == target {
+            // Exact replay does not advance a RiskBook revision or free budget.
+            return Ok(());
+        }
+        if !matches!(
+            (stored.4.as_str(), target),
+            ("POSTED", "UNKNOWN") | ("POSTED", "OPEN") | ("UNKNOWN", "OPEN")
+        ) {
+            return Err(RiskStoreError::Invalid("UNIFIED_OUTCOME_RISK_TRANSITION_DENIED"));
+        }
+        let next = meta
+            .sequence
+            .checked_add(1)
+            .filter(|value| *value <= LEGACY_MAX_SAFE_INTEGER)
+            .ok_or(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+        let changed = tx.execute(
+            "UPDATE risk_entries SET state=?1
+             WHERE installation_id=?2 AND campaign_id=?3
+               AND reservation_key=?4 AND account_key=?5 AND intent_id=?6
+               AND plan_sha256=?7 AND policy_revision=?8 AND state=?9",
+            params![
+                target, installation, campaign, reservation, account, intent,
+                original.1, original.2, stored.4
+            ],
+        )?;
+        if changed != 1 {
+            return Err(RiskStoreError::StaleSequence);
+        }
+        let changed = tx.execute(
+            "UPDATE risk_meta SET book_sequence=?1
+             WHERE singleton=1 AND installation_id=?2 AND campaign_id=?3
+               AND book_sequence=?4 AND policy_revision=?5",
+            params![
+                i64::try_from(next)
+                    .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
+                installation,
+                campaign,
+                i64::try_from(meta.sequence)
+                    .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?,
+                i64::try_from(meta.policy_revision)
+                    .map_err(|_| RiskStoreError::PolicyConflict)?,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(RiskStoreError::StaleSequence);
+        }
+        let verified = read_meta_for_scope(tx, scope)?;
+        integrity::verify_reservation_aggregates_for_scope(tx, &verified, scope)?;
+        Ok(())
+    }
+
     /// A native crash can lose the venue ACK after the ORIGINAL AccountStore
     /// POST fence has committed. In the SAME finance transaction, preserve
     /// every reserved obligation while marking its RiskBook entry UNKNOWN.

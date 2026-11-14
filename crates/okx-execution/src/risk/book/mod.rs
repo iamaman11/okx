@@ -177,6 +177,23 @@ pub(crate) fn release_unsent_unified_native(
     })
 }
 
+/// Project the same original AccountStore outcome and RiskBook state under
+/// one installation-owned SQLite transaction. No new grant, post or release.
+pub(crate) fn reconcile_outcome_unified_native(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    account: &str,
+    intent: &str,
+) -> Result<(), &'static str> {
+    store::RiskBookStore::reconcile_unified_outcome_from_account_sql_transaction(
+        tx,
+        installation,
+        account,
+        intent,
+    )
+    .map_err(|error| original_finance_error(&error))
+}
+
 /// Original POST-fence recovery: the local intent and RiskBook transition
 /// happen under one caller-owned installation transaction and retain all
 /// charged budget until independent venue readback resolves UNKNOWN.

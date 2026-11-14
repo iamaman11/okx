@@ -12632,6 +12632,115 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         .unwrap();
     assert_eq!(foreign, ("HELD".into(), 2));
     tx.rollback().unwrap();
+
+    // A confirmed venue ACK after a killed POST must move the original
+    // AccountStore + RiskBook to OPEN together, without refund or another
+    // exchange POST. Exercise rollback and one actual COMMIT.
+    for commit in [false, true] {
+        let tx = recovered
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let result = apply_original_unified_finance_transaction(
+            &tx,
+            "installation",
+            UnifiedFinanceWrite::RecordOutcome {
+                account: "acct-A".into(),
+                intent: ai.intent_id.clone(),
+                state: IntentState::Acknowledged,
+                exchange_order_id: Some("venue-original-order".into()),
+                evidence: "venue-readback-validated-by-original-agent".into(),
+                now: 10_005,
+            },
+        )
+        .unwrap();
+        assert_eq!(result, UnifiedFinanceWriteReceipt::OutcomeRecorded);
+        let observed: (String, String, String, i64, String) = tx
+            .query_row(
+                "SELECT e.state,i.state,r.state,m.book_sequence,m.global_reserved_usdt
+                 FROM risk_entries e JOIN intents i
+                   ON e.installation_id=i.installation_id
+                  AND e.account_key=i.account_key AND e.intent_id=i.intent_id
+                 JOIN risk_receipts r
+                   ON r.installation_id=i.installation_id
+                  AND r.account_key=i.account_key AND r.intent_id=i.intent_id
+                 JOIN risk_meta m
+                   ON m.installation_id=e.installation_id
+                  AND m.campaign_id=e.campaign_id
+                 WHERE e.campaign_id='campaign-X'
+                   AND e.reservation_key='same-reservation'",
+                [],
+                |row| Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                )),
+            )
+            .unwrap();
+        assert_eq!(
+            observed,
+            ("OPEN".into(), "ACKNOWLEDGED".into(), "OPEN".into(), 5, "1".into())
+        );
+        crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X")
+            .unwrap();
+        if commit {
+            tx.commit().unwrap();
+        } else {
+            tx.rollback().unwrap();
+        }
+    }
+    drop(recovered);
+    let mut recovered = Connection::open(&destination).unwrap();
+    recovered.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let tx = recovered.transaction().unwrap();
+    assert_eq!(
+        tx.query_row::<(String, String, i64, String), _, _>(
+            "SELECT e.state,r.state,m.book_sequence,m.global_reserved_usdt
+             FROM risk_entries e JOIN risk_receipts r
+               ON r.installation_id=e.installation_id
+              AND r.account_key=e.account_key AND r.intent_id=e.intent_id
+             JOIN risk_meta m ON m.installation_id=e.installation_id
+              AND m.campaign_id=e.campaign_id
+             WHERE e.campaign_id='campaign-X'
+               AND e.reservation_key='same-reservation'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        ).unwrap(),
+        ("OPEN".into(), "OPEN".into(), 5, "1".into())
+    );
+    assert_eq!(
+        apply_original_unified_finance_transaction(
+            &tx,
+            "installation",
+            UnifiedFinanceWrite::RecordOutcome {
+                account: "acct-A".into(),
+                intent: ai.intent_id.clone(),
+                state: IntentState::Acknowledged,
+                exchange_order_id: Some("venue-original-order".into()),
+                evidence: "venue-readback-validated-by-original-agent".into(),
+                now: 10_006,
+            }
+        )
+        .unwrap(),
+        UnifiedFinanceWriteReceipt::OutcomeRecorded
+    );
+    let exact_replay_seq: i64 = tx.query_row(
+        "SELECT book_sequence FROM risk_meta
+         WHERE installation_id='installation' AND campaign_id='campaign-X'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(exact_replay_seq, 5);
+    let foreign: (String, i64) = tx.query_row(
+        "SELECT e.state,m.book_sequence FROM risk_entries e JOIN risk_meta m
+         ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
+         WHERE e.campaign_id='campaign-Y' AND e.reservation_key='same-reservation'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(foreign, ("HELD".into(), 2));
+    tx.rollback().unwrap();
 }
 
 #[test]
