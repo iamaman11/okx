@@ -2665,7 +2665,9 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             ),
             Err(RiskStoreError::Invalid("CENTRAL_INSTANCE_MISMATCH"))
         ));
-        tx.rollback().unwrap();
+        // Deliberately commit the OUTER transaction despite the error.
+        // The joint operation itself must have rolled back its savepoint.
+        tx.commit().unwrap();
     }
     assert_eq!(
         db.query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_entries", [], |r| r.get(0))
