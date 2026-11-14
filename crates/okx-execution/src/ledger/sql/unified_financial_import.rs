@@ -182,10 +182,10 @@ fn copy_one_account(
                 .map(|i| row.get::<_, Value>(i))
                 .collect::<Result<Vec<_>, _>>()?;
             for (column, value) in source_cols.iter().zip(&native_values) {
-                if column == "installation_id"
-                    && value != &Value::Text(installation.to_owned())
-                {
-                    return Err(StoreError::Invalid("UNIFIED_LEGACY_ROW_INSTALLATION_MISMATCH"));
+                if column == "installation_id" && value != &Value::Text(installation.to_owned()) {
+                    return Err(StoreError::Invalid(
+                        "UNIFIED_LEGACY_ROW_INSTALLATION_MISMATCH",
+                    ));
                 }
                 if column == "account_key" && value != &Value::Text(account.to_owned()) {
                     return Err(StoreError::Invalid("UNIFIED_LEGACY_ROW_ACCOUNT_MISMATCH"));
@@ -250,13 +250,15 @@ pub(in crate::account_store) fn import_stopped_accounts_into_empty_finance(
     // transaction. A read-only SQLite handle alone does not prohibit the
     // original AccountStore writer from changing WAL under our feet.
     let target_path: String = target.query_row(
-        "SELECT file FROM pragma_database_list WHERE name='main'", [],
+        "SELECT file FROM pragma_database_list WHERE name='main'",
+        [],
         |r| r.get(0),
     )?;
     let mut original_paths = Vec::new();
     for source in sources {
         let path: String = source.query_row(
-            "SELECT file FROM pragma_database_list WHERE name='main'", [],
+            "SELECT file FROM pragma_database_list WHERE name='main'",
+            [],
             |r| r.get(0),
         )?;
         if path.is_empty() || path == target_path {
