@@ -62,7 +62,8 @@ fn fixture_original_receipt(
         cumulative_entry_usd: usd,
         settlement_revision: revision,
         source_digest: source_digest.into(),
-    }).unwrap()
+    })
+    .unwrap()
 }
 fn seed(db: &Connection) {
     db.execute_batch(CORE_SCHEMA).unwrap();
@@ -283,7 +284,13 @@ fn risk_book_contract_single_finance_sqlite_scopes_identical_venue_ids() {
     // Same venue bill ID on B is not a permitted A-source when it has no
     // matching A fill. This is enforced by composite SQL FOREIGN KEY, not UI.
     let original = fixture_original_receipt(
-        "acct-A", "intent-1", "reserve-acct-A", "order-same", &"d".repeat(64), "7", 2,
+        "acct-A",
+        "intent-1",
+        "reserve-acct-A",
+        "order-same",
+        &"d".repeat(64),
+        "7",
+        2,
     );
     let foreign = db.execute(
         "INSERT INTO finance_entry_sources(
@@ -292,8 +299,10 @@ fn risk_book_contract_single_finance_sqlite_scopes_identical_venue_ids() {
             'install-one','acct-A','intent-1',2,'fill-b-only','bill-same',?1,'7',?2)",
         params!["d".repeat(64), original],
     );
-    assert!(matches!(foreign, Err(rusqlite::Error::SqliteFailure(_, _))),
-        "invalid account/intent/source FK must fail, not the evidence requirement");
+    assert!(
+        matches!(foreign, Err(rusqlite::Error::SqliteFailure(_, _))),
+        "invalid account/intent/source FK must fail, not the evidence requirement"
+    );
 }
 
 #[test]
@@ -403,17 +412,25 @@ fn risk_book_contract_single_finance_sqlite_rejects_stale_revision_corrupt_cache
         "INSERT INTO finance_bills VALUES(
              'install-one','acct-A','bill-next','fill-same',?1)",
         [&second_digest],
-    ).unwrap();
+    )
+    .unwrap();
     let later = fixture_original_receipt(
-        "acct-A","intent-1","reserve-acct-A","order-same",&second_digest,"5",2,
+        "acct-A",
+        "intent-1",
+        "reserve-acct-A",
+        "order-same",
+        &second_digest,
+        "5",
+        2,
     );
     db.execute(
         "INSERT INTO finance_entry_sources(
                  installation_id,account_key,intent_id,settlement_revision,
                  fill_id,bill_id,source_digest,cumulative_entry_usd,original_receipt_json) VALUES(
          'install-one','acct-A','intent-1',2,'fill-same','bill-next',?1,'5',?2)",
-        params![second_digest,later],
-    ).unwrap();
+        params![second_digest, later],
+    )
+    .unwrap();
     {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -619,11 +636,14 @@ fn risk_book_contract_unified_receipt_rejects_wrong_account_source_and_digest() 
                 'acct-B','intent-1',1,?1,'4',1)",
         ["b".repeat(64)],
     );
-    assert!(matches!(
-        wrong_account,
-        Err(rusqlite::Error::SqliteFailure(ref code, _))
-            if code.code == rusqlite::ErrorCode::ConstraintViolation
-    ), "receipt may NEVER borrow another account's original source");
+    assert!(
+        matches!(
+            wrong_account,
+            Err(rusqlite::Error::SqliteFailure(ref code, _))
+                if code.code == rusqlite::ErrorCode::ConstraintViolation
+        ),
+        "receipt may NEVER borrow another account's original source"
+    );
 
     let wrong_digest = db.execute(
         "INSERT INTO finance_entry_receipts(
@@ -633,18 +653,26 @@ fn risk_book_contract_unified_receipt_rejects_wrong_account_source_and_digest() 
                 'acct-A','intent-1',1,?1,'6',1)",
         ["b".repeat(64)],
     );
-    assert!(matches!(
-        wrong_digest,
-        Err(rusqlite::Error::SqliteFailure(ref code, _))
-            if code.code == rusqlite::ErrorCode::ConstraintViolation
-    ), "receipt digest must identify the SAME immutable source revision");
+    assert!(
+        matches!(
+            wrong_digest,
+            Err(rusqlite::Error::SqliteFailure(ref code, _))
+                if code.code == rusqlite::ErrorCode::ConstraintViolation
+        ),
+        "receipt digest must identify the SAME immutable source revision"
+    );
     assert_eq!(receipt_count(&db), 0);
     assert_eq!(
         campaign(&db, "campaign-X"),
         (0, "0".into(), "20".into(), "0".into())
     );
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
-    assert_eq!(settle_entry(&tx, &entry_a()).unwrap().cumulative_entry_usd, "6");
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    assert_eq!(
+        settle_entry(&tx, &entry_a()).unwrap().cumulative_entry_usd,
+        "6"
+    );
     tx.commit().unwrap();
     assert_eq!(receipt_count(&db), 1);
 }
@@ -677,7 +705,8 @@ fn risk_book_contract_unified_rejects_missing_or_fake_native_receipt() {
         "INSERT INTO finance_bills VALUES(
            'install-one','acct-A','bill-invalid','fill-same',?1)",
         [&digest],
-    ).unwrap();
+    )
+    .unwrap();
     db.execute(
         "INSERT INTO finance_entry_sources(
            installation_id,account_key,intent_id,settlement_revision,
@@ -685,10 +714,19 @@ fn risk_book_contract_unified_rejects_missing_or_fake_native_receipt() {
          VALUES('install-one','acct-A','intent-1',2,
                 'fill-same','bill-invalid',?1,'7',?2)",
         params![digest, r#""not-an-original-receipt""#],
-    ).unwrap();
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    )
+    .unwrap();
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
     assert!(matches!(
-        settle_entry(&tx, &EntryRef {source_revision: 2, ..entry_a()}),
+        settle_entry(
+            &tx,
+            &EntryRef {
+                source_revision: 2,
+                ..entry_a()
+            }
+        ),
         Err(StoreError::Invalid("UNIFIED_ORIGINAL_JSON_CORRUPT"))
     ));
     tx.rollback().unwrap();
