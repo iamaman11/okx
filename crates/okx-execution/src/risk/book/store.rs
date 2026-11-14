@@ -452,6 +452,34 @@ fn apply_census_loss(
 /// Validate a stopped v5 campaign using its ORIGINAL RiskBook owner rules.
 /// Read-only source transaction; never grants authority, alters policy, or
 /// recomputes financial budgets in the migration layer.
+fn book_readback_from_meta(meta: &BookMeta) -> Result<BookReadback> {
+    Ok(BookReadback {
+            book_sequence: meta.sequence,
+            policy_revision: meta.policy_revision,
+            global_limit_usdt: meta.global_limit.canonical()?,
+            global_reserved_usdt: meta.global_reserved.canonical()?,
+            loss_limit_usd: meta.loss_limit.canonical()?,
+            consumed_loss_usd: meta.loss_consumed.canonical()?,
+            reserved_loss_usd: meta.loss_reserved.canonical()?,
+            remaining_loss_usd: remaining_budget(
+                &meta.loss_limit,
+                &meta.loss_consumed,
+                &meta.loss_reserved,
+            )?
+            .canonical()?,
+            entry_limit_usd: meta.entry_limit.canonical()?,
+            consumed_entry_usd: meta.entry_consumed.canonical()?,
+            reserved_entry_usd: meta.entry_reserved.canonical()?,
+            entry_bound_breach_usd: meta.entry_breach.canonical()?,
+            remaining_entry_usd: remaining_budget(
+                &meta.entry_limit,
+                &meta.entry_consumed,
+                &meta.entry_reserved,
+            )?
+            .canonical()?,
+        })
+}
+
 /// Read-only scoped v6 RiskBook invariant proof, executed under the SAME
 /// AccountStore-owned SQLite Transaction that owns original ledger/fill facts.
 /// This emits no grants or trading permission and creates no SQL writer.
@@ -464,11 +492,29 @@ pub(crate) fn verify_unified_import_campaign(
     if installation.is_empty() || campaign.is_empty() {
         return Err(INVALID);
     }
-    let scope = Some((installation, campaign));
-    let meta = read_meta_for_scope(tx, scope).map_err(|_| INVALID)?;
-    integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope).map_err(|_| INVALID)
+    read_unified_campaign_summary(tx, installation, campaign).map(|_| ())
 }
 
+/// Private read-only Summary against the SAME caller-owned finance SQL
+/// transaction. Uses original RiskBook exact-money rules/projections.
+/// Diagnostic only: neither an authenticated source nor a trade grant.
+pub(crate) fn read_unified_campaign_summary(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    campaign: &str,
+) -> std::result::Result<BookReadback, &'static str> {
+    const INVALID: &str = "UNIFIED_CAMPAIGN_PRIMARY_AGGREGATES_INVALID";
+    if installation.is_empty() || campaign.is_empty() {
+        return Err(INVALID);
+    }
+    let scope = Some((installation, campaign));
+    let meta = read_meta_for_scope(tx, scope).map_err(|_| INVALID)?;
+    integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope)
+        .map_err(|_| INVALID)?;
+    book_readback_from_meta(&meta).map_err(|_| INVALID)
+}
+
+/// Validate stopped v5 source with the ORIGINAL invariant checker.
 pub(crate) fn verify_legacy_import_source(
     source: &Connection,
 ) -> std::result::Result<(), &'static str> {
@@ -540,31 +586,7 @@ impl RiskBookStore {
         let meta = read_meta(&tx)?;
         verify_reservation_aggregates(&tx, &meta)?;
         tx.commit()?;
-        Ok(BookReadback {
-            book_sequence: meta.sequence,
-            policy_revision: meta.policy_revision,
-            global_limit_usdt: meta.global_limit.canonical()?,
-            global_reserved_usdt: meta.global_reserved.canonical()?,
-            loss_limit_usd: meta.loss_limit.canonical()?,
-            consumed_loss_usd: meta.loss_consumed.canonical()?,
-            reserved_loss_usd: meta.loss_reserved.canonical()?,
-            remaining_loss_usd: remaining_budget(
-                &meta.loss_limit,
-                &meta.loss_consumed,
-                &meta.loss_reserved,
-            )?
-            .canonical()?,
-            entry_limit_usd: meta.entry_limit.canonical()?,
-            consumed_entry_usd: meta.entry_consumed.canonical()?,
-            reserved_entry_usd: meta.entry_reserved.canonical()?,
-            entry_bound_breach_usd: meta.entry_breach.canonical()?,
-            remaining_entry_usd: remaining_budget(
-                &meta.entry_limit,
-                &meta.entry_consumed,
-                &meta.entry_reserved,
-            )?
-            .canonical()?,
-        })
+        book_readback_from_meta(&meta)
     }
     /// Read-only, verified account SQL observation. Policy authorization is the
     /// responsibility of the future production adapter, not this private API.
