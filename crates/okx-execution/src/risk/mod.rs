@@ -3,17 +3,18 @@ pub mod stops;
 pub use admission::*;
 pub use stops::*;
 
-// WIP #510: private until its verified policy/legacy transfer boundary is wired.
+// #510 r4.1: the original AccountStore+RiskBook financial rules are
+// callable only on the ONE installation-owned transaction. A verified
+// cutover/activation source is still required before a live COMMIT.
 mod book;
 pub(crate) use book::{
-    AccountReadback, ReservationReadback, read_unified_campaign_account_summary,
-    read_unified_campaign_reservation, read_unified_campaign_summary, verify_legacy_import_source,
-    verify_unified_import_campaign,
+    AccountReadback, PostFenceInput, ReservationReadback, ReserveInput,
+    UnifiedRiskDecision, VerifiedCensus, begin_post_unified_native,
+    read_unified_campaign_account_summary, read_unified_campaign_reservation,
+    read_unified_campaign_summary, release_unsent_unified_native,
+    reserve_unified_native, settle_partial_unified_native,
+    verify_legacy_import_source, verify_unified_import_campaign,
 };
 
 #[cfg(test)]
-pub(crate) use book::{
-    ReserveInput, VerifiedCensus, test_stage_scoped_begin_post,
-    test_trial_unified_partial_from_account, test_trial_unified_reserve,
-    test_trial_unified_unsent_from_account,
-};
+pub(crate) use book::test_stage_scoped_begin_post;
