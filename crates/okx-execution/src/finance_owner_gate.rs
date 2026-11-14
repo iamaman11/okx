@@ -161,11 +161,10 @@ mod tests {
             Err(AuthorityModeError::Busy)
         ));
         drop(first);
-        assert!(matches!(
-            unified_mode_for(&root),
-            Err(AuthorityModeError::Busy),
+        assert!(
+            matches!(unified_mode_for(&root), Err(AuthorityModeError::Busy)),
             "the other old campaign must still hold its own shared lease"
-        ));
+        );
         drop(second);
         let owner = unified_mode_for(&root).unwrap();
         assert!(matches!(
@@ -262,11 +261,10 @@ mod tests {
         });
         let ready = ready_rx.recv_timeout(Duration::from_secs(15));
         if ready.is_ok() {
-            assert!(matches!(
-                unified_mode_for(&root),
-                Err(AuthorityModeError::Busy),
+            assert!(
+                matches!(unified_mode_for(&root), Err(AuthorityModeError::Busy)),
                 "separate live OS process holds the original shared lease"
-            ));
+            );
         }
         child.kill().unwrap();
         let status = child.wait().unwrap();
