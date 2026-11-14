@@ -806,7 +806,7 @@ fn risk_book_contract_unified_full_original_47_tables_have_scoped_identity() {
         .unwrap();
     assert_eq!(
         total, 48,
-        "all 39 original AccountStore and 8 RiskBook tables"
+        "47 original finance tables plus one offline import receipt"
     );
     for account in ["acct-A", "acct-B"] {
         db.execute(
@@ -1060,8 +1060,8 @@ fn risk_book_contract_unified_full_legacy_triggers_and_campaign_scope() {
         .unwrap();
     assert_eq!(index_count, 21, "preserve the original scoped read indexes");
     assert_eq!(
-        trigger_count, 48,
-        "preserve original immutable and source triggers"
+        trigger_count, 50,
+        "48 original triggers plus 2 offline import marker immutability triggers"
     );
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
