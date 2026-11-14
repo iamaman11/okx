@@ -55,9 +55,13 @@ pub(crate) fn test_stage_scoped_begin_post(
             source_digest: "d".repeat(64),
             generated_at_ms: 10_001,
             read_floor_ms: 9_996,
-            occupied: cohort.iter().map(|id| ((*id).to_owned(), zero.clone()))
+            occupied: cohort
+                .iter()
+                .map(|id| ((*id).to_owned(), zero.clone()))
                 .collect::<BTreeMap<_, _>>(),
-            cumulative_loss_usd: cohort.iter().map(|id| ((*id).to_owned(), zero.clone()))
+            cumulative_loss_usd: cohort
+                .iter()
+                .map(|id| ((*id).to_owned(), zero.clone()))
                 .collect::<BTreeMap<_, _>>(),
         },
         causal: PostCausalProof {
