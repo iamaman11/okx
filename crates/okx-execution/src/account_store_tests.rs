@@ -11652,3 +11652,55 @@ fn risk_book_contract_unified_offline_import_bad_campaign_plan_rolls_back() {
         "account and campaign import must roll back together"
     );
 }
+
+#[test]
+fn risk_book_contract_unified_offline_import_rejects_corrupt_legacy_risk_aggregates() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let campaign = path();
+    unified_original_campaign_fixture(
+        &campaign,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    // Both original SQLite integrity and foreign-key checks can be green
+    // while a mutable cached capacity has been tampered with.
+    let tamper = Connection::open(&campaign).unwrap();
+    tamper
+        .execute("UPDATE risk_meta SET global_reserved_usdt='0'", [])
+        .unwrap();
+    drop(tamper);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sc = Connection::open_with_flags(&campaign, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    assert!(matches!(
+        super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+            &mut target,
+            "installation",
+            &[&sa, &sb],
+            &[&sc],
+        ),
+        Err(StoreError::Invalid("UNIFIED_LEGACY_CAMPAIGN_AGGREGATES_INVALID"))
+    ));
+    let tables: i64 = target
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+         AND name NOT LIKE 'sqlite_%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0, "corrupt source must not initialize the unified database");
+}
