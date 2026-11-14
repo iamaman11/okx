@@ -454,30 +454,30 @@ fn apply_census_loss(
 /// recomputes financial budgets in the migration layer.
 fn book_readback_from_meta(meta: &BookMeta) -> Result<BookReadback> {
     Ok(BookReadback {
-            book_sequence: meta.sequence,
-            policy_revision: meta.policy_revision,
-            global_limit_usdt: meta.global_limit.canonical()?,
-            global_reserved_usdt: meta.global_reserved.canonical()?,
-            loss_limit_usd: meta.loss_limit.canonical()?,
-            consumed_loss_usd: meta.loss_consumed.canonical()?,
-            reserved_loss_usd: meta.loss_reserved.canonical()?,
-            remaining_loss_usd: remaining_budget(
-                &meta.loss_limit,
-                &meta.loss_consumed,
-                &meta.loss_reserved,
-            )?
-            .canonical()?,
-            entry_limit_usd: meta.entry_limit.canonical()?,
-            consumed_entry_usd: meta.entry_consumed.canonical()?,
-            reserved_entry_usd: meta.entry_reserved.canonical()?,
-            entry_bound_breach_usd: meta.entry_breach.canonical()?,
-            remaining_entry_usd: remaining_budget(
-                &meta.entry_limit,
-                &meta.entry_consumed,
-                &meta.entry_reserved,
-            )?
-            .canonical()?,
-        })
+        book_sequence: meta.sequence,
+        policy_revision: meta.policy_revision,
+        global_limit_usdt: meta.global_limit.canonical()?,
+        global_reserved_usdt: meta.global_reserved.canonical()?,
+        loss_limit_usd: meta.loss_limit.canonical()?,
+        consumed_loss_usd: meta.loss_consumed.canonical()?,
+        reserved_loss_usd: meta.loss_reserved.canonical()?,
+        remaining_loss_usd: remaining_budget(
+            &meta.loss_limit,
+            &meta.loss_consumed,
+            &meta.loss_reserved,
+        )?
+        .canonical()?,
+        entry_limit_usd: meta.entry_limit.canonical()?,
+        consumed_entry_usd: meta.entry_consumed.canonical()?,
+        reserved_entry_usd: meta.entry_reserved.canonical()?,
+        entry_bound_breach_usd: meta.entry_breach.canonical()?,
+        remaining_entry_usd: remaining_budget(
+            &meta.entry_limit,
+            &meta.entry_consumed,
+            &meta.entry_reserved,
+        )?
+        .canonical()?,
+    })
 }
 
 /// Read-only scoped v6 RiskBook invariant proof, executed under the SAME
@@ -509,8 +509,7 @@ pub(crate) fn read_unified_campaign_summary(
     }
     let scope = Some((installation, campaign));
     let meta = read_meta_for_scope(tx, scope).map_err(|_| INVALID)?;
-    integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope)
-        .map_err(|_| INVALID)?;
+    integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope).map_err(|_| INVALID)?;
     book_readback_from_meta(&meta).map_err(|_| INVALID)
 }
 
