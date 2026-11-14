@@ -1,6 +1,6 @@
 //! One campaign-side entry debit per original native SQL revision.
- //! The original AccountStore proves fill/bill/FX economics, never the
- //! target reservation's transitional POSTED/UNKNOWN/OPEN label.
+//! The original AccountStore proves fill/bill/FX economics, never the
+//! target reservation's transitional POSTED/UNKNOWN/OPEN label.
 //! This module does NOT calculate fill, bill, fee, FX or venue facts; those
 //! economic facts are produced and sealed by the existing AccountStore owner.
 //! No arbitrary network settlement, late fee or terminal release is accepted.

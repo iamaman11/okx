@@ -1703,7 +1703,6 @@ fn risk_book_contract_sql_partial_entry_consumes_reserved_budget_once() {
     assert_eq!(reopened.readback().unwrap().consumed_entry_usd, "1");
 }
 
-
 #[test]
 fn risk_book_contract_sql_account_outcome_open_and_unknown_keep_entry_debit_atomic() {
     // Each state has exactly the same existing RiskBook monetary owner:
@@ -1754,7 +1753,10 @@ fn risk_book_contract_sql_account_outcome_open_and_unknown_keep_entry_debit_atom
         assert_eq!(recovered.readback().unwrap().book_sequence, 4);
         let next = partial_proof(&input, 2, "0.8", 'c');
         assert_eq!(
-            recovered.settle_partial_entry(&next, 4, 7).unwrap().book_sequence,
+            recovered
+                .settle_partial_entry(&next, 4, 7)
+                .unwrap()
+                .book_sequence,
             5
         );
         assert_eq!(recovered.readback().unwrap().reserved_entry_usd, "0.2");
