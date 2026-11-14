@@ -12965,6 +12965,19 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
                 .unwrap()
         );
     }
+    // This same typed PREPARE is now an original production-shaped finance
+    // command, not a separate test-only SQL algorithm. A verified 47-table
+    // OFFLINE import may not persist a real decision, even before Reserve.
+    assert!(matches!(
+        owner
+            .apply_financial_write(crate::account_worker::UnifiedFinanceWrite::Prepare {
+                account: a_key.clone(),
+                decision: trial_decision.clone(),
+                intent: trial_intent.clone(),
+            })
+            .await,
+        Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
+    ));
     assert!(matches!(
         owner
             .trial_original_prepare(

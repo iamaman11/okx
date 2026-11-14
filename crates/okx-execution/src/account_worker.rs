@@ -578,6 +578,14 @@ pub(crate) struct UnifiedFinanceHandle {
 /// The *same* dispatch is used for rollback-only offline contract tests.
 #[derive(Debug, Clone)]
 pub(crate) enum UnifiedFinanceWrite {
+    /// The original AccountStore decision, immutable plan and intent are
+    /// persisted under the same installation writer as subsequent RiskBook
+    /// commands. An idempotent replay returns the FIRST stored identity.
+    Prepare {
+        account: String,
+        decision: crate::Decision,
+        intent: crate::NewIntent,
+    },
     Reserve {
         campaign: String,
         input: crate::risk::ReserveInput,
@@ -621,6 +629,7 @@ pub(crate) enum UnifiedFinanceWrite {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UnifiedFinanceWriteReceipt {
+    Prepared { inserted: bool, intent_id: String },
     Risk(crate::risk::UnifiedRiskDecision),
     Recovered { changed: usize },
     OutcomeRecorded,
@@ -642,6 +651,32 @@ fn apply_original_unified_finance_transaction(
             .map_err(StoreError::Invalid)
     };
     match command {
+        UnifiedFinanceWrite::Prepare {
+            account,
+            decision,
+            intent,
+        } => {
+            let inserted = AccountStore::prepare_sql_transaction(
+                tx,
+                Some((installation, &account)),
+                &decision,
+                &intent,
+            )?;
+            let saved = AccountStore::find_intent_sql(
+                tx,
+                Some((installation, &account)),
+                "idempotency_key",
+                &intent.idempotency_key,
+            )?
+            .ok_or(StoreError::Invalid("UNIFIED_PREPARED_INTENT_MISSING"))?;
+            if saved.request_hash != intent.request_hash {
+                return Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
+            }
+            Ok(UnifiedFinanceWriteReceipt::Prepared {
+                inserted,
+                intent_id: saved.intent_id,
+            })
+        }
         UnifiedFinanceWrite::Reserve {
             campaign,
             input,
@@ -1118,20 +1153,17 @@ impl UnifiedFinanceHandle {
         decision: crate::Decision,
         intent: crate::NewIntent,
     ) -> StoreResult<bool> {
-        let installation = self.installation.clone();
-        self.submit(move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_offline_finance_trial(&tx, &installation)?;
-            let staged = AccountStore::prepare_sql_transaction(
-                &tx,
-                Some((&installation, &account)),
-                &decision,
-                &intent,
-            )?;
-            tx.rollback()?;
-            Ok(staged)
-        })
-        .await
+        match self
+            .trial_financial_write(UnifiedFinanceWrite::Prepare {
+                account,
+                decision,
+                intent,
+            })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::Prepared { inserted, .. } => Ok(inserted),
+            _ => Err(StoreError::Invalid("UNIFIED_PREPARE_RECEIPT_UNEXPECTED")),
+        }
     }
 
     /// TEST ONLY: full ORIGINAL account+RiskBook Reserve under this exact
