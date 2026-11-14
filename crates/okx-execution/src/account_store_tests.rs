@@ -12785,11 +12785,15 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert_eq!(b_read.reserved_loss_usdt, "0");
     assert_eq!(b_read.reserved_loss_usd, "0");
     assert!(matches!(
-        owner.account_summary("campaign-X".into(), "acct-A".into()).await,
+        owner
+            .account_summary("campaign-X".into(), "acct-A".into())
+            .await,
         Err(StoreError::Invalid("UNIFIED_ACCOUNT_RISK_READBACK_INVALID"))
     ));
     assert!(matches!(
-        owner.account_summary("campaign-Y".into(), a_key.clone()).await,
+        owner
+            .account_summary("campaign-Y".into(), a_key.clone())
+            .await,
         Err(StoreError::Invalid("UNIFIED_ACCOUNT_RISK_READBACK_INVALID"))
     ));
 
@@ -12808,25 +12812,48 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert_eq!(held.reservation_sequence, 1);
     assert_eq!(held.current_book_sequence, 2);
     let unsent = owner
-        .inspect_reservation("campaign-X".into(), "same-unsent".into(), bi.plan_hash.clone())
+        .inspect_reservation(
+            "campaign-X".into(),
+            "same-unsent".into(),
+            bi.plan_hash.clone(),
+        )
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(unsent.state, okx_kernel::risk::model::RiskEntryState::Released);
+    assert_eq!(
+        unsent.state,
+        okx_kernel::risk::model::RiskEntryState::Released
+    );
     assert_eq!(unsent.reservation_sequence, 2);
-    assert!(owner
-        .inspect_reservation("campaign-X".into(), "same-reservation".into(), "b".repeat(64))
-        .await
-        .unwrap()
-        .is_none());
-    assert!(owner
-        .inspect_reservation("campaign-X".into(), "not-recorded".into(), ai.plan_hash.clone())
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        owner
+            .inspect_reservation(
+                "campaign-X".into(),
+                "same-reservation".into(),
+                "b".repeat(64)
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        owner
+            .inspect_reservation(
+                "campaign-X".into(),
+                "not-recorded".into(),
+                ai.plan_hash.clone()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(matches!(
         owner
-            .inspect_reservation("campaign-Y".into(), "same-reservation".into(), ai.plan_hash.clone())
+            .inspect_reservation(
+                "campaign-Y".into(),
+                "same-reservation".into(),
+                ai.plan_hash.clone()
+            )
             .await,
         Err(StoreError::Invalid("UNIFIED_RESERVATION_READBACK_INVALID"))
     ));
