@@ -1,6 +1,19 @@
 # #510 r4 — source-derived SQL scope inventory and first physical single-file slice
 
-## Latest #510 r4: original RiskBook BEGIN_POST + AccountStore intent under ONE SQL COMMIT and physical OS kill — 74 direct Rust tests (14 Nov 2026)
+## Latest #510 r4 — original AccountStore full BEGIN_POST checks + RiskBook single-commit and durable readback (14 Nov 2026)
+
+**Verified CODE SHA `6a1db60a17ba7f3a62561557a58dcb9c32a3d8c8`** in [GitHub CI #43626228175](https://github.com/iamaman11/okx/actions/runs/43626228175) **SUCCESS**: 67/67 filtered `okx-execution` risk contracts + 6/6 `okx-kernel` + 1/1 original AccountStore source = **74 direct cases**; architecture guard/negative self-checks and rustfmt PASS. Filtered execution times post-build 1.15 + 0 + 0.11s Linux. **NOT** full native Windows RB01–RB16 or T09/T10 26/26.
+
+**Source ownership (one function, not duplicated):** Original production `AccountStore::begin_post` now calls `AccountStore::begin_post_sql_transaction(&Transaction, scope, intent_id, policy_revision, now, required_reservation)`, the **same** validation and original receipt writer used for old v2 unscoped and new v6 `(installation_id,account_id)` SQL. Preserves original expiration, policy revision, paused/stops, strategy identity, storage-reconcile and unknown-exposure guards; now checks exactly one CAS for intent `RESERVED→POSTING` with `begin_post_at` and the *original* `risk_receipts HELD→POSTED`. Scoped v6 additionally demands same original reservation identity and plan hash in the primary AccountStore receipt. This does **not** invent a new account owner or fee/ledger writer.
+
+**RiskBook composition:** Private `risk::book::store::post::begin_unified_post_and_account_transaction` stages the ORIGINAL native RiskBook `HELD→POSTED` risk/campaign checks, then invokes that original AccountStore method under **the same caller-owned SQLite Transaction**. Any failure is an error and the caller must roll back. Ordinary risk budget denial remains a distinct `PostDecision::Denied` (may persist a properly verified high-water source observation). Native `PostDecision::Authorized` remains *uncommitted internal state*, NOT venue-send permission and **not wired into production TradeService**.
+
+**Original source, not handwritten test status:** The same two-account/two-campaign test now prepares and reserves through genuine original v2 `AccountStore::prepare` + `AccountStore::reserve` before importing 39+8 primary tables; it never manually writes `POSTING`. Negative scenarios: removed original `risk_receipts`, paused source, stale policy revision, expired deadline, incomplete storage recovery all reject. Real Rust child OS-kill before/after combined risk+original-account commit proves all-or-nothing native SQLite/WAL; cold reopen invokes ORIGINAL `AccountStore::post_fence_evidence_sql` to verify exact `begin_post_at=10002` and original POSTED receipt; wrong account/reservation rejects; RiskBook X vs Y isolation and no duplicate grant on replay preserved. Test causal `PostCausalProof` stays explicitly `#[cfg(test)]` synthetic.
+
+**Still blocked:** Actual installed single bounded finance worker, trusted authenticated complete source census and Cloudflare server-side old-owner revoke/owner epoch, all nine production `TradeService` RPC/actions, real venue/replay recovery, partial/terminal/late fees, UNKNOWN and installed Windows RB01–16 / T09/T10 26/26. `finance_import_manifest` still `OFFLINE_NOT_AUTHORIZED`; old live writers untouched. PR Draft/NO-GO; no merge/deploy/live or Demo trading.
+
+
+## Previous #510 r4: staged RiskBook BEGIN_POST with basic original AccountStore SQL — 74 direct tests (historical)
 
 **Verified CODE SHA `ac3cf6ef9b8f09831e9504e8ab142562785c69b6`**, [GitHub CI #43623705885](https://github.com/iamaman11/okx/actions/runs/43623705885) **SUCCESS**: 67/67 `okx-execution` filtered risk contracts, 6/6 kernel, 1/1 original AccountStore fill/bill producer = **74 direct tests**; existing architecture guard/negative guard self-tests and rustfmt PASS. Linux filtered test execution ~0.99+0.00+0.07s after compilation, NOT installed Windows/RB01–16/T09/T10 26/26.
 
