@@ -134,7 +134,7 @@ fn risk_book_contract_sql_concurrent_accounts_share_one_budget() {
     assert_eq!(read.entry_bound_breach_usd, "0");
     assert_eq!(read.remaining_entry_usd, "99");
     assert_eq!(read.book_sequence, 1);
-    drop(s);
+    s.close();
     // The original owner must have physically released the OS lock before
     // another one opens; no sleep/retry may substitute for this observation.
     let lease_path = format!("{}.writer.lock", f.path.canonicalize().unwrap().display());
@@ -169,7 +169,7 @@ fn risk_book_contract_sql_ack_lost_replay_is_read_only() {
     assert_eq!(first.reservation_key, key);
     // Simulate a response lost *after* SQLite COMMIT: only persisted state survives.
     drop(first);
-    drop(s);
+    s.close();
     let mut reopened = open(&f);
     let replay = reopened.reserve(&input, &census()).unwrap();
     assert!(replay.replayed);
@@ -194,7 +194,7 @@ fn risk_book_contract_sql_single_writer_and_no_implicit_init() {
         RiskBookStore::open_existing(&f.path, "test-installation", &opening().campaign_id),
         Err(RiskStoreError::WriterBusy)
     ));
-    drop(store);
+    store.close();
     assert!(matches!(
         RiskBookStore::open_existing(&f.path, "other", &opening().campaign_id),
         Err(RiskStoreError::IdentityMismatch)
@@ -399,7 +399,7 @@ fn risk_book_contract_sql_cross_process_exclusive_lease() {
         String::from_utf8_lossy(&probe.stdout),
         String::from_utf8_lossy(&probe.stderr)
     );
-    drop(store);
+    store.close();
     assert!(open(&fixture).readback().is_ok());
 }
 
@@ -453,7 +453,7 @@ fn risk_book_contract_sql_loss_source_monotonic_even_on_denied_reserve() {
         store.reserve(&request('b', "intentloss3", "1"), &regression),
         Err(RiskStoreError::LossRegression)
     ));
-    drop(store);
+    store.close();
     let mut reopened = open(&fixture);
     assert_eq!(reopened.readback().unwrap().consumed_loss_usd, "11");
     assert_eq!(reopened.readback().unwrap().book_sequence, 2);
@@ -538,7 +538,7 @@ fn risk_book_contract_sql_corrupted_reservation_aggregates_reject_reopen() {
         .reserve(&request('a', "intentcorrupt1", "6"), &census())
         .unwrap();
     assert_eq!(store.readback().unwrap().global_reserved_usdt, "6");
-    drop(store);
+    store.close();
 
     // Deliberately damage only a materialized total in an isolated test DB.
     // The primary HELD reservation and account/strategy aggregates remain intact.
@@ -564,7 +564,7 @@ fn risk_book_contract_sql_release_requires_zero_reservations() {
     let input = request('a', "intentrelease1", "6");
     let mut store = open(&fixture);
     store.reserve(&input, &census()).unwrap();
-    drop(store);
+    store.close();
 
     // A terminal label alone must never erase a still-funded obligation.
     // SQLite rejects the incomplete transition even if a caller bypasses Rust.
@@ -680,7 +680,7 @@ fn risk_book_contract_sql_loss_source_total_and_presence_are_durable() {
         Err(RiskStoreError::Denied(RiskRuleError::LossBudgetExhausted))
     ));
     assert_eq!(store.readback().unwrap().consumed_loss_usd, "11");
-    drop(store);
+    store.close();
     let connection = rusqlite::Connection::open(&fixture.path).unwrap();
     connection
         .execute(
@@ -801,7 +801,7 @@ fn risk_book_contract_sql_durable_no_reserve_tombstone_prevents_future_grant() {
         Err(RiskStoreError::IdempotencyConflict)
     ));
     assert_eq!(store.readback().unwrap().book_sequence, 1);
-    drop(store);
+    store.close();
 
     let mut recovered = open(&fixture);
     assert_eq!(
@@ -887,7 +887,7 @@ fn risk_book_contract_sql_unsent_held_release_is_exact_and_durable() {
         store.reserve(&input, &census()),
         Err(RiskStoreError::AlreadyResolved)
     ));
-    drop(store);
+    store.close();
 
     let mut reopened = open(&fixture);
     assert_eq!(
@@ -923,7 +923,7 @@ fn risk_book_contract_sql_rejects_invalid_no_send_and_conflicting_fence() {
     store
         .reserve(&request('a', "intentother2", "4"), &census())
         .unwrap();
-    drop(store);
+    store.close();
     // Out-of-band corruption must not allow both a positive reservation
     // and a negative no-reserve fence on the exact same durable identity.
     let conflict = unsent('a', "intentother2");
@@ -1259,7 +1259,7 @@ fn risk_book_contract_sql_post_fence_commits_once() {
         store.release_unsent(&unsent('a', "intentpost1"), 2, 7),
         Err(RiskStoreError::AlreadyResolved)
     ));
-    drop(store);
+    store.close();
     let db = rusqlite::Connection::open(&fixture.path).unwrap();
     let stored: (String, i64, String, String) = db
         .query_row(
@@ -1413,7 +1413,7 @@ fn risk_book_contract_sql_post_loss_high_water_is_durable_on_denial() {
             .state,
         okx_kernel::risk::model::RiskEntryState::Held
     );
-    drop(store);
+    store.close();
     let mut reopened = open(&fixture);
     assert_eq!(reopened.readback().unwrap(), read);
     assert!(matches!(
@@ -1555,7 +1555,7 @@ fn risk_book_contract_sql_posted_requires_durable_proof_fields() {
     let mut store = open(&fixture);
     let input = request('a', "intentpostcheck1", "3");
     store.reserve(&input, &census()).unwrap();
-    drop(store);
+    store.close();
     let db = rusqlite::Connection::open(&fixture.path).unwrap();
     let rejected = db.execute(
         "UPDATE risk_entries SET state='POSTED' WHERE reservation_key=?1",
@@ -1646,7 +1646,7 @@ fn risk_book_contract_sql_partial_entry_consumes_reserved_budget_once() {
     assert_eq!(b.consumed_entry_usd, "0.75");
     assert_eq!(b.reserved_entry_usd, "0.25");
     assert_eq!(b.global_reserved_usdt, "3");
-    drop(s);
+    s.close();
     let mut reopened = open(&fixture);
     assert_eq!(reopened.readback().unwrap(), b);
     assert!(
@@ -1725,7 +1725,7 @@ fn risk_book_contract_sql_partial_entry_integrity_detects_forged_cache() {
     s.begin_post(&post_fence(&input, 1)).unwrap();
     s.settle_partial_entry(&partial_proof(&input, 1, "0.25", 'b'), 2, 7)
         .unwrap();
-    drop(s);
+    s.close();
     let db = rusqlite::Connection::open(&fixture.path).unwrap();
     db.execute(
         "UPDATE risk_meta SET entry_consumed_usd='0' WHERE singleton=1",
