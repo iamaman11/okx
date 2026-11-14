@@ -2364,7 +2364,7 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         let tx = db.transaction().unwrap();
         for letter in ['a', 'b'] {
             let key = account(letter);
-            let intent = format!("intent{}", letter.to_ascii_uppercase());
+            let intent = format!("intent{}0001", letter.to_ascii_uppercase());
             tx.execute(
                 "INSERT INTO account_meta(
                 installation_id,account_key,singleton,schema_version,initialized_at,
@@ -2453,7 +2453,7 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         }
         tx.commit().unwrap();
     }
-    let original = request('a', "intentA", "6");
+    let original = request('a', "intentA0001", "6");
     // The first uncommitted reserve is a real v6 SQL mutation: rollback must
     // eliminate both the reservation and all associated budget/cache writes.
     {
@@ -2518,7 +2518,7 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             RiskBookStore::reserve_sql_transaction(
                 &tx,
                 Some(("test-installation", &campaign)),
-                &request('b', "intentB", "6"),
+                &request('b', "intentB0001", "6"),
                 &fresh
             )
             .unwrap(),
