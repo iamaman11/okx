@@ -2499,6 +2499,36 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
     };
     let receipt_a = account_receipt(&original);
     let receipt_b = account_receipt(&second);
+    // The AccountStore check runs AFTER RiskBook has staged a HELD reservation.
+    // If the original owner proof disagrees, the caller must roll back BOTH
+    // writes, not commit a risk-only reservation with no native receipt.
+    {
+        let mut foreign_owner = receipt_a.clone();
+        foreign_owner.instance_id = None;
+        let tx = db.transaction().unwrap();
+        assert!(matches!(
+            RiskBookStore::reserve_unified_account_transaction(
+                &tx,
+                "test-installation",
+                &campaign,
+                &original,
+                &census(),
+                &foreign_owner
+            ),
+            Err(RiskStoreError::Invalid("CENTRAL_INSTANCE_MISMATCH"))
+        ));
+        tx.rollback().unwrap();
+    }
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_entries", [], |r| r.get(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_receipts", [], |r| r.get(0))
+            .unwrap(),
+        0
+    );
     // The first uncommitted reserve is a real v6 SQL mutation: rollback must
     // eliminate both the reservation and all associated budget/cache writes.
     {
