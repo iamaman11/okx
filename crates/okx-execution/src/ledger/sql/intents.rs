@@ -3196,7 +3196,9 @@ impl AccountStore {
                     |r| r.get(0),
                 )?;
                 if broken != 0 {
-                    return Err(StoreError::Invalid("UNIFIED_RECOVERY_ORIGINAL_POST_UNPROVEN"));
+                    return Err(StoreError::Invalid(
+                        "UNIFIED_RECOVERY_ORIGINAL_POST_UNPROVEN",
+                    ));
                 }
                 let originals: i64 = tx.query_row(
                     "SELECT COUNT(*) FROM intents WHERE installation_id=?1

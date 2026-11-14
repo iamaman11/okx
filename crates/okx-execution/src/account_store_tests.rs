@@ -12856,27 +12856,36 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         assert_eq!(observed.intent_id, prepared.intent_id);
         assert_eq!(observed.plan, prepared.plan);
     }
-    assert!(owner
-        .account_intent("foreign-account".into(), ai.intent_id.clone())
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        owner
+            .account_intent("foreign-account".into(), ai.intent_id.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(matches!(
         owner.account_intent(a_key.clone(), "".into()).await,
         Err(StoreError::Invalid("UNIFIED_FINANCE_INTENT_SCOPE_INVALID"))
     ));
     assert_eq!(
-        owner.trial_original_recover_posting(a_key.clone(), 10)
-            .await.unwrap(),
+        owner
+            .trial_original_recover_posting(a_key.clone(), 10)
+            .await
+            .unwrap(),
         0,
         "a PREPARED original intent cannot be recovered as POSTING"
     );
     assert!(matches!(
-        owner.trial_original_record_outcome(
-            a_key.clone(), ai.intent_id.clone(),
-            IntentState::Acknowledged, Some("unverified-order".into()),
-            "not-a-real-venue-readback".into(), 10,
-        ).await,
+        owner
+            .trial_original_record_outcome(
+                a_key.clone(),
+                ai.intent_id.clone(),
+                IntentState::Acknowledged,
+                Some("unverified-order".into()),
+                "not-a-real-venue-readback".into(),
+                10,
+            )
+            .await,
         Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"))
     ));
 
@@ -13562,10 +13571,10 @@ fn risk_book_contract_unified_original_prepare_is_scoped_atomic_and_idempotent()
             .unwrap();
         tx.execute_batch(corrupt_sql).unwrap();
         assert!(matches!(
-            AccountStore::recover_posting_sql_transaction(
-                &tx, Some(("installation", "acct-A")), 5
-            ),
-            Err(StoreError::Invalid("UNIFIED_RECOVERY_ORIGINAL_POST_UNPROVEN"))
+            AccountStore::recover_posting_sql_transaction(&tx, Some(("installation", "acct-A")), 5),
+            Err(StoreError::Invalid(
+                "UNIFIED_RECOVERY_ORIGINAL_POST_UNPROVEN"
+            ))
         ));
         let unchanged: String = tx.query_row(
             "SELECT state FROM intents WHERE installation_id='installation' AND account_key='acct-A'",
@@ -13581,8 +13590,11 @@ fn risk_book_contract_unified_original_prepare_is_scoped_atomic_and_idempotent()
             .unwrap();
         assert_eq!(
             AccountStore::recover_posting_sql_transaction(
-                &tx, Some(("installation", "foreign-account")), 5
-            ).unwrap(),
+                &tx,
+                Some(("installation", "foreign-account")),
+                5
+            )
+            .unwrap(),
             0
         );
         tx.rollback().unwrap();
@@ -13713,8 +13725,11 @@ fn risk_book_contract_unified_original_prepare_is_scoped_atomic_and_idempotent()
         for account in ["acct-A", "acct-B"] {
             assert_eq!(
                 AccountStore::recover_posting_sql_transaction(
-                    &tx, Some(("installation", account)), 12
-                ).unwrap(),
+                    &tx,
+                    Some(("installation", account)),
+                    12
+                )
+                .unwrap(),
                 0,
             );
         }
