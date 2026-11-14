@@ -638,6 +638,17 @@ fn reserve_scope_values(
 }
 
 impl RiskBookStore {
+    /// Release the legacy SQLite writer in a physically ordered close:
+    /// Connection first, explicit lock release second. Only after returning
+    /// may the bounded worker publish its termination witness. This is NOT
+    /// another writer or a parallel finance authority.
+    pub(super) fn close(self) {
+        let Self { connection, _lease } = self;
+        drop(connection);
+        let _ = _lease.unlock();
+        drop(_lease);
+    }
+
     pub(super) fn open_existing(path: &Path, installation: &str, campaign: &str) -> Result<Self> {
         if !path.is_file() {
             return Err(RiskStoreError::Uninitialized);
