@@ -2,6 +2,18 @@
 
 **Date:** 14 November 2026. **Canonical architecture:** [Issue #510 r4.0](https://github.com/iamaman11/okx/issues/510). **Code:** [Draft PR #511](https://github.com/iamaman11/okx/pull/511). No production authorization, migration, Cloudflare cutover, Windows installation or trading follows from this first slice.
 
+## #510 r4 P0: SQL original-source and intent identity boundaries (direct PASS, production NO-GO)
+
+**Verified code SHA `9f62f2df354b58dccc9f2d2a6961a7fbad34bebc`**, [GitHub CI #43533925640](https://github.com/iamaman11/okx/actions/runs/43533925640) **SUCCESS**: **52/52** `okx-execution` filtered `risk_book_contract`, **6/6** `okx-kernel`, **1/1** original `AccountStore` fill/bill test = **59 filtered cases** including child-process entrypoints; cargo fmt and existing architecture guard/negative self-tests PASS. After compilation on Linux runner: 0.58 + 0.00 + 0.12 s. Neither Windows/26/26 nor RB01–16 production is proven.
+
+Three production-blocking **SQL invariants** are now enforced in the private scoped 10-table target fixture:
+
+1. `finance_entry_receipts` has a single composite FK `(installation_id,campaign_id,reservation_key,account_key,intent_id)` to the exact `finance_risk_entries` row. Another composite FK `(installation_id,account_key,intent_id,settlement_revision,source_digest)` links to the *same original* immutable source. Independent valid references to A-reservation/B-source, or a foreign source digest, fail at the actual SQLite engine even without Rust preflight. The new negative test confirms the constraint and that no budget changes.
+2. `finance_entry_sources.original_receipt_json` is **NOT NULL and nonempty** with no silent default. `unified_financial::settle_entry` **always deserializes and verifies** the original `EntrySettlementEvidence`, its account/intent, plan, reservation, order, exact revision/source digest and amount; the previous empty-JSON bypass is removed. Test-only synthetic entries now use structurally valid **mock receipts**; they are NOT authenticated exchange observations. The separate original native AccountStore producer test is still the only positive genuine provenance witness and remains private, offline.
+3. A given original `(installation_id,account_key,intent_id)` can occur in **only one** campaign risk entry in the entire installation DB. SQL also enforces that `risk_entries.plan_sha256` matches the original account intent. Tests attempt an actual second campaign entry for the same order and a forged plan hash, both denied. Distinct account IDs and distinct original intent IDs remain independent.
+
+**Remaining distinction:** these exact constraints hold on the *new unactivated target schema*. They **do not** retroactively change the original production account-v2 29+10 tables or separate RiskBook's eight tables; there is not yet a single native production writer for all accounts. A JSON document on its own is not a cryptographic producer signature; only the original authenticated SQL AccountStore ownership and verified migration can establish provenance. Until the real source producer writes into the same fully normalized DB under the same writer and the legacy Worker is fenced, #510 remains Draft/NO-GO.
+
 ## Original SQL table inventory (47 tables; verified against GitHub)
 
 All 47 original tables below must be inspected for their **existing SQL PK/UNIQUE/FK, source joins, immutable triggers, account/campaign lifecycle and every caller**. Listing them is not a migration.
