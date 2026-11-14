@@ -2542,10 +2542,7 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
                 &fresh
             )
             .unwrap(),
-            ReserveDecision::Held(HeldReceipt {
-                replayed: true,
-                ..
-            })
+            ReserveDecision::Held(HeldReceipt { replayed: true, .. })
         ));
         tx.rollback().unwrap();
     }
