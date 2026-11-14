@@ -1,5 +1,10 @@
 # Trade acceptance evidence map — #448 / #449 / #501
 
+## Full original execution regression after shared BEGIN_POST — 237/237 PASS (14 Nov 2026)
+
+**Code + draft CI SHA `70039cb06cd0f6581ebfe3d2f69cb05f211a7b94`**, [GitHub CI #43626550682](https://github.com/iamaman11/okx/actions/runs/43626550682) **SUCCESS**. Same EXISTING Draft RiskBook job now runs fast original/source/architecture/format guards **first**, then `cargo test --locked -p okx-execution --lib` using the same cached compilation; complete existing `okx-execution` library regression **237 passed, 0 failed, 3 ignored** (~15.06s after compile). RiskBook filtered cases 67/67 execution + 6/6 kernel + original source 1/1 still PASS. NOT Windows installed 26/26 or physical Cloudflare fencing; ignored tests are NOT claimed as passed. No second workflow/CI or new application engine. The single normal `riskbook-draft-rust` job remains a Draft code gate, not final acceptance.
+
+
 ## Latest #510 r4 — original AccountStore full BEGIN_POST checks + RiskBook single-commit and durable readback (14 Nov 2026)
 
 **Verified CODE SHA `6a1db60a17ba7f3a62561557a58dcb9c32a3d8c8`** in [GitHub CI #43626228175](https://github.com/iamaman11/okx/actions/runs/43626228175) **SUCCESS**: 67/67 filtered `okx-execution` risk contracts + 6/6 `okx-kernel` + 1/1 original AccountStore source = **74 direct cases**; architecture guard/negative self-checks and rustfmt PASS. Filtered execution times post-build 1.15 + 0 + 0.11s Linux. **NOT** full native Windows RB01–RB16 or T09/T10 26/26.
