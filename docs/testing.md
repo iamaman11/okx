@@ -1,5 +1,14 @@
 # Trade acceptance evidence map — #448 / #449 / #501
 
+### #510 r4 SQL identity and evidence guard — 59-case checkpoint
+
+**Verified exact code SHA:** `9f62f2df354b58dccc9f2d2a6961a7fbad34bebc`, [CI #43533925640](https://github.com/iamaman11/okx/actions/runs/43533925640) **SUCCESS**. Linux direct filtered `risk_book_contract`: `okx-execution` **52/52**, `okx-kernel` **6/6**, plus original `AccountStore` SQL partial/terminal/late fixture **1/1** = **59** filtered test cases, executed in 0.58s + 0.00s + 0.12s after compile. This is **not** full Windows 26/26/T09/T10 or complete RB01–RB16.
+
+New physical SQLite negative witnesses in the *unactivated scoped schema*: `risk_book_contract_unified_receipt_rejects_wrong_account_source_and_digest` prevents mixed A-reservation/B-source and wrong source digest at the FOREIGN KEY layer; `risk_book_contract_unified_rejects_missing_or_fake_native_receipt` denies absent original financial proof and rejects malformed/non-structural JSON at Rust source validation; `risk_book_contract_unified_one_original_intent_one_campaign_and_original_plan` prevents a single original account intent being charged in two campaigns or acquiring a forged plan hash. Existing real AccountStore original-source import, exact replay, A/B duplicate venue IDs and OS-kill before/after one local COMMIT continue to pass.
+
+**Scope caveat:** mock receipts used in isolated A/B/failure fixtures validate shape and SQL invariants but are **not exchange-authenticated source**; trusted original AccountStore source is exercised separately during offline migration. The final 47-table normalized source producer, single production writer, multi-fill/late/terminal migration, Cloudflare fencing, Windows and full RB physical matrix remain **NOT_PROVEN**. [Detailed SQL table and source map](financial-sql-scope-r4.md). PR #511 stays Draft/NO-GO.
+
+
 ### #510 r4.0 source-authentic partial migration — verified original AccountStore producer
 
 **Actual Rust code SHA `a1660565771a5e805f2c03d347840284b5a8d60f`**; [CI #43531489964](https://github.com/iamaman11/okx/actions/runs/43531489964) **SUCCESS**: 49/49 filtered execution Rust contracts + 6/6 kernel + 1/1 **real native AccountStore** `e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted` (extended to exercise legacy original-source import), formatting, architecture guard and negative self-tests PASS.
