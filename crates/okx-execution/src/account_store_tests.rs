@@ -12291,38 +12291,23 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         .unwrap();
     assert_eq!(before, ("HELD".into(), "RESERVED".into(), 2));
 
-    // The next retry uses ONE BEGIN IMMEDIATE and one COMMIT for BOTH
-    // original AccountStore intent and the native RiskBook POST fence.
-    {
-        use rusqlite::TransactionBehavior;
-        let tx = target
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .unwrap();
-        assert_eq!(
-            crate::risk::test_stage_scoped_begin_post(
-                &tx,
-                "installation",
-                "campaign-X",
-                "same-reservation",
-                &ai.plan_hash,
-                cohort,
-                2,
-            )
-            .unwrap(),
-            3
-        );
-        assert_eq!(
-            tx.execute(
-                "UPDATE intents SET state='POSTING'
-             WHERE installation_id='installation' AND account_key='acct-A'
-               AND intent_id=?1 AND state='RESERVED'",
-                [&ai.intent_id],
-            )
-            .unwrap(),
-            1
-        );
-        tx.commit().unwrap();
-    }
+    // Independently of ordinary ROLLBACK, OS-kill the actual Rust child
+    // during a coupled original AccountStore + native RiskBook transaction.
+    // The installed Windows witness remains separate/NOT_PROVEN.
+    kill_unified_native_post_at_commit(&destination, &ai.plan_hash, &ai.intent_id, "BEFORE_COMMIT");
+    let rolled_back: (String, String, i64) = target.query_row(
+        "SELECT e.state,i.state,m.book_sequence
+         FROM risk_entries e JOIN intents i
+           ON e.installation_id=i.installation_id AND e.account_key=i.account_key
+          AND e.intent_id=i.intent_id JOIN risk_meta m
+           ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
+         WHERE e.campaign_id='campaign-X' AND e.reservation_key='same-reservation'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).unwrap();
+    assert_eq!(rolled_back, ("HELD".into(), "RESERVED".into(), 2));
+
+    kill_unified_native_post_at_commit(&destination, &ai.plan_hash, &ai.intent_id, "AFTER_COMMIT");
     drop(target);
     let mut recovered = Connection::open(&destination).unwrap();
     let state: (String, String, i64) = recovered
@@ -12377,4 +12362,85 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         )
         .unwrap();
     assert_eq!(count, 1, "lost ACK must never create a second POST grant");
+}
+
+#[test]
+fn risk_book_contract_child_unified_native_post_os_kill_barrier() {
+    use rusqlite::{Connection, TransactionBehavior};
+    let Ok(path) = std::env::var("OKX_510_POST_CHILD_SQLITE") else {
+        return;
+    };
+    let plan = std::env::var("OKX_510_POST_CHILD_PLAN").unwrap();
+    let intent = std::env::var("OKX_510_POST_CHILD_INTENT").unwrap();
+    let phase = std::env::var("OKX_510_POST_CHILD_PHASE").unwrap();
+    let mut db = Connection::open(path).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    assert_eq!(
+        crate::risk::test_stage_scoped_begin_post(
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &plan,
+            &["acct-A", "acct-B"],
+            2,
+        ).unwrap(), 3
+    );
+    assert_eq!(tx.execute(
+        "UPDATE intents SET state='POSTING'
+         WHERE installation_id='installation' AND account_key='acct-A'
+           AND intent_id=?1 AND state='RESERVED'",
+        [&intent],
+    ).unwrap(), 1);
+    match phase.as_str() {
+        "BEFORE_COMMIT" => std::mem::forget(tx),
+        "AFTER_COMMIT" => tx.commit().unwrap(),
+        _ => panic!("unknown import phase"),
+    }
+    use std::io::Write;
+    println!("OKX_510_UNIFIED_POST_REACHED_{phase}");
+    std::io::stdout().flush().unwrap();
+    std::thread::park();
+    unreachable!("parent must OS-kill child at real finance commit");
+}
+
+fn kill_unified_native_post_at_commit(
+    destination: &std::path::Path,
+    plan: &str,
+    intent: &str,
+    phase: &str,
+) {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+        sync::mpsc,
+        time::Duration,
+    };
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["risk_book_contract_child_unified_native_post_os_kill_barrier", "--nocapture"])
+        .env("OKX_510_POST_CHILD_SQLITE", destination)
+        .env("OKX_510_POST_CHILD_PLAN", plan)
+        .env("OKX_510_POST_CHILD_INTENT", intent)
+        .env("OKX_510_POST_CHILD_PHASE", phase)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let marker = format!("OKX_510_UNIFIED_POST_REACHED_{phase}");
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if line.unwrap_or_default().contains(&marker) {
+                let _ = sender.send(());
+                return;
+            }
+        }
+    });
+    let observed = receiver.recv_timeout(Duration::from_secs(15));
+    child.kill().unwrap();
+    assert!(!child.wait().unwrap().success(), "actual native Rust subprocess must OS-exit");
+    reader.join().unwrap();
+    assert!(observed.is_ok(), "original account + RiskBook child never reached {phase}");
 }
