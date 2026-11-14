@@ -1,5 +1,9 @@
 # #510 r4 — source-derived SQL scope inventory and first physical single-file slice
 
+### Scope/authority correction after the first joint proof
+
+**Code SHA `47b53099a442b10002a2e6a7eef76769ef0e7771`**, [CI #43632385416](https://github.com/iamaman11/okx/actions/runs/43632385416) **SUCCESS** (69 execution, 6 kernel, 1 original source; 239 full execution PASS, 3 ignored). The private joint Reserve now additionally verifies original account intent `risk_increase=1`, original `account_policy.campaign_id` exactly matches the requested RiskBook campaign, source revision matches the receipt, and account is not paused, **inside the same transaction before staging RiskBook**. Negative tests fail closed on foreign campaign/stale revision/paused/neutral intent; old v2/v5 public semantics and live owners remain unchanged. Not a production authority or a Windows proof.
+
 ## Original Reserve now has one scoped AccountStore + RiskBook SQL transaction — Draft PASS (14 Nov 2026)
 
 **Code SHA `2395bb7aa8600234890d9e3354b83ac303edb004`**, [CI #43631998537](https://github.com/iamaman11/okx/actions/runs/43631998537) **SUCCESS**: 69 original execution RiskBook direct tests, 6 kernel, 1 original AccountStore producer, full execution library **239 passed / 0 failed / 3 ignored**, guard and rustfmt PASS. This is **Draft Linux Rust only**, not production RB07/RB08, Windows or T09/T10 26/26.
