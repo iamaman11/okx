@@ -12064,12 +12064,14 @@ fn risk_book_contract_scoped_original_risk_aggregate_checker_is_campaign_isolate
     let x = path();
     let y = path();
     unified_original_campaign_fixture(
-        &x, "campaign-X",
+        &x,
+        "campaign-X",
         ("acct-A", &ai.intent_id, &ai.plan_hash),
         ("acct-B", &bi.intent_id, &bi.plan_hash),
     );
     unified_original_campaign_fixture(
-        &y, "campaign-Y",
+        &y,
+        "campaign-Y",
         ("acct-B", &bi.intent_id, &bi.plan_hash),
         ("acct-A", &ai.intent_id, &ai.plan_hash),
     );
@@ -12090,30 +12092,38 @@ fn risk_book_contract_scoped_original_risk_aggregate_checker_is_campaign_isolate
         campaigns: &["campaign-X", "campaign-Y"],
     };
     super::sql::unified_financial::importer::import_stopped_finance_into_empty(
-        &mut target, &expected, &[&sa, &sb], &[&sx, &sy],
-    ).unwrap();
+        &mut target,
+        &expected,
+        &[&sa, &sb],
+        &[&sx, &sy],
+    )
+    .unwrap();
     {
         let tx = target.transaction().unwrap();
         crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
         crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-Y").unwrap();
-        assert!(crate::risk::verify_unified_import_campaign(
-            &tx, "foreign-installation", "campaign-X",
-        ).is_err(), "wrong installation can never inspect a campaign");
+        assert!(
+            crate::risk::verify_unified_import_campaign(&tx, "foreign-installation", "campaign-X",)
+                .is_err(),
+            "wrong installation can never inspect a campaign"
+        );
         tx.rollback().unwrap();
     }
     // Out-of-band damage in only campaign Y must not contaminate X's
     // legitimate obligations or silently pass Y's primary-vs-cache proof.
-    target.execute(
-        "UPDATE risk_account_occupied SET reserved_usdt='3'
+    target
+        .execute(
+            "UPDATE risk_account_occupied SET reserved_usdt='3'
          WHERE installation_id='installation' AND campaign_id='campaign-Y'
            AND account_key='acct-B'",
-        [],
-    ).unwrap();
+            [],
+        )
+        .unwrap();
     let tx = target.transaction().unwrap();
     crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
-    assert!(crate::risk::verify_unified_import_campaign(
-        &tx, "installation", "campaign-Y",
-    ).is_err());
+    assert!(
+        crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-Y",).is_err()
+    );
     tx.rollback().unwrap();
     assert!(super::sql::unified_financial::importer::inspect_stopped_finance_import(
         &target, &expected,
