@@ -650,6 +650,14 @@ fn import_sources(
             )?)
             .ok_or(StoreError::Invalid("UNIFIED_LEGACY_ROW_COUNT_OVERFLOW"))?;
     }
+    // Verify ORIGINAL native RiskBook money invariants for each scoped
+    // campaign on the *same* target transaction after the account rows,
+    // foreign-key references and campaign rows are together. No second
+    // connection, no duplicated arithmetic, no second budget writer.
+    for campaign in &campaign_identities {
+        crate::risk::verify_unified_import_campaign(&tx, installation, campaign)
+            .map_err(StoreError::Invalid)?;
+    }
     // Original event logs must precede trigger installation to avoid replaying
     // immutable operation_receipts as newly emitted source events.
     tx.execute_batch(&format!("{MARKER}{trigger_and_version}"))?;
@@ -816,6 +824,12 @@ pub(in crate::account_store) fn inspect_stopped_finance_import(
         || hash_inventory(expected.installation, &accounts, &campaigns) != inventory_sha256
     {
         return Err(StoreError::Invalid("UNIFIED_IMPORT_COMMIT_MARKER_CONFLICT"));
+    }
+    // Original RiskBook integrity remains mandatory after cold reopen,
+    // not merely at source import time.
+    for campaign in &campaigns {
+        crate::risk::verify_unified_import_campaign(&tx, expected.installation, campaign)
+            .map_err(StoreError::Invalid)?;
     }
     let (actual_account_rows, actual_campaign_rows) =
         target_row_totals(&tx, expected.installation, &accounts, &campaigns)?;
