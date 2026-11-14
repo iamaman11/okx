@@ -2374,10 +2374,28 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             )
             .unwrap();
             tx.execute(
+                "INSERT INTO strategy_definition_versions(
+                installation_id,account_key,definition_id,version,parameters,
+                parameters_digest,created_at)
+                VALUES('test-installation',?1,'definition','1','{}',?2,1)",
+                params![&key, uid('f')],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO strategy_instances(
+                installation_id,account_key,instance_id,definition_id,
+                definition_version,parameters,enabled,policy_revision,budget,
+                last_decision_key,parameters_digest)
+                VALUES('test-installation',?1,'strategy_test','definition',
+                '1','{}',1,1,'10',NULL,?2)",
+                params![&key, uid('f')],
+            )
+            .unwrap();
+            tx.execute(
                 "INSERT INTO decisions(
                 installation_id,account_key,decision_id,instance_id,
                 decision_at,input_digest,policy_revision,code_version)
-                VALUES('test-installation',?1,?2,NULL,1,?3,1,'rust')",
+                VALUES('test-installation',?1,?2,'strategy_test',1,?3,1,'rust')",
                 params![&key, format!("decision-{letter}"), uid('b')],
             )
             .unwrap();
@@ -2397,6 +2415,18 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
                     format!("client-{letter}"),
                     uid('e')
                 ],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO intent_plans(
+                installation_id,account_key,intent_id,operation,side,quantity,
+                limit_price,stop_price,strategy_instance,planned_loss_usd,
+                source_generation,position_side,private_source_generation,
+                contract_value,inverse,settlement_currency,strategy_definition_id,
+                strategy_definition_version,strategy_parameters_digest)
+                VALUES('test-installation',?1,?2,'open','buy','1','100','95',
+                'strategy_test','6',1,'long',1,'1',0,'USDT','definition','1',?3)",
+                params![&key, &intent, uid('f')],
             )
             .unwrap();
         }
@@ -2454,16 +2484,33 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         tx.commit().unwrap();
     }
     let original = request('a', "intentA0001", "6");
+    let second = request('b', "intentB0001", "6");
+    let account_receipt = |input: &ReserveInput| crate::CentralReceipt {
+        reservation_key: input.reservation_key(),
+        account_key: input.account_key(),
+        installation_id: "test-installation".into(),
+        instance_id: Some("strategy_test".into()),
+        intent_id: input.intent_id.clone(),
+        plan_hash: input.plan_sha256.clone(),
+        policy_revision: 1,
+        receipt_hash: uid('b'),
+        requested_loss_usd: rust_decimal::Decimal::from(6),
+        conversion_digest: input.conversion_digest.clone(),
+    };
+    let receipt_a = account_receipt(&original);
+    let receipt_b = account_receipt(&second);
     // The first uncommitted reserve is a real v6 SQL mutation: rollback must
     // eliminate both the reservation and all associated budget/cache writes.
     {
         let tx = db.transaction().unwrap();
         assert!(matches!(
-            RiskBookStore::reserve_sql_transaction(
+            RiskBookStore::reserve_unified_account_transaction(
                 &tx,
-                Some(("test-installation", &campaign)),
+                "test-installation",
+                &campaign,
                 &original,
-                &census()
+                &census(),
+                &receipt_a
             )
             .unwrap(),
             ReserveDecision::Held(_)
@@ -2475,14 +2522,21 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             .unwrap(),
         0
     );
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_receipts", [], |r| r.get(0))
+            .unwrap(),
+        0
+    );
     {
         let tx = db.transaction().unwrap();
         assert!(matches!(
-            RiskBookStore::reserve_sql_transaction(
+            RiskBookStore::reserve_unified_account_transaction(
                 &tx,
-                Some(("test-installation", &campaign)),
+                "test-installation",
+                &campaign,
                 &original,
-                &census()
+                &census(),
+                &receipt_a
             )
             .unwrap(),
             ReserveDecision::Held(HeldReceipt {
@@ -2508,6 +2562,18 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         .unwrap()
     };
     assert_eq!(read(&db), ("6".into(), "0".into(), 1));
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_receipts", [], |r| r.get(0))
+            .unwrap(),
+        1
+    );
+    let a_state: String = db.query_row(
+        "SELECT state FROM intents WHERE installation_id='test-installation'
+         AND account_key=?1 AND intent_id='intentA0001'",
+        [account('a')],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(a_state, "RESERVED");
     // B is denied by the SAME cohort budget; its newer observed loss must
     // still be durable even though no second reservation can be created.
     let mut fresh = census();
@@ -2515,11 +2581,13 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
     {
         let tx = db.transaction().unwrap();
         assert!(matches!(
-            RiskBookStore::reserve_sql_transaction(
+            RiskBookStore::reserve_unified_account_transaction(
                 &tx,
-                Some(("test-installation", &campaign)),
-                &request('b', "intentB0001", "6"),
-                &fresh
+                "test-installation",
+                &campaign,
+                &second,
+                &fresh,
+                &receipt_b
             )
             .unwrap(),
             ReserveDecision::Rejected(RiskStoreError::Denied(
@@ -2529,17 +2597,26 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         tx.commit().unwrap();
     }
     assert_eq!(read(&db), ("6".into(), "1".into(), 2));
+    let b_state: String = db.query_row(
+        "SELECT state FROM intents WHERE installation_id='test-installation'
+         AND account_key=?1 AND intent_id='intentB0001'",
+        [account('b')],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(b_state, "PREPARED");
     drop(db);
     let mut db = Connection::open(&f.path).unwrap();
     db.pragma_update(None, "foreign_keys", "ON").unwrap();
     {
         let tx = db.transaction().unwrap();
         assert!(matches!(
-            RiskBookStore::reserve_sql_transaction(
+            RiskBookStore::reserve_unified_account_transaction(
                 &tx,
-                Some(("test-installation", &campaign)),
+                "test-installation",
+                &campaign,
                 &original,
-                &fresh
+                &fresh,
+                &receipt_a
             )
             .unwrap(),
             ReserveDecision::Held(HeldReceipt { replayed: true, .. })
@@ -2549,6 +2626,11 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
     assert_eq!(read(&db), ("6".into(), "1".into(), 2));
     assert_eq!(
         db.query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_entries", [], |r| r.get(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_receipts", [], |r| r.get(0))
             .unwrap(),
         1
     );
