@@ -387,14 +387,6 @@ fn amount(text: String) -> Result<RiskAmount> {
 
 // One durable source-high-water per managed account. The caller's complete
 // census must have already been checked against the entire SQL policy cohort.
-fn apply_census_loss(
-    tx: &rusqlite::Transaction<'_>,
-    meta: &mut BookMeta,
-    census: &VerifiedCensus,
-) -> Result<()> {
-    apply_census_loss_for_scope(tx, meta, census, None)
-}
-
 /// The SAME monotonic-loss algorithm for single-campaign v5 and scoped v6.
 fn apply_census_loss_for_scope(
     tx: &rusqlite::Transaction<'_>,
@@ -697,6 +689,59 @@ impl RiskBookStore {
 
     /// The source proof type is private to this module pending validated native
     /// evidence constructor and production wiring. A caller cannot mint grants.
+    /// One private v6 SQL operation for both original account reservation and
+    /// RiskBook capacity. The caller owns the ONLY COMMIT. The returned Held
+    /// value is not authorization to send to the venue; the import manifest
+    /// remains OFFLINE_NOT_AUTHORIZED and trusted production ingress is absent.
+    ///
+    /// Ordinary RiskBook Denied is a value: the caller must COMMIT its verified
+    /// monotonic source loss without saving an AccountStore reservation.
+    /// Any AccountStore/source mismatch is an error and requires ROLLBACK.
+    pub(in crate::risk::book) fn reserve_unified_account_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        installation: &str,
+        campaign: &str,
+        input: &ReserveInput,
+        census: &VerifiedCensus,
+        receipt: &crate::CentralReceipt,
+    ) -> Result<ReserveDecision> {
+        if installation.is_empty() || campaign.is_empty() {
+            return Err(RiskStoreError::Invalid("UNIFIED_RESERVE_SCOPE_INVALID"));
+        }
+        let policy_revision =
+            i64::try_from(input.policy_revision).map_err(|_| RiskStoreError::PolicyConflict)?;
+        let requested_loss = RiskAmount::parse(&receipt.requested_loss_usd.to_string())?;
+        if receipt.installation_id != installation
+            || receipt.account_key != input.account_key()
+            || receipt.reservation_key != input.reservation_key()
+            || receipt.intent_id != input.intent_id
+            || receipt.plan_hash != input.plan_sha256
+            || receipt.policy_revision != policy_revision
+            || receipt.conversion_digest != input.conversion_digest
+            || requested_loss != input.proposal.loss_usd
+        {
+            return Err(RiskStoreError::Invalid("UNIFIED_ACCOUNT_RISK_RECEIPT_CONFLICT"));
+        }
+        let decision =
+            Self::reserve_sql_transaction(tx, Some((installation, campaign)), input, census)?;
+        if let ReserveDecision::Held(_) = &decision {
+            // The SAME original AccountStore reserve state/plan/receipt rules.
+            // A failure rejects this uncommitted joint transition (no ACK).
+            crate::account_store::AccountStore::reserve_sql_transaction(
+                tx,
+                Some((installation, &receipt.account_key)),
+                receipt,
+                input.now_ms,
+            )
+            .map_err(|error| match error {
+                crate::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),
+                crate::StoreError::Sql(error) => RiskStoreError::Sql(error),
+                crate::StoreError::Io(error) => RiskStoreError::Io(error),
+            })?;
+        }
+        Ok(decision)
+    }
+
     pub(super) fn reserve(
         &mut self,
         input: &ReserveInput,
