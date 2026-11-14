@@ -11337,3 +11337,247 @@ fn risk_book_contract_unified_offline_import_rejects_active_native_writer() {
     drop(target);
     let _ = std::fs::remove_file(destination);
 }
+
+
+/// Genuine v5 RiskBook SQL (the same schema the old native owner opens),
+/// with a live HELD budget obligation and a separate immutable no-reserve
+/// fence. Accounts/intents/plans come from original AccountStore producers.
+fn unified_original_campaign_fixture(
+    path: &std::path::Path,
+    campaign: &str,
+    primary: (&str, &str, &str),
+    other: (&str, &str, &str),
+) {
+    use rusqlite::{Connection, params};
+    let source = Connection::open(path).unwrap();
+    source.pragma_update(None, "journal_mode", "WAL").unwrap();
+    source.pragma_update(None, "synchronous", "FULL").unwrap();
+    source.pragma_update(None, "foreign_keys", "ON").unwrap();
+    source
+        .execute_batch(include_str!("risk/book/schema.sql"))
+        .unwrap();
+    source.execute(
+        "INSERT INTO risk_meta VALUES
+         (1,?1,'installation',1,7,2,1,'10','1','100','0','1',
+          '100','0','0','2','0')",
+        [campaign],
+    ).unwrap();
+    for (key, reserved) in [(primary.0, "1"), (other.0, "0")] {
+        source.execute(
+            "INSERT INTO risk_account_occupied VALUES(?1,?2)",
+            params![key, reserved],
+        ).unwrap();
+        source.execute(
+            "INSERT INTO risk_policy_account VALUES(?1,'10','8','5')",
+            [key],
+        ).unwrap();
+        source.execute(
+            "INSERT INTO risk_loss_source VALUES(?1,'0',?2)",
+            params![key, "d".repeat(64)],
+        ).unwrap();
+        source.execute(
+            "INSERT INTO risk_policy_strategy VALUES(?1,'strategy_test','8')",
+            [key],
+        ).unwrap();
+        source.execute(
+            "INSERT INTO risk_strategy_occupied VALUES(?1,'strategy_test',?2)",
+            params![key, reserved],
+        ).unwrap();
+    }
+    source.execute(
+        "INSERT INTO risk_entries(
+           reservation_key,account_key,strategy_id,intent_id,plan_sha256,
+           request_digest,policy_revision,state,loss_usdt,loss_usd,
+           entry_upper_usd,reserved_usdt,reserved_loss_usd,reserved_entry_usd,
+           entry_proof_digest,source_digest,book_sequence,held_at_ms,
+           reserve_read_floor_ms,native_incarnation)
+         VALUES ('same-reservation',?1,'strategy_test',?2,?3,?4,1,'HELD',
+                 '1','1','2','1','1','2',?5,?6,1,10000,9995,?7)",
+        params![
+            primary.0, primary.1, primary.2, "a".repeat(64),
+            "b".repeat(64), "c".repeat(64), "f".repeat(32)
+        ],
+    ).unwrap();
+    source.execute(
+        "INSERT INTO risk_no_reserve(
+           reservation_key,account_key,intent_id,plan_sha256,request_hash,
+           record_digest,reason,policy_revision,book_sequence)
+         VALUES ('same-unsent',?1,?2,?3,?4,?5,'PROVEN_NOT_SENT',1,2)",
+        params![
+            other.0, other.1, other.2,
+            "a".repeat(64), "b".repeat(64)
+        ],
+    ).unwrap();
+    let check: String = source
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(check, "ok");
+    let mut fk = source.prepare("PRAGMA foreign_key_check").unwrap();
+    assert!(fk.query([]).unwrap().next().unwrap().is_none());
+}
+
+#[test]
+fn risk_book_contract_unified_offline_import_all_47_original_tables_and_obligations() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let x = path();
+    let y = path();
+    unified_original_campaign_fixture(
+        &x, "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    unified_original_campaign_fixture(
+        &y, "campaign-Y",
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sx = Connection::open_with_flags(&x, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sy = Connection::open_with_flags(&y, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let report =
+        super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+            &mut target, "installation", &[&sa, &sb], &[&sx, &sy],
+        ).unwrap();
+    assert_eq!((report.accounts, report.campaigns), (2, 2));
+    assert_eq!((report.tables_per_account, report.tables_per_campaign), (39, 8));
+    assert!(report.account_rows >= 20);
+    assert_eq!(report.campaign_rows, 2 * (1 + 2 * 5 + 1 + 1));
+    for (table, expected) in [
+        ("risk_meta", 2_i64),
+        ("risk_policy_account", 4),
+        ("risk_account_occupied", 4),
+        ("risk_loss_source", 4),
+        ("risk_policy_strategy", 4),
+        ("risk_strategy_occupied", 4),
+        ("risk_entries", 2),
+        ("risk_no_reserve", 2),
+    ] {
+        let actual: i64 = target.query_row(
+            &format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(actual, expected, "{table} exact original row count");
+    }
+    let obligations: (String, String, String, String) = target.query_row(
+        "SELECT m.global_reserved_usdt,m.loss_reserved_usd,
+                m.entry_reserved_usd,e.reserved_entry_usd
+         FROM risk_meta m JOIN risk_entries e
+         ON e.installation_id=m.installation_id
+         AND e.campaign_id=m.campaign_id
+         WHERE m.campaign_id='campaign-X'",
+        [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
+    ).unwrap();
+    assert_eq!(obligations, ("1".into(), "1".into(), "2".into(), "2".into()));
+    let shared_keys: i64 = target.query_row(
+        "SELECT COUNT(*) FROM risk_entries WHERE reservation_key='same-reservation'",
+        [], |r| r.get(0)
+    ).unwrap();
+    assert_eq!(shared_keys, 2, "same historical key must remain campaign-scoped");
+    let mut fk = target.prepare("PRAGMA foreign_key_check").unwrap();
+    assert!(fk.query([]).unwrap().next().unwrap().is_none());
+    drop(fk);
+    drop(target);
+    let reopened = Connection::open(&destination).unwrap();
+    let (accounts, debts): (i64, i64) = (
+        reopened.query_row("SELECT COUNT(*) FROM account_meta", [], |r| r.get(0)).unwrap(),
+        reopened.query_row("SELECT COUNT(*) FROM risk_entries WHERE state='HELD'", [], |r| r.get(0)).unwrap(),
+    );
+    assert_eq!((accounts, debts), (2, 2));
+}
+
+#[test]
+fn risk_book_contract_unified_offline_import_rejects_live_campaign_writer() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let campaign = path();
+    unified_original_campaign_fixture(
+        &campaign, "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sc = Connection::open_with_flags(&campaign, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    // Exactly the original RiskBookStore::open_existing OS writer lock path.
+    let lock = std::fs::OpenOptions::new()
+        .read(true).write(true).create(true).truncate(false)
+        .open(format!("{}.writer.lock", campaign.canonicalize().unwrap().display()))
+        .unwrap();
+    lock.try_lock().unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    assert!(matches!(
+        super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+            &mut target, "installation", &[&sa,&sb], &[&sc],
+        ),
+        Err(StoreError::Invalid("ACCOUNT_WRITER_ALREADY_RUNNING"))
+    ));
+    let tables: i64 = target.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+         AND name NOT LIKE 'sqlite_%'", [], |r| r.get(0)
+    ).unwrap();
+    assert_eq!(tables, 0, "must reject before creating finance schema");
+}
+
+#[test]
+fn risk_book_contract_unified_offline_import_bad_campaign_plan_rolls_back() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let campaign = path();
+    unified_original_campaign_fixture(
+        &campaign, "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let tamper = Connection::open(&campaign).unwrap();
+    tamper.execute(
+        "UPDATE risk_entries SET plan_sha256=?1", ["f".repeat(64)]
+    ).unwrap();
+    drop(tamper);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sc = Connection::open_with_flags(&campaign, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    assert!(
+        super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+            &mut target, "installation", &[&sa,&sb], &[&sc],
+        ).is_err(),
+        "campaign must not import an intent with a forged plan digest"
+    );
+    let tables: i64 = target.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+         AND name NOT LIKE 'sqlite_%'", [], |r| r.get(0)
+    ).unwrap();
+    assert_eq!(tables, 0, "account and campaign import must roll back together");
+}
