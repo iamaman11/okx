@@ -11544,6 +11544,18 @@ fn risk_book_contract_unified_offline_import_all_47_original_tables_and_obligati
             .unwrap(),
     );
     assert_eq!((accounts, debts), (2, 2));
+    let expected = super::sql::unified_financial::importer::ExpectedFinanceInventory {
+        installation: "installation",
+        accounts: &["acct-B", "acct-A"],
+        campaigns: &["campaign-Y", "campaign-X"],
+    };
+    let recovered =
+        super::sql::unified_financial::importer::inspect_stopped_finance_import(
+            &reopened, &expected,
+        ).unwrap();
+    assert_eq!(recovered, report, "ACK lost after COMMIT is a read-only recovery");
+    assert_eq!(recovered.inventory_sha256.len(), 64);
+    assert_eq!(recovered.content_sha256.len(), 64);
 }
 
 #[test]
@@ -11724,4 +11736,133 @@ fn risk_book_contract_unified_offline_import_rejects_corrupt_legacy_risk_aggrega
         tables, 0,
         "corrupt source must not initialize the unified database"
     );
+}
+
+#[test]
+fn risk_book_contract_unified_manifest_refuses_missing_account_or_campaign_before_schema() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let x = path();
+    let y = path();
+    unified_original_campaign_fixture(
+        &x,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    unified_original_campaign_fixture(
+        &y,
+        "campaign-Y",
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sx = Connection::open_with_flags(&x, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sy = Connection::open_with_flags(&y, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let importer = super::sql::unified_financial::importer::import_stopped_finance_into_empty;
+    for (accounts, campaigns) in [
+        (vec!["acct-A"], vec!["campaign-X", "campaign-Y"]),
+        (vec!["acct-A", "acct-B"], vec!["campaign-X"]),
+        (vec!["acct-A", "acct-A"], vec!["campaign-X", "campaign-Y"]),
+    ] {
+        let destination = path();
+        let mut target = Connection::open(&destination).unwrap();
+        target.pragma_update(None, "journal_mode", "WAL").unwrap();
+        target.pragma_update(None, "synchronous", "FULL").unwrap();
+        target.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let expected = super::sql::unified_financial::importer::ExpectedFinanceInventory {
+            installation: "installation",
+            accounts: &accounts,
+            campaigns: &campaigns,
+        };
+        assert!(importer(&mut target, &expected, &[&sa, &sb], &[&sx, &sy]).is_err());
+        let count: i64 = target.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+             AND name NOT LIKE 'sqlite_%'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 0, "incomplete/duplicate inventory must not create target schema");
+    }
+}
+
+#[test]
+fn risk_book_contract_unified_manifest_detects_modified_financial_fact_after_reopen() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let campaign = path();
+    unified_original_campaign_fixture(
+        &campaign,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sc = Connection::open_with_flags(&campaign, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let expected = super::sql::unified_financial::importer::ExpectedFinanceInventory {
+        installation: "installation",
+        accounts: &["acct-A", "acct-B"],
+        campaigns: &["campaign-X"],
+    };
+    let import = super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+        &mut target, &expected, &[&sa, &sb], &[&sc],
+    ).unwrap();
+    assert_eq!(
+        super::sql::unified_financial::importer::inspect_stopped_finance_import(
+            &target, &expected,
+        ).unwrap(),
+        import
+    );
+    // A retry must not overwrite a committed source inventory or duplicate debt.
+    assert!(matches!(
+        super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+            &mut target, &expected, &[&sa, &sb], &[&sc],
+        ),
+        Err(StoreError::Invalid("UNIFIED_IMPORT_TARGET_NOT_EMPTY"))
+    ));
+    assert!(target.execute(
+        "UPDATE finance_import_manifest SET content_sha256=?1",
+        ["0".repeat(64)]
+    ).is_err(), "completed offline marker is immutable");
+    drop(target);
+    let reopened = Connection::open(&destination).unwrap();
+    assert_eq!(
+        super::sql::unified_financial::importer::inspect_stopped_finance_import(
+            &reopened, &expected,
+        ).unwrap(),
+        import
+    );
+    // SQL integrity, FKs and schema version remain valid, but financial
+    // content is no longer what the single committed import recorded.
+    reopened.execute(
+        "UPDATE risk_meta SET global_limit_usdt='11' WHERE campaign_id='campaign-X'",
+        [],
+    ).unwrap();
+    let check: String = reopened.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+    assert_eq!(check, "ok");
+    assert!(matches!(
+        super::sql::unified_financial::importer::inspect_stopped_finance_import(
+            &reopened, &expected,
+        ),
+        Err(StoreError::Invalid("UNIFIED_IMPORT_CONTENT_DIGEST_MISMATCH"))
+    ));
 }
