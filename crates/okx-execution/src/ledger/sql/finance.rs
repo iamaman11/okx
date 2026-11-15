@@ -100,47 +100,13 @@ fn link_late_swap_fee(tx: &rusqlite::Transaction<'_>, fill_id: &str) -> StoreRes
 }
 
 fn finance_rowid(db: &Connection) -> StoreResult<i64> {
-    Ok(db.query_row(
-        "SELECT COALESCE(MAX(rowid),0) FROM finance_entries",
-        [],
-        |r| r.get(0),
-    )?)
+    AccountStore::finance_rowid_sql(db, None)
 }
-
-fn provenance_watermark(db: &Connection) -> StoreResult<Option<i64>> {
-    Ok(db.query_row(
-        "SELECT watermark FROM source_cursors WHERE source='finance_provenance' AND stream_partition='account' AND cursor='' AND coverage_gaps='' AND generation=0",
-        [],
-        |r| r.get(0),
-    ).optional()?)
-}
-
 fn finance_proof_sealed(db: &Connection) -> StoreResult<bool> {
-    let latest = finance_rowid(db)?;
-    Ok(provenance_watermark(db)? == Some(latest)
-        || (latest == 0 && provenance_watermark(db)?.is_none()))
+    AccountStore::finance_proof_sealed_sql(db, None)
 }
-
-fn advance_finance_provenance(
-    tx: &rusqlite::Transaction<'_>,
-    previous_rowid: i64,
-) -> StoreResult<()> {
-    let prior = provenance_watermark(tx)?;
-    if prior != Some(previous_rowid) && !(previous_rowid == 0 && prior.is_none()) {
-        // Existing unverified history must not be silently grandfathered in.
-        return Ok(());
-    }
-    let latest = finance_rowid(tx)?;
-    if latest != previous_rowid {
-        tx.execute(
-            "INSERT INTO source_cursors(source,stream_partition,cursor,watermark,generation,coverage_gaps)
-             VALUES('finance_provenance','account','',?1,0,'')
-             ON CONFLICT(source,stream_partition)
-             DO UPDATE SET cursor='',watermark=excluded.watermark,generation=0,coverage_gaps=''",
-            [latest],
-        )?;
-    }
-    Ok(())
+fn advance_finance_provenance(tx: &rusqlite::Transaction<'_>, previous: i64) -> StoreResult<()> {
+    AccountStore::advance_finance_provenance_sql(tx, None, previous)
 }
 
 /// Start from the bounded set of unapplied fills, never from immutable history.
@@ -178,18 +144,7 @@ impl<O: FnOnce(IngestTransactionTiming)> Drop for IngestTimingGuard<O> {
 
 /// Account-owned, monotonic source cursor update shared by ingestion and NAV.
 fn upsert_source_cursor(tx: &rusqlite::Transaction<'_>, c: &SourceCursor) -> StoreResult<()> {
-    let prior: Option<(i64,i64)> = tx.query_row(
-        "SELECT generation,watermark FROM source_cursors WHERE source=?1 AND stream_partition=?2",
-        params![c.source,c.stream_partition], |r| Ok((r.get(0)?,r.get(1)?))
-    ).optional()?;
-    if prior.is_some_and(|(g, w)| c.generation < g || (c.generation == g && c.watermark < w)) {
-        return Err(StoreError::Invalid("SOURCE_CURSOR_REGRESSION"));
-    }
-    tx.execute(
-        "INSERT INTO source_cursors VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(source,stream_partition) DO UPDATE SET cursor=excluded.cursor,watermark=excluded.watermark,generation=excluded.generation,coverage_gaps=excluded.coverage_gaps",
-        params![c.source,c.stream_partition,c.cursor,c.watermark,c.generation,c.coverage_gaps]
-    )?;
-    Ok(())
+    AccountStore::upsert_source_cursor_sql(tx, None, c)
 }
 impl AccountStore {
     /// Seal an externally classified USD-denominated campaign monetary

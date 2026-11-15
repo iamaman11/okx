@@ -394,6 +394,88 @@ pub(super) fn assert_contract(target: &mut Connection, a_key: String, b_key: Str
         Decimal::ZERO
     );
     assert_eq!(tx.query_row::<String,_,_>("SELECT loss_usd FROM daily_losses WHERE installation_id='installation' AND account_key=?1 AND scope_id='account' AND utc_day=0",[&a_key],|r|r.get(0)).unwrap(),"3");
+    let mut cursor = SourceCursor {
+        source: "fills".into(),
+        stream_partition: "SWAP".into(),
+        cursor: "next-page".into(),
+        watermark: 30,
+        generation: 6,
+        coverage_gaps: String::new(),
+    };
+    AccountStore::upsert_source_cursor_sql(&tx, Some(("installation", &a_key)), &cursor).unwrap();
+    assert_eq!(
+        AccountStore::scoped_source_cursor_sql(&tx, "installation", &b_key, "fills", "SWAP")
+            .unwrap()
+            .unwrap()
+            .generation,
+        11
+    );
+    cursor.generation = 5;
+    assert!(matches!(
+        AccountStore::upsert_source_cursor_sql(&tx, Some(("installation", &a_key)), &cursor),
+        Err(StoreError::Invalid("SOURCE_CURSOR_REGRESSION"))
+    ));
+    cursor.generation = 6;
+    cursor.watermark = 29;
+    assert!(matches!(
+        AccountStore::upsert_source_cursor_sql(&tx, Some(("installation", &a_key)), &cursor),
+        Err(StoreError::Invalid("SOURCE_CURSOR_REGRESSION"))
+    ));
+    let scope_a = Some(("installation", a_key.as_str()));
+    let scope_b = Some(("installation", b_key.as_str()));
+    let before = AccountStore::finance_rowid_sql(&tx, scope_a).unwrap();
+    let original_mark = AccountStore::provenance_watermark_sql(&tx, scope_a).unwrap();
+    if original_mark != Some(before) {
+        AccountStore::advance_finance_provenance_sql(&tx, scope_a, before).unwrap();
+        assert!(!AccountStore::finance_proof_sealed_sql(&tx, scope_a).unwrap());
+        assert_eq!(
+            AccountStore::provenance_watermark_sql(&tx, scope_a).unwrap(),
+            original_mark
+        );
+    }
+    // Explicit TEST seed of a verified starting frontier, not a migration audit.
+    let seal = SourceCursor {
+        source: "finance_provenance".into(),
+        stream_partition: "account".into(),
+        cursor: String::new(),
+        watermark: before,
+        generation: 0,
+        coverage_gaps: String::new(),
+    };
+    AccountStore::upsert_source_cursor_sql(&tx, scope_a, &seal).unwrap();
+    let b_mark = AccountStore::provenance_watermark_sql(&tx, scope_b).unwrap();
+    assert!(AccountStore::finance_proof_sealed_sql(&tx, scope_a).unwrap());
+    tx.execute_batch("SAVEPOINT complete_page_probe").unwrap();
+    let mut next = charge.clone();
+    next.entry_id = "next-page-charge".into();
+    next.economic_event_key = "next-page-event".into();
+    AccountStore::record_finance_entries_sql(&tx, scope_a, &[next]).unwrap();
+    assert!(!AccountStore::finance_proof_sealed_sql(&tx, scope_a).unwrap());
+    AccountStore::advance_finance_provenance_sql(&tx, scope_a, before).unwrap();
+    assert!(AccountStore::finance_proof_sealed_sql(&tx, scope_a).unwrap());
+    assert_eq!(
+        AccountStore::provenance_watermark_sql(&tx, scope_b).unwrap(),
+        b_mark
+    );
+    cursor.watermark = 40;
+    AccountStore::upsert_source_cursor_sql(&tx, scope_a, &cursor).unwrap();
+    tx.execute_batch("ROLLBACK TO complete_page_probe; RELEASE complete_page_probe")
+        .unwrap();
+    assert_eq!(
+        AccountStore::finance_rowid_sql(&tx, scope_a).unwrap(),
+        before
+    );
+    assert_eq!(
+        AccountStore::provenance_watermark_sql(&tx, scope_a).unwrap(),
+        Some(before)
+    );
+    assert_eq!(
+        AccountStore::scoped_source_cursor_sql(&tx, "installation", &a_key, "fills", "SWAP")
+            .unwrap()
+            .unwrap()
+            .watermark,
+        30
+    );
     // The real stopped import cannot be activated by a source-storage witness.
     tx.rollback().unwrap();
 }

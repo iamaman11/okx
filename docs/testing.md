@@ -1,3 +1,32 @@
+## #510 - scoped cursor and provenance transaction operations
+
+Original cursor/provenance callers now delegate to shared AccountStore SQL
+operations with optional installation/account scope. Scoped monotonic cursor
+updates use original generation/watermark rejection. Provenance reads and
+advancement are account-scoped and preserve the original rule: a previously
+unsealed non-empty history is not silently sealed by appending a new event.
+No public cursor-only mutation or activation bypass is exposed.
+
+Full imported-schema witness verifies A/B frontier isolation, generation and
+watermark regression rejection, explicit TEST verified frontier then event
+append/seal, unchanged B provenance, and rollback restoring event/frontier/
+source cursor together. This is a composed transaction witness, not a complete
+production unified-page handler. The positive starting seal is TEST SEEDED;
+it is not an import audit or authenticated source certificate.
+
+OPEN MIGRATION BLOCKER: original provenance/review receipts contain physical
+SQLite rowid references. Full multi-account import reassigns rowids. Before
+activation, the importer/verification must explicitly preserve or revalidate
+the meaning of these references; equal integers cannot prove preserved
+financial coverage. No activation may be authorized from the copied mark.
+This pass does not claim to resolve that mapping.
+
+Local Windows full execution library: 258 PASS, 0 FAIL, 2 ignored (6.25s after
+build). Architecture/negative self-tests and formatting PASS. Full native
+page/capture, cutover, nine actions and RB01-RB16/26x remain unaccepted.
+
+---
+
 ## #510 - shared canonical financial event and totals transaction body
 
 Original page ingestion now calls record_finance_entries_sql in the same
