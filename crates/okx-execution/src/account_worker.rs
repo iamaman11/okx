@@ -773,20 +773,29 @@ pub(crate) fn original_bound_unsent_source_sql(
     {
         return Err(StoreError::Invalid("UNIFIED_UNSENT_WIRE_SCOPE_INVALID"));
     }
-    let assigned: Option<String> = tx.query_row(
-        "SELECT campaign_id FROM account_policy
+    let assigned: Option<String> = tx
+        .query_row(
+            "SELECT campaign_id FROM account_policy
          WHERE installation_id=?1 AND account_key=?2 AND singleton=1",
-        rusqlite::params![installation, &request.account_key],
-        |row| row.get(0),
-    ).optional()?;
+            rusqlite::params![installation, &request.account_key],
+            |row| row.get(0),
+        )
+        .optional()?;
     if assigned.as_deref() != Some(request.campaign.as_str()) {
-        return Err(StoreError::Invalid("UNIFIED_UNSENT_ACCOUNT_CAMPAIGN_MISMATCH"));
+        return Err(StoreError::Invalid(
+            "UNIFIED_UNSENT_ACCOUNT_CAMPAIGN_MISMATCH",
+        ));
     }
     let original = AccountStore::unsent_release_receipt_sql(
-        tx, Some(installation), &request.account_key, &request.intent_id,
-    )?.ok_or(StoreError::Invalid("UNIFIED_UNSENT_ORIGINAL_PROOF_MISSING"))?;
+        tx,
+        Some(installation),
+        &request.account_key,
+        &request.intent_id,
+    )?
+    .ok_or(StoreError::Invalid("UNIFIED_UNSENT_ORIGINAL_PROOF_MISSING"))?;
     let digest = format!(
-        "{:x}", sha2::Sha256::digest(
+        "{:x}",
+        sha2::Sha256::digest(
             serde_json::to_vec(&original)
                 .map_err(|_| StoreError::Invalid("UNIFIED_UNSENT_ORIGINAL_DIGEST_INVALID"))?
         )
@@ -814,28 +823,39 @@ fn original_bound_unsent_release_sql(
         "SELECT generation,policy_revision FROM risk_meta
          WHERE installation_id=?1 AND campaign_id=?2 AND singleton=1",
         rusqlite::params![installation, &request.campaign],
-        |row| Ok((row.get(0)?,row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let generation = u64::try_from(generation)
         .map_err(|_| StoreError::Invalid("UNIFIED_UNSENT_GENERATION_INVALID"))?;
     let policy_revision = u64::try_from(revision)
         .map_err(|_| StoreError::Invalid("UNIFIED_UNSENT_POLICY_REVISION_INVALID"))?;
     if generation == 0 || policy_revision == 0 {
-        return Err(StoreError::Invalid("UNIFIED_UNSENT_AUTHORITY_REVISION_INVALID"));
+        return Err(StoreError::Invalid(
+            "UNIFIED_UNSENT_AUTHORITY_REVISION_INVALID",
+        ));
     }
     // The original v6 domain re-reads the very same scoped AccountStore
     // receipt and commits a RiskBook release/tombstone under this tx.
     let outcome = crate::risk::release_unsent_unified_native(
-        tx, installation, &request.campaign, &request.account_key,
-        &request.intent_id, request.expected_sequence, generation,
-    ).map_err(StoreError::Invalid)?;
+        tx,
+        installation,
+        &request.campaign,
+        &request.account_key,
+        &request.intent_id,
+        request.expected_sequence,
+        generation,
+    )
+    .map_err(StoreError::Invalid)?;
     match outcome {
         crate::risk::UnifiedRiskDecision::UnsentReleased {
-            reservation_key, book_sequence, ..
-        } if reservation_key == request.reservation_key =>
-            Ok(UnifiedFinanceBoundUnsentReceipt {
-                reservation_key, book_sequence, policy_revision,
-            }),
+            reservation_key,
+            book_sequence,
+            ..
+        } if reservation_key == request.reservation_key => Ok(UnifiedFinanceBoundUnsentReceipt {
+            reservation_key,
+            book_sequence,
+            policy_revision,
+        }),
         _ => Err(StoreError::Invalid("UNIFIED_UNSENT_RECEIPT_UNEXPECTED")),
     }
 }
