@@ -1418,9 +1418,10 @@ mod unified_finance_queue_contract_tests {
         let (sender, receiver) = sync_channel::<FinanceJob>(1);
         let owner = offline_owner(sender);
         let error = owner
-            .submit_before(Some(Instant::now() - Duration::from_millis(1)), |_db| -> StoreResult<()> {
-                panic!("expired financial command must not execute")
-            })
+            .submit_before(
+                Some(Instant::now() - Duration::from_millis(1)),
+                |_db| -> StoreResult<()> { panic!("expired financial command must not execute") },
+            )
             .await
             .unwrap_err();
         assert!(matches!(
