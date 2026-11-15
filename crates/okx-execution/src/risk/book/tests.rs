@@ -3608,7 +3608,7 @@ fn risk_book_contract_unified_original_opening_requires_exact_two_account_sql_so
     use crate::account_worker::{
         UnifiedFinanceWrite, UnifiedFinanceWriteReceipt, apply_original_unified_finance_transaction,
     };
-    use okx_protocol::risk_authority::{CampaignOpeningAccount, CampaignOpeningSource};
+    use super::store::{NativeOpeningAccount, NativeOpeningSource};
     use rusqlite::{Connection, params};
     use sha2::{Digest, Sha256};
 
@@ -3711,14 +3711,14 @@ fn risk_book_contract_unified_original_opening_requires_exact_two_account_sql_so
             params![&key,&campaign,uid('f')],
         ).unwrap();
     }
-    let mut source = CampaignOpeningSource {
+    let mut source = NativeOpeningSource {
         campaign_id: campaign.clone(),
         limit_usd: "10".into(),
         consumed_usd: "0".into(),
         source_digest: String::new(),
         as_of_ms: 200,
         campaign_started_at_ms: 100,
-        accounts: ['a','b'].into_iter().map(|letter| CampaignOpeningAccount {
+        accounts: ['a','b'].into_iter().map(|letter| NativeOpeningAccount {
             account_key: account(letter), history_from_ms:100,
             history_through_ms:200, consumed_entry_usd:"0".into(),
             order_history_complete:true, fill_history_complete:true,
@@ -3726,7 +3726,7 @@ fn risk_book_contract_unified_original_opening_requires_exact_two_account_sql_so
             source_digest:uid('f'),
         }).collect(),
     };
-    let source_hash = |value:&CampaignOpeningSource| -> String {
+    let source_hash = |value:&NativeOpeningSource| -> String {
         format!("{:x}",Sha256::digest(serde_json::to_vec(&(
             "okx.campaign-entry-opening/v1",&value.campaign_id,
             &value.limit_usd,&value.consumed_usd,

@@ -7,7 +7,54 @@ use super::{
     amount, integrity, read_meta_for_scope, valid_digest,
 };
 use okx_kernel::risk::money::RiskAmount;
-use okx_protocol::risk_authority::CampaignOpeningSource;
+/// Pure typed native source passed by the authenticated agent adapter.
+/// The external protocol DTO is converted at the agent boundary; execution
+/// never depends on protocol, WS, Cloudflare or the exchange transport.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct NativeOpeningAccount {
+    pub account_key: String,
+    pub history_from_ms: u64,
+    pub history_through_ms: u64,
+    pub consumed_entry_usd: String,
+    pub order_history_complete: bool,
+    pub fill_history_complete: bool,
+    pub bill_history_complete: bool,
+    pub finance_provenance_sealed: bool,
+    pub source_digest: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeOpeningSource {
+    pub campaign_id: String,
+    pub limit_usd: String,
+    pub consumed_usd: String,
+    pub source_digest: String,
+    pub as_of_ms: u64,
+    pub campaign_started_at_ms: u64,
+    pub accounts: Vec<NativeOpeningAccount>,
+}
+impl NativeOpeningSource {
+    fn valid(&self) -> bool {
+        self.campaign_id.strip_prefix("sha256:").is_some_and(valid_digest)
+            && valid_digest(&self.source_digest)
+            && RiskAmount::parse_positive(&self.limit_usd).is_ok()
+            && RiskAmount::parse(&self.consumed_usd).is_ok()
+            && self.campaign_started_at_ms > 0
+            && self.as_of_ms > self.campaign_started_at_ms
+            && !self.accounts.is_empty() && self.accounts.len() <= 32
+            && self.accounts.windows(2)
+                .all(|pair| pair[0].account_key < pair[1].account_key)
+            && self.accounts.iter().all(|row| {
+                row.account_key.strip_prefix("okx:real:").is_some_and(valid_digest)
+                    && row.history_from_ms == self.campaign_started_at_ms
+                    && row.history_through_ms == self.as_of_ms
+                    && RiskAmount::parse(&row.consumed_entry_usd).is_ok()
+                    && row.order_history_complete && row.fill_history_complete
+                    && row.bill_history_complete && row.finance_provenance_sealed
+                    && valid_digest(&row.source_digest)
+            })
+    }
+}
+
 use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
@@ -31,7 +78,7 @@ impl RiskBookStore {
     pub(in crate::risk::book) fn install_unified_entry_opening_from_account_sql_transaction(
         tx: &Transaction<'_>,
         installation: &str,
-        source: &CampaignOpeningSource,
+        source: &NativeOpeningSource,
         census: &VerifiedCensus,
         now_ms: i64,
     ) -> Result<EntryOpeningReceipt> {

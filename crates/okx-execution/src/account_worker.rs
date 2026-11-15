@@ -587,7 +587,7 @@ pub(crate) enum UnifiedFinanceWrite {
         intent: crate::NewIntent,
     },
     InstallEntryOpening {
-        source: okx_protocol::risk_authority::CampaignOpeningSource,
+        source: crate::risk::NativeOpeningSource,
         census: crate::risk::VerifiedCensus,
         now_ms: i64,
     },

@@ -14,7 +14,7 @@ pub(crate) use store::{
 // DOMAIN calls on the caller's existing transaction, not a second owner,
 // separate campaign database or bypass around AccountStore source proofs.
 pub(crate) use store::{PostFenceInput, TerminalResolveInput};
-pub(crate) use store::{ReserveInput, VerifiedCensus};
+pub(crate) use store::{NativeOpeningAccount, NativeOpeningSource, ReserveInput, VerifiedCensus};
 
 /// The ORIGINAL AccountStore receipt type to debit; never caller-supplied
 /// monetary values. All three sources share the same RiskBook arithmetic.
@@ -97,7 +97,7 @@ fn original_finance_error(error: &store::RiskStoreError) -> &'static str {
 pub(crate) fn install_entry_opening_unified_native(
     tx: &rusqlite::Transaction<'_>,
     installation: &str,
-    source: &okx_protocol::risk_authority::CampaignOpeningSource,
+    source: &NativeOpeningSource,
     census: &VerifiedCensus,
     now_ms: i64,
 ) -> Result<UnifiedRiskDecision, &'static str> {

@@ -1568,7 +1568,6 @@ name = "okx-execution"
 version = "0.1.0"
 dependencies = [
  "okx-kernel",
- "okx-protocol",
  "rusqlite",
  "rust_decimal",
  "serde",
