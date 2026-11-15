@@ -399,3 +399,113 @@ async fn run(cli: Cli) -> AgentResult<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod native_finance_startup_tests {
+    use super::*;
+    use okx_protocol::{
+        account_catalog_proto,
+        accounts::{AccountKey, Environment, VerifiedAccountConfig},
+    };
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use sha2::Digest;
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "okx-510-engine-native-startup-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn startup(root: PathBuf, campaign: Option<String>) -> Cli {
+        Cli {
+            root,
+            key_id: "agent-key-1".into(),
+            region: "global".into(),
+            stopped_finance_campaign: campaign,
+            command: Command::Run {
+                mailbox_issue: None,
+                poll_seconds: 15,
+                cloudflare_ws_url: None,
+                cloudflare_runtime_id: "windows-primary".into(),
+                native_child_control_stdio: false,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn finance_file_without_explicit_campaign_cannot_start_legacy_run() {
+        let path = root();
+        let finance = path.join("finance").join("finance.sqlite");
+        std::fs::create_dir_all(finance.parent().unwrap()).unwrap();
+        std::fs::write(&finance, b"sealed-finance-sentinel").unwrap();
+        let result = run(startup(path.clone(), None)).await;
+        assert!(matches!(
+            result,
+            Err(AgentError::FinancialCaptureTask(ref reason))
+                if reason == "FINANCE_STOPPED_CAMPAIGN_REQUIRED"
+        ));
+        assert_eq!(std::fs::read(&finance).unwrap(), b"sealed-finance-sentinel");
+        assert!(!path.join("accounts").exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_native_mode_without_finance_file_never_falls_back_to_cloudflare() {
+        let path = root();
+        let result = run(startup(path.clone(), Some("campaign-X".into()))).await;
+        assert!(matches!(
+            result,
+            Err(AgentError::FinancialCaptureTask(ref reason))
+                if reason == "FINANCE_STOPPED_IMPORT_REQUIRED"
+        ));
+        assert!(!path.join("accounts").exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_native_run_uses_catalog_roster_and_never_opens_legacy_account_writer() {
+        let path = root();
+        account_catalog_proto::initialize(&path, "installation-test").unwrap();
+        let account = VerifiedAccountConfig {
+            account_key: AccountKey {
+                venue: "okx".into(),
+                environment: Environment::Real,
+                verified_uid: "a".repeat(64),
+            },
+            alias: "account_one".into(),
+            credential_ref: "credential_one".into(),
+            connect_operation_id: "connect_1234".into(),
+            configuration_digest: "b".repeat(64),
+        };
+        account_catalog_proto::append(&path, &account).unwrap();
+        let finance = path.join("finance").join("finance.sqlite");
+        std::fs::create_dir_all(finance.parent().unwrap()).unwrap();
+        // Invalid SQL must fail at the ORIGINAL unified import checker.
+        // No native mode may quietly fall back to a legacy account writer,
+        // Cloudflare financial request or unauthorized empty bootstrap.
+        std::fs::write(&finance, b"not-a-valid-financial-import").unwrap();
+        let result = run(startup(path.clone(), Some("campaign-X".into()))).await;
+        assert!(result.is_err());
+        assert!(!matches!(
+            result,
+            Err(AgentError::FinancialCaptureTask(ref reason))
+                if reason == "FINANCE_CUTOVER_NOT_ACCEPTED"
+        ));
+        assert_eq!(std::fs::read(&finance).unwrap(), b"not-a-valid-financial-import");
+        let legacy_account_sql = path
+            .join("accounts")
+            .join(format!(
+                "{:x}",
+                sha2::Sha256::digest(account.account_key.wire().as_bytes())
+            ))
+            .join("account.sqlite");
+        assert!(!legacy_account_sql.exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}

@@ -198,6 +198,7 @@ jobs:
           cargo test --locked -p okx-agent --lib native_finance_risk::tests -- --nocapture
           cargo test --locked -p okx-agent --lib risk_bridge::tests -- --nocapture
           cargo test --locked -p okx-agent --bin okx-agent --no-run
+          cargo test --locked -p okx-agent --bin okx-agent native_finance_startup_tests -- --nocapture
 
   architecture:
     name: architecture
