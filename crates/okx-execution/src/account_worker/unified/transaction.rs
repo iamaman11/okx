@@ -455,16 +455,31 @@ fn apply_original_unified_finance_inner(
     }
 }
 
-/// The stopped source manifest is deliberately immutable: a valid import
-/// digest is NOT evidence that the old Cloudflare financial endpoint was
-/// server-disabled and all outstanding obligations were inventoried.
-/// Production financial COMMIT stays disabled until RB09 supplies a new,
-/// separately verified local activation receipt. This code NEVER promotes
-/// OFFLINE_NOT_AUTHORIZED by itself and never calls Cloudflare on a hot path.
+/// Creation of a local database is NOT verified account/policy/source evidence.
+/// The new installation remains read-only until its account bootstrap is wired.
+/// Historical offline fixtures cannot promote themselves or act as fallback.
+/// No Cloudflare financial authority is consulted on this local boundary.
 pub(super) fn require_verified_live_finance_authority(
     tx: &rusqlite::Transaction<'_>,
     installation: &str,
 ) -> StoreResult<()> {
+    let fresh: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='finance_installation')",
+        [], |row| row.get(0),
+    )?;
+    if fresh {
+        let identity: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM finance_installation WHERE singleton=1 AND installation_id=?1)",
+            [installation], |row| row.get(0),
+        )?;
+        return Err(StoreError::Invalid(if identity {
+            // A new local DB proves no external account balance, source
+            // completeness or policy. Verified account bootstrap comes next.
+            "FINANCE_ACCOUNT_BOOTSTRAP_REQUIRED"
+        } else {
+            "FINANCE_INSTALLATION_IDENTITY_MISMATCH"
+        }));
+    }
     let state: String = tx.query_row(
         "SELECT state FROM finance_import_manifest
          WHERE singleton=1 AND installation_id=?1",

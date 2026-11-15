@@ -363,19 +363,44 @@ impl AccountRuntimeRegistry {
         Ok((registry, owner))
     }
 
-    /// One Native Engine composition. Until RB09 supplies independently
-    /// verified authority this fails BEFORE credentials, clients or writers.
+    /// One new Native Engine composition, without a legacy import/fallback.
+    /// Verified account bootstrap must pass before private clients are loaded.
     pub async fn open_native_finance(
         root: &Path,
         rate_budget: RateBudget,
         campaign: &str,
     ) -> AgentResult<(Self, UnifiedFinanceHandle)> {
-        let (mut registry, owner) = Self::open_stopped_finance(root, rate_budget, campaign).await?;
+        if campaign.is_empty() {
+            return Err(AgentError::FinancialCaptureTask(
+                "FINANCE_EXPECTED_CAMPAIGN_REQUIRED".into(),
+            ));
+        }
+        let catalog = account_catalog_proto::load(root)?;
+        let owner = UnifiedFinanceHandle::open_native(
+            root.canonicalize()?,
+            catalog.installation_id.clone(),
+        )
+        .await?;
         owner
             .verify_live_authority(Instant::now() + std::time::Duration::from_secs(2))
             .await?;
-        registry.native_stopped_finance = false;
-        registry.native_finance_owner = Some(owner.clone());
+        let registry = Self {
+            root: root.to_path_buf(),
+            installation_id: catalog.installation_id,
+            routes: RwLock::new(BTreeMap::new()),
+            configurations: RwLock::new(
+                catalog
+                    .accounts
+                    .into_iter()
+                    .map(|c| (c.account_key.wire(), c))
+                    .collect(),
+            ),
+            failures: RwLock::new(BTreeMap::new()),
+            catalog_write: tokio::sync::Mutex::new(()),
+            rate_budget,
+            native_stopped_finance: false,
+            native_finance_owner: Some(owner.clone()),
+        };
         for config in registry.list().await {
             let credentials = load_native_account_credentials(&config.credential_ref)?;
             let resources = registry

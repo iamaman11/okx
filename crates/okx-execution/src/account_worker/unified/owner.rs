@@ -7,7 +7,6 @@ use super::{
     UnifiedFinanceWrite, UnifiedFinanceWriteReceipt,
 };
 use super::{apply_original_unified_finance_transaction, require_verified_live_finance_authority};
-use crate::finance_owner_gate::{self, AuthorityModeError, AuthorityModeLease};
 use crate::{AccountStore, StoreError, StoreResult};
 use std::{
     path::PathBuf,
@@ -33,22 +32,53 @@ impl UnifiedFinanceHandle {
         accounts: Vec<String>,
         campaigns: Vec<String>,
     ) -> StoreResult<Self> {
-        if !runtime_root.is_absolute()
-            || installation.is_empty()
-            || accounts.is_empty()
-            || campaigns.is_empty()
-        {
+        if accounts.is_empty() || campaigns.is_empty() {
             return Err(StoreError::Invalid("UNIFIED_FINANCE_OWNER_SCOPE_INVALID"));
         }
-        // This exact path is the only future installation finance authority.
-        // No auto-create or re-initialization: all original source tables and
-        // immutable manifest must already exist and verify in the same file.
-        let path = runtime_root.join("finance").join("finance.sqlite");
-        if !path.is_file() {
-            return Err(StoreError::Invalid("UNIFIED_FINANCE_IMPORT_NOT_FOUND"));
+        Self::open_owned(
+            runtime_root,
+            installation,
+            super::owner_startup::Startup::StoppedImport {
+                accounts,
+                campaigns,
+            },
+        )
+        .await
+    }
+
+    /// Explicit creation of a NEW installation. Unknown existing state is never
+    /// migrated or reset. Account verification is a separate typed operation.
+    pub async fn initialize_new(
+        runtime_root: PathBuf,
+        request: crate::NewFinanceInstallation,
+    ) -> StoreResult<Self> {
+        request.validate()?;
+        Self::open_owned(
+            runtime_root,
+            request.installation_id.clone(),
+            super::owner_startup::Startup::Initialize(request),
+        )
+        .await
+    }
+
+    /// Reopen current Native facts, not an immutable initial content snapshot.
+    pub async fn open_native(runtime_root: PathBuf, installation: String) -> StoreResult<Self> {
+        Self::open_owned(
+            runtime_root,
+            installation,
+            super::owner_startup::Startup::Native,
+        )
+        .await
+    }
+
+    async fn open_owned(
+        runtime_root: PathBuf,
+        installation: String,
+        startup_mode: super::owner_startup::Startup,
+    ) -> StoreResult<Self> {
+        if !runtime_root.is_absolute() || installation.is_empty() {
+            return Err(StoreError::Invalid("UNIFIED_FINANCE_OWNER_SCOPE_INVALID"));
         }
-        let path = path.canonicalize()?;
-        let runtime_root = runtime_root.canonicalize()?;
         let (sender, receiver) = sync_channel::<FinanceJob>(128);
         let (ready_tx, ready_rx) = oneshot::channel();
         let (terminated_tx, terminated_rx) = watch::channel(false);
@@ -56,52 +86,8 @@ impl UnifiedFinanceHandle {
         std::thread::Builder::new()
             .name("okx-finance-sql".into())
             .spawn(move || {
-                let startup = (|| -> StoreResult<(rusqlite::Connection, std::fs::File, AuthorityModeLease)> {
-                    use std::fs::OpenOptions;
-                    // Exclusive across ALL legacy accounts/campaigns, not just
-                    // other openers of this particular finance.sqlite file.
-                    let mode_lease = finance_owner_gate::unified_mode_for(&runtime_root)
-                        .map_err(|error| match error {
-                            AuthorityModeError::Io(error) => StoreError::Io(error),
-                            AuthorityModeError::Busy => {
-                                StoreError::Invalid("UNIFIED_FINANCE_WRITER_BUSY")
-                            }
-                            AuthorityModeError::FinancePresent => {
-                                StoreError::Invalid("UNIFIED_FINANCE_MODE_INVALID")
-                            }
-                        })?;
-                    let lease = OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(false)
-                        .open(format!("{}.writer.lock", path.display()))?;
-                    match lease.try_lock() {
-                        Ok(()) => {}
-                        Err(std::fs::TryLockError::WouldBlock) => {
-                            return Err(StoreError::Invalid("UNIFIED_FINANCE_WRITER_BUSY"));
-                        }
-                        Err(std::fs::TryLockError::Error(error)) => {
-                            return Err(StoreError::Io(error));
-                        }
-                    }
-                    let db = rusqlite::Connection::open_with_flags(
-                        &path,
-                        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-                    )?;
-                    db.busy_timeout(Duration::from_millis(250))?;
-                    db.pragma_update(None, "foreign_keys", "ON")?;
-                    // Must not silently alter WAL mode or repair an unknown
-                    // source. The original finance importer proves schema,
-                    // 47 tables, identity, digest, integrity and all FKs.
-                    AccountStore::inspect_offline_finance_import(
-                        &db,
-                        &startup_installation,
-                        &accounts.iter().map(String::as_str).collect::<Vec<_>>(),
-                        &campaigns.iter().map(String::as_str).collect::<Vec<_>>(),
-                    )?;
-                    Ok((db, lease, mode_lease))
-                })();
+                let startup =
+                    super::owner_startup::open(&runtime_root, &startup_installation, startup_mode);
                 let (mut db, lease, mode_lease) = match startup {
                     Ok(resources) => resources,
                     Err(error) => {
@@ -136,6 +122,17 @@ impl UnifiedFinanceHandle {
 
     pub fn termination_signal(&self) -> watch::Receiver<bool> {
         self.owner.terminated.clone()
+    }
+    /// Read-only current installation receipt, never a budget or trade grant.
+    pub async fn installation_receipt(
+        &self,
+        deadline: Instant,
+    ) -> StoreResult<crate::FinanceInstallationReceipt> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            AccountStore::inspect_finance_installation(db, &installation)
+        })
+        .await
     }
     /// Startup checks authority before loading private clients or publishing
     /// trading routes. A staged import never becomes live by being opened.

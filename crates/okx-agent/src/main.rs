@@ -43,8 +43,8 @@ struct Cli {
     /// finance.sqlite. Enables read-only native Run/Once, never live trading.
     #[arg(long, global = true)]
     stopped_finance_campaign: Option<String>,
-    /// Native finance startup still requires independently verified RB09
-    /// authority; selecting this route never activates an imported database.
+    /// New Native finance requires explicit initialization and verified
+    /// account sources; selecting this route never creates financial state.
     #[arg(long, global = true, conflicts_with = "stopped_finance_campaign")]
     native_finance_campaign: Option<String>,
     #[command(subcommand)]
@@ -286,7 +286,11 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     .as_deref()
                     .or(native_finance_campaign.as_deref())
                     .ok_or_else(|| {
-                        AgentError::FinancialCaptureTask("FINANCE_STOPPED_CAMPAIGN_REQUIRED".into())
+                        AgentError::FinancialCaptureTask(if stopped_finance_mode {
+                            "FINANCE_STOPPED_CAMPAIGN_REQUIRED".into()
+                        } else {
+                            "FINANCE_EXPECTED_CAMPAIGN_REQUIRED".into()
+                        })
                     })?;
                 let (registry, owner) = if stopped_finance_mode {
                     AccountRuntimeRegistry::open_stopped_finance(
@@ -306,9 +310,11 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 (Arc::new(registry), Some(owner))
             } else {
                 if stopped_finance_campaign.is_some() || native_finance_campaign.is_some() {
-                    return Err(AgentError::FinancialCaptureTask(
-                        "FINANCE_STOPPED_IMPORT_REQUIRED".into(),
-                    ));
+                    return Err(AgentError::FinancialCaptureTask(if stopped_finance_mode {
+                        "FINANCE_STOPPED_IMPORT_REQUIRED".into()
+                    } else {
+                        "FINANCE_INSTALLATION_NOT_INITIALIZED".into()
+                    }));
                 }
                 (
                     Arc::new(AccountRuntimeRegistry::open(&config.root, budget.clone()).await?),
@@ -472,7 +478,7 @@ mod native_finance_startup_tests {
         assert!(matches!(
             result,
             Err(AgentError::FinancialCaptureTask(ref reason))
-                if reason == "FINANCE_STOPPED_CAMPAIGN_REQUIRED"
+                if reason == "FINANCE_EXPECTED_CAMPAIGN_REQUIRED"
         ));
         assert_eq!(std::fs::read(&finance).unwrap(), b"sealed-finance-sentinel");
         assert!(!path.join("accounts").exists());
@@ -498,7 +504,7 @@ mod native_finance_startup_tests {
         let mut cli = startup(path.clone(), None);
         cli.native_finance_campaign = Some("campaign-X".into());
         assert!(matches!(run(cli).await,
-            Err(AgentError::FinancialCaptureTask(ref reason)) if reason=="FINANCE_STOPPED_IMPORT_REQUIRED"));
+            Err(AgentError::FinancialCaptureTask(ref reason)) if reason=="FINANCE_INSTALLATION_NOT_INITIALIZED"));
         assert!(!path.join("accounts").exists());
         assert!(!path.join("finance").exists());
         std::fs::remove_dir_all(path).unwrap();

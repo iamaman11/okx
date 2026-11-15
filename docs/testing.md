@@ -1,3 +1,66 @@
+## #510 r5 - clean new installation, no legacy migration (Draft / NO-GO)
+
+This CURRENT scope supersedes older RB09/import/provenance instructions below.
+The owner explicitly rejected backward compatibility and migration obligations.
+Issue #510 r5 is canonical. ONE Rust Engine / ONE financial SQLite / ONE bounded
+writer remains the target. Historical import fixtures are not the new runtime.
+
+The abandoned uncommitted TS snapshot parser/import/provenance work was archived
+outside the repository and removed from this candidate. No legacy provenance
+columns, invented Native proofs, schema7 migration rows or backwards-compatible
+activation were retained. Installed user financial files were not touched.
+
+New production initialization now creates the same 47 scoped financial domain
+tables plus ONE immutable finance_installation receipt, schema7. The fresh DB
+has NO finance_import_manifest, old source snapshot or migrated obligations.
+The caller must explicitly provide installation/request identity and accepted
+release source tree; it does not infer accounts, external balances or policy.
+The sole existing SQL worker owns initialization and all subsequent jobs.
+
+Current reopen validates identity, exact schema/constraints/triggers, WAL/FULL,
+FK/integrity, installation scope and ORIGINAL current RiskBook invariants.
+It does not require changing financial rows to match an initial content hash.
+Exact initialize replay returns the original receipt; conflicting identity/body
+or unknown existing schema rejects instead of reset/import. No auto-create on
+ordinary open. Unknown/old financial roots, orphan sidecars, reparse paths and
+foreign target files reject. Second writer rejects using existing OS leases.
+
+Agent's existing InitializeInstallation command now calls the same typed new
+finance initializer, after accepted release and Engine-stop checks. Native
+startup uses open_native instead of the stopped import opener. No new installer,
+controller, command bus or finance worker has been introduced. A freshly created
+local DB is NOT proof of an empty OKX account: the financial mutation guard
+returns FINANCE_ACCOUNT_BOOTSTRAP_REQUIRED until real account/source bootstrap.
+No arbitrary READY flag or legacy-disabled receipt grants a POST.
+
+Local verification: complete execution library 321 PASS / 0 FAIL / 2 ignored,
+8.85s after compilation. Includes seven new direct SQL/writer lifecycle cases;
+Agent addressed contracts: 85 PASS; binary startup: 5 PASS. Agent lib/bin build,
+architecture guard and negative self-tests, ledger schema, fmt, CI YAML and diff
+checks PASS. Existing warnings remain. No full 26/26 or P95 claim.
+Logs: temp/okx510-fresh-execution.log, okx510-fresh-agent-build.log,
+okx510-fresh-storage_commands-tests.log and okx510-fresh-startup.log.
+GitHub exact-SHA CI remains pending until this candidate is pushed and checked.
+The draft CI no longer requires the obsolete Cloudflare retirement witness;
+normal Cloudflare safety tests remain regression coverage until old handlers
+are removed from the final active financial path.
+
+Remaining accepting slice: typed verified account connection/bootstrap into the
+SAME owner (no account-local SQLite), policy/campaign creation from authorized
+sources, all nine actions and Native Execute -> Status -> Close with lost ACK,
+concurrency/crash/reopen; remove old live finance routes/writers; final RB01-16
+and relevant T09/T10, exact SHA and measured P95. Existing import/legacy paths
+still present in older code/tests are transition debt to REMOVE, not a supported
+second model or an obligation to migrate. #510 is NOT complete or deployable.
+
+A foreign-format real SQLite/WAL/SHM is rejected before opening it in SQLite;
+all three original hashes remain unchanged in the negative witness. The standard
+application_id header tag is written before initial WAL use; it is a format tag,
+NOT identity/authority. Known-format existing files receive read-only preflight
+before writable open, then current invariant recheck under the same OS lease.
+
+--- Historical checkpoints (not additional r5 requirements) ---
+
 ## #510 - Native Status and stopped legacy finance boundary (Draft / NO-GO)
 
 Baseline b08a24b6; one parent-integrated batch with code subagents. Supersedes

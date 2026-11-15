@@ -1,6 +1,7 @@
 mod campaign_capture;
 mod definitions;
 mod finance;
+pub(in crate::account_store) mod finance_installation;
 mod intents;
 mod orders;
 mod projections;

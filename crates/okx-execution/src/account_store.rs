@@ -35,6 +35,7 @@ mod authority_reads;
 pub use authority_reads::{AccountPolicySnapshot, CentralReceiptView};
 #[path = "account_financial_admission.rs"]
 mod financial_admission;
+pub use self::sql::finance_installation::{FinanceInstallationReceipt, NewFinanceInstallation};
 pub use financial_admission::{FinancialAdmissionRequest, instance_nav_gate};
 #[path = "account_trade_reads.rs"]
 mod trade_reads;

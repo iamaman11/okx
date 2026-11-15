@@ -1,12 +1,12 @@
 //! One installation-local OS authority-mode lock, shared by the ORIGINAL
 //! account/campaign SQL owners and exclusive to the unified finance writer.
 //! This does NOT coordinate with Cloudflare and does NOT renew an owner epoch.
-//! A one-time stopped RB09 legacy-finance disable/import is still required.
+//! New Native installations do not import old financial state (#510 r5).
 //!
 //! Old mode: multiple account/campaign owners may each hold a shared lease.
 //! New mode: the single installation SQLite owner holds the exclusive lease.
 //! The locks protect against a simultaneous native start in this code version;
-//! the stopped legacy Cloudflare/older-binary transition is an external gate.
+//! legacy fixtures are not a supported Native startup or migration mechanism.
 use std::{
     fs::{self, File, OpenOptions},
     io,

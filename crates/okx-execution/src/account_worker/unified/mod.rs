@@ -5,6 +5,9 @@ use crate::{StoreError, StoreResult};
 use std::sync::Arc;
 mod opening_ingress;
 mod owner;
+mod owner_startup;
+#[cfg(test)]
+mod owner_startup_tests;
 pub(crate) use opening_ingress::install_reported_opening_sql;
 pub use opening_ingress::{ReportedOpeningCensus, ReportedOpeningReceipt};
 mod admission_lifecycle;
