@@ -20,6 +20,7 @@ use std::{
 };
 use thiserror::Error;
 mod integrity;
+mod opening;
 mod post;
 mod queries;
 mod settlement;
@@ -27,6 +28,7 @@ mod terminal;
 mod unsent;
 use integrity::verify_reservation_aggregates;
 pub(super) use post::PostAuthorized;
+pub(crate) use opening::EntryOpeningReceipt;
 pub(crate) use post::PostFenceInput;
 pub(in crate::risk::book) use post::{PostDecision, begin_unified_post_and_account_transaction};
 pub(crate) use queries::{AccountReadback, ReservationReadback};

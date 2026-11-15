@@ -32,6 +32,11 @@ pub(crate) enum UnifiedRiskDecision {
         book_sequence: u64,
         replayed: bool,
     },
+    EntryOpeningInstalled {
+        source_digest: String,
+        book_sequence: u64,
+        replayed: bool,
+    },
     Denied {
         reason: String,
     },
@@ -85,6 +90,25 @@ fn original_finance_error(error: &store::RiskStoreError) -> &'static str {
         E::Money(_) => "RISK_MONEY_INVALID",
         E::Sql(_) | E::Io(_) | E::Encode(_) => "RISK_STORAGE_UNAVAILABLE",
     }
+}
+
+/// One original AccountStore baseline for ALL accounts, one original
+/// RiskBook budget, one native installation-owned SQL COMMIT.
+pub(crate) fn install_entry_opening_unified_native(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    source: &okx_protocol::risk_authority::CampaignOpeningSource,
+    census: &VerifiedCensus,
+    now_ms: i64,
+) -> Result<UnifiedRiskDecision, &'static str> {
+    let installed = store::RiskBookStore::install_unified_entry_opening_from_account_sql_transaction(
+        tx,installation,source,census,now_ms,
+    ).map_err(|error|original_finance_error(&error))?;
+    Ok(UnifiedRiskDecision::EntryOpeningInstalled {
+        source_digest:installed.source_digest,
+        book_sequence:installed.book_sequence,
+        replayed:installed.replayed,
+    })
 }
 
 pub(crate) fn reserve_unified_native(
