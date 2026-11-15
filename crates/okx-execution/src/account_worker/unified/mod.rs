@@ -103,6 +103,10 @@ pub struct UnifiedFinanceBoundSettlementReceipt {
 
 #[derive(Debug, Clone)]
 pub(crate) enum UnifiedFinanceWrite {
+    ProjectPendingFills {
+        account: String,
+        limit: usize,
+    },
     AttributePendingFunding {
         account: String,
         conversion: crate::UsdConversionEvidence,
@@ -220,6 +224,7 @@ pub(crate) enum UnifiedFinanceWriteReceipt {
     SourceBillsRecorded,
     SourcePageIngested,
     FundingAttributed { count: usize },
+    FillsProjected { count: usize },
     SourcePageRejected { reason: &'static str },
     BoundEntrySettled(UnifiedFinanceBoundSettlementReceipt),
     BoundUnsentReleased(UnifiedFinanceBoundUnsentReceipt),

@@ -2802,7 +2802,7 @@ impl AccountStore {
 
     // The original native plan decoder, shared by per-account v2 and scoped v6
     // SQL. Reserve validates the entire original plan under its caller's lock.
-    fn plan_sql(
+    pub(crate) fn plan_sql(
         db: &rusqlite::Connection,
         scope: Option<(&str, &str)>,
         id: &str,

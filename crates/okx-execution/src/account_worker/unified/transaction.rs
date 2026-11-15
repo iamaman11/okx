@@ -48,6 +48,18 @@ fn apply_original_unified_finance_inner(
             .map_err(StoreError::Invalid)
     };
     match command {
+        UnifiedFinanceWrite::ProjectPendingFills { account, limit } => {
+            let scope = Some((installation, account.as_str()));
+            let fills = AccountStore::pending_fill_sources_sql(tx, scope, limit, |_| {})?;
+            let count = fills.len();
+            for fill in fills {
+                let effect = AccountStore::pending_fill_effect_sql(tx, scope, &fill)?;
+                let page =
+                    AccountStore::project_attributed_fill_sql(tx, scope, fill, effect, None)?;
+                AccountStore::ingest_unified_source_page_sql(tx, installation, &account, &page)?;
+            }
+            Ok(UnifiedFinanceWriteReceipt::FillsProjected { count })
+        }
         UnifiedFinanceWrite::AttributePendingFunding {
             account,
             conversion,

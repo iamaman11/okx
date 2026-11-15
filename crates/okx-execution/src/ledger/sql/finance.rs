@@ -26,7 +26,7 @@ fn advance_finance_provenance(tx: &rusqlite::Transaction<'_>, previous: i64) -> 
 /// Start from the bounded set of unapplied fills, never from immutable history.
 /// SQLite otherwise chooses idx_fills_time to satisfy ORDER BY and scans all
 /// historical fills even when fill_projection_pending is empty.
-const PENDING_FILL_PROJECTION_SQL: &str = "SELECT f.fill_id,f.instrument_id,f.trade_id,f.exchange_order_id,f.intent_id,f.time,f.qty,f.price,f.fee,f.currency,p.side
+pub(super) const PENDING_FILL_PROJECTION_SQL: &str = "SELECT f.fill_id,f.instrument_id,f.trade_id,f.exchange_order_id,f.intent_id,f.time,f.qty,f.price,f.fee,f.currency,p.side
     FROM fill_projection_pending p CROSS JOIN fills f ON f.fill_id=p.fill_id
     ORDER BY f.time,f.fill_id LIMIT ?1";
 
@@ -3737,62 +3737,10 @@ impl AccountStore {
         limit: usize,
         observe: impl FnOnce(AccountSqlStatementStat),
     ) -> StoreResult<usize> {
-        let rows = {
-            let mut s = self.connection.prepare(PENDING_FILL_PROJECTION_SQL)?;
-            let started = std::time::Instant::now();
-            let result = s
-                .query_map([limit.min(1000) as i64], |r| {
-                    Ok((
-                        Fill {
-                            fill_id: r.get(0)?,
-                            instrument_id: r.get(1)?,
-                            trade_id: r.get(2)?,
-                            exchange_order_id: r.get(3)?,
-                            intent_id: r.get(4)?,
-                            time: r.get(5)?,
-                            qty: Decimal::ZERO,
-                            price: Decimal::ZERO,
-                            fee: Decimal::ZERO,
-                            currency: r.get(9)?,
-                            side: r.get(10)?,
-                        },
-                        r.get::<_, String>(6)?,
-                        r.get::<_, String>(7)?,
-                        r.get::<_, String>(8)?,
-                    ))
-                })
-                .and_then(|items| items.collect::<Result<Vec<_>, _>>());
-            observe(AccountSqlStatementStat {
-                statement_id: "pending_fills_select",
-                elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-                rows: result.as_ref().map(|v| v.len() as u64).unwrap_or(0),
-                vm_steps: s.get_status(rusqlite::StatementStatus::VmStep).max(0) as u64,
-                fullscan_steps: s.get_status(rusqlite::StatementStatus::FullscanStep).max(0) as u64,
-                sorts: s.get_status(rusqlite::StatementStatus::Sort).max(0) as u64,
-                succeeded: result.is_ok(),
-            });
-            result?
-        };
+        let rows = Self::pending_fill_sources_sql(&self.connection, None, limit, observe)?;
         let count = rows.len();
-        for (mut fill, q, p, fee) in rows {
-            fill.qty = decimal(q)?;
-            fill.price = decimal(p)?;
-            fill.fee = decimal(fee)?;
-            let plan = fill
-                .intent_id
-                .as_deref()
-                .map(|id| self.plan(id))
-                .transpose()?;
-            let effect = if plan
-                .as_ref()
-                .is_some_and(|p| matches!(p.operation.as_str(), "close" | "reduce"))
-            {
-                FillEffect::Reduce
-            } else {
-                FillEffect::Open {
-                    side: if fill.side == "buy" { "long" } else { "short" }.into(),
-                }
-            };
+        for fill in rows {
+            let effect = Self::pending_fill_effect_sql(&self.connection, None, &fill)?;
             self.ingest_attributed_fill(fill, effect, None)?;
         }
         Ok(count)
@@ -3803,168 +3751,10 @@ impl AccountStore {
         effect: FillEffect,
         cursor: Option<SourceCursor>,
     ) -> StoreResult<()> {
-        let existing:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM fills WHERE instrument_id=?1 AND trade_id=?2 AND exchange_order_id=?3)",params![fill.instrument_id,fill.trade_id,fill.exchange_order_id],|r|r.get(0))?;
-        let pending: bool = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM fill_projection_pending WHERE fill_id=?1)",
-            [&fill.fill_id],
-            |r| r.get(0),
-        )?;
-        if existing && !pending {
-            return self.ingest_page(&IngestPage {
-                fills: vec![fill],
-                cursor,
-                ..Default::default()
-            });
-        }
-        let instance: Option<String> = if let Some(id) = &fill.intent_id {
-            self.connection.query_row("SELECT instance_id FROM decisions JOIN intents USING(decision_id) WHERE intent_id=?1",[id],|r|r.get(0))?
-        } else {
-            None
-        };
-        let key = format!(
-            "fill:{}:{}:{}",
-            fill.instrument_id, fill.trade_id, fill.exchange_order_id
-        );
-        // Source capture already persisted the authenticated SWAP bill ID
-        // before this pending-fill projection. Reuse its economic fee key:
-        // projection is not a second fee (or a second owner of the key).
-        // The legacy fill key remains for sources without a bill ID; those
-        // are not final bill evidence and cannot authorize settlement.
-        let fee_event_key = match self
-            .connection
-            .query_row(
-                "SELECT bill_id FROM swap_fill_sources WHERE fill_id=?1",
-                [&fill.fill_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            Some(id) if id.is_empty() => None,
-            Some(id) => Some(format!("bill:{id}")),
-            None => Some(key.clone()),
-        };
-        let mut page = IngestPage {
-            cursor,
-            ..Default::default()
-        };
-        // F7: a raw fill may have committed with fill_projection_pending
-        // before its fee/position projection. Rebuild the fee on replay;
-        // the canonical economic-event uniqueness prevents double charge.
-        if fill.fee != Decimal::ZERO
-            && let Some(fee_event_key) = fee_event_key
-        {
-            page.finance.push(FinanceEntry {
-                entry_id: format!("{fee_event_key}:fee"),
-                economic_event_key: fee_event_key,
-                component: "FEE".into(),
-                allocation_leg: "account".into(),
-                amount: fill.fee,
-                currency: fill.currency.clone(),
-                instance_id: instance.clone(),
-                source_ref: format!("fill:{}", fill.fill_id),
-                time: fill.time,
-                reverses_entry_id: None,
-            });
-        }
-        match effect {
-            FillEffect::Open { side } => {
-                if !matches!(side.as_str(), "long" | "short") {
-                    return Err(StoreError::Invalid("INVALID_POSITION_SIDE"));
-                }
-                page.lots.push(StoredLot {
-                    lot_id: format!("lot:{}", fill.fill_id),
-                    instance_id: instance.clone(),
-                    intent_id: fill.intent_id.clone(),
-                    fill_id: Some(fill.fill_id.clone()),
-                    instrument_id: fill.instrument_id.clone(),
-                    side,
-                    remaining_qty: fill.qty,
-                    cost: fill.price,
-                    opened_at: fill.time,
-                });
-            }
-            FillEffect::Reduce => {
-                let owner = instance.as_deref().ok_or(StoreError::Invalid(
-                    "EXPLICIT_INSTANCE_REQUIRED_FOR_REDUCTION",
-                ))?;
-                let reduce_plan = self.plan(
-                    fill.intent_id
-                        .as_deref()
-                        .ok_or(StoreError::Invalid("REDUCTION_INTENT_REQUIRED"))?,
-                )?;
-                let existing_lots = self
-                    .active_lots(&fill.instrument_id)?
-                    .into_iter()
-                    .filter(|l| {
-                        l.side == reduce_plan.position_side
-                            && l.instance_id.as_deref() == Some(owner)
-                    })
-                    .collect::<Vec<_>>();
-                let mut lots = existing_lots
-                    .iter()
-                    .map(|l| {
-                        let p = self.plan(
-                            l.intent_id
-                                .as_deref()
-                                .ok_or(StoreError::Invalid("LOT_MECHANICS_UNAVAILABLE"))?,
-                        )?;
-                        Ok(crate::finance::PositionLot {
-                            contract_value: p.contract_value,
-                            inverse: p.inverse,
-                            lot_id: l.lot_id.clone(),
-                            instance_id: l.instance_id.clone(),
-                            instrument_id: l.instrument_id.clone(),
-                            signed_qty: if l.side == "long" {
-                                l.remaining_qty
-                            } else {
-                                -l.remaining_qty
-                            },
-                            unit_cost: l.cost,
-                            opened_at: l.opened_at,
-                        })
-                    })
-                    .collect::<StoreResult<Vec<_>>>()?;
-                let reductions = crate::finance::reduce_fifo(
-                    &mut lots,
-                    owner,
-                    &fill.instrument_id,
-                    fill.qty,
-                    fill.price,
-                )?;
-                let pnl = reductions.iter().try_fold(Decimal::ZERO, |a, r| {
-                    a.checked_add(r.realized_pnl)
-                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))
-                })?;
-                for l in existing_lots {
-                    if let Some(updated) = lots.iter().find(|v| v.lot_id == l.lot_id)
-                        && updated.signed_qty.abs() != l.remaining_qty
-                    {
-                        page.lots.push(StoredLot {
-                            remaining_qty: updated.signed_qty.abs(),
-                            ..l
-                        });
-                    }
-                }
-                if !existing {
-                    page.finance.push(FinanceEntry {
-                        entry_id: format!("{key}:realized"),
-                        economic_event_key: key,
-                        component: "REALIZED_PNL".into(),
-                        allocation_leg: owner.into(),
-                        amount: pnl,
-                        currency: fill.currency.clone(),
-                        instance_id: instance.clone(),
-                        source_ref: format!("fill:{}", fill.fill_id),
-                        time: fill.time,
-                        reverses_entry_id: None,
-                    });
-                }
-            }
-        }
-        page.projected_fill_ids.push(fill.fill_id.clone());
-        page.fills.push(fill);
+        let page = Self::project_attributed_fill_sql(&self.connection, None, fill, effect, cursor)?;
         self.ingest_page(&page)
     }
+
     pub fn finance_totals(
         &self,
         from: i64,
@@ -4080,32 +3870,9 @@ impl AccountStore {
         Ok(())
     }
     pub fn active_lots(&self, instrument: &str) -> StoreResult<Vec<StoredLot>> {
-        let mut s=self.connection.prepare("SELECT lot_id,instance_id,intent_id,fill_id,instrument_id,side,remaining_qty,cost,opened_at FROM position_lots WHERE instrument_id=?1 AND remaining_qty<>'0' ORDER BY side,instance_id,opened_at,lot_id")?;
-        s.query_map([instrument], |r| {
-            Ok((
-                StoredLot {
-                    lot_id: r.get(0)?,
-                    instance_id: r.get(1)?,
-                    intent_id: r.get(2)?,
-                    fill_id: r.get(3)?,
-                    instrument_id: r.get(4)?,
-                    side: r.get(5)?,
-                    remaining_qty: Decimal::ZERO,
-                    cost: Decimal::ZERO,
-                    opened_at: r.get(8)?,
-                },
-                r.get::<_, String>(6)?,
-                r.get::<_, String>(7)?,
-            ))
-        })?
-        .map(|v| {
-            let (mut l, q, c) = v?;
-            l.remaining_qty = decimal(q)?;
-            l.cost = decimal(c)?;
-            Ok(l)
-        })
-        .collect()
+        Self::active_lots_sql(&self.connection, None, instrument)
     }
+
     pub fn finance_history(
         &self,
         from: i64,

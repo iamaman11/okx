@@ -206,6 +206,19 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    /// Read pending facts, project FIFO lots and acknowledge them in one COMMIT.
+    pub async fn project_pending_fills(&self, account: String, limit: usize) -> StoreResult<usize> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::ProjectPendingFills { account, limit })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::FillsProjected { count } => Ok(count),
+            _ => Err(StoreError::Invalid(
+                "UNIFIED_FILL_PROJECTION_RECEIPT_UNEXPECTED",
+            )),
+        }
+    }
+
     pub async fn attribute_pending_funding(
         &self,
         account: String,

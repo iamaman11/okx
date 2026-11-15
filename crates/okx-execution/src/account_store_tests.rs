@@ -6,6 +6,8 @@ mod captured_bill_contracts;
 mod captured_fill_contracts;
 #[path = "account_entry_fee_contract_tests.rs"]
 mod entry_fee_contracts;
+#[path = "account_fill_projection_contract_tests.rs"]
+mod fill_projection_contracts;
 #[path = "account_funding_projection_contract_tests.rs"]
 mod funding_projection_contracts;
 #[path = "account_raw_source_tests.rs"]
@@ -6167,9 +6169,19 @@ fn sqlite_million_history_bounded_rss() {
     std::fs::remove_file(path).unwrap();
 }
 fn path() -> PathBuf {
+    // Windows may reuse a PID while files from a previous test run remain.
+    // A new run must never open those files as its freshly initialized state.
+    static RUN: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    let run = RUN.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    });
     std::env::temp_dir().join(format!(
-        "okx-t0-{}-{}.db",
+        "okx-t0-{}-{}-{}.db",
         std::process::id(),
+        run,
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ))
 }

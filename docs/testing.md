@@ -1,3 +1,38 @@
+## #510 - atomic pending-fill FIFO projection and raw-close PnL repair
+
+Original AccountStore and the unified writer share source_fill_projection:
+bounded pending reads (max 1000), original plan/lot decoders, fee identity and
+the existing reduce_fifo calculation. All unified reads and joins are scoped
+by installation/account. ProjectPendingFills reads sources, updates lots,
+records finance and acknowledges pending fills in ONE command transaction;
+an error rolls back earlier fills in that batch. Public handle remains behind
+the unchanged activation gate; no trading capability is granted by this work.
+
+The direct test exposed a production defect: after raw capture, a closing
+fill already existed, so the old if !existing skipped REALIZED_PNL while
+reducing its lots. RED was QueryReturnedNoRows for the expected PnL. Projection
+now records that component whenever the pending reduction is applied; replay
+without pending returns early and immutable economic keys prevent duplication.
+This intentional financial behavior correction affects the legacy caller too.
+
+Witness: two accounts reuse the same intent/fill/lot IDs with different contract
+values. FIFO leaves one unit of the second lot; independent arithmetic gives
+30 and 60 USDT PnL. A later over-close rolls back all earlier lots, PnL and
+pending ACKs; unknown account and zero limit cannot project anything. Bounded
+continuation, replay, COMMIT/reopen and the legacy raw-fill production entry
+are checked. Test file names include a process-run nonce to avoid Windows PID
+reuse opening stale test databases; no previous files are removed.
+
+Local Windows execution library: 265 PASS, 0 FAIL, 2 ignored, 6.35s after build.
+The direct witness passed in 0.24s before additional differing-account
+mechanics assertions, which pass in the full regression. These are NOT full
+26x, RB01-RB16, physical cutover or P95 acceptance results.
+
+Remaining: account/strategy NAV reconciliation, new-owner resource startup,
+activation and four native risk actions; old Cloudflare financial path removal
+and final acceptance. Production Agent still selects legacy AccountStoreHandle;
+the new unified projection command is implemented but not selected by it yet.
+
 ## #510 - scoped historical funding projection and atomic attribution command
 
 Original AccountStore funding attribution now reuses source_funding_projection
