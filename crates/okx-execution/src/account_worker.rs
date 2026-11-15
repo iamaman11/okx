@@ -644,6 +644,32 @@ pub(crate) fn apply_original_unified_finance_transaction(
     installation: &str,
     command: UnifiedFinanceWrite,
 ) -> StoreResult<UnifiedFinanceWriteReceipt> {
+    // Enforce the complete command's atomicity even if a future caller
+    // mishandles Err and attempts to COMMIT its surrounding transaction.
+    // This nested savepoint is NOT a second database writer or COMMIT.
+    // Normal Risk::Denied is an Ok receipt and preserves any monotonic
+    // source-loss high-water observed before denial.
+    tx.execute_batch("SAVEPOINT okx_finance_command")?;
+    match apply_original_unified_finance_inner(tx, installation, command) {
+        Ok(receipt) => {
+            tx.execute_batch("RELEASE SAVEPOINT okx_finance_command")?;
+            Ok(receipt)
+        }
+        Err(error) => {
+            tx.execute_batch(
+                "ROLLBACK TO SAVEPOINT okx_finance_command;
+                 RELEASE SAVEPOINT okx_finance_command",
+            )?;
+            Err(error)
+        }
+    }
+}
+
+fn apply_original_unified_finance_inner(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    command: UnifiedFinanceWrite,
+) -> StoreResult<UnifiedFinanceWriteReceipt> {
     use crate::risk;
     let risk_operation = |outcome: Result<risk::UnifiedRiskDecision, &'static str>| {
         outcome

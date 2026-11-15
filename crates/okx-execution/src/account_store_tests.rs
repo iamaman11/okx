@@ -12633,6 +12633,72 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
     assert_eq!(foreign, ("HELD".into(), 2));
     tx.rollback().unwrap();
 
+    // Force an ORIGINAL cross-owner identity failure AFTER the native
+    // AccountStore accepts the venue result. Even if the caller tries to
+    // COMMIT after Err, the dispatch's nested savepoint must undo the
+    // intermediate account outcome and revision. The corrupted receipt is
+    // repaired OUTSIDE the savepoint before this real SQL COMMIT.
+    {
+        let tx = recovered
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let before: (String, i64, String, Option<String>) = tx
+            .query_row(
+                "SELECT i.state,i.revision,r.state,i.exchange_order_id
+                 FROM intents i JOIN risk_receipts r
+                   ON r.installation_id=i.installation_id
+                  AND r.account_key=i.account_key AND r.intent_id=i.intent_id
+                 WHERE i.installation_id='installation'
+                   AND i.account_key='acct-A' AND i.intent_id=?1",
+                [&ai.intent_id],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(before.0, "UNKNOWN");
+        assert_eq!(before.2, "UNKNOWN");
+        assert_eq!(tx.execute(
+            "UPDATE risk_receipts SET reservation_key='wrong-reservation'
+             WHERE installation_id='installation' AND account_key='acct-A'
+               AND intent_id=?1",
+            [&ai.intent_id],
+        ).unwrap(), 1);
+        assert!(matches!(
+            apply_original_unified_finance_transaction(
+                &tx,
+                "installation",
+                UnifiedFinanceWrite::RecordOutcome {
+                    account: "acct-A".into(),
+                    intent: ai.intent_id.clone(),
+                    state: IntentState::Acknowledged,
+                    exchange_order_id: Some("should-never-persist".into()),
+                    evidence: "verified-source-but-risk-address-conflicts".into(),
+                    now: 10_005,
+                }
+            ),
+            Err(StoreError::Invalid("UNIFIED_OUTCOME_RISK_ENTRY_MISSING"))
+        ));
+        let after: (String, i64, String, Option<String>) = tx
+            .query_row(
+                "SELECT i.state,i.revision,r.state,i.exchange_order_id
+                 FROM intents i JOIN risk_receipts r
+                   ON r.installation_id=i.installation_id
+                  AND r.account_key=i.account_key AND r.intent_id=i.intent_id
+                 WHERE i.installation_id='installation'
+                   AND i.account_key='acct-A' AND i.intent_id=?1",
+                [&ai.intent_id],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(after, before, "risk rejection rolls back AccountStore");
+        assert_eq!(tx.execute(
+            "UPDATE risk_receipts SET reservation_key='same-reservation'
+             WHERE installation_id='installation' AND account_key='acct-A'
+               AND intent_id=?1",
+            [&ai.intent_id],
+        ).unwrap(), 1);
+        tx.commit().unwrap();
+    }
+
     // A confirmed venue ACK after a killed POST must move the original
     // AccountStore + RiskBook to OPEN together, without refund or another
     // exchange POST. Exercise rollback and one actual COMMIT.
