@@ -1,3 +1,24 @@
+## #510 - original account source cursors through unified finance owner
+
+Production UnifiedFinanceHandle now reads source_generation_base(account)
+and source_cursor(account, source, partition) from original source_cursors,
+scoped by installation AND account. No separate account connection. Missing
+account returns UNIFIED_SOURCE_ACCOUNT_NOT_FOUND instead of generation zero.
+Original generation bounds are shared with the legacy AccountStore method.
+
+The original import/owner witness now ingests A/B cursors with identical
+source/partition and different generations (5/11) and values before import.
+Unified reads preserve isolation, missing streams return None, foreign
+accounts fail, and close/reopen retains original generations and cursor.
+
+Local Windows: complete execution library 258 PASS, 0 FAIL, 2 ignored
+(5.81s after build); Agent all-target cargo check PASS; architecture guard,
+negative self-tests, formatting and diff checks PASS.
+This prepares source producer wiring. Capture/ingestion, native activation,
+9/9 actions and full RB01-RB16/T09/T10 are still incomplete.
+
+---
+
 ## #510 — BEGIN_POST uses original finance dispatcher in physical witnesses
 
 The existing test-only causal input constructor now calls

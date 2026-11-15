@@ -13100,6 +13100,21 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     let mut b = store_with_account_campaign(&b_key, "campaign-X");
     let ai = intent_with_plan_hash_and_id(&mut a, &original_plan, "intent0001");
     let bi = intent_with_plan_hash_and_id(&mut b, &original_plan, "intent0001");
+    for (store, generation, value) in [(&mut a, 5, "cursor-A"), (&mut b, 11, "cursor-B")] {
+        store
+            .ingest_page(&IngestPage {
+                cursor: Some(SourceCursor {
+                    source: "fills".into(),
+                    stream_partition: "SWAP".into(),
+                    cursor: value.into(),
+                    watermark: 20,
+                    generation,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+    }
     let original_manual_definition = a.strategy_definition("manual").unwrap();
     let (ap, bp) = (a.path.clone(), b.path.clone());
     let campaign = path();
@@ -13166,6 +13181,40 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         )
     };
     let owner = open().await.unwrap();
+    assert_eq!(
+        owner.source_generation_base(a_key.clone()).await.unwrap(),
+        5
+    );
+    assert_eq!(
+        owner.source_generation_base(b_key.clone()).await.unwrap(),
+        11
+    );
+    for (account, expected) in [(&a_key, "cursor-A"), (&b_key, "cursor-B")] {
+        let cursor = owner
+            .source_cursor(account.clone(), "fills".into(), "SWAP".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cursor.cursor, expected);
+        assert_eq!(cursor.watermark, 20);
+        assert!(
+            owner
+                .source_cursor(account.clone(), "bills".into(), "SWAP".into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert!(matches!(
+        owner.source_generation_base("foreign-account".into()).await,
+        Err(StoreError::Invalid("UNIFIED_SOURCE_ACCOUNT_NOT_FOUND"))
+    ));
+    assert!(matches!(
+        owner
+            .source_cursor("foreign-account".into(), "fills".into(), "SWAP".into())
+            .await,
+        Err(StoreError::Invalid("UNIFIED_SOURCE_ACCOUNT_NOT_FOUND"))
+    ));
     let inventory = owner.inventory().await.unwrap();
     assert_eq!(inventory.accounts, 2);
     assert_eq!(inventory.campaigns, 1);
@@ -13754,6 +13803,29 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     // A new owner can reopen the same original finance SQLite only after
     // genuine close and complete 47-table/manifest re-verification.
     let reopened = open().await.unwrap();
+    assert_eq!(
+        reopened
+            .source_generation_base(a_key.clone())
+            .await
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        reopened
+            .source_generation_base(b_key.clone())
+            .await
+            .unwrap(),
+        11
+    );
+    assert_eq!(
+        reopened
+            .source_cursor(a_key.clone(), "fills".into(), "SWAP".into())
+            .await
+            .unwrap()
+            .unwrap()
+            .cursor,
+        "cursor-A"
+    );
     assert_eq!(reopened.inventory().await.unwrap(), inventory);
     assert_eq!(
         reopened

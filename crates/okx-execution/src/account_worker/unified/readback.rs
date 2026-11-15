@@ -6,6 +6,31 @@ use super::{
 };
 use crate::{AccountStore, StoreError, StoreResult};
 impl UnifiedFinanceHandle {
+    /// Resume the original observer generation from this account only.
+    /// Reading a missing account is an error, never a fresh generation zero.
+    pub async fn source_generation_base(&self, account: String) -> StoreResult<u64> {
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            AccountStore::source_generation_base_sql(db, Some((&installation, &account)))
+        })
+        .await
+    }
+
+    /// Original durable cursor through the sole finance FIFO. No SQL or
+    /// account-local writable connection escapes to the source observer.
+    pub async fn source_cursor(
+        &self,
+        account: String,
+        source: String,
+        partition: String,
+    ) -> StoreResult<Option<crate::SourceCursor>> {
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            AccountStore::scoped_source_cursor_sql(db, &installation, &account, &source, &partition)
+        })
+        .await
+    }
+
     pub async fn inventory(&self) -> StoreResult<UnifiedFinanceInventory> {
         let installation = self.installation.clone();
         self.submit(move |db| {
