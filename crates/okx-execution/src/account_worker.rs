@@ -594,6 +594,28 @@ pub struct UnifiedFinancePolicy {
     pub accounts: Vec<UnifiedFinancePolicyAccount>,
 }
 
+/// Authenticated ReleaseUnsent is an address to the ORIGINAL AccountStore
+/// no-send receipt, never a source-proof constructor or a POST capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedFinanceBoundUnsent {
+    pub campaign: String,
+    pub reservation_key: String,
+    pub plan_sha256: String,
+    pub expected_sequence: u64,
+    pub account_key: String,
+    pub intent_id: String,
+    pub request_hash: String,
+    pub reason: String,
+    pub record_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedFinanceBoundUnsentReceipt {
+    pub reservation_key: String,
+    pub book_sequence: u64,
+    pub policy_revision: u64,
+}
+
 /// Source-only settlement address from the authenticated native RiskCommand.
 /// Numeric fields are comparisons against original AccountStore immutable
 /// SQL receipts, NEVER instructions to debit a caller-selected amount.
@@ -659,6 +681,10 @@ pub(crate) enum UnifiedFinanceWrite {
     SettleBoundEntry {
         request: UnifiedFinanceBoundSettlement,
     },
+    /// Original immutable REJECTED_UNSENT source, not caller proof flags.
+    ReleaseBoundUnsent {
+        request: UnifiedFinanceBoundUnsent,
+    },
     ResolveTerminal {
         campaign: String,
         input: crate::risk::TerminalResolveInput,
@@ -695,6 +721,7 @@ pub(crate) enum UnifiedFinanceWriteReceipt {
     Recovered { changed: usize },
     OutcomeRecorded,
     BoundEntrySettled(UnifiedFinanceBoundSettlementReceipt),
+    BoundUnsentReleased(UnifiedFinanceBoundUnsentReceipt),
 }
 
 /// The original SQL owners share this one transaction; no secondary
@@ -724,6 +751,92 @@ pub(crate) fn apply_original_unified_finance_transaction(
             )?;
             Err(error)
         }
+    }
+}
+
+/// The original AccountStore source is authoritative. A supplied proof
+/// merely names an existing no-send record; an absent, foreign or altered
+/// terminal receipt is NEVER proof that the venue POST did not happen.
+/// The ORIGINAL RiskBook computes the exact same canonical receipt SHA-256.
+pub(crate) fn original_bound_unsent_source_sql(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    request: &UnifiedFinanceBoundUnsent,
+) -> StoreResult<()> {
+    use sha2::Digest;
+    if installation.is_empty()
+        || request.campaign.is_empty()
+        || request.account_key.is_empty()
+        || request.intent_id.is_empty()
+        || request.reservation_key.is_empty()
+        || request.plan_sha256.is_empty()
+    {
+        return Err(StoreError::Invalid("UNIFIED_UNSENT_WIRE_SCOPE_INVALID"));
+    }
+    let assigned: Option<String> = tx.query_row(
+        "SELECT campaign_id FROM account_policy
+         WHERE installation_id=?1 AND account_key=?2 AND singleton=1",
+        rusqlite::params![installation, &request.account_key],
+        |row| row.get(0),
+    ).optional()?;
+    if assigned.as_deref() != Some(request.campaign.as_str()) {
+        return Err(StoreError::Invalid("UNIFIED_UNSENT_ACCOUNT_CAMPAIGN_MISMATCH"));
+    }
+    let original = AccountStore::unsent_release_receipt_sql(
+        tx, Some(installation), &request.account_key, &request.intent_id,
+    )?.ok_or(StoreError::Invalid("UNIFIED_UNSENT_ORIGINAL_PROOF_MISSING"))?;
+    let digest = format!(
+        "{:x}", sha2::Sha256::digest(
+            serde_json::to_vec(&original)
+                .map_err(|_| StoreError::Invalid("UNIFIED_UNSENT_ORIGINAL_DIGEST_INVALID"))?
+        )
+    );
+    if original.reservation_key != request.reservation_key
+        || original.account_key != request.account_key
+        || original.intent_id != request.intent_id
+        || original.plan_hash != request.plan_sha256
+        || original.request_hash != request.request_hash
+        || original.reason != request.reason
+        || digest != request.record_digest
+    {
+        return Err(StoreError::Invalid("UNIFIED_UNSENT_WIRE_SOURCE_CONFLICT"));
+    }
+    Ok(())
+}
+
+fn original_bound_unsent_release_sql(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    request: &UnifiedFinanceBoundUnsent,
+) -> StoreResult<UnifiedFinanceBoundUnsentReceipt> {
+    original_bound_unsent_source_sql(tx, installation, request)?;
+    let (generation, revision): (i64, i64) = tx.query_row(
+        "SELECT generation,policy_revision FROM risk_meta
+         WHERE installation_id=?1 AND campaign_id=?2 AND singleton=1",
+        rusqlite::params![installation, &request.campaign],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    )?;
+    let generation = u64::try_from(generation)
+        .map_err(|_| StoreError::Invalid("UNIFIED_UNSENT_GENERATION_INVALID"))?;
+    let policy_revision = u64::try_from(revision)
+        .map_err(|_| StoreError::Invalid("UNIFIED_UNSENT_POLICY_REVISION_INVALID"))?;
+    if generation == 0 || policy_revision == 0 {
+        return Err(StoreError::Invalid("UNIFIED_UNSENT_AUTHORITY_REVISION_INVALID"));
+    }
+    // The original v6 domain re-reads the very same scoped AccountStore
+    // receipt and commits a RiskBook release/tombstone under this tx.
+    let outcome = crate::risk::release_unsent_unified_native(
+        tx, installation, &request.campaign, &request.account_key,
+        &request.intent_id, request.expected_sequence, generation,
+    ).map_err(StoreError::Invalid)?;
+    match outcome {
+        crate::risk::UnifiedRiskDecision::UnsentReleased {
+            reservation_key, book_sequence, ..
+        } if reservation_key == request.reservation_key =>
+            Ok(UnifiedFinanceBoundUnsentReceipt {
+                reservation_key, book_sequence, policy_revision,
+            }),
+        _ => Err(StoreError::Invalid("UNIFIED_UNSENT_RECEIPT_UNEXPECTED")),
     }
 }
 
@@ -972,6 +1085,10 @@ fn apply_original_unified_finance_inner(
         UnifiedFinanceWrite::SettleBoundEntry { request } => {
             let receipt = original_bound_entry_settlement_sql(tx, installation, &request)?;
             Ok(UnifiedFinanceWriteReceipt::BoundEntrySettled(receipt))
+        }
+        UnifiedFinanceWrite::ReleaseBoundUnsent { request } => {
+            let receipt = original_bound_unsent_release_sql(tx, installation, &request)?;
+            Ok(UnifiedFinanceWriteReceipt::BoundUnsentReleased(receipt))
         }
         UnifiedFinanceWrite::ResolveTerminal { campaign, input } => risk_operation(
             risk::resolve_terminal_unified_native(tx, installation, &campaign, &input),
@@ -1327,6 +1444,22 @@ impl UnifiedFinanceHandle {
         {
             UnifiedFinanceWriteReceipt::BoundEntrySettled(receipt) => Ok(receipt),
             _ => Err(StoreError::Invalid("UNIFIED_SETTLEMENT_RECEIPT_UNEXPECTED")),
+        }
+    }
+
+    /// Source-bound native release. No-send is proven by the ORIGINAL
+    /// AccountStore terminal operation and reserve-attempt receipt in this
+    /// writer, never by caller absence, flags, a timeout or foreign ACK.
+    pub async fn release_bound_unsent(
+        &self,
+        request: UnifiedFinanceBoundUnsent,
+    ) -> StoreResult<UnifiedFinanceBoundUnsentReceipt> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::ReleaseBoundUnsent { request })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::BoundUnsentReleased(receipt) => Ok(receipt),
+            _ => Err(StoreError::Invalid("UNIFIED_UNSENT_RECEIPT_UNEXPECTED")),
         }
     }
 

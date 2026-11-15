@@ -13877,6 +13877,116 @@ fn risk_book_contract_one_installation_finance_owner_child() {
 }
 
 #[test]
+fn risk_book_contract_unified_bound_unsent_reads_original_sql_without_fake_no_send() {
+    use rusqlite::{Connection, TransactionBehavior, params};
+    use sha2::Digest;
+    let file = path();
+    let mut db = Connection::open(&file).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    db.execute_batch(include_str!("../schema/finance-unified-v1.sql"))
+        .unwrap();
+    let account = format!("okx:real:{}", "a".repeat(64));
+    let installation = "installation";
+    let intent = "unsent-native-source";
+    let plan = "b".repeat(64);
+    let request_hash = "c".repeat(64);
+    let reason = "COMMAND_EXPIRED";
+    let run = "continuous_engine";
+    let reserve_key = [
+        "okx".to_owned(),
+        "real".to_owned(),
+        "a".repeat(64),
+        run.to_owned(),
+        intent.to_owned(),
+    ].iter().map(|part| format!("{}:{part}", part.len())).collect::<String>();
+    db.execute(
+        "INSERT INTO account_meta(
+           singleton,account_key,installation_id,schema_version,
+           initialized_at,opening_source,initialize_operation_id,release_id)
+         VALUES(1,?1,?2,2,1,'source','init','release')",
+        params![&account, installation],
+    ).unwrap();
+    db.execute(
+        "INSERT INTO account_policy(
+           installation_id,account_key,singleton,revision,paused,
+           campaign_id,campaign_limit,campaign_loss)
+         VALUES(?1,?2,1,1,1,'campaign-X','100','0')",
+        params![installation, &account],
+    ).unwrap();
+    db.execute(
+        "INSERT INTO decisions(
+           installation_id,account_key,decision_id,instance_id,
+           decision_at,input_digest,policy_revision,code_version)
+         VALUES(?1,?2,'decision',NULL,1,'input',1,'fixture')",
+        params![installation, &account],
+    ).unwrap();
+    db.execute(
+        "INSERT INTO intents(
+           installation_id,account_key,intent_id,idempotency_key,request_hash,
+           decision_id,state,revision,client_order_id,deadline,plan_hash,
+           policy_revision,risk_increase,instrument_id,created_at,updated_at,
+           begin_post_at,exchange_order_id,incident)
+         VALUES(?1,?2,?3,'idempotency',?4,'decision',
+           'REJECTED',1,'client',1000,?5,1,1,'BTC-USDT-SWAP',1,2,
+           NULL,NULL,?6)",
+        params![installation, &account, intent, &request_hash, &plan, reason],
+    ).unwrap();
+    for (id,kind,result) in [
+        (format!("risk-reserve:{intent}"),"RISK_RESERVE_ATTEMPT",reserve_key.as_str()),
+        (format!("terminal:{intent}"),"REJECTED_UNSENT",reason),
+    ] {
+        db.execute(
+            "INSERT INTO operation_receipts(
+               installation_id,account_key,operation_id,kind,request_hash,result_ref,committed_at)
+             VALUES(?1,?2,?3,?4,?5,?6,2)",
+            params![installation, &account, id, kind, &request_hash, result],
+        ).unwrap();
+    }
+    let original = AccountStore::unsent_release_receipt_sql(
+        &db, Some(installation), &account, intent,
+    ).unwrap().unwrap();
+    let digest = format!("{:x}", sha2::Sha256::digest(serde_json::to_vec(&original).unwrap()));
+    let request = crate::account_worker::UnifiedFinanceBoundUnsent {
+        campaign: "campaign-X".into(),
+        reservation_key: reserve_key.clone(),
+        plan_sha256: plan.clone(),
+        expected_sequence: 0,
+        account_key: account.clone(),
+        intent_id: intent.into(),
+        request_hash: request_hash.clone(),
+        reason: reason.into(),
+        record_digest: digest,
+    };
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    let read = |r: &crate::account_worker::UnifiedFinanceBoundUnsent| {
+        crate::account_worker::original_bound_unsent_source_sql(
+            &tx, installation, r,
+        )
+    };
+    read(&request).unwrap();
+    let mut foreign = request.clone();
+    foreign.account_key = format!("okx:real:{}", "d".repeat(64));
+    assert!(read(&foreign).is_err());
+    let mut changed = request.clone();
+    changed.reason = "OTHER".into();
+    assert!(matches!(read(&changed), Err(StoreError::Invalid("UNIFIED_UNSENT_WIRE_SOURCE_CONFLICT"))));
+    changed = request.clone();
+    changed.record_digest = "f".repeat(64);
+    assert!(matches!(read(&changed), Err(StoreError::Invalid("UNIFIED_UNSENT_WIRE_SOURCE_CONFLICT"))));
+    changed = request.clone();
+    changed.plan_sha256 = "e".repeat(64);
+    assert!(matches!(read(&changed), Err(StoreError::Invalid("UNIFIED_UNSENT_WIRE_SOURCE_CONFLICT"))));
+    changed = request.clone();
+    changed.campaign = "campaign-Y".into();
+    assert!(matches!(read(&changed), Err(StoreError::Invalid("UNIFIED_UNSENT_ACCOUNT_CAMPAIGN_MISMATCH"))));
+    tx.rollback().unwrap();
+    // Read-only proof matching must never manufacture a risk tombstone or ACK.
+    assert_eq!(db.query_row::<i64,_,_>(
+        "SELECT COUNT(*) FROM risk_no_reserve", [], |row| row.get(0),
+    ).unwrap(),0);
+}
+
+#[test]
 fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_replay() {
     use rusqlite::{Connection, TransactionBehavior, params};
     let file = path();

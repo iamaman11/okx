@@ -3,7 +3,8 @@
 //! budget/venue grant. Trading mutations require independently accepted
 //! RB09 activation and a fully source-wired AccountStore/TradeService.
 use okx_execution::account_worker::{
-    UnifiedFinanceBoundSettlement, UnifiedFinanceHandle, UnifiedFinancePolicy,
+    UnifiedFinanceBoundSettlement, UnifiedFinanceBoundUnsent, UnifiedFinanceHandle,
+    UnifiedFinancePolicy,
     UnifiedFinancePolicyAccount,
 };
 use okx_protocol::account_governance::{AccountEnvironment, CentralGovernanceSnapshot};
@@ -248,9 +249,35 @@ impl NativeFinanceRisk {
                     None,
                 )
             }
+            RiskCommandAction::ReleaseUnsent {
+                reservation_key,
+                plan_sha256,
+                expected_risk_book_sequence,
+                proof,
+            } => {
+                // No claimed no-send source can be trusted over the wire:
+                // the same SQL owner re-reads ORIGINAL account terminal
+                // receipt, reserve attempt, immutable hash and campaign.
+                let receipt = self.owner.release_bound_unsent(UnifiedFinanceBoundUnsent {
+                    campaign: self.campaign.clone(),
+                    reservation_key: reservation_key.clone(),
+                    plan_sha256: plan_sha256.clone(),
+                    expected_sequence: *expected_risk_book_sequence,
+                    account_key: proof.account_key.clone(),
+                    intent_id: proof.intent_id.clone(),
+                    request_hash: proof.request_hash.clone(),
+                    reason: proof.reason.clone(),
+                    record_digest: proof.record_digest.clone(),
+                }).await.map_err(|error| match error {
+                    okx_execution::StoreError::Invalid(reason) => reason,
+                    _ => "NATIVE_RISK_UNSENT_OWNER_UNAVAILABLE",
+                })?;
+                base(RiskDecisionStatus::Updated, None,
+                    Some(receipt.reservation_key), Some(receipt.book_sequence),
+                    Some(receipt.policy_revision), None, None, None)
+            }
             RiskCommandAction::InstallEntryOpening { .. }
             | RiskCommandAction::Reserve { .. }
-            | RiskCommandAction::ReleaseUnsent { .. }
             | RiskCommandAction::BeginPost { .. }
             | RiskCommandAction::Resolve { .. } => {
                 return Err("FINANCE_CUTOVER_NOT_ACCEPTED");

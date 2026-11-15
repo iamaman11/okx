@@ -1,3 +1,25 @@
+## #510 — source-bound native ReleaseUnsent
+
+Native `RiskCommandAction::ReleaseUnsent` is now mapped to the existing sole
+`UnifiedFinanceHandle` financial transaction (never to Cloudflare in local
+mode). The untrusted wire's no-send proof is matched against the ORIGINAL
+AccountStore `REJECTED_UNSENT`, pre-POST state, durable reserve-attempt
+receipt and precise campaign/account/intent/plan/request hash. The original
+`UnsentSqlProof::from_account_receipt` canonical JSON SHA-256 is checked;
+no caller flag can mint a no-send fact. The ORIGINAL RiskBook native
+`release_unsent_unified_native` then independently reads that same original
+source and applies the release or no-reserve fence with ONE SQLite COMMIT.
+The exact output maps to `RiskResult::Updated`; never a venue POST grant.
+
+Direct SQL tests prove a genuine no-send address; foreign account/campaign,
+altered plan, reason or record digest are all rejected. Exact original SQL
+reader is reused; no duplicate financial/no-send state machine is built.
+Current import's `OFFLINE_NOT_AUTHORIZED` still denies actual financial
+COMMIT before mutation. Source producers for original AccountStore remain
+an outstanding part of complete production cutover, as does RB09.
+
+---
+
 ## #510 — original AccountStore source-bound SettleEntry ingress
 
 The canonical native RiskCommand `SettleEntry` now forwards its exact
