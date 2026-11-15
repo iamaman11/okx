@@ -13423,6 +13423,19 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert_eq!(a_read.active_reservations, 1);
     assert_eq!(a_read.reserved_loss_usdt, "1");
     assert_eq!(a_read.reserved_loss_usd, "1");
+    // This is the PUBLIC, read-only projection consumed by the new native
+    // stopped-finance CLI. It reads the same imported original RiskBook rows.
+    let public_a = owner
+        .stopped_account_summary("campaign-X".into(), a_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(public_a.account_key, a_key);
+    assert_eq!(public_a.active_reservations, 1);
+    assert_eq!(public_a.reserved_loss_usdt, "1");
+    assert_eq!(
+        serde_json::to_value(&public_a).unwrap()["cumulative_loss_usd"],
+        a_read.cumulative_loss_usd
+    );
     let b_read = owner
         .account_summary("campaign-X".into(), b_key.clone())
         .await
@@ -13431,6 +13444,13 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert_eq!(b_read.active_reservations, 0);
     assert_eq!(b_read.reserved_loss_usdt, "0");
     assert_eq!(b_read.reserved_loss_usd, "0");
+    let public_b = owner
+        .stopped_account_summary("campaign-X".into(), b_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(public_b.active_reservations, 0);
+    assert_eq!(public_b.reserved_loss_usdt, "0");
+    assert_ne!(public_a.account_key, public_b.account_key);
     assert!(matches!(
         owner
             .account_summary("campaign-X".into(), "acct-A".into())
@@ -13458,6 +13478,21 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert_eq!(held.state, okx_kernel::risk::model::RiskEntryState::Held);
     assert_eq!(held.reservation_sequence, 1);
     assert_eq!(held.current_book_sequence, 2);
+    let public_held = owner
+        .stopped_inspect_reservation(
+            "campaign-X".into(),
+            "same-reservation".into(),
+            ai.plan_hash.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(public_held.state, "HELD");
+    assert_eq!(public_held.reservation_sequence, held.reservation_sequence);
+    assert_eq!(
+        serde_json::to_value(&public_held).unwrap()["state"],
+        "HELD"
+    );
     let unsent = owner
         .inspect_reservation(
             "campaign-X".into(),
@@ -13472,6 +13507,17 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         okx_kernel::risk::model::RiskEntryState::Released
     );
     assert_eq!(unsent.reservation_sequence, 2);
+    let public_unsent = owner
+        .stopped_inspect_reservation(
+            "campaign-X".into(),
+            "same-unsent".into(),
+            bi.plan_hash.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(public_unsent.state, "RELEASED");
+    assert_eq!(public_unsent.reservation_sequence, 2);
     assert!(
         owner
             .inspect_reservation(
@@ -13493,6 +13539,18 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
             .await
             .unwrap()
             .is_none()
+    );
+    assert!(
+        owner
+            .stopped_inspect_reservation(
+                "campaign-X".into(),
+                "same-reservation".into(),
+                "b".repeat(64)
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "wrong immutable plan must remain UNKNOWN to the external adapter"
     );
     assert!(matches!(
         owner
