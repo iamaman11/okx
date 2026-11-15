@@ -11,6 +11,8 @@ use rusqlite::{
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, path::Path};
 
+#[path = "unified_import_frontiers.rs"]
+mod frontiers;
 /// Same 29 canonical account-v2 tables plus 10 source-owned derived tables.
 /// Compare against the physical old source on EVERY import: new unlisted
 /// obligations must fail closed instead of being lost during normalization.
@@ -163,7 +165,7 @@ fn target_content_digest(
     campaigns: &BTreeSet<String>,
 ) -> StoreResult<String> {
     let mut hash = Sha256::new();
-    frame(&mut hash, b"okx-finance-content-r4-v1");
+    frame(&mut hash, b"okx-finance-content-r4-v2");
     frame(&mut hash, installation.as_bytes());
     for (kind, names, scope_column, tables) in [
         (b'A', accounts, "account_key", &ORIGINAL_ACCOUNT_TABLES[..]),
@@ -184,9 +186,13 @@ fn target_content_digest(
                 for col in &cols {
                     frame(&mut hash, col.as_bytes());
                 }
-                let projected = cols.iter().map(|c| quote(c)).collect::<Vec<_>>().join(",");
-                // Order by the COMPLETE row, rather than rowid, to ignore
-                // SQLite page allocation and retain duplicate rows.
+                let mut projected = cols.iter().map(|c| quote(c)).collect::<Vec<_>>().join(",");
+                let frontier_rows = frontiers::references_rowid(table);
+                if frontier_rows {
+                    projected = format!("rowid,{projected}");
+                }
+                // Referenced rowids are part of the content contract. Other tables
+                // remain ordered by the complete logical row, independent of pages.
                 let query = format!(
                     "SELECT {projected} FROM {} WHERE installation_id=?1 AND {}=?2
                      ORDER BY {projected}",
@@ -198,7 +204,7 @@ fn target_content_digest(
                 let mut row_count = 0_u64;
                 while let Some(row) = rows.next()? {
                     hash.update([0x52]);
-                    for index in 0..cols.len() {
+                    for index in 0..cols.len() + usize::from(frontier_rows) {
                         hash_value(&mut hash, row.get::<_, Value>(index)?);
                     }
                     row_count = row_count
@@ -405,8 +411,9 @@ fn verify_original_campaign(source: &Connection, installation: &str) -> StoreRes
     Ok(campaign)
 }
 
-/// Copy exact original SQLite column values, adding only the missing
-/// installation/account or installation/campaign namespace columns.
+/// Copy original source facts and add missing namespace columns.
+/// Mutable rowid scan frontiers are translated to the same economic prefix
+/// after copying; monetary facts, identities and immutable receipts are unchanged.
 /// SQL foreign keys, immutable monetary values and legacy IDs are preserved.
 fn copy_one_scope(
     source: &Connection,
@@ -433,7 +440,7 @@ fn copy_one_scope(
             return Err(StoreError::Invalid("UNIFIED_LEGACY_SCHEMA_NOT_LOSSLESS"));
         }
         let query = format!(
-            "SELECT {} FROM {}",
+            "SELECT {} FROM {} ORDER BY rowid",
             source_cols
                 .iter()
                 .map(|c| quote(c))
@@ -502,6 +509,9 @@ fn copy_one_scope(
                     .map_err(|_| StoreError::Invalid("UNIFIED_LEGACY_ROW_COUNT_OVERFLOW"))?,
             )
             .ok_or(StoreError::Invalid("UNIFIED_LEGACY_ROW_COUNT_OVERFLOW"))?;
+    }
+    if scope_column == "account_key" {
+        frontiers::rebase(source, tx, installation, scope)?;
     }
     Ok(imported)
 }

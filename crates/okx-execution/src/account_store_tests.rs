@@ -11214,6 +11214,35 @@ fn risk_book_contract_unified_full_original_account_import_two_accounts() {
     let two = intent(&mut b);
     assert_eq!(one.intent_id, two.intent_id);
     assert_eq!(one.plan_hash, two.plan_hash);
+    for source in [&mut a, &mut b] {
+        source
+            .ingest_page(&IngestPage {
+                finance: (1..=2)
+                    .map(|n| FinanceEntry {
+                        entry_id: format!("fee-{n}"),
+                        economic_event_key: format!("event-{n}"),
+                        component: "FEE".into(),
+                        allocation_leg: "account".into(),
+                        amount: -Decimal::ONE,
+                        currency: "USDT".into(),
+                        instance_id: Some("manual".into()),
+                        source_ref: format!("bill:{n}"),
+                        time: n,
+                        reverses_entry_id: None,
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .unwrap();
+        source.connection.execute("INSERT INTO campaign_entry_readiness(campaign_id,from_ms,covered_through_ms,source_revision,source_generations,reviewed_finance_rowid) VALUES('campaign-X',1,2,0,'fixture',1)",[]).unwrap();
+    }
+    // B has a partial, NOT sealed original history. Import must retain that.
+    b.connection
+        .execute(
+            "UPDATE source_cursors SET watermark=1 WHERE source='finance_provenance'",
+            [],
+        )
+        .unwrap();
     let a_path = a.path.clone();
     let b_path = b.path.clone();
     drop(a);
@@ -11232,6 +11261,32 @@ fn risk_book_contract_unified_full_original_account_import_two_accounts() {
             &[&sa, &sb],
         )
         .unwrap();
+    assert!(
+        AccountStore::finance_proof_sealed_sql(&unified, Some(("installation", "acct-A"))).unwrap()
+    );
+    assert!(
+        !AccountStore::finance_proof_sealed_sql(&unified, Some(("installation", "acct-B")))
+            .unwrap()
+    );
+    for account in ["acct-A", "acct-B"] {
+        let first:i64=unified.query_row("SELECT rowid FROM finance_entries WHERE installation_id='installation' AND account_key=?1 AND entry_id='fee-1'",[account],|r|r.get(0)).unwrap();
+        let reviewed:i64=unified.query_row("SELECT reviewed_finance_rowid FROM campaign_entry_readiness WHERE installation_id='installation' AND account_key=?1",[account],|r|r.get(0)).unwrap();
+        assert_eq!(
+            reviewed, first,
+            "frontier must refer to the same original economic prefix"
+        );
+        if account == "acct-B" {
+            assert!(
+                first > 1,
+                "the regression requires reassigned physical rowids"
+            );
+            assert_eq!(
+                AccountStore::provenance_watermark_sql(&unified, Some(("installation", account)))
+                    .unwrap(),
+                Some(first)
+            );
+        }
+    }
     assert_eq!(outcome.accounts, 2);
     assert_eq!(outcome.tables_per_account, 39);
     assert!(
@@ -11307,6 +11362,60 @@ fn risk_book_contract_unified_full_original_account_import_two_accounts() {
         )
         .unwrap();
     assert_eq!(count, 2);
+    drop(reopened);
+    // The same shifted B rowids must also preserve a fully sealed source.
+    let source_writer = Connection::open(&b_path).unwrap();
+    source_writer
+        .execute(
+            "UPDATE source_cursors SET watermark=2 WHERE source='finance_provenance'",
+            [],
+        )
+        .unwrap();
+    let import_again = |mark: i64| {
+        source_writer
+            .execute(
+                "UPDATE source_cursors SET watermark=?1 WHERE source='finance_provenance'",
+                [mark],
+            )
+            .unwrap();
+        let file = path();
+        let mut db = Connection::open(file).unwrap();
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
+        db.pragma_update(None, "synchronous", "FULL").unwrap();
+        db.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let result =
+            super::sql::unified_financial::importer::import_stopped_accounts_into_empty_finance(
+                &mut db,
+                "installation",
+                &[&sa, &sb],
+            );
+        (db, result)
+    };
+    let (sealed, result) = import_again(2);
+    result.unwrap();
+    assert!(
+        AccountStore::finance_proof_sealed_sql(&sealed, Some(("installation", "acct-B"))).unwrap()
+    );
+    assert_eq!(
+        AccountStore::provenance_watermark_sql(&sealed, Some(("installation", "acct-B"))).unwrap(),
+        Some(4)
+    );
+    let (invalid, result) = import_again(99);
+    assert!(matches!(
+        result,
+        Err(StoreError::Invalid("UNIFIED_IMPORT_FRONTIER_OUT_OF_RANGE"))
+    ));
+    assert_eq!(
+        invalid
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+        0,
+        "failed translation must roll back the whole import"
+    );
     let _ = std::fs::remove_file(&destination);
 }
 

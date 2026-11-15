@@ -1,3 +1,31 @@
+## #510 - translate original rowid frontiers during unified import
+
+The stopped importer now copies rows in original rowid order, then translates
+mutable readiness frontiers for fills/bills/operation_receipts/finance_entries/
+cash_flows and finance_provenance watermark to the same account-local source
+prefix in target rowids. Original monetary facts, IDs and immutable receipts
+are not rewritten. Nonpositive source rowids, target order mismatch or a
+frontier outside original history reject and roll back the entire import.
+
+Direct original two-account import regression now has identical financial
+entry IDs and shifted B target rowids. It proves a partial source stays
+partial, a fully sealed B stays sealed, reviewed prefix still refers to the
+same event, and an impossible watermark rejects with no target tables left.
+Full library import/crash/reopen regressions still pass.
+
+The content digest uses r4-v2 and includes referenced rowids, since they now
+carry persisted frontier semantics. Older OFFLINE candidate manifests are
+not silently accepted under the new digest; isolated re-import is required.
+No installed database/manifest was edited. This resolves the known mutable
+frontier mapping blocker recorded in the preceding checkpoint, not the
+remaining native activation/full page/capture and RB01-RB16 acceptance.
+
+Local native Windows: complete execution library 258 PASS, 0 FAIL, 2 ignored
+(6.16s after build); Agent all-target check PASS; architecture/negative tests,
+format and diff PASS. No 26/26 or trading activation claimed.
+
+---
+
 ## #510 - scoped cursor and provenance transaction operations
 
 Original cursor/provenance callers now delegate to shared AccountStore SQL
