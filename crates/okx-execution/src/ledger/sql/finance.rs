@@ -4472,44 +4472,7 @@ impl AccountStore {
             return Err(StoreError::Invalid("FINANCE_PROVENANCE_CURSOR_INTERNAL"));
         }
         let finance_rowid_before = finance_rowid(&tx)?;
-        for f in &page.fills {
-            if f.qty <= Decimal::ZERO || f.price <= Decimal::ZERO || f.currency.is_empty() {
-                return Err(StoreError::Invalid("INVALID_FILL"));
-            }
-            f.qty
-                .checked_mul(f.price)
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            let inserted=tx.execute("INSERT INTO fills VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(instrument_id,trade_id,exchange_order_id) DO NOTHING",params![f.fill_id,f.instrument_id,f.trade_id,f.exchange_order_id,f.intent_id,f.time,exact(f.qty),exact(f.price),exact(f.fee),f.currency,f.side])?;
-            if inserted == 1 {
-                tx.execute(
-                    "INSERT INTO fill_projection_pending VALUES(?1,?2)",
-                    params![f.fill_id, f.side],
-                )?;
-            }
-            // The exchange (instrument,trade,order) key identifies one
-            // immutable fill. Its time, side and intent ownership are as
-            // material to positions/finance as its quantity, price and fee.
-            let old: (String, Option<String>, i64, String, String, String, String, String) =
-                tx.query_row(
-                    "SELECT fill_id,intent_id,time,side,qty,price,fee,currency FROM fills WHERE instrument_id=?1 AND trade_id=?2 AND exchange_order_id=?3",
-                    params![f.instrument_id, f.trade_id, f.exchange_order_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
-                )?;
-            if old
-                != (
-                    f.fill_id.clone(),
-                    f.intent_id.clone(),
-                    f.time,
-                    f.side.clone(),
-                    exact(f.qty),
-                    exact(f.price),
-                    exact(f.fee),
-                    f.currency.clone(),
-                )
-            {
-                return Err(StoreError::Invalid("IMMUTABLE_FILL_CONFLICT"));
-            }
-        }
+        Self::record_source_fills_sql(&tx, None, &page.fills)?;
         // SWAP source labels and the page frontier commit atomically.
         // Conflicting replays never advance the source cursor.
         for source in &page.swap_fill_sources {

@@ -13167,6 +13167,116 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         &[&sc],
     )
     .unwrap();
+    {
+        use crate::account_worker::{
+            UnifiedFinanceWrite, UnifiedFinanceWriteReceipt,
+            apply_original_unified_finance_transaction as dispatch,
+        };
+        let tx = target.transaction().unwrap();
+        let raw = Fill {
+            fill_id: "same-raw-fill".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            trade_id: "same-raw-trade".into(),
+            exchange_order_id: "same-raw-order".into(),
+            intent_id: None,
+            time: 6,
+            qty: Decimal::ONE,
+            price: Decimal::from(5),
+            fee: Decimal::ZERO,
+            currency: "USDT".into(),
+            side: "buy".into(),
+        };
+        for account in [&a_key, &b_key] {
+            for _ in 0..2 {
+                assert!(matches!(
+                    dispatch(
+                        &tx,
+                        "installation",
+                        UnifiedFinanceWrite::RecordSourceFills {
+                            account: account.clone(),
+                            fills: vec![raw.clone()]
+                        }
+                    )
+                    .unwrap(),
+                    UnifiedFinanceWriteReceipt::SourceFillsRecorded
+                ));
+            }
+        }
+        assert_eq!(
+            tx.query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM fills WHERE fill_id='same-raw-fill'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            tx.query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM fill_projection_pending WHERE fill_id='same-raw-fill'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            2
+        );
+        let mut conflict = raw.clone();
+        conflict.fee = Decimal::ONE;
+        assert!(matches!(
+            dispatch(
+                &tx,
+                "installation",
+                UnifiedFinanceWrite::RecordSourceFills {
+                    account: a_key.clone(),
+                    fills: vec![conflict]
+                }
+            ),
+            Err(StoreError::Invalid("IMMUTABLE_FILL_CONFLICT"))
+        ));
+        let mut first = raw.clone();
+        first.fill_id = "rollback-fill".into();
+        first.trade_id = "rollback-trade".into();
+        let mut invalid = raw.clone();
+        invalid.qty = Decimal::ZERO;
+        assert!(matches!(
+            dispatch(
+                &tx,
+                "installation",
+                UnifiedFinanceWrite::RecordSourceFills {
+                    account: a_key.clone(),
+                    fills: vec![first, invalid]
+                }
+            ),
+            Err(StoreError::Invalid("INVALID_FILL"))
+        ));
+        assert_eq!(
+            tx.query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM fills WHERE fill_id='rollback-fill'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            AccountStore::source_generation_base_sql(&tx, Some(("installation", &a_key))).unwrap(),
+            5,
+            "raw source storage must not advance coverage"
+        );
+        assert!(matches!(
+            dispatch(
+                &tx,
+                "foreign-installation",
+                UnifiedFinanceWrite::RecordSourceFills {
+                    account: a_key.clone(),
+                    fills: vec![raw]
+                }
+            ),
+            Err(StoreError::Invalid("UNIFIED_SOURCE_ACCOUNT_NOT_FOUND"))
+        ));
+        // The real stopped import cannot be activated by a source-storage witness.
+        tx.rollback().unwrap();
+    }
     drop(target);
     drop(sa);
     drop(sb);

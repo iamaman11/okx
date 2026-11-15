@@ -1,3 +1,27 @@
+## #510 - shared immutable source-fill storage
+
+Original ingest_page_observed and the unified RecordSourceFills dispatcher
+now use one AccountStore::record_source_fills_sql implementation. It validates
+positive quantity/price, overflow and immutable economic identity, writes the
+original fills and fill_projection_pending tables, and scopes unified SQL by
+installation/account. No coverage cursor, financial total or settlement grant
+is changed by this operation. The public unified owner method uses the same
+activation gate and single commit as other writes; stopped imports still deny.
+
+Original imported-table witness: identical venue IDs on A/B remain separate;
+exact replay yields two fills/two pending rows total; altered fee conflicts;
+a later invalid fill rolls back an earlier fill via the original dispatcher
+savepoint; foreign installation fails; generation remains unchanged. The
+witness rolls back to preserve the sealed offline import. It does not claim
+accepted activation or full source-page/producer wiring.
+
+Local native Windows full execution regression: 258 PASS, 0 FAIL, 2 ignored,
+6.51s after build. Direct original-import witness PASS (0.43s); architecture
+and negative self-test PASS. Complete ingestion, source provenance/finance
+projection and observer startup wiring remain outstanding before RB01-RB16.
+
+---
+
 ## #510 - original account source cursors through unified finance owner
 
 Production UnifiedFinanceHandle now reads source_generation_base(account)

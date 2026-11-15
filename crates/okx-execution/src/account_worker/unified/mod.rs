@@ -103,6 +103,10 @@ pub struct UnifiedFinanceBoundSettlementReceipt {
 
 #[derive(Debug, Clone)]
 pub(crate) enum UnifiedFinanceWrite {
+    RecordSourceFills {
+        account: String,
+        fills: Vec<crate::Fill>,
+    },
     /// The original AccountStore decision, immutable plan and intent are
     /// persisted under the same installation writer as subsequent RiskBook
     /// commands. An idempotent replay returns the FIRST stored identity.
@@ -183,6 +187,7 @@ pub(crate) enum UnifiedFinanceWriteReceipt {
     Risk(crate::risk::UnifiedRiskDecision),
     Recovered { changed: usize },
     OutcomeRecorded,
+    SourceFillsRecorded,
     BoundEntrySettled(UnifiedFinanceBoundSettlementReceipt),
     BoundUnsentReleased(UnifiedFinanceBoundUnsentReceipt),
 }

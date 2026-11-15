@@ -206,6 +206,24 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    /// Store raw authenticated-source fills and pending projection atomically.
+    /// Coverage is advanced only by complete page ingestion, never here.
+    pub async fn record_source_fills(
+        &self,
+        account: String,
+        fills: Vec<crate::Fill>,
+    ) -> StoreResult<()> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::RecordSourceFills { account, fills })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::SourceFillsRecorded => Ok(()),
+            _ => Err(StoreError::Invalid(
+                "UNIFIED_SOURCE_FILL_RECEIPT_UNEXPECTED",
+            )),
+        }
+    }
+
     /// The original AccountStore account-policies and RiskBook revision are
     /// one local transaction. No per-account owner, second COMMIT or Cloudflare
     /// finance write. Before accepted RB09 this remains strictly fail-closed.
