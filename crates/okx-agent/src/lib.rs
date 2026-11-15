@@ -23,8 +23,8 @@ pub mod source_capture;
 pub mod storage_commands;
 pub mod trade_service;
 
-pub mod risk_bridge;
 pub mod native_finance_risk;
+pub mod risk_bridge;
 
 pub mod runtime;
 

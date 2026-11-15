@@ -113,11 +113,9 @@ pub(super) fn account_readback(
     } else {
         "SELECT COALESCE(MAX(held_at_ms),0) FROM risk_entries WHERE account_key=?1"
     };
-    let activity: i64 = tx.query_row(
-        activity_sql,
-        params_from_iter(values.iter()),
-        |row| row.get(0),
-    )?;
+    let activity: i64 = tx.query_row(activity_sql, params_from_iter(values.iter()), |row| {
+        row.get(0)
+    })?;
     let latest_activity_ms = u64::try_from(activity)
         .map_err(|_| RiskStoreError::Corrupt("RISK_ACTIVITY_TIME_INVALID"))?;
     if count > 0 && latest_activity_ms == 0 {

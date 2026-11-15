@@ -22,12 +22,16 @@ enum RiskRoute {
 }
 impl NativeRiskClient {
     pub fn new(tx: mpsc::Sender<OutboundRiskCommand>) -> Self {
-        Self { route: RiskRoute::Cloudflare(tx) }
+        Self {
+            route: RiskRoute::Cloudflare(tx),
+        }
     }
     /// Dedicated single-writer native route. No shadow Cloudflare risk call
     /// or independent SQL owner; installation mode selection is exclusive.
     pub fn local(backend: crate::native_finance_risk::NativeFinanceRisk) -> Self {
-        Self { route: RiskRoute::Local(backend) }
+        Self {
+            route: RiskRoute::Local(backend),
+        }
     }
     pub async fn request(&self, command: RiskCommand) -> Result<RiskResult, &'static str> {
         if !command.valid() {
@@ -39,12 +43,11 @@ impl NativeRiskClient {
         };
         let id = command.command_id.clone();
         let (reply, rx) = oneshot::channel();
-        tx
-            .try_send(OutboundRiskCommand {
-                command,
-                return_to: reply,
-            })
-            .map_err(|_| "RISK_TRANSPORT_UNAVAILABLE")?;
+        tx.try_send(OutboundRiskCommand {
+            command,
+            return_to: reply,
+        })
+        .map_err(|_| "RISK_TRANSPORT_UNAVAILABLE")?;
         let response = tokio::time::timeout(Duration::from_secs(5), rx)
             .await
             .map_err(|_| "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY")?
