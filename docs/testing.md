@@ -1,3 +1,50 @@
+## #510 - shared strategy valuation and conserved capital operations
+
+Original AccountStore now delegates to explicit SQL modules: source_capital
+(principal/current or historical as-of), source_valuation_finance (bounded
+current totals and historical filtered fold), source_strategy_valuation
+(source/position/FX reconciliation), source_strategy_nav (immutable revisions,
+NAV and receipts), source_capital_assignment (two conserved governance legs).
+Source identity/receipt decoders are shared, not replaced with trust flags.
+All unified queries and joins bind installation/account scope explicitly.
+
+CommitStrategyNav runs reconciliation, receipt/NAV publication and the coverage
+cursor under the installation command transaction. Its cursor must name the
+strategy valuation stream, exact as-of and account snapshot generation.
+AssignCapital keeps account identity, source NAV, policy revision, available
+principal, chronological assignment and idempotency checks in the SAME write
+transaction as both opposite economic legs, totals, provenance and receipt.
+Neither command reserves venue risk or creates strategy risk highwater.
+Public Native APIs remain behind the unchanged activation gate.
+
+Direct strategy witness: same IDs on two accounts with different entry prices
+and principal. Exact original results match, including 0.1/0.2 unrealized PnL.
+A later capital assignment is excluded from historical as-of principal; filtered
+SQL parameters, stale NAV, recovery isolation, foreign evidence, missing mark/FX,
+wrong cursor, pending foreign projection and event-time revision are checked.
+Cursor failure after tentative NAV/receipt inserts rolls back both. Replays and
+COMMIT/reopen preserve exactly two NAV points/receipts per account, no highwater.
+
+Direct capital witness: A receives +3 to principal 28; B releases -7 to 38,
+with the same operation ID. Foreign identity, stale policy, backdating,
+over-assignment and over-release reject. A test-only temporary SQL trigger
+rejects the final receipt AFTER both legs/totals: original finance frontier,
+principal and receipt absence are unchanged. Replay writes no extra legs;
+changed request hash conflicts; account net capital stays zero, provenance
+sealed and historical principal 20/40 survives COMMIT/reopen.
+
+Windows execution library: 269 PASS, 0 FAIL, 2 ignored, 8.02s after build.
+Each new direct witness passed in 0.22s before additional strategy assertions;
+those pass in the full regression. Full 26x, RB01-RB16, P95 and cutover acceptance
+are NOT established by these unit/SQL results. Source facts/auth receipts in
+fixtures are synthetic and do not prove live producer authorization.
+
+Remaining: user-facing NAV/report queries and other original AccountStore
+producers, new-owner AccountResources composition, four Native risk actions,
+authenticated activation/old Cloudflare financial path removal and final
+same-SHA acceptance. Native strategy/capital commands are implemented, but the
+production Agent composition still selects the legacy AccountStoreHandle.
+
 ## #510 - shared account NAV arithmetic and atomic scoped projection
 
 The collector now calls build_account_nav_page in okx-execution instead of

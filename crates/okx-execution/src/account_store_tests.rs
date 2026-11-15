@@ -1,5 +1,7 @@
 #[path = "account_store_attribution_tests.rs"]
 mod attribution;
+#[path = "account_capital_assignment_contract_tests.rs"]
+mod capital_assignment_contracts;
 #[path = "account_captured_bill_contract_tests.rs"]
 mod captured_bill_contracts;
 #[path = "account_captured_fill_contract_tests.rs"]
@@ -16,6 +18,8 @@ mod nav_projection_contracts;
 mod raw_sources;
 #[path = "account_page_contract_tests.rs"]
 mod source_pages;
+#[path = "account_strategy_nav_contract_tests.rs"]
+mod strategy_nav_contracts;
 #[path = "account_store_terminal_diagnostic_tests.rs"]
 mod terminal_diagnostics;
 #[path = "account_usd_page_contract_tests.rs"]

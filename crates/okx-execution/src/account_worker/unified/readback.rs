@@ -6,6 +6,25 @@ use super::{
 };
 use crate::{AccountStore, StoreError, StoreResult};
 impl UnifiedFinanceHandle {
+    /// Committed account-backed principal; never a reserve or venue-send grant.
+    pub async fn capital_state(
+        &self,
+        account: String,
+        now: i64,
+        deadline: std::time::Instant,
+    ) -> StoreResult<crate::AccountCapitalState> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let scope = Some((installation.as_str(), account.as_str()));
+            let latest = AccountStore::latest_capital_assignment_time_sql(&tx, scope)?;
+            let state = AccountStore::capital_state_sql(&tx, scope, now, latest)?;
+            tx.commit()?;
+            Ok(state)
+        })
+        .await
+    }
+
     /// Scoped source identity read. The result is not an ownership assertion
     /// for a later mutation; the page/operation still validates its sources.
     pub async fn source_order_owner(

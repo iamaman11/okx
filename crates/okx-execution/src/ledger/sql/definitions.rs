@@ -53,12 +53,7 @@ fn manual_instance(budget: Decimal) -> StrategyInstance {
 
 impl AccountStore {
     pub fn instance(&self, id: &str) -> StoreResult<Option<StrategyInstance>> {
-        let row=self.connection.query_row("SELECT instance_id,definition_id,definition_version,parameters,enabled,policy_revision,budget,last_decision_key FROM strategy_instances WHERE instance_id=?1",[id],|r|Ok((StrategyInstance{instance_id:r.get(0)?,definition_id:r.get(1)?,definition_version:r.get(2)?,parameters:r.get(3)?,enabled:r.get(4)?,policy_revision:r.get(5)?,budget:Decimal::ZERO,last_decision_key:r.get(7)?},r.get::<_,String>(6)?))).optional()?;
-        row.map(|(mut instance, budget)| {
-            instance.budget = decimal(budget)?;
-            Ok(instance)
-        })
-        .transpose()
+        Self::instance_sql(&self.connection, None, id)
     }
     pub fn strategy_definition(&self, instance_id: &str) -> StoreResult<StrategyDefinitionVersion> {
         Ok(self.connection.query_row("SELECT v.definition_id,v.version,v.parameters,v.parameters_digest,v.created_at FROM strategy_instances i JOIN strategy_definition_versions v ON v.definition_id=i.definition_id AND v.version=i.definition_version AND v.parameters_digest=i.parameters_digest WHERE i.instance_id=?1",[instance_id],|r|Ok(StrategyDefinitionVersion{definition_id:r.get(0)?,version:r.get(1)?,parameters:r.get(2)?,parameters_digest:r.get(3)?,created_at:r.get(4)?}))?)

@@ -2557,115 +2557,15 @@ impl AccountStore {
     /// Account-backed principal, never PnL or independently priced strategy NAV.
     /// All returned balances are exact USD decimals within this AccountStore.
     pub fn capital_state(&self, now: i64) -> StoreResult<AccountCapitalState> {
-        let (nav,nav_time,coverage,source):(String,i64,String,String)=self.connection.query_row(
-            "SELECT equity,time,coverage,mark_source FROM nav_points WHERE scope_id='account' AND currency='USD' AND time<=?1 ORDER BY time DESC,source_version DESC LIMIT 1",
-            [now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
-        ).optional()?.ok_or(StoreError::Invalid("ACCOUNT_NAV_SOURCE_MISSING"))?;
-        let recovering: i64 = self.connection.query_row(
-            "SELECT requires_reconcile FROM storage_recovery WHERE singleton=1",
-            [],
-            |r| r.get(0),
-        )?;
-        if coverage != "COMPLETE" || now < nav_time || now - nav_time > 5000 || recovering != 0 {
-            return Err(StoreError::Invalid(
-                "ACCOUNT_CAPITAL_SOURCE_INCOMPLETE_OR_STALE",
-            ));
-        }
-        let account_nav = decimal(nav)?;
-        if account_nav < Decimal::ZERO {
-            return Err(StoreError::Invalid("ACCOUNT_NAV_NEGATIVE"));
-        }
-        // instance_finance_totals is a CURRENT projection, not an as-of
-        // balance. A later allocation must never appear as historical money.
-        // Use the fast projection at the latest point; only historical reads
-        // replay the already-immutable, source-backed assignment legs.
-        // Immutable finance history belongs on disk, but its latest
-        // assignment timestamp need not be scanned at every NAV cycle.
         let cached_assignment = *self.latest_capital_assignment_time.borrow();
         let latest_assignment = if let Some(cached) = cached_assignment {
             cached
         } else {
-            let loaded: Option<i64> = self.connection.query_row(
-                "SELECT MAX(time) FROM finance_entries WHERE component='INTERNAL_CAPITAL_USD'",
-                [],
-                |r| r.get(0),
-            )?;
+            let loaded = Self::latest_capital_assignment_time_sql(&self.connection, None)?;
             *self.latest_capital_assignment_time.borrow_mut() = Some(loaded);
             loaded
         };
-        let historical = latest_assignment.is_some_and(|last| now < last);
-        let sql = if historical {
-            "SELECT instance_id,amount FROM finance_entries
-             WHERE component='INTERNAL_CAPITAL_USD' AND currency='USD'
-               AND instance_id IS NOT NULL AND time<=?1
-             ORDER BY time,entry_id"
-        } else {
-            "SELECT instance_id,amount FROM instance_finance_totals
-             WHERE currency='USD' AND component='INTERNAL_CAPITAL_USD'
-             ORDER BY instance_id"
-        };
-        let mut query = self.connection.prepare(sql)?;
-        let mut rows = if historical {
-            query.query([now])?
-        } else {
-            query.query([])?
-        };
-        let mut principals = std::collections::BTreeMap::new();
-        let mut assigned = Decimal::ZERO;
-        while let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
-            let amount = decimal(row.get(1)?)?;
-            let next = principals
-                .get(&id)
-                .copied()
-                .unwrap_or(Decimal::ZERO)
-                .checked_add(amount)
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            if id == "manual" || next < Decimal::ZERO {
-                return Err(StoreError::Invalid("INTERNAL_CAPITAL_CORRUPT"));
-            }
-            principals.insert(id, next);
-            assigned = assigned
-                .checked_add(amount)
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            if principals.len() > 64 {
-                return Err(StoreError::Invalid("CAPITAL_SCOPE_LIMIT"));
-            }
-        }
-        let residual = account_nav
-            .checked_sub(assigned)
-            .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-        // The residual includes economic returns until complete per-owner
-        // valuation exists. It must never be presented as trading PnL.
-        // Known venue losses can reduce equity below previously assigned
-        // principal. Report the deficit, but allow safe deallocation to repair it.
-        let under_collateralized = residual < Decimal::ZERO;
-        let total:String=self.connection.query_row(
-            "SELECT amount FROM finance_totals WHERE currency='USD' AND component='INTERNAL_CAPITAL_USD'",
-            [],|r|r.get(0)
-        ).optional()?.unwrap_or_else(||"0".into());
-        if decimal(total)? != Decimal::ZERO {
-            return Err(StoreError::Invalid("INTERNAL_CAPITAL_NOT_CONSERVED"));
-        }
-        Ok(AccountCapitalState {
-            account_nav_usd: account_nav,
-            assigned_usd: assigned,
-            unattributed_residual_usd: residual,
-            strategy_principal_usd: principals,
-            nav_source_as_of: nav_time,
-            nav_source_ref: source,
-            coverage: if under_collateralized {
-                "PARTIAL"
-            } else {
-                "COMPLETE"
-            }
-            .into(),
-            reason_code: if under_collateralized {
-                Some("ACCOUNT_CAPITAL_OVERASSIGNED".into())
-            } else {
-                None
-            },
-        })
+        Self::capital_state_sql(&self.connection, None, now, latest_assignment)
     }
 
     /// One-time existing-v2 migration fence. No second database or schema
@@ -2712,27 +2612,6 @@ impl AccountStore {
         Ok(())
     }
 
-    /// Bounded by current (instance,currency,component) combinations, not
-    /// lifetime finance_entries. Historical reports keep their own fold.
-    fn current_strategy_finance_totals(&self) -> StoreResult<FinanceAttribution> {
-        let mut stmt = self.connection.prepare(
-            "SELECT instance_id,currency,component,amount FROM instance_finance_totals ORDER BY instance_id,currency,component LIMIT 4097",
-        )?;
-        let mut rows = stmt.query([])?;
-        let mut totals = std::collections::BTreeMap::new();
-        while let Some(r) = rows.next()? {
-            let owner: String = r.get(0)?;
-            let currency: String = r.get(1)?;
-            let component: String = r.get(2)?;
-            let amount = decimal(r.get(3)?)?;
-            if totals.len() >= 4096 {
-                return Err(StoreError::Invalid("FINANCE_ATTRIBUTION_GROUP_LIMIT"));
-            }
-            totals.insert((Some(owner), currency, component), amount);
-        }
-        Ok(totals)
-    }
-
     /// Verify and price known strategy capital without creating a NAV point or
     /// unlocking risk. Only a converged exchange snapshot and five complete
     /// post-T0 history streams may supply a COMPLETE calculation.
@@ -2740,242 +2619,7 @@ impl AccountStore {
         &self,
         evidence: &StrategyValuationEvidence,
     ) -> StoreResult<StrategyValuationReconciliation> {
-        if evidence.account_key != self.meta.account_key
-            || evidence.account_nav_source.is_empty()
-            || evidence.conversion.source_digest.is_empty()
-            || evidence.as_of != evidence.conversion.observed_at
-            || evidence.venue_positions.len() > 256
-        {
-            return Err(StoreError::Invalid("STRATEGY_VALUATION_EVIDENCE_INVALID"));
-        }
-        let state = self.capital_state(evidence.as_of)?;
-        if state.coverage != "COMPLETE"
-            || state.nav_source_as_of != evidence.as_of
-            || state.nav_source_ref != evidence.account_nav_source
-        {
-            return Err(StoreError::Invalid("STRATEGY_NAV_ACCOUNT_SOURCE_MISMATCH"));
-        }
-        for (source, part) in [
-            ("fills", "SPOT"),
-            ("fills", "SWAP"),
-            ("fills", "FUTURES"),
-            ("fills", "OPTION"),
-            ("bills", "account"),
-            ("account_snapshot", "account"),
-        ] {
-            let found:Option<(i64,String,String)>=self.connection.query_row(
-                "SELECT watermark,cursor,coverage_gaps FROM source_cursors WHERE source=?1 AND stream_partition=?2",
-                params![source,part],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
-            ).optional()?;
-            if !found.is_some_and(|(t, c, g)| t >= evidence.as_of && c.is_empty() && g.is_empty()) {
-                return Err(StoreError::Invalid("STRATEGY_NAV_HISTORY_INCOMPLETE"));
-            }
-        }
-        let pending: bool = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM fill_projection_pending LIMIT 1) OR EXISTS(SELECT 1 FROM funding_projection_pending LIMIT 1)",
-            [], |r| r.get(0)
-        )?;
-        if pending {
-            return Err(StoreError::Invalid("STRATEGY_NAV_PROJECTION_PENDING"));
-        }
-        // F1: check an atomic, monotonic provenance proof, not all finance rows.
-        // An old/foreign/unverified entry must never inherit a COMPLETE NAV.
-        if !finance_proof_sealed(&self.connection)? {
-            return Err(StoreError::Invalid(
-                "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",
-            ));
-        }
-        let fx = &evidence.conversion.usd_per_currency;
-        let convert = |currency: &str, value: Decimal| -> StoreResult<Decimal> {
-            let rate = if currency == "USD" {
-                Decimal::ONE
-            } else {
-                *fx.get(currency)
-                    .ok_or(StoreError::Invalid("STRATEGY_NAV_FX_MISSING"))?
-            };
-            if rate <= Decimal::ZERO {
-                return Err(StoreError::Invalid("STRATEGY_NAV_FX_INVALID"));
-            }
-            value
-                .checked_mul(rate)
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))
-        };
-        let mut result = state
-            .strategy_principal_usd
-            .into_iter()
-            .map(|(id, capital)| {
-                (
-                    id.clone(),
-                    StrategyValuation {
-                        instance_id: id,
-                        capital_usd: capital,
-                        realized_usd: Decimal::ZERO,
-                        unrealized_usd: Decimal::ZERO,
-                        equity_usd: capital,
-                    },
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        // Only economic components count. USD risk mirrors, deposits and
-        // internal assignments are NEVER extra strategy profit.
-        // Current NAV consumes the existing event-updated projection.
-        // True historical as-of queries retain their immutable ledger fold.
-        let latest_time: Option<i64> =
-            self.connection
-                .query_row("SELECT MAX(time) FROM finance_entries", [], |r| r.get(0))?;
-        let attribution = if latest_time.is_some_and(|t| t > evidence.as_of) {
-            self.finance_attribution_filtered(self.meta.initialized_at, evidence.as_of, &[], &[])?
-        } else {
-            self.current_strategy_finance_totals()?
-        };
-        for ((owner, currency, component), amount) in attribution {
-            let Some(owner) = owner else { continue };
-            if owner == "manual" {
-                continue;
-            }
-            if component == "INTERNAL_CAPITAL_USD" {
-                continue;
-            }
-            if !matches!(
-                component.as_str(),
-                "FEE" | "FUNDING" | "REALIZED_PNL" | "LIQUIDATION_COST" | "CAMPAIGN_LOSS_USD"
-            ) {
-                return Err(StoreError::Invalid("STRATEGY_NAV_COMPONENT_UNKNOWN"));
-            }
-            if component == "CAMPAIGN_LOSS_USD" {
-                continue;
-            }
-            let row = result
-                .get_mut(&owner)
-                .ok_or(StoreError::Invalid("STRATEGY_NAV_CAPITAL_NOT_ASSIGNED"))?;
-            row.realized_usd = row
-                .realized_usd
-                .checked_add(convert(&currency, amount)?)
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-        }
-        let mut marks = std::collections::BTreeMap::new();
-        for p in &evidence.venue_positions {
-            if p.instrument_id.is_empty()
-                || p.signed_contracts == Decimal::ZERO
-                || p.mark_price <= Decimal::ZERO
-                || marks.insert(p.instrument_id.clone(), p).is_some()
-            {
-                return Err(StoreError::Invalid("STRATEGY_NAV_POSITION_WITNESS_INVALID"));
-            }
-        }
-        // One account may contain unattributed or manual positions. They
-        // are included in net exposure reconciliation, not a second NAV.
-        let mut venue_net = std::collections::BTreeMap::<String, (Decimal, Decimal)>::new();
-        let mut lots=self.connection.prepare(
-            "SELECT instance_id,intent_id,instrument_id,side,remaining_qty,cost FROM position_lots WHERE remaining_qty<>'0' ORDER BY instrument_id,lot_id LIMIT 258"
-        )?;
-        let mut rows = lots.query([])?;
-        let mut count = 0_usize;
-        while let Some(r) = rows.next()? {
-            count += 1;
-            if count > 256 {
-                return Err(StoreError::Invalid("STRATEGY_NAV_POSITION_LIMIT"));
-            }
-            let owner: Option<String> = r.get(0)?;
-            let intent: Option<String> = r.get(1)?;
-            let instrument: String = r.get(2)?;
-            let side: String = r.get(3)?;
-            let qty = decimal(r.get(4)?)?;
-            let entry = decimal(r.get(5)?)?;
-            if qty <= Decimal::ZERO
-                || entry <= Decimal::ZERO
-                || !matches!(side.as_str(), "long" | "short")
-            {
-                return Err(StoreError::Invalid("STRATEGY_NAV_LOT_INVALID"));
-            }
-            let signed = if side == "long" { qty } else { -qty };
-            let old = venue_net
-                .get(&instrument)
-                .copied()
-                .unwrap_or((Decimal::ZERO, Decimal::ZERO));
-            venue_net.insert(
-                instrument.clone(),
-                (
-                    old.0
-                        .checked_add(signed)
-                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
-                    old.1
-                        .checked_add(qty)
-                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
-                ),
-            );
-            let Some(owner) = owner else { continue };
-            if owner == "manual" {
-                continue;
-            }
-            let mark = marks
-                .get(&instrument)
-                .ok_or(StoreError::Invalid("STRATEGY_NAV_MARK_MISSING"))?;
-            let intent =
-                intent.ok_or(StoreError::Invalid("STRATEGY_NAV_LOT_PROVENANCE_MISSING"))?;
-            let plan = self.plan(&intent)?;
-            let direction = if side == "long" {
-                Decimal::ONE
-            } else {
-                -Decimal::ONE
-            };
-            let native = crate::finance::position_pnl(
-                qty,
-                entry,
-                mark.mark_price,
-                plan.contract_value,
-                plan.inverse,
-                direction,
-            )?;
-            let unrealized = convert(&plan.settlement_currency, native)?;
-            let row = result
-                .get_mut(&owner)
-                .ok_or(StoreError::Invalid("STRATEGY_NAV_CAPITAL_NOT_ASSIGNED"))?;
-            row.unrealized_usd = row
-                .unrealized_usd
-                .checked_add(unrealized)
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-        }
-        if marks.len() != venue_net.len() {
-            return Err(StoreError::Invalid("STRATEGY_NAV_VENUE_POSITION_MISMATCH"));
-        }
-        for (instrument, (net, gross)) in venue_net {
-            let Some(witness) = marks.get(&instrument) else {
-                return Err(StoreError::Invalid("STRATEGY_NAV_VENUE_POSITION_MISMATCH"));
-            };
-            if net != witness.signed_contracts || gross != net.abs() {
-                return Err(StoreError::Invalid("STRATEGY_NAV_VENUE_NETTING_UNRESOLVED"));
-            }
-        }
-        let mut attributed = Decimal::ZERO;
-        for row in result.values_mut() {
-            row.equity_usd = row
-                .capital_usd
-                .checked_add(row.realized_usd)
-                .and_then(|x| x.checked_add(row.unrealized_usd))
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            attributed = attributed
-                .checked_add(row.equity_usd)
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-        }
-        let residual = state
-            .account_nav_usd
-            .checked_sub(attributed)
-            .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-        if residual < Decimal::ZERO {
-            return Err(StoreError::Invalid(
-                "STRATEGY_NAV_ACCOUNT_RECONCILIATION_FAILED",
-            ));
-        }
-        Ok(StrategyValuationReconciliation {
-            account_nav_usd: state.account_nav_usd,
-            attributed_usd: attributed,
-            unattributed_usd: residual,
-            as_of: evidence.as_of,
-            source_ref: evidence.account_nav_source.clone(),
-            strategies: result.into_values().collect(),
-            coverage: "COMPLETE".into(),
-        })
+        Self::reconcile_strategy_valuation_sql(&self.connection, None, evidence)
     }
 
     /// Valuation needs a stronger fence than finance-history pagination:
@@ -2990,31 +2634,7 @@ impl AccountStore {
     /// exchange timestamp belongs to that period. Future market moves must
     /// not erase earlier, already verified financial reports.
     pub fn strategy_valuation_revision_as_of(&self, through: i64) -> StoreResult<String> {
-        let (finance, fills, bills, lots, flows, nav): (i64, i64, i64, i64, i64, i64) =
-            self.connection.query_row(
-                "SELECT
-                    (SELECT COALESCE(MAX(rowid),0) FROM finance_entries WHERE time<=?1),
-                    (SELECT COALESCE(MAX(rowid),0) FROM fills WHERE time<=?1),
-                    (SELECT COALESCE(MAX(rowid),0) FROM bills WHERE time<=?1),
-                    (SELECT COALESCE(MAX(rowid),0) FROM position_lots WHERE opened_at<=?1),
-                    (SELECT COALESCE(MAX(rowid),0) FROM cash_flows WHERE time<=?1),
-                    (SELECT COALESCE(MAX(rowid),0) FROM nav_points
-                     WHERE scope_id='account' AND currency='USD' AND time<=?1)",
-                [through],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                    ))
-                },
-            )?;
-        Ok(format!(
-            "f{finance}:x{fills}:b{bills}:p{lots}:c{flows}:n{nav}"
-        ))
+        Self::strategy_valuation_revision_sql(&self.connection, None, through)
     }
 
     /// Atomically publish only a previously source-verified estimate to the
@@ -3041,81 +2661,10 @@ impl AccountStore {
         evidence: &StrategyValuationEvidence,
         cursor: Option<&SourceCursor>,
     ) -> StoreResult<StrategyValuationReconciliation> {
-        let summary = self.reconcile_strategy_valuation(evidence)?;
-        if summary.strategies.is_empty() && cursor.is_none() {
-            return Ok(summary);
-        }
-        let revision = if summary.strategies.is_empty() {
-            String::new()
-        } else {
-            self.strategy_valuation_revision_as_of(evidence.as_of)?
-        };
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for row in &summary.strategies {
-            let scope = format!("strategy:{}", row.instance_id);
-            let points = [
-                (
-                    self.meta.initialized_at,
-                    Decimal::ZERO,
-                    Decimal::ZERO,
-                    Decimal::ZERO,
-                    self.meta.opening_source.as_str(),
-                    String::from("opening"),
-                ),
-                (
-                    evidence.as_of,
-                    row.equity_usd,
-                    row.realized_usd
-                        .checked_add(row.unrealized_usd)
-                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
-                    row.capital_usd,
-                    evidence.account_nav_source.as_str(),
-                    format!("revision:{revision}"),
-                ),
-            ];
-            for (time, equity, pnl, flows, source, version) in points {
-                // Same as-of can be revalued after an out-of-order fill, bill
-                // or account correction. Keep both revisions immutable;
-                // readback accepts only the currently verified source revision.
-                let source_version = format!("strategy-reconciled-v1:{version}");
-                let receipt_id = format!("strategy-nav:{scope}:{time}:{source_version}");
-                let previous:Option<(String,String,String)>=tx.query_row(
-                    "SELECT kind,request_hash,result_ref FROM operation_receipts WHERE operation_id=?1",
-                    [&receipt_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
-                ).optional()?;
-                if previous.is_some_and(|(kind, hash, refid)| {
-                    kind != "STRATEGY_NAV_RECONCILED" || hash != version || refid != source
-                }) {
-                    return Err(StoreError::Invalid("STRATEGY_NAV_WITNESS_CONFLICT"));
-                }
-                tx.execute(
-                    "INSERT INTO operation_receipts VALUES(?1,'STRATEGY_NAV_RECONCILED',?2,?3,?4) ON CONFLICT(operation_id) DO NOTHING",
-                    params![receipt_id,version,source,time]
-                )?;
-                tx.execute(
-                    "INSERT INTO nav_points VALUES(?1,?2,?3,?4,?5,?6,'USD','COMPLETE',?7) ON CONFLICT(scope_id,time,source_version) DO NOTHING",
-                    params![scope,time,source_version,exact(equity),exact(pnl),exact(flows),source]
-                )?;
-                let actual:(String,String,String,String)=tx.query_row(
-                    "SELECT equity,pnl,flows,mark_source FROM nav_points WHERE scope_id=?1 AND time=?2 AND source_version=?3",
-                    params![scope,time,source_version],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
-                )?;
-                if actual != (exact(equity), exact(pnl), exact(flows), source.to_owned()) {
-                    return Err(StoreError::Invalid("STRATEGY_NAV_WITNESS_CONFLICT"));
-                }
-            }
-            tx.execute(
-                "INSERT INTO nav_scopes VALUES(?1,'USD') ON CONFLICT DO NOTHING",
-                [&scope],
-            )?;
-            // No strategy high-water or risk admission from this read model:
-            // strategy drawdown and authorization need independent acceptance.
-        }
-        if let Some(cursor) = cursor {
-            upsert_source_cursor(&tx, cursor)?;
-        }
+        let summary = Self::commit_reconciled_strategy_nav_sql(&tx, None, evidence, cursor)?;
         tx.commit()?;
         Ok(summary)
     }
@@ -3128,127 +2677,13 @@ impl AccountStore {
         &mut self,
         request: &AuthorizedCapitalAssignment,
     ) -> StoreResult<OperationReceipt> {
-        if request.account_key != self.meta.account_key
-            || request.installation_id != self.meta.installation_id
-            || request.nav_source_ref.is_empty()
-            || request.instance_id == "manual"
-            || request.instance_id.is_empty()
-            || request.operation_id.is_empty()
-            || request.request_hash.is_empty()
-            || request.authority_receipt.is_empty()
-            || request.authority_revision <= 0
-            || request.time < self.meta.initialized_at
-            || request.delta_usd == Decimal::ZERO
-        {
-            return Err(StoreError::Invalid("INVALID_CAPITAL_ASSIGNMENT"));
-        }
-        if let Some(old) = self.operation(&request.operation_id)? {
-            if old.kind != "CAPITAL_ASSIGNMENT" || old.request_hash != request.request_hash {
-                return Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
-            }
-            return Ok(old);
-        }
-        // Current principal totals are a projection of this ordered series.
-        // Backdated new assignments would corrupt that projection and
-        // retroactively change NAV; reject them instead of silently rewriting
-        // prior allocations. Exact idempotent retries still return above.
-        let latest_assignment: Option<i64> = self.connection.query_row(
-            "SELECT MAX(time) FROM finance_entries WHERE component='INTERNAL_CAPITAL_USD'",
-            [],
-            |r| r.get(0),
-        )?;
-        if latest_assignment.is_some_and(|last| request.time < last) {
-            return Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_OUT_OF_ORDER"));
-        }
-        let state = self.capital_state(request.time)?;
-        if request.nav_source_ref != state.nav_source_ref {
-            return Err(StoreError::Invalid("CAPITAL_NAV_SOURCE_MISMATCH"));
-        }
-        let existing = *state
-            .strategy_principal_usd
-            .get(&request.instance_id)
-            .unwrap_or(&Decimal::ZERO);
-        let next = existing
-            .checked_add(request.delta_usd)
-            .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-        if next < Decimal::ZERO
-            || (request.delta_usd > Decimal::ZERO
-                && request.delta_usd > state.unattributed_residual_usd)
-        {
-            return Err(StoreError::Invalid("CAPITAL_ASSIGNMENT_EXCEEDS_AVAILABLE"));
-        }
-        if self.instance(&request.instance_id)?.is_none() {
-            return Err(StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"));
-        }
-        let (policy_revision,): (i64,) = self.connection.query_row(
-            "SELECT revision FROM account_policy WHERE singleton=1",
-            [],
-            |r| Ok((r.get(0)?,)),
-        )?;
-        if policy_revision != request.authority_revision {
-            return Err(StoreError::Invalid("CAPITAL_AUTHORITY_REVISION_MISMATCH"));
-        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let finance_rowid_before = finance_rowid(&tx)?;
-        // Book two opposite legs under one economic event. Neither leg is
-        // income or expense. SQL immutability protects the event after commit.
-        for (leg, owner, delta) in [
-            (
-                format!("strategy:{}", request.instance_id),
-                Some(request.instance_id.as_str()),
-                request.delta_usd,
-            ),
-            (
-                String::from("unattributed"),
-                None,
-                Decimal::ZERO
-                    .checked_sub(request.delta_usd)
-                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
-            ),
-        ] {
-            let entry_id = format!("capital:{}:{leg}", request.operation_id);
-            tx.execute(
-                "INSERT INTO finance_entries(entry_id,economic_event_key,component,allocation_leg,amount,currency,instance_id,source_ref,time,reverses_entry_id) VALUES(?1,?2,'INTERNAL_CAPITAL_USD',?3,?4,'USD',?5,?6,?7,NULL)",
-                params![entry_id,format!("capital:{}",request.operation_id),leg,exact(delta),owner,request.authority_receipt,request.time]
-            )?;
-            tx.execute(
-                "INSERT INTO finance_source_links(entry_id,source_ref) VALUES(?1,?2)",
-                params![entry_id, request.authority_receipt],
-            )?;
-        }
-        tx.execute(
-            "INSERT INTO instance_finance_totals(instance_id,currency,component,amount) VALUES(?1,'USD','INTERNAL_CAPITAL_USD',?2) ON CONFLICT(instance_id,currency,component) DO UPDATE SET amount=excluded.amount",
-            params![request.instance_id,exact(next)]
-        )?;
-        // A single account aggregate represents BOTH legs and remains zero.
-        tx.execute(
-            "INSERT INTO finance_totals(currency,component,amount) VALUES('USD','INTERNAL_CAPITAL_USD','0') ON CONFLICT(currency,component) DO NOTHING",
-            []
-        )?;
-        let result = format!(
-            "strategy:{}|principal_usd:{}|account_nav_as_of:{}",
-            request.instance_id,
-            exact(next),
-            state.nav_source_as_of
-        );
-        tx.execute(
-            "INSERT INTO operation_receipts VALUES(?1,'CAPITAL_ASSIGNMENT',?2,?3,?4)",
-            params![
-                request.operation_id,
-                request.request_hash,
-                result,
-                request.time
-            ],
-        )?;
-        advance_finance_provenance(&tx, finance_rowid_before)?;
+        let receipt = Self::commit_authorized_capital_assignment_sql(&tx, None, request)?;
         tx.commit()?;
-        // Rebuild this derived timestamp after a committed allocation,
-        // including one whose event timestamp predates a prior allocation.
         *self.latest_capital_assignment_time.borrow_mut() = None;
-        self.operation(&request.operation_id)?
-            .ok_or(StoreError::Invalid("CAPITAL_ASSIGNMENT_RECEIPT_MISSING"))
+        Ok(receipt)
     }
 
     pub fn nav_summary(
@@ -3608,33 +3043,14 @@ impl AccountStore {
         instances: &[String],
         currencies: &[String],
     ) -> StoreResult<FinanceAttribution> {
-        let (filter, mut args) = finance_filter(instances, currencies, 2)?;
-        let mut values = vec![from.into(), through.into()];
-        values.append(&mut args);
-        let query = format!(
-            "SELECT instance_id,currency,component,amount FROM finance_entries WHERE time>=?1 AND time<=?2{filter} ORDER BY time,entry_id"
-        );
-        let mut s = self.connection.prepare(&query)?;
-        let mut rows = s.query(rusqlite::params_from_iter(values))?;
-        let mut totals = std::collections::BTreeMap::new();
-        while let Some(row) = rows.next()? {
-            let key = (
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            );
-            let amount = decimal(row.get(3)?)?;
-            let old = *totals.get(&key).unwrap_or(&Decimal::ZERO);
-            totals.insert(
-                key,
-                old.checked_add(amount)
-                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
-            );
-            if totals.len() > 4096 {
-                return Err(StoreError::Invalid("FINANCE_ATTRIBUTION_GROUP_LIMIT"));
-            }
-        }
-        Ok(totals)
+        Self::finance_attribution_filtered_sql(
+            &self.connection,
+            None,
+            from,
+            through,
+            instances,
+            currencies,
+        )
     }
 
     pub fn finance_totals_filtered(
@@ -3866,7 +3282,7 @@ impl AccountStore {
         .collect()
     }
 }
-fn finance_filter(
+pub(super) fn finance_filter(
     instances: &[String],
     currencies: &[String],
     offset: usize,

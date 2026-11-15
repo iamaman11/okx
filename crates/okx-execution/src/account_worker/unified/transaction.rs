@@ -48,6 +48,44 @@ fn apply_original_unified_finance_inner(
             .map_err(StoreError::Invalid)
     };
     match command {
+        UnifiedFinanceWrite::AssignCapital { account, request } => {
+            let receipt = AccountStore::commit_authorized_capital_assignment_sql(
+                tx,
+                Some((installation, &account)),
+                &request,
+            )?;
+            Ok(UnifiedFinanceWriteReceipt::CapitalAssigned(receipt))
+        }
+        UnifiedFinanceWrite::CommitStrategyNav {
+            account,
+            evidence,
+            cursor,
+        } => {
+            let scope = Some((installation, account.as_str()));
+            let snapshot = AccountStore::scoped_source_cursor_sql(
+                tx,
+                installation,
+                &account,
+                "account_snapshot",
+                "account",
+            )?;
+            if cursor.source != "strategy_valuation"
+                || cursor.stream_partition != "account"
+                || cursor.watermark != evidence.as_of
+                || !cursor.coverage_gaps.is_empty()
+                || !cursor.cursor.is_empty()
+                || !snapshot.is_some_and(|s| s.generation == cursor.generation)
+            {
+                return Err(StoreError::Invalid("STRATEGY_NAV_CURSOR_INVALID"));
+            }
+            let summary = AccountStore::commit_reconciled_strategy_nav_sql(
+                tx,
+                scope,
+                &evidence,
+                Some(&cursor),
+            )?;
+            Ok(UnifiedFinanceWriteReceipt::StrategyNavCommitted(summary))
+        }
         UnifiedFinanceWrite::ProjectAccountNav { account, snapshot } => {
             let scope = Some((installation, account.as_str()));
             let state = AccountStore::source_capture_state_sql(tx, scope)?;

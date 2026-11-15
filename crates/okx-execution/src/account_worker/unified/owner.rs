@@ -206,6 +206,46 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    /// The authorized governance producer supplies this command; it is not a
+    /// client-controlled grant and does not reserve risk or send venue orders.
+    pub async fn commit_authorized_capital_assignment(
+        &self,
+        account: String,
+        request: crate::AuthorizedCapitalAssignment,
+    ) -> StoreResult<crate::OperationReceipt> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::AssignCapital { account, request })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::CapitalAssigned(receipt) => Ok(receipt),
+            _ => Err(StoreError::Invalid(
+                "UNIFIED_CAPITAL_ASSIGNMENT_RECEIPT_UNEXPECTED",
+            )),
+        }
+    }
+
+    /// Source reconciliation, immutable NAV witnesses and coverage share one commit.
+    pub async fn commit_reconciled_strategy_nav_with_cursor(
+        &self,
+        account: String,
+        evidence: crate::StrategyValuationEvidence,
+        cursor: crate::SourceCursor,
+    ) -> StoreResult<crate::StrategyValuationReconciliation> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::CommitStrategyNav {
+                account,
+                evidence,
+                cursor,
+            })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::StrategyNavCommitted(summary) => Ok(summary),
+            _ => Err(StoreError::Invalid(
+                "UNIFIED_STRATEGY_NAV_RECEIPT_UNEXPECTED",
+            )),
+        }
+    }
+
     pub async fn project_account_nav(
         &self,
         account: String,

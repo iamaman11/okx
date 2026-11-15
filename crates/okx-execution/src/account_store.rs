@@ -314,7 +314,7 @@ pub struct ProtectionReceipt {
     pub verified_at: i64,
     pub source_digest: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationReceipt {
     pub operation_id: String,
     pub kind: String,

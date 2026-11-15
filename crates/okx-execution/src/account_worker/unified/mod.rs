@@ -103,6 +103,15 @@ pub struct UnifiedFinanceBoundSettlementReceipt {
 
 #[derive(Debug, Clone)]
 pub(crate) enum UnifiedFinanceWrite {
+    AssignCapital {
+        account: String,
+        request: crate::AuthorizedCapitalAssignment,
+    },
+    CommitStrategyNav {
+        account: String,
+        evidence: crate::StrategyValuationEvidence,
+        cursor: crate::SourceCursor,
+    },
     ProjectAccountNav {
         account: String,
         snapshot: crate::AccountNavSnapshot,
@@ -219,6 +228,8 @@ pub(crate) enum UnifiedFinanceWrite {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UnifiedFinanceWriteReceipt {
+    CapitalAssigned(crate::OperationReceipt),
+    StrategyNavCommitted(crate::StrategyValuationReconciliation),
     Prepared { inserted: bool, intent_id: String },
     PolicyApplied,
     Risk(crate::risk::UnifiedRiskDecision),

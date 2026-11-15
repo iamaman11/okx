@@ -2648,8 +2648,9 @@ impl AccountStore {
         self.find_intent("client_order_id", key)
     }
     pub fn operation(&self, id: &str) -> StoreResult<Option<OperationReceipt>> {
-        Ok(self.connection.query_row("SELECT kind,request_hash,result_ref,committed_at FROM operation_receipts WHERE operation_id=?1",[id],|r|Ok(OperationReceipt{operation_id:id.into(),kind:r.get(0)?,request_hash:r.get(1)?,result_ref:r.get(2)?,committed_at:r.get(3)?})).optional()?)
+        Self::operation_sql(&self.connection, None, id)
     }
+
     /// Return a bounded, read-only projection of this account's existing
     /// protection-cleanup receipts. The kind/time/id index keeps the scan
     /// within the cleanup receipt range; the LEFT JOIN preserves orphaned
@@ -2796,10 +2797,6 @@ impl AccountStore {
         })
         .transpose()
     }
-    pub(super) fn plan(&self, id: &str) -> StoreResult<IntentPlan> {
-        Self::plan_sql(&self.connection, None, id)
-    }
-
     // The original native plan decoder, shared by per-account v2 and scoped v6
     // SQL. Reserve validates the entire original plan under its caller's lock.
     pub(crate) fn plan_sql(
