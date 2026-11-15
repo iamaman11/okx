@@ -146,7 +146,8 @@ pub(super) fn verify_reservation_aggregates_for_scope(
             } else {
                 settlement_revision > 0
                     && super::valid_digest(&settlement_digest)
-                    && !settled.is_zero()
+                    // A source-proven zero-fill terminal receipt is a genuine
+                    // revision with zero money; zero without digest is invalid.
                     && matches!(state.as_str(), "POSTED" | "UNKNOWN" | "OPEN")
             };
             if !settlement_consistent

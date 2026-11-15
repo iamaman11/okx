@@ -994,6 +994,233 @@ impl AccountStore {
         Ok(Some(proof))
     }
 
+    /// Read the ORIGINAL immutable terminal/late SQL money producer on the
+    /// same scoped financial snapshot. The caller supplies ONLY the address
+    /// and kind, never a debit amount, fake fee, zero-fill flag or JSON proof.
+    /// A late revision is bound to the original terminal receipt and its
+    /// immutable revision; mutable head pointers cannot mint new money.
+    pub(crate) fn final_entry_settlement_receipt_sql(
+        db: &rusqlite::Connection,
+        installation: &str,
+        account: &str,
+        id: &str,
+        late: bool,
+    ) -> StoreResult<Option<EntrySettlementEvidence>> {
+        if installation.is_empty() || account.is_empty() || id.is_empty() {
+            return Err(StoreError::Invalid("UNIFIED_FINAL_SOURCE_SCOPE_INVALID"));
+        }
+        let read = |operation: &str| -> StoreResult<Option<(String, String, String, i64)>> {
+            db.query_row(
+                "SELECT kind,request_hash,result_ref,committed_at
+                 FROM operation_receipts
+                 WHERE installation_id=?1 AND account_key=?2 AND operation_id=?3",
+                params![installation, account, operation],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(StoreError::from)
+        };
+        let terminal_operation = format!("entry-settlement:{id}");
+        let Some(terminal_row) = read(&terminal_operation)? else {
+            return Ok(None);
+        };
+        let terminal: EntrySettlementEvidence = serde_json::from_str(&terminal_row.2)
+            .map_err(|_| StoreError::Invalid("UNIFIED_TERMINAL_SOURCE_CORRUPT"))?;
+        if terminal_row.0 != "ENTRY_SETTLEMENT_PROVEN"
+            || terminal.schema != "okx.entry-terminal-settlement/v1"
+            || terminal.account_key != account
+            || terminal.intent_id != id
+            || terminal_row.1 != terminal.plan_hash
+            || terminal_row.3 != terminal.venue_update_ms
+            || terminal.settlement_revision == 0
+            || terminal.source_covered_through_ms < terminal.venue_update_ms
+            || terminal.cumulative_entry_usd < Decimal::ZERO
+        {
+            return Err(StoreError::Invalid("UNIFIED_TERMINAL_SOURCE_INVALID"));
+        }
+        let (proof, head, immutable) = if late {
+            let Some(head) = read(&format!("entry-late-head:{id}"))? else {
+                return Ok(None);
+            };
+            let proof: EntrySettlementEvidence = serde_json::from_str(&head.2)
+                .map_err(|_| StoreError::Invalid("UNIFIED_LATE_HEAD_CORRUPT"))?;
+            let immutable = read(&format!(
+                "entry-late:{id}:r{}",
+                proof.settlement_revision
+            ))?
+            .ok_or(StoreError::Invalid("UNIFIED_LATE_REVISION_MISSING"))?;
+            if head.0 != "ENTRY_LATE_HEAD"
+                || immutable.0 != "ENTRY_LATE_SETTLEMENT_PROVEN"
+                || proof.schema != "okx.entry-late-settlement/v1"
+                || head.1 != terminal.plan_hash
+                || immutable.1 != head.1
+                || immutable.2 != head.2
+                || immutable.3 != proof.source_covered_through_ms
+                || head.3 != proof.source_covered_through_ms
+                || proof.account_key != terminal.account_key
+                || proof.intent_id != terminal.intent_id
+                || proof.plan_hash != terminal.plan_hash
+                || proof.reservation_key != terminal.reservation_key
+                || proof.venue_order_id != terminal.venue_order_id
+                || proof.venue_update_ms != terminal.venue_update_ms
+                || proof.venue_filled_quantity != terminal.venue_filled_quantity
+                || proof.settlement_revision <= terminal.settlement_revision
+                || proof.source_covered_through_ms <= terminal.source_covered_through_ms
+                || proof.cumulative_entry_usd <= terminal.cumulative_entry_usd
+            {
+                return Err(StoreError::Invalid("UNIFIED_LATE_SOURCE_INVALID"));
+            }
+            (proof, head, immutable)
+        } else {
+            (terminal.clone(), terminal_row.clone(), terminal_row)
+        };
+        if head.2 != immutable.2
+            || proof.account_key != account
+            || proof.intent_id != id
+            || proof.reservation_key.is_empty()
+            || proof.reservation_key.starts_with("local:")
+            || proof.venue_order_id.is_empty()
+            || proof.venue_update_ms <= 0
+            || proof.source_covered_through_ms < proof.venue_update_ms
+            || proof.settlement_revision == 0
+            || proof.source_digest.len() != 64
+            || !proof.source_digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || proof.plan_hash.len() != 64
+            || !proof.plan_hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(StoreError::Invalid("UNIFIED_FINAL_SOURCE_INVALID"));
+        }
+        let intent: Option<(String, Option<String>, String, i64)> = db
+            .query_row(
+                "SELECT plan_hash,exchange_order_id,state,risk_increase
+                 FROM intents
+                 WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
+                params![installation, account, id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let receipt: Option<(String, String)> = db
+            .query_row(
+                "SELECT reservation_key,plan_hash FROM risk_receipts
+                 WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
+                params![installation, account, id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if !matches!(
+            intent,
+            Some((ref plan, Some(ref venue), ref state, 1))
+                if *plan == proof.plan_hash
+                    && *venue == proof.venue_order_id
+                    && matches!(state.as_str(), "FILLED" | "CANCELLED")
+        ) || !matches!(receipt,
+            Some((ref reservation, ref plan))
+                if *reservation == proof.reservation_key && *plan == proof.plan_hash)
+        {
+            return Err(StoreError::Invalid("UNIFIED_FINAL_INTENT_SOURCE_UNPROVEN"));
+        }
+        Ok(Some(proof))
+    }
+
+    /// The RiskBook debit and this ORIGINAL native ACK live in the SAME
+    /// installation transaction. A late fee cannot clear a newer pending
+    /// bill marker by merely updating the old SQL head.
+    pub(crate) fn acknowledge_unified_final_entry_sql(
+        tx: &rusqlite::Transaction<'_>,
+        installation: &str,
+        account: &str,
+        accepted: &EntrySettlementEvidence,
+        late: bool,
+    ) -> StoreResult<()> {
+        let stored = Self::final_entry_settlement_receipt_sql(
+            tx, installation, account, &accepted.intent_id, late,
+        )?
+        .ok_or(StoreError::Invalid("UNIFIED_FINAL_ACK_SOURCE_MISSING"))?;
+        if stored != *accepted {
+            return Err(StoreError::Invalid("UNIFIED_FINAL_ACK_SOURCE_CHANGED"));
+        }
+        let state: String = tx.query_row(
+            "SELECT state FROM risk_receipts
+             WHERE installation_id=?1 AND account_key=?2
+               AND intent_id=?3 AND plan_hash=?4 AND reservation_key=?5",
+            params![
+                installation, account, &accepted.intent_id,
+                &accepted.plan_hash, &accepted.reservation_key
+            ],
+            |row| row.get(0),
+        )?;
+        if (late && !matches!(state.as_str(), "LATE_SETTLEMENT_PENDING" | "RELEASED"))
+            || (!late && !matches!(
+                state.as_str(), "OPEN" | "POSTED" | "UNKNOWN"
+                    | "TERMINAL_PENDING_CENTRAL" | "RELEASED"
+            ))
+        {
+            return Err(StoreError::Invalid("UNIFIED_FINAL_ACK_STATE_INVALID"));
+        }
+        let (operation, kind) = if late {
+            (
+                format!("entry-late-settled:{}:r{}", accepted.intent_id, accepted.settlement_revision),
+                "ENTRY_LATE_SETTLED",
+            )
+        } else {
+            (
+                format!("entry-terminal-settled:{}:r{}", accepted.intent_id, accepted.settlement_revision),
+                "ENTRY_TERMINAL_SETTLED",
+            )
+        };
+        tx.execute(
+            "INSERT INTO operation_receipts(
+                 installation_id,account_key,operation_id,kind,
+                 request_hash,result_ref,committed_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(installation_id,account_key,operation_id) DO NOTHING",
+            params![
+                installation, account, &operation, kind,
+                &accepted.plan_hash, &accepted.source_digest, wall_time_ms()
+            ],
+        )?;
+        let observed: (String, String, String) = tx.query_row(
+            "SELECT kind,request_hash,result_ref FROM operation_receipts
+             WHERE installation_id=?1 AND account_key=?2 AND operation_id=?3",
+            params![installation, account, &operation],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if observed != (
+            kind.to_owned(),
+            accepted.plan_hash.clone(),
+            accepted.source_digest.clone(),
+        ) {
+            return Err(StoreError::Invalid("UNIFIED_FINAL_ACK_CONFLICT"));
+        }
+        // The original post-release late marker is cleared only if the
+        // campaign itself is ALREADY released in this same transaction.
+        // A pending terminal exposure can never be discharged by a fee ACK.
+        if late && state == "LATE_SETTLEMENT_PENDING" {
+            let entry: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM risk_entries
+                     WHERE installation_id=?1 AND account_key=?2
+                       AND intent_id=?3 AND plan_sha256=?4
+                       AND reservation_key=?5",
+                    params![
+                        installation, account, &accepted.intent_id,
+                        &accepted.plan_hash, &accepted.reservation_key
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if entry.as_deref() == Some("RELEASED") {
+                tx.execute(
+                    "UPDATE risk_receipts SET state='RELEASED'
+                     WHERE installation_id=?1 AND account_key=?2
+                       AND intent_id=?3 AND state='LATE_SETTLEMENT_PENDING'",
+                    params![installation, account, &accepted.intent_id],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     /// The ORIGINAL AccountStore ACK is written in the SAME installation
     /// SQL transaction as the RiskBook budget debit. The existing immutable
     /// source/head/intent/receipt verification is rerun on this same snapshot,

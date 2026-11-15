@@ -596,12 +596,13 @@ pub(crate) enum UnifiedFinanceWrite {
         campaign: String,
         input: crate::risk::PostFenceInput,
     },
-    SettlePartial {
+    SettleEntry {
         campaign: String,
         account: String,
         intent: String,
         expected_sequence: u64,
         generation: u64,
+        source: crate::risk::EntrySettlementSource,
     },
     ReleaseUnsent {
         campaign: String,
@@ -719,13 +720,14 @@ fn apply_original_unified_finance_inner(
         UnifiedFinanceWrite::BeginPost { campaign, input } => risk_operation(
             risk::begin_post_unified_native(tx, installation, &campaign, &input),
         ),
-        UnifiedFinanceWrite::SettlePartial {
+        UnifiedFinanceWrite::SettleEntry {
             campaign,
             account,
             intent,
             expected_sequence,
             generation,
-        } => risk_operation(risk::settle_partial_unified_native(
+            source,
+        } => risk_operation(risk::settle_entry_unified_native(
             tx,
             installation,
             &campaign,
@@ -733,6 +735,7 @@ fn apply_original_unified_finance_inner(
             &intent,
             expected_sequence,
             generation,
+            source,
         )),
         UnifiedFinanceWrite::ReleaseUnsent {
             campaign,
@@ -1300,12 +1303,13 @@ impl UnifiedFinanceHandle {
         generation: u64,
     ) -> StoreResult<(u64, String, bool)> {
         match self
-            .trial_financial_write(UnifiedFinanceWrite::SettlePartial {
+            .trial_financial_write(UnifiedFinanceWrite::SettleEntry {
                 campaign,
                 account,
                 intent,
                 expected_sequence,
                 generation,
+                source: crate::risk::EntrySettlementSource::Partial,
             })
             .await
             .map_err(|_| StoreError::Invalid("UNIFIED_PARTIAL_SOURCE_OR_RISK_DENIED"))?

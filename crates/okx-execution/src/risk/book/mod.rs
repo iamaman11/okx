@@ -16,6 +16,15 @@ pub(crate) use store::{
 pub(crate) use store::PostFenceInput;
 pub(crate) use store::{ReserveInput, VerifiedCensus};
 
+/// The ORIGINAL AccountStore receipt type to debit; never caller-supplied
+/// monetary values. All three sources share the same RiskBook arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntrySettlementSource {
+    Partial,
+    Terminal,
+    Late,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UnifiedRiskDecision {
     Reserved {
@@ -124,7 +133,7 @@ pub(crate) fn begin_post_unified_native(
     }
 }
 
-pub(crate) fn settle_partial_unified_native(
+pub(crate) fn settle_entry_unified_native(
     tx: &rusqlite::Transaction<'_>,
     installation: &str,
     campaign: &str,
@@ -132,8 +141,9 @@ pub(crate) fn settle_partial_unified_native(
     intent: &str,
     expected_sequence: u64,
     generation: u64,
+    source: EntrySettlementSource,
 ) -> Result<UnifiedRiskDecision, &'static str> {
-    let receipt = store::RiskBookStore::settle_unified_partial_from_account_sql_transaction(
+    let receipt = store::RiskBookStore::settle_unified_entry_from_account_sql_transaction(
         tx,
         installation,
         campaign,
@@ -141,6 +151,7 @@ pub(crate) fn settle_partial_unified_native(
         intent,
         expected_sequence,
         generation,
+        source,
     )
     .map_err(|e| original_finance_error(&e))?;
     Ok(UnifiedRiskDecision::EntrySettled {
