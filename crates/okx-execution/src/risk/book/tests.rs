@@ -1916,7 +1916,7 @@ fn risk_book_contract_sql_zero_terminal_then_post_release_late_fee_is_one_budget
             .unwrap()
             .replayed
     );
-    let changed = fixture_final_proof(&input, "okx.entry-late-settlement/v1", 2, "0.4", 'g');
+    let changed = fixture_final_proof(&input, "okx.entry-late-settlement/v1", 2, "0.4", 'a');
     assert!(matches!(
         RiskBookStore::settle_partial_entry_sql_transaction(&tx, None, &changed, 5, 7,),
         Err(RiskStoreError::IdempotencyConflict)
