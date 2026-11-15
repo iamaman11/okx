@@ -48,6 +48,34 @@ fn apply_original_unified_finance_inner(
             .map_err(StoreError::Invalid)
     };
     match command {
+        UnifiedFinanceWrite::IngestSourcePageUsd {
+            account,
+            page,
+            conversion,
+        } => {
+            // Invalid attestation metadata does not create a stop witness.
+            if conversion.source_digest.is_empty() || conversion.observed_at <= 0 {
+                return Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE"));
+            }
+            let page = match AccountStore::normalize_source_page_usd_sql(
+                tx,
+                Some((installation, &account)),
+                &page,
+                &conversion,
+            ) {
+                Ok(page) => page,
+                Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE")) => {
+                    tx.execute("INSERT INTO risk_stops VALUES(?1,?2,'usd-conversion-unavailable','account','USD_CONVERSION_SOURCE_UNAVAILABLE',?3,NULL) ON CONFLICT(installation_id,account_key,stop_id) DO NOTHING",rusqlite::params![installation,account,conversion.observed_at])?;
+                    // Commit the fail-closed stop, NOT any page facts/cursor.
+                    return Ok(UnifiedFinanceWriteReceipt::SourcePageRejected {
+                        reason: "USD_CONVERSION_SOURCE_UNAVAILABLE",
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+            AccountStore::ingest_unified_source_page_sql(tx, installation, &account, &page)?;
+            Ok(UnifiedFinanceWriteReceipt::SourcePageIngested)
+        }
         UnifiedFinanceWrite::IngestSourcePage { account, page } => {
             AccountStore::ingest_unified_source_page_sql(tx, installation, &account, &page)?;
             Ok(UnifiedFinanceWriteReceipt::SourcePageIngested)

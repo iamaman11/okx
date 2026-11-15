@@ -1,3 +1,37 @@
+## #510 - original USD normalization and durable source-stop outcome
+
+Existing AccountStore::ingest_page_with_usd now reuses normalize_source_page_usd_sql.
+Unified IngestSourcePageUsd runs the SAME source existence checks, checked
+USD conversion and original conservative loss rounding inside the sole SQL
+transaction, then the complete page dispatcher. Existing derived events
+are not converted or charged a second time, scoped by account.
+
+For valid conversion metadata but missing/nonpositive rate, the command
+returns a typed SourcePageRejected and commits only the same original
+usd-conversion-unavailable stop. The public owner maps the committed receipt
+to the exact failure reason. No page rows/cursor are applied. Invalid metadata
+returns error without manufacturing an observation/stop; other failures use
+normal rollback. Live authority gate remains mandatory for this new command.
+
+New isolated original-schema two-account test: 8 USDT * 1.25 -> 10 USD flow;
+0.01 USDT fee -> 0.0125 USD cumulative account loss; identical source IDs
+on A/B and replay yield one derived event per account. Missing BTC/zero USDT
+rate persists only the scoped stop, malformed metadata creates none, and
+actual COMMIT/reopen preserves stop reason and last successful cursor.
+Synthetic conversion/source inputs do not prove venue identity or activation.
+
+Local Windows: complete execution library 260 PASS, 0 FAIL, 2 ignored
+(6.67s after build); Agent all-target check and architecture/negative guard,
+format/diff PASS. Direct USD witness PASS (0.17s before extra assertions).
+
+Collector NOT YET SWITCHED: it still needs scoped original owner lookups by
+client/venue order, consistent six-cursor/opening read, fill/funding/NAV
+reconciliation and native AccountResources startup. USD page ingress is a
+necessary part, not evidence these production callers are connected.
+RB09/four financial actions/full RB01-RB16/T09/T10 remain incomplete.
+
+---
+
 ## #510 - entry fee proof completes the IngestPage field dispatch
 
 Original and unified ingestion share source_entry_fees transaction logic:

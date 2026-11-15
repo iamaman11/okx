@@ -3634,32 +3634,10 @@ impl AccountStore {
         if fx.source_digest.is_empty() || fx.observed_at <= 0 {
             return Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE"));
         }
-        let mut normalized = page.clone();
-        for flow in &page.cash_flows {
-            if flow.kind == "OPENING" {
-                continue;
-            }
-            let exists:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM finance_entries WHERE economic_event_key=?1 AND component='EXTERNAL_FLOW_USD' AND allocation_leg='account')",[&flow.event_id],|r|r.get(0))?;
-            if exists {
-                continue;
-            }
-            let rate = if flow.currency == "USD" {
-                Decimal::ONE
-            } else {
-                match fx.usd_per_currency.get(&flow.currency).copied() {
-                    Some(v) => v,
-                    None => {
-                        self.latch_stop(
-                            "usd-conversion-unavailable",
-                            "account",
-                            "USD_CONVERSION_SOURCE_UNAVAILABLE",
-                            fx.observed_at,
-                        )?;
-                        return Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE"));
-                    }
-                }
-            };
-            if rate <= Decimal::ZERO {
+        let normalized = match Self::normalize_source_page_usd_sql(&self.connection, None, page, fx)
+        {
+            Ok(page) => page,
+            Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE")) => {
                 self.latch_stop(
                     "usd-conversion-unavailable",
                     "account",
@@ -3668,91 +3646,8 @@ impl AccountStore {
                 )?;
                 return Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE"));
             }
-            let amount = flow
-                .amount
-                .checked_mul(rate)
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            normalized.finance.push(FinanceEntry {
-                entry_id: format!("{}:usd-flow", flow.event_id),
-                economic_event_key: flow.event_id.clone(),
-                component: "EXTERNAL_FLOW_USD".into(),
-                allocation_leg: "account".into(),
-                amount,
-                currency: "USD".into(),
-                instance_id: None,
-                source_ref: format!(
-                    "{}|fx:{}|rate:{}|at:{}",
-                    flow.source_ref,
-                    fx.source_digest,
-                    exact(rate),
-                    fx.observed_at
-                ),
-                time: flow.time,
-                reverses_entry_id: None,
-            });
-        }
-        for e in &page.finance {
-            if e.amount >= Decimal::ZERO
-                || !matches!(
-                    e.component.as_str(),
-                    "FEE" | "REALIZED_PNL" | "FUNDING" | "INTEREST" | "LIQUIDATION_COST"
-                )
-            {
-                continue;
-            }
-            let leg = format!("{}:{}", e.component, e.allocation_leg);
-            let exists:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM finance_entries WHERE economic_event_key=?1 AND component='CAMPAIGN_LOSS_USD' AND allocation_leg=?2)",params![e.economic_event_key,leg],|r|r.get(0))?;
-            if exists {
-                continue;
-            }
-            let rate = if e.currency == "USD" {
-                Decimal::ONE
-            } else {
-                match fx.usd_per_currency.get(&e.currency).copied() {
-                    Some(v) => v,
-                    None => {
-                        self.latch_stop(
-                            "usd-conversion-unavailable",
-                            "account",
-                            "USD_CONVERSION_SOURCE_UNAVAILABLE",
-                            fx.observed_at,
-                        )?;
-                        return Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE"));
-                    }
-                }
-            };
-            if rate <= Decimal::ZERO {
-                self.latch_stop(
-                    "usd-conversion-unavailable",
-                    "account",
-                    "USD_CONVERSION_SOURCE_UNAVAILABLE",
-                    fx.observed_at,
-                )?;
-                return Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE"));
-            }
-            let loss = (-e.amount)
-                .checked_mul(rate)
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?
-                .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::AwayFromZero);
-            normalized.finance.push(FinanceEntry {
-                entry_id: format!("{}:usd-loss:{leg}", e.economic_event_key),
-                economic_event_key: e.economic_event_key.clone(),
-                component: "CAMPAIGN_LOSS_USD".into(),
-                allocation_leg: leg,
-                amount: loss,
-                currency: "USD".into(),
-                instance_id: e.instance_id.clone(),
-                source_ref: format!(
-                    "{}|fx:{}|rate:{}|at:{}",
-                    e.source_ref,
-                    fx.source_digest,
-                    exact(rate),
-                    fx.observed_at
-                ),
-                time: e.time,
-                reverses_entry_id: None,
-            });
-        }
+            Err(error) => return Err(error),
+        };
         self.ingest_page(&normalized)
     }
     #[allow(clippy::too_many_arguments)] // Public bounded pagination/filter facade.

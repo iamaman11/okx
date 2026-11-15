@@ -206,6 +206,32 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    /// Same original USD conversion and atomic page ingestion as the source
+    /// collector. A missing rate commits only a stop and returns its reason.
+    pub async fn ingest_source_page_with_usd(
+        &self,
+        account: String,
+        page: crate::IngestPage,
+        conversion: crate::UsdConversionEvidence,
+    ) -> StoreResult<()> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::IngestSourcePageUsd {
+                account,
+                page,
+                conversion,
+            })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::SourcePageIngested => Ok(()),
+            UnifiedFinanceWriteReceipt::SourcePageRejected { reason } => {
+                Err(StoreError::Invalid(reason))
+            }
+            _ => Err(StoreError::Invalid(
+                "UNIFIED_SOURCE_PAGE_RECEIPT_UNEXPECTED",
+            )),
+        }
+    }
+
     /// Commit all financial-history page components and its cursor in one
     /// transaction. Authenticity belongs to the source producer; activation
     /// remains independently required before this owner can commit.

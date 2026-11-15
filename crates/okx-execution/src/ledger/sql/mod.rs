@@ -16,5 +16,6 @@ mod source_page;
 mod source_positions;
 mod source_provenance;
 mod source_swap;
+mod source_usd;
 mod sources;
 pub(in crate::account_store) mod unified_financial;
