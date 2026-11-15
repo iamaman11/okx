@@ -203,7 +203,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for contract in admission_source::tests native_finance_admission::tests source_capture::tests trade_service::plan::tests entry_settlement::direct_tests strategy_contract_tests; do
+          for contract in admission_source::tests native_finance_admission::tests source_capture::tests trade_service::plan::tests entry_settlement::direct_tests strategy_contract_tests protection_cleanup_direct_tests terminal_release::tests unsent_release::tests; do
             log="$RUNNER_TEMP/native-boundary-${contract//:/_}.log"
             cargo test --locked -p okx-agent --lib "$contract" -- --nocapture | tee "$log"
             grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$log"

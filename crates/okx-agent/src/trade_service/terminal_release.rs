@@ -1,7 +1,8 @@
 //! Terminal reservation settlement and release for a reconciled intent.
 use super::reconcile::{verified_order_readback, verified_terminal_order_update_time};
 use super::{AccountResources, StoredIntent, TradeService, deadline, digest, err, exact};
-use okx_execution::{AccountStoreHandle, CentralReceipt, IntentState, SourceCursor};
+use crate::execution_store::ExecutionStore;
+use okx_execution::{CentralReceipt, IntentState, SourceCursor};
 use okx_protocol::risk_authority::{
     RiskCommandAction, RiskDecisionStatus, RiskReservationState, RiskResolution,
     TerminalRiskLedgerProof,
@@ -44,15 +45,12 @@ pub(super) struct TerminalReleaseError {
 /// Read the actual account owner. An absent grant is not a proof of capacity
 /// for an opening intent, but remains inapplicable for a reducing operation.
 async fn terminal_receipt(
-    store: &AccountStoreHandle,
+    store: &ExecutionStore,
     intent_id: &str,
     risk_increase: bool,
 ) -> Result<Option<CentralReceipt>, String> {
     let id = intent_id.to_owned();
-    let receipt = store
-        .call(deadline(), move |s| s.central_receipt(&id))
-        .await
-        .map_err(err)?;
+    let receipt = store.central_receipt(deadline(), id).await.map_err(err)?;
     if receipt.is_none() && risk_increase {
         return Err("TERMINAL_CENTRAL_RESERVATION_UNVERIFIED".into());
     }
@@ -113,12 +111,8 @@ impl TradeService {
                 .ok_or("AUTHORITY_UNAVAILABLE")?;
             stage = TerminalReleaseStage::Reservation;
             observe(stage, reservation_key.as_deref(), "running", None, &facts);
-            let Some(receipt) = terminal_receipt(
-                r.execution.store.legacy().map_err(err)?,
-                &i.intent_id,
-                i.risk_increase,
-            )
-            .await?
+            let Some(receipt) =
+                terminal_receipt(&r.execution.store, &i.intent_id, i.risk_increase).await?
             else {
                 return Ok(());
             };
@@ -151,7 +145,7 @@ impl TradeService {
             let complete = r
                 .execution
                 .store
-                .call(deadline(), move |s| s.cursor("fills", partition))
+                .cursor(deadline(), "fills".into(), partition.into())
                 .await
                 .map_err(err)?
                 .ok_or("FILL_COVERAGE_MISSING")?;
@@ -171,7 +165,7 @@ impl TradeService {
                 let bills = r
                     .execution
                     .store
-                    .call(deadline(), |s| s.cursor("bills", "account"))
+                    .cursor(deadline(), "bills".into(), "account".into())
                     .await
                     .map_err(err)?
                     .ok_or("BILLS_COVERAGE_MISSING")?;
@@ -201,13 +195,32 @@ impl TradeService {
                 observe(stage, reservation_key.as_deref(), "running", None, &facts);
                 let id = i.intent_id.clone();
                 let order_id = venue.order_id.clone();
-                r.execution
-                    .store
-                    .call(deadline(), move |s| {
-                        s.acknowledge_local_terminal_close(&id, &order_id, filled, venue_updated_at)
-                    })
-                    .await
-                    .map_err(err)?;
+                if let Some((owner, account)) = r.execution.store.native_scope() {
+                    owner
+                        .acknowledge_local_terminal_close(
+                            deadline(),
+                            account.to_owned(),
+                            id,
+                            order_id,
+                            filled,
+                            venue_updated_at,
+                        )
+                        .await
+                        .map_err(err)?;
+                } else {
+                    r.execution
+                        .store
+                        .call(deadline(), move |s| {
+                            s.acknowledge_local_terminal_close(
+                                &id,
+                                &order_id,
+                                filled,
+                                venue_updated_at,
+                            )
+                        })
+                        .await
+                        .map_err(err)?;
+                }
                 return Ok(());
             }
             stage = TerminalReleaseStage::Inspection;
@@ -260,7 +273,7 @@ impl TradeService {
                 let id = i.intent_id.clone();
                 if r.execution
                     .store
-                    .call(deadline(), move |s| s.entry_late_pending(&id))
+                    .entry_late_pending(deadline(), id)
                     .await
                     .map_err(err)?
                 {
@@ -268,6 +281,19 @@ impl TradeService {
                 }
                 stage = TerminalReleaseStage::SqlAcknowledgement;
                 observe(stage, reservation_key.as_deref(), "running", None, &facts);
+                if let Some((owner, account)) = r.execution.store.native_scope() {
+                    owner
+                        .verify_terminal_release_ack(
+                            deadline(),
+                            account.to_owned(),
+                            i.intent_id.clone(),
+                            i.plan_hash.clone(),
+                            receipt.reservation_key.clone(),
+                        )
+                        .await
+                        .map_err(err)?;
+                    return Ok(());
+                }
                 let k = receipt.reservation_key.clone();
                 let e = digest(&observed)?;
                 r.execution
@@ -279,18 +305,25 @@ impl TradeService {
             }
             stage = TerminalReleaseStage::BillCoverage;
             observe(stage, reservation_key.as_deref(), "running", None, &facts);
-            let (through, loss) = r
-                .execution
-                .store
-                .call(deadline(), |s| {
-                    Ok((
-                        s.cursor("bills", "account")?
-                            .ok_or(okx_execution::StoreError::Invalid("BILLS_COVERAGE_MISSING"))?,
-                        s.policy()?.4,
-                    ))
-                })
-                .await
-                .map_err(err)?;
+            let (through, loss) = if let Some((owner, account)) = r.execution.store.native_scope() {
+                owner
+                    .terminal_financial_snapshot(deadline(), account.to_owned())
+                    .await
+                    .map_err(err)?
+            } else {
+                r.execution
+                    .store
+                    .call(deadline(), |s| {
+                        Ok((
+                            s.cursor("bills", "account")?.ok_or(
+                                okx_execution::StoreError::Invalid("BILLS_COVERAGE_MISSING"),
+                            )?,
+                            s.policy()?.4,
+                        ))
+                    })
+                    .await
+                    .map_err(err)?
+            };
             facts.bills = Some((&through).into());
             if !source_covers_terminal(&through, venue_updated_at) {
                 return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
@@ -331,14 +364,13 @@ impl TradeService {
             let settlement = r
                 .execution
                 .store
-                .call(deadline(), move |s| {
-                    s.bind_terminal_entry_settlement(
-                        &id,
-                        venue_updated_at,
-                        filled,
-                        financial_through,
-                    )
-                })
+                .bind_terminal_entry_settlement(
+                    deadline(),
+                    id,
+                    venue_updated_at,
+                    filled,
+                    financial_through,
+                )
                 .await
                 .map_err(err)?;
             if settlement.reservation_key != receipt.reservation_key
@@ -393,6 +425,32 @@ impl TradeService {
                 .await?;
             stage = TerminalReleaseStage::Release;
             observe(stage, reservation_key.as_deref(), "running", None, &facts);
+            if let Some((owner, account)) = r.execution.store.native_scope() {
+                if self.governance.read().await.as_ref().is_none_or(|latest| {
+                    latest.session_generation != state.session_generation
+                        || latest.state.installation_id != state.state.installation_id
+                }) {
+                    return Err("TERMINAL_INSPECTION_SESSION_CHANGED".into());
+                }
+                let reported =
+                    crate::native_finance_admission::reported(&census).map_err(str::to_owned)?;
+                owner
+                    .resolve_terminal_status(
+                        deadline(),
+                        account.to_owned(),
+                        i.intent_id.clone(),
+                        i.plan_hash.clone(),
+                        receipt.reservation_key.clone(),
+                        settlement_sequence,
+                        reported,
+                    )
+                    .await
+                    .map_err(err)?;
+                // The original joint Resolve writes AccountStore release ACK
+                // in this same COMMIT. No separate account acknowledgement.
+                stage = TerminalReleaseStage::SqlAcknowledgement;
+                return Ok(());
+            }
             let proof = TerminalRiskLedgerProof {
                 account_uid: r.configuration.account_key.verified_uid.clone(),
                 run_id: "continuous_engine".into(),

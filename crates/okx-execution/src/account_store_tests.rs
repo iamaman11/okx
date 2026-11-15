@@ -18,14 +18,20 @@ mod fill_projection_contracts;
 mod finance_report_contracts;
 #[path = "account_funding_projection_contract_tests.rs"]
 mod funding_projection_contracts;
+#[path = "account_local_close_contract_tests.rs"]
+mod local_close_contracts;
 #[path = "account_native_admission_contract_tests.rs"]
 mod native_admission_contracts;
 #[path = "account_nav_projection_contract_tests.rs"]
 mod nav_projection_contracts;
+#[path = "account_protection_status_contract_tests.rs"]
+mod protection_status_contracts;
 #[path = "account_raw_source_tests.rs"]
 mod raw_sources;
 #[path = "account_reserve_source_contract_tests.rs"]
 mod reserve_source_contracts;
+#[path = "account_scoped_entry_settlement_contract_tests.rs"]
+mod scoped_entry_settlement_contracts;
 #[path = "account_page_contract_tests.rs"]
 mod source_pages;
 #[path = "account_strategy_nav_contract_tests.rs"]

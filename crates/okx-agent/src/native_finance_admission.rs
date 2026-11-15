@@ -10,7 +10,7 @@ use okx_execution::{CentralReceipt, CommittedVenueSend};
 use okx_protocol::risk_authority::*;
 use sha2::{Digest, Sha256};
 
-fn reported(census: &NativeRiskCensus) -> Result<ReportedRiskCensus, &'static str> {
+pub(crate) fn reported(census: &NativeRiskCensus) -> Result<ReportedRiskCensus, &'static str> {
     if !census.valid() {
         return Err("NATIVE_ADMISSION_CENSUS_INVALID");
     }

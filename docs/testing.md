@@ -1,3 +1,62 @@
+## #510 - Native Status source/settlement/protection integration candidate
+
+Baseline b08a24b6; one parent-integrated batch with code subagents. Supersedes
+that checkpoint's list of unported Status operations, NOT its NO-GO decision.
+Target remains ONE installation financial SQLite/SQL writer. Legacy adapters
+remain transition compatibility only, never a second simultaneous authority.
+
+Production Status now routes cleanup, protection receipts/incidents/resolution,
+effective protected quantity, partial/terminal/late settlement and ACK readback,
+no-send release, terminal Resolve and local Close through existing scoped owner
+APIs. Stop resizing after Reduce uses the same original billed-reduction proof
+and coherent original lot/opening/receipt snapshot. Emergency/public cancel
+markers use the typed existing durable operation owner. No duplicate venue POST.
+
+The original three raw financial validators and four settlement binders were
+extracted from large finance/intents methods into domain source modules; legacy
+methods delegate to the same implementation. Static scoped CTE reads isolate
+all fill/bill/fee joins, exact decimals and original digest/revision checks.
+Native SETTLE already writes account ACK with RiskBook; subsequent ACK calls now
+VERIFY the accepted original durable receipt read-only, never write another ACK.
+No-send release commits its original account ACK with the RiskBook operation.
+Native terminal release uses original ResolveTerminal plus account release ACK
+in one COMMIT; lost replies require matching immutable readback.
+
+Terminal peers in census are now replayed through the FULL original immutable
+fill/bill/fee validator inside the same snapshot, with complete fresh source
+frontiers and no own lots. Source replay must perform no writes. The Agent uses
+verified peers ONLY after independently proven venue-flat/no-algos/no-orders.
+No cached receipt or synthetic complete flag substitutes these facts.
+
+Native terminal release has a DIFFERENT receipt hash domain than historical
+legacy ACKs. Protection resolution checks exact risk_entries release_request_hash
+and release_proof_digest for native release, scoped to the same original intent,
+reservation and plan. Imported archived legacy ACKs retain their original domain;
+a present native release must match its authoritative fields.
+
+Local evidence after this batch:
+- Full execution library 314 PASS, 0 FAIL, 2 ignored, 9.84s after compilation.
+- Agent addressed regression contracts: 78 PASS; startup binary: 5 PASS.
+- Agent build, architecture guard+self-test, ledger schema, fmt, diff-check and
+  CI YAML parse PASS. Existing warnings remain; no warning-free claim.
+- New original SQL contracts cover same IDs across accounts, missing foreign
+  bill/cursor, partial/terminal/reopen, immutable ACK, zero-fill rollback,
+  peer-source replay without writes, local Close, billed Reduce and protection
+  incident/receipt isolation. Bad fixture durability/receipt ownership were
+  corrected; no FK, immutable-plan, source or risk guard was relaxed.
+- Existing short CI now includes cleanup/terminal/unsent regressions and rejects
+  zero matching tests. GitHub run for THIS candidate still needs verification.
+
+Still NOT accepted: positive fully activated Native Engine Execute -> Status ->
+Close, concurrency/lost-ACK/reopen on that real runtime composition, RB09 isolated
+server-disable/import/activation, all-nine-action/final required exact-SHA gates,
+full T09/T10 26/26 and direct-target measured P95. The activation gate remains
+closed. This code/test batch does NOT manufacture a live activation or financial
+source, and does NOT claim installed Windows, physical or live-market acceptance.
+RB09 and final production-path proof are the next acceptance boundary; do not
+start another helper-only phase or call these unit counts product readiness.
+No merge, deployment, installed-data changes or trading performed. PR stays Draft.
+
 ## #510 - scoped runtime admission/capture/recovery port (NO-GO remains)
 
 One integrated batch, baseline c5865232, with three code subagents and parent

@@ -12,7 +12,7 @@ const ALGO: &str = "owned-protection-001";
 const UID: &str = "verified-account-a";
 
 struct Fixture {
-    store: AccountStoreHandle,
+    store: ExecutionStore,
     db: std::path::PathBuf,
     account_key: String,
 }
@@ -52,7 +52,7 @@ async fn fixture() -> Fixture {
     .await
     .unwrap();
     Fixture {
-        store,
+        store: store.into(),
         db,
         account_key,
     }
@@ -86,7 +86,7 @@ fn inventory(
 fn positions(qty: &str) -> Vec<(String, String)> {
     vec![(INST.into(), qty.into())]
 }
-async fn operation(store: &AccountStoreHandle, key: &str) -> okx_execution::OperationReceipt {
+async fn operation(store: &ExecutionStore, key: &str) -> okx_execution::OperationReceipt {
     let key = key.to_owned();
     store
         .call(deadline(), move |s| s.operation(&key))
@@ -95,7 +95,7 @@ async fn operation(store: &AccountStoreHandle, key: &str) -> okx_execution::Oper
         .unwrap()
 }
 async fn readback(
-    store: &AccountStoreHandle,
+    store: &ExecutionStore,
     key: &str,
     hash: &str,
     inventory: &PendingDerivativeAlgoRiskInventory,
@@ -335,9 +335,11 @@ async fn pc_05_restart_recovers_the_same_sql_begin_without_new_send() {
         .expect("PC-05 previous SQL writer did not terminate")
         .expect("PC-05 SQL termination witness dropped");
     assert!(*terminated.borrow(), "PC-05 SQL owner still alive");
-    let reopened = AccountStoreHandle::open_existing(db, account_key, "installation_test".into())
-        .await
-        .unwrap();
+    let reopened: ExecutionStore =
+        AccountStoreHandle::open_existing(db, account_key, "installation_test".into())
+            .await
+            .unwrap()
+            .into();
     assert_eq!(
         protection_cleanup_step(&reopened, "pc-05", "hash-05")
             .await

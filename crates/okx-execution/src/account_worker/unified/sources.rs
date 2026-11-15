@@ -98,11 +98,24 @@ pub(super) fn original_bound_unsent_release_sql(
             reservation_key,
             book_sequence,
             ..
-        } if reservation_key == request.reservation_key => Ok(UnifiedFinanceBoundUnsentReceipt {
-            reservation_key,
-            book_sequence,
-            policy_revision,
-        }),
+        } if reservation_key == request.reservation_key => {
+            // The immutable original no-send receipt, RiskBook tombstone and
+            // account acknowledgement have ONE transaction boundary. A lost
+            // caller reply cannot leave a release waiting for a second writer.
+            let evidence = format!("native-unsent-sql:{}", request.record_digest);
+            AccountStore::acknowledge_central_release_sql(
+                tx,
+                Some((installation, &request.account_key)),
+                &reservation_key,
+                &evidence,
+                super::opening_ingress::owner_now_ms()?,
+            )?;
+            Ok(UnifiedFinanceBoundUnsentReceipt {
+                reservation_key,
+                book_sequence,
+                policy_revision,
+            })
+        }
         _ => Err(StoreError::Invalid("UNIFIED_UNSENT_RECEIPT_UNEXPECTED")),
     }
 }

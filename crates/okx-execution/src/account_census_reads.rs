@@ -1,6 +1,6 @@
 //! One coherent account census snapshot. Observations do not grant a send or release.
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
 pub struct AccountCensusRequest {
@@ -38,6 +38,9 @@ pub struct AccountCensusSnapshot {
     pub intents: Vec<(StoredIntent, Option<CentralReceipt>)>,
     pub pending_central: Vec<String>,
     pub terminal_peer_sources: Vec<TerminalPeerSources>,
+    /// Original immutable fill/bill/fee sources replayed in this very snapshot.
+    /// These peers still require the caller's independently signed flat venue census.
+    pub verified_terminal_peers: BTreeSet<String>,
     pub financial_risk: FinancialRisk,
     pub policy: AccountPolicySnapshot,
 }
@@ -169,7 +172,7 @@ impl AccountStore {
     }
 
     pub(crate) fn census_snapshot_sql(
-        db: &Connection,
+        db: &rusqlite::Transaction<'_>,
         installation: &str,
         account: &str,
         request: AccountCensusRequest,
@@ -223,6 +226,7 @@ impl AccountStore {
         let (intents, pending_central) =
             Self::risk_census_intents_sql(db, scope, request.limit, now)?;
         let mut terminal_peer_sources = Vec::new();
+        let mut verified_terminal_peers = BTreeSet::new();
         if let Some(releasing) = request.terminal_peer_release_intent {
             for intent in &intents {
                 if !intent.risk_increase
@@ -234,7 +238,7 @@ impl AccountStore {
                     continue;
                 }
                 let late_pending: bool = db.query_row("SELECT state='LATE_SETTLEMENT_PENDING' FROM risk_receipts WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",params![installation,account,intent.intent_id],|r|r.get(0)).optional()?.unwrap_or(false);
-                terminal_peer_sources.push(TerminalPeerSources {
+                let sources = TerminalPeerSources {
                     intent_id: intent.intent_id.clone(),
                     receipt: Self::operation_sql(
                         db,
@@ -257,7 +261,11 @@ impl AccountStore {
                         "account",
                     )?,
                     lots: Self::active_lots_sql(db, scope, &intent.instrument_id)?,
-                });
+                };
+                if Self::verify_terminal_peer_sources_sql(db, scope, intent, &sources)? {
+                    verified_terminal_peers.insert(intent.intent_id.clone());
+                }
+                terminal_peer_sources.push(sources);
             }
         }
         let intents = intents
@@ -279,8 +287,71 @@ impl AccountStore {
             intents,
             pending_central,
             terminal_peer_sources,
+            verified_terminal_peers,
             financial_risk: Self::financial_risk_sql(db, scope, now, None)?,
             policy: Self::account_policy_sql(db, scope)?,
         })
+    }
+
+    fn verify_terminal_peer_sources_sql(
+        tx: &rusqlite::Transaction<'_>,
+        scope: Option<(&str, &str)>,
+        intent: &StoredIntent,
+        sources: &TerminalPeerSources,
+    ) -> StoreResult<bool> {
+        let Some(saved) = sources.receipt.as_ref().filter(|saved| {
+            saved.kind == "ENTRY_SETTLEMENT_PROVEN" && saved.request_hash == intent.plan_hash
+        }) else {
+            return Ok(false);
+        };
+        let proof: EntrySettlementEvidence = serde_json::from_str(&saved.result_ref)
+            .map_err(|_| StoreError::Invalid("COHORT_TERMINAL_PEER_PROOF_CORRUPT"))?;
+        if proof.schema != "okx.entry-terminal-settlement/v1"
+            || proof.intent_id != intent.intent_id
+            || proof.plan_hash != intent.plan_hash
+            || sources.late_pending
+        {
+            return Ok(false);
+        }
+        let (Some(fills), Some(bills)) = (&sources.fills, &sources.bills) else {
+            return Ok(false);
+        };
+        if fills.generation <= 0
+            || bills.generation <= 0
+            || !fills.cursor.is_empty()
+            || !bills.cursor.is_empty()
+            || !fills.coverage_gaps.is_empty()
+            || !bills.coverage_gaps.is_empty()
+        {
+            return Ok(false);
+        }
+        let frontier = fills.watermark.min(bills.watermark);
+        if frontier < proof.venue_update_ms
+            || frontier < proof.source_covered_through_ms
+            || sources.lots.iter().any(|lot| {
+                lot.intent_id.as_deref() == Some(intent.intent_id.as_str())
+                    && lot.remaining_qty > Decimal::ZERO
+            })
+        {
+            return Ok(false);
+        }
+        // An existing terminal witness is required above. Re-run the complete
+        // original immutable source validator; a cached receipt is not proof.
+        let changes = tx.total_changes();
+        let original = Self::bind_terminal_entry_settlement_sql(
+            tx,
+            scope,
+            &intent.intent_id,
+            proof.venue_update_ms,
+            proof.venue_filled_quantity,
+            frontier,
+        )?;
+        if tx.total_changes() != changes {
+            return Err(StoreError::Invalid("COHORT_TERMINAL_PEER_REPLAY_WROTE_SQL"));
+        }
+        if original != proof {
+            return Err(StoreError::Invalid("COHORT_TERMINAL_PEER_SOURCE_CHANGED"));
+        }
+        Ok(true)
     }
 }

@@ -20,6 +20,391 @@ impl From<AccountStoreHandle> for ExecutionStore {
     }
 }
 impl ExecutionStore {
+    pub async fn entry_late_pending(&self, deadline: Instant, id: String) -> StoreResult<bool> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| sql.entry_late_pending(&id))
+                    .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .entry_late_pending(deadline, account.clone(), id)
+                    .await
+            }
+        }
+    }
+    pub async fn partial_entry_ack_pending(
+        &self,
+        deadline: Instant,
+        id: String,
+    ) -> StoreResult<bool> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| sql.partial_entry_ack_pending(&id))
+                    .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .partial_entry_ack_pending(deadline, account.clone(), id)
+                    .await
+            }
+        }
+    }
+    pub async fn bind_partial_entry_settlement(
+        &self,
+        deadline: Instant,
+        id: String,
+        at: i64,
+        filled: rust_decimal::Decimal,
+        covered: i64,
+    ) -> StoreResult<okx_execution::EntrySettlementEvidence> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.bind_partial_entry_settlement(&id, at, filled, covered)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .bind_partial_entry_settlement(
+                        deadline,
+                        account.clone(),
+                        id,
+                        at,
+                        filled,
+                        covered,
+                    )
+                    .await
+            }
+        }
+    }
+    pub async fn bind_terminal_entry_settlement(
+        &self,
+        deadline: Instant,
+        id: String,
+        at: i64,
+        filled: rust_decimal::Decimal,
+        covered: i64,
+    ) -> StoreResult<okx_execution::EntrySettlementEvidence> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.bind_terminal_entry_settlement(&id, at, filled, covered)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .bind_terminal_entry_settlement(
+                        deadline,
+                        account.clone(),
+                        id,
+                        at,
+                        filled,
+                        covered,
+                    )
+                    .await
+            }
+        }
+    }
+    pub async fn bind_late_entry_settlement(
+        &self,
+        deadline: Instant,
+        id: String,
+        at: i64,
+        filled: rust_decimal::Decimal,
+        covered: i64,
+    ) -> StoreResult<okx_execution::EntrySettlementEvidence> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.bind_late_entry_settlement(&id, at, filled, covered)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .bind_late_entry_settlement(deadline, account.clone(), id, at, filled, covered)
+                    .await
+            }
+        }
+    }
+    pub async fn acknowledge_partial_entry_settlement(
+        &self,
+        deadline: Instant,
+        proof: okx_execution::EntrySettlementEvidence,
+    ) -> StoreResult<()> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.acknowledge_partial_entry_settlement(&proof)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .acknowledge_partial_entry_settlement(deadline, account.clone(), proof)
+                    .await
+            }
+        }
+    }
+    pub async fn acknowledge_late_entry_settlement(
+        &self,
+        deadline: Instant,
+        proof: okx_execution::EntrySettlementEvidence,
+    ) -> StoreResult<()> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.acknowledge_late_entry_settlement(&proof)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .acknowledge_late_entry_settlement(deadline, account.clone(), proof)
+                    .await
+            }
+        }
+    }
+    pub async fn intent_fill_cost_evidence(
+        &self,
+        deadline: Instant,
+        id: String,
+        through: i64,
+    ) -> StoreResult<okx_execution::IntentFillCostEvidence> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.intent_fill_cost_evidence(&id, through)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .intent_fill_cost_evidence(deadline, account.clone(), id, through)
+                    .await
+            }
+        }
+    }
+    pub async fn intent_fee_bill_evidence(
+        &self,
+        deadline: Instant,
+        id: String,
+        through: i64,
+    ) -> StoreResult<okx_execution::IntentFeeBillEvidence> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.intent_fee_bill_evidence(&id, through)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .intent_fee_bill_evidence(deadline, account.clone(), id, through)
+                    .await
+            }
+        }
+    }
+    pub async fn central_receipt(
+        &self,
+        deadline: Instant,
+        intent: String,
+    ) -> StoreResult<Option<okx_execution::CentralReceipt>> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| sql.central_receipt(&intent))
+                    .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .reservation_receipt(
+                        account.clone(),
+                        intent,
+                        okx_execution::CentralReceiptView::Retained,
+                        deadline,
+                    )
+                    .await
+            }
+        }
+    }
+    pub async fn cursor(
+        &self,
+        deadline: Instant,
+        source: String,
+        partition: String,
+    ) -> StoreResult<Option<okx_execution::SourceCursor>> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| sql.cursor(&source, &partition))
+                    .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .source_cursor(account.clone(), source, partition)
+                    .await
+            }
+        }
+    }
+    pub async fn operation(
+        &self,
+        deadline: Instant,
+        id: String,
+    ) -> StoreResult<Option<okx_execution::OperationReceipt>> {
+        match self {
+            Self::Legacy(s) => s.call(deadline, move |sql| sql.operation(&id)).await,
+            Self::Native { owner, account } => owner.operation(deadline, account.clone(), id).await,
+        }
+    }
+    pub async fn begin_operation(
+        &self,
+        deadline: Instant,
+        id: String,
+        hash: String,
+        kind: String,
+    ) -> StoreResult<bool> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.begin_operation(&id, &hash, &kind, chrono::Utc::now().timestamp_millis())
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .begin_operation(deadline, account.clone(), id, hash, kind)
+                    .await
+            }
+        }
+    }
+    pub async fn operation_receipt(
+        &self,
+        deadline: Instant,
+        id: String,
+        hash: String,
+        kind: String,
+        result: String,
+    ) -> StoreResult<okx_execution::OperationReceipt> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.operation_receipt(
+                        &id,
+                        &hash,
+                        &kind,
+                        &result,
+                        chrono::Utc::now().timestamp_millis(),
+                    )
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .operation_receipt(deadline, account.clone(), id, hash, kind, result)
+                    .await
+            }
+        }
+    }
+    pub async fn effective_protected_quantity(
+        &self,
+        deadline: Instant,
+        intent: String,
+        filled: rust_decimal::Decimal,
+    ) -> StoreResult<Option<rust_decimal::Decimal>> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.effective_protected_quantity(&intent, filled)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .effective_protected_quantity(deadline, account.clone(), intent, filled)
+                    .await
+            }
+        }
+    }
+    pub async fn verify_protection(
+        &self,
+        deadline: Instant,
+        receipt: okx_execution::ProtectionReceipt,
+    ) -> StoreResult<()> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| sql.verify_protection(&receipt))
+                    .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .verify_protection(deadline, account.clone(), receipt)
+                    .await
+            }
+        }
+    }
+    pub async fn protection_incident(
+        &self,
+        deadline: Instant,
+        intent: String,
+        reason: String,
+    ) -> StoreResult<()> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.protection_incident(&intent, &reason, chrono::Utc::now().timestamp_millis())
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .protection_incident(deadline, account.clone(), intent, reason)
+                    .await
+            }
+        }
+    }
+    pub async fn resolve_protection_incident_after_flat(
+        &self,
+        deadline: Instant,
+        intent: String,
+        digest: String,
+    ) -> StoreResult<bool> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.resolve_protection_incident_after_flat(
+                        &intent,
+                        &digest,
+                        chrono::Utc::now().timestamp_millis(),
+                    )
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .resolve_protection_incident_after_flat(
+                        deadline,
+                        account.clone(),
+                        intent,
+                        digest,
+                    )
+                    .await
+            }
+        }
+    }
+    pub async fn protection(
+        &self,
+        deadline: Instant,
+        intent: String,
+    ) -> StoreResult<Option<okx_execution::ProtectionReceipt>> {
+        match self {
+            Self::Legacy(s) => s.call(deadline, move |sql| sql.protection(&intent)).await,
+            Self::Native { owner, account } => {
+                owner.protection(deadline, account.clone(), intent).await
+            }
+        }
+    }
     pub fn native(owner: UnifiedFinanceHandle, account: String) -> StoreResult<Self> {
         if account.is_empty() {
             return Err(StoreError::Invalid("NATIVE_ACCOUNT_SCOPE_REQUIRED"));

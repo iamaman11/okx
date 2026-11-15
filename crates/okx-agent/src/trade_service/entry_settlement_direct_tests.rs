@@ -1,6 +1,7 @@
 //! Direct entry settlement tests: real SQL owner, programmed RiskAuthority replies.
 //! The RiskAuthority seam tests orchestration, not real Worker money correctness.
 use super::*;
+use okx_execution::AccountStoreHandle;
 use okx_execution::{
     AccountMeta, Bill, BillOrderSource, CentralReceipt, Decision, EntryAdmissionEvidence,
     EntryQuoteEvidence, Fill, FinanceEntry, IngestPage, IntentPlan, IntentState, NewIntent,
@@ -485,7 +486,7 @@ async fn settle(
         &f.account,
         &f.intent,
         Some(&f.order),
-        &f.store,
+        &ExecutionStore::from(f.store.clone()),
         risk,
         &f.governance,
         deadline,
@@ -559,7 +560,7 @@ async fn r04_missing_source_cannot_ack_and_identity_mismatch_preserves_first_rea
         &f.account,
         &f.intent,
         Some(&alien),
-        &f.store,
+        &ExecutionStore::from(f.store.clone()),
         &risk,
         &f.governance,
         deadline,
@@ -653,7 +654,7 @@ async fn r00_demo_and_unverified_order_block_without_sql_or_risk_mutation() {
             &demo,
             &f.intent,
             Some(&f.order),
-            &f.store,
+            &ExecutionStore::from(f.store.clone()),
             &risk,
             &f.governance,
             deadline
@@ -666,7 +667,7 @@ async fn r00_demo_and_unverified_order_block_without_sql_or_risk_mutation() {
         &f.account,
         &f.intent,
         None,
-        &f.store,
+        &ExecutionStore::from(f.store.clone()),
         &risk,
         &f.governance,
         deadline,

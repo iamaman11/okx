@@ -1,7 +1,7 @@
 //! Direct owner gates used by production terminal release. These do not claim
 //! to replace the full cohort/Worker census evidence in T09/T10.
 use super::*;
-use okx_execution::{AccountMeta, OpeningSnapshot};
+use okx_execution::{AccountMeta, AccountStoreHandle, OpeningSnapshot};
 
 #[test]
 fn terminal_coverage_requires_all_frontiers_without_refreshing_source() {
@@ -71,14 +71,24 @@ async fn missing_real_sql_reservation_denies_opening_but_not_reduction() {
     .await
     .unwrap();
     assert_eq!(
-        terminal_receipt(&store, "missing", true).await.unwrap_err(),
+        terminal_receipt(
+            &crate::execution_store::ExecutionStore::from(store.clone()),
+            "missing",
+            true
+        )
+        .await
+        .unwrap_err(),
         "TERMINAL_CENTRAL_RESERVATION_UNVERIFIED"
     );
     assert!(
-        terminal_receipt(&store, "missing", false)
-            .await
-            .unwrap()
-            .is_none()
+        terminal_receipt(
+            &crate::execution_store::ExecutionStore::from(store.clone()),
+            "missing",
+            false
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     // Neither read can manufacture the missing grant.
     assert!(

@@ -2613,10 +2613,9 @@ impl TradeService {
                         .all(|p| dec(&p.position).is_ok_and(|quantity| quantity == Decimal::ZERO));
                 let releasing_id = release_scope.map(|scope| scope.intent_id.to_owned());
                 let (local_intents, pending_central, verified_terminal_peers) = if let Some(census) = &native_census {
-                    if venue_empty_for_terminal_peers && !census.terminal_peer_sources.is_empty() {
-                        return Err("COHORT_TERMINAL_PEER_REVALIDATION_REQUIRED".into());
-                    }
-                    (census.intents.clone(), census.pending_central.clone(), std::collections::BTreeSet::new())
+                    (census.intents.clone(), census.pending_central.clone(),
+                     if venue_empty_for_terminal_peers {census.verified_terminal_peers.clone()}
+                     else {std::collections::BTreeSet::new()})
                 } else { r
                     .execution
                     .store

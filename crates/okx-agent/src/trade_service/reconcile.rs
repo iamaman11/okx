@@ -841,7 +841,7 @@ impl TradeService {
             .is_ok();
             protection_cleanup::cleanup_flat_protection(
                 protection_cleanup::CleanupDependencies {
-                    store: r.execution.store.legacy().map_err(err)?,
+                    store: &r.execution.store,
                     observer: &r.observer,
                     trade: &r.execution.trade,
                     clock: &r.execution.clock,
@@ -874,95 +874,10 @@ impl TradeService {
                 // the still-owned SQL lot quantity with a verified durable
                 // single-send amendment receipt. An unsigned/synthetic
                 // smaller live stop is always rejected.
-                let original_id = i.intent_id.clone();
-                let original_inst = i.instrument_id.clone();
-                let original_terminal = i.state.terminal();
-                let original_plan_hash = i.plan_hash.clone();
-                let original_order_id = i.exchange_order_id.clone();
                 let effective_protected = r
                     .execution
                     .store
-                    .call(deadline(), move |s| {
-                        let lots = s.active_lots(&original_inst)?;
-                        let own = lots
-                            .iter()
-                            .filter(|lot| lot.intent_id.as_deref() == Some(original_id.as_str()))
-                            .fold(Decimal::ZERO, |sum, lot| sum + lot.remaining_qty);
-                        // A later position on the same instrument does not
-                        // belong to an already closed/released entry. Its late
-                        // fees still need the ordinary financial reconciliation
-                        // below, without resurrecting its former venue stop.
-                        if own == Decimal::ZERO
-                            && original_terminal
-                            && s.active_central_receipt(&original_id)?.is_none()
-                        {
-                            let terminal_evidence = (
-                                s.central_receipt(&original_id)?,
-                                s.operation(&format!("entry-settlement:{original_id}"))?,
-                            );
-                            if let (Some(receipt), Some(terminal)) = terminal_evidence {
-                                let proof = serde_json::from_str::<
-                                    okx_execution::EntrySettlementEvidence,
-                                >(&terminal.result_ref)
-                                .map_err(|_| {
-                                    okx_execution::StoreError::Invalid(
-                                        "TERMINAL_ENTRY_PROOF_CORRUPT",
-                                    )
-                                })?;
-                                let release = s.operation(&format!(
-                                    "central-release:{}",
-                                    receipt.reservation_key
-                                ))?;
-                                if terminal.kind == "ENTRY_SETTLEMENT_PROVEN"
-                                    && proof.schema == "okx.entry-terminal-settlement/v1"
-                                    && proof.intent_id == original_id
-                                    && receipt.intent_id == original_id
-                                    && original_order_id.as_deref()
-                                        == Some(proof.venue_order_id.as_str())
-                                    && proof.plan_hash == original_plan_hash
-                                    && receipt.plan_hash == original_plan_hash
-                                    && proof.account_key == receipt.account_key
-                                    && proof.reservation_key == receipt.reservation_key
-                                    && proof.venue_filled_quantity == filled
-                                    && release.is_some_and(|ack| {
-                                        ack.kind == "CENTRAL_RELEASE"
-                                            && ack.request_hash == receipt.receipt_hash
-                                            && !ack.result_ref.is_empty()
-                                    })
-                                {
-                                    return Ok(None);
-                                }
-                            }
-                        }
-                        if own <= Decimal::ZERO || own > filled {
-                            return Err(okx_execution::StoreError::Invalid(
-                                "PROTECTION_ORIGINAL_SQL_LOT_MISMATCH",
-                            ));
-                        }
-                        if own == filled {
-                            return Ok(Some(own));
-                        }
-                        let receipt = s.protection(&original_id)?.ok_or(
-                            okx_execution::StoreError::Invalid(
-                                "PROTECTION_REDUCED_LOT_RECEIPT_MISSING",
-                            ),
-                        )?;
-                        let key = format!("protection-shrink:{}:{}", original_id, exact(own));
-                        let op = s.operation(&format!("{key}:verified"))?.ok_or(
-                            okx_execution::StoreError::Invalid(
-                                "PROTECTION_REDUCE_SOURCE_ACK_MISSING",
-                            ),
-                        )?;
-                        if op.kind != "protection_shrink_verified"
-                            || op.result_ref != "VERIFIED"
-                            || receipt.quantity != own
-                        {
-                            return Err(okx_execution::StoreError::Invalid(
-                                "PROTECTION_REDUCE_SOURCE_MISMATCH",
-                            ));
-                        }
-                        Ok(Some(own))
-                    })
+                    .effective_protected_quantity(deadline(), i.intent_id.clone(), filled)
                     .await
                     .map_err(err)?;
                 if let Some(effective_protected) = effective_protected {
@@ -1018,7 +933,7 @@ impl TradeService {
                             };
                             r.execution
                                 .store
-                                .call(deadline(), move |s| s.verify_protection(&protection))
+                                .verify_protection(deadline(), protection)
                                 .await
                                 .map_err(err)?;
                             // If the live venue quantity exceeds this intent's
@@ -1081,13 +996,7 @@ impl TradeService {
                                     let id = i.intent_id.clone();
                                     r.execution
                                         .store
-                                        .call(deadline(), move |s| {
-                                            s.protection_incident(
-                                                &id,
-                                                "MANAGED_AGGREGATE_PROTECTION_UNVERIFIED",
-                                                now(),
-                                            )
-                                        })
+                                        .protection_incident(deadline(),id,"MANAGED_AGGREGATE_PROTECTION_UNVERIFIED".into())
                                         .await
                                         .map_err(err)?;
                                 }
@@ -1100,13 +1009,11 @@ impl TradeService {
                             let id = i.intent_id.clone();
                             r.execution
                                 .store
-                                .call(deadline(), move |s| {
-                                    s.protection_incident(
-                                        &id,
-                                        "PROTECTION_PENDING_OR_FAILED",
-                                        now(),
-                                    )
-                                })
+                                .protection_incident(
+                                    deadline(),
+                                    id,
+                                    "PROTECTION_PENDING_OR_FAILED".into(),
+                                )
                                 .await
                                 .map_err(err)?;
                         }
@@ -1217,7 +1124,7 @@ impl TradeService {
                 &r.configuration.account_key,
                 &i,
                 order.as_ref(),
-                r.execution.store.legacy().map_err(err)?,
+                &r.execution.store,
                 &self.risk,
                 &self.governance,
                 deadline,
@@ -1269,7 +1176,7 @@ impl TradeService {
                 let id = i.intent_id.clone();
                 r.execution
                     .store
-                    .call(deadline(), move |s| s.partial_entry_ack_pending(&id))
+                    .partial_entry_ack_pending(deadline(), id)
                     .await
                     .map_err(err)?
             } else {
@@ -1309,75 +1216,77 @@ impl TradeService {
         let protection = r
             .execution
             .store
-            .call(deadline(), move |s| s.protection(&id))
+            .protection(deadline(), id)
             .await
             .map_err(err)?;
         // Expose the immutable, cursor-covered source ledger for this intent,
         // not an estimate from venue order status or a permission to settle
         // central USD entry spend. Missing coverage remains explicitly blocked.
-        let entry_fill_evidence =
-            if financial && i.risk_increase {
-                let evidence_id = i.intent_id.clone();
-                match r
+        let entry_fill_evidence = if financial && i.risk_increase {
+            let evidence_id = i.intent_id.clone();
+            let source_result = async {
+                let cursor = r
                     .execution
                     .store
-                    .call(deadline(), move |s| {
-                        let cursor = s.cursor("fills", "SWAP")?.ok_or(
-                            okx_execution::StoreError::Invalid("ENTRY_FILL_COVERAGE_UNPROVEN"),
-                        )?;
-                        s.intent_fill_cost_evidence(&evidence_id, cursor.watermark)
-                    })
+                    .cursor(deadline(), "fills".into(), "SWAP".into())
+                    .await?
+                    .ok_or(okx_execution::StoreError::Invalid(
+                        "ENTRY_FILL_COVERAGE_UNPROVEN",
+                    ))?;
+                r.execution
+                    .store
+                    .intent_fill_cost_evidence(deadline(), evidence_id, cursor.watermark)
                     .await
-                {
-                    Ok(source) => match order.as_ref() {
-                        Some(observed) => match verify_venue_fill_coverage(&i, &source, observed) {
-                            Ok(()) => {
-                                // The independent venue order proves the
-                                // filled quantity, not that the venue has
-                                // published its final fee bill. Cross-check
-                                // each raw fill's fee with the SAME account
-                                // finance event linked by a real bill.
-                                let bill_id = i.intent_id.clone();
-                                let through = source.covered_through;
-                                match r
-                                    .execution
-                                    .store
-                                    .call(deadline(), move |s| {
-                                        s.intent_fee_bill_evidence(&bill_id, through)
-                                    })
-                                    .await
-                                {
-                                    Ok(billed) => json!({
-                                        "state":"verified_native_fill_and_bill_fee_sources",
-                                        "scope":"USDT_fee_bill_source_link_only",
-                                        "final_bill_and_margin_debit_proven":false,
-                                        "all_in_entry_cost_proven":false,
-                                        "source":billed,
-                                    }),
-                                    Err(reason) => json!({
-                                        "state":"native_fills_verified_bill_pending",
-                                        "scope":"USDT_fill_notional_and_fee_only",
-                                        "all_in_entry_cost_proven":false,
-                                        "reason_code":err(reason),
-                                        "source":source,
-                                    }),
-                                }
+            }
+            .await;
+            match source_result {
+                Ok(source) => match order.as_ref() {
+                    Some(observed) => match verify_venue_fill_coverage(&i, &source, observed) {
+                        Ok(()) => {
+                            // The independent venue order proves the
+                            // filled quantity, not that the venue has
+                            // published its final fee bill. Cross-check
+                            // each raw fill's fee with the SAME account
+                            // finance event linked by a real bill.
+                            let bill_id = i.intent_id.clone();
+                            let through = source.covered_through;
+                            match r
+                                .execution
+                                .store
+                                .intent_fee_bill_evidence(deadline(), bill_id, through)
+                                .await
+                            {
+                                Ok(billed) => json!({
+                                    "state":"verified_native_fill_and_bill_fee_sources",
+                                    "scope":"USDT_fee_bill_source_link_only",
+                                    "final_bill_and_margin_debit_proven":false,
+                                    "all_in_entry_cost_proven":false,
+                                    "source":billed,
+                                }),
+                                Err(reason) => json!({
+                                    "state":"native_fills_verified_bill_pending",
+                                    "scope":"USDT_fill_notional_and_fee_only",
+                                    "all_in_entry_cost_proven":false,
+                                    "reason_code":err(reason),
+                                    "source":source,
+                                }),
                             }
-                            Err(reason) => json!({"state":"incomplete",
+                        }
+                        Err(reason) => json!({"state":"incomplete",
                                 "all_in_entry_cost_proven":false,
                                 "reason_code":reason}),
-                        },
-                        None => json!({"state":"incomplete",
+                    },
+                    None => json!({"state":"incomplete",
                             "all_in_entry_cost_proven":false,
                             "reason_code":"ENTRY_FILL_VENUE_ORDER_UNAVAILABLE"}),
-                    },
-                    Err(reason) => json!({"state":"incomplete",
+                },
+                Err(reason) => json!({"state":"incomplete",
                     "all_in_entry_cost_proven":false,
                     "reason_code":err(reason)}),
-                }
-            } else {
-                json!({"state":"not_evaluated","all_in_entry_cost_proven":false})
-            };
+            }
+        } else {
+            json!({"state":"not_evaluated","all_in_entry_cost_proven":false})
+        };
         let entry_fill_pending =
             entry_fill_finance_pending(i.risk_increase, verified_zero_cancel, &entry_fill_evidence);
         let settlement_pending = incremental_entry["state"] == "pending"
@@ -1440,9 +1349,7 @@ impl TradeService {
                     let committed = r
                         .execution
                         .store
-                        .call(deadline(), move |s| {
-                            s.resolve_protection_incident_after_flat(&id, &proof, now())
-                        })
+                        .resolve_protection_incident_after_flat(deadline(), id, proof)
                         .await
                         .map_err(err)?;
                     if committed {
@@ -1524,14 +1431,7 @@ impl TradeService {
             r.configuration.account_key.environment,
             i,
             unsent_release::UnsentReleaseDependencies {
-                store: r.execution.store.legacy().map_err(|error| {
-                    unsent_release::UnsentReleaseError {
-                        stage: unsent_release::UnsentReleaseStage::SqlProof,
-                        reason_code: error.to_string(),
-                        intent_id: i.intent_id.clone(),
-                        reservation_key: None,
-                    }
-                })?,
+                store: &r.execution.store,
                 risk: &self.risk,
                 governance: &self.governance,
                 sql_deadline: deadline,
@@ -1596,9 +1496,7 @@ impl TradeService {
             let fresh = r
                 .execution
                 .store
-                .call(deadline(), move |s| {
-                    s.begin_operation(&k, &h, "safety_cancel", now())
-                })
+                .begin_operation(deadline(), k, h, "safety_cancel".into())
                 .await
                 .map_err(err)?;
             if !fresh {
@@ -1628,9 +1526,13 @@ impl TradeService {
             }
             r.execution
                 .store
-                .call(deadline(), move |s| {
-                    s.operation_receipt(&key, &hash, "safety_cancel", "TERMINAL_VERIFIED", now())
-                })
+                .operation_receipt(
+                    deadline(),
+                    key,
+                    hash,
+                    "safety_cancel".into(),
+                    "TERMINAL_VERIFIED".into(),
+                )
                 .await
                 .map_err(err)?;
             drop(permit);
@@ -1644,16 +1546,13 @@ impl TradeService {
         let owned_lots = r
             .execution
             .store
-            .call(deadline(), move |s| {
-                let lots = s.active_lots(&instrument)?;
-                Ok(lots
-                    .into_iter()
-                    .filter(|lot| lot.intent_id.as_deref() == Some(&intent_id))
-                    .map(|lot| (lot.side, lot.remaining_qty))
-                    .collect::<Vec<_>>())
-            })
+            .active_lots(deadline(), instrument)
             .await
-            .map_err(err)?;
+            .map_err(err)?
+            .into_iter()
+            .filter(|lot| lot.intent_id.as_deref() == Some(&intent_id))
+            .map(|lot| (lot.side, lot.remaining_qty))
+            .collect::<Vec<_>>();
         let owned = verified_emergency_owned_exposure(
             i,
             venue_filled,
@@ -1692,9 +1591,7 @@ impl TradeService {
         let fresh = r
             .execution
             .store
-            .call(deadline(), move |s| {
-                s.begin_operation(&op, &h, "cancel", now())
-            })
+            .begin_operation(deadline(), op, h, "cancel".into())
             .await
             .map_err(err)?;
         if !fresh {
@@ -1708,9 +1605,7 @@ impl TradeService {
             let id = i.intent_id.clone();
             r.execution
                 .store
-                .call(deadline(), move |s| {
-                    s.reject_unsent(&id, "USER_CANCELLED_UNSENT", now())
-                })
+                .reject_unsent(deadline(), id, "USER_CANCELLED_UNSENT".into())
                 .await
                 .map_err(err)?;
         } else if !i.state.terminal() {
@@ -1743,9 +1638,7 @@ impl TradeService {
         let result = i.intent_id.clone();
         r.execution
             .store
-            .call(deadline(), move |s| {
-                s.operation_receipt(&op, &h, "cancel", &result, now())
-            })
+            .operation_receipt(deadline(), op, h, "cancel".into(), result)
             .await
             .map_err(err)?;
         // Cancel ACK is not a terminal financial proof. Reconciliation

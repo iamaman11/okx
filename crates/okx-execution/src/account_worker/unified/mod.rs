@@ -18,11 +18,17 @@ mod order_observation;
 pub(crate) use native_admission::{
     bind_census as test_bind_native_census, reserve_reported_sql as test_reserve_reported_sql,
 };
+mod entry_settlement;
 mod posting_recovery;
+mod protection_cleanup;
+mod protection_resize;
+mod protection_status;
 mod readback;
 mod reduction_submission;
 mod reservation;
 mod source_stops;
+mod terminal_status;
+mod unsent_status;
 pub use native_admission::{
     NativePostDecision, NativePostRequest, NativeReserveDecision, NativeReserveRequest,
     ReportedRiskCensus,
