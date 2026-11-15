@@ -13489,10 +13489,7 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         .unwrap();
     assert_eq!(public_held.state, "HELD");
     assert_eq!(public_held.reservation_sequence, held.reservation_sequence);
-    assert_eq!(
-        serde_json::to_value(&public_held).unwrap()["state"],
-        "HELD"
-    );
+    assert_eq!(serde_json::to_value(&public_held).unwrap()["state"], "HELD");
     let unsent = owner
         .inspect_reservation(
             "campaign-X".into(),
