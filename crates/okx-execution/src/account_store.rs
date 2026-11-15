@@ -15,6 +15,10 @@ mod tests;
 mod source_state;
 pub use source_state::{AccountSourceCursors, AccountSourceState};
 
+#[path = "account_nav_projection.rs"]
+mod nav_projection;
+pub use nav_projection::{AccountNavSnapshot, build_account_nav_page};
+
 #[path = "account_captured_fills.rs"]
 mod captured_fills;
 pub use captured_fills::{CapturedFill, CapturedFillPage};

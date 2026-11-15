@@ -103,6 +103,10 @@ pub struct UnifiedFinanceBoundSettlementReceipt {
 
 #[derive(Debug, Clone)]
 pub(crate) enum UnifiedFinanceWrite {
+    ProjectAccountNav {
+        account: String,
+        snapshot: crate::AccountNavSnapshot,
+    },
     ProjectPendingFills {
         account: String,
         limit: usize,

@@ -6,8 +6,9 @@ use crate::{
 };
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
-    AccountSqlStatementStat, Fill, IngestPage, NavPoint, SourceCursor, StoreError, StoreResult,
-    StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition, VenueMark,
+    AccountNavSnapshot, AccountSqlStatementStat, Fill, IngestPage, SourceCursor, StoreError,
+    StoreResult, StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition, VenueMark,
+    build_account_nav_page,
 };
 use okx_runtime::PrivateWsHandle;
 use rust_decimal::Decimal;
@@ -582,65 +583,24 @@ pub(crate) async fn capture_account_sources_traced(
                     s.cash_flow_totals_observed(|stat| record_statement(&nav_trace, stat))
                 })?;
                 let page = measured_nav_phase(&nav_trace, NavPhase::AccountNavBuild, || {
-                    let mut page = IngestPage::default();
-                    let external_usd = s.usd_component_total("EXTERNAL_FLOW_USD")?;
-                    let account_pnl = usd_equity
-                        .checked_sub(s.opening_equity_usd()?)
-                        .and_then(|v| v.checked_sub(external_usd))
-                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-                    page.nav.push(NavPoint {
-                        scope_id: "account".into(),
-                        time: now,
-                        source_version: version.clone(),
-                        equity: usd_equity,
-                        pnl: account_pnl,
-                        flows: external_usd,
-                        currency: "USD".into(),
-                        coverage: if complete { "COMPLETE" } else { "PARTIAL" }.into(),
-                        mark_source: source.clone(),
-                    });
-                    for balance in balances {
-                        let currency = balance.currency;
-                        let equity = d(&balance.equity)?;
-                        let opening = *flows
-                            .get(&(currency.clone(), "OPENING".into()))
-                            .unwrap_or(&Decimal::ZERO);
-                        let external = flows
-                            .iter()
-                            .filter(|((c, k), _)| c == &currency && k != "OPENING")
-                            .try_fold(Decimal::ZERO, |a, (_, v)| {
-                                a.checked_add(*v)
-                                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))
-                            })?;
-                        let pnl = equity
-                            .checked_sub(opening)
-                            .and_then(|v| v.checked_sub(external))
-                            .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-                        page.nav.push(NavPoint {
-                            scope_id: format!("account:{currency}"),
-                            time: now,
-                            source_version: version.clone(),
-                            equity,
-                            pnl,
-                            flows: external,
-                            currency,
-                            coverage: if complete { "COMPLETE" } else { "PARTIAL" }.into(),
-                            mark_source: source.clone(),
-                        });
-                    }
-                    page.cursor = Some(SourceCursor {
-                        source: "account_snapshot".into(),
-                        stream_partition: "account".into(),
-                        cursor: String::new(),
-                        watermark: now,
+                    let input = AccountNavSnapshot {
+                        as_of: now,
                         generation,
-                        coverage_gaps: if complete {
-                            String::new()
-                        } else {
-                            "FINANCIAL_BACKFILL_PENDING".into()
-                        },
-                    });
-                    Ok(page)
+                        source_version: version.clone(),
+                        source_ref: source.clone(),
+                        equity_usd: usd_equity,
+                        balances: balances
+                            .into_iter()
+                            .map(|balance| Ok((balance.currency, d(&balance.equity)?)))
+                            .collect::<StoreResult<Vec<_>>>()?,
+                        complete,
+                    };
+                    build_account_nav_page(
+                        &input,
+                        &flows,
+                        s.opening_equity_usd()?,
+                        s.usd_component_total("EXTERNAL_FLOW_USD")?,
+                    )
                 })?;
                 measured_nav_phase(&nav_trace, NavPhase::AccountNavCommit, || {
                     s.ingest_page_observed(&page, |timing| {

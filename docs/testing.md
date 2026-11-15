@@ -1,3 +1,37 @@
+## #510 - shared account NAV arithmetic and atomic scoped projection
+
+The collector now calls build_account_nav_page in okx-execution instead of
+owning a second account/currency NAV calculation. AccountNavSnapshot carries
+typed Decimal values; the pure function derives PnL after external flows,
+per-currency NAV and the matching account_snapshot cursor. Empty source
+metadata, duplicate/empty currencies and arithmetic overflow reject the input.
+This read model is not an execution grant or independently verified venue proof.
+
+Original opening equity, USD component and cash-flow reads share SQL helpers.
+Legacy cash-flow caching and statement timings are preserved. Unified reads
+scope every table by installation/account. ProjectAccountNav reads those facts,
+builds NAV and commits points/highwater/cursor in one command. COMPLETE requires
+all six same-generation historical cursors through as_of without gaps; PARTIAL
+retains FINANCIAL_BACKFILL_PENDING. Activation remains closed.
+
+Direct tests: pure arithmetic excludes a 10 USDT deposit from 117 equity over
+100 opening (PnL 7); duplicate currency and overflow reject. Two imported
+accounts reuse the deposit ID but have amounts 10/20 and equity 117/141;
+COMMIT/reopen yields independent PnL 7/21 in account and currency views. Missing,
+foreign and wrong-generation coverage cannot produce COMPLETE; replay is
+idempotent and conflicting immutable NAV cannot replace facts.
+
+Windows execution library: 267 PASS, 0 FAIL, 2 ignored, 6.37s after build;
+Agent all-target check, architecture/negative guard and format/diff PASS.
+Selected source_capture Agent tests: 8 PASS, 0 FAIL, 0.00s after build.
+Two direct NAV tests: 0.19s after build. This is NOT full 26x or P95 acceptance.
+
+Remaining: strategy NAV/capital/reconciliation, new-owner AccountResources
+startup, activation and four native risk actions; remove the old Cloudflare
+financial path and perform final same-SHA acceptance. Current production
+composition still selects AccountStoreHandle; only the shared account NAV
+builder is already called by that collector, not the new unified command.
+
 ## #510 - atomic pending-fill FIFO projection and raw-close PnL repair
 
 Original AccountStore and the unified writer share source_fill_projection:

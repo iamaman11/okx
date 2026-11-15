@@ -14,6 +14,7 @@ mod source_flows;
 mod source_funding;
 mod source_funding_projection;
 mod source_nav;
+mod source_nav_inputs;
 mod source_orders;
 mod source_page;
 mod source_positions;

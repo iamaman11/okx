@@ -206,6 +206,22 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    pub async fn project_account_nav(
+        &self,
+        account: String,
+        snapshot: crate::AccountNavSnapshot,
+    ) -> StoreResult<()> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::ProjectAccountNav { account, snapshot })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::SourcePageIngested => Ok(()),
+            _ => Err(StoreError::Invalid(
+                "UNIFIED_ACCOUNT_NAV_RECEIPT_UNEXPECTED",
+            )),
+        }
+    }
+
     /// Read pending facts, project FIFO lots and acknowledge them in one COMMIT.
     pub async fn project_pending_fills(&self, account: String, limit: usize) -> StoreResult<usize> {
         match self

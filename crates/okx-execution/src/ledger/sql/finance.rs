@@ -3452,20 +3452,10 @@ impl AccountStore {
         Ok(result)
     }
     pub fn opening_equity_usd(&self) -> StoreResult<Decimal> {
-        decimal(self.connection.query_row("SELECT equity FROM nav_points WHERE scope_id='account' AND time=?1 AND source_version='opening'",[self.meta.initialized_at],|r|r.get(0))?)
+        Self::opening_equity_usd_sql(&self.connection, None)
     }
     pub fn usd_component_total(&self, component: &str) -> StoreResult<Decimal> {
-        let v: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT amount FROM finance_totals WHERE currency='USD' AND component=?1",
-                [component],
-                |r| r.get(0),
-            )
-            .optional()?;
-        v.map(decimal)
-            .transpose()
-            .map(|v| v.unwrap_or(Decimal::ZERO))
+        Self::usd_component_total_sql(&self.connection, None, component)
     }
     pub fn financial_risk(&self, now: i64, instance: Option<&str>) -> StoreResult<FinancialRisk> {
         let scope = instance
@@ -3688,41 +3678,7 @@ impl AccountStore {
         if let Some(cached) = self.cash_flow_totals_cache.borrow().clone() {
             return Ok(cached);
         }
-        let mut statement = self
-            .connection
-            .prepare("SELECT currency,kind,amount FROM cash_flows ORDER BY time,event_id")?;
-        let started = std::time::Instant::now();
-        let mut count = 0_u64;
-        let result: StoreResult<std::collections::BTreeMap<(String, String), Decimal>> = (|| {
-            let mut rows = statement.query([])?;
-            let mut totals = std::collections::BTreeMap::new();
-            while let Some(row) = rows.next()? {
-                let key = (row.get::<_, String>(0)?, row.get::<_, String>(1)?);
-                let old = *totals.get(&key).unwrap_or(&Decimal::ZERO);
-                let amount = decimal(row.get(2)?)?;
-                totals.insert(
-                    key,
-                    old.checked_add(amount)
-                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
-                );
-                count += 1;
-            }
-            Ok(totals)
-        })(
-        );
-        observe(AccountSqlStatementStat {
-            statement_id: "cash_flow_totals_select",
-            elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-            rows: count,
-            vm_steps: statement
-                .get_status(rusqlite::StatementStatus::VmStep)
-                .max(0) as u64,
-            fullscan_steps: statement
-                .get_status(rusqlite::StatementStatus::FullscanStep)
-                .max(0) as u64,
-            sorts: statement.get_status(rusqlite::StatementStatus::Sort).max(0) as u64,
-            succeeded: result.is_ok(),
-        });
+        let result = Self::cash_flow_totals_sql(&self.connection, None, observe);
         let totals = result?;
         *self.cash_flow_totals_cache.borrow_mut() = Some(totals.clone());
         Ok(totals)

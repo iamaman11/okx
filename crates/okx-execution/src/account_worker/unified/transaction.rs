@@ -48,6 +48,37 @@ fn apply_original_unified_finance_inner(
             .map_err(StoreError::Invalid)
     };
     match command {
+        UnifiedFinanceWrite::ProjectAccountNav { account, snapshot } => {
+            let scope = Some((installation, account.as_str()));
+            let state = AccountStore::source_capture_state_sql(tx, scope)?;
+            if snapshot.complete {
+                for cursor in [
+                    state.cursors.spot,
+                    state.cursors.margin,
+                    state.cursors.swap,
+                    state.cursors.futures,
+                    state.cursors.options,
+                    state.cursors.bills,
+                ] {
+                    if !cursor.is_some_and(|c| {
+                        c.generation == snapshot.generation
+                            && c.watermark >= snapshot.as_of
+                            && c.coverage_gaps.is_empty()
+                    }) {
+                        return Err(StoreError::Invalid("ACCOUNT_NAV_SOURCE_HISTORY_INCOMPLETE"));
+                    }
+                }
+            }
+            let flows = AccountStore::cash_flow_totals_sql(tx, scope, |_| {})?;
+            let page = crate::build_account_nav_page(
+                &snapshot,
+                &flows,
+                AccountStore::opening_equity_usd_sql(tx, scope)?,
+                AccountStore::usd_component_total_sql(tx, scope, "EXTERNAL_FLOW_USD")?,
+            )?;
+            AccountStore::ingest_unified_source_page_sql(tx, installation, &account, &page)?;
+            Ok(UnifiedFinanceWriteReceipt::SourcePageIngested)
+        }
         UnifiedFinanceWrite::ProjectPendingFills { account, limit } => {
             let scope = Some((installation, account.as_str()));
             let fills = AccountStore::pending_fill_sources_sql(tx, scope, limit, |_| {})?;
