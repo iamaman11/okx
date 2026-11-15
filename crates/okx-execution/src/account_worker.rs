@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{oneshot, watch};
+use rusqlite::OptionalExtension;
 type Job = Box<dyn FnOnce(&mut AccountStore) + Send + 'static>;
 mod storage_projection;
 pub use storage_projection::AccountStorageReadback;
@@ -593,6 +594,28 @@ pub struct UnifiedFinancePolicy {
     pub accounts: Vec<UnifiedFinancePolicyAccount>,
 }
 
+/// Source-only settlement address from the authenticated native RiskCommand.
+/// Numeric fields are comparisons against original AccountStore immutable
+/// SQL receipts, NEVER instructions to debit a caller-selected amount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedFinanceBoundSettlement {
+    pub campaign: String,
+    pub reservation_key: String,
+    pub plan_sha256: String,
+    pub expected_sequence: u64,
+    pub cumulative_entry_usd: String,
+    pub settlement_revision: u64,
+    pub source_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedFinanceBoundSettlementReceipt {
+    pub reservation_key: String,
+    pub book_sequence: u64,
+    pub policy_revision: u64,
+    pub cumulative_entry_usd: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum UnifiedFinanceWrite {
     /// The original AccountStore decision, immutable plan and intent are
@@ -631,6 +654,11 @@ pub(crate) enum UnifiedFinanceWrite {
         generation: u64,
         source: crate::risk::EntrySettlementSource,
     },
+    /// Wire fields are an address+CAS only. All economic and account identity
+    /// proofs are independently fetched from ORIGINAL AccountStore in this tx.
+    SettleBoundEntry {
+        request: UnifiedFinanceBoundSettlement,
+    },
     ResolveTerminal {
         campaign: String,
         input: crate::risk::TerminalResolveInput,
@@ -666,6 +694,7 @@ pub(crate) enum UnifiedFinanceWriteReceipt {
     Risk(crate::risk::UnifiedRiskDecision),
     Recovered { changed: usize },
     OutcomeRecorded,
+    BoundEntrySettled(UnifiedFinanceBoundSettlementReceipt),
 }
 
 /// The original SQL owners share this one transaction; no secondary
@@ -695,6 +724,132 @@ pub(crate) fn apply_original_unified_finance_transaction(
             )?;
             Err(error)
         }
+    }
+}
+
+/// Resolve authenticated wire SettleEntry against the ORIGINAL immutable
+/// AccountStore source. The caller may name an exact reservation/plan/digest
+/// but cannot choose the account, intent, settlement kind, generation,
+/// revision or money without matching a producer-sealed durable SQL receipt.
+/// No SQL writes and no second financial owner here.
+pub(crate) fn original_bound_entry_source_sql(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    account: &str,
+    intent: &str,
+    request: &UnifiedFinanceBoundSettlement,
+) -> StoreResult<crate::risk::EntrySettlementSource> {
+    use crate::risk::EntrySettlementSource;
+    use okx_kernel::risk::money::RiskAmount;
+    if installation.is_empty()
+        || account.is_empty()
+        || intent.is_empty()
+        || request.campaign.is_empty()
+        || request.reservation_key.is_empty()
+        || request.reservation_key.len() > 512
+        || request.plan_sha256.len() != 64
+        || request.source_digest.len() != 64
+        || ![&request.plan_sha256, &request.source_digest]
+            .iter()
+            .all(|s| s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        || request.expected_sequence == 0
+        || request.settlement_revision == 0
+    {
+        return Err(StoreError::Invalid("UNIFIED_SETTLEMENT_WIRE_SCOPE_INVALID"));
+    }
+    let claimed = RiskAmount::parse(&request.cumulative_entry_usd)
+        .map_err(|_| StoreError::Invalid("UNIFIED_SETTLEMENT_AMOUNT_INVALID"))?;
+    // All three ORIGINAL read functions verify immutable event receipts,
+    // plan, account, venue order and exact revision in their original code.
+    // Corrupt one source -> fail closed; never try the next as a fallback.
+    let candidates = [
+        (
+            EntrySettlementSource::Partial,
+            AccountStore::partial_entry_settlement_receipt_sql(
+                tx, Some(installation), account, intent,
+            )?,
+        ),
+        (
+            EntrySettlementSource::Terminal,
+            AccountStore::final_entry_settlement_receipt_sql(
+                tx, installation, account, intent, false,
+            )?,
+        ),
+        (
+            EntrySettlementSource::Late,
+            AccountStore::final_entry_settlement_receipt_sql(
+                tx, installation, account, intent, true,
+            )?,
+        ),
+    ];
+    let mut selected = None;
+    for (source, row) in candidates {
+        let Some(proof) = row else { continue };
+        let actual = RiskAmount::parse(&proof.cumulative_entry_usd.normalize().to_string())
+            .map_err(|_| StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_MONEY_INVALID"))?;
+        if proof.account_key == account
+            && proof.intent_id == intent
+            && proof.reservation_key == request.reservation_key
+            && proof.plan_hash == request.plan_sha256
+            && proof.source_digest == request.source_digest
+            && proof.settlement_revision == request.settlement_revision
+            && claimed == actual
+        {
+            if selected.is_some() {
+                return Err(StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_AMBIGUOUS"));
+            }
+            selected = Some(source);
+        }
+    }
+    selected.ok_or(StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_MISMATCH"))
+}
+
+/// One original RiskBook/AccountStore source lookup and one original financial
+/// mutation in the SAME already-held BEGIN IMMEDIATE transaction.
+fn original_bound_entry_settlement_sql(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    request: &UnifiedFinanceBoundSettlement,
+) -> StoreResult<UnifiedFinanceBoundSettlementReceipt> {
+    let row: Option<(String, String, String)> = tx.query_row(
+        "SELECT account_key,intent_id,plan_sha256
+         FROM risk_entries WHERE installation_id=?1 AND campaign_id=?2
+           AND reservation_key=?3",
+        rusqlite::params![installation, &request.campaign, &request.reservation_key],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional()?;
+    let (account, intent, plan) = row
+        .ok_or(StoreError::Invalid("UNIFIED_SETTLEMENT_RESERVATION_NOT_FOUND"))?;
+    if plan != request.plan_sha256 {
+        return Err(StoreError::Invalid("UNIFIED_SETTLEMENT_PLAN_MISMATCH"));
+    }
+    let (generation, revision): (i64, i64) = tx.query_row(
+        "SELECT generation,policy_revision FROM risk_meta
+         WHERE installation_id=?1 AND campaign_id=?2 AND singleton=1",
+        rusqlite::params![installation, &request.campaign],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    )?;
+    let generation = u64::try_from(generation)
+        .map_err(|_| StoreError::Invalid("UNIFIED_SETTLEMENT_GENERATION_INVALID"))?;
+    let policy_revision = u64::try_from(revision)
+        .map_err(|_| StoreError::Invalid("UNIFIED_SETTLEMENT_POLICY_REVISION_INVALID"))?;
+    if generation == 0 || policy_revision == 0 {
+        return Err(StoreError::Invalid("UNIFIED_SETTLEMENT_AUTHORITY_REVISION_INVALID"));
+    }
+    let source = original_bound_entry_source_sql(
+        tx, installation, &account, &intent, request,
+    )?;
+    let outcome = crate::risk::settle_entry_unified_native(
+        tx, installation, &request.campaign, &account, &intent,
+        request.expected_sequence, generation, source,
+    ).map_err(StoreError::Invalid)?;
+    match outcome {
+        crate::risk::UnifiedRiskDecision::EntrySettled {
+            reservation_key, book_sequence, cumulative_entry_usd, ..
+        } => Ok(UnifiedFinanceBoundSettlementReceipt {
+            reservation_key, book_sequence, policy_revision, cumulative_entry_usd,
+        }),
+        _ => Err(StoreError::Invalid("UNIFIED_SETTLEMENT_RECEIPT_UNEXPECTED")),
     }
 }
 
@@ -784,6 +939,10 @@ fn apply_original_unified_finance_inner(
             generation,
             source,
         )),
+        UnifiedFinanceWrite::SettleBoundEntry { request } => {
+            let receipt = original_bound_entry_settlement_sql(tx, installation, &request)?;
+            Ok(UnifiedFinanceWriteReceipt::BoundEntrySettled(receipt))
+        }
         UnifiedFinanceWrite::ResolveTerminal { campaign, input } => risk_operation(
             risk::resolve_terminal_unified_native(tx, installation, &campaign, &input),
         ),
@@ -1121,6 +1280,23 @@ impl UnifiedFinanceHandle {
         {
             UnifiedFinanceWriteReceipt::PolicyApplied => Ok(()),
             _ => Err(StoreError::Invalid("UNIFIED_POLICY_RECEIPT_UNEXPECTED")),
+        }
+    }
+
+    /// The ONLY native SettleEntry public ingress. The wire supplies a
+    /// matching address/revision, not money authority. No durable mutation
+    /// may occur before RB09 verifies the old owner stopped and creates an
+    /// accepted native activation receipt. No secondary SQL or Cloudflare RPC.
+    pub async fn settle_bound_entry(
+        &self,
+        request: UnifiedFinanceBoundSettlement,
+    ) -> StoreResult<UnifiedFinanceBoundSettlementReceipt> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::SettleBoundEntry { request })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::BoundEntrySettled(receipt) => Ok(receipt),
+            _ => Err(StoreError::Invalid("UNIFIED_SETTLEMENT_RECEIPT_UNEXPECTED")),
         }
     }
 

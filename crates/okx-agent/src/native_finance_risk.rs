@@ -3,7 +3,8 @@
 //! budget/venue grant. Trading mutations require independently accepted
 //! RB09 activation and a fully source-wired AccountStore/TradeService.
 use okx_execution::account_worker::{
-    UnifiedFinanceHandle, UnifiedFinancePolicy, UnifiedFinancePolicyAccount,
+    UnifiedFinanceBoundSettlement, UnifiedFinanceHandle, UnifiedFinancePolicy,
+    UnifiedFinancePolicyAccount,
 };
 use okx_protocol::account_governance::{AccountEnvironment, CentralGovernanceSnapshot};
 use okx_protocol::risk_authority::{
@@ -208,9 +209,36 @@ impl NativeFinanceRisk {
             // import is NOT an accepted production financial owner. The
             // AccountStore + native census source producers must first be
             // fully moved before enabling their existing joint transactions.
+            RiskCommandAction::SettleEntry {
+                reservation_key,
+                plan_sha256,
+                expected_risk_book_sequence,
+                cumulative_entry_usd,
+                settlement_revision,
+                source_digest,
+            } => {
+                // The same native SQL worker resolves source amount and
+                // immutable fill/bill revisions internally, then commits
+                // the original AccountStore ACK and RiskBook debit together.
+                // Before RB09 the common write gate always refuses.
+                let receipt = self.owner.settle_bound_entry(UnifiedFinanceBoundSettlement {
+                    campaign: self.campaign.clone(),
+                    reservation_key: reservation_key.clone(),
+                    plan_sha256: plan_sha256.clone(),
+                    expected_sequence: *expected_risk_book_sequence,
+                    cumulative_entry_usd: cumulative_entry_usd.clone(),
+                    settlement_revision: *settlement_revision,
+                    source_digest: source_digest.clone(),
+                }).await.map_err(|e| match e {
+                    okx_execution::StoreError::Invalid(reason) => reason,
+                    _ => "NATIVE_RISK_SETTLEMENT_OWNER_UNAVAILABLE",
+                })?;
+                base(RiskDecisionStatus::Updated, None,
+                    Some(receipt.reservation_key), Some(receipt.book_sequence),
+                    Some(receipt.policy_revision), None, None, None)
+            }
             RiskCommandAction::InstallEntryOpening { .. }
             | RiskCommandAction::Reserve { .. }
-            | RiskCommandAction::SettleEntry { .. }
             | RiskCommandAction::ReleaseUnsent { .. }
             | RiskCommandAction::BeginPost { .. }
             | RiskCommandAction::Resolve { .. } => {

@@ -1,3 +1,31 @@
+## #510 — original AccountStore source-bound SettleEntry ingress
+
+The canonical native RiskCommand `SettleEntry` now forwards its exact
+reservation/plan/sequence/amount/revision/source-digest comparison fields to
+`UnifiedFinanceHandle::settle_bound_entry`. This is not a separate financial
+backend: its existing `apply_financial_write` caller obtains the sole
+installation-owned `BEGIN IMMEDIATE` transaction, checks RB09 authority,
+reads original `risk_entries` account/intent/generation and the exact original
+immutable AccountStore partial, terminal and late receipt. The wire's USD
+amount **cannot** debit the RiskBook unless it matches the ORIGINAL SQL
+receipt's money, revision, plan, reservation and source digest; ambiguous,
+missing, foreign, stale or changed source fails closed. Only then the original
+`risk::settle_entry_unified_native` mutates the RiskBook and AccountStore ACK
+in the SAME COMMIT. The exact output is mapped into `RiskResult::Updated`,
+never `Held` or `PostAuthorized`.
+
+A direct integration witness reuses the original AccountStore scoped
+partial fill/bill receipt SQL: exact amount 0.4, revision 1, plan and digest
+select the real `Partial` producer; changed money, plan, revision, digest or
+foreign account cannot select one. The original terminal/late SQL producer
+and single mutation algorithm are reused unchanged. **With the current
+OFFLINE_NOT_AUTHORIZED import the live route is still denied BEFORE it can
+COMMIT.** This is substantive native wiring of one mutation, NOT acceptance
+of 9/9, no replacement for still-unmigrated fill/bill source ingestion or
+independent RB09 server-disable/activation evidence.
+
+---
+
 ## #510 r4.1 — native whole-cohort governance route
 
 `NativeFinanceRisk::apply_governance` converts an already validated,

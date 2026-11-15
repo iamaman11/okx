@@ -13962,6 +13962,66 @@ fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_
         )
         .unwrap();
     }
+    // The exact WIRE SettleEntry settlement fields are NOT trusted money.
+    // This is the SAME production original AccountStore source reader
+    // selected inside the one owned SQL transaction. No separate test
+    // implementation and no account/campaign budget can be debited here.
+    let request = crate::account_worker::UnifiedFinanceBoundSettlement {
+        campaign: "campaign-X".into(),
+        reservation_key: reservation.into(),
+        plan_sha256: plan.clone(),
+        expected_sequence: 3,
+        cumulative_entry_usd: "0.4".into(),
+        settlement_revision: 1,
+        source_digest: source.clone(),
+    };
+    {
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let read = |request: &crate::account_worker::UnifiedFinanceBoundSettlement| {
+            crate::account_worker::original_bound_entry_source_sql(
+                &tx, installation, &account, intent, request,
+            )
+        };
+        assert_eq!(
+            read(&request).unwrap(),
+            crate::risk::EntrySettlementSource::Partial
+        );
+        let mut changed = request.clone();
+        changed.cumulative_entry_usd = "0.5".into();
+        assert!(matches!(
+            read(&changed),
+            Err(StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_MISMATCH"))
+        ));
+        changed = request.clone();
+        changed.plan_sha256 = "a".repeat(64);
+        assert!(matches!(
+            read(&changed),
+            Err(StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_MISMATCH"))
+        ));
+        changed = request.clone();
+        changed.source_digest = "d".repeat(64);
+        assert!(matches!(
+            read(&changed),
+            Err(StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_MISMATCH"))
+        ));
+        changed = request.clone();
+        changed.settlement_revision = 2;
+        assert!(matches!(
+            read(&changed),
+            Err(StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_MISMATCH"))
+        ));
+        // A second account, even if intent IDs collide, has no source in
+        // this account's original SQL scope.
+        assert!(matches!(
+            crate::account_worker::original_bound_entry_source_sql(
+                &tx, installation, &format!("okx:real:{}", "d".repeat(64)), intent, &request
+            ),
+            Err(StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_MISMATCH"))
+        ));
+        tx.rollback().unwrap();
+    }
     for attempt in 0..2 {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
