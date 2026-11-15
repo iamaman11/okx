@@ -12389,6 +12389,49 @@ fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit(
         Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED"))
     ));
 
+    // Force a storage failure AFTER the RiskBook POSTED change, in the
+    // original account intent write. Even COMMIT after Err must not persist
+    // half a grant: the production command savepoint owns the rollback.
+    {
+        let tx = target.transaction().unwrap();
+        let snapshot = |tx: &rusqlite::Transaction<'_>| {
+            tx.query_row(
+                "SELECT e.state,i.state,m.book_sequence,r.state
+                 FROM risk_entries e JOIN intents i
+                  ON i.installation_id=e.installation_id AND i.account_key=e.account_key AND i.intent_id=e.intent_id
+                 JOIN risk_meta m ON m.installation_id=e.installation_id AND m.campaign_id=e.campaign_id
+                 JOIN risk_receipts r ON r.installation_id=i.installation_id AND r.account_key=i.account_key AND r.intent_id=i.intent_id
+                 WHERE e.installation_id='installation' AND e.campaign_id='campaign-X' AND e.reservation_key='same-reservation'",
+                [], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,i64>(2)?, row.get::<_,String>(3)?))
+            ).unwrap()
+        };
+        let before = snapshot(&tx);
+        tx.execute_batch(
+            "CREATE TEMP TRIGGER fail_original_account_post BEFORE UPDATE ON intents
+            WHEN NEW.state='POSTING' AND NEW.account_key='acct-A'
+            BEGIN SELECT RAISE(ABORT,'INJECTED_ACCOUNT_POST_FAILURE'); END;",
+        )
+        .unwrap();
+        let result = crate::risk::test_stage_scoped_begin_post(
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &ai.plan_hash,
+            cohort,
+            2,
+        );
+        assert_eq!(result.unwrap_err(), "RISK_STORAGE_UNAVAILABLE");
+        assert_eq!(
+            snapshot(&tx),
+            before,
+            "the whole financial command rolled back"
+        );
+        tx.execute_batch("DROP TRIGGER fail_original_account_post")
+            .unwrap();
+        tx.commit().unwrap();
+    }
+
     // First execute a true ROLLBACK after both RiskBook and native intent
     // changed, proving neither half survives on a shared SQLite file.
     {

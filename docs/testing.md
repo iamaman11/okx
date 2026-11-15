@@ -1,3 +1,27 @@
+## #510 — BEGIN_POST uses original finance dispatcher in physical witnesses
+
+The existing test-only causal input constructor now calls
+`apply_original_unified_finance_transaction(UnifiedFinanceWrite::BeginPost)`
+instead of bypassing the common command/savepoint boundary and calling the
+RiskBook mutation directly. The same original positive/rejected/replay tests
+and child-process BEFORE/AFTER COMMIT kill/reopen witnesses now traverse
+that dispatcher. The causal input is still explicitly synthetic; this does
+not prove authenticated live source construction or enable native POST.
+
+Added a real SQLite failure boundary: a TEMP trigger aborts the original
+account intent POSTING write after the RiskBook change. The public error is
+RISK_STORAGE_UNAVAILABLE; original risk/account states and book sequence
+must remain unchanged even if the outer caller commits after the error.
+After trigger removal the existing successful/rollback/crash/replay path
+still passes, so an always-denied implementation cannot satisfy the test.
+
+Local Windows direct named test PASS (0.44s after build); full execution
+regression 258 PASS, 0 FAIL, 2 ignored (6.60s), architecture self-test/guard,
+format and diff PASS. Counts overlap. Complete RB01–16/T09–T10 and real
+source/activation remain unaccepted. Installed data and runtime untouched.
+
+---
+
 ## #510 — complete committed entry-budget readback (15 Nov 2026)
 
 `UnifiedFinanceHandle::campaign_summary` now preserves the original

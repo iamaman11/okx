@@ -346,9 +346,27 @@ pub(crate) fn test_stage_scoped_begin_post(
             account_reads: reads,
         },
     };
-    match begin_post_unified_native(tx, installation, campaign, &input).map_err(str::to_owned)? {
-        UnifiedRiskDecision::PostAuthorized { book_sequence, .. } => Ok(book_sequence),
-        UnifiedRiskDecision::Denied { reason } => Err(reason),
+    // Exercise the exact command/savepoint boundary used by the finance FIFO,
+    // including the real child-process kill and original WAL reopen witnesses.
+    // Only input construction above is test-specific, never the algorithm.
+    use crate::account_worker::{
+        UnifiedFinanceWrite, UnifiedFinanceWriteReceipt, apply_original_unified_finance_transaction,
+    };
+    let receipt = apply_original_unified_finance_transaction(
+        tx,
+        installation,
+        UnifiedFinanceWrite::BeginPost {
+            campaign: campaign.to_owned(),
+            input,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    match receipt {
+        UnifiedFinanceWriteReceipt::Risk(UnifiedRiskDecision::PostAuthorized {
+            book_sequence,
+            ..
+        }) => Ok(book_sequence),
+        UnifiedFinanceWriteReceipt::Risk(UnifiedRiskDecision::Denied { reason }) => Err(reason),
         _ => Err("UNIFIED_POST_RECEIPT_UNEXPECTED".into()),
     }
 }
