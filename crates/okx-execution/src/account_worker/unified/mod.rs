@@ -205,6 +205,10 @@ pub struct UnifiedFinanceCampaignSummary {
     pub consumed_loss_usd: String,
     pub reserved_loss_usd: String,
     pub remaining_loss_usd: String,
+    pub entry_limit_usd: String,
+    pub consumed_entry_usd: String,
+    pub reserved_entry_usd: String,
+    pub entry_bound_breach_usd: String,
     pub remaining_entry_usd: String,
 }
 

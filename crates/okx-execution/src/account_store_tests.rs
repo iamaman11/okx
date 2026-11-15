@@ -13248,6 +13248,24 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     assert_eq!(summary.global_reserved_usdt, "1");
     assert_eq!(summary.remaining_loss_usd, "99");
     assert_eq!(summary.remaining_entry_usd, "98");
+    assert_eq!(summary.entry_limit_usd, "100");
+    assert_eq!(summary.consumed_entry_usd, "0");
+    assert_eq!(summary.reserved_entry_usd, "2");
+    assert_eq!(summary.entry_bound_breach_usd, "0");
+    let serialized = serde_json::to_value(&summary).unwrap();
+    assert_eq!(serialized["reserved_entry_usd"], "2");
+    assert_eq!(serialized["entry_limit_usd"], "100");
+    assert!(
+        owner
+            .campaign_summary("foreign-campaign".into())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        owner.campaign_summary("campaign-X".into()).await.unwrap(),
+        summary
+    );
+
     // AccountStore intent/plan readback uses this same installation SQL FIFO.
     // A/B original intent IDs may coincide, but a third account cannot read
     // either row and no read provides a budget/venue write capability.

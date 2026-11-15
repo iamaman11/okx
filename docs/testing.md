@@ -1,3 +1,22 @@
+## #510 — complete committed entry-budget readback (15 Nov 2026)
+
+`UnifiedFinanceHandle::campaign_summary` now preserves the original
+RiskBook entry limit, consumed amount, reserved amount and bound breach,
+in addition to the existing remaining amount. These values come from the
+same original verified readback and SQL snapshot, without reimplementing
+money arithmetic in the Agent/inspection layer. The stopped inspection's
+existing serialized campaign view exposes these fields automatically.
+Opening provenance/time and live authorization are NOT fabricated.
+
+The original two-account imported-owner test independently checks exact
+100 limit / 0 consumed / 2 reserved / 98 remaining / 0 breach, serialized
+values, refusal of a foreign campaign, and unchanged repeated readback.
+Local Windows named test PASS (0.37s after build). Full contract and Agent
+checks are recorded in the associated implementation report. This change
+completes that read projection, not production mutation/activation or 26/26.
+
+---
+
 ## #510 — explicit unified finance responsibilities (15 Nov 2026)
 
 The installation financial owner was moved out of account_worker.rs into

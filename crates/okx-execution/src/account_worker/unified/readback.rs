@@ -60,6 +60,10 @@ impl UnifiedFinanceHandle {
                 consumed_loss_usd: original.consumed_loss_usd,
                 reserved_loss_usd: original.reserved_loss_usd,
                 remaining_loss_usd: original.remaining_loss_usd,
+                entry_limit_usd: original.entry_limit_usd,
+                consumed_entry_usd: original.consumed_entry_usd,
+                reserved_entry_usd: original.reserved_entry_usd,
+                entry_bound_breach_usd: original.entry_bound_breach_usd,
                 remaining_entry_usd: original.remaining_entry_usd,
             })
         })
