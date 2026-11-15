@@ -13747,6 +13747,95 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         .await
         .unwrap()
         .unwrap();
+
+    // Physical original AccountStore + RiskBook joint COMMIT witness after
+    // ALL native owner handles are stopped. This directly invokes the SAME
+    // production transaction dispatcher on the imported 47-table SQLite;
+    // it never creates an activation marker or a simulated financial owner.
+    // The imported OFFLINE_NOT_AUTHORIZED file is consumed by this test and
+    // deleted below, so it cannot accidentally become a startup authority.
+    let assert_committed = |source: &rusqlite::Connection, revision: i64, paused: i64| {
+        for account in [&a_key, &b_key] {
+            let row: (i64, i64, String, String) = source
+                .query_row(
+                    "SELECT revision,paused,campaign_id,campaign_limit
+                     FROM account_policy
+                     WHERE installation_id='installation' AND account_key=?1 AND singleton=1",
+                    [account],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(row, (revision, paused, "campaign-X".into(), "100".into()));
+        }
+        let campaign_revision: i64 = source
+            .query_row(
+                "SELECT policy_revision FROM risk_meta
+                 WHERE installation_id='installation' AND campaign_id='campaign-X' AND singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(campaign_revision, revision);
+    };
+    {
+        let mut connection = Connection::open(&finance).unwrap();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(
+            crate::account_worker::apply_original_unified_finance_transaction(
+                &tx,
+                "installation",
+                crate::account_worker::UnifiedFinanceWrite::ApplyPolicy {
+                    policy: policy.clone(),
+                },
+            )
+            .unwrap(),
+            crate::account_worker::UnifiedFinanceWriteReceipt::PolicyApplied
+        );
+        // One SQL snapshot sees A + B + campaign revision together.
+        assert_committed(&tx, 8, 1);
+        tx.commit().unwrap();
+    }
+    let mut cold = Connection::open(&finance).unwrap();
+    assert_committed(&cold, 8, 1);
+    {
+        let tx = cold
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(
+            crate::account_worker::apply_original_unified_finance_transaction(
+                &tx,
+                "installation",
+                crate::account_worker::UnifiedFinanceWrite::ApplyPolicy {
+                    policy: policy.clone(),
+                },
+            )
+            .unwrap(),
+            crate::account_worker::UnifiedFinanceWriteReceipt::PolicyApplied,
+            "exact governance replay cannot create another policy revision"
+        );
+        tx.commit().unwrap();
+    }
+    assert_committed(&cold, 8, 1);
+    {
+        let tx = cold
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let mut stale = policy;
+        stale.policy_revision = 7;
+        assert!(matches!(
+            crate::account_worker::apply_original_unified_finance_transaction(
+                &tx,
+                "installation",
+                crate::account_worker::UnifiedFinanceWrite::ApplyPolicy { policy: stale }
+            ),
+            Err(StoreError::Invalid("POLICY_REVISION_CONFLICT"))
+        ));
+        tx.rollback().unwrap();
+    }
+    assert_committed(&cold, 8, 1);
+    drop(cold);
     let _ = std::fs::remove_dir_all(&root);
 }
 
