@@ -19,6 +19,9 @@ pub struct NativeRiskClient {
 enum RiskRoute {
     Cloudflare(mpsc::Sender<OutboundRiskCommand>),
     Local(crate::native_finance_risk::NativeFinanceRisk),
+    /// Installed finance snapshot, real Engine route, ZERO private SQL/POST
+    /// producers and ZERO financial COMMIT permission.
+    LocalStopped(crate::native_finance_risk::NativeFinanceRisk),
 }
 impl NativeRiskClient {
     pub fn new(tx: mpsc::Sender<OutboundRiskCommand>) -> Self {
@@ -33,6 +36,10 @@ impl NativeRiskClient {
             route: RiskRoute::Local(backend),
         }
     }
+    pub fn local_stopped(backend: crate::native_finance_risk::NativeFinanceRisk) -> Self {
+        Self { route: RiskRoute::LocalStopped(backend) }
+    }
+
     /// The native route applies the FULL signed governance roster in its
     /// single SQL COMMIT; it must never fall back to legacy per-account SQL
     /// if the native gate rejects. False selects the still-unswitched
@@ -47,6 +54,12 @@ impl NativeRiskClient {
                 backend.apply_governance(snapshot).await?;
                 Ok(true)
             }
+            RiskRoute::LocalStopped(backend) => {
+                // Only compare an authenticated policy to original imported
+                // SQL; do NOT write it or promote the sealed import to LIVE.
+                backend.verify_stopped_observation(snapshot).await?;
+                Ok(true)
+            }
         }
     }
 
@@ -55,7 +68,9 @@ impl NativeRiskClient {
             return Err("INVALID_RISK_COMMAND");
         }
         let tx = match &self.route {
-            RiskRoute::Local(backend) => return backend.request(command).await,
+            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
+                return backend.request(command).await
+            }
             RiskRoute::Cloudflare(sender) => sender,
         };
         let id = command.command_id.clone();

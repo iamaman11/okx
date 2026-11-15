@@ -81,6 +81,53 @@ impl NativeFinanceRisk {
             .map_err(|error| error.to_string())
     }
 
+    /// An authenticated incoming governance frame may be OBSERVED while
+    /// an import is stopped, but it may never update SQL or authorize a
+    /// venue operation. Every claimed account and policy field is compared
+    /// to the ORIGINAL import on the one installed owner before publishing
+    /// an in-memory diagnostic snapshot.
+    pub async fn verify_stopped_observation(
+        &self,
+        snapshot: &CentralGovernanceSnapshot,
+    ) -> Result<(), String> {
+        if !snapshot.valid()
+            || snapshot.state.installation_id != self.installation
+            || snapshot.state.campaign_id != self.campaign
+            || snapshot.state.accounts.is_empty()
+            || snapshot.state.accounts.iter().any(|a| a.environment != AccountEnvironment::Real)
+        {
+            return Err("FINANCE_STOPPED_OBSERVATION_SCOPE_MISMATCH".into());
+        }
+        let inventory = self.owner.inventory().await.map_err(|e| e.to_string())?;
+        if inventory.state != "OFFLINE_NOT_AUTHORIZED"
+            || inventory.accounts != snapshot.state.accounts.len() as i64
+            || inventory.campaigns != 1
+        {
+            return Err("FINANCE_STOPPED_OBSERVATION_ROSTER_MISMATCH".into());
+        }
+        let summary = self.owner.campaign_summary(self.campaign.clone()).await
+            .map_err(|e| e.to_string())?;
+        if summary.policy_revision != snapshot.state.revision
+            || snapshot.state.campaign_loss_limit_usd.parse::<rust_decimal::Decimal>().ok()
+                != summary.loss_limit_usd.parse::<rust_decimal::Decimal>().ok()
+        {
+            return Err("FINANCE_STOPPED_OBSERVATION_POLICY_MISMATCH".into());
+        }
+        for account in &snapshot.state.accounts {
+            let original = self.owner.stopped_account_policy(
+                self.campaign.clone(), account.account_key.clone()
+            ).await.map_err(|e| e.to_string())?;
+            if original.revision != account.policy_revision
+                || original.paused == account.access_enabled()
+                || original.campaign_limit_usd.parse::<rust_decimal::Decimal>().ok()
+                    != summary.loss_limit_usd.parse::<rust_decimal::Decimal>().ok()
+            {
+                return Err("FINANCE_STOPPED_OBSERVATION_ACCOUNT_MISMATCH".into());
+            }
+        }
+        Ok(())
+    }
+
     pub async fn request(&self, command: RiskCommand) -> Result<RiskResult, &'static str> {
         if !command.valid() {
             return Err("INVALID_RISK_COMMAND");

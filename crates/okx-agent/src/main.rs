@@ -15,6 +15,7 @@ use okx_agent::{
     query::DispatchContext,
     reference_bootstrap::bootstrap_reference,
     risk_bridge::NativeRiskClient,
+    native_finance_risk::NativeFinanceRisk,
     runtime::{EngineContext, run_engine},
     trade_service::TradeService,
 };
@@ -38,6 +39,10 @@ struct Cli {
     key_id: String,
     #[arg(long, global = true, default_value = "global")]
     region: String,
+    /// Exact immutable single campaign expected for the stopped imported
+    /// finance.sqlite. Enables read-only native Run/Once, never live trading.
+    #[arg(long, global = true)]
+    stopped_finance_campaign: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -133,6 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 async fn run(cli: Cli) -> AgentResult<()> {
     let config = AgentConfig::new(cli.root, cli.key_id);
+    let stopped_finance_campaign = cli.stopped_finance_campaign;
     let env = OkxEnvironment::new(Region::from_str(&cli.region)?, false);
     match cli.command {
         Command::InitKey => println!(
@@ -254,8 +260,36 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 .try_lock()
                 .map_err(|_| AgentError::FinancialCaptureTask("ENGINE_ALREADY_RUNNING".into()))?;
             let budget = RateBudget::new();
-            let accounts =
-                Arc::new(AccountRuntimeRegistry::open(&config.root, budget.clone()).await?);
+            // Runtime MODE SELECTION occurs before any account SQL resource
+            // is opened. A finance.sqlite can only open via the single
+            // native owner; a legacy Cloudflare finance fallback is never
+            // constructed for the same installation.
+            let finance_present = match std::fs::symlink_metadata(
+                config.root.join("finance").join("finance.sqlite")
+            ) {
+                Ok(_) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => return Err(AgentError::FinancialCaptureTask(
+                    "FINANCE_AUTHORITY_STATUS_UNAVAILABLE".into()
+                )),
+            };
+            let (accounts, native_owner) = if finance_present {
+                let campaign = stopped_finance_campaign.as_deref()
+                    .ok_or_else(|| AgentError::FinancialCaptureTask(
+                        "FINANCE_STOPPED_CAMPAIGN_REQUIRED".into()
+                    ))?;
+                let (registry, owner) = AccountRuntimeRegistry::open_stopped_finance(
+                    &config.root, budget.clone(), campaign
+                ).await?;
+                (Arc::new(registry), Some(owner))
+            } else {
+                if stopped_finance_campaign.is_some() {
+                    return Err(AgentError::FinancialCaptureTask(
+                        "FINANCE_STOPPED_IMPORT_REQUIRED".into()
+                    ));
+                }
+                (Arc::new(AccountRuntimeRegistry::open(&config.root, budget.clone()).await?), None)
+            };
             let public_client = OkxPublicClient::with_rate_budget(env, budget.clone())?;
             let reference = bootstrap_reference(public_client.clone()).await?;
             let (public, public_ws) =
@@ -264,10 +298,21 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let analytics = AnalyticsService::new(config.root.join("analytics"), market.clone())
                 .map_err(AgentError::ResearchSessionTask)?;
             let (risk_tx, risk) = tokio::sync::mpsc::channel(32);
+            let risk_client = match native_owner {
+                Some(owner) => {
+                    let campaign = stopped_finance_campaign
+                        .expect("stopped finance already required above");
+                    let backend = NativeFinanceRisk::new(
+                        owner, accounts.installation_id().to_owned(), campaign,
+                    ).map_err(|reason| AgentError::FinancialCaptureTask(reason.into()))?;
+                    NativeRiskClient::local_stopped(backend)
+                }
+                None => NativeRiskClient::new(risk_tx),
+            };
             let trade = Arc::new(TradeService::new(
                 accounts.clone(),
                 public_ws.clone(),
-                NativeRiskClient::new(risk_tx),
+                risk_client,
             ));
             trade.set_analytics(analytics.clone()).await;
             let dispatch = DispatchContext {

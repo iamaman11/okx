@@ -1256,6 +1256,15 @@ pub struct UnifiedFinanceReservationReadback {
     pub policy_revision: u64,
 }
 
+/// Exact original stopped AccountStore policy, not an incoming proposal.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UnifiedFinanceAccountPolicyReadback {
+    pub account_key: String,
+    pub revision: u64,
+    pub paused: bool,
+    pub campaign_limit_usd: String,
+}
+
 impl UnifiedFinanceHandle {
     pub async fn open_stopped_import(
         runtime_root: PathBuf,
@@ -1640,6 +1649,40 @@ impl UnifiedFinanceHandle {
                 policy_revision: original.policy_revision,
             }
         }))
+    }
+
+    /// Original scoped account policy, read via the installation SQL FIFO.
+    /// Intended only to compare authenticated governance against a sealed
+    /// import; no read of an account may create a mutation permit.
+    pub async fn stopped_account_policy(
+        &self,
+        campaign: String,
+        account: String,
+    ) -> StoreResult<UnifiedFinanceAccountPolicyReadback> {
+        if campaign.is_empty() || account.is_empty() {
+            return Err(StoreError::Invalid("UNIFIED_STOPPED_POLICY_SCOPE_INVALID"));
+        }
+        let installation = self.installation.clone();
+        self.submit(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let row: (i64, i64, String, String) = tx.query_row(
+                "SELECT revision,paused,campaign_id,campaign_limit
+                 FROM account_policy WHERE installation_id=?1 AND account_key=?2 AND singleton=1",
+                rusqlite::params![installation, &account],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+            )?;
+            tx.commit()?;
+            if row.2 != campaign || !(0..=1).contains(&row.1) {
+                return Err(StoreError::Invalid("UNIFIED_STOPPED_POLICY_IDENTITY_MISMATCH"));
+            }
+            Ok(UnifiedFinanceAccountPolicyReadback {
+                account_key: account,
+                revision: u64::try_from(row.0).map_err(|_|
+                    StoreError::Invalid("UNIFIED_STOPPED_POLICY_REVISION_INVALID"))?,
+                paused: row.1 == 1,
+                campaign_limit_usd: row.3,
+            })
+        }).await
     }
 
     /// Read-only original AccountStore intent (and immutable full plan)

@@ -8,6 +8,7 @@ use crate::{
 };
 use okx_api::{AccountApi, Credentials, OkxEnvironment, OkxRestClient, RateBudget};
 use okx_execution::{AccountMeta, AccountStoreHandle, OpeningSnapshot};
+use okx_execution::account_worker::UnifiedFinanceHandle;
 use okx_protocol::{
     account_catalog_proto,
     accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
@@ -177,6 +178,9 @@ pub struct AccountRuntimeRegistry {
     /// Only catalog publication is serialized. Verification/HTTP never hold it.
     catalog_write: tokio::sync::Mutex<()>,
     rate_budget: RateBudget,
+    /// An opened stopped finance import has ZERO account-local writers.
+    /// No connect/recovery source task or venue POST can start in this mode.
+    native_stopped_finance: bool,
 }
 
 fn invalid() -> AgentError {
@@ -255,6 +259,7 @@ impl AccountRuntimeRegistry {
             failures: RwLock::new(BTreeMap::new()),
             catalog_write: tokio::sync::Mutex::new(()),
             rate_budget,
+            native_stopped_finance: false,
         };
         // Build independently: one account's slow verification cannot block another.
         use futures_util::{StreamExt, stream};
@@ -292,6 +297,60 @@ impl AccountRuntimeRegistry {
         Ok(registry)
     }
 
+    /// Actual Engine startup path for the original unified finance import.
+    /// The ONE finance.sqlite writer is opened before any account resources,
+    /// and NO AccountStoreHandle/venue observer/executor is created. The
+    /// account-catalog roster is independent of the immutable SQL manifest;
+    /// both must match. One campaign only until native multi-campaign
+    /// routing is implemented; never infer other campaigns away.
+    pub async fn open_stopped_finance(
+        root: &Path,
+        rate_budget: RateBudget,
+        campaign: &str,
+    ) -> AgentResult<(Self, UnifiedFinanceHandle)> {
+        if campaign.is_empty() {
+            return Err(AgentError::FinancialCaptureTask(
+                "FINANCE_EXPECTED_CAMPAIGN_REQUIRED".into(),
+            ));
+        }
+        let catalog = account_catalog_proto::load(root)?;
+        if catalog.accounts.is_empty()
+            || catalog.accounts.iter().any(|c| c.account_key.environment != Environment::Real)
+        {
+            return Err(AgentError::FinancialCaptureTask(
+                "FINANCE_STOPPED_CATALOG_COHORT_INVALID".into(),
+            ));
+        }
+        let roster = catalog
+            .accounts.iter().map(|c| c.account_key.wire()).collect::<Vec<_>>();
+        let owner = UnifiedFinanceHandle::open_stopped_import(
+            root.canonicalize()?,
+            catalog.installation_id.clone(),
+            roster,
+            vec![campaign.to_owned()],
+        ).await?;
+        if owner.inventory().await?.state != "OFFLINE_NOT_AUTHORIZED" {
+            return Err(AgentError::FinancialCaptureTask(
+                "FINANCE_STOPPED_MANIFEST_INVALID".into(),
+            ));
+        }
+        let registry = Self {
+            root: root.to_path_buf(),
+            installation_id: catalog.installation_id,
+            routes: RwLock::new(BTreeMap::new()),
+            configurations: RwLock::new(
+                catalog.accounts.into_iter()
+                    .map(|c| (c.account_key.wire(), c))
+                    .collect(),
+            ),
+            failures: RwLock::new(BTreeMap::new()),
+            catalog_write: tokio::sync::Mutex::new(()),
+            rate_budget,
+            native_stopped_finance: true,
+        };
+        Ok((registry, owner))
+    }
+
     pub fn installation_id(&self) -> &str {
         &self.installation_id
     }
@@ -315,6 +374,11 @@ impl AccountRuntimeRegistry {
     /// Re-open unavailable contexts without changing configuration or storage.
     /// An unreachable account never holds another account's mutation owner.
     pub async fn recover_unavailable(&self) {
+        // No legacy resource can be re-opened while the new installation
+        // writer owns finance.sqlite; stopped mode never heals to two owners.
+        if self.native_stopped_finance {
+            return;
+        }
         use futures_util::{StreamExt, stream};
         let unavailable = self
             .failures
@@ -362,6 +426,11 @@ impl AccountRuntimeRegistry {
         operation_id: &str,
         request_digest: &str,
     ) -> AgentResult<VerifiedAccountConfig> {
+        if self.native_stopped_finance {
+            return Err(AgentError::FinancialCaptureTask(
+                "FINANCE_STOPPED_ACCOUNT_CONNECTION_DISABLED".into(),
+            ));
+        }
         if !valid_reference(credential_ref)
             || request_digest.len() != 64
             || !request_digest

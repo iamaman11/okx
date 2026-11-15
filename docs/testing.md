@@ -1,3 +1,43 @@
+## #510 — runtime owner selection (actual Run/Once startup)
+
+The canonical `okx-agent Run/Once` path now checks for the installed
+`runtime_root/finance/finance.sqlite` BEFORE opening any account resources.
+When the unified file exists it **does not** instantiate the former
+`AccountRuntimeRegistry::open`, account-local `AccountStoreHandle`,
+private source observers, source capture loops or Cloudflare financial
+`NativeRiskClient::new`. Instead the same production `TradeService` is
+constructed with `NativeRiskClient::local_stopped` backed by the original
+single `UnifiedFinanceHandle::open_stopped_import` owner.
+
+To open this strictly read-only installed mode the operator MUST supply
+`--stopped-finance-campaign <exact-campaign-id>`. The independent existing
+Protobuf `account-catalog.pb` supplies the complete exact REAL account
+roster. Original manifest/RiskBook verify the full one-campaign inventory.
+Missing/mismatching roster, missing/extra campaigns, or any invalid import
+fail before the Engine session starts. Neither missing finance.sqlite nor
+missing campaign can silently fall back to Cloudflare finance. The native
+registry denies `ConnectAccount`, auto-recovery, private account contexts
+and every venue trade. The local single-writer finance owner is held for
+the Engine lifetime and its exclusive lease excludes old SQL writers.
+
+Authenticated governance snapshots may be loaded into memory **for
+observations only** if their full roster, revision, policy cap and
+per-account paused/revision matches the ORIGINAL scoped SQL rows read from
+the same installation writer. No incoming governance is committed or
+promoted from `OFFLINE_NOT_AUTHORIZED`. `Summary`, `AccountSummary`
+and `Inspect` remain source read-only; all six mutations are denied
+before any COMMIT. This is the FIRST REAL native branch in existing
+Run/Once production startup rather than isolated test/CLI handlers; it
+does NOT make trade/POST production-capable or constitute RB09.
+
+Outstanding: migrate original account capture/quote/fill/bill/fee,
+ledger/protection/recovery consumers into the unified writer; finish four
+remaining mutation ingress actions; verified RB09 old-Cloudflare financial
+shutdown, immutable activation and exact-SHA Windows RB01–16/T09/T10/26x.
+No merge, deploy or real/demo trade authorized.
+
+---
+
 ## #510 — source-bound native ReleaseUnsent
 
 Native `RiskCommandAction::ReleaseUnsent` is now mapped to the existing sole
