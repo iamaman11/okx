@@ -597,7 +597,7 @@ pub use unified::{
 };
 pub(crate) use unified::{
     UnifiedFinanceWrite, UnifiedFinanceWriteReceipt, apply_original_unified_finance_transaction,
-    install_reported_opening_sql, original_bound_entry_source_sql,
+    install_reported_opening_sql, native_reservation_receipt_sql, original_bound_entry_source_sql,
     original_bound_unsent_source_sql,
 };
 

@@ -9,7 +9,9 @@ pub(crate) use opening_ingress::install_reported_opening_sql;
 pub use opening_ingress::{ReportedOpeningCensus, ReportedOpeningReceipt};
 mod authority_reads;
 mod readback;
+mod reservation;
 mod reserve_source;
+pub(crate) use reservation::{native_reservation_receipt_sql, reserve_native_sql};
 mod sources;
 mod submission;
 mod trade_reads;
@@ -116,6 +118,11 @@ pub struct UnifiedFinanceBoundSettlementReceipt {
 
 #[derive(Debug, Clone)]
 pub(crate) enum UnifiedFinanceWrite {
+    ReserveNative {
+        campaign: String,
+        input: crate::risk::ReserveInput,
+        census: crate::risk::VerifiedCensus,
+    },
     InstallReportedOpening {
         source: crate::risk::NativeOpeningSource,
         census: ReportedOpeningCensus,

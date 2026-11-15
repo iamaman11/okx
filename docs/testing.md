@@ -1,3 +1,38 @@
+## #510 - Native local reservation receipt contract (no wire HELD hash cycle)
+
+A private ReserveNative transaction now derives CentralReceipt from ORIGINAL
+scoped intent/decision and reserve proposal instead of asking Agent to hash a
+not-yet-delivered RiskResult. Domain hash preimage is the explicit JSON tuple:
+["okx.native-reservation-receipt/v1",installation,campaign,account,intent,
+reservation_key,plan_hash,policy_revision,decision_owner,canonical_loss_usd,
+conversion_digest]. SHA-256 output remains 64 lowercase hex characters.
+This digest binds local durable identity; it is NOT external source authentication
+or a venue POST grant. Legacy remote RiskResult hash semantics remain unchanged.
+No clock, native incarnation, response sequence or transport serialization enters
+this identity. Policy/campaign/owner/amount validation and budget/account updates
+still run through the original single-transaction reserve implementation.
+
+The existing two-account joint-reserve contract now also exercises ReserveNative:
+local receipt stable across envelope time/incarnation, distinct from the legacy
+fixture response hash, wrong plan/foreign installation reject, first reserve
+and exact retry leave one risk entry with the exact locally derived receipt.
+The isolated transaction rolls back before all original OS-kill/reopen tests.
+A first negative used an accidentally identical hash; fixed the test to guarantee
+a different value, with production checks unchanged.
+
+Execution library: 273 PASS, 0 FAIL, 2 ignored, 10.02s after build. This is a
+single full-library timing, NOT the direct-target P95 <=10s performance proof.
+Agent all-target check, architecture guard/self-test and format/diff PASS.
+No Agent test binary rebuild was needed for this private execution-only command.
+
+Still NOT implemented: public source-bound Native Reserve ingress must validate
+current actual census/ALL-IN admission and connect this domain receipt to native
+HELD/readback without another account reserve. Current command accepts private
+ReserveInput/VerifiedCensus only; it is not exposed on the wire or activated.
+Runtime composition, BeginPost producer + consuming sender, Resolve, RB09 and
+full exact-SHA acceptance remain. Do not count this backend contract as an
+accepted end-to-end Native Execute.
+
 ## #510 - combined source/policy/sender integration batch
 
 One parent-integrated batch from two code subagents plus sender integration.

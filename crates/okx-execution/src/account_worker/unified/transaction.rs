@@ -48,6 +48,11 @@ fn apply_original_unified_finance_inner(
             .map_err(StoreError::Invalid)
     };
     match command {
+        UnifiedFinanceWrite::ReserveNative {
+            campaign,
+            input,
+            census,
+        } => super::reserve_native_sql(tx, installation, &campaign, &input, &census),
         UnifiedFinanceWrite::InstallReportedOpening { source, census } => {
             super::opening_ingress::install_reported_opening_sql(
                 tx,

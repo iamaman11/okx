@@ -2928,6 +2928,64 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         ));
         tx.rollback().unwrap();
     }
+    {
+        use crate::account_worker::{
+            UnifiedFinanceWrite, UnifiedFinanceWriteReceipt,
+            apply_original_unified_finance_transaction, native_reservation_receipt_sql,
+        };
+        let tx = db.transaction().unwrap();
+        let receipt =
+            native_reservation_receipt_sql(&tx, "test-installation", &campaign, &original).unwrap();
+        let mut later = original.clone();
+        later.now_ms += 1;
+        later.native_incarnation = "e".repeat(32);
+        let repeat =
+            native_reservation_receipt_sql(&tx, "test-installation", &campaign, &later).unwrap();
+        assert_eq!(receipt.receipt_hash, repeat.receipt_hash);
+        assert_eq!(receipt.receipt_hash.len(), 64);
+        assert_ne!(
+            receipt.receipt_hash, receipt_a.receipt_hash,
+            "Native identity is not a fabricated wire response hash"
+        );
+        let mut changed = original.clone();
+        changed.plan_sha256 = if original.plan_sha256 == uid('a') {
+            uid('b')
+        } else {
+            uid('a')
+        };
+        assert!(
+            native_reservation_receipt_sql(&tx, "test-installation", &campaign, &changed).is_err()
+        );
+        assert!(native_reservation_receipt_sql(&tx, "foreign", &campaign, &original).is_err());
+        for replay in [false, true] {
+            let result = apply_original_unified_finance_transaction(
+                &tx,
+                "test-installation",
+                UnifiedFinanceWrite::ReserveNative {
+                    campaign: campaign.clone(),
+                    input: original.clone(),
+                    census: census(),
+                },
+            )
+            .unwrap();
+            assert!(
+                matches!(result,UnifiedFinanceWriteReceipt::Risk(super::UnifiedRiskDecision::Reserved {replayed,..}) if replayed==replay)
+            );
+        }
+        let saved: String = tx
+            .query_row(
+                "SELECT receipt_hash FROM risk_receipts WHERE account_key=?1 AND intent_id=?2",
+                params![account('a'), original.intent_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(saved, receipt.receipt_hash);
+        let rows: i64 = tx
+            .query_row("SELECT COUNT(*) FROM risk_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+        tx.rollback().unwrap();
+    }
     // The AccountStore check runs AFTER RiskBook has staged a HELD reservation.
     // If the original owner proof disagrees, the caller must roll back BOTH
     // writes, not commit a risk-only reservation with no native receipt.
