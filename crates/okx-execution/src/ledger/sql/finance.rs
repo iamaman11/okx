@@ -783,117 +783,166 @@ impl AccountStore {
         digest: &str,
     ) -> StoreResult<()> {
         const BAD: &str = "UNIFIED_OPENING_ORIGINAL_SOURCE_UNVERIFIED";
-        if installation.is_empty() || account.is_empty() || campaign.is_empty()
-            || from_ms <= 0 || through_ms <= from_ms || amount < Decimal::ZERO
-            || digest.len() != 64 || !digest.bytes().all(|v| v.is_ascii_hexdigit())
-        { return Err(StoreError::Invalid(BAD)); }
-        let init: Option<i64> = tx.query_row(
-            "SELECT initialized_at FROM account_meta
+        if installation.is_empty()
+            || account.is_empty()
+            || campaign.is_empty()
+            || from_ms <= 0
+            || through_ms <= from_ms
+            || amount < Decimal::ZERO
+            || digest.len() != 64
+            || !digest.bytes().all(|v| v.is_ascii_hexdigit())
+        {
+            return Err(StoreError::Invalid(BAD));
+        }
+        let init: Option<i64> = tx
+            .query_row(
+                "SELECT initialized_at FROM account_meta
              WHERE installation_id=?1 AND account_key=?2 AND singleton=1",
-            params![installation,account], |r| r.get(0),
-        ).optional()?;
-        if init.is_none_or(|at| at > from_ms) { return Err(StoreError::Invalid(BAD)); }
+                params![installation, account],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if init.is_none_or(|at| at > from_ms) {
+            return Err(StoreError::Invalid(BAD));
+        }
 
         let mut generations = Vec::new();
         for (source, partition) in [
-            ("fills", "SPOT"), ("fills", "MARGIN"), ("fills", "SWAP"),
-            ("fills", "FUTURES"), ("fills", "OPTION"), ("bills", "account"),
+            ("fills", "SPOT"),
+            ("fills", "MARGIN"),
+            ("fills", "SWAP"),
+            ("fills", "FUTURES"),
+            ("fills", "OPTION"),
+            ("bills", "account"),
         ] {
-            let row: Option<(String, i64, i64, String)> = tx.query_row(
-                "SELECT cursor,watermark,generation,coverage_gaps
+            let row: Option<(String, i64, i64, String)> = tx
+                .query_row(
+                    "SELECT cursor,watermark,generation,coverage_gaps
                  FROM source_cursors WHERE installation_id=?1 AND account_key=?2
                    AND source=?3 AND stream_partition=?4",
-                params![installation,account,source,partition],
-                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
-            ).optional()?;
+                    params![installation, account, source, partition],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
             if !matches!(row, Some((ref cursor,watermark,generation,ref gaps))
                 if cursor.is_empty() && gaps.is_empty()
                     && generation>0 && watermark>=through_ms)
-            { return Err(StoreError::Invalid(BAD)); }
+            {
+                return Err(StoreError::Invalid(BAD));
+            }
             let generation = row.unwrap().2;
             generations.push(format!("{source}/{partition}:{generation}"));
         }
-        let readiness: Option<(i64,i64,i64,String,i64)> = tx.query_row(
-            "SELECT from_ms,covered_through_ms,source_revision,
+        let readiness: Option<(i64, i64, i64, String, i64)> = tx
+            .query_row(
+                "SELECT from_ms,covered_through_ms,source_revision,
                     source_generations,reviewed_late_epoch
              FROM campaign_entry_readiness WHERE installation_id=?1
                AND account_key=?2 AND campaign_id=?3",
-            params![installation,account,campaign],
-            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
-        ).optional()?;
-        let epoch: Option<i64> = tx.query_row(
-            "SELECT revision FROM campaign_source_epoch
+                params![installation, account, campaign],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?;
+        let epoch: Option<i64> = tx
+            .query_row(
+                "SELECT revision FROM campaign_source_epoch
              WHERE installation_id=?1 AND account_key=?2 AND id=1",
-            params![installation,account], |r| r.get(0),
-        ).optional()?;
+                params![installation, account],
+                |r| r.get(0),
+            )
+            .optional()?;
         let late_epoch: i64 = tx.query_row(
             "SELECT COALESCE(MAX(revision),0) FROM campaign_late_head_epoch
              WHERE installation_id=?1 AND account_key=?2 AND id=1",
-            params![installation,account], |r| r.get(0),
+            params![installation, account],
+            |r| r.get(0),
         )?;
         if !matches!(readiness,Some((f,t,e,ref gen,late))
             if f==from_ms && t==through_ms && epoch==Some(e)
                 && gen==&generations.join("|") && late==late_epoch)
-        { return Err(StoreError::Invalid(BAD)); }
+        {
+            return Err(StoreError::Invalid(BAD));
+        }
 
         // Recheck the ORIGINAL sealed finance provenance, scoped by account.
         let highest: i64 = tx.query_row(
             "SELECT COALESCE(MAX(rowid),0) FROM finance_entries
              WHERE installation_id=?1 AND account_key=?2",
-            params![installation,account], |r| r.get(0),
+            params![installation, account],
+            |r| r.get(0),
         )?;
-        let sealed: Option<i64> = tx.query_row(
-            "SELECT watermark FROM source_cursors WHERE installation_id=?1
+        let sealed: Option<i64> = tx
+            .query_row(
+                "SELECT watermark FROM source_cursors WHERE installation_id=?1
                 AND account_key=?2 AND source='finance_provenance'
                 AND stream_partition='account' AND cursor=''
                 AND coverage_gaps='' AND generation=0",
-            params![installation,account], |r| r.get(0),
-        ).optional()?;
-        if sealed!=Some(highest) && !(highest==0 && sealed.is_none())
-        { return Err(StoreError::Invalid(BAD)); }
+                params![installation, account],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if sealed != Some(highest) && !(highest == 0 && sealed.is_none()) {
+            return Err(StoreError::Invalid(BAD));
+        }
 
-        let totals: Option<(i64,i64,String)> = tx.query_row(
-            "SELECT from_ms,covered_through_ms,consumed_usd
+        let totals: Option<(i64, i64, String)> = tx
+            .query_row(
+                "SELECT from_ms,covered_through_ms,consumed_usd
              FROM campaign_entry_totals WHERE installation_id=?1
                 AND account_key=?2 AND campaign_id=?3",
-            params![installation,account,campaign],
-            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-        ).optional()?;
-        let window: Option<(String,String)> = tx.query_row(
-            "SELECT consumed_usd,source_digest FROM campaign_entry_window_proofs
+                params![installation, account, campaign],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let window: Option<(String, String)> = tx
+            .query_row(
+                "SELECT consumed_usd,source_digest FROM campaign_entry_window_proofs
              WHERE installation_id=?1 AND account_key=?2
                AND campaign_id=?3 AND covered_through_ms=?4",
-            params![installation,account,campaign,through_ms],
-            |r| Ok((r.get(0)?,r.get(1)?)),
-        ).optional()?;
+                params![installation, account, campaign, through_ms],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
         if !matches!(totals,Some((f,t,ref money))
             if f==from_ms && t==through_ms
                 && decimal(money.clone()).ok()==Some(amount))
             || !matches!(window,Some((ref money,ref saved))
                 if saved==digest && decimal(money.clone()).ok()==Some(amount))
-        { return Err(StoreError::Invalid(BAD)); }
-        let operation=format!("campaign_entry_opening:{campaign}:{digest}");
-        let receipt: Option<(String,String,String,i64)> = tx.query_row(
-            "SELECT kind,request_hash,result_ref,committed_at FROM operation_receipts
+        {
+            return Err(StoreError::Invalid(BAD));
+        }
+        let operation = format!("campaign_entry_opening:{campaign}:{digest}");
+        let receipt: Option<(String, String, String, i64)> = tx
+            .query_row(
+                "SELECT kind,request_hash,result_ref,committed_at FROM operation_receipts
              WHERE installation_id=?1 AND account_key=?2 AND operation_id=?3",
-            params![installation,account,operation],
-            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
-        ).optional()?;
+                params![installation, account, operation],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
         if !matches!(receipt,Some((ref kind,ref hash,ref result,t))
             if kind=="CAMPAIGN_ENTRY_OPENING_SEALED" && hash==digest
                 && result==digest && t==through_ms)
-        { return Err(StoreError::Invalid(BAD)); }
+        {
+            return Err(StoreError::Invalid(BAD));
+        }
         let latest: i64 = tx.query_row(
             "SELECT COALESCE(MAX(event_seq),0) FROM campaign_receipt_events
              WHERE installation_id=?1 AND account_key=?2",
-            params![installation,account], |r| r.get(0),
+            params![installation, account],
+            |r| r.get(0),
         )?;
-        let cursor: Option<i64> = tx.query_row(
-            "SELECT reviewed_event_seq FROM campaign_receipt_cursors
+        let cursor: Option<i64> = tx
+            .query_row(
+                "SELECT reviewed_event_seq FROM campaign_receipt_cursors
              WHERE installation_id=?1 AND account_key=?2 AND campaign_id=?3",
-            params![installation,account,campaign], |r| r.get(0),
-        ).optional()?;
-        if cursor!=Some(latest) { return Err(StoreError::Invalid(BAD)); }
+                params![installation, account, campaign],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if cursor != Some(latest) {
+            return Err(StoreError::Invalid(BAD));
+        }
 
         // No unaccounted pending orders, risk receipts or original open lots.
         let pending: i64 = tx.query_row(
@@ -903,9 +952,12 @@ impl AccountStore {
                 AND account_key=?2 AND state<>'RELEASED')
              + (SELECT COUNT(*) FROM position_lots WHERE installation_id=?1
                 AND account_key=?2 AND remaining_qty!='0')",
-            params![installation,account], |r| r.get(0),
+            params![installation, account],
+            |r| r.get(0),
         )?;
-        if pending!=0 { return Err(StoreError::Invalid("UNIFIED_OPENING_UNRESOLVED_EXPOSURE")); }
+        if pending != 0 {
+            return Err(StoreError::Invalid("UNIFIED_OPENING_UNRESOLVED_EXPOSURE"));
+        }
         Ok(())
     }
 

@@ -713,10 +713,17 @@ fn apply_original_unified_finance_inner(
                 intent_id: saved.intent_id,
             })
         }
-        UnifiedFinanceWrite::InstallEntryOpening { source, census, now_ms } =>
-            risk_operation(risk::install_entry_opening_unified_native(
-                tx,installation,&source,&census,now_ms,
-            )),
+        UnifiedFinanceWrite::InstallEntryOpening {
+            source,
+            census,
+            now_ms,
+        } => risk_operation(risk::install_entry_opening_unified_native(
+            tx,
+            installation,
+            &source,
+            &census,
+            now_ms,
+        )),
         UnifiedFinanceWrite::Reserve {
             campaign,
             input,

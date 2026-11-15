@@ -3605,10 +3605,10 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
 
 #[test]
 fn risk_book_contract_unified_original_opening_requires_exact_two_account_sql_sources() {
+    use super::store::{NativeOpeningAccount, NativeOpeningSource};
     use crate::account_worker::{
         UnifiedFinanceWrite, UnifiedFinanceWriteReceipt, apply_original_unified_finance_transaction,
     };
-    use super::store::{NativeOpeningAccount, NativeOpeningSource};
     use rusqlite::{Connection, params};
     use sha2::{Digest, Sha256};
 
@@ -3619,9 +3619,14 @@ fn risk_book_contract_unified_original_opening_requires_exact_two_account_sql_so
         .unwrap();
     let campaign = opening().campaign_id;
     let source_gen = [
-        "fills/SPOT:1", "fills/MARGIN:1", "fills/SWAP:1",
-        "fills/FUTURES:1", "fills/OPTION:1", "bills/account:1",
-    ].join("|");
+        "fills/SPOT:1",
+        "fills/MARGIN:1",
+        "fills/SWAP:1",
+        "fills/FUTURES:1",
+        "fills/OPTION:1",
+        "bills/account:1",
+    ]
+    .join("|");
     db.execute(
         "INSERT INTO risk_meta(
              singleton,campaign_id,installation_id,policy_revision,generation,
@@ -3632,7 +3637,8 @@ fn risk_book_contract_unified_original_opening_requires_exact_two_account_sql_so
          VALUES(1,?1,'test-installation',1,7,0,1,'10','0',
                 '100','0','0','10','0','0','0','0')",
         [&campaign],
-    ).unwrap();
+    )
+    .unwrap();
     for letter in ['a', 'b'] {
         let key = account(letter);
         db.execute(
@@ -3641,75 +3647,92 @@ fn risk_book_contract_unified_original_opening_requires_exact_two_account_sql_so
                opening_source,initialize_operation_id,release_id)
              VALUES('test-installation',?1,1,2,1,'test-only',?2,'test-release')",
             params![&key, format!("init-{letter}")],
-        ).unwrap();
+        )
+        .unwrap();
         db.execute(
             "INSERT INTO account_policy(
                 installation_id,account_key,singleton,revision,paused,campaign_id,
                 campaign_limit,campaign_loss)
              VALUES('test-installation',?1,1,1,0,?2,'10','0')",
-            params![&key,&campaign],
-        ).unwrap();
+            params![&key, &campaign],
+        )
+        .unwrap();
         db.execute(
             "INSERT INTO risk_account_occupied VALUES('test-installation',?1,?2,'0')",
-            params![&campaign,&key],
-        ).unwrap();
+            params![&campaign, &key],
+        )
+        .unwrap();
         db.execute(
             "INSERT INTO risk_policy_account VALUES('test-installation',?1,?2,'10','8','10')",
-            params![&campaign,&key],
-        ).unwrap();
+            params![&campaign, &key],
+        )
+        .unwrap();
         db.execute(
             "INSERT INTO risk_loss_source VALUES('test-installation',?1,?2,'0','')",
-            params![&campaign,&key],
-        ).unwrap();
+            params![&campaign, &key],
+        )
+        .unwrap();
         db.execute(
             "INSERT INTO risk_policy_strategy
              VALUES('test-installation',?1,?2,'strategy_test','8')",
-            params![&campaign,&key],
-        ).unwrap();
+            params![&campaign, &key],
+        )
+        .unwrap();
         db.execute(
             "INSERT INTO risk_strategy_occupied
              VALUES('test-installation',?1,?2,'strategy_test','0')",
-            params![&campaign,&key],
-        ).unwrap();
+            params![&campaign, &key],
+        )
+        .unwrap();
         db.execute(
             "INSERT INTO campaign_source_epoch
              VALUES('test-installation',?1,1,1)",
             [&key],
-        ).unwrap();
-        for (source,partition) in [
-            ("fills","SPOT"),("fills","MARGIN"),("fills","SWAP"),
-            ("fills","FUTURES"),("fills","OPTION"),("bills","account"),
+        )
+        .unwrap();
+        for (source, partition) in [
+            ("fills", "SPOT"),
+            ("fills", "MARGIN"),
+            ("fills", "SWAP"),
+            ("fills", "FUTURES"),
+            ("fills", "OPTION"),
+            ("bills", "account"),
         ] {
             db.execute(
                 "INSERT INTO source_cursors(
                  installation_id,account_key,source,stream_partition,
                  cursor,watermark,generation,coverage_gaps)
                  VALUES('test-installation',?1,?2,?3,'',200,1,'')",
-                params![&key,source,partition],
-            ).unwrap();
+                params![&key, source, partition],
+            )
+            .unwrap();
         }
         db.execute(
             "INSERT INTO campaign_entry_readiness(
                 installation_id,account_key,campaign_id,from_ms,covered_through_ms,
                 source_revision,source_generations,reviewed_late_epoch)
              VALUES('test-installation',?1,?2,100,200,1,?3,0)",
-            params![&key,&campaign,&source_gen],
-        ).unwrap();
+            params![&key, &campaign, &source_gen],
+        )
+        .unwrap();
         db.execute(
             "INSERT INTO campaign_receipt_cursors
              VALUES('test-installation',?1,?2,0)",
-            params![&key,&campaign],
-        ).unwrap();
+            params![&key, &campaign],
+        )
+        .unwrap();
         db.execute(
             "INSERT INTO campaign_entry_totals
              VALUES('test-installation',?1,?2,100,200,'0')",
-            params![&key,&campaign],
-        ).unwrap();
+            params![&key, &campaign],
+        )
+        .unwrap();
         db.execute(
             "INSERT INTO campaign_entry_window_proofs
              VALUES('test-installation',?1,?2,200,'0',?3)",
-            params![&key,&campaign,uid('f')],
-        ).unwrap();
+            params![&key, &campaign, uid('f')],
+        )
+        .unwrap();
     }
     let mut source = NativeOpeningSource {
         campaign_id: campaign.clone(),
@@ -3718,117 +3741,174 @@ fn risk_book_contract_unified_original_opening_requires_exact_two_account_sql_so
         source_digest: String::new(),
         as_of_ms: 200,
         campaign_started_at_ms: 100,
-        accounts: ['a','b'].into_iter().map(|letter| NativeOpeningAccount {
-            account_key: account(letter), history_from_ms:100,
-            history_through_ms:200, consumed_entry_usd:"0".into(),
-            order_history_complete:true, fill_history_complete:true,
-            bill_history_complete:true, finance_provenance_sealed:true,
-            source_digest:uid('f'),
-        }).collect(),
+        accounts: ['a', 'b']
+            .into_iter()
+            .map(|letter| NativeOpeningAccount {
+                account_key: account(letter),
+                history_from_ms: 100,
+                history_through_ms: 200,
+                consumed_entry_usd: "0".into(),
+                order_history_complete: true,
+                fill_history_complete: true,
+                bill_history_complete: true,
+                finance_provenance_sealed: true,
+                source_digest: uid('f'),
+            })
+            .collect(),
     };
-    let source_hash = |value:&NativeOpeningSource| -> String {
-        format!("{:x}",Sha256::digest(serde_json::to_vec(&(
-            "okx.campaign-entry-opening/v1",&value.campaign_id,
-            &value.limit_usd,&value.consumed_usd,
-            value.campaign_started_at_ms,value.as_of_ms,&value.accounts,
-        )).unwrap()))
+    let source_hash = |value: &NativeOpeningSource| -> String {
+        format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    "okx.campaign-entry-opening/v1",
+                    &value.campaign_id,
+                    &value.limit_usd,
+                    &value.consumed_usd,
+                    value.campaign_started_at_ms,
+                    value.as_of_ms,
+                    &value.accounts,
+                ))
+                .unwrap()
+            )
+        )
     };
-    source.source_digest=source_hash(&source);
+    source.source_digest = source_hash(&source);
     assert!(source.valid());
-    let mut complete=census();
-    complete.generated_at_ms=201;
-    complete.read_floor_ms=201;
-    let command=|| UnifiedFinanceWrite::InstallEntryOpening {
-        source:source.clone(),census:complete.clone(),now_ms:202,
+    let mut complete = census();
+    complete.generated_at_ms = 201;
+    complete.read_floor_ms = 201;
+    let command = || UnifiedFinanceWrite::InstallEntryOpening {
+        source: source.clone(),
+        census: complete.clone(),
+        now_ms: 202,
     };
     // Missing even one immutable AccountStore seal must never mint zero
     // opening, even if caller commits the outer transaction after denial.
     {
-        let tx=db.transaction().unwrap();
+        let tx = db.transaction().unwrap();
         assert!(matches!(
-            apply_original_unified_finance_transaction(&tx,"test-installation",command()),
-            Err(crate::StoreError::Invalid("UNIFIED_OPENING_ORIGINAL_SOURCE_UNVERIFIED"))
+            apply_original_unified_finance_transaction(&tx, "test-installation", command()),
+            Err(crate::StoreError::Invalid(
+                "UNIFIED_OPENING_ORIGINAL_SOURCE_UNVERIFIED"
+            ))
         ));
         tx.commit().unwrap();
     }
-    let seq:i64=db.query_row(
-        "SELECT book_sequence FROM risk_meta WHERE installation_id='test-installation'
-         AND campaign_id=?1",[&campaign],|r|r.get(0)
-    ).unwrap();
-    assert_eq!(seq,0);
-    for letter in ['a','b'] {
-        let key=account(letter);
+    let seq: i64 = db
+        .query_row(
+            "SELECT book_sequence FROM risk_meta WHERE installation_id='test-installation'
+         AND campaign_id=?1",
+            [&campaign],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(seq, 0);
+    for letter in ['a', 'b'] {
+        let key = account(letter);
         db.execute(
             "INSERT INTO operation_receipts(
                 installation_id,account_key,operation_id,kind,
                 request_hash,result_ref,committed_at)
              VALUES('test-installation',?1,?2,'CAMPAIGN_ENTRY_OPENING_SEALED',?3,?3,200)",
-            params![key,format!("campaign_entry_opening:{campaign}:{}",uid('f')),uid('f')],
-        ).unwrap();
+            params![
+                key,
+                format!("campaign_entry_opening:{campaign}:{}", uid('f')),
+                uid('f')
+            ],
+        )
+        .unwrap();
     }
     {
-        let tx=db.transaction().unwrap();
+        let tx = db.transaction().unwrap();
         tx.execute(
             "UPDATE campaign_source_epoch SET revision=2
              WHERE installation_id='test-installation' AND account_key=?1",
             [account('b')],
-        ).unwrap();
+        )
+        .unwrap();
         assert!(matches!(
-            apply_original_unified_finance_transaction(&tx,"test-installation",command()),
-            Err(crate::StoreError::Invalid("UNIFIED_OPENING_ORIGINAL_SOURCE_UNVERIFIED"))
+            apply_original_unified_finance_transaction(&tx, "test-installation", command()),
+            Err(crate::StoreError::Invalid(
+                "UNIFIED_OPENING_ORIGINAL_SOURCE_UNVERIFIED"
+            ))
         ));
         tx.rollback().unwrap();
     }
     // Native SQL rollback: neither an original source nor risk opening is
     // installed before an actual COMMIT by the sole installation writer.
     {
-        let tx=db.transaction().unwrap();
-        let receipt=apply_original_unified_finance_transaction(
-            &tx,"test-installation",command(),
-        ).unwrap();
-        assert!(matches!(receipt, UnifiedFinanceWriteReceipt::Risk(
-            super::UnifiedRiskDecision::EntryOpeningInstalled { replayed:false,.. }
-        )));
+        let tx = db.transaction().unwrap();
+        let receipt =
+            apply_original_unified_finance_transaction(&tx, "test-installation", command())
+                .unwrap();
+        assert!(matches!(
+            receipt,
+            UnifiedFinanceWriteReceipt::Risk(super::UnifiedRiskDecision::EntryOpeningInstalled {
+                replayed: false,
+                ..
+            })
+        ));
         tx.rollback().unwrap();
     }
-    assert_eq!(db.query_row::<i64,_,_>(
-        "SELECT book_sequence FROM risk_meta WHERE installation_id='test-installation'
-         AND campaign_id=?1",[&campaign],|r|r.get(0),
-    ).unwrap(),0);
+    assert_eq!(
+        db.query_row::<i64, _, _>(
+            "SELECT book_sequence FROM risk_meta WHERE installation_id='test-installation'
+         AND campaign_id=?1",
+            [&campaign],
+            |r| r.get(0),
+        )
+        .unwrap(),
+        0
+    );
     {
-        let tx=db.transaction().unwrap();
-        apply_original_unified_finance_transaction(
-            &tx,"test-installation",command(),
-        ).unwrap();
+        let tx = db.transaction().unwrap();
+        apply_original_unified_finance_transaction(&tx, "test-installation", command()).unwrap();
         tx.commit().unwrap();
     }
     drop(db);
-    let mut db=Connection::open(&f.path).unwrap();
-    db.pragma_update(None,"foreign_keys","ON").unwrap();
+    let mut db = Connection::open(&f.path).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
     {
-        let tx=db.transaction().unwrap();
-        let replay=apply_original_unified_finance_transaction(
-            &tx,"test-installation",command(),
-        ).unwrap();
-        assert!(matches!(replay,UnifiedFinanceWriteReceipt::Risk(
-            super::UnifiedRiskDecision::EntryOpeningInstalled {
-                book_sequence:1,replayed:true,..
-            }
-        )));
+        let tx = db.transaction().unwrap();
+        let replay =
+            apply_original_unified_finance_transaction(&tx, "test-installation", command())
+                .unwrap();
+        assert!(matches!(
+            replay,
+            UnifiedFinanceWriteReceipt::Risk(super::UnifiedRiskDecision::EntryOpeningInstalled {
+                book_sequence: 1,
+                replayed: true,
+                ..
+            })
+        ));
         tx.commit().unwrap();
     }
-    assert_eq!(db.query_row::<(String,String,i64),_,_>(
-        "SELECT entry_opening_consumed_usd,entry_consumed_usd,book_sequence
+    assert_eq!(
+        db.query_row::<(String, String, i64), _, _>(
+            "SELECT entry_opening_consumed_usd,entry_consumed_usd,book_sequence
          FROM risk_meta WHERE installation_id='test-installation' AND campaign_id=?1",
-        [&campaign],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-    ).unwrap(),("0".into(),"0".into(),1));
-    let mut forged=source.clone();
-    forged.accounts[1].source_digest=uid('e');
-    forged.source_digest=source_hash(&forged);
-    let tx=db.transaction().unwrap();
-    assert!(apply_original_unified_finance_transaction(&tx,"test-installation",
-        UnifiedFinanceWrite::InstallEntryOpening{
-            source:forged,census:complete,now_ms:202,
-        }).is_err());
+            [&campaign],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap(),
+        ("0".into(), "0".into(), 1)
+    );
+    let mut forged = source.clone();
+    forged.accounts[1].source_digest = uid('e');
+    forged.source_digest = source_hash(&forged);
+    let tx = db.transaction().unwrap();
+    assert!(
+        apply_original_unified_finance_transaction(
+            &tx,
+            "test-installation",
+            UnifiedFinanceWrite::InstallEntryOpening {
+                source: forged,
+                census: complete,
+                now_ms: 202,
+            }
+        )
+        .is_err()
+    );
     tx.rollback().unwrap();
 }

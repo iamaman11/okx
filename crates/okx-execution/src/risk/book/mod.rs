@@ -13,8 +13,8 @@ pub(crate) use store::{
 // Original RiskBook operations for the shared finance SQL writer. These are
 // DOMAIN calls on the caller's existing transaction, not a second owner,
 // separate campaign database or bypass around AccountStore source proofs.
-pub(crate) use store::{PostFenceInput, TerminalResolveInput};
 pub(crate) use store::{NativeOpeningAccount, NativeOpeningSource, ReserveInput, VerifiedCensus};
+pub(crate) use store::{PostFenceInput, TerminalResolveInput};
 
 /// The ORIGINAL AccountStore receipt type to debit; never caller-supplied
 /// monetary values. All three sources share the same RiskBook arithmetic.
@@ -101,13 +101,19 @@ pub(crate) fn install_entry_opening_unified_native(
     census: &VerifiedCensus,
     now_ms: i64,
 ) -> Result<UnifiedRiskDecision, &'static str> {
-    let installed = store::RiskBookStore::install_unified_entry_opening_from_account_sql_transaction(
-        tx,installation,source,census,now_ms,
-    ).map_err(|error|original_finance_error(&error))?;
+    let installed =
+        store::RiskBookStore::install_unified_entry_opening_from_account_sql_transaction(
+            tx,
+            installation,
+            source,
+            census,
+            now_ms,
+        )
+        .map_err(|error| original_finance_error(&error))?;
     Ok(UnifiedRiskDecision::EntryOpeningInstalled {
-        source_digest:installed.source_digest,
-        book_sequence:installed.book_sequence,
-        replayed:installed.replayed,
+        source_digest: installed.source_digest,
+        book_sequence: installed.book_sequence,
+        replayed: installed.replayed,
     })
 }
 
