@@ -1871,7 +1871,7 @@ fn risk_book_contract_sql_zero_terminal_then_post_release_late_fee_is_one_budget
     let initial = reopened.readback().unwrap();
     assert_eq!(initial.book_sequence, 4);
     assert_eq!(initial.global_reserved_usdt, "0");
-    assert_eq!(initial.entry_reserved_usd, "0");
+    assert_eq!(initial.reserved_entry_usd, "0");
     assert_eq!(initial.consumed_entry_usd, "0");
     let partial = partial_proof(&input, 2, "0.3", 'e');
     let tx = db.transaction().unwrap();
@@ -3126,7 +3126,7 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
         // The caller cannot mint entry consumption: a correct POSTED risk
         // row alone is NOT a durable AccountStore fill/fee revision.
         assert!(matches!(
-            RiskBookStore::settle_unified_partial_from_account_sql_transaction(
+            RiskBookStore::settle_unified_entry_from_account_sql_transaction(
                 &tx,
                 "test-installation",
                 &campaign,
@@ -3134,6 +3134,7 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
                 &original.intent_id,
                 2,
                 7,
+                super::EntrySettlementSource::Partial,
             ),
             Err(RiskStoreError::EntrySqlUnproven)
         ));
@@ -3191,7 +3192,7 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
                     &source.plan_hash,&bytes],
             ).unwrap();
         }
-        let first = RiskBookStore::settle_unified_partial_from_account_sql_transaction(
+        let first = RiskBookStore::settle_unified_entry_from_account_sql_transaction(
             &tx,
             "test-installation",
             &campaign,
@@ -3199,12 +3200,13 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             &original.intent_id,
             2,
             7,
+                super::EntrySettlementSource::Partial,
         )
         .unwrap();
         assert_eq!(first.book_sequence, 3);
         assert_eq!(first.cumulative_entry_usd, "0.4");
         assert!(!first.replayed);
-        let repeated = RiskBookStore::settle_unified_partial_from_account_sql_transaction(
+        let repeated = RiskBookStore::settle_unified_entry_from_account_sql_transaction(
             &tx,
             "test-installation",
             &campaign,
@@ -3212,6 +3214,7 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             &original.intent_id,
             2,
             7,
+                super::EntrySettlementSource::Partial,
         )
         .unwrap();
         assert!(repeated.replayed);
