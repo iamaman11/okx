@@ -176,8 +176,12 @@ pub(crate) fn resolve_terminal_unified_native(
     input: &TerminalResolveInput,
 ) -> Result<UnifiedRiskDecision, &'static str> {
     let accepted = store::RiskBookStore::resolve_unified_terminal_from_account_sql_transaction(
-        tx, installation, campaign, input,
-    ).map_err(|error| original_finance_error(&error))?;
+        tx,
+        installation,
+        campaign,
+        input,
+    )
+    .map_err(|error| original_finance_error(&error))?;
     Ok(UnifiedRiskDecision::TerminalReleased {
         reservation_key: accepted.reservation_key,
         book_sequence: accepted.book_sequence,

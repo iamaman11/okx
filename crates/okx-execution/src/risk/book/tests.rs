@@ -3400,45 +3400,71 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
              entry_settlement_digest=?3,reserved_entry_usd='0.6'
              WHERE installation_id='test-installation' AND campaign_id=?4
                AND reservation_key=?5",
-            params![uid('a'),uid('b'),&terminal.source_digest,&campaign,original.reservation_key()],
-        ).unwrap();
+            params![
+                uid('a'),
+                uid('b'),
+                &terminal.source_digest,
+                &campaign,
+                original.reservation_key()
+            ],
+        )
+        .unwrap();
         tx.execute(
             "UPDATE risk_meta SET entry_consumed_usd='0.4',
                entry_reserved_usd='0.6'
              WHERE installation_id='test-installation' AND campaign_id=?1",
             [&campaign],
-        ).unwrap();
+        )
+        .unwrap();
         tx.execute(
             "UPDATE intents SET state='FILLED',begin_post_at=10001,
                exchange_order_id=?1
              WHERE installation_id='test-installation' AND account_key=?2
                AND intent_id=?3",
-            params![&terminal.venue_order_id,account('a'),&original.intent_id],
-        ).unwrap();
+            params![&terminal.venue_order_id, account('a'), &original.intent_id],
+        )
+        .unwrap();
         tx.execute(
             "UPDATE risk_receipts SET state='OPEN' WHERE
              installation_id='test-installation' AND account_key=?1 AND intent_id=?2",
-            params![account('a'),&original.intent_id],
-        ).unwrap();
-        for (operation,kind,hash,encoded,at) in [
-            (format!("entry-settlement:{}",original.intent_id),
-             "ENTRY_SETTLEMENT_PROVEN",terminal.plan_hash.clone(),original_json.clone(),10002),
-            (format!("entry-terminal-settled:{}:r1",original.intent_id),
-             "ENTRY_TERMINAL_SETTLED",terminal.plan_hash.clone(),terminal.source_digest.clone(),11000),
-            (format!("terminal:{}",original.intent_id),
-             "TERMINAL",uid('c'),"verified-test-venue-terminal".into(),10002),
+            params![account('a'), &original.intent_id],
+        )
+        .unwrap();
+        for (operation, kind, hash, encoded, at) in [
+            (
+                format!("entry-settlement:{}", original.intent_id),
+                "ENTRY_SETTLEMENT_PROVEN",
+                terminal.plan_hash.clone(),
+                original_json.clone(),
+                10002,
+            ),
+            (
+                format!("entry-terminal-settled:{}:r1", original.intent_id),
+                "ENTRY_TERMINAL_SETTLED",
+                terminal.plan_hash.clone(),
+                terminal.source_digest.clone(),
+                11000,
+            ),
+            (
+                format!("terminal:{}", original.intent_id),
+                "TERMINAL",
+                uid('c'),
+                "verified-test-venue-terminal".into(),
+                10002,
+            ),
         ] {
             tx.execute(
                 "INSERT INTO operation_receipts(
                  installation_id,account_key,operation_id,kind,request_hash,result_ref,committed_at)
                  VALUES('test-installation',?1,?2,?3,?4,?5,?6)",
-                params![account('a'),operation,kind,hash,encoded,at],
-            ).unwrap();
+                params![account('a'), operation, kind, hash, encoded, at],
+            )
+            .unwrap();
         }
         tx.commit().unwrap();
     }
     let mut flat = census();
-    flat.cumulative_loss_usd.insert(account('b'),amt("1"));
+    flat.cumulative_loss_usd.insert(account('b'), amt("1"));
     flat.read_floor_ms = 11_001;
     flat.generated_at_ms = 12_000;
     let input = TerminalResolveInput {
@@ -3456,19 +3482,28 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
     {
         let tx = db.transaction().unwrap();
         let mut occupied = input.clone();
-        occupied.census.occupied.insert(account('a'),amt("1"));
+        occupied.census.occupied.insert(account('a'), amt("1"));
         assert!(matches!(
             RiskBookStore::resolve_unified_terminal_from_account_sql_transaction(
-                &tx,"test-installation",&campaign,&occupied,
+                &tx,
+                "test-installation",
+                &campaign,
+                &occupied,
             ),
             Err(RiskStoreError::CensusUnproven)
         ));
-        assert!(RiskBookStore::resolve_unified_terminal_from_account_sql_transaction(
-            &tx,"test-installation","another-campaign",&input,
-        ).is_err());
+        assert!(
+            RiskBookStore::resolve_unified_terminal_from_account_sql_transaction(
+                &tx,
+                "test-installation",
+                "another-campaign",
+                &input,
+            )
+            .is_err()
+        );
         tx.commit().unwrap();
     }
-    assert_eq!(read(&db),("6".into(),"1".into(),2));
+    assert_eq!(read(&db), ("6".into(), "1".into(), 2));
     // A missing original terminal settlement ACK is not proof of a debit.
     {
         let tx = db.transaction().unwrap();
@@ -3476,63 +3511,93 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             "DELETE FROM operation_receipts
              WHERE installation_id='test-installation' AND account_key=?1
                AND operation_id=?2",
-            params![account('a'),format!("entry-terminal-settled:{}:r1",original.intent_id)],
-        ).unwrap();
+            params![
+                account('a'),
+                format!("entry-terminal-settled:{}:r1", original.intent_id)
+            ],
+        )
+        .unwrap();
         assert!(matches!(
             RiskBookStore::resolve_unified_terminal_from_account_sql_transaction(
-                &tx,"test-installation",&campaign,&input,
+                &tx,
+                "test-installation",
+                &campaign,
+                &input,
             ),
-            Err(RiskStoreError::Invalid("TERMINAL_ENTRY_DEBIT_NOT_ACKNOWLEDGED"))
+            Err(RiskStoreError::Invalid(
+                "TERMINAL_ENTRY_DEBIT_NOT_ACKNOWLEDGED"
+            ))
         ));
         tx.rollback().unwrap();
     }
     {
         let tx = db.transaction().unwrap();
         let done = RiskBookStore::resolve_unified_terminal_from_account_sql_transaction(
-            &tx,"test-installation",&campaign,&input,
-        ).unwrap();
+            &tx,
+            "test-installation",
+            &campaign,
+            &input,
+        )
+        .unwrap();
         assert!(!done.replayed);
-        assert_eq!(done.book_sequence,3);
+        assert_eq!(done.book_sequence, 3);
         assert_eq!(
-            tx.query_row::<(String,String,String,String,i64),_,_>(
+            tx.query_row::<(String, String, String, String, i64), _, _>(
                 "SELECT global_reserved_usdt,loss_reserved_usd,
                         entry_reserved_usd,entry_consumed_usd,book_sequence
                  FROM risk_meta WHERE installation_id='test-installation' AND campaign_id=?1",
                 [&campaign],
-                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))
-            ).unwrap(),
-            ("0".into(),"0".into(),"0".into(),"0.4".into(),3)
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            )
+            .unwrap(),
+            ("0".into(), "0".into(), "0".into(), "0.4".into(), 3)
         );
-        assert!(RiskBookStore::resolve_unified_terminal_from_account_sql_transaction(
-            &tx,"test-installation",&campaign,&input,
-        ).unwrap().replayed);
+        assert!(
+            RiskBookStore::resolve_unified_terminal_from_account_sql_transaction(
+                &tx,
+                "test-installation",
+                &campaign,
+                &input,
+            )
+            .unwrap()
+            .replayed
+        );
         tx.commit().unwrap();
     }
     drop(db);
     let mut db = Connection::open(&f.path).unwrap();
-    db.pragma_update(None,"foreign_keys","ON").unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
     let tx = db.transaction().unwrap();
-    assert!(RiskBookStore::resolve_unified_terminal_from_account_sql_transaction(
-        &tx,"test-installation",&campaign,&input,
-    ).unwrap().replayed);
+    assert!(
+        RiskBookStore::resolve_unified_terminal_from_account_sql_transaction(
+            &tx,
+            "test-installation",
+            &campaign,
+            &input,
+        )
+        .unwrap()
+        .replayed
+    );
     assert_eq!(
-        tx.query_row::<String,_,_>(
+        tx.query_row::<String, _, _>(
             "SELECT state FROM risk_receipts
              WHERE installation_id='test-installation' AND account_key=?1 AND intent_id=?2",
-            params![account('a'),&original.intent_id],
+            params![account('a'), &original.intent_id],
             |r| r.get(0)
-        ).unwrap(),
+        )
+        .unwrap(),
         "RELEASED",
         "original AccountStore and campaign RiskBook must survive cold reopen together"
     );
     assert_eq!(
-        tx.query_row::<String,_,_>(
+        tx.query_row::<String, _, _>(
             "SELECT state FROM risk_entries
              WHERE installation_id='test-installation' AND campaign_id=?1
                AND reservation_key=?2",
-            params![&campaign,original.reservation_key()],
+            params![&campaign, original.reservation_key()],
             |r| r.get(0)
-        ).unwrap(),
+        )
+        .unwrap(),
         "RELEASED"
     );
     tx.rollback().unwrap();
