@@ -1,3 +1,24 @@
+## #510 r4.1 — unified finance queue admission and SQL outcome boundary (candidate)
+
+The one installation-wide `UnifiedFinanceHandle` now distinguishes definite
+**pre-acceptance** failures (`UNIFIED_FINANCE_QUEUE_FULL`,
+`UNIFIED_FINANCE_WORKER_STOPPED`, expired start deadline) from a dropped SQL
+reply **after enqueue** (`UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY`).
+The production-shaped write entrypoint has a bounded **start deadline** only;
+it does not cancel an already-started SQL commit, nor grant venue replay.
+SQLite COMMIT uncertainty is likewise an unknown outcome requiring original
+identity/receipt readback. The original `OFFLINE_NOT_AUTHORIZED` production
+gate remains active; no financial mutation was enabled by this change.
+
+Native deterministic direct tests: rejection before enqueue leaves the FIFO
+empty; a full or disconnected queue refuses before acceptance; a worker that
+drops an accepted reply returns UNKNOWN; a single real SQLite worker preserves
+interleaved A/B/A account ordering. These are queue-boundary witnesses, **not**
+the full RB15 load/fairness/backup or Windows 26/26 acceptance. Exact SHA CI
+and final production cutover remain required.
+
+---
+
 # Trade acceptance evidence map — #448 / #449 / #501
 
 ## #510 — original finance domain dispatch and legacy-route hard stop (candidate)

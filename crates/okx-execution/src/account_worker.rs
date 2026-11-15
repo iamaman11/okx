@@ -995,8 +995,26 @@ impl UnifiedFinanceHandle {
         &self,
         operation: impl FnOnce(&mut rusqlite::Connection) -> StoreResult<T> + Send + 'static,
     ) -> StoreResult<T> {
+        self.submit_before(None, operation).await
+    }
+
+    /// The deadline applies only BEFORE execution begins. Once the FIFO accepts
+    /// a financial job, dropping its caller never aborts a possible COMMIT.
+    /// A vanished worker/reply after enqueue is UNKNOWN, not a safe retry.
+    async fn submit_before<T: Send + 'static>(
+        &self,
+        start_deadline: Option<Instant>,
+        operation: impl FnOnce(&mut rusqlite::Connection) -> StoreResult<T> + Send + 'static,
+    ) -> StoreResult<T> {
+        if start_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(StoreError::Invalid("UNIFIED_FINANCE_QUEUE_DEADLINE"));
+        }
         let (tx, rx) = oneshot::channel();
         let job: FinanceJob = Box::new(move |db| {
+            if start_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                let _ = tx.send(Err(StoreError::Invalid("UNIFIED_FINANCE_QUEUE_DEADLINE")));
+                return;
+            }
             let _ = tx.send(operation(db));
         });
         self.owner
@@ -1008,8 +1026,10 @@ impl UnifiedFinanceHandle {
                     StoreError::Invalid("UNIFIED_FINANCE_WORKER_STOPPED")
                 }
             })?;
+        // Accepted is not completed. On cancellation the worker still runs.
+        // If the one-shot is lost, only a durable identity readback may resolve it.
         rx.await
-            .map_err(|_| StoreError::Invalid("UNIFIED_FINANCE_WORKER_STOPPED"))?
+            .map_err(|_| StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY"))?
     }
 
     /// This is the ONLY future production financial COMMIT entrypoint.
@@ -1023,11 +1043,16 @@ impl UnifiedFinanceHandle {
         command: UnifiedFinanceWrite,
     ) -> StoreResult<UnifiedFinanceWriteReceipt> {
         let installation = self.installation.clone();
-        self.submit(move |db| {
+        // A queued mutation is safe to reject BEFORE the SQL owner starts it.
+        // After start, neither a dropped caller nor a late reply can cancel the
+        // transaction or authorize a blind retry of a financial/venue command.
+        self.submit_before(Some(Instant::now() + Duration::from_secs(10)), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             require_verified_live_finance_authority(&tx, &installation)?;
             let result = apply_original_unified_finance_transaction(&tx, &installation, command)?;
-            tx.commit()?;
+            tx.commit().map_err(|_| {
+                StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
+            })?;
             Ok(result)
         })
         .await
@@ -1373,6 +1398,106 @@ impl UnifiedFinanceHandle {
             Ok(readback)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod unified_finance_queue_contract_tests {
+    use super::*;
+
+    fn offline_owner(sender: SyncSender<FinanceJob>) -> UnifiedFinanceHandle {
+        let (_, terminated) = watch::channel(false);
+        UnifiedFinanceHandle {
+            owner: Arc::new(FinanceWorkerOwner { sender, terminated }),
+            installation: "queue-fixture".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_before_enqueue_never_enters_writer() {
+        let (sender, receiver) = sync_channel::<FinanceJob>(1);
+        let owner = offline_owner(sender);
+        let error = owner
+            .submit_before(Some(Instant::now() - Duration::from_millis(1)), |_db| {
+                panic!("expired financial command must not execute")
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            StoreError::Invalid("UNIFIED_FINANCE_QUEUE_DEADLINE")
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn full_and_disconnected_queue_are_definite_pre_acceptance_failures() {
+        let (sender, receiver) = sync_channel::<FinanceJob>(1);
+        let owner = offline_owner(sender.clone());
+        assert!(sender.try_send(Box::new(|_| {})).is_ok());
+        assert!(matches!(
+            owner.submit(|_| -> StoreResult<()> { panic!("queue is full") }).await,
+            Err(StoreError::Invalid("UNIFIED_FINANCE_QUEUE_FULL"))
+        ));
+        drop(receiver);
+        assert!(matches!(
+            owner.submit(|_| -> StoreResult<()> { panic!("worker is gone") }).await,
+            Err(StoreError::Invalid("UNIFIED_FINANCE_WORKER_STOPPED"))
+        ));
+    }
+
+    #[tokio::test]
+    async fn accepted_then_lost_sql_reply_is_unknown_not_a_retry_permission() {
+        let (sender, receiver) = sync_channel::<FinanceJob>(1);
+        let worker = std::thread::spawn(move || {
+            let accepted = receiver.recv().expect("queued job");
+            // Emulate worker termination after admission but before a result.
+            // A caller cannot infer whether a prior COMMIT took place.
+            drop(accepted);
+        });
+        let owner = offline_owner(sender);
+        let error = owner
+            .submit(|_| -> StoreResult<()> { Ok(()) })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
+        ));
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn one_sql_fifo_preserves_interleaved_account_order() {
+        let (sender, receiver) = sync_channel::<FinanceJob>(2);
+        let worker = std::thread::spawn(move || {
+            let mut db = rusqlite::Connection::open_in_memory().unwrap();
+            db.execute_batch("CREATE TABLE observed(account TEXT NOT NULL)").unwrap();
+            while let Ok(job) = receiver.recv() {
+                job(&mut db);
+            }
+            db.query_row(
+                "SELECT group_concat(account, ',') FROM observed",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        });
+        let owner = offline_owner(sender);
+        for account in ["account-a", "account-b", "account-a"] {
+            owner
+                .submit(move |db| {
+                    db.execute("INSERT INTO observed(account) VALUES(?1)", [account])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        drop(owner);
+        assert_eq!(worker.join().unwrap(), "account-a,account-b,account-a");
     }
 }
 
