@@ -33,7 +33,7 @@ pub(crate) struct NativeOpeningSource {
     pub accounts: Vec<NativeOpeningAccount>,
 }
 impl NativeOpeningSource {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         self.campaign_id
             .strip_prefix("sha256:")
             .is_some_and(valid_digest)

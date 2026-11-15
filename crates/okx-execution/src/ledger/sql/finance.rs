@@ -857,9 +857,9 @@ impl AccountStore {
             params![installation, account],
             |r| r.get(0),
         )?;
-        if !matches!(readiness,Some((f,t,e,ref gen,late))
+        if !matches!(readiness,Some((f,t,e,ref saved_generations,late))
             if f==from_ms && t==through_ms && epoch==Some(e)
-                && gen==&generations.join("|") && late==late_epoch)
+                && saved_generations==&generations.join("|") && late==late_epoch)
         {
             return Err(StoreError::Invalid(BAD));
         }
