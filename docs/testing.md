@@ -1,3 +1,32 @@
+## #510 r4.1 — native stopped-finance inspection (read-only, no trade owner)
+
+A built-in `okx-agent inspect-finance` command reads an existing, independently
+rostered and *sealed* 47-table stopped import through the ORIGINAL bounded
+`UnifiedFinanceHandle` SQL worker. It is selected **before** the legacy
+`AccountRuntimeRegistry` and before market/Cloudflare/venue initialization.
+No account-specific writer, legacy financial RPC or venue POST is started.
+
+Input: explicit `--installation-id`, one or more `--expected-account`
+and `--expected-campaign` values from an independent stopped-source roster,
+and `--campaign` (plus optional `--account`, or the exact pair
+`--reservation-key`/`--plan-sha256`). The import validator checks the
+roster, source primary rows, manifest digest, FKs and original scopes;
+a missing/invalid/staged-only source rejects, rather than producing a
+fictional empty risk budget. Results contain the original campaign,
+account, reservation readbacks, `trade_authorized:false` and immutable
+`OFFLINE_NOT_AUTHORIZED` state. A missing reservation is **UNKNOWN**,
+not POST permission. The worker lease is observed released before exit.
+
+**Acceptance scope:** only the three *read* shapes (Summary,
+AccountSummary, Inspect) have an external native stopped-import diagnostic
+consumer. The remaining six mutation commands and ALL production trading
+remain on the unaccepted cutover boundary; this command is not an active
+TradeService route and does **not** constitute 3/9 production cutover.
+RB09 server-side legacy finance disable, source producer verification,
+nine-action production wiring, Windows physical 26/26 remain NO-GO.
+
+---
+
 ## #510 r4.1 — unified finance queue admission and SQL outcome boundary (candidate)
 
 The one installation-wide `UnifiedFinanceHandle` now distinguishes definite

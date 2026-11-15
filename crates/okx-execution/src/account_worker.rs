@@ -567,7 +567,7 @@ fn require_offline_finance_trial(
 }
 
 #[derive(Clone)]
-pub(crate) struct UnifiedFinanceHandle {
+pub struct UnifiedFinanceHandle {
     owner: Arc<FinanceWorkerOwner>,
     installation: String,
 }
@@ -861,7 +861,8 @@ fn require_verified_live_finance_authority(
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct UnifiedFinanceInventory {
+#[derive(serde::Serialize)]
+pub struct UnifiedFinanceInventory {
     pub accounts: i64,
     pub campaigns: i64,
     pub state: String,
@@ -869,7 +870,8 @@ pub(crate) struct UnifiedFinanceInventory {
 
 /// Exact original RiskBook projection, not a second financial calculation.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct UnifiedFinanceCampaignSummary {
+#[derive(serde::Serialize)]
+pub struct UnifiedFinanceCampaignSummary {
     pub campaign: String,
     pub book_sequence: u64,
     pub global_reserved_usdt: String,
@@ -877,8 +879,29 @@ pub(crate) struct UnifiedFinanceCampaignSummary {
     pub remaining_entry_usd: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UnifiedFinanceAccountReadback {
+    pub account_key: String,
+    pub policy_revision: u64,
+    pub book_sequence: u64,
+    pub active_reservations: u64,
+    pub reserved_loss_usdt: String,
+    pub reserved_loss_usd: String,
+    pub cumulative_loss_usd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UnifiedFinanceReservationReadback {
+    pub reservation_key: String,
+    pub plan_sha256: String,
+    pub state: &'static str,
+    pub reservation_sequence: u64,
+    pub current_book_sequence: u64,
+    pub policy_revision: u64,
+}
+
 impl UnifiedFinanceHandle {
-    pub(crate) async fn open_stopped_import(
+    pub async fn open_stopped_import(
         runtime_root: PathBuf,
         installation: String,
         accounts: Vec<String>,
@@ -984,7 +1007,7 @@ impl UnifiedFinanceHandle {
         })
     }
 
-    pub(crate) fn termination_signal(&self) -> watch::Receiver<bool> {
+    pub fn termination_signal(&self) -> watch::Receiver<bool> {
         self.owner.terminated.clone()
     }
 
@@ -1079,7 +1102,7 @@ impl UnifiedFinanceHandle {
 
     /// Read-only installation-scoped diagnostic. No finance mutation API is
     /// exported while the import marker says OFFLINE_NOT_AUTHORIZED.
-    pub(crate) async fn inventory(&self) -> StoreResult<UnifiedFinanceInventory> {
+    pub async fn inventory(&self) -> StoreResult<UnifiedFinanceInventory> {
         let installation = self.installation.clone();
         self.submit(move |db| {
             let accounts = db.query_row(
@@ -1110,7 +1133,7 @@ impl UnifiedFinanceHandle {
     /// The existing original RiskBook Summary algorithm, executed through
     /// the installation's sole SQL owner and exact campaign identity scope.
     /// It is read-only; a Summary cannot issue a venue-send capability.
-    pub(crate) async fn campaign_summary(
+    pub async fn campaign_summary(
         &self,
         campaign: String,
     ) -> StoreResult<UnifiedFinanceCampaignSummary> {
@@ -1159,6 +1182,57 @@ impl UnifiedFinanceHandle {
             Ok(readback)
         })
         .await
+    }
+
+    /// Safe external projection of the original RiskBook account SQL read.
+    /// Only scoped readback data crosses crate boundaries: no SQL closure,
+    /// source-attestation constructor, mutation handle or exchange capability.
+    pub async fn stopped_account_summary(
+        &self,
+        campaign: String,
+        account_key: String,
+    ) -> StoreResult<UnifiedFinanceAccountReadback> {
+        let original = self.account_summary(campaign, account_key).await?;
+        Ok(UnifiedFinanceAccountReadback {
+            account_key: original.account_key,
+            policy_revision: original.policy_revision,
+            book_sequence: original.book_sequence,
+            active_reservations: original.active_reservations,
+            reserved_loss_usdt: original.reserved_loss_usdt,
+            reserved_loss_usd: original.reserved_loss_usd,
+            cumulative_loss_usd: original.cumulative_loss_usd,
+        })
+    }
+
+    /// Missing or foreign reservation is None (UNKNOWN), never an
+    /// authorization to send. Original RiskBook source is queried unchanged.
+    pub async fn stopped_inspect_reservation(
+        &self,
+        campaign: String,
+        reservation_key: String,
+        plan_sha256: String,
+    ) -> StoreResult<Option<UnifiedFinanceReservationReadback>> {
+        let found = self
+            .inspect_reservation(campaign, reservation_key, plan_sha256)
+            .await?;
+        Ok(found.map(|original| {
+            use okx_kernel::risk::model::RiskEntryState;
+            let state = match original.state {
+                RiskEntryState::Held => "HELD",
+                RiskEntryState::Posted => "POSTED",
+                RiskEntryState::Unknown => "UNKNOWN",
+                RiskEntryState::Open => "OPEN",
+                RiskEntryState::Released => "RELEASED",
+            };
+            UnifiedFinanceReservationReadback {
+                reservation_key: original.reservation_key,
+                plan_sha256: original.plan_sha256,
+                state,
+                reservation_sequence: original.reservation_sequence,
+                current_book_sequence: original.current_book_sequence,
+                policy_revision: original.policy_revision,
+            }
+        }))
     }
 
     /// Read-only original AccountStore intent (and immutable full plan)

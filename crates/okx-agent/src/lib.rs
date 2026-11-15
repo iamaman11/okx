@@ -7,6 +7,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod execution_preflight;
 pub mod execution_runtime;
+pub mod finance_inspection;
 pub(crate) mod finance_trace;
 pub(crate) mod finance_window;
 pub mod github_auth;

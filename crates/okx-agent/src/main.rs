@@ -73,6 +73,24 @@ enum Command {
         #[arg(long)]
         account_key: String,
     },
+    /// Inspect a verified stopped 47-table finance import. No trading,
+    /// account writers, Cloudflare session or financial mutation is started.
+    InspectFinance {
+        #[arg(long)]
+        installation_id: String,
+        #[arg(long = "expected-account", required = true)]
+        expected_accounts: Vec<String>,
+        #[arg(long = "expected-campaign", required = true)]
+        expected_campaigns: Vec<String>,
+        #[arg(long)]
+        campaign: String,
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        reservation_key: Option<String>,
+        #[arg(long)]
+        plan_sha256: Option<String>,
+    },
     RestoreAccount {
         #[arg(long)]
         account_key: String,
@@ -178,6 +196,27 @@ async fn run(cli: Cli) -> AgentResult<()> {
             )
             .await?;
             println!("{}", result);
+        }
+        Command::InspectFinance {
+            installation_id,
+            expected_accounts,
+            expected_campaigns,
+            campaign,
+            account,
+            reservation_key,
+            plan_sha256,
+        } => {
+            let request = okx_agent::finance_inspection::StoppedFinanceInspectionRequest {
+                installation_id,
+                expected_accounts,
+                expected_campaigns,
+                campaign,
+                account,
+                reservation_key,
+                plan_sha256,
+            };
+            let result = okx_agent::finance_inspection::inspect(&config.root, request).await?;
+            println!("{}", serde_json::to_string(&result)?);
         }
         Command::BackupAccount { account_key } => {
             println!(
