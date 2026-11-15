@@ -6,6 +6,30 @@ use super::{
 };
 use crate::{AccountStore, StoreError, StoreResult};
 impl UnifiedFinanceHandle {
+    /// Scoped source identity read. The result is not an ownership assertion
+    /// for a later mutation; the page/operation still validates its sources.
+    pub async fn source_order_owner(
+        &self,
+        account: String,
+        client: String,
+        venue: String,
+        deadline: std::time::Instant,
+    ) -> StoreResult<Option<crate::StoredIntent>> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let owner = AccountStore::source_order_owner_sql(
+                &tx,
+                Some((&installation, &account)),
+                &client,
+                &venue,
+            )?;
+            tx.commit()?;
+            Ok(owner)
+        })
+        .await
+    }
+
     /// Same collector frontier in one read transaction on the sole FIFO.
     pub async fn source_capture_state(
         &self,

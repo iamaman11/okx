@@ -44,6 +44,42 @@ fn risk_book_contract_unified_entry_fee_ownership_and_late_debit() {
         &[&sa, &sb],
     )
     .unwrap();
+    for (account, venue) in [("fee-A", "order-A"), ("fee-B", "order-B")] {
+        let scope = Some(("installation", account));
+        for (client, order) in [("stableclient", venue), ("stableclient", ""), ("", venue)] {
+            let owner = AccountStore::source_order_owner_sql(&target, scope, client, order)
+                .unwrap()
+                .unwrap();
+            assert_eq!(owner.exchange_order_id.as_deref(), Some(venue));
+        }
+        let other = if account == "fee-A" {
+            "order-B"
+        } else {
+            "order-A"
+        };
+        assert!(
+            AccountStore::source_order_owner_sql(&target, scope, "", other)
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            AccountStore::source_order_owner_sql(&target, scope, "stableclient", other),
+            Err(StoreError::Invalid("SOURCE_ORDER_IDENTITY_CONFLICT"))
+        ));
+        assert!(matches!(
+            AccountStore::source_order_owner_sql(&target, scope, "foreign-client", venue),
+            Err(StoreError::Invalid("SOURCE_ORDER_IDENTITY_CONFLICT"))
+        ));
+    }
+    assert!(matches!(
+        AccountStore::source_order_owner_sql(
+            &target,
+            Some(("installation", "missing-account")),
+            "stableclient",
+            ""
+        ),
+        Err(StoreError::Invalid("UNIFIED_SOURCE_ACCOUNT_NOT_FOUND"))
+    ));
     let tx = target.transaction().unwrap();
     let make_page = |order: &str| IngestPage {
         bills: vec![Bill {

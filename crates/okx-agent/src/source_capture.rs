@@ -833,7 +833,7 @@ async fn capture_fills(
                 if time < t0 {
                     continue;
                 }
-                let owner = s.by_client_order_id(&r.client_order_id)?;
+                let owner = s.source_order_owner(&r.client_order_id, &r.order_id)?;
                 let instance = owner.as_ref().map(|i| i.plan.strategy_instance.clone());
                 let fee = required_d(&r.fee, "FILL_FEE_SOURCE_UNAVAILABLE")?;
                 let key = if r.bill_id.is_empty() {
@@ -956,9 +956,7 @@ async fn capture_bills(
                         trade_id: b.trade_id.clone(),
                     });
                 }
-                let owner = s
-                    .by_client_order_id(&b.client_order_id)?
-                    .or(s.by_exchange_order_id(&b.order_id)?);
+                let owner = s.source_order_owner(&b.client_order_id, &b.order_id)?;
                 let fee = optional_d(&b.fee)?;
                 if fee < Decimal::ZERO
                     && let Some(i) = owner.as_ref().filter(|i| i.risk_increase)

@@ -13399,6 +13399,41 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
             .await,
         Err(StoreError::Invalid("UNIFIED_FINANCE_QUEUE_DEADLINE"))
     ));
+    let source_owner = owner
+        .source_order_owner(
+            a_key.clone(),
+            "stableclient".into(),
+            String::new(),
+            std::time::Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(source_owner.intent_id, ai.intent_id);
+    assert_eq!(source_owner.plan_hash, ai.plan_hash);
+    assert!(
+        owner
+            .source_order_owner(
+                a_key.clone(),
+                String::new(),
+                "foreign-order".into(),
+                std::time::Instant::now() + Duration::from_secs(2)
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        owner
+            .source_order_owner(
+                "foreign-account".into(),
+                "stableclient".into(),
+                String::new(),
+                std::time::Instant::now() + Duration::from_secs(2)
+            )
+            .await,
+        Err(StoreError::Invalid("UNIFIED_SOURCE_ACCOUNT_NOT_FOUND"))
+    ));
     let inventory = owner.inventory().await.unwrap();
     assert_eq!(inventory.accounts, 2);
     assert_eq!(inventory.campaigns, 1);

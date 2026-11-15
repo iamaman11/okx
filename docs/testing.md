@@ -1,3 +1,36 @@
+## #510 - source order ownership contract used by the production collector
+
+Fills and bills now use AccountStore::source_order_owner instead of separate
+ad-hoc lookups. A shared scoped SQL function resolves durable client/venue
+identity and original stored plan. Both identifiers may resolve only the same
+intent; a known venue binding cannot contradict a supplied client identity.
+Conflict yields SOURCE_ORDER_IDENTITY_CONFLICT before constructing attributed
+finance facts. An unbound/unknown order remains None, not an owned position.
+
+The unified FIFO exposes the same read-only operation with account scope and
+queue deadline. This readback is not a mutation/POST capability; later source
+writes still require source validation and the independent activation gate.
+No generic SQL callback or second writer is exported.
+
+Tests on original prepared/reserved/posted account sources with identical
+client IDs verify exact client+venue, client-only and venue-only lookup,
+foreign venue absence, contradictory client/venue rejection and unknown
+account failure. The real unified owner/import test checks public readback
+with original immutable plan and foreign-account denial.
+
+Local Windows full execution regression: 261 PASS, 0 FAIL, 2 ignored (8.03s
+after build); Agent all-target check, architecture/negative guard, format/diff
+PASS. This intentionally tightens old bills' client-first selection and fills'
+client-only attribution: contradictory raw exchange identities now fail closed.
+Affected T09/T10 production integration still needs final acceptance; recorded
+source conflicts must be diagnosed, never hidden by ignoring the new reason.
+
+Native AccountResources/collector full startup, projection/reconciliation,
+activation and four financial command arms remain incomplete. No RB01-RB16,
+26/26 or installed trading readiness is claimed.
+
+---
+
 ## #510 - typed coherent collector frontier on legacy and unified SQL owners
 
 The production collector now calls AccountStoreHandle::source_capture_state
