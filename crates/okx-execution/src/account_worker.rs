@@ -1418,7 +1418,7 @@ mod unified_finance_queue_contract_tests {
         let (sender, receiver) = sync_channel::<FinanceJob>(1);
         let owner = offline_owner(sender);
         let error = owner
-            .submit_before(Some(Instant::now() - Duration::from_millis(1)), |_db| {
+            .submit_before(Some(Instant::now() - Duration::from_millis(1)), |_db| -> StoreResult<()> {
                 panic!("expired financial command must not execute")
             })
             .await
@@ -1439,12 +1439,16 @@ mod unified_finance_queue_contract_tests {
         let owner = offline_owner(sender.clone());
         assert!(sender.try_send(Box::new(|_| {})).is_ok());
         assert!(matches!(
-            owner.submit(|_| -> StoreResult<()> { panic!("queue is full") }).await,
+            owner
+                .submit(|_| -> StoreResult<()> { panic!("queue is full") })
+                .await,
             Err(StoreError::Invalid("UNIFIED_FINANCE_QUEUE_FULL"))
         ));
         drop(receiver);
         assert!(matches!(
-            owner.submit(|_| -> StoreResult<()> { panic!("worker is gone") }).await,
+            owner
+                .submit(|_| -> StoreResult<()> { panic!("worker is gone") })
+                .await,
             Err(StoreError::Invalid("UNIFIED_FINANCE_WORKER_STOPPED"))
         ));
     }
@@ -1475,12 +1479,13 @@ mod unified_finance_queue_contract_tests {
         let (sender, receiver) = sync_channel::<FinanceJob>(2);
         let worker = std::thread::spawn(move || {
             let mut db = rusqlite::Connection::open_in_memory().unwrap();
-            db.execute_batch("CREATE TABLE observed(account TEXT NOT NULL)").unwrap();
+            db.execute_batch("CREATE TABLE observed(account TEXT NOT NULL)")
+                .unwrap();
             while let Ok(job) = receiver.recv() {
                 job(&mut db);
             }
             db.query_row(
-                "SELECT group_concat(account, ',') FROM observed",
+                "SELECT group_concat(account, ',') FROM (SELECT account FROM observed ORDER BY rowid)",
                 [],
                 |row| row.get::<_, String>(0),
             )
