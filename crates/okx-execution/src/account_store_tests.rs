@@ -13198,7 +13198,7 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
             .await,
         Err(StoreError::Invalid("UNIFIED_POLICY_COHORT_MISMATCH"))
     ));
-    let mut bad_limit = policy;
+    let mut bad_limit = policy.clone();
     bad_limit.campaign_loss_limit_usd = "101".into();
     assert!(matches!(
         owner
