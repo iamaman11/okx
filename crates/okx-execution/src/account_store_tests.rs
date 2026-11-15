@@ -13762,32 +13762,40 @@ fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_
         .unwrap();
     }
     for attempt in 0..2 {
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
-        AccountStore::acknowledge_unified_partial_entry_sql(
-            &tx, installation, &account, &proof,
-        )
-        .unwrap();
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        AccountStore::acknowledge_unified_partial_entry_sql(&tx, installation, &account, &proof)
+            .unwrap();
         tx.commit().unwrap();
-        let count: i64 = db.query_row(
-            "SELECT COUNT(*) FROM operation_receipts
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM operation_receipts
              WHERE installation_id=?1 AND account_key=?2
                AND operation_id=?3 AND kind='ENTRY_PARTIAL_SETTLED'
                AND request_hash=?4 AND result_ref=?5",
-            params![
-                installation, &account, format!("entry-partial-settled:{intent}:r1"),
-                &plan, &source
-            ],
-            |row| row.get(0),
-        ).unwrap();
-        assert_eq!(count, 1, "UNKNOWN source ACK replay {attempt} cannot double-book");
+                params![
+                    installation,
+                    &account,
+                    format!("entry-partial-settled:{intent}:r1"),
+                    &plan,
+                    &source
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "UNKNOWN source ACK replay {attempt} cannot double-book"
+        );
     }
     let mut forged = proof.clone();
     forged.cumulative_entry_usd = Decimal::new(50, 2);
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
     assert!(matches!(
-        AccountStore::acknowledge_unified_partial_entry_sql(
-            &tx, installation, &account, &forged,
-        ),
+        AccountStore::acknowledge_unified_partial_entry_sql(&tx, installation, &account, &forged,),
         Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_SOURCE_MISMATCH"))
     ));
     tx.rollback().unwrap();
@@ -13797,7 +13805,8 @@ fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_
              WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
             params![installation, &account, intent],
             |row| row.get(0),
-        ).unwrap(),
+        )
+        .unwrap(),
         "UNKNOWN",
         "even exact financial acknowledgement does not invent a venue outcome"
     );
