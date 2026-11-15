@@ -25,6 +25,22 @@ pub enum RiskRuleError {
     #[error("POST_CAUSAL_PROOF_UNPROVEN")]
     PostCausalProofUnproven,
 }
+impl RiskRuleError {
+    /// Stable diagnostic code preserved at the application boundary.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::BoundBreach => "BUDGET_BOUND_BREACH",
+            Self::EntryBudgetExhausted => "CAMPAIGN_ENTRY_BUDGET_EXHAUSTED",
+            Self::LossBudgetExhausted => "CAMPAIGN_LOSS_BUDGET_EXHAUSTED",
+            Self::OrderOrStrategyLimit => "ORDER_OR_STRATEGY_RISK_LIMIT",
+            Self::StrategyAggregateLimit => "STRATEGY_AGGREGATE_RISK_LIMIT",
+            Self::AccountAlreadyOverLimit => "ACCOUNT_ALREADY_OVER_LIMIT",
+            Self::InsufficientAggregateOrAccountRisk => "INSUFFICIENT_AGGREGATE_OR_ACCOUNT_RISK",
+            Self::AccountEntryLimitExceeded => "ACCOUNT_ENTRY_UPPER_LIMIT_EXCEEDED",
+            Self::PostCausalProofUnproven => "POST_CAUSAL_PROOF_UNPROVEN",
+        }
+    }
+}
 
 /// Pure shape/causality check for the complete registered cohort.
 /// A valid shape is NOT an attestation that the sources were actually read.

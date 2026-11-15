@@ -3,3 +3,5 @@
 pub mod model;
 pub mod money;
 pub mod rules;
+
+pub mod settlement;

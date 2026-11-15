@@ -22,6 +22,17 @@ pub enum MoneyError {
     #[error("NEGATIVE_RISK_AMOUNT")]
     Negative,
 }
+impl MoneyError {
+    /// Stable diagnostic code preserved at the application boundary.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidSyntax => "INVALID_DECIMAL_SYNTAX",
+            Self::NumericRange => "NUMERIC_RANGE",
+            Self::MustBePositive => "DECIMAL_MUST_BE_POSITIVE",
+            Self::Negative => "NEGATIVE_RISK_AMOUNT",
+        }
+    }
+}
 
 /// Exact unsigned decimal expressed in legacy 10^28 atomic units.
 /// The private representation cannot bypass canonical output range checks.

@@ -86,8 +86,8 @@ fn original_finance_error(error: &store::RiskStoreError) -> &'static str {
         E::OutcomeUnknown => "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY",
         E::IdentityMismatch => "RISK_BOOK_IDENTITY_MISMATCH",
         E::Uninitialized => "RISK_BOOK_UNINITIALIZED",
-        E::Denied(_) => "RISK_RULE_DENIED",
-        E::Money(_) => "RISK_MONEY_INVALID",
+        E::Denied(reason) => reason.code(),
+        E::Money(reason) => reason.code(),
         E::Sql(_) | E::Io(_) | E::Encode(_) => "RISK_STORAGE_UNAVAILABLE",
     }
 }
@@ -350,5 +350,39 @@ pub(crate) fn test_stage_scoped_begin_post(
         UnifiedRiskDecision::PostAuthorized { book_sequence, .. } => Ok(book_sequence),
         UnifiedRiskDecision::Denied { reason } => Err(reason),
         _ => Err("UNIFIED_POST_RECEIPT_UNEXPECTED".into()),
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_contract_tests {
+    use super::{original_finance_error, store::RiskStoreError};
+    use okx_kernel::risk::{money::MoneyError, rules::RiskRuleError};
+
+    #[test]
+    fn risk_book_contract_domain_reason_survives_finance_boundary() {
+        for (error, expected) in [
+            (
+                RiskStoreError::Denied(RiskRuleError::EntryBudgetExhausted),
+                "CAMPAIGN_ENTRY_BUDGET_EXHAUSTED",
+            ),
+            (
+                RiskStoreError::Denied(RiskRuleError::AccountAlreadyOverLimit),
+                "ACCOUNT_ALREADY_OVER_LIMIT",
+            ),
+            (
+                RiskStoreError::Denied(RiskRuleError::PostCausalProofUnproven),
+                "POST_CAUSAL_PROOF_UNPROVEN",
+            ),
+            (
+                RiskStoreError::Money(MoneyError::NumericRange),
+                "NUMERIC_RANGE",
+            ),
+            (
+                RiskStoreError::Money(MoneyError::Negative),
+                "NEGATIVE_RISK_AMOUNT",
+            ),
+        ] {
+            assert_eq!(original_finance_error(&error), expected);
+        }
     }
 }

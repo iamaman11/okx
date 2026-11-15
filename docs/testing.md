@@ -1,3 +1,31 @@
+## #510 — settlement domain extraction and diagnostic reason preservation (15 Nov 2026)
+
+The production SQL settlement transaction now calls
+`okx_kernel::risk::settlement::calculate_entry_settlement` for cumulative entry
+consumption, remaining reserve and the monotonic bound-breach increment.
+The previous arithmetic body and overage helpers were removed from the SQL
+module; source validation, revision checks and atomic writes remain inside
+its original transaction. Independent fixed expected values cover partial
+settlement, excess cost, late fees after release, unrelated reservations,
+corrupt reserve and cumulative regression.
+
+`RiskRuleError::code` and `MoneyError::code` preserve specific causes through
+`original_finance_error` instead of collapsing them to RISK_RULE_DENIED or
+RISK_MONEY_INVALID. A direct boundary regression asserts the exact causes.
+
+Local native Windows, Rust 1.95.0, debug profile, on parent `5c793735`:
+- direct `risk_book_contract`: execution 80 PASS (2.12 s), kernel 8 PASS;
+- complete execution library: 258 PASS, 0 failed, 2 ignored (5.80 s);
+- kernel all-target Clippy with -D warnings, architecture guard/self-test,
+  rustfmt and diff checks PASS.
+Counts overlap; ignored tests are not accepted. These are individual measured
+execution times after build, not P95 or complete RB01–16/26/26 acceptance.
+The installed system and activation gate were not changed. Remaining work:
+production source/9-action completion, actual verified activation/legacy stop,
+module separation in account_worker/store, final Windows acceptance and P95.
+
+---
+
 ## #510 â€” close maintenance bypass on authority-mode gate
 
 Admin `InitializeAccount`, `BackupAccount` and `RestoreAccount`

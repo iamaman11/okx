@@ -10,7 +10,13 @@ use super::{
 };
 use crate::account_store::EntrySettlementEvidence;
 use crate::risk::book::EntrySettlementSource;
-use okx_kernel::risk::money::RiskAmount;
+use okx_kernel::risk::{
+    money::RiskAmount,
+    settlement::{
+        EntrySettlementChange, EntrySettlementError, EntrySettlementInput,
+        calculate_entry_settlement, entry_overage,
+    },
+};
 use rusqlite::{
     OptionalExtension, Transaction, TransactionBehavior, params_from_iter, types::Value,
 };
@@ -32,24 +38,6 @@ pub(in crate::risk::book) struct EntrySettlementReceipt {
     pub cumulative_entry_usd: String,
     pub entry_bound_breach_usd: String,
     pub replayed: bool,
-}
-fn overage(value: &RiskAmount, limit: &RiskAmount) -> Result<RiskAmount> {
-    if value > limit {
-        Ok(value.checked_sub(limit)?)
-    } else {
-        Ok(RiskAmount::zero())
-    }
-}
-fn aggregate_overage(
-    consumed: &RiskAmount,
-    reserved: &RiskAmount,
-    limit: &RiskAmount,
-) -> Result<RiskAmount> {
-    if RiskAmount::sum_exceeds(&[consumed, reserved], limit) {
-        Ok(consumed.checked_add(reserved)?.checked_sub(limit)?)
-    } else {
-        Ok(RiskAmount::zero())
-    }
 }
 impl PartialEntrySqlProof {
     pub(in crate::risk::book) fn from_account_receipt(
@@ -319,7 +307,7 @@ impl RiskBookStore {
         let before = amount(previous)?;
         let upper = amount(upper)?;
         let previous_reserved = amount(remaining)?;
-        let previous_over = overage(&before, &upper)?;
+        let previous_over = entry_overage(&before, &upper)?;
         if amount(prior_breach)? != previous_over {
             return Err(RiskStoreError::Corrupt("ENTRY_SETTLEMENT_BOUND"));
         }
@@ -355,47 +343,31 @@ impl RiskBookStore {
                 "ENTRY_SETTLEMENT_REVISION_CONFLICT",
             ));
         }
-        let expected_remaining = if state == "RELEASED" {
-            RiskAmount::zero()
-        } else if upper > before {
-            upper.checked_sub(&before)?
-        } else {
-            RiskAmount::zero()
-        };
-        if expected_remaining != previous_reserved {
-            return Err(RiskStoreError::Corrupt("ENTRY_RESERVED_PRIMARY_MISMATCH"));
-        }
-        let delta = proof.cumulative_usd.checked_sub(&before)?;
-        let remaining_after = if state == "RELEASED" {
-            RiskAmount::zero()
-        } else if upper > proof.cumulative_usd {
-            upper.checked_sub(&proof.cumulative_usd)?
-        } else {
-            RiskAmount::zero()
-        };
-        let reserve_debit = previous_reserved.checked_sub(&remaining_after)?;
-        let consumed_after = meta.entry_consumed.checked_add(&delta)?;
-        let reserved_after = meta.entry_reserved.checked_sub(&reserve_debit)?;
-        let current_over = overage(&proof.cumulative_usd, &upper)?;
-        let individual_delta = current_over.checked_sub(&previous_over)?;
-        let prior_aggregate = aggregate_overage(
-            &meta.entry_consumed,
-            &meta.entry_reserved,
-            &meta.entry_limit,
-        )?;
-        let current_aggregate =
-            aggregate_overage(&consumed_after, &reserved_after, &meta.entry_limit)?;
-        let aggregate_delta = if current_aggregate > prior_aggregate {
-            current_aggregate.checked_sub(&prior_aggregate)?
-        } else {
-            RiskAmount::zero()
-        };
-        let breach_delta = if individual_delta > aggregate_delta {
-            individual_delta
-        } else {
-            aggregate_delta
-        };
-        let breach_after = meta.entry_breach.checked_add(&breach_delta)?;
+        let calculated = calculate_entry_settlement(&EntrySettlementInput {
+            released: state == "RELEASED",
+            upper: &upper,
+            previous_cumulative: &before,
+            cumulative: &proof.cumulative_usd,
+            previous_reserved: &previous_reserved,
+            previous_overage: &previous_over,
+            consumed: &meta.entry_consumed,
+            reserved: &meta.entry_reserved,
+            limit: &meta.entry_limit,
+            breach: &meta.entry_breach,
+        })
+        .map_err(|error| match error {
+            EntrySettlementError::ReservedMismatch => {
+                RiskStoreError::Corrupt("ENTRY_RESERVED_PRIMARY_MISMATCH")
+            }
+            EntrySettlementError::Money(error) => RiskStoreError::Money(error),
+        })?;
+        let EntrySettlementChange {
+            remaining_after,
+            consumed_after,
+            reserved_after,
+            current_over,
+            breach_after,
+        } = calculated;
         let next = meta
             .sequence
             .checked_add(1)
