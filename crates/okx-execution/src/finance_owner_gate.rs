@@ -144,16 +144,23 @@ pub fn hold_legacy_account_maintenance(
     account_sql: &Path,
 ) -> crate::StoreResult<LegacyAccountMaintenanceLease> {
     use crate::StoreError;
-    let source_root = installation_for_legacy(account_sql)
-        .ok_or(StoreError::Invalid("LEGACY_MAINTENANCE_ACCOUNT_PATH_INVALID"))?;
+    let source_root = installation_for_legacy(account_sql).ok_or(StoreError::Invalid(
+        "LEGACY_MAINTENANCE_ACCOUNT_PATH_INVALID",
+    ))?;
     if source_root.canonicalize()? != root.canonicalize()? {
         return Err(StoreError::Invalid("LEGACY_MAINTENANCE_ROOT_MISMATCH"));
     }
-    let held = legacy_mode_for(account_sql).map_err(|error| match error {
-        AuthorityModeError::Busy => StoreError::Invalid("FINANCE_INSTALLATION_WRITER_BUSY"),
-        AuthorityModeError::FinancePresent => StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"),
-        AuthorityModeError::Io(error) => StoreError::Io(error),
-    })?.ok_or(StoreError::Invalid("LEGACY_MAINTENANCE_ACCOUNT_PATH_INVALID"))?;
+    let held = legacy_mode_for(account_sql)
+        .map_err(|error| match error {
+            AuthorityModeError::Busy => StoreError::Invalid("FINANCE_INSTALLATION_WRITER_BUSY"),
+            AuthorityModeError::FinancePresent => {
+                StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED")
+            }
+            AuthorityModeError::Io(error) => StoreError::Io(error),
+        })?
+        .ok_or(StoreError::Invalid(
+            "LEGACY_MAINTENANCE_ACCOUNT_PATH_INVALID",
+        ))?;
     Ok(LegacyAccountMaintenanceLease { _lease: held })
 }
 
@@ -169,7 +176,8 @@ mod tests {
         use crate::StoreError;
         let root = std::env::temp_dir().join(format!(
             "okx-510-legacy-maintenance-{}-{}",
-            std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let account = root
             .join("accounts")
@@ -177,7 +185,10 @@ mod tests {
             .join("account.sqlite");
         fs::create_dir_all(account.parent().unwrap()).unwrap();
         let guard = hold_legacy_account_maintenance(&root, &account).unwrap();
-        assert!(matches!(unified_mode_for(&root), Err(AuthorityModeError::Busy)));
+        assert!(matches!(
+            unified_mode_for(&root),
+            Err(AuthorityModeError::Busy)
+        ));
         drop(guard);
         assert!(unified_mode_for(&root).is_ok());
         // The same path cannot reopen legacy maintenance after a sealed
@@ -189,11 +200,15 @@ mod tests {
             hold_legacy_account_maintenance(&root, &account),
             Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
         ));
-        assert_eq!(fs::read(&finance).unwrap(), b"original-sealed-import-sentinel");
+        assert_eq!(
+            fs::read(&finance).unwrap(),
+            b"original-sealed-import-sentinel"
+        );
         // Foreign root identity must not be able to borrow a lease for A.
         let other = std::env::temp_dir().join(format!(
             "okx-510-foreign-maintenance-{}-{}",
-            std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&other).unwrap();
         assert!(matches!(

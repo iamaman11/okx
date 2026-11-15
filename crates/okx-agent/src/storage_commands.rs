@@ -110,8 +110,7 @@ fn legacy_account_maintenance_lease(
     key: &AccountKey,
 ) -> AgentResult<okx_execution::LegacyAccountMaintenanceLease> {
     let account_sql = account_root(root, key).join("account.sqlite");
-    okx_execution::hold_legacy_account_maintenance(root, &account_sql)
-        .map_err(AgentError::from)
+    okx_execution::hold_legacy_account_maintenance(root, &account_sql).map_err(AgentError::from)
 }
 
 fn parse_key(wire: &str) -> AgentResult<AccountKey> {
