@@ -1,3 +1,30 @@
+## #510 - typed SQL boundary of the production venue sender
+
+post_once now calls claim_legacy_post and record_intent_outcome instead of
+passing SQL closures into the Agent send routine. Claim keeps the original
+AccountStore CAS and evaluates wall time INSIDE its SQL owner after queue
+wait. Typed IntentOutcome carries the observed result; the unified counterpart
+uses the existing original RecordOutcome transaction under the activation gate.
+No new finance model, send permission from readback or Native activation exists.
+
+The seven original entry-settlement direct tests now prepare their real SQL
+intent/reservation using two concurrent post_once callers: exactly one succeeds
+and invokes the controlled send callback; a third replay returns None without
+another callback. Original partial/terminal/late settlement negatives remain.
+This is a real production sender + SQLite contract with a controlled callback,
+not physical OKX HTTP acceptance. 7 PASS, 0 FAIL, 0.19s after build. Initial
+filename-based filter executed ZERO tests and is explicitly NOT evidence; the
+verified module filter is entry_settlement::direct_tests. Final execution
+library: 271 PASS, 0 FAIL, 2 ignored, 7.39s after build. Architecture guard and
+negative self-test, formatting and diff checks pass.
+
+This prepares but DOES NOT solve the Native single-send handoff. Current
+post_once accepts the legacy AccountStoreHandle only. A future Native path
+must consume a private non-cloneable first-COMMIT send result; it must not
+repeat the account begin_post after the combined SQL fence or accept POSTING,
+Inspect, replay or reopened state as a new send grant. Four Native action
+bindings, runtime composition and RB09 still block #510 completion.
+
 ## #510 - immutable campaign opening provenance and Native Summary readback
 
 Opening installation now commits its canonical full source as a separate

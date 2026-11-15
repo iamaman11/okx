@@ -17,7 +17,7 @@ where
     let id = intent.intent_id.clone();
     let revision = intent.policy_revision;
     if !store
-        .call(until, move |s| s.begin_post(&id, revision, now()))
+        .claim_legacy_post(until, id, revision)
         .await
         .map_err(err)?
     {
@@ -26,15 +26,16 @@ where
     if Instant::now() >= until {
         let id = intent.intent_id.clone();
         store
-            .call(deadline(), move |s| {
-                s.record_outcome(
-                    &id,
-                    IntentState::Rejected,
-                    None,
-                    "monotonic-deadline-expired-owner-confirmed-unsent",
-                    now(),
-                )
-            })
+            .record_intent_outcome(
+                deadline(),
+                okx_execution::IntentOutcome {
+                    intent_id: id,
+                    state: IntentState::Rejected,
+                    exchange_order_id: None,
+                    evidence: "monotonic-deadline-expired-owner-confirmed-unsent".into(),
+                    observed_at: now(),
+                },
+            )
             .await
             .map_err(err)?;
         return Err("COMMAND_EXPIRED".into());
@@ -48,15 +49,16 @@ where
             let id = intent.intent_id.clone();
             let proof = reason.clone();
             store
-                .call(deadline(), move |s| {
-                    s.record_outcome(
-                        &id,
-                        IntentState::Rejected,
-                        None,
-                        &format!("owner-confirmed-unsent:{proof}"),
-                        now(),
-                    )
-                })
+                .record_intent_outcome(
+                    deadline(),
+                    okx_execution::IntentOutcome {
+                        intent_id: id,
+                        state: IntentState::Rejected,
+                        exchange_order_id: None,
+                        evidence: format!("owner-confirmed-unsent:{proof}"),
+                        observed_at: now(),
+                    },
+                )
                 .await
                 .map_err(err)?;
             Err(reason)
@@ -64,15 +66,16 @@ where
         Err(_) => {
             let id = intent.intent_id.clone();
             store
-                .call(deadline(), move |s| {
-                    s.record_outcome(
-                        &id,
-                        IntentState::Unknown,
-                        None,
-                        "exchange-post-outcome-unknown",
-                        now(),
-                    )
-                })
+                .record_intent_outcome(
+                    deadline(),
+                    okx_execution::IntentOutcome {
+                        intent_id: id,
+                        state: IntentState::Unknown,
+                        exchange_order_id: None,
+                        evidence: "exchange-post-outcome-unknown".into(),
+                        observed_at: now(),
+                    },
+                )
                 .await
                 .map_err(err)?;
             Ok(None)

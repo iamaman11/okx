@@ -206,6 +206,27 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    pub async fn record_intent_outcome(
+        &self,
+        account: String,
+        outcome: crate::IntentOutcome,
+    ) -> StoreResult<()> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::RecordOutcome {
+                account,
+                intent: outcome.intent_id,
+                state: outcome.state,
+                exchange_order_id: outcome.exchange_order_id,
+                evidence: outcome.evidence,
+                now: outcome.observed_at,
+            })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::OutcomeRecorded => Ok(()),
+            _ => Err(StoreError::Invalid("UNIFIED_OUTCOME_RECEIPT_UNEXPECTED")),
+        }
+    }
+
     pub async fn assign_capital(
         &self,
         account: String,

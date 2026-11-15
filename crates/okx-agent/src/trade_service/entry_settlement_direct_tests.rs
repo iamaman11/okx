@@ -197,12 +197,30 @@ async fn fixture(label: &str, finance: bool) -> Fixture {
         })
         .await
         .unwrap();
-    let posted = crate::trade_service::post_once(&store, &saved, deadline(), || async {
+    let sends = std::sync::atomic::AtomicUsize::new(0);
+    let (first, second) = tokio::join!(
+        crate::trade_service::post_once(&store, &saved, deadline(), || async {
+            sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, String>(())
+        }),
+        crate::trade_service::post_once(&store, &saved, deadline(), || async {
+            sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, String>(())
+        }),
+    );
+    assert_eq!(
+        usize::from(first.unwrap().is_some()) + usize::from(second.unwrap().is_some()),
+        1
+    );
+    assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let repeat = crate::trade_service::post_once(&store, &saved, deadline(), || async {
+        sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok::<_, String>(())
     })
     .await
     .unwrap();
-    assert_eq!(posted, Some(()));
+    assert!(repeat.is_none());
+    assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 1);
     let id = saved.intent_id.clone();
     store
         .call(deadline(), move |s| {
