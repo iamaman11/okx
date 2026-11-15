@@ -11,6 +11,13 @@ use okx_protocol::risk_authority::{
     RiskDecisionStatus, RiskReservationState, RiskResult,
 };
 
+/// Observing authorized configuration is not an SQL financial permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativePolicyObservation {
+    WaitingForAccounts,
+    Applied,
+}
+
 #[derive(Clone)]
 pub struct NativeFinanceRisk {
     pub(super) owner: UnifiedFinanceHandle,
@@ -58,6 +65,68 @@ impl NativeFinanceRisk {
         Self::new(self.owner.clone(), self.installation.clone(), campaign)
     }
 
+    /// Initial policy delivery must not deadlock account connection. Only the
+    /// complete original SQL roster can activate policy; pending observations
+    /// remain memory-only and cannot manufacture a campaign, budget or grant.
+    pub async fn observe_governance(
+        &self,
+        snapshot: &CentralGovernanceSnapshot,
+    ) -> Result<NativePolicyObservation, String> {
+        self.validate_governance_scope(snapshot)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let configured = self
+            .owner
+            .configured_campaign(deadline)
+            .await
+            .map_err(|e| e.to_string())?;
+        if configured
+            .as_ref()
+            .is_some_and(|c| c != &snapshot.state.campaign_id)
+        {
+            return Err("UNIFIED_GOVERNANCE_IDENTITY_UNVERIFIED".into());
+        }
+        if configured.is_none() {
+            let registered = self
+                .owner
+                .connected_account_keys(deadline)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut requested = snapshot
+                .state
+                .accounts
+                .iter()
+                .map(|a| a.account_key.clone())
+                .collect::<Vec<_>>();
+            requested.sort();
+            if requested.is_empty() || registered != requested {
+                return Ok(NativePolicyObservation::WaitingForAccounts);
+            }
+        }
+        self.apply_governance(snapshot).await?;
+        Ok(NativePolicyObservation::Applied)
+    }
+
+    fn validate_governance_scope(
+        &self,
+        snapshot: &CentralGovernanceSnapshot,
+    ) -> Result<(), String> {
+        if !snapshot.valid()
+            || snapshot.state.installation_id != self.installation
+            || (!self.campaign.is_empty() && snapshot.state.campaign_id != self.campaign)
+        {
+            return Err("UNIFIED_GOVERNANCE_IDENTITY_UNVERIFIED".into());
+        }
+        if snapshot
+            .state
+            .accounts
+            .iter()
+            .any(|a| a.environment != AccountEnvironment::Real)
+        {
+            return Err("UNIFIED_GOVERNANCE_DEMO_COHORT_UNSUPPORTED".into());
+        }
+        Ok(())
+    }
+
     /// Apply original native AccountStore account-policy rows and RiskBook
     /// campaign revision in ONE caller-owned SQL transaction. A policy creates
     /// no financial opening, no source-completeness assertion and no POST grant.
@@ -65,22 +134,9 @@ impl NativeFinanceRisk {
         &self,
         snapshot: &CentralGovernanceSnapshot,
     ) -> Result<(), String> {
-        if !snapshot.valid()
-            || snapshot.state.installation_id != self.installation
-            || (!self.campaign.is_empty() && snapshot.state.campaign_id != self.campaign)
-            || snapshot.state.accounts.is_empty()
-        {
-            return Err("UNIFIED_GOVERNANCE_IDENTITY_UNVERIFIED".into());
-        }
-        // The original RiskBook campaign is a REAL cohort. A demo policy
-        // cannot be silently ignored or rewritten as a real account row.
-        if snapshot
-            .state
-            .accounts
-            .iter()
-            .any(|account| account.environment != AccountEnvironment::Real)
-        {
-            return Err("UNIFIED_GOVERNANCE_DEMO_COHORT_UNSUPPORTED".into());
+        self.validate_governance_scope(snapshot)?;
+        if snapshot.state.accounts.is_empty() {
+            return Err("NATIVE_CAMPAIGN_ACCOUNTS_NOT_CONNECTED".into());
         }
         use okx_execution::account_worker::{
             NativeCampaignAccountPolicy, NativeCampaignPolicy, NativeCampaignStrategyPolicy,

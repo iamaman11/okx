@@ -21,6 +21,9 @@ use std::time::Duration;
 mod fixture;
 use fixture::*;
 
+#[path = "accounts_native_filled_close_contract_tests.rs"]
+mod native_filled_close;
+
 #[tokio::test]
 async fn risk_book_contract_native_capture_and_public_execute_require_original_opening() {
     let fixture = fixture().await;
@@ -395,3 +398,9 @@ async fn risk_book_contract_native_public_execute_lost_ack_and_replay_send_once(
         .unwrap();
     fixture.finish().await;
 }
+
+#[path = "accounts_native_strategy_contract_tests.rs"]
+mod native_strategies;
+
+#[path = "accounts_native_crash_contract_tests.rs"]
+mod native_crash;

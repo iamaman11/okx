@@ -1,0 +1,314 @@
+//! Finite external observations for the original Native fill/Close owners.
+use super::*;
+
+pub(super) const INSTRUMENT: &str = "BTC-USDT-SWAP";
+pub(super) const OPEN_ORDER: &str = "native-filled-open-001";
+pub(super) const CLOSE_ORDER: &str = "native-filled-close-001";
+pub(super) const STOP: &str = "900000002";
+
+pub(super) async fn opened_market(
+    fixture: &mut NativeFixture,
+) -> (
+    watch::Sender<bool>,
+    tokio::task::JoinHandle<()>,
+    Arc<RecordedWsConnector>,
+    okx_runtime::PublicWsHandle,
+) {
+    let (stop, stopped) = watch::channel(false);
+    let service = fixture.trade.clone();
+    let maintenance = tokio::spawn(async move { service.run(stopped).await });
+    let mut observations = tokio::time::interval(Duration::from_millis(25));
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            observations.tick().await;
+            if fixture
+                .owner
+                .campaign_summary(fixture.campaign.clone())
+                .await
+                .unwrap()
+                .opening
+                .is_some()
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("production maintenance opening before external fills");
+    stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), maintenance)
+        .await
+        .unwrap()
+        .unwrap();
+    let (market, public, socket) = raw_market();
+    let mut updates = public.subscribe_market_updates();
+    let (stop, stopped) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        market.run(stopped).await.unwrap();
+    });
+    public.demand_instrument(INSTRUMENT).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if public
+                .risk_fresh_snapshot(
+                    INSTRUMENT,
+                    chrono::Utc::now().timestamp_millis() as u64,
+                    2000,
+                    180000,
+                    chrono::Utc::now().to_rfc3339(),
+                )
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            updates.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("original raw public market parser");
+    *fixture.market_boundary.market.lock().unwrap() = Some((socket.clone(), public.clone()));
+    fixture.trade = Arc::new(TradeService::new(
+        fixture.registry.clone(),
+        public.clone(),
+        NativeRiskClient::local(NativeFinanceRisk::from_owner(fixture.owner.clone())),
+    ));
+    fixture
+        .trade
+        .update_governance(&fixture.authority)
+        .await
+        .unwrap();
+    (stop, task, socket, public)
+}
+
+pub(super) fn get(
+    feed: &RecordedAccountHttp,
+    actor: &str,
+    path: &str,
+    query: Vec<(&str, &str)>,
+    data: Value,
+) {
+    feed.expect_get(RecordedGet {
+        access_key: actor.into(),
+        path: path.into(),
+        required_query: query
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect(),
+        raw_response: envelope(data),
+    });
+}
+
+/// One independently timestamped balance and position snapshot. Repetition is
+/// explicit at the caller: each item names a real production assessment.
+pub(super) fn snapshot(feed: &RecordedAccountHttp, equity: &str, quantity: &str) {
+    let at = chrono::Utc::now().timestamp_millis().to_string();
+    get(
+        feed,
+        "fixture-observer-a",
+        "/api/v5/account/balance",
+        vec![],
+        json!([{
+        "totalEq":equity,"adjEq":equity,"uTime":at,"details":[{"ccy":"USDT","eq":equity,
+        "liab":"0","availEq":equity,"availBal":equity,"eqUsd":equity,"uTime":at}]}]),
+    );
+    let positions = if quantity == "0" {
+        json!([])
+    } else {
+        json!([{
+        "instType":"SWAP","instId":INSTRUMENT,"posSide":"long","pos":quantity,
+        "mgnMode":"cross","avgPx":"1000","markPx":"1000","uTime":at}])
+    };
+    get(
+        feed,
+        "fixture-observer-a",
+        "/api/v5/account/positions",
+        vec![],
+        positions,
+    );
+}
+
+/// Exactly one production monetary capture turn, five original partitions and
+/// one independently signed bill page. Later turns may be empty incremental
+/// windows; immutable prior fills and bills remain in the original SQL owner.
+pub(super) fn history(feed: &RecordedAccountHttp, execution: Option<(&str, &str, &str, i64)>) {
+    let (fills, bills) = match execution {
+        Some((order, event, side, at)) => {
+            let subtype = if side == "buy" { "3" } else { "5" };
+            (
+                json!([{"instType":"SWAP","instId":INSTRUMENT,
+                "tradeId":format!("{event}-trade"),"ordId":order,"clOrdId":"__REQUEST_CL_ORD_ID__",
+                "billId":format!("{event}-bill"),"subType":subtype,"side":side,"posSide":"long",
+                "fillPx":"1000","fillSz":"0.1","fillPnl":"0","fee":"-0.0005","feeCcy":"USDT",
+                "ts":at.to_string(),"fillTime":at.to_string()}]),
+                json!([{"billId":format!("{event}-bill"),"instType":"SWAP","instId":INSTRUMENT,
+                "ordId":order,"tradeId":format!("{event}-trade"),"clOrdId":"__REQUEST_CL_ORD_ID__",
+                "ccy":"USDT","type":"2","subType":subtype,"balChg":"-0.0005",
+                "fee":"-0.0005","pnl":"0","ts":at.to_string()}]),
+            )
+        }
+        None => (json!([]), json!([])),
+    };
+    for partition in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
+        get(
+            feed,
+            "fixture-executor-a",
+            "/api/v5/trade/fills-history",
+            vec![("instType", partition)],
+            if partition == "SWAP" {
+                fills.clone()
+            } else {
+                json!([])
+            },
+        );
+    }
+    get(
+        feed,
+        "fixture-executor-a",
+        "/api/v5/account/bills-archive",
+        vec![],
+        bills,
+    );
+}
+
+pub(super) fn order(feed: &RecordedAccountHttp, id: &str, side: &str, at: i64) {
+    get(
+        feed,
+        "fixture-executor-a",
+        "/api/v5/trade/order",
+        vec![("instId", INSTRUMENT)],
+        json!([{
+        "instId":INSTRUMENT,"ordId":id,"clOrdId":"__REQUEST_CL_ORD_ID__","side":side,
+        "posSide":"long","tdMode":"cross","ordType":if side == "buy" {"limit"} else {"ioc"},
+        "px":if side == "buy" {"1000"} else {"999"},"sz":"0.1","accFillSz":"0.1",
+        "avgPx":"1000","state":"filled","cTime":at.to_string(),"uTime":at.to_string()}]),
+    );
+}
+
+pub(super) fn protection(feed: &RecordedAccountHttp, client: &str) {
+    get(
+        feed,
+        "fixture-executor-a",
+        "/api/v5/trade/order-algo",
+        vec![("algoClOrdId", client)],
+        json!([{
+        "instId":INSTRUMENT,"algoId":STOP,"algoClOrdId":client,"state":"live","sz":"0.1",
+        "side":"sell","posSide":"long","tdMode":"cross","ordType":"conditional",
+        "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"}]),
+    );
+}
+
+pub(super) async fn capture(fixture: &NativeFixture) {
+    crate::source_capture::capture_account_sources_measured(
+        &fixture._account.observer,
+        &fixture._account.private_ws,
+        &fixture._account.execution,
+    )
+    .await
+    .expect("original signed history ingestion, lot projection and account NAV");
+    let (risk, stops) = fixture
+        .owner
+        .financial_readiness(
+            fixture.config.account_key.wire(),
+            None,
+            Instant::now() + Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+    assert!(risk.nav_complete, "original NAV completeness: {risk:?}");
+    assert_eq!(stops, 0, "no source or projection stop may be hidden");
+}
+
+pub(super) async fn close_market(
+    socket: &RecordedWsConnector,
+    public: &okx_runtime::PublicWsHandle,
+) {
+    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let mut parsed = public.subscribe_market_updates();
+    socket.send_public_frame(
+        json!({"arg":{"channel":"tickers","instId":INSTRUMENT},"data":[{
+        "instType":"SWAP","instId":INSTRUMENT,"last":"1000","lastSz":"1","askPx":"1000",
+        "askSz":"10","bidPx":"999.9","bidSz":"10","ts":at}]})
+        .to_string(),
+    );
+    socket.send_public_frame(
+        json!({"arg":{"channel":"mark-price","instId":INSTRUMENT},"data":[{
+        "instType":"SWAP","instId":INSTRUMENT,"markPx":"1000","ts":at}]})
+        .to_string(),
+    );
+    socket.send_public_frame(
+        json!({"arg":{"channel":"index-tickers","instId":"BTC-USDT"},"data":[{
+        "instId":"BTC-USDT","idxPx":"1000","ts":at}]})
+        .to_string(),
+    );
+    socket.send_public_frame(
+        json!({"arg":{"channel":"books","instId":INSTRUMENT},"action":"update","data":[{
+        "asks":[["1000","10","0","1"]],"bids":[["999.9","10","0","1"]],
+        "seqId":13,"prevSeqId":12,"ts":at}]})
+        .to_string(),
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            parsed.changed().await.unwrap();
+            if public
+                .risk_fresh_snapshot(
+                    INSTRUMENT,
+                    chrono::Utc::now().timestamp_millis() as u64,
+                    2000,
+                    180000,
+                    chrono::Utc::now().to_rfc3339(),
+                )
+                .await
+                .is_ok()
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("single named Close market observation");
+}
+
+pub(super) fn cleanup(feed: &RecordedAccountHttp, stop_client: &str) {
+    let mut before = vec![];
+    let mut after = vec![];
+    for kind in ["SWAP", "FUTURES"] {
+        for order_type in [
+            "conditional",
+            "oco",
+            "trigger",
+            "move_order_stop",
+            "chase",
+            "iceberg",
+            "twap",
+            "smart_iceberg",
+        ] {
+            let query = vec![
+                ("instType".into(), kind.into()),
+                ("ordType".into(), order_type.into()),
+                ("limit".into(), "100".into()),
+            ];
+            let page = |data| RecordedGet {
+                access_key: "fixture-observer-a".into(),
+                path: "/api/v5/trade/orders-algo-pending".into(),
+                required_query: query.clone(),
+                raw_response: envelope(data),
+            };
+            before.push(page(if kind == "SWAP" && order_type == "conditional" {json!([{
+                "instType":"SWAP","instId":INSTRUMENT,"algoId":STOP,"algoClOrdId":stop_client,
+                "ordType":"conditional","state":"live","side":"sell","posSide":"long","tdMode":"cross",
+                "sz":"0.1","slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"}])} else {json!([])}));
+            after.push(page(json!([])));
+        }
+    }
+    feed.expect_causal_algo_inventory(STOP, before, after);
+    feed.expect_public_clock(envelope(
+        json!([{"ts":chrono::Utc::now().timestamp_millis().to_string()}]),
+    ));
+    feed.expect_post(RecordedPost {
+        access_key: "fixture-executor-a".into(),
+        path: "/api/v5/trade/cancel-algos".into(),
+        expected_body: json!([{"instId":INSTRUMENT,"algoId":STOP}]),
+        raw_response: envelope(json!([{"algoId":STOP,"sCode":"0"}])),
+    });
+}

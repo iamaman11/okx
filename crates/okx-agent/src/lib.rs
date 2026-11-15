@@ -67,6 +67,12 @@ pub enum AgentError {
     #[error("native financial evidence capture task failed: {0}")]
     FinancialCaptureTask(String),
 
+    #[error("ACCOUNT_CONNECTION_CATALOG_PUBLICATION_PENDING_RETRY_SAME_OPERATION: {source}")]
+    AccountCatalogPublicationPending {
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

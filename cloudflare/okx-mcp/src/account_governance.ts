@@ -1,4 +1,4 @@
-import {units, type RiskPolicy} from "./risk_book.js";
+import {units} from "./decimal.js";
 
 
 /** The sole access/limits owner for this clean installation. */
@@ -156,20 +156,4 @@ export function reviseGovernance(previous:Governance,change:GovernanceUpdate):Go
        {campaign_entry_limit_usd:change.campaign_entry_limit_usd}),
     max_total_modelled_loss_usdt:change.max_total_modelled_loss_usdt,accounts};
   return validGovernance(next)?next:null;
-}
-/** RiskBook derives all its account-specific caps from the same policy. */
-export function projectRiskPolicy(state:Governance):RiskPolicy|null{
-  if(!validGovernance(state))return null;
-  const accounts:Record<string,string>={};
-  for(const a of state.accounts)if(a.environment==="real"){
-    // Disabled registered accounts still occupy risk. An unverified UID
-    // cannot be silently excluded as if it had zero exchange exposure.
-    if(!a.identity_verified)return null;
-    accounts[a.venue+":"+a.environment+":"+a.uid_fingerprint]=a.limits.max_modelled_loss_usdt;
-  }
-  return {revision:state.revision,
-    enabled:state.accounts.some(a=>a.environment==="real"&&accessEnabled(a)),
-    authorized_ceiling_usdt:state.max_total_modelled_loss_usdt,
-    global_limit_usdt:state.max_total_modelled_loss_usdt,
-    account_limits_usdt:accounts};
 }

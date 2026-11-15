@@ -19,7 +19,7 @@ if((await defaultHandler.fetch(req(),env)).status!==401||calls!==0)throw Error('
 if((await defaultHandler.fetch(req('Bearer fixture_secret'),env)).status!==200)throw Error('owner initialization failed');
 if((await defaultHandler.fetch(req('Bearer fixture_secret'),env)).status!==200)throw Error('lost init response exact retry');
 if((await defaultHandler.fetch(req('Bearer fixture_secret',{...body,release_sha256:'b'.repeat(64)}),env)).status!==409)throw Error('init same key changed body conflict');
-if(!storage.map.has('risk_meta_v2')||!storage.map.has('installation_release_v1'))throw Error('initialization not atomic');
+if(!storage.map.has('account_access_v1')||!storage.map.has('installation_release_v1')||storage.map.has('risk_meta_v2'))throw Error('configuration initialization not atomic or creates financial state');
 const lower=new Request('https://fixture/account-governance/campaign-limit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({expected_revision:0,campaign_loss_limit_usd:'8',idempotency_key:'lower_campaign_01'})});
 if((await defaultHandler.fetch(lower,env)).status!==401)throw Error('campaign reduction must authenticate owner');
 const lowerAuthorized=new Request('https://fixture/account-governance/campaign-limit',{method:'POST',headers:{authorization:'Bearer fixture_secret','content-type':'application/json'},body:JSON.stringify({expected_revision:0,campaign_loss_limit_usd:'8',idempotency_key:'lower_campaign_01'})});
@@ -35,11 +35,10 @@ if((await defaultHandler.fetch(inspection(),env)).status!==401||calls!==forwarde
 const snapshot=JSON.stringify([...storage.map.entries()]);
 const inspected:any=await(await defaultHandler.fetch(inspection('Bearer fixture_secret'),env)).json();
 if(inspected.schema!=='okx.installation-inspection/v1'||inspected.state!=='BOUND'
- ||inspected.accounts_total!==0||inspected.risk.metadata_present!==true
- ||inspected.risk.unresolved_entries!==0||inspected.risk.occupied_usd_nonzero!==false
+ ||inspected.accounts_total!==0||inspected.finance_authority!=='native'||'risk' in inspected
  ||JSON.stringify([...storage.map.entries()])!==snapshot)
  throw Error('owner inspection must be read-only with bounded safe summary');
-if(JSON.stringify(inspected).includes('fixture_secret')||'occupied_usd' in inspected.risk)
+if(JSON.stringify(inspected).includes('fixture_secret')||'budget' in inspected)
  throw Error('inspection must not disclose secrets or financial amounts');
 
 const accountTemplate=account;
@@ -61,8 +60,8 @@ if(openPolicy.real_accounts_enabled!==1||openPolicy.all_new_real_risk_paused!==f
 storage.map.set('account_access_v1',{...initial});
 storage.map.set('risk_entry_v2:fixture_01',{state:'UNKNOWN'});
 const unsettled:any=await(await defaultHandler.fetch(inspection('Bearer fixture_secret'),env)).json();
-if(unsettled.risk.unresolved_entries!==1||unsettled.risk.reservation_entries!==1)
- throw Error('unresolved risk must never be reported as settled');
+if('risk' in unsettled||unsettled.finance_authority!=='native'||storage.map.get('risk_entry_v2:fixture_01').state!=='UNKNOWN')
+ throw Error('configuration inspection must preserve and never interpret historical financial data');
 storage.map.delete('account_access_v1');
 const missing:any=await(await defaultHandler.fetch(inspection('Bearer fixture_secret'),env)).json();
 if(missing.state!=='MISSING_OR_INVALID')throw Error('missing governance must fail closed');

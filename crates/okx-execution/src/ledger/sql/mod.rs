@@ -47,3 +47,5 @@ mod source_usd;
 mod source_valuation_finance;
 mod sources;
 pub(in crate::account_store) mod unified_financial;
+
+mod source_strategy_operations;

@@ -1,5 +1,7 @@
+// Historical financial authority retained only for retired test evidence.
+// Not imported by the production Worker graph. See FINANCIAL_WITNESS_RETIREMENT.md.
 import {legacyFinanceDisabled, LEGACY_FINANCE_DISABLED} from "./legacy_finance_cutover.js";
-import {validGovernance,projectRiskPolicy,accessEnabled,GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
+import {validGovernance,accessEnabled,GOVERNANCE_STORAGE_KEY,type Governance} from "./account_governance.js";
 
 /**
  * Durable Object risk ledger primitive. This is NOT an exchange admission endpoint.
@@ -993,3 +995,21 @@ export async function beginRiskPost(
 
 export async function readRiskBook(storage:any):Promise<RiskMeta|null>{const v=await storage.get(KEY);return validMeta(v)?v:null;}
 
+
+// Historical ledger-only projection. Not reachable from the Worker runtime.
+/** RiskBook derives all its account-specific caps from the same policy. */
+export function projectRiskPolicy(state:Governance):RiskPolicy|null{
+  if(!validGovernance(state))return null;
+  const accounts:Record<string,string>={};
+  for(const a of state.accounts)if(a.environment==="real"){
+    // Disabled registered accounts still occupy risk. An unverified UID
+    // cannot be silently excluded as if it had zero exchange exposure.
+    if(!a.identity_verified)return null;
+    accounts[a.venue+":"+a.environment+":"+a.uid_fingerprint]=a.limits.max_modelled_loss_usdt;
+  }
+  return {revision:state.revision,
+    enabled:state.accounts.some(a=>a.environment==="real"&&accessEnabled(a)),
+    authorized_ceiling_usdt:state.max_total_modelled_loss_usdt,
+    global_limit_usdt:state.max_total_modelled_loss_usdt,
+    account_limits_usdt:accounts};
+}

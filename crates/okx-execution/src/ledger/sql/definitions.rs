@@ -67,42 +67,6 @@ impl AccountStore {
 
 impl AccountStore {
     pub fn strategy_status(&self, id: &str, now: i64) -> StoreResult<serde_json::Value> {
-        let instance = self
-            .instance(id)?
-            .ok_or(StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"))?;
-        let mut q=self.connection.prepare("SELECT lot_id,intent_id,fill_id,instrument_id,side,remaining_qty,cost,opened_at FROM position_lots WHERE instance_id=?1 AND remaining_qty<>'0' ORDER BY instrument_id,side,opened_at,lot_id LIMIT 51")?;
-        let mut positions = q
-            .query_map([id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, String>(6)?,
-                    r.get::<_, i64>(7)?,
-                ))
-            })?
-            .map(|row| {
-                let (lot_id, intent_id, fill_id, instrument_id, side, qty, cost, opened_at) = row?;
-                Ok(StoredLot {
-                    lot_id,
-                    instance_id: Some(id.into()),
-                    intent_id,
-                    fill_id,
-                    instrument_id,
-                    side,
-                    remaining_qty: decimal(qty)?,
-                    cost: decimal(cost)?,
-                    opened_at,
-                })
-            })
-            .collect::<StoreResult<Vec<_>>>()?;
-        let partial = positions.len() > 50;
-        positions.truncate(50);
-        Ok(
-            serde_json::json!({"instance":instance,"definition":self.strategy_definition(id)?,"positions":positions,"positions_partial":partial,"limits":{"allocated_budget_usd":instance.budget,"policy_revision":instance.policy_revision},"nav":self.nav_summary(self.meta.initialized_at,now,&[id.into()],&["USD".into()])?,"capital_scope":if id == "manual" { "account" } else { "strategy" },"risk":self.financial_risk(now,if id == "manual" { None } else { Some(id) })?}),
-        )
+        Self::strategy_status_sql(&self.connection, None, id, now)
     }
 }

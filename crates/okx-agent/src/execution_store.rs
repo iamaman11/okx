@@ -20,6 +20,126 @@ impl From<AccountStoreHandle> for ExecutionStore {
     }
 }
 impl ExecutionStore {
+    pub async fn strategy_status(
+        &self,
+        deadline: Instant,
+        instance: String,
+        time: i64,
+    ) -> StoreResult<serde_json::Value> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| sql.strategy_status(&instance, time))
+                    .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .strategy_status(deadline, account.clone(), instance, time)
+                    .await
+            }
+        }
+    }
+    pub async fn mutate_strategy_instance(
+        &self,
+        deadline: Instant,
+        command: okx_execution::account_worker::StrategyMutationCommand,
+    ) -> StoreResult<okx_execution::OperationReceipt> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    let mut command = command;
+                    if matches!(command.action.as_str(), "start" | "stop")
+                        && sql.operation(&command.operation_id)?.is_none()
+                    {
+                        command.instance = sql
+                            .instance(&command.instance.instance_id)?
+                            .ok_or(StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"))?;
+                        command.expected_revision = Some(command.instance.policy_revision);
+                        command.instance.policy_revision = command
+                            .instance
+                            .policy_revision
+                            .checked_add(1)
+                            .ok_or(StoreError::Invalid("INSTANCE_REVISION_OVERFLOW"))?;
+                    }
+                    sql.mutate_instance(
+                        &command.operation_id,
+                        &command.request_hash,
+                        &command.action,
+                        &command.instance,
+                        command.expected_revision,
+                        command.time,
+                    )
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .mutate_strategy_instance(deadline, account.clone(), command)
+                    .await
+            }
+        }
+    }
+    pub async fn claim_strategy_decision(
+        &self,
+        deadline: Instant,
+        command: okx_execution::account_worker::StrategyDecisionClaimCommand,
+    ) -> StoreResult<Option<String>> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    if sql.strategy_definition(&command.instance_id)?.version
+                        != command.expected_version
+                    {
+                        return Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"));
+                    }
+                    sql.claim_strategy_decision_with_id(
+                        &command.instance_id,
+                        &command.decision_key,
+                        &command.input_digest,
+                        command.policy_revision,
+                        command.time,
+                    )
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .claim_strategy_decision(deadline, account.clone(), command)
+                    .await
+            }
+        }
+    }
+    pub async fn finish_strategy_no_trade(
+        &self,
+        deadline: Instant,
+        instance: String,
+        key: String,
+        expected_version: String,
+        time: i64,
+    ) -> StoreResult<()> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    if sql.strategy_definition(&instance)?.version != expected_version {
+                        return Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"));
+                    }
+                    sql.finish_strategy_no_trade(&instance, &key, time)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .finish_strategy_no_trade(
+                        deadline,
+                        account.clone(),
+                        instance,
+                        key,
+                        expected_version,
+                        time,
+                    )
+                    .await
+            }
+        }
+    }
     pub async fn financial_readiness(
         &self,
         deadline: Instant,

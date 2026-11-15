@@ -599,7 +599,19 @@ impl AccountRuntimeRegistry {
                 "ACCOUNT_ALREADY_CONNECTED".into(),
             ));
         }
-        account_catalog_proto::append(&self.root, configuration)?;
+        if let Err(source) = account_catalog_proto::append(&self.root, configuration) {
+            // SQL initialization is already durable. Release unpublished source
+            // tasks and the account lease before the caller retries its original
+            // connect identity; never reset SQL or auto-repeat publication.
+            drop(configs);
+            drop(_publication);
+            resources.stop_sources().await;
+            return Err(if self.native_finance_owner.is_some() {
+                AgentError::AccountCatalogPublicationPending { source }
+            } else {
+                AgentError::Io(source)
+            });
+        }
         configs.insert(configuration.account_key.wire(), configuration.clone());
         self.routes
             .write()
@@ -801,15 +813,7 @@ impl AccountRuntimeRegistry {
             let _ = account.source_shutdown.send(true);
         }
         for account in resources {
-            let tasks = std::mem::take(
-                &mut *account
-                    .source_tasks
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()),
-            );
-            for task in tasks {
-                stop_source_task(task, std::time::Duration::from_secs(10)).await;
-            }
+            account.stop_sources().await;
         }
     }
 }
@@ -923,6 +927,15 @@ pub(crate) fn acquire_identity_lease(root: &Path, key: &AccountKey) -> AgentResu
 }
 
 impl AccountResources {
+    async fn stop_sources(&self) {
+        let _ = self.source_shutdown.send(true);
+        let tasks =
+            std::mem::take(&mut *self.source_tasks.lock().unwrap_or_else(|e| e.into_inner()));
+        for task in tasks {
+            stop_source_task(task, std::time::Duration::from_secs(10)).await;
+        }
+    }
+
     /// A diagnostic observation only, never an admission or freshness proof.
     pub(crate) fn diagnostic_source_identity(&self) -> Option<bool> {
         let state = self.private_ws.state();

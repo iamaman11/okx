@@ -1,3 +1,5 @@
+// Historical financial authority retained only for retired test evidence.
+// Not imported by the production Worker graph. See FINANCIAL_WITNESS_RETIREMENT.md.
 import { GOVERNANCE_STORAGE_KEY, validGovernance } from "./account_governance.js";
 import { sha256Hex } from "./shared.js";
 

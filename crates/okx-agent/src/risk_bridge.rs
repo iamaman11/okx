@@ -96,6 +96,24 @@ impl NativeRiskClient {
         }
     }
 
+    /// Transport policy observation precedes account connection on a new
+    /// installation; it is distinct from strict financial policy application.
+    pub async fn observe_native_governance(
+        &self,
+        snapshot: &okx_protocol::account_governance::CentralGovernanceSnapshot,
+    ) -> Result<Option<crate::native_finance_risk::NativePolicyObservation>, String> {
+        match &self.route {
+            RiskRoute::Cloudflare(_) => Ok(None),
+            RiskRoute::Local(backend) => backend.observe_governance(snapshot).await.map(Some),
+            RiskRoute::LocalStopped(backend) => {
+                backend.verify_stopped_observation(snapshot).await?;
+                Ok(Some(
+                    crate::native_finance_risk::NativePolicyObservation::Applied,
+                ))
+            }
+        }
+    }
+
     /// The native route applies the FULL signed governance roster in its
     /// single SQL COMMIT; it must never fall back to legacy per-account SQL
     /// if the native gate rejects. False selects the still-unswitched

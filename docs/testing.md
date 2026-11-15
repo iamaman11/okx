@@ -1,89 +1,87 @@
-## #510 r5 - one Native financial owner (Draft / NO-GO)
+## #510 r5 - Native lifecycle and financial authority retirement (Draft / NO-GO)
 
-Issue #510 r5 is the current scope. Older stopped-import/cutover evidence below
-is historical, not a migration requirement or a production authority grant.
-One Rust Engine / one finance.sqlite / one bounded writer is the active model.
-No installed user financial files are changed by these isolated tests.
+One Rust Engine, one financial SQLite, one bounded writer. New initialization,
+verified account connection, campaign policy, execution, financial projection,
+RiskBook and recovery use the same original SQL owner. No installed C:\okx data
+was read or changed by these isolated contracts. No deployment or trading.
 
-### Production ownership
+### Production contracts now exercised directly
 
-- `ledger/sql/finance_installation.rs`: explicit new installation, immutable
-  identity, exact schema/FK/integrity/WAL/FULL, current financial invariants.
-  Initialize replay retains the original identity; unknown targets reject.
-- `accounts.rs` + `account_opening.rs` + `native_account_connection.rs`: original
-  authenticated UID, two signed flat snapshots and original SQL opening. A/B
-  share the SAME writer; no account-local database is created. SQL-commit before
-  catalog-publication loss reuses the original connect receipt on retry.
-- `unified/campaign_initialization.rs` + `source_campaign_initialization.rs`:
-  complete authorized policy, account/strategy caps, original financial epoch,
-  canonical replay/conflict, lowering cannot replenish spent or reserved money.
-  CAMPAIGN_CREATED records the real owner time; policy is not financial opening.
-- `unified/finance_authority.rs`: source collection, baseline preparation and
-  proven financial execution are separate permissions. Reserve/BeginPost need
-  original opening receipts and the complete connected policy cohort. No READY
-  flag, imported receipt or Cloudflare grant can promote an empty local file.
-- `authority_reads.rs`, `trade_reads.rs`, `storage_recovery.rs`: typed native
-  preflight/financial reads, recovery scan and strict scoped recovery commit.
-  Original SQL rules are shared; network and await stay outside transactions.
-- `main.rs`: a missing canonical finance.sqlite is stopped/uninitialized.
-  Production startup constructs the local owner, never a remote finance fallback.
-- `TradeService`: public orchestration; original source capture and maintenance
-  install the opening; prepared Native transactions retain post-once/UNKNOWN.
+- Initial empty policy and full desired roster may arrive BEFORE account
+  connection. NativePolicyObservation separates observation from strict SQL
+  application. Pending policy creates no campaign, reserve or trade permission;
+  foreign installation/demo scope rejects. After the original signed account
+  connection, strict application/maintenance can create the authorized policy.
+- Account publication failure is explicit and recoverable by the SAME connect
+  request. SQL remains durable; unpublished source tasks are stopped/joined.
+  The failure contract forces a real filesystem obstruction and proves original
+  opening reuse, one account, no grant and no POST after exact retry. This does
+  not claim arbitrary external Windows file locks can never reject publication.
+- Public Native strategy Create/List/Status/Start/Stop/Update, replay/conflict,
+  CAS and immutable versions use typed original scoped SQL. Automatic decision
+  claim/no-trade retain policy retry lineage and terminal idempotency. No legacy
+  AccountStore closure runs through these strategy entrypoints.
+- Public Native Execute performs one Create; lost ACK becomes UNKNOWN; repeated
+  Execute and Status use original readback, never another Create.
+- The filled lifecycle captures real raw fill/bill observations, projects the
+  original attributed lot/NAV, verifies attached protection, settles entry,
+  sends public Close once, resolves its lost ACK, captures its fill/fee, cancels
+  protection and releases risk. Cold reopen retains zero reserve, spent entry
+  1.0005, equity 99.999 and exact fees 0.001. Individual run PASS in 14.35s.
+- A REAL CHILD PROCESS initializes a new Native installation and performs public
+  Execute. Parent kills it after the single Create and before outcome commit.
+  Reopen preserves POSTING/fence/reserves; original recover_posting makes UNKNOWN
+  without changing money, repeated recovery is idempotent, reconnected public
+  Status finds the same order and sends no POST. Individual run PASS in 6.51s.
+  This is one crash boundary, NOT all F0-F8 and NOT power-loss durability.
 
-### Current direct evidence
+### Cloudflare responsibility
 
-`cargo test --locked -p okx-execution --lib`: 326 PASS, 0 FAIL, 2 ignored;
-current execution time 9.85 seconds (not a P95 claim).
-Native Agent contracts use the original production source/SQL/HTTP/WS paths:
+Active governance/configuration/auth/MCP/transport no longer imports the old
+risk_book or legacy_finance_cutover modules. Old financial RPC always denies
+NATIVE_FINANCE_AUTHORITY_REQUIRED after session/auth fences, without storage
+access or a financial grant. Existing DO financial keys are not reset/deleted.
+Pure decimal validation is separate from historical financial code.
 
-- `native_connect_contracts`: A/B initialization, UID/liability denial, original
-  SQL receipt replay after catalog publication loss, shutdown and cold reopen.
-- `risk_book_contract_native_campaign_policy_*`: full policy, canonical decimal
-  replay/reconnect, immutable receipts, roster/conflict/limit negatives; source
-  ingress allowed but Reserve/BeginPost denied without original opening.
-- `risk_book_contract_native_storage_recovery_scoped_sources_and_reopen`:
-  source/gen/digest/budget negatives; only the selected account gate clears;
-  original risk budget is independently re-read in the final SQL transaction.
-- `native_trade_contracts`: original source capture and financial opening,
-  read-only public Preflight, scoped maintenance reads and cold reopen; the
-  finite raw-market lost-ACK Execute/replay/Status contract validates the real
-  post-once boundary. Four fresh scenarios PASS in 8.41s after build; they are
-  separate from the execution target, not a combined <=10s or full 26/26 claim.
+npm run check: 9 retained Worker test files PASS. Actual workerd physical check
+PASS: token/session/generation, obsolete finance denial, ping, dispatch ACK and
+response, persisted SQLite generation restart. This is transport evidence only.
+FINANCIAL_WITNESS_RETIREMENT.md maps all 26 historical IDs to actual Rust
+properties and labels gaps NOT_PROVEN. Old financial successes are not reused.
+The required Linux/Worker CI uses new transport and Native component checks in
+place of retired Worker money traces/shared-cap authority. Full Windows T09/T10
+matrix still needs property-based adaptation; it remains mandatory and is NOT
+marked green or skipped by this change. Ready/merge remains NO-GO.
 
-Current local validation: 94 Agent checks (including 4 Native and 6 startup),
-326 complete execution tests (2 explicitly ignored historical probes), 8 kernel
-money/rule contracts, the original strict-market negative contract and 3 catalog
-contracts PASS. Architecture/self-tests, schema guard, format and YAML PASS.
-Raw inputs live in accounts_native_trade_fixture.rs; executable case assertions
-live in accounts_native_trade_contract_tests.rs. Neither is a second financial
-implementation. The same 4 Native scenarios PASS after this file split.
+### Current local validation and limits
 
-No cold build or previous SHA is counted as a fresh complete acceptance result.
-The changed CI job runs these named filters and rejects zero-test success.
+Complete execution library: 329 PASS, 0 FAIL, 2 ignored historical probes, 8.88s.
+Fresh Native aggregation: 7/7 PASS, 14.68s including actual child death and full
+filled/Close/release/reopen. Named Agent groups plus startup: 98 PASS total
+including those seven. Worker check and actual workerd transport PASS.
+These are separate targets; there is no combined <=10s claim.
+Named Agent regression groups and startup checks PASS before final aggregation;
+final exact-tree run results are recorded on #510. Formatting, architecture plus
+negative self-tests, SQL schema guard and workflow YAML are required unchanged.
+Build time is separate. The filled and crash probes above are independent times,
+not a combined <=10s claim. #512 whole-matrix P95<=10s is not yet demonstrated.
 
-Final send-time market validation now uses the SAME new-risk contract as plan:
-2s price/book and 180s derivative context, verified WS generation/subscriptions,
-no REST fallback. The former generic fresh_snapshot incorrectly applied 2s to
-funding/OI as well. Original stream risk-readiness negative tests remain required.
-The finite send contract publishes raw market observations only at the two
-named Execute inventory boundaries; no repeated publisher or spare GET pages.
+### Remaining before #510 GO
 
-### Remaining acceptance - do not close #510
+1. Final exact-SHA CI on this candidate; do not combine results across SHAs.
+2. Remaining fresh-owner negative/physical properties identified by the 26-ID
+   map: native source failures/partial and late fills/fee changes/STOP/fairness,
+   distinct crash boundaries and transport child death. Old AccountStore/import
+   fixtures are component evidence, not replacements for new-owner callers.
+3. RB01-RB16 evidence and measured speed; diagnostics busy/restart and immutable
+   source responsibilities remain explicit. No claim that ordinary lifecycle
+   alone proves every negative financial path.
+4. Retire unreachable legacy runtime/storage commands after their surviving
+   user-facing operations have one verified Native implementation; no backward
+   compatibility, historical import or second financial owner in production.
 
-1. Prove the full public Native Execute -> ACK/UNKNOWN -> Status -> Close/Resolve
-   and reopen chain with the real callers, original fees/fills and no extra POST.
-   Include normal CONTROL/transport startup and the first-policy handshake;
-   tests constructing TradeService directly do not prove the installed path.
-2. Complete any remaining Native strategy/storage operations instead of calling
-   a forbidden legacy writer; retain explicit missing-source diagnostic reasons.
-3. Remove remaining Cloudflare financial handlers and legacy runtime selection
-   debt. Preserve auth, MCP and transport; do not add migration/compatibility.
-4. Finish exact-SHA RB01-RB16 evidence, required physical probes and performance
-   measurements. One ~9-second execution run is not P95 <=10 seconds.
-
-#512 starts after accepted #510, with a full per-property mapping and one fresh
-Rust 26/26 result including setup/physical/teardown. This direct subset is NOT
-26/26 and is NOT approval to install, deploy, merge or enable real trading.
+Do not close #510 or mark PR ready based on a small subset. #512 mapping may be
+prepared now; its new complete runner cannot hide unfinished #510 properties.
 
 ## #510 - Native Status and stopped legacy finance boundary (Draft / NO-GO)
 

@@ -125,7 +125,7 @@ export const defaultHandler = {
       });
     }
 
-    if(((url.pathname==="/installation/initialize"||url.pathname==="/installation/disable-legacy-finance"||url.pathname==="/account-governance/campaign-limit")&&request.method==="POST")||((url.pathname==="/installation/inspect"||url.pathname==="/installation/legacy-finance-readback")&&request.method==="GET")){
+    if(((url.pathname==="/installation/initialize"||url.pathname==="/account-governance/campaign-limit")&&request.method==="POST")||((url.pathname==="/installation/inspect")&&request.method==="GET")){
       const supplied=request.headers.get("authorization");
       if(!supplied?.startsWith("Bearer ")||!sameHex(await sha256Hex(supplied.slice(7)),await sha256Hex(env.MCP_OWNER_SECRET)))return new Response("unauthorized",{status:401});
       const stub=await runtimeStub(env);return stub.fetch(request);

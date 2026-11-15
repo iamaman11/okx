@@ -31,7 +31,9 @@ pub(crate) use native_admission::{
 mod entry_settlement;
 mod posting_recovery;
 mod storage_recovery;
+mod strategy_operations;
 pub use storage_recovery::NativeRecoveryProof;
+pub use strategy_operations::{StrategyDecisionClaimCommand, StrategyMutationCommand};
 mod protection_cleanup;
 mod protection_resize;
 mod protection_status;

@@ -258,11 +258,10 @@ impl TradeService {
         }) {
             return Err("POLICY_REVISION_CONFLICT".into());
         }
-        // Publish the new in-process authority only after all connected SQL
-        // account owners have durably applied it. On failure, retain the old
-        // authority; stale SQL revisions reject attempts to reuse it.
-        // Holding the write guard also prevents readers from observing a
-        // partially applied multi-account policy.
+        // Serialize policy delivery. An initial Native policy may be observed
+        // before accounts connect, but it cannot grant financial permission.
+        // Execution independently requires the strict SQL policy application;
+        // failures retain the prior snapshot. No partial SQL policy is visible.
 
         // A policy frame is the authoritative update.  Persist the campaign
         // ceiling for every currently connected account before returning the
@@ -272,7 +271,17 @@ impl TradeService {
         // route, the original account_policy and RiskBook revision have ONE
         // SQL transaction owner. Native rejection is FINAL, never a fallback
         // to the legacy per-account writer loop.
-        if self.risk.apply_native_governance(snapshot).await? {
+        if let Some(observation) = self.risk.observe_native_governance(snapshot).await? {
+            // Pending configuration keeps the authenticated session usable for
+            // account connection. Execution's authority path independently
+            // requires strict SQL application; preview checks its SQL receipt.
+            if observation
+                == crate::native_finance_risk::NativePolicyObservation::WaitingForAccounts
+            {
+                eprintln!(
+                    "OKX_NATIVE_POLICY_V1 state=WAITING_FOR_ACCOUNTS reason=NATIVE_CAMPAIGN_ACCOUNTS_NOT_CONNECTED"
+                );
+            }
             *latest = Some(snapshot.clone());
             return Ok(());
         }

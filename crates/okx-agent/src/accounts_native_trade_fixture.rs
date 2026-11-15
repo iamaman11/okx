@@ -20,7 +20,27 @@ impl HttpTransport for ExecuteMarketBoundary {
                     .url()
                     .query_pairs()
                     .any(|(k, v)| k == "ordType" && v == "smart_iceberg");
-            let response = self.feed.send(request, deadline).await?;
+            let create =
+                request.method() == "POST" && request.url().path() == "/api/v5/trade/order";
+            let result = self.feed.send(request, deadline).await;
+            // A real child process stops after the venue consumed Create,
+            // before Execute can persist the transport outcome. Only this
+            // precise test flag and original lost-ACK response arm the probe.
+            if create
+                && std::env::var("OKX_NATIVE_CRASH_CHILD").as_deref()
+                    == Ok("POST_CREATE_PRE_RESULT")
+                && matches!(&result, Err(okx_api::OkxError::Response(reason))
+                    if reason == "TRANSCRIPT_POST_ACK_LOST_AFTER_SEND")
+            {
+                assert!(self.feed.lost_create_ack_was_consumed());
+                assert_eq!(self.feed.outbound_posts.lock().unwrap().len(), 1);
+                use std::io::Write;
+                println!("OKX_NATIVE_OS_CRASH_POST_CREATE_PRE_RESULT");
+                std::io::stdout().flush().unwrap();
+                std::future::pending::<()>().await;
+                unreachable!();
+            }
+            let response = result?;
             let market = if last_inventory {
                 self.market.lock().unwrap().clone()
             } else {
@@ -212,10 +232,34 @@ pub(super) struct NativeFixture {
 pub(super) async fn fixture() -> NativeFixture {
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce).unwrap();
-    let root = std::env::temp_dir().join(format!(
-        "okx-native-trade-{:032x}",
-        u128::from_le_bytes(nonce)
-    ));
+    let root = if std::env::var("OKX_NATIVE_CRASH_CHILD").as_deref() == Ok("POST_CREATE_PRE_RESULT")
+    {
+        let root = PathBuf::from(std::env::var_os("OKX_NATIVE_CRASH_ROOT").unwrap());
+        assert!(root.is_absolute());
+        assert_eq!(
+            root.parent().unwrap().canonicalize().unwrap(),
+            std::env::temp_dir().canonicalize().unwrap(),
+            "crash fixture must be a direct child of the OS temp directory"
+        );
+        assert!(
+            root.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("okx-native-os-crash-")
+        );
+        assert!(
+            matches!(std::fs::symlink_metadata(&root), Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound),
+            "crash fixture must create a NEW installation"
+        );
+        root
+    } else {
+        std::env::temp_dir().join(format!(
+            "okx-native-trade-{:032x}",
+            u128::from_le_bytes(nonce)
+        ))
+    };
     let installation = "installation-native-trade";
     let campaign = format!("sha256:{}", "c".repeat(64));
     initialize_installation(&root, installation).unwrap();
@@ -251,6 +295,88 @@ pub(super) async fn fixture() -> NativeFixture {
     });
     let (config, clients) =
         prepared_with_socket("a", market_boundary.clone(), socket, budget.clone());
+    let environment = OkxEnvironment::new(okx_api::Region::Global, false);
+    let (market, public_ws) = okx_runtime::PublicWsCoordinator::new_with_connector(
+        environment,
+        okx_observation::ReferenceRegistry::from_public("native-admission", vec![]).unwrap(),
+        budget,
+        Arc::new(recorded_support::OfflineSocket),
+    );
+    assert!(matches!(
+        NativeFinanceRisk::from_owner(owner.clone())
+            .resolved()
+            .await,
+        Err("FINANCE_CAMPAIGN_POLICY_REQUIRED")
+    ));
+    let trade = Arc::new(TradeService::new(
+        registry.clone(),
+        public_ws,
+        NativeRiskClient::local(NativeFinanceRisk::from_owner(owner.clone())),
+    ));
+    let authority: CentralGovernanceSnapshot = serde_json::from_value(serde_json::json!({
+        "state":{"schema":"okx.governance/v3","revision":2,
+            "installation_id":installation,"campaign_id":campaign,
+            "campaign_loss_limit_usd":"10","campaign_entry_limit_usd":"10",
+            "max_total_modelled_loss_usdt":"10",
+            "accounts":[{"id":"account_a","label":"Recorded A","venue":"okx",
+                "environment":"real","uid_fingerprint":config.account_key.verified_uid,
+                "identity_verified":true,"enabled":true,"explicit_pause":false,
+                "policy_revision":2,"account_key":config.account_key.wire(),"strategies":[],
+                "limits":{"max_modelled_loss_usdt":"10","max_order_loss_usdt":"5","max_entry_usd":"10",
+                    "max_notional_usdt":"1000","max_leverage":"5",
+                    "max_daily_realized_loss_usdt":"10","max_drawdown_ratio":"0.5",
+                    "allowed_instruments":["BTC-USDT-SWAP"]}}]},
+        "issued_at_ms":chrono::Utc::now().timestamp_millis(),"session_generation":1
+    }))
+    .unwrap();
+    assert!(authority.valid());
+    // Same callback used by authenticated PolicySnapshot delivery: first an
+    // empty initial configuration, then the desired roster BEFORE connection.
+    // Neither observation may create financial authority or tear down transport.
+    let mut initial = authority.clone();
+    initial.state.revision = 1;
+    initial.state.accounts.clear();
+    assert!(initial.valid());
+    let mut wrong_installation = authority.clone();
+    wrong_installation.state.installation_id = "foreign-installation".into();
+    assert!(trade.update_governance(&wrong_installation).await.is_err());
+    let mut demo = authority.clone();
+    demo.state.accounts[0].environment = okx_protocol::account_governance::AccountEnvironment::Demo;
+    demo.state.accounts[0].account_key = demo.state.accounts[0]
+        .account_key
+        .replace(":real:", ":demo:");
+    assert!(demo.valid());
+    assert!(trade.update_governance(&demo).await.is_err());
+    trade.update_governance(&initial).await.unwrap();
+    trade.update_governance(&authority).await.unwrap();
+    assert!(
+        owner
+            .connected_account_keys(Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        owner
+            .configured_campaign(Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        NativeFinanceRisk::from_owner(owner.clone())
+            .apply_governance(&authority)
+            .await
+            .is_err(),
+        "observed policy is not the strict financial application"
+    );
+    assert!(
+        owner
+            .verify_live_authority(Instant::now() + Duration::from_secs(2))
+            .await
+            .is_err()
+    );
+    assert!(feed.outbound_posts.lock().unwrap().is_empty());
     registry
         .connect_prepared(config.clone(), clients)
         .await
@@ -293,41 +419,6 @@ pub(super) async fn fixture() -> NativeFixture {
         assert!(cursor.coverage_gaps.is_empty());
     }
 
-    let environment = OkxEnvironment::new(okx_api::Region::Global, false);
-    let (market, public_ws) = okx_runtime::PublicWsCoordinator::new_with_connector(
-        environment,
-        okx_observation::ReferenceRegistry::from_public("native-admission", vec![]).unwrap(),
-        budget,
-        Arc::new(recorded_support::OfflineSocket),
-    );
-    assert!(matches!(
-        NativeFinanceRisk::from_owner(owner.clone())
-            .resolved()
-            .await,
-        Err("FINANCE_CAMPAIGN_POLICY_REQUIRED")
-    ));
-    let trade = Arc::new(TradeService::new(
-        registry.clone(),
-        public_ws,
-        NativeRiskClient::local(NativeFinanceRisk::from_owner(owner.clone())),
-    ));
-    let authority: CentralGovernanceSnapshot = serde_json::from_value(serde_json::json!({
-        "state":{"schema":"okx.governance/v3","revision":1,
-            "installation_id":installation,"campaign_id":campaign,
-            "campaign_loss_limit_usd":"10","campaign_entry_limit_usd":"10",
-            "max_total_modelled_loss_usdt":"10",
-            "accounts":[{"id":"account_a","label":"Recorded A","venue":"okx",
-                "environment":"real","uid_fingerprint":config.account_key.verified_uid,
-                "identity_verified":true,"enabled":true,"explicit_pause":false,
-                "policy_revision":1,"account_key":config.account_key.wire(),"strategies":[],
-                "limits":{"max_modelled_loss_usdt":"10","max_order_loss_usdt":"5","max_entry_usd":"10",
-                    "max_notional_usdt":"1000","max_leverage":"5",
-                    "max_daily_realized_loss_usdt":"10","max_drawdown_ratio":"0.5",
-                    "allowed_instruments":["BTC-USDT-SWAP"]}}]},
-        "issued_at_ms":chrono::Utc::now().timestamp_millis(),"session_generation":1
-    }))
-    .unwrap();
-    assert!(authority.valid());
     trade.update_governance(&authority).await.unwrap();
     assert_eq!(
         owner

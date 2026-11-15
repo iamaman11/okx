@@ -214,6 +214,13 @@ jobs:
             cargo test --locked -p okx-agent --lib "$contract" -- --nocapture | tee "$log"
             grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$log"
           done
+      - name: Worker transport and retired financial RPC boundary
+        working-directory: cloudflare/okx-mcp
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          node scripts/test-native-finance-retirement-do.mjs
+
 
   architecture:
     name: architecture
@@ -287,45 +294,22 @@ jobs:
       - name: Measure two-account 100-parallel native SQL (not WSS)
         run: cargo test --locked -p okx-execution --lib two_account_100_parallel_sql_readonly_isolation -- --nocapture
 
-      - name: Verify actual Worker governance CAS history against native SQL owner
+      # #510: finances now commit inside the Native SQLite owner. Old Worker
+      # monetary CAS traces are retired; they cannot witness the current owner.
+      - name: Native policy and original financial invariants
         shell: bash
         run: |
           set -euo pipefail
-          # Run in the same job/toolchain that already compiled native SQL.
-          # No new runner or production transport, no additional Rust rebuild.
-          # Native SQL creates actual immutable terminal fill/bill admission
-          # and campaign source *before* the Worker financial CAS fixture.
-          # This is a single offline CI composition, no real exchange POST.
-          OKX_E1_BRIDGE_SOURCE_PATH="$RUNNER_TEMP/e1-native-sql-source.json" \
-            cargo test --locked -p okx-execution --lib \
-              e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten -- --nocapture
-          test -s "$RUNNER_TEMP/e1-native-sql-source.json"
-          pushd cloudflare/okx-mcp
-          npm ci --ignore-scripts --no-audit --no-fund
-          OKX_E1_BRIDGE_SOURCE_JSON="$(cat "$RUNNER_TEMP/e1-native-sql-source.json")" \
-            OKX_A2_TRACE=1 npm run check | tee "$RUNNER_TEMP/a2-worker-cas.log"
-          popd
-          test "$(grep -c '^E1_SQL_WORKER_BRIDGE_TRACE_V1:' "$RUNNER_TEMP/a2-worker-cas.log")" -eq 1
-          sed -n 's/^E1_SQL_WORKER_BRIDGE_TRACE_V1://p' "$RUNNER_TEMP/a2-worker-cas.log" \
-            > "$RUNNER_TEMP/e1-worker-riskbook.json"
-          test -s "$RUNNER_TEMP/e1-worker-riskbook.json"
-          OKX_E1_BRIDGE_SOURCE_PATH="$RUNNER_TEMP/e1-native-sql-source.json" \
-            OKX_E1_BRIDGE_RESULT_PATH="$RUNNER_TEMP/e1-worker-riskbook.json" \
-            cargo test --locked -p okx-execution --lib \
-              e1_worker_finance_receipt_roundtrip_matches_native_sql_after_restart -- --ignored --nocapture
-          test "$(grep -c '^A2_SQL_BRIDGE_TRACE_V1:' "$RUNNER_TEMP/a2-worker-cas.log")" -eq 1
-          sed -n 's/^A2_SQL_BRIDGE_TRACE_V1://p' "$RUNNER_TEMP/a2-worker-cas.log" > "$RUNNER_TEMP/a2-worker-governance.json"
-          test -s "$RUNNER_TEMP/a2-worker-governance.json"
-          OKX_A2_TRACE_PATH="$RUNNER_TEMP/a2-worker-governance.json" \
-            cargo test --locked -p okx-protocol --lib worker_do_policy_frames_decode_and_fail_closed_in_native_protocol -- --ignored --nocapture
-          OKX_A2_TRACE_PATH="$RUNNER_TEMP/a2-worker-governance.json" \
-            cargo test --locked -p okx-execution --lib central_worker_cas_trace_native_sql_readback_and_restart -- --ignored --nocapture
-
-      - name: Real Rust Native WSS to persisted Worker SQLite DO (no exchange POST)
+          cargo test --locked -p okx-execution --lib risk_book_contract_native_campaign_policy_ -- --nocapture | tee "$RUNNER_TEMP/native-policy.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-policy.log"
+          cargo test --locked -p okx-execution --lib e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten -- --nocapture
+      - name: Actual Worker authenticated transport without financial authority
         timeout-minutes: 8
         working-directory: cloudflare/okx-mcp
-        run: OKX_NATIVE_WORKER_INTEGRATION=1 node scripts/test-runtime-do.mjs
-
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          node scripts/test-native-finance-retirement-do.mjs
 
   cloudflare-mcp:
     name: cloudflare-mcp
@@ -350,24 +334,12 @@ jobs:
 
       - name: Typecheck
         run: npm run check
-      - name: Accept production RuntimeSession backed by persisted workerd SQLite
-        run: node scripts/test-runtime-do.mjs
+      - name: Accept authenticated RuntimeSession transport without financial authority
+        run: node scripts/test-native-finance-retirement-do.mjs
 
-      # B1/#449 T10-07: real SQLite-backed Worker shared-cap prerequisite.
-      # This is NOT Native/SQL T10-07 acceptance; mandatory 26-case gate stays blocked.
-      - name: B1 Worker two-account shared-cap regression (component only)
-        working-directory: .
-        run: |
-          node scripts/trade-integration/worker-shared-cap.mjs --self-test
-          node scripts/trade-integration/worker-shared-cap.mjs --artifacts "${{ runner.temp }}/b1-worker-cap"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: b1-worker-only-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}/b1-worker-cap
-          retention-days: 7
-          if-no-files-found: warn
-
+      # The previous Worker shared-cap owner no longer exists. The original
+      # scoped Rust shared-budget invariants run in the execution job. Full
+      # Native T10-07 acceptance remains part of the mandatory matrix (#512).
       - name: Reject drift in generated MCP public contracts
         working-directory: cloudflare/okx-mcp
         run: git diff --exit-code -- contracts/tools.schema.json contracts/action-fixtures.json

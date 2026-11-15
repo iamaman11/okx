@@ -299,3 +299,61 @@ async fn risk_book_contract_native_connect_existing_liability_is_not_zeroed_into
     assert!(feed.outbound_posts.lock().unwrap().is_empty());
     stop(registry, owner).await;
 }
+
+#[tokio::test]
+async fn risk_book_contract_native_catalog_failure_retains_sql_and_retries_original_connection() {
+    let root = fresh().await;
+    let feed = Arc::new(RecordedAccountHttp::default());
+    let budget = RateBudget::new();
+    let (registry, owner) =
+        AccountRuntimeRegistry::open_native_catalog(&root, budget.clone(), &campaign())
+            .await
+            .unwrap();
+    let (config, clients) = prepared("a", feed.clone(), budget);
+    // A real filesystem publication obstruction, not a mocked SQL failure.
+    let canonical = root.join(account_catalog_proto::CATALOG_FILE);
+    let saved = root.join("test-original-catalog.pb");
+    std::fs::rename(&canonical, &saved).unwrap();
+    std::fs::create_dir(&canonical).unwrap();
+    let error = registry
+        .connect_prepared(config.clone(), clients)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, AgentError::AccountCatalogPublicationPending { .. }),
+        "{error}"
+    );
+    assert_eq!(account_count(&root), 1);
+    assert!(registry.list().await.is_empty());
+    let original = owner
+        .account_metadata(deadline(), config.account_key.wire())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        owner.verify_live_authority(deadline()).await,
+        Err(okx_execution::StoreError::Invalid(
+            "FINANCE_CAMPAIGN_POLICY_REQUIRED"
+        ))
+    ));
+    // The retained original catalog is restored only as test teardown of the
+    // deliberate obstruction. The application's recovery is an exact RPC retry.
+    std::fs::remove_dir(&canonical).unwrap();
+    std::fs::rename(&saved, &canonical).unwrap();
+    let (_, clients) = prepared("a", feed.clone(), RateBudget::new());
+    registry
+        .connect_prepared(config.clone(), clients)
+        .await
+        .unwrap();
+    assert_eq!(
+        owner
+            .account_metadata(deadline(), config.account_key.wire())
+            .await
+            .unwrap(),
+        Some(original)
+    );
+    assert_eq!(account_count(&root), 1);
+    assert_eq!(registry.list().await, vec![config]);
+    assert!(feed.outbound_posts.lock().unwrap().is_empty());
+    stop(registry, owner).await;
+}

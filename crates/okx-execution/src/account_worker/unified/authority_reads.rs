@@ -3,6 +3,15 @@ use super::UnifiedFinanceHandle;
 use crate::{AccountPolicySnapshot, AccountStore, CentralReceipt, CentralReceiptView, StoreResult};
 use std::time::Instant;
 impl UnifiedFinanceHandle {
+    /// Original connected roster, read from the installation owner.
+    pub async fn connected_account_keys(&self, deadline: Instant) -> StoreResult<Vec<String>> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline),move|db|{
+            Ok(db.prepare("SELECT account_key FROM account_meta WHERE installation_id=?1 ORDER BY account_key")?
+                .query_map([installation],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?)
+        }).await
+    }
+
     /// The campaign identity belongs to canonical SQL, not launch arguments.
     /// A fresh installation has no policy yet; multiple campaigns are ambiguous.
     pub async fn configured_campaign(&self, deadline: Instant) -> StoreResult<Option<String>> {
