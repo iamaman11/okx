@@ -23,6 +23,7 @@ mod integrity;
 mod post;
 mod queries;
 mod settlement;
+mod terminal;
 mod unsent;
 use integrity::verify_reservation_aggregates;
 pub(super) use post::PostAuthorized;
@@ -30,6 +31,7 @@ pub(crate) use post::PostFenceInput;
 pub(in crate::risk::book) use post::{PostDecision, begin_unified_post_and_account_transaction};
 pub(crate) use queries::{AccountReadback, ReservationReadback};
 pub(super) use settlement::{EntrySettlementReceipt, PartialEntrySqlProof};
+pub(crate) use terminal::{TerminalResolveInput, TerminalResolveReceipt};
 pub(super) use unsent::{UnsentReceipt, UnsentSqlProof};
 
 #[derive(Debug, Error)]

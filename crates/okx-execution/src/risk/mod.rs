@@ -9,6 +9,7 @@ pub use stops::*;
 mod book;
 pub(crate) use book::{
     AccountReadback, EntrySettlementSource, PostFenceInput, ReservationReadback, ReserveInput,
+    TerminalResolveInput,
     UnifiedRiskDecision, VerifiedCensus, begin_post_unified_native,
     read_unified_campaign_account_summary, read_unified_campaign_reservation,
     read_unified_campaign_summary, reconcile_outcome_unified_native,

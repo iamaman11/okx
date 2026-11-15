@@ -604,6 +604,10 @@ pub(crate) enum UnifiedFinanceWrite {
         generation: u64,
         source: crate::risk::EntrySettlementSource,
     },
+    ResolveTerminal {
+        campaign: String,
+        input: crate::risk::TerminalResolveInput,
+    },
     ReleaseUnsent {
         campaign: String,
         account: String,
@@ -737,6 +741,9 @@ fn apply_original_unified_finance_inner(
             generation,
             source,
         )),
+        UnifiedFinanceWrite::ResolveTerminal { campaign, input } => risk_operation(
+            risk::resolve_terminal_unified_native(tx, installation, &campaign, &input),
+        ),
         UnifiedFinanceWrite::ReleaseUnsent {
             campaign,
             account,

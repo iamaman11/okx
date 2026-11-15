@@ -13,7 +13,7 @@ pub(crate) use store::{
 // Original RiskBook operations for the shared finance SQL writer. These are
 // DOMAIN calls on the caller's existing transaction, not a second owner,
 // separate campaign database or bypass around AccountStore source proofs.
-pub(crate) use store::PostFenceInput;
+pub(crate) use store::{PostFenceInput, TerminalResolveInput};
 pub(crate) use store::{ReserveInput, VerifiedCensus};
 
 /// The ORIGINAL AccountStore receipt type to debit; never caller-supplied
@@ -47,6 +47,11 @@ pub(crate) enum UnifiedRiskDecision {
         replayed: bool,
     },
     UnsentReleased {
+        reservation_key: String,
+        book_sequence: u64,
+        replayed: bool,
+    },
+    TerminalReleased {
         reservation_key: String,
         book_sequence: u64,
         replayed: bool,
@@ -159,6 +164,24 @@ pub(crate) fn settle_entry_unified_native(
         book_sequence: receipt.book_sequence,
         cumulative_entry_usd: receipt.cumulative_entry_usd,
         replayed: receipt.replayed,
+    })
+}
+
+/// Only the immutable original terminal debit + full native flat census
+/// can unlock this terminal refund. No second finance writer or network owner.
+pub(crate) fn resolve_terminal_unified_native(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    campaign: &str,
+    input: &TerminalResolveInput,
+) -> Result<UnifiedRiskDecision, &'static str> {
+    let accepted = store::RiskBookStore::resolve_unified_terminal_from_account_sql_transaction(
+        tx, installation, campaign, input,
+    ).map_err(|error| original_finance_error(&error))?;
+    Ok(UnifiedRiskDecision::TerminalReleased {
+        reservation_key: accepted.reservation_key,
+        book_sequence: accepted.book_sequence,
+        replayed: accepted.replayed,
     })
 }
 
