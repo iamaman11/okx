@@ -8,12 +8,16 @@ mod owner;
 pub(crate) use opening_ingress::install_reported_opening_sql;
 pub use opening_ingress::{ReportedOpeningCensus, ReportedOpeningReceipt};
 mod authority_reads;
+mod native_admission;
 mod readback;
 mod reservation;
+pub use native_admission::{
+    NativePostDecision, NativePostRequest, NativeReserveDecision, NativeReserveRequest,
+    ReportedRiskCensus,
+};
 mod reserve_source;
 pub(crate) use reservation::{native_reservation_receipt_sql, reserve_native_sql};
 mod sources;
-mod submission;
 mod trade_reads;
 mod transaction;
 use sources::{original_bound_entry_settlement_sql, original_bound_unsent_release_sql};

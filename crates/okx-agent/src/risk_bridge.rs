@@ -24,6 +24,45 @@ enum RiskRoute {
     LocalStopped(crate::native_finance_risk::NativeFinanceRisk),
 }
 impl NativeRiskClient {
+    pub(crate) fn is_native_finance(&self) -> bool {
+        !matches!(&self.route, RiskRoute::Cloudflare(_))
+    }
+
+    pub(crate) fn native_finance_owner(
+        &self,
+    ) -> Option<okx_execution::account_worker::UnifiedFinanceHandle> {
+        match &self.route {
+            RiskRoute::Cloudflare(_) => None,
+            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
+                Some(backend.owner.clone())
+            }
+        }
+    }
+
+    pub(crate) async fn reserve_produced(
+        &self,
+        packet: crate::trade_service::ProducedReserve,
+    ) -> Result<(RiskResult, Option<okx_execution::CentralReceipt>), &'static str> {
+        match &self.route {
+            RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED"),
+            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
+                backend.reserve_produced(packet).await
+            }
+        }
+    }
+
+    pub(crate) async fn post_produced(
+        &self,
+        packet: crate::trade_service::ProducedPost,
+    ) -> Result<(RiskResult, Option<okx_execution::CommittedVenueSend>), &'static str> {
+        match &self.route {
+            RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED"),
+            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
+                backend.post_produced(packet).await
+            }
+        }
+    }
+
     pub(crate) async fn install_produced_opening(
         &self,
         packet: crate::trade_service::ProducedOpening,

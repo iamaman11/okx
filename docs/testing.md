@@ -1,3 +1,47 @@
+## #510 - Native admission integration candidate (NOT accepted end-to-end)
+
+Supersedes the unfinished-ingress notes in the historical checkpoint below.
+The production Execute branch now passes its produced Reserve/BeginPost to the
+single installation writer, receives the original joint-commit reservation
+receipt, consumes the first-COMMIT send claim, and routes ACK/REJECTED/UNKNOWN
+to that same owner. Native does not call a second account reserve or begin_post.
+An unknown native admission outcome cannot enter legacy rejection/release.
+Produced native admission cannot fall back to the Cloudflare route.
+
+Contract fixes found during independent review:
+- SQL rederives USDT/USD loss from the immutable plan and stored admission FX;
+  a self-consistent but smaller caller-selected reserve is rejected.
+- Shared native sizing keeps ceil9 USDT and the original exact RiskAmount USD
+  product. The internal producer carries this exact USD separately from the
+  unchanged legacy nine-place transport envelope. Non-parity FX is tested.
+- Census is checked against original scoped account policy/loss and fresh
+  COMPLETE NAV in the same SQL transaction. Foreign/incomplete/stale sources
+  and unsupported nonzero external occupancy are rejected without writes.
+- The send capability is created only AFTER the joint COMMIT succeeds.
+
+Local evidence: execution library 281 PASS, 0 FAIL, 2 ignored, 7.19s after build;
+Agent producer 3 PASS, census mapping 2 PASS, entry/sender 8 PASS (0.29s),
+strategy contracts 3 PASS (0.13s), native generic-mutation guard 1 PASS.
+The counts and timings are NOT Native Execute acceptance, full 26/26 or P95.
+
+FIRST UNFINISHED BOUNDARY: actual Native runtime composition, not another helper.
+ExecutionRuntime.store remains AccountStoreHandle. open_stopped_finance creates
+no trading routes. The RB09 authority gate correctly rejects all live commits.
+Therefore this candidate has NO accepted positive end-to-end Native Execute.
+Do not activate it, invent a live marker, use trial_* as production, or open a
+second account writer to make the positive path reachable.
+
+Complete the existing runtime port as one unit: scoped prepare/manual-instance,
+quote+ALL-IN binding, reserve-attempt and no-send outcomes, coherent obligation/
+protection/receipt census snapshot, source capture and posting recovery. Retain
+original source validation and the same SQL transaction for related facts.
+ACK currently continues into Status, so that continuation must use the same
+owner too. Pure readonly helpers or an enum alone do not finish this boundary.
+Then prove concurrent Execute, lost reply and reopen through the actual runtime
+without another grant/POST. Resolve, isolated RB09, removal of old financial
+handlers and exact-SHA complete acceptance still remain. PR stays Draft/NO-GO;
+no Windows installation, Cloudflare deployment or trading was performed.
+
 ## #510 - Native local reservation receipt contract (no wire HELD hash cycle)
 
 A private ReserveNative transaction now derives CentralReceipt from ORIGINAL

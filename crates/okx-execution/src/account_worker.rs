@@ -588,9 +588,10 @@ impl AccountStoreHandle {
 mod unified;
 pub use crate::risk::{NativeOpeningAccount, NativeOpeningSource};
 pub use unified::{
-    ReportedOpeningCensus, ReportedOpeningReceipt, UnifiedFinanceAccountPolicyReadback,
-    UnifiedFinanceAccountReadback, UnifiedFinanceBoundSettlement,
-    UnifiedFinanceBoundSettlementReceipt, UnifiedFinanceBoundUnsent,
+    NativePostDecision, NativePostRequest, NativeReserveDecision, NativeReserveRequest,
+    ReportedOpeningCensus, ReportedOpeningReceipt, ReportedRiskCensus,
+    UnifiedFinanceAccountPolicyReadback, UnifiedFinanceAccountReadback,
+    UnifiedFinanceBoundSettlement, UnifiedFinanceBoundSettlementReceipt, UnifiedFinanceBoundUnsent,
     UnifiedFinanceBoundUnsentReceipt, UnifiedFinanceCampaignSummary, UnifiedFinanceHandle,
     UnifiedFinanceInventory, UnifiedFinancePolicy, UnifiedFinancePolicyAccount,
     UnifiedFinanceReservationReadback,

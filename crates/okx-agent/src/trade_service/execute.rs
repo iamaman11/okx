@@ -977,6 +977,7 @@ impl TradeService {
         }
         let mut central = None;
         let mut post_held_selected = None;
+        let mut native_send_claim = None;
         if increase
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
         {
@@ -1239,11 +1240,40 @@ impl TradeService {
                 })
                 .await
                 .map_err(err)?;
-            let held = match self
-                .reserve_inspect_retry(&state, reserve, &prepared, r)
-                .await
-            {
+            let native_reserve = self.risk.is_native_finance();
+            let reserved = if native_reserve {
+                let packet = ProducedReserve::from_production(
+                    reserve,
+                    native_process_incarnation()?.to_owned(),
+                    plan.planned_loss_usd,
+                )?;
+                self.risk
+                    .reserve_produced(packet)
+                    .await
+                    .map_err(str::to_owned)
+                    .and_then(|(result, receipt)| {
+                        if result.status == RiskDecisionStatus::Held {
+                            Ok((result, receipt))
+                        } else {
+                            Err(result.reason.unwrap_or_else(|| {
+                                "NATIVE_RESERVE_DENIED_OUTCOME_REQUIRES_READBACK".into()
+                            }))
+                        }
+                    })
+                    .map_err(|e| (e, false))
+            } else {
+                self.reserve_inspect_retry(&state, reserve, &prepared, r)
+                    .await
+                    .map(|held| (held, None))
+            };
+            let (held, native_receipt) = match reserved {
                 Ok(held) => held,
+                Err((reason, _)) if native_reserve => {
+                    // An enqueued native transaction may have committed before
+                    // its reply was lost. Never reject/release it through the
+                    // legacy account writer or obtain another send grant.
+                    return Ok(uncertain(&prepared.intent_id, &reason));
+                }
                 Err((reason, authoritative_denial)) => {
                     let id = prepared.intent_id.clone();
                     if authoritative_denial {
@@ -1283,12 +1313,22 @@ impl TradeService {
                 }
             };
             let held_received = Instant::now();
-            let receipt = self.local_receipt(r, &prepared, &held, usd, &conversion)?;
-            r.execution
-                .store
-                .call(until, move |s| s.reserve(&receipt, now()))
-                .await
-                .map_err(err)?;
+            if native_reserve {
+                let receipt = native_receipt.ok_or("NATIVE_RESERVE_DURABLE_RECEIPT_MISSING")?;
+                if receipt.intent_id != prepared.intent_id
+                    || receipt.plan_hash != prepared.plan_hash
+                    || receipt.account_key != r.configuration.account_key.wire()
+                {
+                    return Err("NATIVE_RESERVE_DURABLE_RECEIPT_MISMATCH".into());
+                }
+            } else {
+                let receipt = self.local_receipt(r, &prepared, &held, usd, &conversion)?;
+                r.execution
+                    .store
+                    .call(until, move |s| s.reserve(&receipt, now()))
+                    .await
+                    .map_err(err)?;
+            }
             // TEST-ONLY: the true SQL owner has now persisted Worker HELD.
             // Holding here (rather than withholding the WSS HELD reply)
             // keeps the cohort census safe: a separate Execute can observe
@@ -1327,9 +1367,15 @@ impl TradeService {
                 )
                 .await
             {
-                Ok((v, witness)) => {
+                Ok((v, witness, claim)) => {
                     central = Some(v);
                     post_held_selected = Some(witness);
+                    native_send_claim = claim;
+                }
+                Err(reason) if native_reserve => {
+                    // Only the installation SQL owner may resolve this
+                    // outcome. Inspect/readback cannot mint a send capability.
+                    return Ok(uncertain(&prepared.intent_id, &reason));
                 }
                 Err(reason)
                     if matches!(
@@ -1524,7 +1570,7 @@ impl TradeService {
             attached_algo_orders: if increase { attached } else { Vec::new() },
         };
         let rate = r.execution.trade.admit_place_order(&venue).map_err(err)?;
-        let result = post_once(&r.execution.store, &prepared, until, || async {
+        let send = || async {
             if self
                 .governance
                 .read()
@@ -1542,68 +1588,106 @@ impl TradeService {
                 .place_order_after_admission(&venue, &timing, &rate)
                 .await
                 .map_err(err)
-        })
-        .await?;
+        };
+        let result = if let Some(claim) = native_send_claim {
+            let owner = self
+                .risk
+                .native_finance_owner()
+                .ok_or("NATIVE_SEND_OWNER_MISSING")?;
+            submission::post_committed_native(
+                &owner,
+                self.accounts.installation_id(),
+                &r.configuration.account_key.wire(),
+                &prepared,
+                claim,
+                until,
+                send,
+            )
+            .await?
+        } else {
+            if increase && self.risk.is_native_finance() {
+                return Err("NATIVE_SEND_CLAIM_MISSING_NO_POST".into());
+            }
+            post_once(&r.execution.store, &prepared, until, send).await?
+        };
+
         drop(_new_risk_admission);
         drop(_capacity);
         match result {
             Some(response) => match place_ack_verdict(&response, &venue.client_order_id) {
                 PlaceAckVerdict::Accepted => {
                     let order_id = response.data[0].order_id.clone();
-                    let intent_id = id.clone();
-                    r.execution
-                        .store
-                        .call(deadline(), move |s| {
-                            s.record_outcome(
-                                &intent_id,
-                                IntentState::Acknowledged,
-                                Some(&order_id),
-                                "exchange-ack",
-                                now(),
-                            )
-                        })
-                        .await
-                        .map_err(err)?;
+                    self.record_execute_outcome(
+                        r,
+                        okx_execution::IntentOutcome {
+                            intent_id: id.clone(),
+                            state: IntentState::Acknowledged,
+                            exchange_order_id: Some(order_id),
+                            evidence: "exchange-ack".into(),
+                            observed_at: now(),
+                        },
+                    )
+                    .await?;
                     self.status_intent(r, &id, None).await
                 }
                 PlaceAckVerdict::ExplicitRejected => {
-                    let i = id.clone();
-                    r.execution
-                        .store
-                        .call(deadline(), move |s| {
-                            s.record_outcome(
-                                &i,
-                                IntentState::Rejected,
-                                None,
-                                "exchange-explicit-rejection",
-                                now(),
-                            )
-                        })
-                        .await
-                        .map_err(err)?;
+                    self.record_execute_outcome(
+                        r,
+                        okx_execution::IntentOutcome {
+                            intent_id: id.clone(),
+                            state: IntentState::Rejected,
+                            exchange_order_id: None,
+                            evidence: "exchange-explicit-rejection".into(),
+                            observed_at: now(),
+                        },
+                    )
+                    .await?;
                     Ok(completed(
                         json!({"intent_id":id,"state":"REJECTED","exchange_code":response.code,"central_reservation":central}),
                     ))
                 }
                 PlaceAckVerdict::Unknown => {
-                    let i = id.clone();
-                    r.execution
-                        .store
-                        .call(deadline(), move |s| {
-                            s.record_outcome(
-                                &i,
-                                IntentState::Unknown,
-                                None,
-                                "exchange-ack-unverified",
-                                now(),
-                            )
-                        })
-                        .await
-                        .map_err(err)?;
+                    self.record_execute_outcome(
+                        r,
+                        okx_execution::IntentOutcome {
+                            intent_id: id.clone(),
+                            state: IntentState::Unknown,
+                            exchange_order_id: None,
+                            evidence: "exchange-ack-unverified".into(),
+                            observed_at: now(),
+                        },
+                    )
+                    .await?;
                     Ok(uncertain(&id, "EXCHANGE_ACK_UNVERIFIED_NO_REPOST"))
                 }
             },
             None => Ok(uncertain(&id, "EXCHANGE_POST_OUTCOME_UNKNOWN")),
+        }
+    }
+    async fn record_execute_outcome(
+        &self,
+        resource: &AccountResources,
+        outcome: okx_execution::IntentOutcome,
+    ) -> Result<(), String> {
+        if self.risk.is_native_finance() {
+            let owner = self
+                .risk
+                .native_finance_owner()
+                .ok_or("NATIVE_OUTCOME_OWNER_MISSING")?;
+            if owner.installation_id() != self.accounts.installation_id() {
+                return Err("NATIVE_OUTCOME_INSTALLATION_MISMATCH".into());
+            }
+            owner
+                .record_intent_outcome(resource.configuration.account_key.wire(), outcome)
+                .await
+                .map_err(err)
+        } else {
+            resource
+                .execution
+                .store
+                .record_intent_outcome(deadline(), outcome)
+                .await
+                .map_err(err)
         }
     }
     pub(super) fn risk_command(
@@ -1885,7 +1969,14 @@ impl TradeService {
         until: Instant,
         held_received: Instant,
         fx: PostFxFence<'_>,
-    ) -> Result<(RiskResult, PostHeldSelected), String> {
+    ) -> Result<
+        (
+            RiskResult,
+            PostHeldSelected,
+            Option<okx_execution::CommittedVenueSend>,
+        ),
+        String,
+    > {
         let key = held
             .reservation_key
             .clone()
@@ -1928,12 +2019,26 @@ impl TradeService {
                     causal_proof,
                 },
             );
-            match self.risk.request(command).await {
+            let (response, claim) = if self.risk.is_native_finance() {
+                let packet = ProducedPost::from_production(command)?;
+                let (result, claim) = self
+                    .risk
+                    .post_produced(packet)
+                    .await
+                    .map_err(str::to_owned)?;
+                (Ok(result), claim)
+            } else {
+                (self.risk.request(command).await, None)
+            };
+            match response {
                 Ok(v) if v.status == RiskDecisionStatus::PostAuthorized => {
                     if !post_receipt_bound(&v, &key, state.state.revision, sequence) {
                         return Err("POST_FENCE_RECEIPT_BINDING_MISMATCH".into());
                     }
-                    return Ok((v, selected));
+                    if self.risk.is_native_finance() && claim.is_none() {
+                        return Err("NATIVE_POST_CLAIM_MISSING_NO_POST".into());
+                    }
+                    return Ok((v, selected, claim));
                 }
                 Ok(v) if v.reason.as_deref() != Some("STALE_RISK_BOOK_SEQUENCE") => {
                     return Err(v.reason.unwrap_or("CENTRAL_POST_FENCE_DENIED".into()));

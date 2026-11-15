@@ -25,7 +25,8 @@ impl NativeFinanceRisk {
         installation: String,
         campaign: String,
     ) -> Result<Self, &'static str> {
-        if installation.is_empty() || campaign.is_empty() {
+        if installation.is_empty() || campaign.is_empty() || owner.installation_id() != installation
+        {
             return Err("NATIVE_FINANCE_RISK_SCOPE_INVALID");
         }
         Ok(Self {

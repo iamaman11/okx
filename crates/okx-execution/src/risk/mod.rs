@@ -1,6 +1,9 @@
 pub mod admission;
+mod native_sizing;
 pub mod stops;
 pub use admission::*;
+pub use native_sizing::native_reserved_loss;
+pub use okx_kernel::risk::model::{PostAccountRead, PostCausalProof};
 pub use stops::*;
 
 // #510 r4.1: the original AccountStore+RiskBook financial rules are
