@@ -13,7 +13,8 @@ pub(crate) use book::{
     read_unified_campaign_account_summary, read_unified_campaign_reservation,
     read_unified_campaign_summary, reconcile_outcome_unified_native,
     recover_posting_unified_native, release_unsent_unified_native, reserve_unified_native,
-    settle_entry_unified_native, verify_legacy_import_source, verify_unified_import_campaign,
+    resolve_terminal_unified_native, settle_entry_unified_native, verify_legacy_import_source,
+    verify_unified_import_campaign,
 };
 
 #[cfg(test)]
