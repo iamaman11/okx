@@ -8,6 +8,7 @@ mod source_bills;
 mod source_capital;
 mod source_capital_assignment;
 mod source_entries;
+mod source_entry_admission;
 mod source_entry_fees;
 mod source_fill_projection;
 mod source_fills;

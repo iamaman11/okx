@@ -413,7 +413,7 @@ impl TradeService {
         let policy = r
             .execution
             .store
-            .call(deadline(), |store| store.policy())
+            .account_policy(deadline())
             .await
             .map_err(err)?;
         if Self::sql_policy_receipt(&policy, Some(&state), &r.configuration.account_key.wire())["matches_governance"]
@@ -424,7 +424,7 @@ impl TradeService {
         Ok((state, account))
     }
     fn sql_policy_receipt(
-        policy: &(i64, bool, String, Decimal, Decimal),
+        policy: &okx_execution::AccountPolicySnapshot,
         governance: Option<&CentralGovernanceSnapshot>,
         account_key: &str,
     ) -> Value {
@@ -438,18 +438,19 @@ impl TradeService {
                 return false;
             };
             snapshot.valid()
-                && i64::try_from(snapshot.state.revision).ok() == Some(policy.0)
-                && policy.1 != account.access_enabled()
-                && policy.2 == snapshot.state.campaign_id
-                && dec(&snapshot.state.campaign_loss_limit_usd).is_ok_and(|value| policy.3 == value)
+                && i64::try_from(snapshot.state.revision).ok() == Some(policy.revision)
+                && policy.paused != account.access_enabled()
+                && policy.campaign_id == snapshot.state.campaign_id
+                && dec(&snapshot.state.campaign_loss_limit_usd)
+                    .is_ok_and(|value| policy.campaign_limit == value)
         });
         json!({
             "schema":"okx.native-policy-sql-receipt/v1",
             "source":"account_sql",
-            "revision":policy.0,
-            "paused":policy.1,
-            "campaign_id":policy.2,
-            "campaign_limit_usd":exact(policy.3),
+            "revision":policy.revision,
+            "paused":policy.paused,
+            "campaign_id":policy.campaign_id,
+            "campaign_limit_usd":exact(policy.campaign_limit),
             "matches_governance":matched,
             "state":if matched {"applied"} else {"mismatch"},
         })
@@ -507,11 +508,7 @@ impl TradeService {
                     // the native account-local SQLite owner. It proves the current
                     // governance revision was physically applied; the cached Worker
                     // snapshot alone is insufficient evidence.
-                    let sql = r
-                        .execution
-                        .store
-                        .call(deadline(), |store| store.policy())
-                        .await;
+                    let sql = r.execution.store.account_policy(deadline()).await;
                     let governance = self.governance.read().await;
                     let sql_receipt = match sql {
                         Ok(policy) => Self::sql_policy_receipt(
@@ -959,7 +956,8 @@ mod governance_sql_proof_tests {
             Decimal::from(10),
             Decimal::ZERO,
         );
-        let receipt = TradeService::sql_policy_receipt(&original, Some(&governance), &key);
+        let receipt =
+            TradeService::sql_policy_receipt(&original.clone().into(), Some(&governance), &key);
         assert_eq!(receipt["state"], "applied");
         assert_eq!(receipt["revision"], 2);
         assert_eq!(receipt["matches_governance"], true);
@@ -994,16 +992,17 @@ mod governance_sql_proof_tests {
             ),
         ] {
             assert_eq!(
-                TradeService::sql_policy_receipt(&failed, Some(&governance), &key)["matches_governance"],
+                TradeService::sql_policy_receipt(&failed.into(), Some(&governance), &key)["matches_governance"],
                 false
             );
         }
         assert_eq!(
-            TradeService::sql_policy_receipt(&original, Some(&governance), "wrong")["matches_governance"],
+            TradeService::sql_policy_receipt(&original.clone().into(), Some(&governance), "wrong")
+                ["matches_governance"],
             false
         );
         assert_eq!(
-            TradeService::sql_policy_receipt(&original, None, &key)["matches_governance"],
+            TradeService::sql_policy_receipt(&original.clone().into(), None, &key)["matches_governance"],
             false
         );
     }

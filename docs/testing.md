@@ -1,3 +1,47 @@
+## #510 - combined source/policy/sender integration batch
+
+One parent-integrated batch from two code subagents plus sender integration.
+Typed AccountPolicySnapshot/CentralReceiptView now back original legacy methods
+and scoped Native reads; actual TradeService policy consumers use named fields
+instead of positional tuples. The original active-exposure receipt predicate,
+exact decimals, campaign identity and retained-vs-active semantics are preserved.
+
+AccountReserveSource reads intent + original quote + ALL-IN admission under one
+Deferred snapshot. The original four quote/admission validators were extracted
+into source_entry_admission with scoped SQL; no alternate financial arithmetic.
+A known quote still cannot stand in for missing all-in admission. Native Reserve
+mutation is NOT implemented by this read API and these data are not a grant.
+
+Submission has one common send/outcome routine. Legacy obtains its own claim;
+the staged Native entry consumes the already committed claim without a second
+account CAS, checks the real owner installation before any callback, and records
+UNKNOWN or proven-unsent via the selected owner. Native first-COMMIT operation
+now samples clock inside the owner and preserves typed original denial reason.
+The Native entry remains unselected by Execute until Reserve/fence integration.
+
+New direct tests: two-account policy/receipts with same local IDs and different
+campaigns/plans; retained RELEASED evidence vs active None; no read-side changes;
+scoped quote/admission equality and forged fee/upper rejection. Sender contract
+adds real SQL lost-ACK -> UNKNOWN and replay no-send; pre-send policy denial ->
+REJECTED; dropped committed claim cannot be reissued. Sources/venue callback are
+synthetic, original SQL state transitions are real. Two new fixture setup bugs
+(campaign mutation, missing WAL/FULL) rejected first run; corrected at setup,
+with production invariants unchanged.
+
+Execution library: 273 PASS, 0 FAIL, 2 ignored, 8.89s after build. Agent all-target
+check and architecture negative/normal guard, format/diff PASS. Sender targeted
+contracts: 8 PASS, 0 FAIL, 0.24s after one 3m42s Agent test build. Production
+Strategies/governance contracts: 3 PASS, 0 FAIL, 0.23s on the SAME binary. No manual full GitHub CI was launched.
+
+Critical next contract: existing CentralReceipt.receipt_hash is digest(RiskResult)
+constructed AFTER remote HELD; unified reserve needs the local receipt DURING
+its same COMMIT. Define and independently test the Native durable reservation
+receipt contract before wiring the action; do not invent a fake remote response
+or a second reserve. Update Native local receipt readback and sender together.
+Also remaining: actual runtime composition, source-bound BeginPost/Resolve,
+activated producer-to-owner positive tests, RB09 and final exact-SHA acceptance.
+This batch does NOT complete #510 or the 26x matrix.
+
 ## #510 - consuming send capability at the real legacy sender
 
 CommittedVenueSend is an ephemeral owned result: private fields/constructor,

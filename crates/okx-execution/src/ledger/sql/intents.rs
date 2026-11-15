@@ -77,94 +77,7 @@ impl AccountStore {
     /// operation_receipts journal, bound to the original saved intent/plan.
     /// Its kind explicitly denies any claim of ALL-IN cost authorization.
     fn verified_stored_entry_quote(&self, quote: &EntryQuoteEvidence) -> StoreResult<StoredIntent> {
-        let intent = self
-            .intent(&quote.intent_id)?
-            .ok_or(StoreError::Invalid("ENTRY_QUOTE_INTENT_MISSING"))?;
-        let maker = Decimal::from_str(&quote.maker_rate)
-            .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_FEE_RATE_INVALID"))?;
-        let taker = Decimal::from_str(&quote.taker_rate)
-            .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_FEE_RATE_INVALID"))?;
-        if quote.schema != "okx.entry-known-quote/v1"
-            || quote.account_key != self.meta.account_key
-            || quote.installation_id != self.meta.installation_id
-            || quote.plan_hash != intent.plan_hash
-            || quote.policy_revision != intent.policy_revision
-            || quote.instrument_id != intent.instrument_id
-            || !intent.risk_increase
-            || quote.quantity != intent.plan.quantity
-            || quote.limit_price != intent.plan.limit_price
-            || quote.contract_value != intent.plan.contract_value
-            || quote.quantity <= Decimal::ZERO
-            || quote.limit_price <= Decimal::ZERO
-            || quote.contract_value <= Decimal::ZERO
-            || quote.fee_rate < Decimal::ZERO
-            || quote.fee_rate != maker.abs().max(taker.abs())
-            || quote.fee_level.is_empty()
-            || quote.fee_exchange_at <= 0
-            || quote.usd_per_usdt <= Decimal::ZERO
-            || quote.fee_received_at <= 0
-            || quote.conversion_received_at <= 0
-            || quote.observed_at <= 0
-            || quote.fee_received_at > quote.observed_at
-            || quote.fee_exchange_at > quote.observed_at
-            || quote.conversion_received_at > quote.observed_at
-            || quote.observed_at - quote.fee_received_at > 5_000
-            || quote.observed_at - quote.fee_exchange_at > 5_000
-            || quote.observed_at - quote.conversion_received_at > 5_000
-            || quote.fee_generation.len() != 71
-            || !quote.fee_generation.starts_with("sha256:")
-            || !quote.fee_generation[7..]
-                .bytes()
-                .all(|c| c.is_ascii_hexdigit())
-            || quote.reference_generation.is_empty()
-            || quote.conversion_digest.len() != 64
-            || !quote
-                .conversion_digest
-                .bytes()
-                .all(|c| c.is_ascii_hexdigit())
-        {
-            return Err(StoreError::Invalid("ENTRY_QUOTE_SCOPE_UNVERIFIED"));
-        }
-        let tariff_bytes = serde_json::to_vec(&(
-            &quote.instrument_id,
-            &quote.reference_generation,
-            &quote.fee_level,
-            &quote.maker_rate,
-            &quote.taker_rate,
-            true,
-        ))
-        .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"))?;
-        let tariff_digest = format!("sha256:{:x}", Sha256::digest(tariff_bytes));
-        if tariff_digest != quote.fee_generation {
-            return Err(StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"));
-        }
-        let notional = quote
-            .quantity
-            .checked_mul(quote.contract_value)
-            .and_then(|v| v.checked_mul(quote.limit_price))
-            .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?;
-        let fee = notional
-            .checked_mul(quote.fee_rate)
-            .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?
-            .round_dp_with_strategy(6, rust_decimal::RoundingStrategy::ToPositiveInfinity);
-        let total_usdt = notional
-            .checked_add(fee)
-            .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?;
-        let usd = total_usdt
-            .checked_mul(quote.usd_per_usdt)
-            .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?
-            .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity);
-        if (notional, fee, total_usdt, usd)
-            != (
-                quote.notional_usdt,
-                quote.fee_usdt,
-                quote.total_usdt,
-                quote.total_usd,
-            )
-        {
-            return Err(StoreError::Invalid("ENTRY_QUOTE_ARITHMETIC_MISMATCH"));
-        }
-        Ok(intent)
+        Self::verified_stored_entry_quote_sql(&self.connection, None, quote)
     }
 
     pub fn bind_entry_quote(&mut self, quote: &EntryQuoteEvidence) -> StoreResult<()> {
@@ -193,69 +106,14 @@ impl AccountStore {
     }
 
     pub fn entry_quote(&self, intent_id: &str) -> StoreResult<Option<EntryQuoteEvidence>> {
-        let name = format!("entry-quote:{intent_id}");
-        let Some(receipt) = self.operation(&name)? else {
-            return Ok(None);
-        };
-        if receipt.kind != "ENTRY_QUOTE_UNPROVEN" {
-            return Err(StoreError::Invalid("ENTRY_QUOTE_INVALID_RECEIPT"));
-        }
-        let quote: EntryQuoteEvidence = serde_json::from_str(&receipt.result_ref)
-            .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_CORRUPT"))?;
-        if quote.intent_id != intent_id
-            || quote.plan_hash != receipt.request_hash
-            || quote.observed_at != receipt.committed_at
-        {
-            return Err(StoreError::Invalid("ENTRY_QUOTE_CORRUPT"));
-        }
-        // Revalidate against the actual durable plan and exact arithmetic on
-        // EVERY read, including after Windows restart and v2 DB reopen.
-        self.verified_stored_entry_quote(&quote)?;
-        Ok(Some(quote))
+        Self::entry_quote_sql(&self.connection, None, intent_id)
     }
     /// Validate the independently produced native cost proof against the
     /// immutable quote on EVERY read, including after a Windows restart.
     /// The digest here is a binding to the native source witness, not a
     /// cryptographic claim that arbitrary user-supplied evidence is trusted.
     fn verified_entry_admission(&self, proof: &EntryAdmissionEvidence) -> StoreResult<()> {
-        let quote = self
-            .entry_quote(&proof.intent_id)?
-            .ok_or(StoreError::Invalid("ENTRY_ADMISSION_QUOTE_MISSING"))?;
-        let bytes = serde_json::to_vec(&quote)
-            .map_err(|_| StoreError::Invalid("ENTRY_ADMISSION_QUOTE_DIGEST_INVALID"))?;
-        let expected_quote_digest = format!("{:x}", Sha256::digest(bytes));
-        let computed = quote
-            .total_usdt
-            .checked_mul(proof.admission_usd_per_usdt)
-            .ok_or(StoreError::Invalid("ENTRY_ADMISSION_UPPER_OVERFLOW"))?
-            .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity)
-            .checked_add(proof.other_entry_costs_upper_usd)
-            .ok_or(StoreError::Invalid("ENTRY_ADMISSION_UPPER_OVERFLOW"))?;
-        let digest_valid = |v: &str| {
-            v.len() == 64
-                && v.bytes()
-                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-        };
-        if proof.schema != "okx.entry-admission/v2"
-            || proof.account_key != self.meta.account_key
-            || proof.installation_id != self.meta.installation_id
-            || proof.intent_id != quote.intent_id
-            || proof.plan_hash != quote.plan_hash
-            || !digest_valid(&proof.quote_digest)
-            || proof.quote_digest != expected_quote_digest
-            || !digest_valid(&proof.entry_proof_digest)
-            || proof.admission_usd_per_usdt != quote.usd_per_usdt
-            || proof.admission_usd_per_usdt <= Decimal::ZERO
-            || proof.other_entry_costs_upper_usd < Decimal::ZERO
-            || proof.entry_upper_usd != computed
-            || proof.entry_upper_usd < quote.total_usd
-            || proof.entry_upper_usd <= Decimal::ZERO
-            || proof.observed_at < quote.observed_at
-            || proof.observed_at - quote.observed_at > 5_000
-        {
-            return Err(StoreError::Invalid("ENTRY_ADMISSION_SOURCE_UNVERIFIED"));
-        }
-        Ok(())
+        Self::verified_entry_admission_sql(&self.connection, None, proof)
     }
 
     /// A fully admitted entry is a native, source-bound quote + USD upper +
@@ -290,23 +148,7 @@ impl AccountStore {
     }
 
     pub fn entry_admission(&self, id: &str) -> StoreResult<Option<EntryAdmissionEvidence>> {
-        let key = format!("entry-admission:{id}");
-        let Some(receipt) = self.operation(&key)? else {
-            return Ok(None);
-        };
-        if receipt.kind != "ENTRY_ADMISSION_PROVEN" {
-            return Err(StoreError::Invalid("ENTRY_ADMISSION_INVALID_RECEIPT"));
-        }
-        let proof: EntryAdmissionEvidence = serde_json::from_str(&receipt.result_ref)
-            .map_err(|_| StoreError::Invalid("ENTRY_ADMISSION_CORRUPT"))?;
-        if proof.intent_id != id
-            || proof.plan_hash != receipt.request_hash
-            || proof.observed_at != receipt.committed_at
-        {
-            return Err(StoreError::Invalid("ENTRY_ADMISSION_CORRUPT"));
-        }
-        self.verified_entry_admission(&proof)?;
-        Ok(Some(proof))
+        Self::entry_admission_sql(&self.connection, None, id)
     }
 
     /// A source-complete venue cancellation with ZERO executed quantity.
@@ -2320,30 +2162,11 @@ impl AccountStore {
         .map_err(StoreError::from)
     }
     pub fn central_receipt(&self, id: &str) -> StoreResult<Option<CentralReceipt>> {
-        let row=self.connection.query_row("SELECT reservation_key,account_key,installation_id,instance_id,plan_hash,policy_revision,receipt_hash,requested_loss_usd,conversion_digest FROM risk_receipts WHERE intent_id=?1",[id],|r|Ok((CentralReceipt{reservation_key:r.get(0)?,account_key:r.get(1)?,installation_id:r.get(2)?,instance_id:r.get(3)?,intent_id:id.into(),plan_hash:r.get(4)?,policy_revision:r.get(5)?,receipt_hash:r.get(6)?,requested_loss_usd:Decimal::ZERO,conversion_digest:r.get(8)?},r.get::<_,String>(7)?))).optional()?;
-        row.map(|(mut receipt, amount)| {
-            receipt.requested_loss_usd = decimal(amount)?;
-            Ok(receipt)
-        })
-        .transpose()
+        self.reservation_receipt(id, CentralReceiptView::Retained)
     }
-    /// Only a central reservation still charged to the risk book can cover
-    /// exchange exposure. A historically retained RELEASED SQL receipt is
-    /// not permission to consider its position/order centrally reserved.
+    /// RELEASED receipts remain observable, but cannot cover exposure.
     pub fn active_central_receipt(&self, id: &str) -> StoreResult<Option<CentralReceipt>> {
-        let state: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT state FROM risk_receipts WHERE intent_id=?1",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if state.as_deref().is_some_and(risk_receipt_covers_exposure) {
-            self.central_receipt(id)
-        } else {
-            Ok(None)
-        }
+        self.reservation_receipt(id, CentralReceiptView::ActiveExposure)
     }
     pub fn by_exchange_order_id(&self, key: &str) -> StoreResult<Option<StoredIntent>> {
         self.find_intent("exchange_order_id", key)
@@ -3623,10 +3446,7 @@ fn verified_durable_post_fence(
 
 /// SQL risk receipt state is read under the existing single AccountStore owner.
 fn risk_receipt_covers_exposure(state: &str) -> bool {
-    matches!(
-        state,
-        "HELD" | "POSTED" | "UNKNOWN" | "OPEN" | "TERMINAL_PENDING_CENTRAL"
-    )
+    AccountStore::receipt_covers_exposure(state)
 }
 
 #[cfg(test)]

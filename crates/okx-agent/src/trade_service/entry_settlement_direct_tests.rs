@@ -29,7 +29,14 @@ struct Fixture {
     governance: RwLock<Option<CentralGovernanceSnapshot>>,
 }
 
-async fn fixture(label: &str, finance: bool) -> Fixture {
+async fn reserved_fixture(
+    label: &str,
+) -> (
+    std::path::PathBuf,
+    AccountKey,
+    AccountStoreHandle,
+    StoredIntent,
+) {
     let root = std::env::temp_dir().join(format!(
         "okx-entry-settlement-{label}-{}-{}-{}",
         std::process::id(),
@@ -197,6 +204,11 @@ async fn fixture(label: &str, finance: bool) -> Fixture {
         })
         .await
         .unwrap();
+    (root, account, store, saved)
+}
+async fn fixture(label: &str, finance: bool) -> Fixture {
+    let (root, account, store, saved) = reserved_fixture(label).await;
+    let account_wire = account.wire();
     let sends = std::sync::atomic::AtomicUsize::new(0);
     let mut wrong_plan = saved.clone();
     wrong_plan.plan_hash = "wrong-plan".into();
@@ -877,4 +889,76 @@ async fn r03_released_late_bill_requires_same_reservation_new_revision_and_ack()
             .unwrap(),
         "late SQL ACK must follow accepted Worker SETTLE_ENTRY"
     );
+}
+
+#[tokio::test]
+async fn sender_lost_ack_claim_drop_and_pre_send_denial_never_resend() {
+    for (label, reason, expected_state) in [
+        ("lost-ack", "lost-venue-ack", IntentState::Unknown),
+        (
+            "pre-send-denial",
+            "POLICY_CHANGED_BEFORE_SEND",
+            IntentState::Rejected,
+        ),
+    ] {
+        let (_root, _account, store, saved) = reserved_fixture(label).await;
+        let calls = AtomicUsize::new(0);
+        let result = crate::trade_service::post_once(&store, &saved, deadline(), || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), String>(reason.into())
+        })
+        .await;
+        if expected_state == IntentState::Unknown {
+            assert_eq!(result.unwrap(), None);
+        } else {
+            assert_eq!(result.unwrap_err(), reason);
+        }
+        let id = saved.intent_id.clone();
+        let current = store
+            .call(deadline(), move |s| s.intent(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.state, expected_state);
+        // UNKNOWN cannot create a new claim. Explicit Rejected remains final.
+        let repeated = crate::trade_service::post_once(&store, &saved, deadline(), || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<(), String>(())
+        })
+        .await;
+        assert!(!matches!(repeated, Ok(Some(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+    let (_root, account, store, saved) = reserved_fixture("dropped-claim").await;
+    let claim = store
+        .claim_legacy_send(
+            deadline(),
+            saved.intent_id.clone(),
+            saved.plan_hash.clone(),
+            saved.policy_revision,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(claim.matches(
+        "installation_test",
+        &account.wire(),
+        &saved.intent_id,
+        &saved.plan_hash
+    ));
+    assert!(!claim.matches(
+        "foreign",
+        &account.wire(),
+        &saved.intent_id,
+        &saved.plan_hash
+    ));
+    drop(claim);
+    let result = crate::trade_service::post_once(&store, &saved, deadline(), || async {
+        panic!("dropped claim cannot be reissued");
+        #[allow(unreachable_code)]
+        Ok::<(), String>(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(result, None);
 }

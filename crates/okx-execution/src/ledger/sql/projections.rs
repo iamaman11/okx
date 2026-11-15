@@ -404,14 +404,8 @@ impl AccountStore {
         Ok(())
     }
     pub fn policy(&self) -> StoreResult<(i64, bool, String, Decimal, Decimal)> {
-        let (rev, paused, id, limit, loss): (i64, bool, String, String, String) = self
-            .connection
-            .query_row(
-            "SELECT revision,paused,campaign_id,campaign_limit,campaign_loss FROM account_policy",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )?;
-        Ok((rev, paused, id, decimal(limit)?, decimal(loss)?))
+        self.account_policy()
+            .map(AccountPolicySnapshot::legacy_tuple)
     }
     pub fn put_instance(&mut self, instance: &StrategyInstance) -> StoreResult<()> {
         let prior = self.instance(&instance.instance_id)?;

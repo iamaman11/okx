@@ -7,7 +7,9 @@ mod opening_ingress;
 mod owner;
 pub(crate) use opening_ingress::install_reported_opening_sql;
 pub use opening_ingress::{ReportedOpeningCensus, ReportedOpeningReceipt};
+mod authority_reads;
 mod readback;
+mod reserve_source;
 mod sources;
 mod submission;
 mod trade_reads;
@@ -39,6 +41,12 @@ fn require_offline_finance_trial(
 pub struct UnifiedFinanceHandle {
     owner: Arc<owner::FinanceWorkerOwner>,
     installation: String,
+}
+impl UnifiedFinanceHandle {
+    /// Immutable identity of the SQL owner; no grant or mutable state.
+    pub fn installation_id(&self) -> &str {
+        &self.installation
+    }
 }
 
 /// Exactly one Rust SQL writer for the account and RiskBook parts of
