@@ -13676,6 +13676,134 @@ fn risk_book_contract_one_installation_finance_owner_child() {
 }
 
 #[test]
+fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_replay() {
+    use rusqlite::{Connection, TransactionBehavior, params};
+    let file = path();
+    let mut db = Connection::open(&file).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    db.execute_batch(include_str!("../schema/finance-unified-v1.sql"))
+        .unwrap();
+    let installation = "installation";
+    let account = format!("okx:real:{}", "a".repeat(64));
+    let plan = "b".repeat(64);
+    let source = "c".repeat(64);
+    let reservation = "scope-reserve";
+    let intent = "original-partial-intent";
+    // SQL primary state and immutable receipt are fixtures, not a claimed
+    // production fill/bill producer or authority cutover witness.
+    db.execute(
+        "INSERT INTO account_meta(
+           singleton,account_key,installation_id,schema_version,
+           initialized_at,opening_source,initialize_operation_id,release_id)
+         VALUES(1,?1,?2,2,1,'fixture-source','fixture-init','fixture-release')",
+        params![&account, installation],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO decisions(
+           installation_id,account_key,decision_id,instance_id,
+           decision_at,input_digest,policy_revision,code_version)
+         VALUES(?1,?2,'fixture-decision',NULL,1,'fixture-input',1,'fixture')",
+        params![installation, &account],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO intents(
+           installation_id,account_key,intent_id,idempotency_key,request_hash,
+           decision_id,state,revision,client_order_id,deadline,plan_hash,
+           policy_revision,risk_increase,instrument_id,created_at,updated_at,
+           begin_post_at,exchange_order_id,incident)
+         VALUES(?1,?2,?3,'fixture-idempotency','fixture-hash','fixture-decision',
+           'UNKNOWN',1,'fixture-client',1000,?4,1,1,'BTC-USDT-SWAP',1,2,2,
+           'verified-venue-order',NULL)",
+        params![installation, &account, intent, &plan],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO risk_receipts(
+           reservation_key,intent_id,account_key,installation_id,instance_id,
+           plan_hash,policy_revision,receipt_hash,requested_loss_usd,
+           conversion_digest,state)
+         VALUES(?1,?2,?3,?4,NULL,?5,1,'fixture-risk-receipt','1',
+                'fixture-conversion','UNKNOWN')",
+        params![reservation, intent, &account, installation, &plan],
+    )
+    .unwrap();
+    let proof = EntrySettlementEvidence {
+        schema: "okx.entry-partial-settlement/v1".into(),
+        account_key: account.clone(),
+        intent_id: intent.into(),
+        plan_hash: plan.clone(),
+        reservation_key: reservation.into(),
+        venue_order_id: "verified-venue-order".into(),
+        venue_update_ms: 3,
+        source_covered_through_ms: 4,
+        venue_filled_quantity: Decimal::ONE,
+        booked_notional_and_fee_usdt: Decimal::ONE,
+        cumulative_entry_usd: Decimal::new(40, 2),
+        settlement_revision: 1,
+        source_digest: source.clone(),
+    };
+    let serialized = serde_json::to_string(&proof).unwrap();
+    for (id, kind) in [
+        (format!("entry-partial-head:{intent}"), "ENTRY_PARTIAL_HEAD"),
+        (
+            format!("entry-partial:{intent}:r1"),
+            "ENTRY_PARTIAL_SETTLEMENT_PROVEN",
+        ),
+    ] {
+        db.execute(
+            "INSERT INTO operation_receipts(
+                installation_id,account_key,operation_id,kind,
+                request_hash,result_ref,committed_at)
+             VALUES(?1,?2,?3,?4,?5,?6,4)",
+            params![installation, &account, id, kind, &plan, &serialized],
+        )
+        .unwrap();
+    }
+    for attempt in 0..2 {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        AccountStore::acknowledge_unified_partial_entry_sql(
+            &tx, installation, &account, &proof,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let count: i64 = db.query_row(
+            "SELECT COUNT(*) FROM operation_receipts
+             WHERE installation_id=?1 AND account_key=?2
+               AND operation_id=?3 AND kind='ENTRY_PARTIAL_SETTLED'
+               AND request_hash=?4 AND result_ref=?5",
+            params![
+                installation, &account, format!("entry-partial-settled:{intent}:r1"),
+                &plan, &source
+            ],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1, "UNKNOWN source ACK replay {attempt} cannot double-book");
+    }
+    let mut forged = proof.clone();
+    forged.cumulative_entry_usd = Decimal::new(50, 2);
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    assert!(matches!(
+        AccountStore::acknowledge_unified_partial_entry_sql(
+            &tx, installation, &account, &forged,
+        ),
+        Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_SOURCE_MISMATCH"))
+    ));
+    tx.rollback().unwrap();
+    assert_eq!(
+        db.query_row::<String, _, _>(
+            "SELECT state FROM risk_receipts
+             WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
+            params![installation, &account, intent],
+            |row| row.get(0),
+        ).unwrap(),
+        "UNKNOWN",
+        "even exact financial acknowledgement does not invent a venue outcome"
+    );
+}
+
+#[test]
 fn risk_book_contract_unified_original_prepare_is_scoped_atomic_and_idempotent() {
     use rusqlite::{Connection, TransactionBehavior, params};
     let file = path();

@@ -1033,7 +1033,11 @@ impl AccountStore {
                 |row| row.get(0),
             )
             .optional()?;
-        if !matches!(state.as_deref(), Some("OPEN" | "POSTED")) {
+        // A lost venue ACK leaves this original receipt UNKNOWN, even when
+        // independently captured immutable fills/bills prove a real partial
+        // debit. Preserve the risk obligation and accept only that exact
+        // AccountStore source revision; UNKNOWN itself grants no second POST.
+        if !matches!(state.as_deref(), Some("OPEN" | "POSTED" | "UNKNOWN")) {
             return Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_RESERVATION_STATE"));
         }
         let operation = format!(
