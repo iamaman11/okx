@@ -1044,11 +1044,8 @@ impl AccountStore {
             };
             let proof: EntrySettlementEvidence = serde_json::from_str(&head.2)
                 .map_err(|_| StoreError::Invalid("UNIFIED_LATE_HEAD_CORRUPT"))?;
-            let immutable = read(&format!(
-                "entry-late:{id}:r{}",
-                proof.settlement_revision
-            ))?
-            .ok_or(StoreError::Invalid("UNIFIED_LATE_REVISION_MISSING"))?;
+            let immutable = read(&format!("entry-late:{id}:r{}", proof.settlement_revision))?
+                .ok_or(StoreError::Invalid("UNIFIED_LATE_REVISION_MISSING"))?;
             if head.0 != "ENTRY_LATE_HEAD"
                 || immutable.0 != "ENTRY_LATE_SETTLEMENT_PROVEN"
                 || proof.schema != "okx.entry-late-settlement/v1"
@@ -1084,9 +1081,15 @@ impl AccountStore {
             || proof.source_covered_through_ms < proof.venue_update_ms
             || proof.settlement_revision == 0
             || proof.source_digest.len() != 64
-            || !proof.source_digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !proof
+                .source_digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             || proof.plan_hash.len() != 64
-            || !proof.plan_hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !proof
+                .plan_hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
             return Err(StoreError::Invalid("UNIFIED_FINAL_SOURCE_INVALID"));
         }
@@ -1133,7 +1136,11 @@ impl AccountStore {
         late: bool,
     ) -> StoreResult<()> {
         let stored = Self::final_entry_settlement_receipt_sql(
-            tx, installation, account, &accepted.intent_id, late,
+            tx,
+            installation,
+            account,
+            &accepted.intent_id,
+            late,
         )?
         .ok_or(StoreError::Invalid("UNIFIED_FINAL_ACK_SOURCE_MISSING"))?;
         if stored != *accepted {
@@ -1144,27 +1151,37 @@ impl AccountStore {
              WHERE installation_id=?1 AND account_key=?2
                AND intent_id=?3 AND plan_hash=?4 AND reservation_key=?5",
             params![
-                installation, account, &accepted.intent_id,
-                &accepted.plan_hash, &accepted.reservation_key
+                installation,
+                account,
+                &accepted.intent_id,
+                &accepted.plan_hash,
+                &accepted.reservation_key
             ],
             |row| row.get(0),
         )?;
         if (late && !matches!(state.as_str(), "LATE_SETTLEMENT_PENDING" | "RELEASED"))
-            || (!late && !matches!(
-                state.as_str(), "OPEN" | "POSTED" | "UNKNOWN"
-                    | "TERMINAL_PENDING_CENTRAL" | "RELEASED"
-            ))
+            || (!late
+                && !matches!(
+                    state.as_str(),
+                    "OPEN" | "POSTED" | "UNKNOWN" | "TERMINAL_PENDING_CENTRAL" | "RELEASED"
+                ))
         {
             return Err(StoreError::Invalid("UNIFIED_FINAL_ACK_STATE_INVALID"));
         }
         let (operation, kind) = if late {
             (
-                format!("entry-late-settled:{}:r{}", accepted.intent_id, accepted.settlement_revision),
+                format!(
+                    "entry-late-settled:{}:r{}",
+                    accepted.intent_id, accepted.settlement_revision
+                ),
                 "ENTRY_LATE_SETTLED",
             )
         } else {
             (
-                format!("entry-terminal-settled:{}:r{}", accepted.intent_id, accepted.settlement_revision),
+                format!(
+                    "entry-terminal-settled:{}:r{}",
+                    accepted.intent_id, accepted.settlement_revision
+                ),
                 "ENTRY_TERMINAL_SETTLED",
             )
         };
@@ -1175,8 +1192,13 @@ impl AccountStore {
              VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(installation_id,account_key,operation_id) DO NOTHING",
             params![
-                installation, account, &operation, kind,
-                &accepted.plan_hash, &accepted.source_digest, wall_time_ms()
+                installation,
+                account,
+                &operation,
+                kind,
+                &accepted.plan_hash,
+                &accepted.source_digest,
+                wall_time_ms()
             ],
         )?;
         let observed: (String, String, String) = tx.query_row(
@@ -1185,11 +1207,13 @@ impl AccountStore {
             params![installation, account, &operation],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        if observed != (
-            kind.to_owned(),
-            accepted.plan_hash.clone(),
-            accepted.source_digest.clone(),
-        ) {
+        if observed
+            != (
+                kind.to_owned(),
+                accepted.plan_hash.clone(),
+                accepted.source_digest.clone(),
+            )
+        {
             return Err(StoreError::Invalid("UNIFIED_FINAL_ACK_CONFLICT"));
         }
         // The original post-release late marker is cleared only if the
@@ -1203,8 +1227,11 @@ impl AccountStore {
                        AND intent_id=?3 AND plan_sha256=?4
                        AND reservation_key=?5",
                     params![
-                        installation, account, &accepted.intent_id,
-                        &accepted.plan_hash, &accepted.reservation_key
+                        installation,
+                        account,
+                        &accepted.intent_id,
+                        &accepted.plan_hash,
+                        &accepted.reservation_key
                     ],
                     |row| row.get(0),
                 )

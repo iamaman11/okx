@@ -151,18 +151,32 @@ impl RiskBookStore {
             return Err(RiskStoreError::EntrySqlUnproven);
         }
         let original = match source {
-            EntrySettlementSource::Partial =>
+            EntrySettlementSource::Partial => {
                 crate::account_store::AccountStore::partial_entry_settlement_receipt_sql(
-                    tx, Some(installation), account_key, intent_id,
-                ),
-            EntrySettlementSource::Terminal =>
+                    tx,
+                    Some(installation),
+                    account_key,
+                    intent_id,
+                )
+            }
+            EntrySettlementSource::Terminal => {
                 crate::account_store::AccountStore::final_entry_settlement_receipt_sql(
-                    tx, installation, account_key, intent_id, false,
-                ),
-            EntrySettlementSource::Late =>
+                    tx,
+                    installation,
+                    account_key,
+                    intent_id,
+                    false,
+                )
+            }
+            EntrySettlementSource::Late => {
                 crate::account_store::AccountStore::final_entry_settlement_receipt_sql(
-                    tx, installation, account_key, intent_id, true,
-                ),
+                    tx,
+                    installation,
+                    account_key,
+                    intent_id,
+                    true,
+                )
+            }
         }
         .map_err(|error| match error {
             crate::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),
@@ -182,18 +196,32 @@ impl RiskBookStore {
             generation,
         )?;
         let acknowledgement = match source {
-            EntrySettlementSource::Partial =>
+            EntrySettlementSource::Partial => {
                 crate::account_store::AccountStore::acknowledge_unified_partial_entry_sql(
-                    tx, installation, account_key, &original,
-                ),
-            EntrySettlementSource::Terminal =>
+                    tx,
+                    installation,
+                    account_key,
+                    &original,
+                )
+            }
+            EntrySettlementSource::Terminal => {
                 crate::account_store::AccountStore::acknowledge_unified_final_entry_sql(
-                    tx, installation, account_key, &original, false,
-                ),
-            EntrySettlementSource::Late =>
+                    tx,
+                    installation,
+                    account_key,
+                    &original,
+                    false,
+                )
+            }
+            EntrySettlementSource::Late => {
                 crate::account_store::AccountStore::acknowledge_unified_final_entry_sql(
-                    tx, installation, account_key, &original, true,
-                ),
+                    tx,
+                    installation,
+                    account_key,
+                    &original,
+                    true,
+                )
+            }
         };
         acknowledgement.map_err(|error| match error {
             crate::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),

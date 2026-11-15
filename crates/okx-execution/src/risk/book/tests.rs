@@ -1811,14 +1811,12 @@ fn risk_book_contract_sql_zero_terminal_then_post_release_late_fee_is_one_budget
     owner.begin_post(&post_fence(&input, 1)).unwrap();
     owner.close();
     let mut db = rusqlite::Connection::open(&fixture.path).unwrap();
-    let terminal = fixture_final_proof(
-        &input, "okx.entry-terminal-settlement/v1", 1, "0", 'b',
-    );
+    let terminal = fixture_final_proof(&input, "okx.entry-terminal-settlement/v1", 1, "0", 'b');
     {
         let tx = db.transaction().unwrap();
-        let receipt = RiskBookStore::settle_partial_entry_sql_transaction(
-            &tx, None, &terminal, 2, 7,
-        ).unwrap();
+        let receipt =
+            RiskBookStore::settle_partial_entry_sql_transaction(&tx, None, &terminal, 2, 7)
+                .unwrap();
         assert_eq!(receipt.book_sequence, 3);
         assert_eq!(receipt.cumulative_entry_usd, "0");
         assert!(!receipt.replayed);
@@ -1826,9 +1824,11 @@ fn risk_book_contract_sql_zero_terminal_then_post_release_late_fee_is_one_budget
     }
     {
         let tx = db.transaction().unwrap();
-        assert!(RiskBookStore::settle_partial_entry_sql_transaction(
-            &tx, None, &terminal, 2, 7,
-        ).unwrap().replayed);
+        assert!(
+            RiskBookStore::settle_partial_entry_sql_transaction(&tx, None, &terminal, 2, 7,)
+                .unwrap()
+                .replayed
+        );
         tx.rollback().unwrap();
     }
     // The real source-verified terminal RELEASE has its own separate
@@ -1843,24 +1843,28 @@ fn risk_book_contract_sql_zero_terminal_then_post_release_late_fee_is_one_budget
                 release_reason='fixture-terminal-reconciled'
              WHERE reservation_key=?3",
             rusqlite::params![uid('c'), uid('d'), input.reservation_key()],
-        ).unwrap();
+        )
+        .unwrap();
         tx.execute(
             "UPDATE risk_meta SET
                 global_reserved_usdt='0',loss_reserved_usd='0',
                 entry_reserved_usd='0',book_sequence=4
              WHERE singleton=1 AND book_sequence=3",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         tx.execute(
             "UPDATE risk_account_occupied SET reserved_usdt='0'
              WHERE account_key=?1",
             [account('a')],
-        ).unwrap();
+        )
+        .unwrap();
         tx.execute(
             "UPDATE risk_strategy_occupied SET reserved_usdt='0'
              WHERE account_key=?1",
             [account('a')],
-        ).unwrap();
+        )
+        .unwrap();
         tx.commit().unwrap();
     }
     let mut reopened = open(&fixture);
@@ -1872,20 +1876,15 @@ fn risk_book_contract_sql_zero_terminal_then_post_release_late_fee_is_one_budget
     let partial = partial_proof(&input, 2, "0.3", 'e');
     let tx = db.transaction().unwrap();
     assert!(matches!(
-        RiskBookStore::settle_partial_entry_sql_transaction(
-            &tx, None, &partial, 4, 7,
-        ),
+        RiskBookStore::settle_partial_entry_sql_transaction(&tx, None, &partial, 4, 7,),
         Err(RiskStoreError::AlreadyResolved)
     ));
     tx.rollback().unwrap();
-    let late = fixture_final_proof(
-        &input, "okx.entry-late-settlement/v1", 2, "0.3", 'f',
-    );
+    let late = fixture_final_proof(&input, "okx.entry-late-settlement/v1", 2, "0.3", 'f');
     {
         let tx = db.transaction().unwrap();
-        let accepted = RiskBookStore::settle_partial_entry_sql_transaction(
-            &tx, None, &late, 4, 7,
-        ).unwrap();
+        let accepted =
+            RiskBookStore::settle_partial_entry_sql_transaction(&tx, None, &late, 4, 7).unwrap();
         assert_eq!(accepted.book_sequence, 5);
         assert_eq!(accepted.cumulative_entry_usd, "0.3");
         tx.commit().unwrap();
@@ -1906,21 +1905,20 @@ fn risk_book_contract_sql_zero_terminal_then_post_release_late_fee_is_one_budget
             "SELECT state FROM risk_entries WHERE reservation_key=?1",
             [input.reservation_key()],
             |row| row.get(0)
-        ).unwrap(),
+        )
+        .unwrap(),
         "RELEASED"
     );
     let mut db = db;
     let tx = db.transaction().unwrap();
-    assert!(RiskBookStore::settle_partial_entry_sql_transaction(
-        &tx, None, &late, 4, 7,
-    ).unwrap().replayed);
-    let changed = fixture_final_proof(
-        &input, "okx.entry-late-settlement/v1", 2, "0.4", 'g',
+    assert!(
+        RiskBookStore::settle_partial_entry_sql_transaction(&tx, None, &late, 4, 7,)
+            .unwrap()
+            .replayed
     );
+    let changed = fixture_final_proof(&input, "okx.entry-late-settlement/v1", 2, "0.4", 'g');
     assert!(matches!(
-        RiskBookStore::settle_partial_entry_sql_transaction(
-            &tx, None, &changed, 5, 7,
-        ),
+        RiskBookStore::settle_partial_entry_sql_transaction(&tx, None, &changed, 5, 7,),
         Err(RiskStoreError::IdempotencyConflict)
     ));
     tx.rollback().unwrap();

@@ -13818,12 +13818,14 @@ fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_
         "UPDATE intents SET state='FILLED' WHERE
          installation_id=?1 AND account_key=?2 AND intent_id=?3",
         params![installation, &account, intent],
-    ).unwrap();
+    )
+    .unwrap();
     db.execute(
         "UPDATE risk_receipts SET state='TERMINAL_PENDING_CENTRAL' WHERE
          installation_id=?1 AND account_key=?2 AND intent_id=?3",
         params![installation, &account, intent],
-    ).unwrap();
+    )
+    .unwrap();
     let terminal = EntrySettlementEvidence {
         schema: "okx.entry-terminal-settlement/v1".into(),
         venue_update_ms: 7,
@@ -13840,44 +13842,83 @@ fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_
              request_hash,result_ref,committed_at)
          VALUES(?1,?2,?3,'ENTRY_SETTLEMENT_PROVEN',?4,?5,7)",
         params![
-            installation, &account, format!("entry-settlement:{intent}"),
-            &plan, serde_json::to_string(&terminal).unwrap()
+            installation,
+            &account,
+            format!("entry-settlement:{intent}"),
+            &plan,
+            serde_json::to_string(&terminal).unwrap()
         ],
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(
         AccountStore::final_entry_settlement_receipt_sql(
-            &db, installation, &account, intent, false,
-        ).unwrap(),
+            &db,
+            installation,
+            &account,
+            intent,
+            false,
+        )
+        .unwrap(),
         Some(terminal.clone())
     );
-    assert!(AccountStore::final_entry_settlement_receipt_sql(
-        &db, installation, "other-account", intent, false,
-    ).unwrap().is_none());
+    assert!(
+        AccountStore::final_entry_settlement_receipt_sql(
+            &db,
+            installation,
+            "other-account",
+            intent,
+            false,
+        )
+        .unwrap()
+        .is_none()
+    );
     {
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
         AccountStore::acknowledge_unified_final_entry_sql(
-            &tx, installation, &account, &terminal, false,
-        ).unwrap();
+            &tx,
+            installation,
+            &account,
+            &terminal,
+            false,
+        )
+        .unwrap();
         AccountStore::acknowledge_unified_final_entry_sql(
-            &tx, installation, &account, &terminal, false,
-        ).unwrap();
+            &tx,
+            installation,
+            &account,
+            &terminal,
+            false,
+        )
+        .unwrap();
         let mut forged = terminal.clone();
         forged.cumulative_entry_usd = Decimal::new(80, 2);
         assert!(matches!(
             AccountStore::acknowledge_unified_final_entry_sql(
-                &tx, installation, &account, &forged, false,
+                &tx,
+                installation,
+                &account,
+                &forged,
+                false,
             ),
             Err(StoreError::Invalid("UNIFIED_FINAL_ACK_SOURCE_CHANGED"))
         ));
         tx.commit().unwrap();
     }
-    let terminal_acks: i64 = db.query_row(
-        "SELECT COUNT(*) FROM operation_receipts
+    let terminal_acks: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM operation_receipts
          WHERE installation_id=?1 AND account_key=?2
            AND operation_id=?3 AND kind='ENTRY_TERMINAL_SETTLED'",
-        params![installation, &account, format!("entry-terminal-settled:{intent}:r2")],
-        |r| r.get(0),
-    ).unwrap();
+            params![
+                installation,
+                &account,
+                format!("entry-terminal-settled:{intent}:r2")
+            ],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(terminal_acks, 1);
     assert_eq!(
         db.query_row::<String, _, _>(
@@ -13885,7 +13926,8 @@ fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_
              installation_id=?1 AND account_key=?2 AND intent_id=?3",
             params![installation, &account, intent],
             |r| r.get(0)
-        ).unwrap(),
+        )
+        .unwrap(),
         "TERMINAL_PENDING_CENTRAL",
         "terminal charge must never release capital on its own"
     );
@@ -13893,7 +13935,8 @@ fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_
         "UPDATE risk_receipts SET state='LATE_SETTLEMENT_PENDING' WHERE
          installation_id=?1 AND account_key=?2 AND intent_id=?3",
         params![installation, &account, intent],
-    ).unwrap();
+    )
+    .unwrap();
     let late = EntrySettlementEvidence {
         schema: "okx.entry-late-settlement/v1".into(),
         source_covered_through_ms: 11,
@@ -13906,7 +13949,10 @@ fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_
     let late_json = serde_json::to_string(&late).unwrap();
     for (operation, kind) in [
         (format!("entry-late-head:{intent}"), "ENTRY_LATE_HEAD"),
-        (format!("entry-late:{intent}:r3"), "ENTRY_LATE_SETTLEMENT_PROVEN"),
+        (
+            format!("entry-late:{intent}:r3"),
+            "ENTRY_LATE_SETTLEMENT_PROVEN",
+        ),
     ] {
         db.execute(
             "INSERT INTO operation_receipts(
@@ -13914,7 +13960,8 @@ fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_
                 request_hash,result_ref,committed_at)
              VALUES(?1,?2,?3,?4,?5,?6,11)",
             params![installation, &account, operation, kind, &plan, &late_json],
-        ).unwrap();
+        )
+        .unwrap();
     }
     assert_eq!(
         AccountStore::final_entry_settlement_receipt_sql(
@@ -13922,32 +13969,41 @@ fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_
         ).unwrap(),
         Some(late.clone())
     );
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
-    AccountStore::acknowledge_unified_final_entry_sql(
-        &tx, installation, &account, &late, true,
-    ).unwrap();
-    AccountStore::acknowledge_unified_final_entry_sql(
-        &tx, installation, &account, &late, true,
-    ).unwrap();
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    AccountStore::acknowledge_unified_final_entry_sql(&tx, installation, &account, &late, true)
+        .unwrap();
+    AccountStore::acknowledge_unified_final_entry_sql(&tx, installation, &account, &late, true)
+        .unwrap();
     let mut changed = late.clone();
     changed.source_digest = "f".repeat(64);
     assert!(matches!(
         AccountStore::acknowledge_unified_final_entry_sql(
-            &tx, installation, &account, &changed, true,
+            &tx,
+            installation,
+            &account,
+            &changed,
+            true,
         ),
         Err(StoreError::Invalid("UNIFIED_FINAL_ACK_SOURCE_CHANGED"))
     ));
     tx.commit().unwrap();
-    let saved: (String, i64) = db.query_row(
-        "SELECT state,(SELECT COUNT(*) FROM operation_receipts
+    let saved: (String, i64) = db
+        .query_row(
+            "SELECT state,(SELECT COUNT(*) FROM operation_receipts
           WHERE installation_id=?1 AND account_key=?2
           AND operation_id=?4 AND kind='ENTRY_LATE_SETTLED')
          FROM risk_receipts WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
-        params![
-            installation, &account, intent, format!("entry-late-settled:{intent}:r3"),
-        ],
-        |r| Ok((r.get(0)?,r.get(1)?)),
-    ).unwrap();
+            params![
+                installation,
+                &account,
+                intent,
+                format!("entry-late-settled:{intent}:r3"),
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(saved, ("LATE_SETTLEMENT_PENDING".into(), 1));
 }
 
