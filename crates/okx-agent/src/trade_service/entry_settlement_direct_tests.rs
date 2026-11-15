@@ -198,6 +198,15 @@ async fn fixture(label: &str, finance: bool) -> Fixture {
         .await
         .unwrap();
     let sends = std::sync::atomic::AtomicUsize::new(0);
+    let mut wrong_plan = saved.clone();
+    wrong_plan.plan_hash = "wrong-plan".into();
+    let denied = crate::trade_service::post_once(&store, &wrong_plan, deadline(), || async {
+        sends.fetch_add(1, Ordering::SeqCst);
+        Ok::<_, String>(())
+    })
+    .await;
+    assert_eq!(denied.unwrap_err(), "POST_CLAIM_PLAN_MISMATCH");
+    assert_eq!(sends.load(Ordering::SeqCst), 0);
     let (first, second) = tokio::join!(
         crate::trade_service::post_once(&store, &saved, deadline(), || async {
             sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

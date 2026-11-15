@@ -16,13 +16,13 @@ where
     }
     let id = intent.intent_id.clone();
     let revision = intent.policy_revision;
-    if !store
-        .claim_legacy_post(until, id, revision)
+    let Some(claim) = store
+        .claim_legacy_send(until, id, intent.plan_hash.clone(), revision)
         .await
         .map_err(err)?
-    {
+    else {
         return Ok(None);
-    }
+    };
     if Instant::now() >= until {
         let id = intent.intent_id.clone();
         store
@@ -40,7 +40,7 @@ where
             .map_err(err)?;
         return Err("COMMAND_EXPIRED".into());
     }
-    match send().await {
+    match claim.send(send).await {
         Ok(v) => Ok(Some(v)),
         Err(reason)
             if reason == "COMMAND_EXPIRED_BEFORE_SEND"

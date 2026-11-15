@@ -1,3 +1,27 @@
+## #510 - consuming send capability at the real legacy sender
+
+CommittedVenueSend is an ephemeral owned result: private fields/constructor,
+no Clone or serde, bound to installation/account/intent/plan. Its send(self,
+FnOnce) consumes the value. Legacy claim_legacy_send reads the original plan,
+rejects a mismatched expected plan BEFORE CAS, performs original begin_post,
+and constructs the value only after that method's COMMIT. post_once consumes
+it; deadline and owner-confirmed-unsent/UNKNOWN outcome handling remain.
+There is no constructor from POSTING, Inspect, stored receipt or reopened state.
+
+A PRIVATE native commit_native_post path is staged: same original gate and
+combined risk/account transaction, scoped lookup, COMMIT before minting the
+value, lost response drops it. It is NOT called by Agent yet and does not
+establish an accepted Native positive send. Original public risk actions stay
+fail-closed; native Reserve producer and first-COMMIT/sender integration remain
+required. These staged methods must not be accepted based on legacy tests.
+
+Execution library: 271 PASS, 0 FAIL, 2 ignored, 7.50s after build. Agent all-target
+check and architecture guard/negative self-test pass. Direct sender scenarios
+exercise wrong-plan zero-send, competing callers, repeat no-send and original
+partial/terminal/late settlement behavior: 7 PASS, 0 FAIL, 0.21s after a
+2m24s Agent test build. Native positive COMMIT/send is NOT_PROVEN.
+No full current-SHA 26x, RB09 or P95 acceptance is claimed.
+
 ## #510 - Native opening packet retention and actual stopped-owner gate witness
 
 NativeFinanceRisk::install_produced_opening now consumes ProducedOpening itself,
