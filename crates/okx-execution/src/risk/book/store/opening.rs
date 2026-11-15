@@ -11,7 +11,7 @@ use okx_kernel::risk::money::RiskAmount;
 /// The external protocol DTO is converted at the agent boundary; execution
 /// never depends on protocol, WS, Cloudflare or the exchange transport.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct NativeOpeningAccount {
+pub struct NativeOpeningAccount {
     pub account_key: String,
     pub history_from_ms: u64,
     pub history_through_ms: u64,
@@ -23,7 +23,7 @@ pub(crate) struct NativeOpeningAccount {
     pub source_digest: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct NativeOpeningSource {
+pub struct NativeOpeningSource {
     pub campaign_id: String,
     pub limit_usd: String,
     pub consumed_usd: String,

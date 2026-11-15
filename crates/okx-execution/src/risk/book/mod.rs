@@ -21,8 +21,9 @@ pub(crate) use store::{
 // Original RiskBook operations for the shared finance SQL writer. These are
 // DOMAIN calls on the caller's existing transaction, not a second owner,
 // separate campaign database or bypass around AccountStore source proofs.
-pub(crate) use store::{NativeOpeningAccount, NativeOpeningSource, ReserveInput, VerifiedCensus};
+pub use store::{NativeOpeningAccount, NativeOpeningSource};
 pub(crate) use store::{PostFenceInput, TerminalResolveInput};
+pub(crate) use store::{ReserveInput, VerifiedCensus};
 
 /// The ORIGINAL AccountStore receipt type to debit; never caller-supplied
 /// monetary values. All three sources share the same RiskBook arithmetic.

@@ -658,19 +658,10 @@ impl TradeService {
         // live pending orders, unprotected positions or UNKNOWN obligations.
         // The same authenticated whole-cohort census used for RESERVE must
         // pass before an opening can be installed.
-        let census = self.census(state).await?;
-        if !census.complete {
-            return Err("ENTRY_OPENING_LIVE_CENSUS_INCOMPLETE".into());
-        }
+        let packet = self.produce_opening(state, source.clone()).await?;
         let result = self
             .risk
-            .request(self.risk_command(
-                state,
-                format!("install_opening_{}", now()),
-                RiskCommandAction::InstallEntryOpening {
-                    source: source.clone(),
-                },
-            ))
+            .install_produced_opening(packet)
             .await
             .map_err(str::to_owned)?;
         if result.status != RiskDecisionStatus::Observed

@@ -3,7 +3,10 @@
 #[cfg(test)]
 use crate::{StoreError, StoreResult};
 use std::sync::Arc;
+mod opening_ingress;
 mod owner;
+pub(crate) use opening_ingress::install_reported_opening_sql;
+pub use opening_ingress::{ReportedOpeningCensus, ReportedOpeningReceipt};
 mod readback;
 mod sources;
 mod trade_reads;
@@ -104,6 +107,10 @@ pub struct UnifiedFinanceBoundSettlementReceipt {
 
 #[derive(Debug, Clone)]
 pub(crate) enum UnifiedFinanceWrite {
+    InstallReportedOpening {
+        source: crate::risk::NativeOpeningSource,
+        census: ReportedOpeningCensus,
+    },
     AssignBoundCapital {
         account: String,
         command: crate::CapitalAssignmentCommand,

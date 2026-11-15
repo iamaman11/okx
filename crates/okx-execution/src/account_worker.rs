@@ -586,16 +586,19 @@ impl AccountStoreHandle {
 }
 
 mod unified;
+pub use crate::risk::{NativeOpeningAccount, NativeOpeningSource};
 pub use unified::{
-    UnifiedFinanceAccountPolicyReadback, UnifiedFinanceAccountReadback,
-    UnifiedFinanceBoundSettlement, UnifiedFinanceBoundSettlementReceipt, UnifiedFinanceBoundUnsent,
+    ReportedOpeningCensus, ReportedOpeningReceipt, UnifiedFinanceAccountPolicyReadback,
+    UnifiedFinanceAccountReadback, UnifiedFinanceBoundSettlement,
+    UnifiedFinanceBoundSettlementReceipt, UnifiedFinanceBoundUnsent,
     UnifiedFinanceBoundUnsentReceipt, UnifiedFinanceCampaignSummary, UnifiedFinanceHandle,
     UnifiedFinanceInventory, UnifiedFinancePolicy, UnifiedFinancePolicyAccount,
     UnifiedFinanceReservationReadback,
 };
 pub(crate) use unified::{
     UnifiedFinanceWrite, UnifiedFinanceWriteReceipt, apply_original_unified_finance_transaction,
-    original_bound_entry_source_sql, original_bound_unsent_source_sql,
+    install_reported_opening_sql, original_bound_entry_source_sql,
+    original_bound_unsent_source_sql,
 };
 
 #[cfg(test)]

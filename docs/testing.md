@@ -1,3 +1,38 @@
+## #510 - opening producer-to-Native handoff (activation remains closed)
+
+TradeService no longer discards its real whole-cohort census before opening
+installation. Private ProducedOpening is constructed only by the TradeService
+producer after census/command validation. NativeRiskClient dispatches this
+packet locally or preserves the existing legacy wire command. Native ingress
+validates installation/campaign/account roster and converts only observed
+amounts/times/digest, never a caller-provided financial generation.
+
+Execution receives public DATA DTOs NativeOpeningSource/Account and
+ReportedOpeningCensus; these are not source authentication or financial grants.
+The existing activation gate remains mandatory. The private SQL binder reads
+original risk generation/roster, validates reported account maps/exact money,
+source time/digest and calls the original source-bound opening operation in
+one transaction. Dispatch obtains clock time inside the SQL owner. VerifiedCensus
+remains private. Native returns success only after matching the committed source
+digest to the actual Summary opening readback; network failure is not a retry
+permission. Generic request(InstallEntryOpening) still rejects without this
+internal producer route.
+
+The existing two-account source contract now also exercises the reported binder:
+future/stale census, missing account, foreign installation and negative amount
+reject; valid observations reach the original operation and rollback cleanly.
+Execution library: 271 PASS, 0 FAIL, 2 ignored, 7.74s after build. Agent all-target
+check and architecture/negative guard pass. Existing risk_bridge tests: 5 PASS,
+0 FAIL, 0.01s after a 2m11s Agent test build. They check legacy risk routing
+regressions, not the new positive activated Native opening. This is NOT an activated full Native
+runtime test: production AccountResources still selects the legacy store, and
+end-to-end positive activation, readback failure, RB09 and full 26x are NOT_PROVEN.
+
+Next critical integration: source-bound Reserve/BeginPost + one-use send handoff,
+Resolve Unknown/Open/terminal, remaining account APIs/composition and verified
+activation/old Cloudflare finance disable. Do not grant a send from POSTING,
+Inspect or restart readback. No installed application state was changed.
+
 ## #510 - typed SQL boundary of the production venue sender
 
 post_once now calls claim_legacy_post and record_intent_outcome instead of

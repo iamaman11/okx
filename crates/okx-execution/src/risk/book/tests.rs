@@ -3838,6 +3838,59 @@ fn risk_book_contract_unified_original_opening_requires_exact_two_account_sql_so
     // Native SQL rollback: neither an original source nor risk opening is
     // installed before an actual COMMIT by the sole installation writer.
     {
+        use crate::account_worker::{ReportedOpeningCensus, install_reported_opening_sql};
+        let reported = ReportedOpeningCensus {
+            source_digest: complete.source_digest.clone(),
+            generated_at_ms: 201,
+            read_floor_ms: 201,
+            occupied: complete
+                .occupied
+                .iter()
+                .map(|(k, v)| (k.clone(), v.canonical().unwrap()))
+                .collect(),
+            cumulative_loss_usd: complete
+                .cumulative_loss_usd
+                .iter()
+                .map(|(k, v)| (k.clone(), v.canonical().unwrap()))
+                .collect(),
+        };
+        let tx = db.transaction().unwrap();
+        let mut bad = reported.clone();
+        bad.generated_at_ms = 9000;
+        assert!(
+            install_reported_opening_sql(&tx, "test-installation", &source, &bad, 202).is_err()
+        );
+        bad = reported.clone();
+        bad.occupied.remove(&account('a'));
+        assert!(
+            install_reported_opening_sql(&tx, "test-installation", &source, &bad, 202).is_err()
+        );
+        bad = reported.clone();
+        bad.occupied.insert(account('a'), "-1".into());
+        assert!(
+            install_reported_opening_sql(&tx, "test-installation", &source, &bad, 202).is_err()
+        );
+        assert!(
+            install_reported_opening_sql(&tx, "foreign-installation", &source, &reported, 202)
+                .is_err()
+        );
+        assert!(
+            install_reported_opening_sql(&tx, "test-installation", &source, &reported, 6000)
+                .is_err()
+        );
+        let result =
+            install_reported_opening_sql(&tx, "test-installation", &source, &reported, 202)
+                .unwrap();
+        assert!(matches!(
+            result,
+            UnifiedFinanceWriteReceipt::Risk(super::UnifiedRiskDecision::EntryOpeningInstalled {
+                replayed: false,
+                ..
+            })
+        ));
+        tx.rollback().unwrap();
+    }
+    {
         let tx = db.transaction().unwrap();
         let receipt =
             apply_original_unified_finance_transaction(&tx, "test-installation", command())

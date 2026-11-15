@@ -48,6 +48,15 @@ fn apply_original_unified_finance_inner(
             .map_err(StoreError::Invalid)
     };
     match command {
+        UnifiedFinanceWrite::InstallReportedOpening { source, census } => {
+            super::opening_ingress::install_reported_opening_sql(
+                tx,
+                installation,
+                &source,
+                &census,
+                super::opening_ingress::owner_now_ms()?,
+            )
+        }
         UnifiedFinanceWrite::AssignBoundCapital { account, command } => {
             let result =
                 AccountStore::assign_capital_sql(tx, Some((installation, &account)), &command)?;

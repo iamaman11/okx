@@ -14,9 +14,9 @@ use okx_protocol::risk_authority::{
 
 #[derive(Clone)]
 pub struct NativeFinanceRisk {
-    owner: UnifiedFinanceHandle,
-    installation: String,
-    campaign: String,
+    pub(super) owner: UnifiedFinanceHandle,
+    pub(super) installation: String,
+    pub(super) campaign: String,
 }
 
 impl NativeFinanceRisk {

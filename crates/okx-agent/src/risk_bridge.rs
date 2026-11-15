@@ -24,6 +24,18 @@ enum RiskRoute {
     LocalStopped(crate::native_finance_risk::NativeFinanceRisk),
 }
 impl NativeRiskClient {
+    pub(crate) async fn install_produced_opening(
+        &self,
+        packet: crate::trade_service::ProducedOpening,
+    ) -> Result<RiskResult, &'static str> {
+        let (command, census) = packet.into_parts();
+        match &self.route {
+            RiskRoute::Cloudflare(_) => self.request(command).await,
+            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
+                backend.install_produced_opening(command, census).await
+            }
+        }
+    }
     pub fn new(tx: mpsc::Sender<OutboundRiskCommand>) -> Self {
         Self {
             route: RiskRoute::Cloudflare(tx),

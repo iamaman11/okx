@@ -27,6 +27,8 @@ use tokio::sync::{Mutex, RwLock};
 mod entry_budget;
 mod entry_settlement;
 mod execute;
+mod opening_source;
+pub(crate) use opening_source::ProducedOpening;
 mod plan;
 mod protection_cleanup;
 mod protection_resize;
