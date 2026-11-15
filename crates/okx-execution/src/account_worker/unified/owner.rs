@@ -23,6 +23,7 @@ type FinanceJob = Box<dyn FnOnce(&mut rusqlite::Connection) + Send + 'static>;
 pub(super) struct FinanceWorkerOwner {
     sender: SyncSender<FinanceJob>,
     terminated: watch::Receiver<bool>,
+    timings: Arc<super::super::SqlTimingCounters>,
 }
 
 impl UnifiedFinanceHandle {
@@ -127,6 +128,7 @@ impl UnifiedFinanceHandle {
             owner: Arc::new(FinanceWorkerOwner {
                 sender,
                 terminated: terminated_rx,
+                timings: Arc::new(crate::account_worker::SqlTimingCounters::default()),
             }),
             installation,
         })
@@ -134,6 +136,31 @@ impl UnifiedFinanceHandle {
 
     pub fn termination_signal(&self) -> watch::Receiver<bool> {
         self.owner.terminated.clone()
+    }
+    /// Startup checks authority before loading private clients or publishing
+    /// trading routes. A staged import never becomes live by being opened.
+    pub async fn verify_live_authority(&self, deadline: Instant) -> StoreResult<()> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            require_verified_live_finance_authority(&tx, &installation)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+    /// Actual observations of this installation writer, never legacy timings.
+    pub fn sql_timing(&self) -> super::super::AccountSqlTimingV1 {
+        use std::sync::atomic::Ordering;
+        let t = &self.owner.timings;
+        super::super::AccountSqlTimingV1 {
+            schema: "okx.account-sql-timing/v1",
+            observed_jobs: t.jobs.load(Ordering::Relaxed),
+            last_queue_wait_ms: t.last_queue_wait_ms.load(Ordering::Relaxed),
+            last_sql_owner_ms: t.last_sql_owner_ms.load(Ordering::Relaxed),
+            max_queue_wait_ms: t.max_queue_wait_ms.load(Ordering::Relaxed),
+            max_sql_owner_ms: t.max_sql_owner_ms.load(Ordering::Relaxed),
+        }
     }
 
     // One FIFO and a single Connection for all future typed account/campaign
@@ -158,12 +185,31 @@ impl UnifiedFinanceHandle {
             return Err(StoreError::Invalid("UNIFIED_FINANCE_QUEUE_DEADLINE"));
         }
         let (tx, rx) = oneshot::channel();
+        let enqueued = Instant::now();
+        let timings = self.owner.timings.clone();
         let job: FinanceJob = Box::new(move |db| {
             if start_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 let _ = tx.send(Err(StoreError::Invalid("UNIFIED_FINANCE_QUEUE_DEADLINE")));
                 return;
             }
-            let _ = tx.send(operation(db));
+            let started = Instant::now();
+            let result = operation(db);
+            use std::sync::atomic::Ordering;
+            let queue_ms =
+                u64::try_from(started.duration_since(enqueued).as_millis()).unwrap_or(u64::MAX);
+            let owner_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            timings.jobs.fetch_add(1, Ordering::Relaxed);
+            timings
+                .last_queue_wait_ms
+                .store(queue_ms, Ordering::Relaxed);
+            timings.last_sql_owner_ms.store(owner_ms, Ordering::Relaxed);
+            timings
+                .max_queue_wait_ms
+                .fetch_max(queue_ms, Ordering::Relaxed);
+            timings
+                .max_sql_owner_ms
+                .fetch_max(owner_ms, Ordering::Relaxed);
+            let _ = tx.send(result);
         });
         self.owner
             .sender
@@ -758,7 +804,11 @@ mod unified_finance_queue_contract_tests {
     fn offline_owner(sender: SyncSender<FinanceJob>) -> UnifiedFinanceHandle {
         let (_, terminated) = watch::channel(false);
         UnifiedFinanceHandle {
-            owner: Arc::new(FinanceWorkerOwner { sender, terminated }),
+            owner: Arc::new(FinanceWorkerOwner {
+                sender,
+                terminated,
+                timings: Arc::new(crate::account_worker::SqlTimingCounters::default()),
+            }),
             installation: "queue-fixture".into(),
         }
     }

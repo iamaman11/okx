@@ -178,7 +178,7 @@ fn rejected(response: AgentResponse, code: &str) {
     assert!(response.result.is_none());
     assert_eq!(response.failure.unwrap().code, code);
 }
-async fn money(store: &AccountStoreHandle) -> Value {
+async fn money(store: &crate::execution_store::ExecutionStore) -> Value {
     store
         .call(deadline(), |s| {
             Ok(json!({

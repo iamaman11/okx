@@ -13,6 +13,8 @@ mod tests;
 
 #[path = "account_source_state.rs"]
 mod source_state;
+#[path = "account_source_stops.rs"]
+mod source_stops;
 pub use source_state::{AccountSourceCursors, AccountSourceState};
 
 #[path = "account_nav_projection.rs"]
@@ -31,9 +33,17 @@ pub use reserve_source::AccountReserveSource;
 #[path = "account_authority_reads.rs"]
 mod authority_reads;
 pub use authority_reads::{AccountPolicySnapshot, CentralReceiptView};
+#[path = "account_financial_admission.rs"]
+mod financial_admission;
+pub use financial_admission::{FinancialAdmissionRequest, instance_nav_gate};
 #[path = "account_trade_reads.rs"]
 mod trade_reads;
 pub use trade_reads::TradeIntentLookup;
+#[path = "account_census_reads.rs"]
+mod census_reads;
+pub use census_reads::{
+    AccountCensusRequest, AccountCensusSnapshot, AccountPositionCensus, TerminalPeerSources,
+};
 
 #[path = "account_captured_fills.rs"]
 mod captured_fills;

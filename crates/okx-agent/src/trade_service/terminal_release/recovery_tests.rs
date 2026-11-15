@@ -304,7 +304,7 @@ async fn fixture() -> Fixture {
     }
 }
 
-async fn snapshot(store: &AccountStoreHandle) -> serde_json::Value {
+async fn snapshot(store: &crate::execution_store::ExecutionStore) -> serde_json::Value {
     let mut result = super::terminal_coverage_sql_snapshot(store).await;
     let money = store
         .call(deadline(), |s| {

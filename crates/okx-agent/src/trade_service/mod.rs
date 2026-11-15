@@ -360,6 +360,7 @@ impl TradeService {
         r: &AccountResources,
         supplied: Option<&CentralGovernanceSnapshot>,
     ) -> Result<(CentralGovernanceSnapshot, AccountControl), String> {
+        self.verify_runtime_finance_route(r)?;
         if let Some(s) = supplied {
             self.update_governance(s).await?;
         }
@@ -380,14 +381,36 @@ impl TradeService {
         let paused = !account.access_enabled();
         let campaign = state.state.campaign_id.clone();
         let limit = dec(&state.state.campaign_loss_limit_usd)?;
-        r.execution
-            .store
-            .call(deadline(), move |s| {
-                s.apply_authority_policy(revision, paused, &campaign, limit)
-            })
-            .await
-            .map_err(err)?;
+        if r.execution.store.native_scope().is_some() {
+            if !self.risk.apply_native_governance(&state).await? {
+                return Err("NATIVE_GOVERNANCE_ROUTE_MISMATCH".into());
+            }
+        } else {
+            r.execution
+                .store
+                .call(deadline(), move |s| {
+                    s.apply_authority_policy(revision, paused, &campaign, limit)
+                })
+                .await
+                .map_err(err)?;
+        }
         Ok((state, account))
+    }
+    fn verify_runtime_finance_route(&self, resource: &AccountResources) -> Result<(), String> {
+        match (
+            resource.execution.store.native_scope(),
+            self.risk.native_finance_owner(),
+        ) {
+            (None, None) => Ok(()),
+            (Some((owner, account)), Some(risk_owner))
+                if owner.installation_id() == self.accounts.installation_id()
+                    && risk_owner.installation_id() == owner.installation_id()
+                    && account == resource.configuration.account_key.wire() =>
+            {
+                Ok(())
+            }
+            _ => Err("NATIVE_RUNTIME_FINANCE_ROUTE_MISMATCH".into()),
+        }
     }
     /// A preview observes an already-applied governance revision; only the
     /// policy delivery and execution owners may write policy to account SQL.

@@ -618,7 +618,9 @@ async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-async fn terminal_coverage_sql_snapshot(store: &AccountStoreHandle) -> serde_json::Value {
+async fn terminal_coverage_sql_snapshot(
+    store: &crate::execution_store::ExecutionStore,
+) -> serde_json::Value {
     store
         .call(deadline(), |s| {
             Ok(serde_json::json!({

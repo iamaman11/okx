@@ -43,6 +43,10 @@ struct Cli {
     /// finance.sqlite. Enables read-only native Run/Once, never live trading.
     #[arg(long, global = true)]
     stopped_finance_campaign: Option<String>,
+    /// Native finance startup still requires independently verified RB09
+    /// authority; selecting this route never activates an imported database.
+    #[arg(long, global = true, conflicts_with = "stopped_finance_campaign")]
+    native_finance_campaign: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -139,6 +143,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run(cli: Cli) -> AgentResult<()> {
     let config = AgentConfig::new(cli.root, cli.key_id);
     let stopped_finance_campaign = cli.stopped_finance_campaign;
+    let native_finance_campaign = cli.native_finance_campaign;
+    let stopped_finance_mode = stopped_finance_campaign.is_some();
     let env = OkxEnvironment::new(Region::from_str(&cli.region)?, false);
     match cli.command {
         Command::InitKey => println!(
@@ -276,18 +282,30 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     }
                 };
             let (accounts, native_owner) = if finance_present {
-                let campaign = stopped_finance_campaign.as_deref().ok_or_else(|| {
-                    AgentError::FinancialCaptureTask("FINANCE_STOPPED_CAMPAIGN_REQUIRED".into())
-                })?;
-                let (registry, owner) = AccountRuntimeRegistry::open_stopped_finance(
-                    &config.root,
-                    budget.clone(),
-                    campaign,
-                )
-                .await?;
+                let campaign = stopped_finance_campaign
+                    .as_deref()
+                    .or(native_finance_campaign.as_deref())
+                    .ok_or_else(|| {
+                        AgentError::FinancialCaptureTask("FINANCE_STOPPED_CAMPAIGN_REQUIRED".into())
+                    })?;
+                let (registry, owner) = if stopped_finance_mode {
+                    AccountRuntimeRegistry::open_stopped_finance(
+                        &config.root,
+                        budget.clone(),
+                        campaign,
+                    )
+                    .await?
+                } else {
+                    AccountRuntimeRegistry::open_native_finance(
+                        &config.root,
+                        budget.clone(),
+                        campaign,
+                    )
+                    .await?
+                };
                 (Arc::new(registry), Some(owner))
             } else {
-                if stopped_finance_campaign.is_some() {
+                if stopped_finance_campaign.is_some() || native_finance_campaign.is_some() {
                     return Err(AgentError::FinancialCaptureTask(
                         "FINANCE_STOPPED_IMPORT_REQUIRED".into(),
                     ));
@@ -307,15 +325,20 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let (risk_tx, risk) = tokio::sync::mpsc::channel(32);
             let risk_client = match native_owner {
                 Some(owner) => {
-                    let campaign =
-                        stopped_finance_campaign.expect("stopped finance already required above");
+                    let campaign = stopped_finance_campaign
+                        .or(native_finance_campaign)
+                        .expect("finance campaign already required above");
                     let backend = NativeFinanceRisk::new(
                         owner,
                         accounts.installation_id().to_owned(),
                         campaign,
                     )
                     .map_err(|reason| AgentError::FinancialCaptureTask(reason.into()))?;
-                    NativeRiskClient::local_stopped(backend)
+                    if stopped_finance_mode {
+                        NativeRiskClient::local_stopped(backend)
+                    } else {
+                        NativeRiskClient::local(backend)
+                    }
                 }
                 None => NativeRiskClient::new(risk_tx),
             };
@@ -428,6 +451,7 @@ mod native_finance_startup_tests {
             key_id: "agent-key-1".into(),
             region: "global".into(),
             stopped_finance_campaign: campaign,
+            native_finance_campaign: None,
             command: Command::Run {
                 mailbox_issue: None,
                 poll_seconds: 15,
@@ -466,6 +490,33 @@ mod native_finance_startup_tests {
         ));
         assert!(!path.join("accounts").exists());
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_native_selection_cannot_initialize_or_use_legacy_without_finance() {
+        let path = root();
+        let mut cli = startup(path.clone(), None);
+        cli.native_finance_campaign = Some("campaign-X".into());
+        assert!(matches!(run(cli).await,
+            Err(AgentError::FinancialCaptureTask(ref reason)) if reason=="FINANCE_STOPPED_IMPORT_REQUIRED"));
+        assert!(!path.join("accounts").exists());
+        assert!(!path.join("finance").exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn stopped_and_native_finance_modes_are_mutually_exclusive() {
+        assert!(
+            Cli::try_parse_from([
+                "okx-agent",
+                "--stopped-finance-campaign",
+                "campaign-X",
+                "--native-finance-campaign",
+                "campaign-X",
+                "run",
+            ])
+            .is_err()
+        );
     }
 
     #[tokio::test]

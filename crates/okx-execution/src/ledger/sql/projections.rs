@@ -232,147 +232,21 @@ impl AccountStore {
         expected_revision: Option<i64>,
         now: i64,
     ) -> StoreResult<OperationReceipt> {
-        let kind = format!("STRATEGY_{action}");
-        if let Some(old) = self.operation(operation_id)? {
-            if old.request_hash != request_hash || old.kind != kind {
-                return Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
-            }
-            return Ok(old);
-        }
-        if !matches!(action, "create" | "update" | "start" | "stop")
-            || instance.budget < Decimal::ZERO
-        {
-            return Err(StoreError::Invalid("INVALID_INSTANCE_MUTATION"));
-        }
-        let prior = self.instance(&instance.instance_id)?;
-        if action == "create" && prior.is_some() {
-            return Err(StoreError::Invalid("INSTANCE_ALREADY_EXISTS"));
-        }
-        if action != "create" && prior.is_none() {
-            return Err(StoreError::Invalid("INSTANCE_NOT_FOUND"));
-        }
-        if prior.as_ref().map(|i| i.policy_revision) != expected_revision {
-            return Err(StoreError::Invalid("INSTANCE_REVISION_CONFLICT"));
-        }
-        let next_revision = prior
-            .as_ref()
-            .map(|i| {
-                i.policy_revision
-                    .checked_add(1)
-                    .ok_or(StoreError::Invalid("INSTANCE_REVISION_OVERFLOW"))
-            })
-            .transpose()?
-            .unwrap_or(1);
-        if instance.policy_revision != next_revision {
-            return Err(StoreError::Invalid("INSTANCE_REVISION_CONFLICT"));
-        }
-        let mut committed = if matches!(action, "start" | "stop") {
-            prior
-                .clone()
-                .ok_or(StoreError::Invalid("INSTANCE_NOT_FOUND"))?
-        } else {
-            instance.clone()
-        };
-        committed.policy_revision = next_revision;
-        committed.last_decision_key = prior.as_ref().and_then(|i| i.last_decision_key.clone());
-        committed.enabled = match action {
-            "start" => true,
-            "stop" => false,
-            _ => committed.enabled,
-        };
-        let prior_definition = prior
-            .as_ref()
-            .map(|_| self.strategy_definition(&instance.instance_id))
-            .transpose()?;
-        let mut candidate = super::definitions::canonical_definition(&committed, 1, now)?;
-        let changed = prior_definition.as_ref().is_none_or(|d| {
-            d.definition_id != candidate.definition_id
-                || d.parameters_digest != candidate.parameters_digest
-        });
-        let definition = if changed {
-            let revision = if let Some(old) = &prior_definition {
-                old.version
-                    .split('-')
-                    .next()
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .and_then(|v| v.checked_add(1))
-                    .ok_or(StoreError::Invalid("DEFINITION_VERSION_OVERFLOW"))?
-            } else {
-                instance
-                    .definition_version
-                    .split('-')
-                    .next()
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .filter(|v| *v > 0)
-                    .ok_or(StoreError::Invalid("DEFINITION_VERSION_INVALID"))?
-            };
-            candidate = super::definitions::canonical_definition(&committed, revision, now)?;
-            candidate
-        } else {
-            prior_definition.ok_or(StoreError::Invalid("DEFINITION_VERSION_MISSING"))?
-        };
-        committed.definition_id = definition.definition_id.clone();
-        committed.definition_version = definition.version.clone();
-        committed.parameters = definition.parameters.clone();
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        super::definitions::persist_definition(&tx, &definition)?;
-        let changed = if action == "create" {
-            tx.execute(
-                "INSERT INTO strategy_instances VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                params![
-                    committed.instance_id,
-                    committed.definition_id,
-                    committed.definition_version,
-                    committed.parameters,
-                    committed.enabled,
-                    committed.policy_revision,
-                    exact(committed.budget),
-                    committed.last_decision_key,
-                    definition.parameters_digest
-                ],
-            )?
-        } else {
-            tx.execute("UPDATE strategy_instances SET definition_id=?2,definition_version=?3,parameters=?4,enabled=?5,policy_revision=?6,budget=?7,parameters_digest=?8 WHERE instance_id=?1 AND policy_revision=?9",params![committed.instance_id,committed.definition_id,committed.definition_version,committed.parameters,committed.enabled,committed.policy_revision,exact(committed.budget),definition.parameters_digest,expected_revision])?
-        };
-        if changed != 1 {
-            return Err(StoreError::Invalid("INSTANCE_REVISION_CONFLICT"));
-        }
-        if matches!(action, "create" | "update") {
-            let old = prior.as_ref().map_or(Decimal::ZERO, |i| i.budget);
-            let delta = committed
-                .budget
-                .checked_sub(old)
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            if delta != Decimal::ZERO {
-                tx.execute(
-                    "INSERT INTO allocations VALUES(?1,?2,?3,'USD',?4)",
-                    params![
-                        format!("allocation:{operation_id}"),
-                        committed.instance_id,
-                        exact(delta),
-                        now
-                    ],
-                )?;
-            }
-        }
-        if action == "create" {
-            let scope = format!("strategy:{}", committed.instance_id);
-            // A budget allocation is a risk-policy fact, not a capital transfer.
-            // Register the strategy view, but do not fabricate opening equity,
-            // return, or a high-watermark without verified finance evidence.
-            tx.execute("INSERT INTO nav_scopes VALUES(?1,'USD')", [&scope])?;
-        }
-        let result = serde_json::to_string(&committed)
-            .map_err(|_| StoreError::Invalid("INSTANCE_SERIALIZATION_FAILED"))?;
-        tx.execute(
-            "INSERT INTO operation_receipts VALUES(?1,?2,?3,?4,?5)",
-            params![operation_id, kind, request_hash, result, now],
+        let receipt = Self::mutate_instance_sql(
+            &tx,
+            None,
+            operation_id,
+            request_hash,
+            action,
+            instance,
+            expected_revision,
+            now,
         )?;
         tx.commit()?;
-        self.operation(operation_id)?
-            .ok_or(StoreError::Invalid("OPERATION_MISSING"))
+        Ok(receipt)
     }
     pub fn apply_authority_policy(
         &mut self,
@@ -438,28 +312,7 @@ impl AccountStore {
         Ok(())
     }
     pub fn instances(&self) -> StoreResult<Vec<StrategyInstance>> {
-        let mut s=self.connection.prepare("SELECT instance_id,definition_id,definition_version,parameters,enabled,policy_revision,budget,last_decision_key FROM strategy_instances ORDER BY instance_id")?;
-        s.query_map([], |r| {
-            Ok((
-                StrategyInstance {
-                    instance_id: r.get(0)?,
-                    definition_id: r.get(1)?,
-                    definition_version: r.get(2)?,
-                    parameters: r.get(3)?,
-                    enabled: r.get(4)?,
-                    policy_revision: r.get(5)?,
-                    budget: Decimal::ZERO,
-                    last_decision_key: r.get(7)?,
-                },
-                r.get::<_, String>(6)?,
-            ))
-        })?
-        .map(|x| {
-            let (mut i, b) = x?;
-            i.budget = decimal(b)?;
-            Ok(i)
-        })
-        .collect()
+        Self::instances_sql(&self.connection, None)
     }
     pub fn latch_stop(&mut self, id: &str, scope: &str, reason: &str, now: i64) -> StoreResult<()> {
         Self::latch_stop_sql(&self.connection, None, id, scope, reason, now)
@@ -485,14 +338,7 @@ impl AccountStore {
         Ok(())
     }
     pub fn resolve_stop(&mut self, id: &str, evidence: &str) -> StoreResult<()> {
-        if evidence.is_empty() {
-            return Err(StoreError::Invalid("STOP_RESOLUTION_EVIDENCE_REQUIRED"));
-        }
-        self.connection.execute(
-            "UPDATE risk_stops SET resolution=?2 WHERE stop_id=?1 AND resolution IS NULL",
-            params![id, evidence],
-        )?;
-        Ok(())
+        Self::resolve_source_stop_sql(&self.connection, None, id, evidence)
     }
     pub fn stops(&self) -> StoreResult<Vec<(String, String, String, i64)>> {
         let mut s=self.connection.prepare("SELECT stop_id,scope,reason,latched_at FROM risk_stops WHERE resolution IS NULL ORDER BY latched_at,stop_id")?;

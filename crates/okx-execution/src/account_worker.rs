@@ -601,6 +601,8 @@ pub(crate) use unified::{
     install_reported_opening_sql, native_reservation_receipt_sql, original_bound_entry_source_sql,
     original_bound_unsent_source_sql,
 };
+#[cfg(test)]
+pub(crate) use unified::{test_bind_native_census, test_reserve_reported_sql};
 
 #[cfg(test)]
 mod diagnostic_fault_tests {

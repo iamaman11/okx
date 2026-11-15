@@ -7,10 +7,22 @@ mod opening_ingress;
 mod owner;
 pub(crate) use opening_ingress::install_reported_opening_sql;
 pub use opening_ingress::{ReportedOpeningCensus, ReportedOpeningReceipt};
+mod admission_lifecycle;
 mod authority_reads;
+mod campaign_readiness;
+mod census_reads;
+mod financial_admission;
 mod native_admission;
+mod order_observation;
+#[cfg(test)]
+pub(crate) use native_admission::{
+    bind_census as test_bind_native_census, reserve_reported_sql as test_reserve_reported_sql,
+};
+mod posting_recovery;
 mod readback;
+mod reduction_submission;
 mod reservation;
+mod source_stops;
 pub use native_admission::{
     NativePostDecision, NativePostRequest, NativeReserveDecision, NativeReserveRequest,
     ReportedRiskCensus,

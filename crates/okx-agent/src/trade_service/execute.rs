@@ -496,14 +496,27 @@ impl TradeService {
                 return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
             }
             let campaign = campaign.clone();
-            resource
-                .execution
-                .store
-                .call(until, move |store| {
-                    store.verify_campaign_entry_readiness(&campaign, from, through)
-                })
-                .await
-                .map_err(err)?;
+            if let Some((owner, account)) = resource.execution.store.native_scope() {
+                owner
+                    .verify_campaign_entry_readiness(
+                        until,
+                        account.to_owned(),
+                        campaign,
+                        from,
+                        through,
+                    )
+                    .await
+                    .map_err(err)?;
+            } else {
+                resource
+                    .execution
+                    .store
+                    .call(until, move |store| {
+                        store.verify_campaign_entry_readiness(&campaign, from, through)
+                    })
+                    .await
+                    .map_err(err)?;
+            }
         }
         Ok(CampaignOpeningDecision::VerifyNativeReadiness)
     }
@@ -556,14 +569,27 @@ impl TradeService {
                     return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
                 }
                 let campaign = origin.campaign_id.clone();
-                resource
-                    .execution
-                    .store
-                    .call(until, move |store| {
-                        store.refresh_campaign_entry_readiness(&campaign, from, through)
-                    })
-                    .await
-                    .map_err(err)?;
+                if let Some((owner, account)) = resource.execution.store.native_scope() {
+                    owner
+                        .refresh_campaign_entry_readiness(
+                            until,
+                            account.to_owned(),
+                            campaign,
+                            from,
+                            through,
+                        )
+                        .await
+                        .map_err(err)?;
+                } else {
+                    resource
+                        .execution
+                        .store
+                        .call(until, move |store| {
+                            store.refresh_campaign_entry_readiness(&campaign, from, through)
+                        })
+                        .await
+                        .map_err(err)?;
+                }
             }
             return Ok(());
         }
@@ -602,14 +628,28 @@ impl TradeService {
                 return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
             }
             let campaign = origin.campaign_id.clone();
-            let (spent, source_digest) = resource
-                .execution
-                .store
-                .call(until, move |store| {
-                    store.seal_captured_campaign_baseline(&campaign, from, through)
-                })
-                .await
-                .map_err(err)?;
+            let (spent, source_digest) =
+                if let Some((owner, account)) = resource.execution.store.native_scope() {
+                    owner
+                        .seal_captured_campaign_baseline(
+                            until,
+                            account.to_owned(),
+                            campaign,
+                            from,
+                            through,
+                        )
+                        .await
+                        .map_err(err)?
+                } else {
+                    resource
+                        .execution
+                        .store
+                        .call(until, move |store| {
+                            store.seal_captured_campaign_baseline(&campaign, from, through)
+                        })
+                        .await
+                        .map_err(err)?
+                };
             rows.push(CampaignOpeningAccount {
                 account_key: account.account_key.clone(),
                 history_from_ms: origin.started_at_ms,
@@ -739,6 +779,7 @@ impl TradeService {
             return Err("EXECUTE_REQUIRED".into());
         };
         let started = Instant::now();
+        self.verify_runtime_finance_route(r)?;
         let until = started + Duration::from_millis(*expires_in_ms);
         // New risk still requires the exact per-account mutation semaphore.
         // Check an existing semantic identity from SQL before demanding
@@ -936,42 +977,49 @@ impl TradeService {
         let manual_budget = dec(&state.state.campaign_loss_limit_usd)?;
         let owner_account = r.configuration.account_key.wire();
         let owner_uid = r.execution.uid().to_owned();
-        let prepared = prepare_on_owner(
-            &r.execution.store,
-            until,
-            &owner_account,
-            &owner_uid,
-            move |s| {
-                if intent.plan.strategy_instance == "manual"
-                    && !s.instances()?.iter().any(|i| i.instance_id == "manual")
-                {
-                    let manual = StrategyInstance {
-                        instance_id: "manual".into(),
-                        definition_id: "manual".into(),
-                        definition_version: "1".into(),
-                        parameters: "{}".into(),
-                        enabled: false,
-                        policy_revision: 1,
-                        budget: manual_budget,
-                        last_decision_key: None,
-                    };
-                    let h = format!(
-                        "{:x}",
-                        Sha256::digest(format!("{}:manual", s.meta().account_key).as_bytes())
-                    );
-                    s.mutate_instance(
-                        "internal_create_manual",
-                        &h,
-                        "create",
-                        &manual,
-                        None,
-                        now(),
-                    )?;
-                }
-                s.prepare(&decision, &intent)
-            },
-        )
-        .await?;
+        let prepared = if let Some((owner, account)) = r.execution.store.native_scope() {
+            owner
+                .prepare_admission(until, account.to_owned(), decision, intent)
+                .await
+                .map_err(err)?
+        } else {
+            prepare_on_owner(
+                r.execution.store.legacy().map_err(err)?,
+                until,
+                &owner_account,
+                &owner_uid,
+                move |s| {
+                    if intent.plan.strategy_instance == "manual"
+                        && !s.instances()?.iter().any(|i| i.instance_id == "manual")
+                    {
+                        let manual = StrategyInstance {
+                            instance_id: "manual".into(),
+                            definition_id: "manual".into(),
+                            definition_version: "1".into(),
+                            parameters: "{}".into(),
+                            enabled: false,
+                            policy_revision: 1,
+                            budget: manual_budget,
+                            last_decision_key: None,
+                        };
+                        let h = format!(
+                            "{:x}",
+                            Sha256::digest(format!("{}:manual", s.meta().account_key).as_bytes())
+                        );
+                        s.mutate_instance(
+                            "internal_create_manual",
+                            &h,
+                            "create",
+                            &manual,
+                            None,
+                            now(),
+                        )?;
+                    }
+                    s.prepare(&decision, &intent)
+                },
+            )
+            .await?
+        };
         if Instant::now() >= until {
             return Err("COMMAND_EXPIRED".into());
         }
@@ -1132,13 +1180,7 @@ impl TradeService {
                 .transpose()?;
             r.execution
                 .store
-                .call(until, move |s| {
-                    s.bind_entry_quote(&entry_receipt)?;
-                    if let Some(proof) = entry_admission {
-                        s.bind_entry_admission(&proof)?;
-                    }
-                    Ok(())
-                })
+                .bind_entry_evidence(until, entry_receipt, entry_admission)
                 .await
                 .map_err(err)?;
             // An absent all-in proof is a native decision, not a reason to
@@ -1149,10 +1191,7 @@ impl TradeService {
                 let rejected = prepared.intent_id.clone();
                 r.execution
                     .store
-                    .call(until, move |s| {
-                        s.reject_unsent(&rejected, "ENTRY_ALL_IN_COST_UNPROVEN", now())?;
-                        Ok(())
-                    })
+                    .reject_unsent(until, rejected, "ENTRY_ALL_IN_COST_UNPROVEN".into())
                     .await
                     .map_err(err)?;
                 return Err("ENTRY_ALL_IN_COST_UNPROVEN".into());
@@ -1170,20 +1209,25 @@ impl TradeService {
                     let pre_reserve_id = prepared.intent_id.clone();
                     let rejected = pre_reserve_id.clone();
                     let denied_reason = reason.clone();
-                    if r.execution
-                        .store
-                        .call(deadline(), move |s| {
-                            s.reject_unsent(&rejected, &denied_reason, now())?;
-                            if !s.unsent_before_reserve(&rejected)? {
-                                return Err(okx_execution::StoreError::Invalid(
-                                    "PRE_RESERVE_SQL_NO_SEND_PROOF_MISSING",
-                                ));
-                            }
-                            Ok(())
-                        })
-                        .await
-                        .is_err()
-                    {
+                    let rejection = async {
+                        r.execution
+                            .store
+                            .reject_unsent(deadline(), rejected.clone(), denied_reason)
+                            .await?;
+                        if !r
+                            .execution
+                            .store
+                            .unsent_before_reserve(deadline(), rejected)
+                            .await?
+                        {
+                            return Err(okx_execution::StoreError::Invalid(
+                                "PRE_RESERVE_SQL_NO_SEND_PROOF_MISSING",
+                            ));
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    if rejection.is_err() {
                         return Ok(uncertain(
                             &pre_reserve_id,
                             "PRE_RESERVE_LOCAL_REJECTION_UNCONFIRMED_NO_RESUBMIT",
@@ -1235,9 +1279,7 @@ impl TradeService {
             let reserve_key = key.clone();
             r.execution
                 .store
-                .call(until, move |s| {
-                    s.mark_reserve_attempt(&intent_id, &reserve_key, now())
-                })
+                .mark_reserve_attempt(until, intent_id, reserve_key)
                 .await
                 .map_err(err)?;
             let native_reserve = self.risk.is_native_finance();
@@ -1292,7 +1334,12 @@ impl TradeService {
                             "risk_release_state":"NOT_RESERVED"
                         })));
                     }
-                    return match reject_prepost_denial(&r.execution.store, &prepared, &reason).await
+                    return match reject_prepost_denial(
+                        r.execution.store.legacy().map_err(err)?,
+                        &prepared,
+                        &reason,
+                    )
+                    .await
                     {
                         Ok(mut result) => {
                             match self.release_unsent(r, &prepared).await {
@@ -1401,7 +1448,12 @@ impl TradeService {
                     // A proven ordinary pre-post denial may be rejected;
                     // only an unambiguous unsent release can retire risk.
                     // The ambiguous Worker outcomes above remain durable.
-                    return match reject_prepost_denial(&r.execution.store, &prepared, &reason).await
+                    return match reject_prepost_denial(
+                        r.execution.store.legacy().map_err(err)?,
+                        &prepared,
+                        &reason,
+                    )
+                    .await
                     {
                         Ok(mut result) => {
                             match self.release_unsent(r, &prepared).await {
@@ -1435,11 +1487,34 @@ impl TradeService {
                 requested_loss_usd: plan.planned_loss_usd,
                 conversion_digest: digest(&plan)?,
             };
-            r.execution
-                .store
-                .call(until, move |s| s.reserve(&receipt, now()))
-                .await
-                .map_err(err)?;
+            if let Some((owner, account)) = r.execution.store.native_scope() {
+                owner
+                    .reserve_local_reduction(until, account.to_owned(), receipt)
+                    .await
+                    .map_err(err)?;
+                native_send_claim = owner
+                    .claim_local_reduction_send(
+                        until,
+                        account.to_owned(),
+                        prepared.intent_id.clone(),
+                        prepared.plan_hash.clone(),
+                        prepared.policy_revision,
+                    )
+                    .await
+                    .map_err(err)?;
+                if native_send_claim.is_none() {
+                    return Ok(uncertain(
+                        &prepared.intent_id,
+                        "NATIVE_REDUCTION_POST_ALREADY_CLAIMED_NO_RESEND",
+                    ));
+                }
+            } else {
+                r.execution
+                    .store
+                    .call(until, move |s| s.reserve(&receipt, now()))
+                    .await
+                    .map_err(err)?;
+            }
         }
         let revision = self
             .governance
@@ -1608,7 +1683,13 @@ impl TradeService {
             if increase && self.risk.is_native_finance() {
                 return Err("NATIVE_SEND_CLAIM_MISSING_NO_POST".into());
             }
-            post_once(&r.execution.store, &prepared, until, send).await?
+            post_once(
+                r.execution.store.legacy().map_err(err)?,
+                &prepared,
+                until,
+                send,
+            )
+            .await?
         };
 
         drop(_new_risk_admission);
@@ -1814,22 +1895,14 @@ impl TradeService {
         if generation == 0 || !r.source_identity_ready().await {
             return Err("POST_HELD_SOURCE_GENERATION_UNVERIFIED".into());
         }
-        let id = intent.intent_id.clone();
-        let quote = r
+        let source = r
             .execution
             .store
-            .call(until, move |s| s.entry_quote(&id))
+            .reserve_source(until, intent.intent_id.clone())
             .await
-            .map_err(err)?
-            .ok_or("POST_ENTRY_QUOTE_MISSING")?;
-        let admission_id = intent.intent_id.clone();
-        let admission = r
-            .execution
-            .store
-            .call(until, move |s| s.entry_admission(&admission_id))
-            .await
-            .map_err(err)?
-            .ok_or("POST_ENTRY_ADMISSION_MISSING")?;
+            .map_err(err)?;
+        let quote = source.quote;
+        let admission = source.admission;
         let rules = self
             .public_ws
             .instrument_rules(&intent.instrument_id)
@@ -2341,6 +2414,25 @@ impl TradeService {
                 let algo_source_floor=verified_algo_source_time(algos.received_at_ms,now())
                     .map_err(|e|report("ALGO_SOURCE_FRESHNESS",e))?;
                 let mut managed_algos = std::collections::BTreeSet::new();
+                // Native reads all local obligations and financial facts in
+                // ONE owner snapshot, then compares them to the signed venue
+                // observation below. No per-position SQL hops or legacy owner.
+                let native_census = if let Some((owner, account)) = r.execution.store.native_scope() {
+                    let positions = snapshot.positions.iter().filter_map(|p| {
+                        match super::reconcile::verified_venue_position_direction(&p.position_side, &p.position) {
+                            Ok(Some((direction, _))) => Some(Ok((p.instrument_id.clone(), direction.to_owned()))),
+                            Ok(None) => None,
+                            Err(e) => Some(Err(e)),
+                        }
+                    }).collect::<Result<Vec<_>, String>>()?;
+                    let client_order_ids = snapshot.pending_orders.iter()
+                        .map(|o| o.client_order_id.clone().ok_or("UNATTRIBUTED_PENDING_ORDER".to_owned()))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Some(owner.census_snapshot(account.to_owned(), okx_execution::AccountCensusRequest {
+                        positions, client_order_ids, limit:100,
+                        terminal_peer_release_intent:release_scope.map(|s|s.intent_id.to_owned()),
+                    }, until.unwrap_or_else(deadline)).await.map_err(err)?)
+                } else { None };
                 // Identifiers here are populated ONLY after the independently
                 // observed venue position, SQL lots, central reserve and
                 // verified protective algo have been matched.
@@ -2362,7 +2454,12 @@ impl TradeService {
                     // venue snapshot before the final freshness gate.
                     let instrument = p.instrument_id.clone();
                     let direction = position_direction.to_owned();
-                    let (lots, owned_proofs) = r
+                    let (lots, owned_proofs) = if let Some(census) = &native_census {
+                        let position = census.positions.iter()
+                            .find(|v| v.instrument == instrument && v.direction == direction)
+                            .ok_or("COHORT_POSITION_SNAPSHOT_MISSING")?;
+                        (position.lots.clone(), position.owned_proofs.clone())
+                    } else { r
                         .execution
                         .store
                         .call(deadline(), move |s| {
@@ -2386,7 +2483,7 @@ impl TradeService {
                             Ok((lots, proofs))
                         })
                         .await
-                        .map_err(err)?;
+                        .map_err(err)? };
                     let covered = lots
                         .iter()
                         .filter(|l| l.side == position_direction)
@@ -2449,7 +2546,9 @@ impl TradeService {
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut covered_order_count = 0_usize;
                 if !clients.is_empty() {
-                    let known_orders = r
+                    let known_orders = if let Some(census) = &native_census {
+                        census.pending_orders.clone()
+                    } else { r
                         .execution
                         .store
                         .call(deadline(), move |s| {
@@ -2458,7 +2557,7 @@ impl TradeService {
                             ).collect::<okx_execution::StoreResult<Vec<_>>>()
                         })
                         .await
-                        .map_err(err)?;
+                        .map_err(err)? };
                     for (order, known) in snapshot.pending_orders.iter().zip(known_orders) {
                         let known = known.ok_or("UNATTRIBUTED_PENDING_ORDER")?;
                         verify_pending_order_binding(order, &known)?;
@@ -2513,7 +2612,12 @@ impl TradeService {
                         .iter()
                         .all(|p| dec(&p.position).is_ok_and(|quantity| quantity == Decimal::ZERO));
                 let releasing_id = release_scope.map(|scope| scope.intent_id.to_owned());
-                let (local_intents, pending_central, verified_terminal_peers) = r
+                let (local_intents, pending_central, verified_terminal_peers) = if let Some(census) = &native_census {
+                    if venue_empty_for_terminal_peers && !census.terminal_peer_sources.is_empty() {
+                        return Err("COHORT_TERMINAL_PEER_REVALIDATION_REQUIRED".into());
+                    }
+                    (census.intents.clone(), census.pending_central.clone(), std::collections::BTreeSet::new())
+                } else { r
                     .execution
                     .store
                     .call(deadline(), move |s| {
@@ -2601,7 +2705,7 @@ impl TradeService {
                         Ok((covered, pending, peers))
                     })
                     .await
-                    .map_err(err)?;
+                    .map_err(err)? };
                 let local_intent_digest = verify_local_intent_coverage_with_managed(
                     &local_intents,
                     &pending_central,
@@ -2624,14 +2728,16 @@ impl TradeService {
                 {
                     return Err("COHORT_SOURCE_GENERATION_CHANGED".into());
                 }
-                let financial = r
+                let financial = if let Some(census) = &native_census {
+                    (census.financial_risk.clone(), census.policy.campaign_loss)
+                } else { r
                     .execution
                     .store
                     .call(deadline(), |s| {
                         Ok((s.financial_risk(now(), None)?, s.policy()?.4))
                     })
                     .await
-                    .map_err(|e|report("FINANCIAL_SQL_OWNER",err(e)))?;
+                    .map_err(|e|report("FINANCIAL_SQL_OWNER",err(e)))? };
                 #[cfg(test)]
                 if std::env::var("OKX_B_CENSUS_CAUSE_PROBE").as_deref()==Ok("1")
                     && !financial.0.nav_complete

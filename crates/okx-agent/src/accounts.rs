@@ -181,6 +181,7 @@ pub struct AccountRuntimeRegistry {
     /// An opened stopped finance import has ZERO account-local writers.
     /// No connect/recovery source task or venue POST can start in this mode.
     native_stopped_finance: bool,
+    native_finance_owner: Option<UnifiedFinanceHandle>,
 }
 
 fn invalid() -> AgentError {
@@ -260,6 +261,7 @@ impl AccountRuntimeRegistry {
             catalog_write: tokio::sync::Mutex::new(()),
             rate_budget,
             native_stopped_finance: false,
+            native_finance_owner: None,
         };
         // Build independently: one account's slow verification cannot block another.
         use futures_util::{StreamExt, stream};
@@ -356,7 +358,35 @@ impl AccountRuntimeRegistry {
             catalog_write: tokio::sync::Mutex::new(()),
             rate_budget,
             native_stopped_finance: true,
+            native_finance_owner: None,
         };
+        Ok((registry, owner))
+    }
+
+    /// One Native Engine composition. Until RB09 supplies independently
+    /// verified authority this fails BEFORE credentials, clients or writers.
+    pub async fn open_native_finance(
+        root: &Path,
+        rate_budget: RateBudget,
+        campaign: &str,
+    ) -> AgentResult<(Self, UnifiedFinanceHandle)> {
+        let (mut registry, owner) = Self::open_stopped_finance(root, rate_budget, campaign).await?;
+        owner
+            .verify_live_authority(Instant::now() + std::time::Duration::from_secs(2))
+            .await?;
+        registry.native_stopped_finance = false;
+        registry.native_finance_owner = Some(owner.clone());
+        for config in registry.list().await {
+            let credentials = load_native_account_credentials(&config.credential_ref)?;
+            let resources = registry
+                .open_resources(config.clone(), credentials, false)
+                .await?;
+            registry
+                .routes
+                .write()
+                .await
+                .insert(config.account_key.wire(), resources);
+        }
         Ok((registry, owner))
     }
 
@@ -385,7 +415,7 @@ impl AccountRuntimeRegistry {
     pub async fn recover_unavailable(&self) {
         // No legacy resource can be re-opened while the new installation
         // writer owns finance.sqlite; stopped mode never heals to two owners.
-        if self.native_stopped_finance {
+        if self.native_stopped_finance || self.native_finance_owner.is_some() {
             return;
         }
         use futures_util::{StreamExt, stream};
@@ -435,7 +465,7 @@ impl AccountRuntimeRegistry {
         operation_id: &str,
         request_digest: &str,
     ) -> AgentResult<VerifiedAccountConfig> {
-        if self.native_stopped_finance {
+        if self.native_stopped_finance || self.native_finance_owner.is_some() {
             return Err(AgentError::FinancialCaptureTask(
                 "FINANCE_STOPPED_ACCOUNT_CONNECTION_DISABLED".into(),
             ));
@@ -573,125 +603,153 @@ impl AccountRuntimeRegistry {
             .join("accounts")
             .join(key_hash(&configuration.account_key));
         let identity_lease = acquire_identity_lease(lease_root, &configuration.account_key)?;
-        fs::create_dir_all(&root)?;
+        if self.native_finance_owner.is_none() {
+            fs::create_dir_all(&root)?;
+        }
         let database = root.join("account.sqlite");
-        let store = if initialize {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-            let opening = loop {
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(AgentError::FinancialCaptureTask(
-                        "INITIAL_SNAPSHOT_UNSTABLE".into(),
-                    ));
-                }
-                let first = observer.snapshot().await.map_err(|error| {
-                    AgentError::FinancialCaptureTask(
-                        crate::source_capture::snapshot_failure_code(&error).into(),
-                    )
-                })?;
-                let algos = observer
-                    .pending_derivative_risk_algos()
-                    .await
-                    .map_err(|_| {
-                        AgentError::FinancialCaptureTask("ACCOUNT_ALGO_SOURCE_UNAVAILABLE".into())
+        let store = if let Some(owner) = &self.native_finance_owner {
+            if initialize {
+                return Err(AgentError::FinancialCaptureTask(
+                    "NATIVE_ACCOUNT_INITIALIZATION_NOT_ACCEPTED".into(),
+                ));
+            }
+            owner
+                .recover_posting(
+                    configuration.account_key.wire(),
+                    Instant::now() + std::time::Duration::from_secs(2),
+                )
+                .await?;
+            crate::execution_store::ExecutionStore::native(
+                owner.clone(),
+                configuration.account_key.wire(),
+            )?
+        } else {
+            let legacy = if initialize {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                let opening = loop {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(AgentError::FinancialCaptureTask(
+                            "INITIAL_SNAPSHOT_UNSTABLE".into(),
+                        ));
+                    }
+                    let first = observer.snapshot().await.map_err(|error| {
+                        AgentError::FinancialCaptureTask(
+                            crate::source_capture::snapshot_failure_code(&error).into(),
+                        )
                     })?;
-                let last = observer.snapshot().await.map_err(|error| {
-                    AgentError::FinancialCaptureTask(
-                        crate::source_capture::snapshot_failure_code(&error).into(),
-                    )
-                })?;
-                if first.account_uid_fingerprint != uid || last.account_uid_fingerprint != uid {
-                    return Err(AgentError::FinancialCaptureTask(
-                        "ACCOUNT_IDENTITY_MISMATCH".into(),
-                    ));
-                }
-                if !first
-                    .balance
-                    .same_values_ignoring_update_times(&last.balance)
-                    || first.positions != last.positions
-                    || first.pending_orders != last.pending_orders
-                {
-                    continue;
-                }
-                if !algos.complete_within_bound {
-                    return Err(AgentError::FinancialCaptureTask(
-                        "ACCOUNT_ALGO_COVERAGE_INCOMPLETE".into(),
-                    ));
-                }
-                let liabilities =
-                    last.balance
+                    let algos = observer
+                        .pending_derivative_risk_algos()
+                        .await
+                        .map_err(|_| {
+                            AgentError::FinancialCaptureTask(
+                                "ACCOUNT_ALGO_SOURCE_UNAVAILABLE".into(),
+                            )
+                        })?;
+                    let last = observer.snapshot().await.map_err(|error| {
+                        AgentError::FinancialCaptureTask(
+                            crate::source_capture::snapshot_failure_code(&error).into(),
+                        )
+                    })?;
+                    if first.account_uid_fingerprint != uid || last.account_uid_fingerprint != uid {
+                        return Err(AgentError::FinancialCaptureTask(
+                            "ACCOUNT_IDENTITY_MISMATCH".into(),
+                        ));
+                    }
+                    if !first
+                        .balance
+                        .same_values_ignoring_update_times(&last.balance)
+                        || first.positions != last.positions
+                        || first.pending_orders != last.pending_orders
+                    {
+                        continue;
+                    }
+                    if !algos.complete_within_bound {
+                        return Err(AgentError::FinancialCaptureTask(
+                            "ACCOUNT_ALGO_COVERAGE_INCOMPLETE".into(),
+                        ));
+                    }
+                    let liabilities =
+                        last.balance
+                            .details
+                            .iter()
+                            .try_fold(Decimal::ZERO, |sum, d| {
+                                // OKX documents liab as not applicable to Futures mode (2).
+                                // Other account modes require an explicit observed debt field.
+                                let value = match d.liabilities.as_deref() {
+                                    Some(v) => Decimal::from_str(v).map_err(|_| invalid())?,
+                                    None if last.account_level == "2" => Decimal::ZERO,
+                                    None => return Err(invalid()),
+                                };
+                                sum.checked_add(value).ok_or_else(invalid)
+                            })?;
+                    let positions = last
+                        .positions
+                        .iter()
+                        .filter(|p| Decimal::from_str(&p.position) != Ok(Decimal::ZERO))
+                        .count();
+                    let balances = last
+                        .balance
                         .details
                         .iter()
-                        .try_fold(Decimal::ZERO, |sum, d| {
-                            // OKX documents liab as not applicable to Futures mode (2).
-                            // Other account modes require an explicit observed debt field.
-                            let value = match d.liabilities.as_deref() {
-                                Some(v) => Decimal::from_str(v).map_err(|_| invalid())?,
-                                None if last.account_level == "2" => Decimal::ZERO,
-                                None => return Err(invalid()),
-                            };
-                            sum.checked_add(value).ok_or_else(invalid)
-                        })?;
-                let positions = last
-                    .positions
-                    .iter()
-                    .filter(|p| Decimal::from_str(&p.position) != Ok(Decimal::ZERO))
-                    .count();
-                let balances = last
-                    .balance
-                    .details
-                    .iter()
-                    .map(|d| {
-                        Ok((
-                            d.currency.clone(),
-                            Decimal::from_str(&d.equity).map_err(|_| invalid())?,
-                        ))
-                    })
-                    .collect::<AgentResult<Vec<_>>>()?;
-                let observed_at = chrono::DateTime::parse_from_rfc3339(&last.source_received_at)
-                    .map_err(|_| invalid())?
-                    .timestamp_millis();
-                let source_ref = format!("{:x}", Sha256::digest(serde_json::to_vec(&last)?));
-                break OpeningSnapshot {
-                    opening_equity_usd: Decimal::from_str(&last.balance.total_equity_usd)
-                        .map_err(|_| invalid())?,
-                    source_ref,
-                    observed_at,
-                    positions,
-                    orders: last.pending_orders.len(),
-                    conditional_orders: algos.rows,
-                    liabilities,
-                    balances,
+                        .map(|d| {
+                            Ok((
+                                d.currency.clone(),
+                                Decimal::from_str(&d.equity).map_err(|_| invalid())?,
+                            ))
+                        })
+                        .collect::<AgentResult<Vec<_>>>()?;
+                    let observed_at =
+                        chrono::DateTime::parse_from_rfc3339(&last.source_received_at)
+                            .map_err(|_| invalid())?
+                            .timestamp_millis();
+                    let source_ref = format!("{:x}", Sha256::digest(serde_json::to_vec(&last)?));
+                    break OpeningSnapshot {
+                        opening_equity_usd: Decimal::from_str(&last.balance.total_equity_usd)
+                            .map_err(|_| invalid())?,
+                        source_ref,
+                        observed_at,
+                        positions,
+                        orders: last.pending_orders.len(),
+                        conditional_orders: algos.rows,
+                        liabilities,
+                        balances,
+                    };
                 };
+                let meta = AccountMeta {
+                    account_key: configuration.account_key.wire(),
+                    installation_id: self.installation_id.clone(),
+                    initialized_at: opening.observed_at,
+                    opening_source: opening.source_ref.clone(),
+                    initialize_operation_id: configuration.connect_operation_id.clone(),
+                    release_id: build_release().into(),
+                };
+                AccountStoreHandle::initialize_flat(database, meta, opening).await?
+            } else {
+                AccountStoreHandle::open_existing(
+                    database,
+                    configuration.account_key.wire(),
+                    self.installation_id.clone(),
+                )
+                .await?
             };
-            let meta = AccountMeta {
-                account_key: configuration.account_key.wire(),
-                installation_id: self.installation_id.clone(),
-                initialized_at: opening.observed_at,
-                opening_source: opening.source_ref.clone(),
-                initialize_operation_id: configuration.connect_operation_id.clone(),
-                release_id: build_release().into(),
-            };
-            AccountStoreHandle::initialize_flat(database, meta, opening).await?
-        } else {
-            AccountStoreHandle::open_existing(
-                database,
-                configuration.account_key.wire(),
-                self.installation_id.clone(),
-            )
-            .await?
+            legacy
+                .call(
+                    std::time::Instant::now() + std::time::Duration::from_secs(2),
+                    |s| s.recover_posting(chrono::Utc::now().timestamp_millis()),
+                )
+                .await?;
+            crate::execution_store::ExecutionStore::from(legacy)
         };
-        store
-            .call(
-                std::time::Instant::now() + std::time::Duration::from_secs(2),
-                |s| s.recover_posting(chrono::Utc::now().timestamp_millis()),
-            )
-            .await?;
-        let source_generation_seed = store
-            .call(
-                std::time::Instant::now() + std::time::Duration::from_secs(2),
-                |s| s.source_generation_base(),
-            )
-            .await?;
+        let source_generation_seed = if let Some((owner, account)) = store.native_scope() {
+            owner.source_generation_base(account.to_owned()).await?
+        } else {
+            store
+                .call(
+                    std::time::Instant::now() + std::time::Duration::from_secs(2),
+                    |s| s.source_generation_base(),
+                )
+                .await?
+        };
         let execution = Arc::new(ExecutionRuntime::from_client(
             store,
             clients.executor,
@@ -974,16 +1032,16 @@ impl AccountResources {
         health.last_observer_and_cursors_ms = Some(phases.observer_and_cursors_ms);
         health.last_history_and_ingest_ms = Some(phases.history_and_ingest_ms);
         health.last_nav_reconciliation_ms = Some(phases.nav_reconciliation_ms);
-        health.last_nav_sql_queue_wait_ms = Some(phases.nav_sql_queue_wait_ms);
-        health.last_nav_sql_owner_ms = Some(phases.nav_sql_owner_ms);
+        health.last_nav_sql_queue_wait_ms = phases.nav_sql_queue_wait_ms;
+        health.last_nav_sql_owner_ms = phases.nav_sql_owner_ms;
         health
             .finance_window
             .record(crate::finance_window::FinanceAttempt {
                 at_ms: now,
                 source_generation: generation,
                 elapsed_ms: duration_ms,
-                nav_sql_owner_ms: Some(phases.nav_sql_owner_ms),
-                nav_sql_queue_ms: Some(phases.nav_sql_queue_wait_ms),
+                nav_sql_owner_ms: phases.nav_sql_owner_ms,
+                nav_sql_queue_ms: phases.nav_sql_queue_wait_ms,
                 snapshot_age_ms,
                 failure_code: None,
             });

@@ -1,3 +1,5 @@
+#[path = "account_admission_lifecycle_contract_tests.rs"]
+mod admission_lifecycle_contracts;
 #[path = "account_store_attribution_tests.rs"]
 mod attribution;
 #[path = "account_authority_read_contract_tests.rs"]
@@ -16,6 +18,8 @@ mod fill_projection_contracts;
 mod finance_report_contracts;
 #[path = "account_funding_projection_contract_tests.rs"]
 mod funding_projection_contracts;
+#[path = "account_native_admission_contract_tests.rs"]
+mod native_admission_contracts;
 #[path = "account_nav_projection_contract_tests.rs"]
 mod nav_projection_contracts;
 #[path = "account_raw_source_tests.rs"]

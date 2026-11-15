@@ -76,33 +76,8 @@ impl AccountStore {
     /// No second ledger/table: one immutable, idempotent record in the existing
     /// operation_receipts journal, bound to the original saved intent/plan.
     /// Its kind explicitly denies any claim of ALL-IN cost authorization.
-    fn verified_stored_entry_quote(&self, quote: &EntryQuoteEvidence) -> StoreResult<StoredIntent> {
-        Self::verified_stored_entry_quote_sql(&self.connection, None, quote)
-    }
-
     pub fn bind_entry_quote(&mut self, quote: &EntryQuoteEvidence) -> StoreResult<()> {
-        let intent = self.verified_stored_entry_quote(quote)?;
-        if intent.state != IntentState::Prepared {
-            return Err(StoreError::Invalid("ENTRY_QUOTE_INTENT_STATE_INVALID"));
-        }
-        let name = format!("entry-quote:{}", intent.intent_id);
-        let encoded = serde_json::to_string(quote)
-            .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_SERIALIZATION_FAILED"))?;
-        if let Some(prior) = self.operation(&name)? {
-            if prior.kind != "ENTRY_QUOTE_UNPROVEN"
-                || prior.request_hash != intent.plan_hash
-                || prior.result_ref != encoded
-            {
-                return Err(StoreError::Invalid("ENTRY_QUOTE_IDEMPOTENCY_CONFLICT"));
-            }
-            return Ok(());
-        }
-        self.connection.execute(
-            "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
-             VALUES(?1,'ENTRY_QUOTE_UNPROVEN',?2,?3,?4)",
-            params![name, intent.plan_hash, encoded, quote.observed_at],
-        )?;
-        Ok(())
+        Self::bind_entry_quote_sql(&self.connection, None, quote)
     }
 
     pub fn entry_quote(&self, intent_id: &str) -> StoreResult<Option<EntryQuoteEvidence>> {
@@ -112,39 +87,8 @@ impl AccountStore {
     /// immutable quote on EVERY read, including after a Windows restart.
     /// The digest here is a binding to the native source witness, not a
     /// cryptographic claim that arbitrary user-supplied evidence is trusted.
-    fn verified_entry_admission(&self, proof: &EntryAdmissionEvidence) -> StoreResult<()> {
-        Self::verified_entry_admission_sql(&self.connection, None, proof)
-    }
-
-    /// A fully admitted entry is a native, source-bound quote + USD upper +
-    /// proof digest. Replays are exact; source tampering is never an update.
     pub fn bind_entry_admission(&mut self, proof: &EntryAdmissionEvidence) -> StoreResult<()> {
-        self.verified_entry_admission(proof)?;
-        let key = format!("entry-admission:{}", proof.intent_id);
-        let body = serde_json::to_string(proof)
-            .map_err(|_| StoreError::Invalid("ENTRY_ADMISSION_SERIALIZATION_FAILED"))?;
-        if let Some(prior) = self.operation(&key)? {
-            if prior.kind != "ENTRY_ADMISSION_PROVEN"
-                || prior.request_hash != proof.plan_hash
-                || prior.result_ref != body
-                || prior.committed_at != proof.observed_at
-            {
-                return Err(StoreError::Invalid("ENTRY_ADMISSION_IDEMPOTENCY_CONFLICT"));
-            }
-            return Ok(());
-        }
-        let intent = self
-            .intent(&proof.intent_id)?
-            .ok_or(StoreError::Invalid("ENTRY_ADMISSION_INTENT_MISSING"))?;
-        if intent.state != IntentState::Prepared {
-            return Err(StoreError::Invalid("ENTRY_ADMISSION_INTENT_STATE_INVALID"));
-        }
-        self.connection.execute(
-            "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
-             VALUES(?1,'ENTRY_ADMISSION_PROVEN',?2,?3,?4)",
-            params![key, proof.plan_hash, body, proof.observed_at],
-        )?;
-        Ok(())
+        Self::bind_entry_admission_sql(&self.connection, None, proof)
     }
 
     pub fn entry_admission(&self, id: &str) -> StoreResult<Option<EntryAdmissionEvidence>> {
@@ -1611,38 +1555,10 @@ impl AccountStore {
     /// Durable address of a central reservation attempt, committed before
     /// any WSS RESERVE. A crash or lost ACK cannot orphan the Worker grant.
     pub fn mark_reserve_attempt(&mut self, id: &str, key: &str, now: i64) -> StoreResult<()> {
-        if key.is_empty() || key.len() > 512 {
-            return Err(StoreError::Invalid("INVALID_RESERVE_IDENTITY"));
-        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (state, hash, begin): (String, String, Option<i64>) = tx.query_row(
-            "SELECT state,request_hash,begin_post_at FROM intents WHERE intent_id=?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
-        if state != "PREPARED" || begin.is_some() {
-            return Err(StoreError::Invalid("INVALID_RESERVE_ATTEMPT_STATE"));
-        }
-        let name = format!("risk-reserve:{id}");
-        let previous: Option<(String, String, String)> = tx
-            .query_row(
-                "SELECT kind,request_hash,result_ref FROM operation_receipts WHERE operation_id=?1",
-                [&name],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        if let Some((kind, prior_hash, prior_key)) = previous {
-            if kind != "RISK_RESERVE_ATTEMPT" || prior_hash != hash || prior_key != key {
-                return Err(StoreError::Invalid("RESERVE_ATTEMPT_IDEMPOTENCY_CONFLICT"));
-            }
-        } else {
-            tx.execute(
-                "INSERT INTO operation_receipts VALUES(?1,'RISK_RESERVE_ATTEMPT',?2,?3,?4)",
-                params![name, hash, key, now],
-            )?;
-        }
+        Self::mark_reserve_attempt_sql(&tx, None, id, key, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -1672,23 +1588,7 @@ impl AccountStore {
     /// F1: the prepare transaction committed, but no central RESERVE was
     /// attempted. A matching terminal SQL receipt proves no native POST.
     pub fn unsent_before_reserve(&self, id: &str) -> StoreResult<bool> {
-        self.connection
-            .query_row(
-                "SELECT EXISTS(
-                   SELECT 1 FROM intents i
-                   JOIN operation_receipts t ON t.operation_id='terminal:'||i.intent_id
-                   WHERE i.intent_id=?1 AND i.state='REJECTED'
-                     AND i.begin_post_at IS NULL AND i.exchange_order_id IS NULL
-                     AND t.kind='REJECTED_UNSENT'
-                     AND t.request_hash=i.request_hash AND t.result_ref=i.incident
-                     AND NOT EXISTS(SELECT 1 FROM risk_receipts r
-                       WHERE r.intent_id=i.intent_id)
-                     AND NOT EXISTS(SELECT 1 FROM operation_receipts a
-                       WHERE a.operation_id='risk-reserve:'||i.intent_id))",
-                [id],
-                |r| r.get(0),
-            )
-            .map_err(StoreError::from)
+        Self::unsent_before_reserve_sql(&self.connection, None, id)
     }
 
     pub fn reconcilable_intents(&self, limit: usize) -> StoreResult<Vec<StoredIntent>> {
@@ -1702,49 +1602,7 @@ impl AccountStore {
         limit: usize,
         offset: usize,
     ) -> StoreResult<Vec<StoredIntent>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let ids = {
-            let mut q=self.connection.prepare(
-              "SELECT intent_id FROM (
-                SELECT intent_id,CASE WHEN state='UNSENT_PENDING_CENTRAL' THEN 0 ELSE 3 END AS priority
-                FROM risk_receipts
-                WHERE state IN('HELD','POSTED','UNKNOWN','OPEN','TERMINAL_PENDING_CENTRAL','UNSENT_PENDING_CENTRAL','LATE_SETTLEMENT_PENDING')
-                UNION ALL
-                SELECT i.intent_id,1 AS priority FROM intents i
-                JOIN operation_receipts o ON o.operation_id='risk-reserve:'||i.intent_id
-                WHERE o.kind='RISK_RESERVE_ATTEMPT' AND o.request_hash=i.request_hash
-                  AND i.state IN('PREPARED','REJECTED')
-                  AND NOT EXISTS(SELECT 1 FROM risk_receipts r WHERE r.intent_id=i.intent_id)
-                  AND NOT EXISTS(SELECT 1 FROM operation_receipts ack
-                    WHERE ack.operation_id='central-release:'||o.result_ref
-                      AND ack.kind='CENTRAL_RELEASE')
-                UNION ALL
-                SELECT i.intent_id,2 AS priority FROM intents i
-                WHERE i.state='PREPARED' AND i.deadline<=?2
-                  AND NOT EXISTS(SELECT 1 FROM risk_receipts r
-                    WHERE r.intent_id=i.intent_id)
-                  AND NOT EXISTS(SELECT 1 FROM operation_receipts a
-                    WHERE a.operation_id='risk-reserve:'||i.intent_id)
-               ) GROUP BY intent_id ORDER BY MIN(priority),intent_id LIMIT ?1 OFFSET ?3"
-            )?;
-            q.query_map(
-                params![
-                    limit.min(100) as i64,
-                    wall_time_ms(),
-                    offset.min(100_000) as i64
-                ],
-                |r| r.get::<_, String>(0),
-            )?
-            .collect::<Result<Vec<_>, _>>()?
-        };
-        ids.iter()
-            .map(|id| {
-                self.intent(id)?
-                    .ok_or(StoreError::Invalid("INTENT_MISSING"))
-            })
-            .collect()
+        Self::reconcilable_intents_page_sql(&self.connection, None, limit, offset, wall_time_ms())
     }
     /// A reduce-only local: reservation never reached Worker RiskBook.
     /// Its SQL no-send obligation must still leave risk_census_intents;
@@ -2019,63 +1877,14 @@ impl AccountStore {
         now: i64,
         proven_not_reserved: bool,
     ) -> StoreResult<bool> {
-        if reason.is_empty() {
-            return Err(StoreError::Invalid("UNSENT_REASON_REQUIRED"));
-        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (state, begin, hash): (String, Option<i64>, String) = tx.query_row(
-            "SELECT state,begin_post_at,request_hash FROM intents WHERE intent_id=?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
-        if begin.is_some() {
-            return Err(StoreError::Invalid("POST_OUTCOME_REQUIRES_RECONCILIATION"));
-        }
-        let first = state != "REJECTED";
-        if first {
-            if !matches!(state.as_str(), "PREPARED" | "RESERVED") {
-                return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
-            }
-            tx.execute("UPDATE intents SET state='REJECTED',incident=?2,updated_at=?3,revision=revision+1 WHERE intent_id=?1",params![id,reason,now])?;
-            tx.execute(
-                "UPDATE risk_receipts SET state='UNSENT_PENDING_CENTRAL' WHERE intent_id=?1",
-                [id],
-            )?;
-            tx.execute(
-                "INSERT INTO operation_receipts VALUES(?1,'REJECTED_UNSENT',?2,?3,?4)",
-                params![format!("terminal:{id}"), hash, reason, now],
-            )?;
-        }
-        if proven_not_reserved {
-            let original: Option<(String, String)> = tx
-                .query_row(
-                    "SELECT kind,request_hash FROM operation_receipts WHERE operation_id=?1",
-                    [format!("terminal:{id}")],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            if original
-                .as_ref()
-                .is_none_or(|(kind, request)| kind != "REJECTED_UNSENT" || request != &hash)
-            {
-                return Err(StoreError::Invalid("UNSENT_TERMINAL_RECEIPT_MISSING"));
-            }
-            let operation = format!("risk-reserve:{id}");
-            let changed = tx.execute(
-                "UPDATE operation_receipts SET kind='RISK_RESERVE_DENIED'
-                 WHERE operation_id=?1
-                   AND kind IN('RISK_RESERVE_ATTEMPT','RISK_RESERVE_DENIED')",
-                [&operation],
-            )?;
-            if changed != 1 {
-                return Err(StoreError::Invalid("RESERVE_ATTEMPT_MARKER_MISSING"));
-            }
-        }
+        let result = Self::reject_unsent_sql(&tx, None, id, reason, now, proven_not_reserved)?;
         tx.commit()?;
-        Ok(first)
+        Ok(result)
     }
+
     /// A no-send release requires the ORIGINAL durable rejection receipt,
     /// matching the request with no committed POST claim. The same query
     /// and rule now support both the legacy single-account v2 DB and the
@@ -3388,40 +3197,11 @@ impl AccountStore {
         &self,
         limit: usize,
     ) -> StoreResult<(Vec<StoredIntent>, Vec<String>)> {
-        if limit == 0 || limit > 100 {
-            return Err(StoreError::Invalid("COHORT_CENSUS_LIMIT_INVALID"));
-        }
-        let live = self.active_intents(limit)?;
-        let pending = self.reconcilable_intents_page(limit, 0)?;
-        let mut all = std::collections::BTreeMap::new();
-        for intent in &live {
-            all.insert(intent.intent_id.clone(), intent.clone());
-        }
-        let mut unresolved = std::collections::BTreeSet::new();
-        for intent in pending {
-            unresolved.insert(intent.intent_id.clone());
-            all.insert(intent.intent_id.clone(), intent);
-        }
-        if live.len() >= limit || unresolved.len() >= limit || all.len() >= limit {
-            return Err(StoreError::Invalid("COHORT_LOCAL_INTENTS_TRUNCATED"));
-        }
-        Ok((
-            all.into_values().collect(),
-            unresolved.into_iter().collect(),
-        ))
+        Self::risk_census_intents_sql(&self.connection, None, limit, wall_time_ms())
     }
 
     pub fn active_intents(&self, limit: usize) -> StoreResult<Vec<StoredIntent>> {
-        let mut s=self.connection.prepare("SELECT intent_id FROM intents WHERE state IN('PREPARED','RESERVED','POSTING','UNKNOWN','ACKNOWLEDGED','PARTIALLY_FILLED') ORDER BY state,updated_at,intent_id LIMIT ?1")?;
-        let ids = s
-            .query_map([limit.min(1000) as i64], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        ids.iter()
-            .map(|id| {
-                self.intent(id)?
-                    .ok_or(StoreError::Invalid("INTENT_MISSING"))
-            })
-            .collect()
+        Self::active_intents_sql(&self.connection, None, limit)
     }
     // Cache an already-authorized revision. This grants no new financial authority.
 }

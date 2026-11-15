@@ -113,8 +113,12 @@ impl TradeService {
                 .ok_or("AUTHORITY_UNAVAILABLE")?;
             stage = TerminalReleaseStage::Reservation;
             observe(stage, reservation_key.as_deref(), "running", None, &facts);
-            let Some(receipt) =
-                terminal_receipt(&r.execution.store, &i.intent_id, i.risk_increase).await?
+            let Some(receipt) = terminal_receipt(
+                r.execution.store.legacy().map_err(err)?,
+                &i.intent_id,
+                i.risk_increase,
+            )
+            .await?
             else {
                 return Ok(());
             };

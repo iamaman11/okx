@@ -1,3 +1,65 @@
+## #510 - scoped runtime admission/capture/recovery port (NO-GO remains)
+
+One integrated batch, baseline c5865232, with three code subagents and parent
+runtime integration. This supersedes the first unfinished-boundary paragraph
+in the historical checkpoint below; it does not claim the whole runtime done.
+
+ExecutionRuntime now has exclusive ExecutionStore::Legacy/Native composition.
+Native contains only the existing installation writer plus account scope, never
+another AccountStore/Connection. Unported legacy closures explicitly refuse
+Native access; there is no Deref, hidden second writer or Cloudflare fallback.
+Native storage diagnostics honestly return NOT_EVALUATED when no derivative
+projection exists, while queue/owner timings are actual installation-owner jobs.
+
+Production routing now covers scoped prepare/manual definition, quote+optional
+ALL-IN evidence, reserve-attempt and pre-reserve rejection, account/strategy
+financial admission, campaign readiness/history, coherent local census, source
+capture, order readback, outcome recording and posting recovery. Close/Reduce
+use the original local receipt/CAS and a consuming post-COMMIT claim; they do
+not mint campaign risk. Legacy callers reuse the extracted original rules.
+Native capture has real elapsed public-operation timings; unavailable per-job
+queue/SQL timings remain None, not invented zero-duration SQL measurements.
+
+CampaignCapture is a private domain borrow: original source/continuity/readiness/
+baseline/delta rules, static scoped SELECT CTEs preserving rowids, explicit
+scoped write keys, caller-owned transaction, no second COMMIT. Unused forwarding
+wrappers were removed. One missing namespace binding was found by independent
+review and fixed before testing. Immutable plans and FK constraints remain on;
+new test fixtures were corrected rather than disabling their protections.
+
+Evidence on this local candidate:
+- Full execution library: 305 PASS, 0 FAIL, 2 ignored; 8.23s after compilation.
+- Agent admission, mapping, source, plan, sender/entry settlement, strategy,
+  cleanup, terminal/unsent release, identity and risk routing: 70 PASS.
+- Agent binary native/stopped startup selection: 5 PASS.
+- Agent all-target check, fmt, architecture guard+self-test, original ledger
+  schema check, CI YAML parse and diff whitespace: PASS.
+- New SQL chain uses original prepare/quote/admission source, joint Reserve,
+  BeginPost, close/reopen, UNKNOWN and ACK, rejects repeat authorization. It is
+  explicitly OFFLINE: account-only import has NO migration/activation manifest,
+  no send capability is manufactured and no positive live grant is claimed.
+- Original posting recovery tests retain charged capacity, isolate accounts,
+  roll back all recovery on a broken second account and reopen WAL/FULL state.
+
+The existing draft CI now runs the new short Agent boundaries and refuses zero
+executed tests. Full required Windows/T09/T10 CI has NOT been run for acceptance;
+these direct counts are NOT 26/26, RB01-RB16 completion or P95 <=10s proof.
+
+FIRST REMAINING PRODUCTION BOUNDARY: ACK -> full Status protection/settlement/
+terminal release. These remaining account-only operations explicitly refuse
+Native rather than using legacy SQL. Terminal-peer census facts remain UNVERIFIED
+until the original raw fill/bill/fee settlement validator is scoped and replayed.
+The new explicit native startup route checks original import/authority BEFORE
+credentials/resources; the unchanged RB09 gate currently refuses activation.
+Selecting --native-finance-campaign cannot activate finance. Existing stopped
+selection remains read-only and mutually exclusive. No installed runtime changed.
+
+Complete Native Status and terminal source validation, connect Resolve, prove
+isolated RB09 and remove old financial authority, then perform positive actual
+Native Execute concurrency/lost-ACK/reopen and exact-SHA required acceptance.
+Do not use trial_* or fabricated activation rows to claim that acceptance.
+PR #511 remains Draft; no merge, installation, deployment or trading performed.
+
 ## #510 - Native admission integration candidate (NOT accepted end-to-end)
 
 Supersedes the unfinished-ingress notes in the historical checkpoint below.

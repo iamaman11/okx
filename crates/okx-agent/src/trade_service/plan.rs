@@ -145,20 +145,8 @@ pub(super) fn requires_independent_strategy_nav(instance: &str) -> bool {
     instance != "manual"
 }
 
-/// Missing strategy NAV blocks actual admission, but not a read-only price quote.
-/// An incomplete projection is *never* an affirmative risk admission.
-pub(super) fn instance_nav_gate(
-    nav_complete: bool,
-    record_risk_state: bool,
-) -> Result<bool, &'static str> {
-    if nav_complete {
-        Ok(true)
-    } else if record_risk_state {
-        Err("INSTANCE_NAV_INCOMPLETE")
-    } else {
-        Ok(false)
-    }
-}
+#[cfg(test)]
+use okx_execution::instance_nav_gate;
 
 /// Read-only position count from the actual account snapshot. Malformed sizes must
 /// not be interpreted as a flat account; algos and unknown intents are separate.
@@ -432,16 +420,14 @@ impl TradeService {
             let owned = r
                 .execution
                 .store
-                .call(deadline(), move |s| {
-                    Ok(s.active_lots(&inst)?
-                        .into_iter()
-                        .filter(|l| {
-                            l.instance_id.as_deref() == Some(&owned_instance) && l.side == side_name
-                        })
-                        .fold(Decimal::ZERO, |n, l| n + l.remaining_qty))
-                })
+                .active_lots(deadline(), inst)
                 .await
-                .map_err(err)?;
+                .map_err(err)?
+                .into_iter()
+                .filter(|l| {
+                    l.instance_id.as_deref() == Some(&owned_instance) && l.side == side_name
+                })
+                .fold(Decimal::ZERO, |n, l| n + l.remaining_qty);
             if qty > owned {
                 return Err("REDUCE_EXCEEDS_INSTANCE_OWNED_LOTS".into());
             }
@@ -463,7 +449,7 @@ impl TradeService {
         let instances = r
             .execution
             .store
-            .call(deadline(), |s| s.instances())
+            .strategy_instances(deadline())
             .await
             .map_err(err)?;
         if instance != "manual" {
@@ -501,22 +487,28 @@ impl TradeService {
             return Err("COMMAND_EXPIRED".into());
         }
         let binding_id = instance_id.clone();
-        let definition = r
-            .execution
-            .store
-            .call(until, move |s| {
-                if binding_id == "manual" {
-                    if record_risk_state {
-                        s.ensure_manual_instance(now())
+        let definition = if let Some((owner, account)) = r.execution.store.native_scope() {
+            owner
+                .plan_definition(until, account.to_owned(), binding_id, record_risk_state)
+                .await
+                .map_err(err)?
+        } else {
+            r.execution
+                .store
+                .call(until, move |s| {
+                    if binding_id == "manual" {
+                        if record_risk_state {
+                            s.ensure_manual_instance(now())
+                        } else {
+                            s.manual_definition_preview()
+                        }
                     } else {
-                        s.manual_definition_preview()
+                        s.strategy_definition(&binding_id)
                     }
-                } else {
-                    s.strategy_definition(&binding_id)
-                }
-            })
-            .await
-            .map_err(err)?;
+                })
+                .await
+                .map_err(err)?
+        };
         Ok(IntentPlan {
             strategy_definition_id: definition.definition_id,
             strategy_definition_version: definition.version,
@@ -557,72 +549,27 @@ impl TradeService {
             .max_drawdown_ratio
             .as_deref()
             .ok_or("DRAWDOWN_LIMIT_UNCONFIGURED")?)?;
-        let instance = instance.to_owned();
-        let utc_day = Utc::now().format("%Y-%m-%d").to_string();
-        let decision = r
-            .execution
-            .store
-            .call(deadline(), move |s| {
-                let risk = s.financial_risk(now(), None)?;
-                if !risk.nav_complete
-                    || !crate::config::evidence_fresh(
-                        risk.source_as_of,
-                        now(),
-                        crate::config::ACCOUNT_MAX_AGE_MS,
-                    )
-                {
-                    return Err(okx_execution::StoreError::Invalid(
-                        "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE",
-                    ));
-                }
-                // A preview may inspect historical stops, but must not resolve
-                // even a stale latch: that is a write owned by admission.
-                if record_risk_state {
-                    for (id, _, reason, _) in s.stops()? {
-                        if reason == "DAILY_LOSS_LIMIT" && !id.ends_with(&utc_day) {
-                            s.resolve_stop(&id, "fresh_UTC_window_rollover")?;
-                        }
-                    }
-                }
-                if risk.daily_loss_usd >= daily {
-                    let id = format!("daily:{utc_day}");
-                    if record_risk_state {
-                        s.latch_stop(&id, "account", "DAILY_LOSS_LIMIT", now())?;
-                    }
-                    return Ok(Some("DAILY_LOSS_LIMIT"));
-                }
-                if risk.daily_loss_usd + candidate > daily {
-                    return Ok(Some("DAILY_LOSS_HEADROOM_INSUFFICIENT"));
-                }
-                if risk.drawdown_ratio >= drawdown {
-                    if record_risk_state {
-                        s.latch_stop("drawdown", "account", "DRAWDOWN_LIMIT", now())?;
-                    }
-                    return Ok(Some("DRAWDOWN_LIMIT"));
-                }
-                if requires_independent_strategy_nav(&instance)
-                    && s.instances()?.iter().any(|i| i.instance_id == instance)
-                {
-                    let own = s.financial_risk(now(), Some(&instance))?;
-                    let nav_valid = instance_nav_gate(own.nav_complete, record_risk_state)
-                        .map_err(okx_execution::StoreError::Invalid)?;
-                    if nav_valid && (own.daily_loss_usd >= daily || own.drawdown_ratio >= drawdown)
-                    {
-                        if record_risk_state {
-                            s.latch_stop(
-                                &format!("instance:{instance}:risk"),
-                                &instance,
-                                "INSTANCE_LOSS_LIMIT",
-                                now(),
-                            )?;
-                        }
-                        return Ok(Some("INSTANCE_LOSS_LIMIT"));
-                    }
-                }
-                Ok(None)
-            })
-            .await
-            .map_err(err)?;
+        let request = okx_execution::FinancialAdmissionRequest {
+            daily_loss_limit_usd: daily,
+            max_drawdown_ratio: drawdown,
+            candidate_loss_usd: candidate,
+            strategy_instance: instance.to_owned(),
+            record_risk_state,
+        };
+        let decision = if let Some((owner, account)) = r.execution.store.native_scope() {
+            owner
+                .check_financial_admission(deadline(), account.to_owned(), request)
+                .await
+                .map_err(err)?
+        } else {
+            r.execution
+                .store
+                .call(deadline(), move |s| {
+                    s.check_financial_admission(&request, now())
+                })
+                .await
+                .map_err(err)?
+        };
         if let Some(reason) = decision {
             return Err(reason.into());
         }

@@ -99,6 +99,35 @@ fn risk_book_contract_trade_identity_lookup_and_lots_are_scoped_read_only() {
         assert_eq!(lots.len(), 1);
         assert_eq!(lots[0].remaining_qty, Decimal::from(qty));
         assert_eq!(lots[0].cost, Decimal::from(price));
+        let census = AccountStore::census_snapshot_sql(
+            &tx,
+            "installation",
+            account,
+            AccountCensusRequest {
+                positions: vec![("BTC-USDT-SWAP".into(), "long".into())],
+                client_order_ids: vec!["stableclient".into(), "missing".into()],
+                terminal_peer_release_intent: None,
+                limit: 100,
+            },
+            10,
+        )
+        .unwrap();
+        assert_eq!(census.observed_at_ms, 10);
+        assert_eq!(
+            census.positions[0].lots[0].remaining_qty,
+            Decimal::from(qty)
+        );
+        assert_eq!(census.positions[0].owned_proofs.len(), 1);
+        assert_eq!(census.pending_orders[0].as_ref().unwrap().plan_hash, hash);
+        assert!(census.pending_orders[1].is_none());
+        assert_eq!(census.intents.len(), 1);
+        assert_eq!(census.intents[0].0.plan_hash, hash);
+        assert_eq!(census.pending_central, vec!["intent"]);
+        assert!(census.terminal_peer_sources.is_empty());
+        assert_eq!(
+            census.policy,
+            AccountStore::account_policy_sql(&tx, scope).unwrap()
+        );
     }
     assert!(
         AccountStore::lookup_trade_intent_sql(

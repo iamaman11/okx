@@ -80,7 +80,7 @@ fn verify_reserved_loss(
     }
     Ok(())
 }
-fn bind_census(
+pub(crate) fn bind_census(
     tx: &rusqlite::Transaction<'_>,
     installation: &str,
     campaign: &str,
