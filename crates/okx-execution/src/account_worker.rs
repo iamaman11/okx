@@ -196,6 +196,15 @@ impl std::fmt::Debug for AccountStoreHandle {
     }
 }
 impl AccountStoreHandle {
+    /// Typed coherent source frontier. Raw SQL stays with the account owner.
+    pub async fn source_capture_state(
+        &self,
+        deadline: Instant,
+    ) -> StoreResult<crate::AccountSourceState> {
+        self.call(deadline, |store| store.source_capture_state())
+            .await
+    }
+
     pub async fn open_existing(
         path: PathBuf,
         account_key: String,

@@ -6,6 +6,23 @@ use super::{
 };
 use crate::{AccountStore, StoreError, StoreResult};
 impl UnifiedFinanceHandle {
+    /// Same collector frontier in one read transaction on the sole FIFO.
+    pub async fn source_capture_state(
+        &self,
+        account: String,
+        deadline: std::time::Instant,
+    ) -> StoreResult<crate::AccountSourceState> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let state =
+                AccountStore::source_capture_state_sql(&tx, Some((&installation, &account)))?;
+            tx.commit()?;
+            Ok(state)
+        })
+        .await
+    }
+
     /// Resume the original observer generation from this account only.
     /// Reading a missing account is an error, never a fresh generation zero.
     pub async fn source_generation_base(&self, account: String) -> StoreResult<u64> {

@@ -110,14 +110,8 @@ pub struct CaptureCompleted {
     pub phases: CapturePhaseTimings,
 }
 
-struct CaptureCursors {
-    spot: Option<SourceCursor>,
-    margin: Option<SourceCursor>,
-    swap: Option<SourceCursor>,
-    futures: Option<SourceCursor>,
-    options: Option<SourceCursor>,
-    bills: Option<SourceCursor>,
-}
+#[cfg(test)]
+use okx_execution::AccountSourceCursors as CaptureCursors;
 
 /// Preserve the source partition and its own durable cursor as one argument.
 struct FillHistorySource {
@@ -384,20 +378,9 @@ pub(crate) async fn capture_account_sources_traced(
         async {
             execution
                 .store
-                .call(deadline(), |s| {
-                    Ok((
-                        s.meta().initialized_at,
-                        CaptureCursors {
-                            spot: s.cursor("fills", "SPOT")?,
-                            margin: s.cursor("fills", "MARGIN")?,
-                            swap: s.cursor("fills", "SWAP")?,
-                            futures: s.cursor("fills", "FUTURES")?,
-                            options: s.cursor("fills", "OPTION")?,
-                            bills: s.cursor("bills", "account")?,
-                        },
-                    ))
-                })
+                .source_capture_state(deadline())
                 .await
+                .map(|state| (state.initialized_at, state.cursors))
                 .map_err(AgentError::from)
         },
     );

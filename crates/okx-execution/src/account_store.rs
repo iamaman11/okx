@@ -11,6 +11,10 @@ use std::{
 #[path = "account_store_tests.rs"]
 mod tests;
 
+#[path = "account_source_state.rs"]
+mod source_state;
+pub use source_state::{AccountSourceCursors, AccountSourceState};
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("ACCOUNT_STORAGE_UNAVAILABLE: {0}")]

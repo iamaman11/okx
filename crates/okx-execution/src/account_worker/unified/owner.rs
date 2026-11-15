@@ -149,7 +149,7 @@ impl UnifiedFinanceHandle {
     /// The deadline applies only BEFORE execution begins. Once the FIFO accepts
     /// a financial job, dropping its caller never aborts a possible COMMIT.
     /// A vanished worker/reply after enqueue is UNKNOWN, not a safe retry.
-    async fn submit_before<T: Send + 'static>(
+    pub(super) async fn submit_before<T: Send + 'static>(
         &self,
         start_deadline: Option<Instant>,
         operation: impl FnOnce(&mut rusqlite::Connection) -> StoreResult<T> + Send + 'static,

@@ -13262,6 +13262,10 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
             })
             .unwrap();
     }
+    let original_capture_a = a.source_capture_state().unwrap();
+    let original_capture_b = b.source_capture_state().unwrap();
+    assert_eq!(original_capture_a.generation_base, 5);
+    assert_eq!(original_capture_b.generation_base, 11);
     let original_manual_definition = a.strategy_definition("manual").unwrap();
     let (ap, bp) = (a.path.clone(), b.path.clone());
     let campaign = path();
@@ -13362,6 +13366,38 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
             .source_cursor("foreign-account".into(), "fills".into(), "SWAP".into())
             .await,
         Err(StoreError::Invalid("UNIFIED_SOURCE_ACCOUNT_NOT_FOUND"))
+    ));
+    for (account, expected) in [(&a_key, &original_capture_a), (&b_key, &original_capture_b)] {
+        let state = owner
+            .source_capture_state(
+                account.clone(),
+                std::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.account_key, *account);
+        assert_eq!(state.initialized_at, expected.initialized_at);
+        assert_eq!(state.generation_base, expected.generation_base);
+        assert_eq!(
+            state.cursors.swap.as_ref().unwrap().cursor,
+            expected.cursors.swap.as_ref().unwrap().cursor
+        );
+        assert!(state.cursors.spot.is_none() && state.cursors.bills.is_none());
+    }
+    assert!(matches!(
+        owner
+            .source_capture_state(
+                "foreign-account".into(),
+                std::time::Instant::now() + Duration::from_secs(2)
+            )
+            .await,
+        Err(StoreError::Invalid("UNIFIED_SOURCE_ACCOUNT_NOT_FOUND"))
+    ));
+    assert!(matches!(
+        owner
+            .source_capture_state(a_key.clone(), std::time::Instant::now())
+            .await,
+        Err(StoreError::Invalid("UNIFIED_FINANCE_QUEUE_DEADLINE"))
     ));
     let inventory = owner.inventory().await.unwrap();
     assert_eq!(inventory.accounts, 2);
@@ -15321,4 +15357,51 @@ fn risk_book_contract_unified_original_prepare_is_scoped_atomic_and_idempotent()
         fk.query([]).unwrap().next().unwrap().is_none(),
         "all 47-table scoped FK remain valid"
     );
+}
+
+#[test]
+fn risk_book_contract_source_capture_state_reads_all_partitions() {
+    let mut store = store();
+    let streams = [
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
+    ];
+    for (index, (source, partition)) in streams.iter().enumerate() {
+        store
+            .ingest_page(&IngestPage {
+                cursor: Some(SourceCursor {
+                    source: (*source).into(),
+                    stream_partition: (*partition).into(),
+                    cursor: format!("cursor-{index}"),
+                    watermark: 20 + index as i64,
+                    generation: 3 + index as i64,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    let state = store.source_capture_state().unwrap();
+    assert_eq!(state.account_key, store.meta.account_key);
+    assert_eq!(state.initialized_at, store.meta.initialized_at);
+    assert_eq!(state.generation_base, 8);
+    let cursors = [
+        state.cursors.spot,
+        state.cursors.margin,
+        state.cursors.swap,
+        state.cursors.futures,
+        state.cursors.options,
+        state.cursors.bills,
+    ];
+    for (index, ((source, partition), cursor)) in streams.iter().zip(cursors).enumerate() {
+        let cursor = cursor.unwrap();
+        assert_eq!(cursor.source, *source);
+        assert_eq!(cursor.stream_partition, *partition);
+        assert_eq!(cursor.cursor, format!("cursor-{index}"));
+        assert_eq!(cursor.watermark, 20 + index as i64);
+    }
 }

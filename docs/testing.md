@@ -1,3 +1,30 @@
+## #510 - typed coherent collector frontier on legacy and unified SQL owners
+
+The production collector now calls AccountStoreHandle::source_capture_state
+instead of supplying its own SQL closure for opening time and six cursors.
+AccountSourceState/Cursors replace the agent-local duplicate shape. The
+same AccountStore SQL read implementation serves the unified FIFO through
+an account-scoped read transaction. It returns opening time, generation base
+and the six original fill/bill cursors in a coherent snapshot. Raw SQL stays
+inside execution; no financial capability, cache or second owner is added.
+
+Original-import/owner witness compares legacy and unified account state,
+separate A/B generation/cursor values, unknown account denial and expired
+queue deadline. No cursor or financial rows are advanced by this read.
+Final local Windows execution regression: 261 PASS, 0 FAIL, 2 ignored
+(8.98s after build), including all six cursor partitions; direct owner/import
+witness PASS (0.51s). Agent source_capture tests 8 PASS (0.00s after build),
+Agent all-target check and architecture/negative guard, formatting/diff PASS.
+Agent test-binary compilation took minutes and is separate from execution;
+these timings are not P95 or full Windows acceptance.
+
+This changes a real production collector call, but ExecutionRuntime still
+holds the legacy AccountStoreHandle: new-mode collector/account resource
+startup is NOT yet wired. Owner lookup, source projection/reconciliation,
+activation/four risk actions and complete RB01-RB16/T09/T10 remain outstanding.
+
+---
+
 ## #510 - original USD normalization and durable source-stop outcome
 
 Existing AccountStore::ingest_page_with_usd now reuses normalize_source_page_usd_sql.
