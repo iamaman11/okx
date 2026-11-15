@@ -6,6 +6,23 @@ use super::{
 };
 use crate::{AccountStore, StoreError, StoreResult};
 impl UnifiedFinanceHandle {
+    pub async fn finance_report(
+        &self,
+        account: String,
+        query: crate::FinanceReportQuery,
+        deadline: std::time::Instant,
+    ) -> StoreResult<crate::FinanceReportSnapshot> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let snapshot =
+                AccountStore::finance_report_sql(&tx, Some((&installation, &account)), &query)?;
+            tx.commit()?;
+            Ok(snapshot)
+        })
+        .await
+    }
+
     /// Committed account-backed principal; never a reserve or venue-send grant.
     pub async fn capital_state(
         &self,

@@ -1,3 +1,41 @@
+## #510 - typed production Portfolio snapshot and scoped financial reports
+
+Production portfolio.rs now calls FinanceReportQuery -> FinanceReportSnapshot,
+not an Agent-provided AccountStore SQL closure or positional six-tuple. Health,
+filtered history/attribution, NAV, T0 and ledger revision share one Deferred
+read transaction. The existing AccountStoreHandle and UnifiedFinanceHandle
+expose typed report methods; SQL does not escape okx-execution. The current
+Agent composition still selects the legacy handle, not a new active owner.
+
+Original algorithms are shared by explicit source_nav_report (224 lines),
+source_finance_report (65) and source_financial_risk (57). All unified table,
+receipt and revision reads are scoped by installation/account. Strategy NAV
+requires the original immutable receipt and matching event-time revision;
+manual remains NOT_APPLICABLE. Filtering, checked decimals, pagination,
+freshness and SQL interruption stage codes are retained. No risk grant or
+new financial data source is introduced by a read report.
+
+Direct witness: legacy A report equals unified A; two account principals
+produce 0.1/0.2 strategy PnL. A matching foreign A receipt cannot prove a forged
+B NAV point. One-row filtered history resumes without omission; revision is
+from the same account, and a newer B account mark invalidates B strategy NAV
+without invalidating A. Unknown account/backward range reject. COMMIT/reopen
+retains the original A result. Source data are isolated synthetic fixtures.
+
+Windows execution library: 270 PASS, 0 FAIL, 2 ignored, 8.17s after build.
+Direct report witness: 0.33s. Agent Portfolio tests: 13 PASS, 0 FAIL, 0.30s
+after build. Agent all-target check and architecture/negative guard plus
+format/diff PASS. Each test binary was built once for this slice; the full
+execution regression reused the direct test binary. No full GitHub campaign
+was manually launched. These results are not 26x/RB01-RB16/P95 acceptance.
+
+Remaining integration order: complete original trading/governance/source
+producer typed APIs and bind AccountResources to the one owner; finish the
+four source-bound Native risk actions; implement verified one-time activation
+and disable/remove old Cloudflare financial authority; then full same-SHA
+functional/physical/regression and performance acceptance. Do not select a
+partially ported owner or turn the activation gate into an unconditional allow.
+
 ## #510 - shared strategy valuation and conserved capital operations
 
 Original AccountStore now delegates to explicit SQL modules: source_capital

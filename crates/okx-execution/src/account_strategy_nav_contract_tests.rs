@@ -52,7 +52,7 @@ pub(super) fn seed(
     s.reconcile_strategy_valuation(&evidence(&s.meta.account_key))
         .unwrap()
 }
-fn evidence(account: &str) -> StrategyValuationEvidence {
+pub(super) fn evidence(account: &str) -> StrategyValuationEvidence {
     StrategyValuationEvidence {
         account_key: account.into(),
         account_nav_source: "account-witness".into(),
@@ -69,7 +69,7 @@ fn evidence(account: &str) -> StrategyValuationEvidence {
         }],
     }
 }
-fn cursor() -> SourceCursor {
+pub(super) fn cursor() -> SourceCursor {
     SourceCursor {
         source: "strategy_valuation".into(),
         stream_partition: "account".into(),

@@ -10,6 +10,8 @@ mod captured_fill_contracts;
 mod entry_fee_contracts;
 #[path = "account_fill_projection_contract_tests.rs"]
 mod fill_projection_contracts;
+#[path = "account_finance_report_contract_tests.rs"]
+mod finance_report_contracts;
 #[path = "account_funding_projection_contract_tests.rs"]
 mod funding_projection_contracts;
 #[path = "account_nav_projection_contract_tests.rs"]

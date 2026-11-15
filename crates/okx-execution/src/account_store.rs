@@ -19,6 +19,10 @@ pub use source_state::{AccountSourceCursors, AccountSourceState};
 mod nav_projection;
 pub use nav_projection::{AccountNavSnapshot, build_account_nav_page};
 
+#[path = "account_finance_report.rs"]
+mod finance_report;
+pub use finance_report::{FinanceReportQuery, FinanceReportSnapshot, FinanceReportView};
+
 #[path = "account_captured_fills.rs"]
 mod captured_fills;
 pub use captured_fills::{CapturedFill, CapturedFillPage};

@@ -196,6 +196,15 @@ impl std::fmt::Debug for AccountStoreHandle {
     }
 }
 impl AccountStoreHandle {
+    pub async fn finance_report(
+        &self,
+        deadline: Instant,
+        query: crate::FinanceReportQuery,
+    ) -> StoreResult<crate::FinanceReportSnapshot> {
+        self.call(deadline, move |store| store.finance_report(&query))
+            .await
+    }
+
     pub async fn ingest_captured_bills(
         &self,
         deadline: Instant,

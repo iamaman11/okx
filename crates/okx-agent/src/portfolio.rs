@@ -153,57 +153,24 @@ pub async fn portfolio(
         let page = r
             .execution
             .store
-            .call(Instant::now() + Duration::from_secs(5), move |s| {
-                let health = s
-                    .financial_risk(Utc::now().timestamp_millis(), None)
-                    .map_err(|e| {
-                        e.with_interruption_stage("ACCOUNT_SQL_PORTFOLIO_RISK_INTERRUPTED")
-                    })?;
-                if history {
-                    let entries = s
-                        .finance_history_filtered(
-                            from,
-                            through,
+            .finance_report(
+                Instant::now() + Duration::from_secs(5),
+                okx_execution::FinanceReportQuery {
+                    from,
+                    through,
+                    instances,
+                    currencies,
+                    view: if history {
+                        okx_execution::FinanceReportView::History {
                             after_time,
-                            &after_id,
+                            after_id,
                             limit,
-                            &instances,
-                            &currencies,
-                        )
-                        .map_err(|e| {
-                            e.with_interruption_stage("ACCOUNT_SQL_PORTFOLIO_HISTORY_INTERRUPTED")
-                        })?;
-                    Ok((
-                        entries,
-                        BTreeMap::new(),
-                        health,
-                        Vec::new(),
-                        s.meta().initialized_at,
-                        s.finance_revision()?,
-                    ))
-                } else {
-                    let attribution = s
-                        .finance_attribution_filtered(from, through, &instances, &currencies)
-                        .map_err(|e| {
-                            e.with_interruption_stage(
-                                "ACCOUNT_SQL_PORTFOLIO_ATTRIBUTION_INTERRUPTED",
-                            )
-                        })?;
-                    let nav = s
-                        .nav_summary(from, through, &instances, &currencies)
-                        .map_err(|e| {
-                            e.with_interruption_stage("ACCOUNT_SQL_PORTFOLIO_NAV_INTERRUPTED")
-                        })?;
-                    Ok((
-                        Vec::new(),
-                        attribution,
-                        health,
-                        nav,
-                        s.meta().initialized_at,
-                        s.finance_revision()?,
-                    ))
-                }
-            })
+                        }
+                    } else {
+                        okx_execution::FinanceReportView::Summary
+                    },
+                },
+            )
             .await;
         let page = match page {
             Ok(page) => page,
@@ -220,16 +187,29 @@ pub async fn portfolio(
             }
             Err(err) => return Err(err.to_string()),
         };
-        finance_revisions.insert(key.clone(), page.5);
-        for nav in page.3 {
-            navigation.push(nav_projection(&key, &alias, nav, from, through, page.4));
+        finance_revisions.insert(key.clone(), page.revision);
+        for nav in page.nav {
+            navigation.push(nav_projection(
+                &key,
+                &alias,
+                nav,
+                from,
+                through,
+                page.initialized_at,
+            ));
         }
         readiness
-            .push(json!({"account":key,"account_name":alias,"t0":page.4,"financial_risk":page.2}));
-        for entry in page.0 {
+            .push(json!({"account":key,"account_name":alias,"t0":page.initialized_at,"financial_risk":page.financial_risk}));
+        for entry in page.entries {
             rows.push((entry.time,key.clone(),entry.entry_id.clone(),json!({"time":entry.time,"account":key,"account_name":alias,"component":entry.component,"amount":entry.amount.normalize().to_string(),"currency":entry.currency,"strategy_instance":entry.instance_id,"reference":entry.entry_id})));
         }
-        accumulate_finance(&key, environment, page.1, &mut totals, &mut attribution)?;
+        accumulate_finance(
+            &key,
+            environment,
+            page.attribution,
+            &mut totals,
+            &mut attribution,
+        )?;
     }
     if request.action == PortfolioAction::History {
         let history_snapshot = hash(&(query.as_str(), &finance_revisions))?;

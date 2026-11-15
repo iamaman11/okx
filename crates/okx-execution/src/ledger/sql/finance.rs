@@ -2693,198 +2693,7 @@ impl AccountStore {
         instances: &[String],
         currencies: &[String],
     ) -> StoreResult<Vec<NavWindow>> {
-        if from > through || instances.len() > 32 || currencies.len() > 32 {
-            return Err(StoreError::Invalid("NAV_RANGE_FILTER_INVALID"));
-        }
-        let scopes = {
-            let mut q = self
-                .connection
-                .prepare("SELECT scope_id,currency FROM nav_scopes UNION SELECT 'strategy:' || instance_id, 'USD' FROM strategy_instances ORDER BY scope_id,currency")?;
-            q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-                .filter_map(|v| match v {
-                    Ok((scope, currency))
-                        if (instances.is_empty()
-                            || instances.iter().any(|i| scope == format!("strategy:{i}")))
-                            && (currencies.is_empty() || currencies.contains(&currency)) =>
-                    {
-                        Some(Ok((scope, currency)))
-                    }
-                    Err(e) => Some(Err(e)),
-                    _ => None,
-                })
-                .take(65)
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        if scopes.len() > 64 {
-            return Err(StoreError::Invalid("NAV_SCOPE_LIMIT"));
-        }
-        let mut result = Vec::new();
-        // Only ordinary strategies need a source-revision witness. Account
-        // NAV uses its own source, while manual has no separate strategy NAV.
-        // For an ordinary strategy, both endpoints still retain independent
-        // immutable as-of revisions: later facts cannot validate old marks.
-        let requires_strategy_revision = scopes
-            .iter()
-            .any(|(scope, _)| scope.starts_with("strategy:") && scope != "strategy:manual");
-        let (opening_revision, revision) = if requires_strategy_revision {
-            (
-                self.strategy_valuation_revision_as_of(from).map_err(|e| {
-                    e.with_interruption_stage("ACCOUNT_SQL_NAV_OPENING_REVISION_INTERRUPTED")
-                })?,
-                self.strategy_valuation_revision_as_of(through)
-                    .map_err(|e| {
-                        e.with_interruption_stage("ACCOUNT_SQL_NAV_CLOSING_REVISION_INTERRUPTED")
-                    })?,
-            )
-        } else {
-            (String::new(), String::new())
-        };
-        for (scope, currency) in scopes {
-            // Only native reconciliation receipts authorize strategy NAV rows.
-            // Arbitrary strategy nav_points, including old COMPLETE claims, are
-            // ignored. A new financial event invalidates a prior revision.
-            let manual = scope == "strategy:manual";
-            let strategy = scope.starts_with("strategy:") && !manual;
-            let endpoint = |time: i64,
-                            source_revision: &str|
-             -> StoreResult<Option<(Decimal, Decimal, i64, String)>> {
-                let row: Option<(String, String, i64, String)> = if strategy {
-                    self.connection.query_row(
-                        "SELECT n.equity,n.flows,n.time,n.coverage FROM nav_points n
-                         JOIN operation_receipts o ON o.operation_id='strategy-nav:' || n.scope_id || ':' || n.time || ':' || n.source_version
-                         WHERE n.scope_id=?1 AND n.time<=?2
-                           AND n.source_version IN ('strategy-reconciled-v1:opening',?3)
-                           AND o.kind='STRATEGY_NAV_RECONCILED' AND o.result_ref=n.mark_source
-                           AND o.request_hash=substr(n.source_version,length('strategy-reconciled-v1:')+1)
-                         ORDER BY n.time DESC, n.source_version DESC LIMIT 1",
-                        params![scope,time,format!("strategy-reconciled-v1:revision:{source_revision}")],
-                        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
-                    ).optional()?
-                } else {
-                    self.connection.query_row(
-                        "SELECT equity,flows,time,coverage FROM nav_points WHERE scope_id=?1 AND time<=?2 ORDER BY time DESC,source_version DESC LIMIT 1",
-                        params![scope,time],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
-                    ).optional()?
-                };
-                row.map(|(e, f, t, c)| Ok((decimal(e)?, decimal(f)?, t, c)))
-                    .transpose()
-            };
-            let capital_known=!manual && (!scope.starts_with("strategy:") ||
-                self.connection.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM nav_points n JOIN operation_receipts o ON
-                     o.operation_id='strategy-nav:' || n.scope_id || ':' || n.time || ':' || n.source_version
-                     WHERE n.scope_id=?1 AND n.time<=?2 AND n.source_version=?3
-                       AND o.kind='STRATEGY_NAV_RECONCILED'
-                       AND o.request_hash=substr(n.source_version,length('strategy-reconciled-v1:')+1)
-                       AND o.result_ref=n.mark_source)",
-                    params![scope,through,format!("strategy-reconciled-v1:revision:{revision}")],
-                    |r|r.get::<_,bool>(0)
-                )?);
-            let opening = if capital_known {
-                endpoint(from, &opening_revision)?
-            } else {
-                None
-            };
-            let current = if capital_known {
-                endpoint(through, &revision)?
-            } else {
-                None
-            };
-            let flows = opening
-                .as_ref()
-                .zip(current.as_ref())
-                .map(|(o, c)| {
-                    c.1.checked_sub(o.1)
-                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))
-                })
-                .transpose()?;
-            let pnl = opening
-                .as_ref()
-                .zip(current.as_ref())
-                .zip(flows)
-                .map(|((o, c), f)| {
-                    c.0.checked_sub(o.0)
-                        .and_then(|v| v.checked_sub(f))
-                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))
-                })
-                .transpose()?;
-            let valuation_gap = if strategy {
-                let latest:Option<(i64,String)>=self.connection.query_row(
-                    "SELECT watermark,coverage_gaps FROM source_cursors WHERE source='strategy_valuation' AND stream_partition='account'",
-                    [],|r|Ok((r.get(0)?,r.get(1)?))
-                ).optional()?;
-                latest.is_some_and(|(t, g)| {
-                    !g.is_empty() && t <= through && current.as_ref().is_none_or(|p| t >= p.2)
-                })
-            } else {
-                false
-            };
-            // A newer account snapshot supersedes an old strategy witness
-            // even when there is no fill, bill or finance entry (e.g. a pure
-            // mark-to-market move). Historical reads are checked as-of through.
-            let account_source_matches = if strategy {
-                let account_latest:Option<(i64,String)>=self.connection.query_row(
-                    "SELECT time,mark_source FROM nav_points WHERE scope_id='account'
-                     AND currency='USD' AND time<=?1 ORDER BY time DESC,source_version DESC LIMIT 1",
-                    [through],|r|Ok((r.get(0)?,r.get(1)?))
-                ).optional()?;
-                let strategy_source: Option<String> =
-                    if let Some((_, _, time, _)) = current.as_ref() {
-                        self.connection
-                            .query_row(
-                                "SELECT mark_source FROM nav_points WHERE scope_id=?1 AND time=?2
-                         AND source_version=?3",
-                                params![
-                                    scope,
-                                    time,
-                                    format!("strategy-reconciled-v1:revision:{revision}")
-                                ],
-                                |r| r.get(0),
-                            )
-                            .optional()?
-                    } else {
-                        None
-                    };
-                account_latest
-                    .zip(strategy_source)
-                    .is_some_and(|((time, source), witness)| {
-                        current
-                            .as_ref()
-                            .is_some_and(|row| row.2 == time && source == witness)
-                    })
-            } else {
-                true
-            };
-            let complete = account_source_matches
-                && !valuation_gap
-                && opening
-                    .as_ref()
-                    .is_some_and(|v| v.3 == "COMPLETE" && from - v.2 <= 5000)
-                && current
-                    .as_ref()
-                    .is_some_and(|v| v.3 == "COMPLETE" && through - v.2 <= 5000);
-            result.push(NavWindow {
-                scope_id: scope,
-                currency,
-                opening_equity: opening.as_ref().map(|v| v.0),
-                current_equity: current.as_ref().map(|v| v.0),
-                flows,
-                pnl,
-                opening_as_of: opening.as_ref().map(|v| v.2),
-                current_as_of: current.as_ref().map(|v| v.2),
-                coverage: if manual {
-                    "NOT_APPLICABLE"
-                } else if from < self.meta.initialized_at {
-                    "UNAVAILABLE_BEFORE_T0"
-                } else if complete && capital_known {
-                    "COMPLETE"
-                } else {
-                    "PARTIAL"
-                }
-                .into(),
-            });
-        }
-        Ok(result)
+        Self::nav_summary_sql(&self.connection, None, from, through, instances, currencies)
     }
     pub fn opening_equity_usd(&self) -> StoreResult<Decimal> {
         Self::opening_equity_usd_sql(&self.connection, None)
@@ -2893,42 +2702,7 @@ impl AccountStore {
         Self::usd_component_total_sql(&self.connection, None, component)
     }
     pub fn financial_risk(&self, now: i64, instance: Option<&str>) -> StoreResult<FinancialRisk> {
-        let scope = instance
-            .map(|s| format!("strategy:{s}"))
-            .unwrap_or_else(|| "account".into());
-        let daily: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT loss_usd FROM daily_losses WHERE scope_id=?1 AND utc_day=?2",
-                params![scope, crate::risk::utc_day(now)],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let nav:Option<(String,String,i64,String)>=self.connection.query_row("SELECT highwater,adjusted_equity,time,coverage FROM nav_watermarks WHERE scope_id=?1",[&scope],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-        let (drawdown, asof, complete) = if let Some((peak, equity, time, coverage)) = nav {
-            let peak = decimal(peak)?;
-            let equity = decimal(equity)?;
-            let dd = if peak > Decimal::ZERO {
-                peak.checked_sub(equity)
-                    .and_then(|v| v.max(Decimal::ZERO).checked_div(peak))
-                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?
-            } else {
-                Decimal::ZERO
-            };
-            (
-                dd,
-                time,
-                coverage == "COMPLETE" && instance.is_none() && now >= time && now - time <= 5000,
-            )
-        } else {
-            (Decimal::ZERO, 0, false)
-        };
-        Ok(FinancialRisk {
-            daily_loss_usd: daily.map(decimal).transpose()?.unwrap_or(Decimal::ZERO),
-            drawdown_ratio: drawdown,
-            nav_complete: complete,
-            source_as_of: asof,
-        })
+        Self::financial_risk_sql(&self.connection, None, now, instance)
     }
     pub fn attribute_pending_funding(
         &mut self,
@@ -2986,42 +2760,17 @@ impl AccountStore {
         instances: &[String],
         currencies: &[String],
     ) -> StoreResult<Vec<FinanceEntry>> {
-        let (filter, mut args) = finance_filter(instances, currencies, 5)?;
-        let mut values = vec![
-            from.into(),
-            through.into(),
-            after_time.into(),
-            after_id.to_string().into(),
-            (limit.min(1000) as i64).into(),
-        ];
-        values.append(&mut args);
-        let query = format!(
-            "SELECT entry_id,economic_event_key,component,allocation_leg,amount,currency,instance_id,source_ref,time,reverses_entry_id FROM finance_entries WHERE time>=?1 AND time<=?2 AND (time,entry_id)>(?3,?4){filter} ORDER BY time,entry_id LIMIT ?5"
-        );
-        let mut s = self.connection.prepare(&query)?;
-        s.query_map(rusqlite::params_from_iter(values), |r| {
-            Ok((
-                FinanceEntry {
-                    entry_id: r.get(0)?,
-                    economic_event_key: r.get(1)?,
-                    component: r.get(2)?,
-                    allocation_leg: r.get(3)?,
-                    amount: Decimal::ZERO,
-                    currency: r.get(5)?,
-                    instance_id: r.get(6)?,
-                    source_ref: r.get(7)?,
-                    time: r.get(8)?,
-                    reverses_entry_id: r.get(9)?,
-                },
-                r.get::<_, String>(4)?,
-            ))
-        })?
-        .map(|v| {
-            let (mut e, a) = v?;
-            e.amount = decimal(a)?;
-            Ok(e)
-        })
-        .collect()
+        Self::finance_history_filtered_sql(
+            &self.connection,
+            None,
+            from,
+            through,
+            after_time,
+            after_id,
+            limit,
+            instances,
+            currencies,
+        )
     }
     /// Cheap monotonic revision for the append-only, immutable finance log.
     /// Includes late event-time arrivals. MAX(rowid) uses the table btree,
