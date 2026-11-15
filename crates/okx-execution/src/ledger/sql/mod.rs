@@ -5,6 +5,7 @@ mod orders;
 mod projections;
 mod schema;
 mod source_bills;
+mod source_entries;
 mod source_fills;
 mod source_finance;
 mod sources;

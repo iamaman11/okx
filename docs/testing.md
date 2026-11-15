@@ -1,3 +1,28 @@
+## #510 - shared canonical financial event and totals transaction body
+
+Original page ingestion now calls record_finance_entries_sql in the same
+existing transaction. The helper supports explicit installation/account
+scope for the unified original tables: canonical event replay/conflict,
+reversal original/uniqueness, exact instance/account totals, source links,
+monotonic USD-loss and daily-loss rows. No second calculation or commit is
+introduced. Account campaign-loss update remains in the original page owner;
+full unified page/provenance/cursor and capture wiring are not complete.
+
+On the full original imported schema, direct checks verify same IDs on A/B,
+independent -1 account/instance fee totals, exact replay, a second source
+link without second charge, foreign-account reversal rejection, valid
+correction replay and final fee total, USD loss 3 then replay 0, daily loss 3.
+These source-domain witnesses roll back the sealed offline import, not an
+accepted native activation. Existing original ingestion regressions continue
+to exercise the production caller with real commits.
+
+Local Windows: complete execution library 258 PASS, 0 FAIL, 2 ignored,
+8.34s after build. Direct original-import witness PASS (0.39s). Architecture
+and negative self-tests PASS. No complete-page/native activation/9-actions
+or RB01-RB16/26x acceptance is claimed.
+
+---
+
 ## #510 - account-scoped financial source verification
 
 The original strategy finance provenance verifier now lives in

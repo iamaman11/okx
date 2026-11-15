@@ -302,6 +302,98 @@ pub(super) fn assert_contract(target: &mut Connection, a_key: String, b_key: Str
         verify("unknown-account", &finance),
         Err(StoreError::Invalid("UNIFIED_SOURCE_ACCOUNT_NOT_FOUND"))
     ));
+    let mut charge = FinanceEntry {
+        entry_id: "charge-raw".into(),
+        economic_event_key: "bill:same-raw-bill".into(),
+        component: "FEE".into(),
+        allocation_leg: "account".into(),
+        amount: -Decimal::ONE,
+        currency: "USDT".into(),
+        instance_id: Some("manual".into()),
+        source_ref: "bill:same-raw-bill".into(),
+        time: 7,
+        reverses_entry_id: None,
+    };
+    for account in [&a_key, &b_key] {
+        for _ in 0..2 {
+            assert_eq!(
+                AccountStore::record_finance_entries_sql(
+                    &tx,
+                    Some(("installation", account)),
+                    &[charge.clone()]
+                )
+                .unwrap(),
+                Decimal::ZERO
+            );
+        }
+        let total:String=tx.query_row("SELECT amount FROM finance_totals WHERE installation_id='installation' AND account_key=?1 AND currency='USDT' AND component='FEE'",[account],|r|r.get(0)).unwrap();
+        assert_eq!(total, "-1");
+        let total:String=tx.query_row("SELECT amount FROM instance_finance_totals WHERE installation_id='installation' AND account_key=?1 AND instance_id='manual' AND currency='USDT' AND component='FEE'",[account],|r|r.get(0)).unwrap();
+        assert_eq!(total, "-1");
+    }
+    charge.entry_id = "charge-second-source".into();
+    charge.source_ref = "fill:same-raw-fill".into();
+    charge.time = 9;
+    AccountStore::record_finance_entries_sql(
+        &tx,
+        Some(("installation", &a_key)),
+        &[charge.clone()],
+    )
+    .unwrap();
+    assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM finance_source_links WHERE installation_id='installation' AND account_key=?1 AND entry_id='charge-raw'",[&a_key],|r|r.get(0)).unwrap(),2);
+    let mut original = charge.clone();
+    original.entry_id = "only-A-original".into();
+    original.economic_event_key = "only-A-event".into();
+    AccountStore::record_finance_entries_sql(
+        &tx,
+        Some(("installation", &a_key)),
+        &[original.clone()],
+    )
+    .unwrap();
+    let mut reversal = original.clone();
+    reversal.entry_id = "correction".into();
+    reversal.economic_event_key = "correction-event".into();
+    reversal.reverses_entry_id = Some(original.entry_id);
+    reversal.amount = Decimal::ONE;
+    assert!(matches!(
+        AccountStore::record_finance_entries_sql(
+            &tx,
+            Some(("installation", &b_key)),
+            &[reversal.clone()]
+        ),
+        Err(StoreError::Invalid("FINANCE_REVERSAL_ORIGINAL_MISSING"))
+    ));
+    for _ in 0..2 {
+        AccountStore::record_finance_entries_sql(
+            &tx,
+            Some(("installation", &a_key)),
+            &[reversal.clone()],
+        )
+        .unwrap();
+    }
+    let total:String=tx.query_row("SELECT amount FROM finance_totals WHERE installation_id='installation' AND account_key=?1 AND currency='USDT' AND component='FEE'",[&a_key],|r|r.get(0)).unwrap();
+    assert_eq!(total, "-1");
+    let mut loss = charge.clone();
+    loss.entry_id = "usd-loss".into();
+    loss.economic_event_key = "loss-event".into();
+    loss.component = "CAMPAIGN_LOSS_USD".into();
+    loss.currency = "USD".into();
+    loss.amount = Decimal::from(3);
+    assert_eq!(
+        AccountStore::record_finance_entries_sql(
+            &tx,
+            Some(("installation", &a_key)),
+            &[loss.clone()]
+        )
+        .unwrap(),
+        Decimal::from(3)
+    );
+    assert_eq!(
+        AccountStore::record_finance_entries_sql(&tx, Some(("installation", &a_key)), &[loss])
+            .unwrap(),
+        Decimal::ZERO
+    );
+    assert_eq!(tx.query_row::<String,_,_>("SELECT loss_usd FROM daily_losses WHERE installation_id='installation' AND account_key=?1 AND scope_id='account' AND utc_day=0",[&a_key],|r|r.get(0)).unwrap(),"3");
     // The real stopped import cannot be activated by a source-storage witness.
     tx.rollback().unwrap();
 }
