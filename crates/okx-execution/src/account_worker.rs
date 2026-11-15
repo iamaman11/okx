@@ -576,6 +576,23 @@ pub struct UnifiedFinanceHandle {
 /// native financial commands. Typed inputs are produced by the existing
 /// domain/source owners, never by arbitrary JSON or Cloudflare budget code.
 /// The *same* dispatch is used for rollback-only offline contract tests.
+/// #510: one authenticated campaign policy is applied to every ORIGINAL
+/// AccountStore primary row and the ORIGINAL RiskBook policy revision under
+/// one installation-owned SQL transaction. This DTO is NOT an authority
+/// receipt: the live caller and RB09 activation gate remain independent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedFinancePolicyAccount {
+    pub account_key: String,
+    pub paused: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedFinancePolicy {
+    pub campaign_id: String,
+    pub policy_revision: u64,
+    pub campaign_loss_limit_usd: String,
+    pub accounts: Vec<UnifiedFinancePolicyAccount>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum UnifiedFinanceWrite {
     /// The original AccountStore decision, immutable plan and intent are
@@ -585,6 +602,11 @@ pub(crate) enum UnifiedFinanceWrite {
         account: String,
         decision: crate::Decision,
         intent: crate::NewIntent,
+    },
+    /// An installation-wide policy update, including all original account
+    /// policy rows and the campaign RiskBook CAS revision, in ONE COMMIT.
+    ApplyPolicy {
+        policy: UnifiedFinancePolicy,
     },
     InstallEntryOpening {
         source: crate::risk::NativeOpeningSource,
@@ -640,6 +662,7 @@ pub(crate) enum UnifiedFinanceWrite {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UnifiedFinanceWriteReceipt {
     Prepared { inserted: bool, intent_id: String },
+    PolicyApplied,
     Risk(crate::risk::UnifiedRiskDecision),
     Recovered { changed: usize },
     OutcomeRecorded,
@@ -712,6 +735,14 @@ fn apply_original_unified_finance_inner(
                 inserted,
                 intent_id: saved.intent_id,
             })
+        }
+        UnifiedFinanceWrite::ApplyPolicy { policy } => {
+            AccountStore::apply_unified_campaign_policy_sql_transaction(
+                tx,
+                installation,
+                &policy,
+            )?;
+            Ok(UnifiedFinanceWriteReceipt::PolicyApplied)
         }
         UnifiedFinanceWrite::InstallEntryOpening {
             source,
@@ -1077,6 +1108,22 @@ impl UnifiedFinanceHandle {
             Ok(result)
         })
         .await
+    }
+
+    /// The original AccountStore account-policies and RiskBook revision are
+    /// one local transaction. No per-account owner, second COMMIT or Cloudflare
+    /// finance write. Before accepted RB09 this remains strictly fail-closed.
+    pub async fn apply_governance_policy(
+        &self,
+        policy: UnifiedFinancePolicy,
+    ) -> StoreResult<()> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::ApplyPolicy { policy })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::PolicyApplied => Ok(()),
+            _ => Err(StoreError::Invalid("UNIFIED_POLICY_RECEIPT_UNEXPECTED")),
+        }
     }
 
     /// The SAME real Rust domain dispatch for direct contract witnesses.

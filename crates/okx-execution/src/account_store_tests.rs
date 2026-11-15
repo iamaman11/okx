@@ -13152,6 +13152,53 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         ));
     }
     assert_eq!(owner.inventory().await.unwrap(), inventory);
+    // A valid full-cohort policy is a SINGLE ORIGINAL scoped SQL operation,
+    // not two per-account commits or an extra RiskBook policy owner.
+    let policy = crate::account_worker::UnifiedFinancePolicy {
+        campaign_id: "campaign-X".into(),
+        policy_revision: 8,
+        campaign_loss_limit_usd: "100".into(),
+        accounts: vec![
+            crate::account_worker::UnifiedFinancePolicyAccount {
+                account_key: a_key.clone(),
+                paused: true,
+            },
+            crate::account_worker::UnifiedFinancePolicyAccount {
+                account_key: b_key.clone(),
+                paused: true,
+            },
+        ],
+    };
+    // Offline is a sealed snapshot, not authority. This is the ACTUAL
+    // production method and must refuse before touching the imported policy.
+    assert!(matches!(
+        owner.apply_governance_policy(policy.clone()).await,
+        Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
+    ));
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
+    let mut missing_account = policy.clone();
+    missing_account.accounts.pop();
+    assert!(matches!(
+        owner
+            .trial_financial_write(
+                crate::account_worker::UnifiedFinanceWrite::ApplyPolicy {
+                    policy: missing_account,
+                }
+            )
+            .await,
+        Err(StoreError::Invalid("UNIFIED_POLICY_COHORT_MISMATCH"))
+    ));
+    let mut bad_limit = policy;
+    bad_limit.campaign_loss_limit_usd = "101".into();
+    assert!(matches!(
+        owner
+            .trial_financial_write(
+                crate::account_worker::UnifiedFinanceWrite::ApplyPolicy { policy: bad_limit }
+            )
+            .await,
+        Err(StoreError::Invalid("UNIFIED_POLICY_LIMIT_CHANGE_UNPROVEN"))
+    ));
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
     // Read the original RiskBook summary through that very same owner.
     // No copied risk formulas or independently opened campaign SQL handle.
     let summary = owner.campaign_summary("campaign-X".into()).await.unwrap();

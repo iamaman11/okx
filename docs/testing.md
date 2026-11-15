@@ -1,3 +1,25 @@
+## #510 r4.1 — unified original AccountStore+RiskBook policy CAS
+
+New `UnifiedFinanceWrite::ApplyPolicy` is part of the existing original
+Rust financial transaction dispatcher. `UnifiedFinanceHandle::apply_governance_policy`
+does not create another SQL thread, connection or per-account COMMIT.
+Original `AccountStore::apply_unified_campaign_policy_sql_transaction`
+verifies the **full** registered account roster and every original scoped
+`account_policy` row, campaign identity/immutable limit/revision, and
+updates every account plus `risk_meta.policy_revision` under the SAME
+financial `BEGIN IMMEDIATE/COMMIT`. A partial roster, stale/contradictory
+replay or unproven financial ceiling change fails closed.
+
+The actual `apply_governance_policy` endpoint is still denied on an
+`OFFLINE_NOT_AUTHORIZED` import. Offline tests invoke the **same**
+transaction dispatcher with mandatory rollback and negative cohort/limit
+witnesses. `TradeService::update_governance` still uses legacy per-account
+owners before cutover; it is NOT migrated just because the new transactional
+source operation exists. A complete account-source/9-action production switch
+and RB09 server-disable/import/activation still block GO.
+
+---
+
 ## #510 r4.1 — native stopped-finance inspection (read-only, no trade owner)
 
 A built-in `okx-agent inspect-finance` command reads an existing, independently

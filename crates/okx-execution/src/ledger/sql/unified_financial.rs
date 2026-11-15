@@ -675,6 +675,148 @@ pub(in crate::account_store) fn import_legacy_partial_source(
     Ok(())
 }
 
+
+/// The ORIGINAL account-policy relation, now with mandatory installation +
+/// account scope. This is one transaction with RiskBook policy revision,
+/// not a second policy store. Reject a partial cohort and preserve the
+/// imported budget without silently changing its global ceiling.
+impl crate::AccountStore {
+    pub(crate) fn apply_unified_campaign_policy_sql_transaction(
+        tx: &Transaction<'_>,
+        installation: &str,
+        policy: &crate::account_worker::UnifiedFinancePolicy,
+    ) -> StoreResult<()> {
+        use okx_kernel::risk::money::RiskAmount;
+        let invalid = || StoreError::Invalid("UNIFIED_POLICY_SOURCE_OR_SCOPE_INVALID");
+        if installation.is_empty()
+            || policy.campaign_id.is_empty()
+            || policy.policy_revision == 0
+            || policy.policy_revision > MAX_SAFE_SEQUENCE as u64
+            || policy.accounts.is_empty()
+            || policy.accounts.len() > 32
+            || !policy
+                .accounts
+                .windows(2)
+                .all(|pair| pair[0].account_key < pair[1].account_key)
+        {
+            return Err(invalid());
+        }
+        let proposed = RiskAmount::parse_positive(&policy.campaign_loss_limit_usd)
+            .map_err(|_| invalid())?;
+        // The registered RiskBook roster is authoritative. An authenticated
+        // policy frame with a subset of accounts MUST NOT silently unpause
+        // or increase budget for the subset alone.
+        let actual = {
+            let mut stmt = tx.prepare(
+                "SELECT account_key FROM risk_policy_account
+                 WHERE installation_id=?1 AND campaign_id=?2
+                 ORDER BY account_key",
+            )?;
+            stmt.query_map(params![installation, &policy.campaign_id], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if actual
+            != policy
+                .accounts
+                .iter()
+                .map(|account| account.account_key.clone())
+                .collect::<Vec<_>>()
+        {
+            return Err(StoreError::Invalid("UNIFIED_POLICY_COHORT_MISMATCH"));
+        }
+        let saved: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT policy_revision,loss_limit_usd FROM risk_meta
+                 WHERE installation_id=?1 AND campaign_id=?2 AND singleton=1",
+                params![installation, &policy.campaign_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (old_revision, old_limit) =
+            saved.ok_or(StoreError::Invalid("UNIFIED_POLICY_CAMPAIGN_NOT_FOUND"))?;
+        let existing = RiskAmount::parse(&old_limit).map_err(|_| invalid())?;
+        if existing != proposed {
+            // A signed policy snapshot is not, on its own, a new financial
+            // inception or proof that already-spent risk may be recreated.
+            return Err(StoreError::Invalid("UNIFIED_POLICY_LIMIT_CHANGE_UNPROVEN"));
+        }
+        let revision = i64::try_from(policy.policy_revision).map_err(|_| invalid())?;
+        if revision < old_revision {
+            return Err(StoreError::Invalid("POLICY_REVISION_CONFLICT"));
+        }
+        let normalized = proposed.canonical().map_err(|_| invalid())?;
+        // Verify ALL original policy rows before mutating even one.
+        let mut changed = false;
+        for account in &policy.accounts {
+            let saved: Option<(i64, bool, String, String)> = tx
+                .query_row(
+                    "SELECT revision,paused,campaign_id,campaign_limit
+                     FROM account_policy
+                     WHERE installation_id=?1 AND account_key=?2 AND singleton=1",
+                    params![installation, &account.account_key],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            let (old, old_paused, old_campaign, old_limit) =
+                saved.ok_or(StoreError::Invalid("UNIFIED_POLICY_ACCOUNT_NOT_FOUND"))?;
+            if old_campaign != "unconfigured" && old_campaign != policy.campaign_id {
+                return Err(StoreError::Invalid("CAMPAIGN_ID_IMMUTABLE"));
+            }
+            let same_limit =
+                RiskAmount::parse(&old_limit).map_err(|_| invalid())? == proposed;
+            if revision < old
+                || revision == old
+                    && (old_paused != account.paused
+                        || old_campaign != policy.campaign_id
+                        || !same_limit)
+            {
+                return Err(StoreError::Invalid("POLICY_REVISION_CONFLICT"));
+            }
+            if revision > old {
+                changed = true;
+            }
+        }
+        if changed && revision <= old_revision {
+            return Err(StoreError::Invalid("UNIFIED_POLICY_PARTIAL_REVISION"));
+        }
+        // Every individual scope and RiskBook revision change now occurs in
+        // the same externally-owned BEGIN IMMEDIATE / COMMIT.
+        for account in &policy.accounts {
+            let changed = tx.execute(
+                "UPDATE account_policy
+                 SET revision=?3,paused=?4,campaign_id=?5,campaign_limit=?6
+                 WHERE installation_id=?1 AND account_key=?2 AND singleton=1
+                   AND revision<=?3",
+                params![
+                    installation,
+                    &account.account_key,
+                    revision,
+                    account.paused,
+                    &policy.campaign_id,
+                    &normalized,
+                ],
+            )?;
+            if changed != 1 {
+                return Err(StoreError::Invalid("UNIFIED_POLICY_ACCOUNT_CAS_FAILED"));
+            }
+        }
+        if revision > old_revision {
+            let updated = tx.execute(
+                "UPDATE risk_meta SET policy_revision=?3
+                 WHERE installation_id=?1 AND campaign_id=?2
+                   AND singleton=1 AND policy_revision=?4",
+                params![installation, &policy.campaign_id, revision, old_revision],
+            )?;
+            if updated != 1 {
+                return Err(StoreError::Invalid("UNIFIED_POLICY_CAMPAIGN_CAS_FAILED"));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[path = "unified_financial_import.rs"]
 pub(in crate::account_store) mod importer;
 
