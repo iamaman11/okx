@@ -6,6 +6,7 @@ mod projections;
 mod schema;
 mod source_bills;
 mod source_entries;
+mod source_entry_fees;
 mod source_fills;
 mod source_finance;
 mod source_flows;

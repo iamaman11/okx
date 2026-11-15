@@ -1,3 +1,34 @@
+## #510 - entry fee proof completes the IngestPage field dispatch
+
+Original and unified ingestion share source_entry_fees transaction logic:
+posted intent/order/time, same-account bill+canonical fee+source link,
+immutable fee proof/index and late settlement requeue. Scoped joins bind all
+participating rows to installation/account. No financial authority enabled.
+All current IngestPage fields now have an explicit path in source_page;
+COMPONENT_NOT_PORTED rejection is removed. Exhaustive Rust destructuring
+without a wildcard requires any future field to be handled at compile time.
+
+New isolated test creates two original AccountStore sources through actual
+prepare/reserve/begin_post/outcome/release methods (central/venue evidence
+is explicitly synthetic), imports both, and calls the same page dispatcher.
+It proves foreign-order rejection and rollback, same bill/intent IDs on A/B,
+exact replay with one -0.01 fee, immutable proof/index, late-pending state,
+early bill/incorrect amount/missing source denial, and cursor error rolling
+back a new bill/fee proof. Real COMMIT/reopen retains target receipts/totals;
+original source stays unchanged. This is not physical venue/cutover acceptance.
+
+Local Windows full execution regression: 259 PASS, 0 FAIL, 2 ignored (7.15s
+after build). After final exhaustive field binding, 20 unified contracts PASS
+(1.69s); Agent all-target check, architecture/negative guard, format/diff PASS.
+The formerly unsupported-page test now checks the real missing-order reason.
+
+NEXT: source collector/startup wiring, USD/source normalizers and other
+account reads/writes still need the shared owner; live activation and four
+RiskCommand arms remain incomplete. Whole RB01-RB16, P95 and T09/T10 26/26
+are not accepted. No installed-state changes or trading.
+
+---
+
 ## #510 - position/NAV projections and fill ACK in unified pages
 
 Original and unified page ingestion share source_positions and source_nav

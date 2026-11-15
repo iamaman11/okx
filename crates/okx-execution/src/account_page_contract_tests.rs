@@ -447,8 +447,8 @@ pub(super) fn assert_contract(tx: &rusqlite::Transaction<'_>, a: &str, b: &str) 
     }
     assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM fill_projection_pending WHERE installation_id='installation' AND account_key=?1 AND fill_id='page-fill'",[a],|r|r.get(0)).unwrap(),0);
     assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM fill_projection_pending WHERE installation_id='installation' AND account_key=?1 AND fill_id='page-fill'",[b],|r|r.get(0)).unwrap(),1);
-    let mut unsupported = page.clone();
-    unsupported.entry_order_fee_links.push(EntryOrderFeeLink {
+    let mut missing_order = page.clone();
+    missing_order.entry_order_fee_links.push(EntryOrderFeeLink {
         bill_id: "page-bill".into(),
         intent_id: "not-ported".into(),
         exchange_order_id: "page-order".into(),
@@ -457,10 +457,8 @@ pub(super) fn assert_contract(tx: &rusqlite::Transaction<'_>, a: &str, b: &str) 
         fee_usdt: -Decimal::ONE,
     });
     assert!(matches!(
-        apply(a, unsupported),
-        Err(StoreError::Invalid(
-            "UNIFIED_SOURCE_PAGE_COMPONENT_NOT_PORTED"
-        ))
+        apply(a, missing_order),
+        Err(StoreError::Invalid("ENTRY_BILL_ORDER_UNVERIFIED"))
     ));
     let mut forged = page;
     forged.cursor.as_mut().unwrap().source = "finance_provenance".into();

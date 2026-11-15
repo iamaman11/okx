@@ -206,8 +206,9 @@ impl UnifiedFinanceHandle {
         .await
     }
 
-    /// Commit all supported financial history page facts and its cursor in
-    /// one transaction. Unported page fields fail before writes; no fallback.
+    /// Commit all financial-history page components and its cursor in one
+    /// transaction. Authenticity belongs to the source producer; activation
+    /// remains independently required before this owner can commit.
     pub async fn ingest_source_page(
         &self,
         account: String,
