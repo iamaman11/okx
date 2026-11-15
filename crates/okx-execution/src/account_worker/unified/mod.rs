@@ -6,6 +6,7 @@ use std::sync::Arc;
 mod owner;
 mod readback;
 mod sources;
+mod trade_reads;
 mod transaction;
 use sources::{original_bound_entry_settlement_sql, original_bound_unsent_release_sql};
 pub(crate) use sources::{original_bound_entry_source_sql, original_bound_unsent_source_sql};
@@ -103,6 +104,10 @@ pub struct UnifiedFinanceBoundSettlementReceipt {
 
 #[derive(Debug, Clone)]
 pub(crate) enum UnifiedFinanceWrite {
+    AssignBoundCapital {
+        account: String,
+        command: crate::CapitalAssignmentCommand,
+    },
     AssignCapital {
         account: String,
         request: crate::AuthorizedCapitalAssignment,
@@ -228,6 +233,7 @@ pub(crate) enum UnifiedFinanceWrite {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UnifiedFinanceWriteReceipt {
+    CapitalAssignmentReported(crate::CapitalAssignmentResult),
     CapitalAssigned(crate::OperationReceipt),
     StrategyNavCommitted(crate::StrategyValuationReconciliation),
     Prepared { inserted: bool, intent_id: String },

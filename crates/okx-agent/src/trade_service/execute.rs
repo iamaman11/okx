@@ -777,7 +777,7 @@ impl TradeService {
         let prior = r
             .execution
             .store
-            .call(until, move |s| s.by_idempotency(&key))
+            .lookup_intent(until, okx_execution::TradeIntentLookup::IdempotencyKey(key))
             .await
             .map_err(err)?;
         if let Some(i) = prior {
@@ -3206,7 +3206,7 @@ async fn reject_prepost_denial(
         .map_err(err)?;
     let id = intent.intent_id.clone();
     let saved = store
-        .call(deadline(), move |s| s.intent(&id))
+        .lookup_intent(deadline(), okx_execution::TradeIntentLookup::IntentId(id))
         .await
         .map_err(err)?
         .ok_or("PREPOST_INTENT_READBACK_MISSING")?;

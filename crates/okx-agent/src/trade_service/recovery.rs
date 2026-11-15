@@ -241,7 +241,7 @@ impl TradeService {
             let lots = r
                 .execution
                 .store
-                .call(deadline(), move |s| s.active_lots(&instrument))
+                .active_lots(deadline(), instrument)
                 .await
                 .map_err(err)?;
             let owned = lots
@@ -375,7 +375,7 @@ impl TradeService {
             let intent = r
                 .execution
                 .store
-                .call(deadline(), move |s| s.intent(&id))
+                .lookup_intent(deadline(), okx_execution::TradeIntentLookup::IntentId(id))
                 .await
                 .map_err(err)?
                 .ok_or("STORAGE_RECOVERY_INTENT_MISSING")?;
@@ -383,7 +383,7 @@ impl TradeService {
             let lots = r
                 .execution
                 .store
-                .call(deadline(), move |s| s.active_lots(&instrument))
+                .active_lots(deadline(), instrument)
                 .await
                 .map_err(err)?;
             let owned = lots

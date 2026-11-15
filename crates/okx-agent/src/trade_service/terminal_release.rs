@@ -126,7 +126,7 @@ impl TradeService {
             let lots = r
                 .execution
                 .store
-                .call(deadline(), move |s| s.active_lots(&instrument))
+                .active_lots(deadline(), instrument)
                 .await
                 .map_err(err)?;
             let remaining_exposure = lots.iter().any(|l| {

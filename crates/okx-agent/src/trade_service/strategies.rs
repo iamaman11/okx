@@ -73,25 +73,10 @@ impl TradeService {
             let result = r
                 .execution
                 .store
-                .call(deadline(), move |s| {
-                    // Immutable receipt survives snapshot outages and reruns.
-                    if let Some(prior) = s.operation(&idempotency_key)? {
-                        if prior.kind != "CAPITAL_ASSIGNMENT"
-                            || prior.request_hash != operation_hash
-                        {
-                            return Err(okx_execution::StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
-                        }
-                        let capital = s.capital_state(observed_at).ok();
-                        let coverage = capital.as_ref().map_or("PARTIAL", |v| v.coverage.as_str());
-                        return Ok(
-                            json!({"receipt":prior,"capital":capital,"capital_coverage":coverage}),
-                        );
-                    }
-                    let source = s.capital_state(observed_at)?.nav_source_ref;
-                    let authorized = okx_execution::AuthorizedCapitalAssignment {
+                .assign_capital(
+                    deadline(),
+                    okx_execution::CapitalAssignmentCommand {
                         account_key,
-                        installation_id: s.meta().installation_id.clone(),
-                        nav_source_ref: source,
                         operation_id: idempotency_key,
                         request_hash: operation_hash,
                         instance_id,
@@ -99,15 +84,11 @@ impl TradeService {
                         authority_revision: revision,
                         authority_receipt: verified_authority_receipt,
                         time: observed_at,
-                    };
-                    let receipt = s.commit_authorized_capital_assignment(&authorized)?;
-                    let capital = s.capital_state(observed_at)?;
-                    let coverage = capital.coverage.clone();
-                    Ok(json!({"receipt":receipt,"capital":capital,"capital_coverage":coverage}))
-                })
+                    },
+                )
                 .await
                 .map_err(err)?;
-            return Ok(completed(result));
+            return Ok(completed(serde_json::to_value(result).map_err(err)?));
         }
         let body = request.clone();
         let result = r

@@ -22,6 +22,12 @@ pub use nav_projection::{AccountNavSnapshot, build_account_nav_page};
 #[path = "account_finance_report.rs"]
 mod finance_report;
 pub use finance_report::{FinanceReportQuery, FinanceReportSnapshot, FinanceReportView};
+#[path = "account_capital_command.rs"]
+mod capital_command;
+pub use capital_command::{CapitalAssignmentCommand, CapitalAssignmentResult};
+#[path = "account_trade_reads.rs"]
+mod trade_reads;
+pub use trade_reads::TradeIntentLookup;
 
 #[path = "account_captured_fills.rs"]
 mod captured_fills;

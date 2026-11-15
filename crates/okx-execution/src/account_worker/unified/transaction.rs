@@ -48,6 +48,13 @@ fn apply_original_unified_finance_inner(
             .map_err(StoreError::Invalid)
     };
     match command {
+        UnifiedFinanceWrite::AssignBoundCapital { account, command } => {
+            let result =
+                AccountStore::assign_capital_sql(tx, Some((installation, &account)), &command)?;
+            Ok(UnifiedFinanceWriteReceipt::CapitalAssignmentReported(
+                result,
+            ))
+        }
         UnifiedFinanceWrite::AssignCapital { account, request } => {
             let receipt = AccountStore::commit_authorized_capital_assignment_sql(
                 tx,

@@ -196,6 +196,14 @@ impl std::fmt::Debug for AccountStoreHandle {
     }
 }
 impl AccountStoreHandle {
+    pub async fn assign_capital(
+        &self,
+        deadline: Instant,
+        command: crate::CapitalAssignmentCommand,
+    ) -> StoreResult<crate::CapitalAssignmentResult> {
+        self.call(deadline, move |s| s.assign_capital(&command))
+            .await
+    }
     pub async fn finance_report(
         &self,
         deadline: Instant,

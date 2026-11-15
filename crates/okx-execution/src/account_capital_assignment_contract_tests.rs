@@ -146,6 +146,56 @@ fn risk_book_contract_scoped_capital_two_legs_receipt_and_rollback() {
             AccountStore::finance_proof_sealed_sql(&tx, Some(("installation", account))).unwrap()
         );
     }
+    tx.execute_batch("SAVEPOINT typed_producer").unwrap();
+    let command = CapitalAssignmentCommand {
+        account_key: "capital-A".into(),
+        operation_id: "typed-producer".into(),
+        request_hash: "typed-hash".into(),
+        instance_id: "alpha".into(),
+        delta_usd: Decimal::from(2),
+        authority_revision: 1,
+        authority_receipt: "fixture-governance".into(),
+        time: 10,
+    };
+    let invoke = |command| {
+        dispatch(
+            &tx,
+            "installation",
+            UnifiedFinanceWrite::AssignBoundCapital {
+                account: "capital-A".into(),
+                command,
+            },
+        )
+    };
+    let UnifiedFinanceWriteReceipt::CapitalAssignmentReported(first) =
+        invoke(command.clone()).unwrap()
+    else {
+        panic!("wrong receipt")
+    };
+    assert_eq!(first.capital.unwrap().assigned_usd, Decimal::from(30));
+    let mut stale = command.clone();
+    stale.time = 6000;
+    let UnifiedFinanceWriteReceipt::CapitalAssignmentReported(replay) =
+        invoke(stale.clone()).unwrap()
+    else {
+        panic!("wrong receipt")
+    };
+    assert_eq!(replay.receipt, first.receipt);
+    assert!(replay.capital.is_none());
+    assert_eq!(replay.capital_coverage, "PARTIAL");
+    stale.request_hash = "changed".into();
+    assert!(matches!(
+        invoke(stale),
+        Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"))
+    ));
+    let mut foreign = command;
+    foreign.account_key = "capital-B".into();
+    assert!(matches!(
+        invoke(foreign),
+        Err(StoreError::Invalid("INVALID_CAPITAL_ASSIGNMENT"))
+    ));
+    tx.execute_batch("ROLLBACK TO typed_producer; RELEASE typed_producer")
+        .unwrap();
     tx.commit().unwrap();
     drop(db);
     let db = Connection::open(file).unwrap();

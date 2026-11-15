@@ -1,3 +1,43 @@
+## #510 - typed trading reads and governance capital producer
+
+Actual Execute, Status/Cancel/Close, recovery and terminal-release callers now
+use TradeIntentLookup and typed active_lots reads (11 standalone SQL closures
+removed). Existing find_intent_sql/active_lots_sql decode the original plan and
+scope all identities/lots by installation/account. Unified reads use bounded
+deadlines and a Deferred transaction; no mutable SQL capability escapes.
+
+Actual Strategies CapitalAssign now supplies CapitalAssignmentCommand with the
+already-authenticated governance receipt. AccountStore owns source NAV selection,
+exact replay, two-leg commit and result construction in ONE write transaction.
+Unified AssignBoundCapital uses the same producer. A stale snapshot still
+returns the original receipt with capital=None/PARTIAL on exact replay; a fresh
+new assignment must validate identity/policy/source/principal. Activation is
+unchanged and closed. Production AccountResources remains on the legacy handle.
+
+Direct tests: same intent/fill IDs with different A/B plans and lot quantities;
+all lookup variants, full plan parity, unknown account, SQL column allowlist,
+zero read-side changes and reopen. Capital producer: first assignment, exact
+replay after NAV expires, hash conflict and foreign account. Existing financial
+rollback/reopen witnesses remain in the same regression.
+
+Combined execution library: 271 PASS, 0 FAIL, 2 ignored, 7.99s after build.
+Agent all-target check and architecture/negative guard PASS. Production strategy
+contracts: 3 PASS, 0 FAIL, 0.15s after build. First run failed before production
+entry because simultaneous Windows fixtures reused clock-derived directory names;
+random 128-bit names fix that collision without fixture-data or assertion changes. No full 26x,
+RB01-RB16, cutover or P95 acceptance is claimed.
+
+Focused subagent review found a concrete next wiring dependency: opening's
+production caller currently discards its computed census, while native opening
+requires it. Preserve that actual producer evidence instead of inventing a
+VerifiedCensus from JSON flags or SQL-only data. Native reserve already commits
+AccountStore reserve together with HELD, and native BeginPost already commits
+POSTING. Existing TradeService repeats those transitions after remote replies.
+The next Native ingress work MUST update sender/claim ownership together:
+HELD -> one durable POSTING -> exactly one actual POST; repeat/UNKNOWN -> no
+second send. Resolve needs terminal source binding AND Unknown/Open behavior;
+the terminal-only SQL helper does not implement those other transitions.
+
 ## #510 - typed production Portfolio snapshot and scoped financial reports
 
 Production portfolio.rs now calls FinanceReportQuery -> FinanceReportSnapshot,

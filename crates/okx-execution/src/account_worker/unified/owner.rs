@@ -206,6 +206,22 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    pub async fn assign_capital(
+        &self,
+        account: String,
+        command: crate::CapitalAssignmentCommand,
+    ) -> StoreResult<crate::CapitalAssignmentResult> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::AssignBoundCapital { account, command })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::CapitalAssignmentReported(result) => Ok(result),
+            _ => Err(StoreError::Invalid(
+                "UNIFIED_CAPITAL_ASSIGNMENT_RECEIPT_UNEXPECTED",
+            )),
+        }
+    }
+
     /// The authorized governance producer supplies this command; it is not a
     /// client-controlled grant and does not reserve risk or send venue orders.
     pub async fn commit_authorized_capital_assignment(

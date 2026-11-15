@@ -522,12 +522,10 @@ impl TradeService {
         let reference = reference.to_owned();
         r.execution
             .store
-            .call(deadline(), move |s| {
-                Ok(s.intent(&reference)?
-                    .or(s.by_client_order_id(&reference)?)
-                    .or(s.by_exchange_order_id(&reference)?)
-                    .or(s.by_idempotency(&reference)?))
-            })
+            .lookup_intent(
+                deadline(),
+                okx_execution::TradeIntentLookup::Reference(reference),
+            )
             .await
             .map_err(err)?
             .ok_or("INTENT_NOT_FOUND".into())
@@ -1251,7 +1249,7 @@ impl TradeService {
         let lots = r
             .execution
             .store
-            .call(deadline(), move |s| s.active_lots(&instrument))
+            .active_lots(deadline(), instrument)
             .await
             .map_err(err)?;
         let exposure = lots
@@ -1724,7 +1722,10 @@ impl TradeService {
         if let Some(old) = r
             .execution
             .store
-            .call(deadline(), move |s| s.by_idempotency(&key))
+            .lookup_intent(
+                deadline(),
+                okx_execution::TradeIntentLookup::IdempotencyKey(key),
+            )
             .await
             .map_err(err)?
         {
@@ -1813,7 +1814,10 @@ impl TradeService {
         if let Some(prior) = r
             .execution
             .store
-            .call(deadline(), move |s| s.by_idempotency(&k))
+            .lookup_intent(
+                deadline(),
+                okx_execution::TradeIntentLookup::IdempotencyKey(k),
+            )
             .await
             .map_err(err)?
         {
@@ -1827,7 +1831,7 @@ impl TradeService {
         let lots = r
             .execution
             .store
-            .call(deadline(), move |s| s.active_lots(&instrument))
+            .active_lots(deadline(), instrument)
             .await
             .map_err(err)?;
         let mine = lots
