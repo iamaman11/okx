@@ -330,8 +330,132 @@ pub(super) fn assert_contract(tx: &rusqlite::Transaction<'_>, a: &str, b: &str) 
     assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM funding_projection_pending WHERE installation_id='installation' AND account_key=?1 AND event_id='source-funding'",[a],|r|r.get(0)).unwrap(),0,"attributed funding must not be re-enqueued on replay");
     assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM funding_projection_pending WHERE installation_id='installation' AND account_key=?1 AND event_id='source-funding'",[b],|r|r.get(0)).unwrap(),1,"A acknowledgement cannot consume B pending funding");
     assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM operation_receipts WHERE installation_id='installation' AND account_key=?1 AND operation_id='funding:source-funding'",[a],|r|r.get(0)).unwrap(),1);
+    let lot = StoredLot {
+        lot_id: "projection-lot".into(),
+        instance_id: None,
+        intent_id: None,
+        fill_id: Some("page-fill".into()),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        side: "long".into(),
+        remaining_qty: Decimal::ONE,
+        cost: Decimal::from(5),
+        opened_at: 8,
+    };
+    let nav = NavPoint {
+        scope_id: "account".into(),
+        time: 10,
+        source_version: "projection-v1".into(),
+        equity: Decimal::from(120),
+        pnl: Decimal::ZERO,
+        flows: Decimal::from(10),
+        currency: "USD".into(),
+        coverage: "COMPLETE".into(),
+        mark_source: "signed-fixture-mark".into(),
+    };
+    let projection = IngestPage {
+        lots: vec![lot],
+        nav: vec![nav],
+        ..Default::default()
+    };
+    for account in [a, b] {
+        for _ in 0..2 {
+            apply(account, projection.clone()).unwrap();
+        }
+    }
+    assert_eq!(
+        tx.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM position_lots WHERE lot_id='projection-lot'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        2
+    );
+    for account in [a, b] {
+        assert_eq!(tx.query_row::<String,_,_>("SELECT highwater FROM nav_watermarks WHERE installation_id='installation' AND account_key=?1 AND scope_id='account'",[account],|r|r.get(0)).unwrap(),"110");
+    }
+    let mut higher = projection.clone();
+    higher.lots.clear();
+    higher.nav[0].equity = Decimal::from(150);
+    higher.nav[0].time = 11;
+    higher.nav[0].source_version = "projection-v2".into();
+    apply(a, higher).unwrap();
+    assert_eq!(tx.query_row::<String,_,_>("SELECT highwater FROM nav_watermarks WHERE installation_id='installation' AND account_key=?1 AND scope_id='account'",[a],|r|r.get(0)).unwrap(),"140");
+    assert_eq!(tx.query_row::<String,_,_>("SELECT highwater FROM nav_watermarks WHERE installation_id='installation' AND account_key=?1 AND scope_id='account'",[b],|r|r.get(0)).unwrap(),"110");
+    let mut conflicting_nav = projection.clone();
+    conflicting_nav.lots.clear();
+    conflicting_nav.nav[0].equity = Decimal::from(123);
+    conflicting_nav.cash_flows.push(CashFlow {
+        event_id: "nav-rollback-flow".into(),
+        kind: "DEPOSIT".into(),
+        amount: Decimal::ONE,
+        currency: "USD".into(),
+        time: 12,
+        source_ref: "signed-flow".into(),
+    });
+    assert!(matches!(
+        apply(a, conflicting_nav),
+        Err(StoreError::Invalid("IMMUTABLE_NAV_SOURCE_CONFLICT"))
+    ));
+    assert_eq!(
+        tx.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM cash_flows WHERE event_id='nav-rollback-flow'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        0
+    );
+    let mut wrong_owner = projection.clone();
+    wrong_owner.nav.clear();
+    wrong_owner.lots[0].side = "short".into();
+    assert!(matches!(
+        apply(a, wrong_owner),
+        Err(StoreError::Invalid("LOT_OWNER_MISMATCH"))
+    ));
+    let mut invalid_lot = projection.clone();
+    invalid_lot.nav.clear();
+    invalid_lot.lots[0].remaining_qty = -Decimal::ONE;
+    assert!(matches!(
+        apply(a, invalid_lot),
+        Err(StoreError::Invalid("INVALID_POSITION_LOT"))
+    ));
+    let mut attributed_external = projection.clone();
+    attributed_external.nav.clear();
+    attributed_external.lots[0].instance_id = Some("manual".into());
+    assert!(matches!(
+        apply(a, attributed_external),
+        Err(StoreError::Invalid("EXTERNAL_FILL_MUST_BE_UNATTRIBUTED"))
+    ));
+    let mut unmarked = projection;
+    unmarked.lots.clear();
+    unmarked.nav[0].source_version = "no-mark".into();
+    unmarked.nav[0].mark_source.clear();
+    assert!(matches!(
+        apply(a, unmarked),
+        Err(StoreError::Invalid("NAV_MARK_SOURCE_REQUIRED"))
+    ));
+    for _ in 0..2 {
+        apply(
+            a,
+            IngestPage {
+                projected_fill_ids: vec!["page-fill".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM fill_projection_pending WHERE installation_id='installation' AND account_key=?1 AND fill_id='page-fill'",[a],|r|r.get(0)).unwrap(),0);
+    assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM fill_projection_pending WHERE installation_id='installation' AND account_key=?1 AND fill_id='page-fill'",[b],|r|r.get(0)).unwrap(),1);
     let mut unsupported = page.clone();
-    unsupported.projected_fill_ids.push("not-ported".into());
+    unsupported.entry_order_fee_links.push(EntryOrderFeeLink {
+        bill_id: "page-bill".into(),
+        intent_id: "not-ported".into(),
+        exchange_order_id: "page-order".into(),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        bill_at: 8,
+        fee_usdt: -Decimal::ONE,
+    });
     assert!(matches!(
         apply(a, unsupported),
         Err(StoreError::Invalid(

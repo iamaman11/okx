@@ -4382,88 +4382,12 @@ impl AccountStore {
                 }
             }
         }
-        for l in &page.lots {
-            if l.remaining_qty < Decimal::ZERO
-                || l.cost < Decimal::ZERO
-                || !matches!(l.side.as_str(), "long" | "short")
-            {
-                return Err(StoreError::Invalid("INVALID_POSITION_LOT"));
-            }
-            if let Some(intent) = &l.intent_id {
-                let owner:(Option<String>,String)=tx.query_row("SELECT instance_id,instrument_id FROM intents JOIN decisions USING(decision_id) WHERE intent_id=?1",[intent],|r|Ok((r.get(0)?,r.get(1)?)))?;
-                if owner != (l.instance_id.clone(), l.instrument_id.clone()) {
-                    return Err(StoreError::Invalid("LOT_OWNER_MISMATCH"));
-                }
-            } else if l.instance_id.is_some() {
-                return Err(StoreError::Invalid("EXTERNAL_FILL_MUST_BE_UNATTRIBUTED"));
-            }
-            let changed=tx.execute("INSERT INTO position_lots VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(lot_id) DO UPDATE SET remaining_qty=excluded.remaining_qty,cost=excluded.cost WHERE instance_id IS excluded.instance_id AND instrument_id=excluded.instrument_id AND side=excluded.side AND intent_id IS excluded.intent_id AND fill_id IS excluded.fill_id",params![l.lot_id,l.instance_id,l.intent_id,l.fill_id,l.instrument_id,l.side,exact(l.remaining_qty),exact(l.cost),l.opened_at])?;
-            if changed != 1 {
-                return Err(StoreError::Invalid("LOT_OWNER_MISMATCH"));
-            }
-        }
-        for n in &page.nav {
-            if n.scope_id.starts_with("strategy:")
-                && n.source_version.starts_with("strategy-reconciled-v1")
-            {
-                return Err(StoreError::Invalid("STRATEGY_NAV_REQUIRES_RECONCILIATION"));
-            }
-            tx.execute(
-                "INSERT INTO nav_scopes VALUES(?1,?2) ON CONFLICT DO NOTHING",
-                params![n.scope_id, n.currency],
-            )?;
-            if n.mark_source.is_empty() {
-                return Err(StoreError::Invalid("NAV_MARK_SOURCE_REQUIRED"));
-            }
-            tx.execute("INSERT INTO nav_points VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(scope_id,time,source_version) DO NOTHING",params![n.scope_id,n.time,n.source_version,exact(n.equity),exact(n.pnl),exact(n.flows),n.currency,n.coverage,n.mark_source])?;
-            // A replay may not change a previously accepted mark while
-            // updating its derived high-water or advancing its source cursor.
-            // A legitimate correction needs a distinct immutable source version.
-            let saved: (String, String, String, String, String, String) = tx.query_row(
-                "SELECT equity,pnl,flows,currency,coverage,mark_source FROM nav_points WHERE scope_id=?1 AND time=?2 AND source_version=?3",
-                params![n.scope_id, n.time, n.source_version],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
-            )?;
-            if saved
-                != (
-                    exact(n.equity),
-                    exact(n.pnl),
-                    exact(n.flows),
-                    n.currency.clone(),
-                    n.coverage.clone(),
-                    n.mark_source.clone(),
-                )
-            {
-                return Err(StoreError::Invalid("IMMUTABLE_NAV_SOURCE_CONFLICT"));
-            }
-            if n.currency == "USD" {
-                let adjusted = n
-                    .equity
-                    .checked_sub(n.flows)
-                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-                let prior: Option<(String, i64)> = tx
-                    .query_row(
-                        "SELECT highwater,time FROM nav_watermarks WHERE scope_id=?1",
-                        [&n.scope_id],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .optional()?;
-                if prior.as_ref().is_none_or(|(_, time)| n.time >= *time) {
-                    let peak = prior
-                        .map(|(v, _)| decimal(v))
-                        .transpose()?
-                        .unwrap_or(adjusted)
-                        .max(adjusted);
-                    tx.execute("INSERT INTO nav_watermarks VALUES(?1,?2,?3,?4,?5) ON CONFLICT(scope_id) DO UPDATE SET highwater=excluded.highwater,adjusted_equity=excluded.adjusted_equity,time=excluded.time,coverage=excluded.coverage",params![n.scope_id,exact(peak),exact(adjusted),n.time,n.coverage])?;
-                }
-            }
-        }
+        Self::record_position_lots_sql(&tx, None, &page.lots)?;
+        Self::record_nav_points_sql(&tx, None, &page.nav)?;
         if let Some(c) = &page.cursor {
             upsert_source_cursor(&tx, c)?;
         }
-        for id in &page.projected_fill_ids {
-            tx.execute("DELETE FROM fill_projection_pending WHERE fill_id=?1", [id])?;
-        }
+        Self::acknowledge_projected_fills_sql(&tx, None, &page.projected_fill_ids)?;
         Self::acknowledge_funding_sources_sql(&tx, None, &page.attributed_funding_ids)?;
         advance_finance_provenance(&tx, finance_rowid_before)?;
         timing.body_us =

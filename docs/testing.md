@@ -1,3 +1,32 @@
+## #510 - position/NAV projections and fill ACK in unified pages
+
+Original and unified page ingestion share source_positions and source_nav
+transaction operations. Lot validation/ownership and immutable NAV source
+checks retain original semantics. Unified owned-lot lookup joins decisions
+and intents on installation/account/decision; NAV points, peak watermarks,
+scopes and pending-fill ACK are scoped by installation/account.
+
+Direct full-schema page witnesses verify identical lot IDs on A/B, exact
+replay, adjusted USD peaks (120 equity - 10 flows = 110), A-only increase
+(150 - 10 = 140, B stays 110), changed original NAV causing rollback of a
+preceding flow, lot side/owner mismatch, negative quantity, attributed
+external lot and absent NAV mark rejection. A fill projection ACK cannot
+consume B pending fill. The initial peak from imported state is preserved;
+test values deliberately exercise a new high rather than assume no history.
+
+The old unsupported-page negative now targets the still-unported entry fee
+ownership link; projected-fill ACK is tested positively. Normal new-owner
+writes remain activation-blocked. EntryOrderFeeLink is the remaining
+unsupported IngestPage field; producer normalization/reconciliation, native
+capture/startup and all financial actions are still not complete.
+
+Local native Windows complete execution library: 258 PASS, 0 FAIL, 2 ignored
+(7.91s after build); direct page/import witness PASS (0.68s). Architecture/
+negative self-tests, formatting and diff PASS. No complete RB01-RB16 or
+T09/T10 26/26 acceptance, deployment or trading activation claimed.
+
+---
+
 ## #510 - flows, allocations and funding in atomic unified history pages
 
 Original AccountStore and unified page ingestion now share source_flows and

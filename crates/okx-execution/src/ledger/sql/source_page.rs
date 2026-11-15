@@ -11,11 +11,7 @@ impl AccountStore {
         Self::verify_source_account_sql(tx, installation, account)?;
         // These components still require their original scoped projection
         // paths. Never advance a page containing a silently dropped fact.
-        if !page.entry_order_fee_links.is_empty()
-            || !page.lots.is_empty()
-            || !page.nav.is_empty()
-            || !page.projected_fill_ids.is_empty()
-        {
+        if !page.entry_order_fee_links.is_empty() {
             return Err(StoreError::Invalid(
                 "UNIFIED_SOURCE_PAGE_COMPONENT_NOT_PORTED",
             ));
@@ -43,9 +39,12 @@ impl AccountStore {
                 .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
             tx.execute("UPDATE account_policy SET campaign_loss=?1 WHERE installation_id=?2 AND account_key=?3 AND singleton=1",params![exact(total),installation,account])?;
         }
+        Self::record_position_lots_sql(tx, scope, &page.lots)?;
+        Self::record_nav_points_sql(tx, scope, &page.nav)?;
         if let Some(cursor) = &page.cursor {
             Self::upsert_source_cursor_sql(tx, scope, cursor)?;
         }
+        Self::acknowledge_projected_fills_sql(tx, scope, &page.projected_fill_ids)?;
         Self::acknowledge_funding_sources_sql(tx, scope, &page.attributed_funding_ids)?;
         Self::advance_finance_provenance_sql(tx, scope, previous)?;
         Ok(())
