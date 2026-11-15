@@ -1123,7 +1123,7 @@ impl UnifiedFinanceHandle {
     /// Only the immutable stopped import may be used; the caller never
     /// commits a staged grant, ACK, reserve, loss or release.
     #[cfg(test)]
-    async fn trial_financial_write(
+    pub(crate) async fn trial_financial_write(
         &self,
         command: UnifiedFinanceWrite,
     ) -> StoreResult<UnifiedFinanceWriteReceipt> {
