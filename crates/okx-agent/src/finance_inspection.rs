@@ -151,7 +151,11 @@ mod tests {
             .join(format!("okx-510-no-finance-import-{}", std::process::id()))
             .join("nonexistent");
         let err = inspect(&missing, request()).await.unwrap_err();
-        assert!(err.to_string().contains("UNIFIED_FINANCE_IMPORT_NOT_FOUND"));
+        assert!(err.to_string().contains("FINANCE_RUNTIME_ROOT_MISSING"));
+        assert!(
+            !missing.exists(),
+            "inspection must not create even the runtime root"
+        );
         assert!(!missing.join("finance").join("finance.sqlite").exists());
     }
 }
