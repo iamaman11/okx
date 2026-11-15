@@ -13981,7 +13981,11 @@ fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_
             .unwrap();
         let read = |request: &crate::account_worker::UnifiedFinanceBoundSettlement| {
             crate::account_worker::original_bound_entry_source_sql(
-                &tx, installation, &account, intent, request,
+                &tx,
+                installation,
+                &account,
+                intent,
+                request,
             )
         };
         assert_eq!(
@@ -14016,7 +14020,11 @@ fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_
         // this account's original SQL scope.
         assert!(matches!(
             crate::account_worker::original_bound_entry_source_sql(
-                &tx, installation, &format!("okx:real:{}", "d".repeat(64)), intent, &request
+                &tx,
+                installation,
+                &format!("okx:real:{}", "d".repeat(64)),
+                intent,
+                &request
             ),
             Err(StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_MISMATCH"))
         ));

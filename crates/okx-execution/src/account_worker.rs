@@ -3,6 +3,7 @@ use crate::{
     AccountMeta, AccountStore, OpeningSnapshot, StoreError, StoreResult, WalMaintenanceObservation,
     finance_owner_gate::{self, AuthorityModeError, AuthorityModeLease},
 };
+use rusqlite::OptionalExtension;
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -14,7 +15,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{oneshot, watch};
-use rusqlite::OptionalExtension;
 type Job = Box<dyn FnOnce(&mut AccountStore) + Send + 'static>;
 mod storage_projection;
 pub use storage_projection::AccountStorageReadback;
@@ -751,7 +751,10 @@ pub(crate) fn original_bound_entry_source_sql(
         || request.source_digest.len() != 64
         || ![&request.plan_sha256, &request.source_digest]
             .iter()
-            .all(|s| s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+            .all(|s| {
+                s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
         || request.expected_sequence == 0
         || request.settlement_revision == 0
     {
@@ -766,19 +769,30 @@ pub(crate) fn original_bound_entry_source_sql(
         (
             EntrySettlementSource::Partial,
             AccountStore::partial_entry_settlement_receipt_sql(
-                tx, Some(installation), account, intent,
+                tx,
+                Some(installation),
+                account,
+                intent,
             )?,
         ),
         (
             EntrySettlementSource::Terminal,
             AccountStore::final_entry_settlement_receipt_sql(
-                tx, installation, account, intent, false,
+                tx,
+                installation,
+                account,
+                intent,
+                false,
             )?,
         ),
         (
             EntrySettlementSource::Late,
             AccountStore::final_entry_settlement_receipt_sql(
-                tx, installation, account, intent, true,
+                tx,
+                installation,
+                account,
+                intent,
+                true,
             )?,
         ),
     ];
@@ -811,15 +825,18 @@ fn original_bound_entry_settlement_sql(
     installation: &str,
     request: &UnifiedFinanceBoundSettlement,
 ) -> StoreResult<UnifiedFinanceBoundSettlementReceipt> {
-    let row: Option<(String, String, String)> = tx.query_row(
-        "SELECT account_key,intent_id,plan_sha256
+    let row: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT account_key,intent_id,plan_sha256
          FROM risk_entries WHERE installation_id=?1 AND campaign_id=?2
            AND reservation_key=?3",
-        rusqlite::params![installation, &request.campaign, &request.reservation_key],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    ).optional()?;
-    let (account, intent, plan) = row
-        .ok_or(StoreError::Invalid("UNIFIED_SETTLEMENT_RESERVATION_NOT_FOUND"))?;
+            rusqlite::params![installation, &request.campaign, &request.reservation_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let (account, intent, plan) = row.ok_or(StoreError::Invalid(
+        "UNIFIED_SETTLEMENT_RESERVATION_NOT_FOUND",
+    ))?;
     if plan != request.plan_sha256 {
         return Err(StoreError::Invalid("UNIFIED_SETTLEMENT_PLAN_MISMATCH"));
     }
@@ -827,27 +844,40 @@ fn original_bound_entry_settlement_sql(
         "SELECT generation,policy_revision FROM risk_meta
          WHERE installation_id=?1 AND campaign_id=?2 AND singleton=1",
         rusqlite::params![installation, &request.campaign],
-        |row| Ok((row.get(0)?,row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let generation = u64::try_from(generation)
         .map_err(|_| StoreError::Invalid("UNIFIED_SETTLEMENT_GENERATION_INVALID"))?;
     let policy_revision = u64::try_from(revision)
         .map_err(|_| StoreError::Invalid("UNIFIED_SETTLEMENT_POLICY_REVISION_INVALID"))?;
     if generation == 0 || policy_revision == 0 {
-        return Err(StoreError::Invalid("UNIFIED_SETTLEMENT_AUTHORITY_REVISION_INVALID"));
+        return Err(StoreError::Invalid(
+            "UNIFIED_SETTLEMENT_AUTHORITY_REVISION_INVALID",
+        ));
     }
-    let source = original_bound_entry_source_sql(
-        tx, installation, &account, &intent, request,
-    )?;
+    let source = original_bound_entry_source_sql(tx, installation, &account, &intent, request)?;
     let outcome = crate::risk::settle_entry_unified_native(
-        tx, installation, &request.campaign, &account, &intent,
-        request.expected_sequence, generation, source,
-    ).map_err(StoreError::Invalid)?;
+        tx,
+        installation,
+        &request.campaign,
+        &account,
+        &intent,
+        request.expected_sequence,
+        generation,
+        source,
+    )
+    .map_err(StoreError::Invalid)?;
     match outcome {
         crate::risk::UnifiedRiskDecision::EntrySettled {
-            reservation_key, book_sequence, cumulative_entry_usd, ..
+            reservation_key,
+            book_sequence,
+            cumulative_entry_usd,
+            ..
         } => Ok(UnifiedFinanceBoundSettlementReceipt {
-            reservation_key, book_sequence, policy_revision, cumulative_entry_usd,
+            reservation_key,
+            book_sequence,
+            policy_revision,
+            cumulative_entry_usd,
         }),
         _ => Err(StoreError::Invalid("UNIFIED_SETTLEMENT_RECEIPT_UNEXPECTED")),
     }
