@@ -19,6 +19,12 @@ pub use source_state::{AccountSourceCursors, AccountSourceState};
 mod captured_fills;
 pub use captured_fills::{CapturedFill, CapturedFillPage};
 
+#[path = "account_captured_bills.rs"]
+mod captured_bills;
+pub use captured_bills::{
+    CapturedBill, CapturedBillPage, captured_bill_pnl, captured_bill_residual_component,
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("ACCOUNT_STORAGE_UNAVAILABLE: {0}")]

@@ -206,6 +206,30 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    pub async fn ingest_captured_bills(
+        &self,
+        account: String,
+        input: crate::CapturedBillPage,
+        conversion: crate::UsdConversionEvidence,
+    ) -> StoreResult<()> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::IngestCapturedBills {
+                account,
+                input,
+                conversion,
+            })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::SourcePageIngested => Ok(()),
+            UnifiedFinanceWriteReceipt::SourcePageRejected { reason } => {
+                Err(StoreError::Invalid(reason))
+            }
+            _ => Err(StoreError::Invalid(
+                "UNIFIED_SOURCE_PAGE_RECEIPT_UNEXPECTED",
+            )),
+        }
+    }
+
     /// Bind source ownership, normalize USD and commit the page in the same
     /// transaction. No source attribution can race a separate SQL readback.
     pub async fn ingest_captured_fills(

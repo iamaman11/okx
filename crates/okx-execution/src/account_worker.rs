@@ -196,6 +196,18 @@ impl std::fmt::Debug for AccountStoreHandle {
     }
 }
 impl AccountStoreHandle {
+    pub async fn ingest_captured_bills(
+        &self,
+        deadline: Instant,
+        input: crate::CapturedBillPage,
+        conversion: crate::UsdConversionEvidence,
+    ) -> StoreResult<()> {
+        self.call(deadline, move |store| {
+            store.ingest_captured_bills(&input, &conversion)
+        })
+        .await
+    }
+
     /// Parsed source facts are bound and written by this same SQL owner.
     pub async fn ingest_captured_fills(
         &self,

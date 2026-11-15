@@ -1,3 +1,35 @@
+## #510 - production bill collector submits typed source batches
+
+Agent capture_bills now decodes raw venue fields to CapturedBillPage and
+uses AccountStoreHandle::ingest_captured_bills. SQL owner resolves original
+order/strategy ownership, entry fee proof, bill/order identity, funding,
+transfers, residual classification, USD conversion and atomic page write.
+Unified IngestCapturedBills runs the same binder and USD/page dispatcher
+inside one transaction. No attribution from a separate asynchronous lookup.
+
+Optional Decimal fields preserve the original absent-vs-zero distinction.
+Original funding-PnL and interest ambiguity rules are shared execution
+functions; agent regression helpers delegate instead of duplicating them.
+Source cursor must be bills/account and batches are bounded at 100 rows.
+
+New direct witness uses original prepare/reserve/POST/outcome accounts,
+legacy batch ingestion+replay on A, full import and unified batch on B.
+Identical source IDs remain scoped; one 0.01 fee, one 10 USD external flow,
+one pending funding and immutable entry-fee receipt per account. Missing
+funding amount, foreign order, invalid transfer linkage, ambiguous interest,
+oversized page and stale cursor fail. Valid 0.03 interest advances loss to
+0.04 once; failure rolls back new interest; real COMMIT/reopen preserves
+A/B independent results. Venue/FX acknowledgements are synthetic fixtures.
+
+Local Windows full execution regression: 263 PASS, 0 FAIL, 2 ignored
+(6.61s after build); direct captured-bill witness PASS (0.21s). Agent
+source_capture tests 8 PASS (0.00s execution after build); all-target check,
+architecture/negative guard and formatting/diff PASS. Native resource/collector startup,
+fill/funding/strategy NAV projection, live activation and four risk actions
+remain incomplete. No RB01-RB16 or 26/26 acceptance claimed.
+
+---
+
 ## #510 - production fill collector submits typed source batches to SQL owner
 
 Agent capture_fills now only decodes venue strings/time/fee presence and

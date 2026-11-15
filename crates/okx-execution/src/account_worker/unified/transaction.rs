@@ -48,6 +48,23 @@ fn apply_original_unified_finance_inner(
             .map_err(StoreError::Invalid)
     };
     match command {
+        UnifiedFinanceWrite::IngestCapturedBills {
+            account,
+            input,
+            conversion,
+        } => {
+            let page =
+                AccountStore::bind_captured_bills_sql(tx, Some((installation, &account)), &input)?;
+            apply_original_unified_finance_inner(
+                tx,
+                installation,
+                UnifiedFinanceWrite::IngestSourcePageUsd {
+                    account,
+                    page,
+                    conversion,
+                },
+            )
+        }
         UnifiedFinanceWrite::IngestCapturedFills {
             account,
             input,

@@ -6,8 +6,7 @@ use crate::{
 };
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
-    AccountSqlStatementStat, Bill, BillOrderSource, CashFlow, EntryOrderFeeLink, Fill,
-    FinanceEntry, FundingEvent, IngestPage, NavPoint, SourceCursor, StoreError, StoreResult,
+    AccountSqlStatementStat, Fill, IngestPage, NavPoint, SourceCursor, StoreError, StoreResult,
     StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition, VenueMark,
 };
 use okx_runtime::PrivateWsHandle;
@@ -41,11 +40,11 @@ pub(crate) fn snapshot_failure_code(error: &AccountBootstrapError) -> &'static s
 fn d(s: &str) -> StoreResult<Decimal> {
     Decimal::from_str(s).map_err(|_| StoreError::Invalid("SOURCE_DECIMAL_INVALID"))
 }
-fn optional_d(s: &str) -> StoreResult<Decimal> {
-    if s.is_empty() {
-        Ok(Decimal::ZERO)
+fn source_optional_decimal(value: &str) -> StoreResult<Option<Decimal>> {
+    if value.is_empty() {
+        Ok(None)
     } else {
-        d(s)
+        d(value).map(Some)
     }
 }
 // An absent amount on a real fill or a funding bill is UNKNOWN, not a zero
@@ -57,32 +56,21 @@ fn required_d(s: &str, reason: &'static str) -> StoreResult<Decimal> {
         d(s)
     }
 }
+#[cfg(test)]
 fn bill_pnl(sub_type: &str, value: &str) -> StoreResult<Decimal> {
-    if matches!(sub_type, "173" | "174") {
-        required_d(value, "FUNDING_AMOUNT_SOURCE_UNAVAILABLE")
-    } else {
-        optional_d(value)
-    }
+    okx_execution::captured_bill_pnl(sub_type, source_optional_decimal(value)?)
 }
-// OKX bill type 7 is interest. Never infer it from an unrelated cash
-// movement or silently classify an ambiguous interest bill as a fee/PnL.
+#[cfg(test)]
 fn residual_bill_component(
     bill_type: &str,
     pnl: &str,
     fee: &str,
 ) -> StoreResult<Option<&'static str>> {
-    if bill_type == "7" {
-        // Venue absent fields may be encoded as either "" or "0".
-        // Only a *nonzero* separate fee/PnL would double-count interest.
-        if optional_d(pnl)? != Decimal::ZERO || optional_d(fee)? != Decimal::ZERO {
-            return Err(StoreError::Invalid("INTEREST_BILL_AMBIGUOUS"));
-        }
-        Ok(Some("INTEREST"))
-    } else if pnl.is_empty() && fee.is_empty() {
-        Ok(Some("UNATTRIBUTED"))
-    } else {
-        Ok(None)
-    }
+    okx_execution::captured_bill_residual_component(
+        bill_type,
+        source_optional_decimal(pnl)?,
+        source_optional_decimal(fee)?,
+    )
 }
 fn ts(s: &str) -> StoreResult<i64> {
     s.parse()
@@ -906,134 +894,37 @@ async fn capture_bills(
         rows.last().map(|r| r.bill_id.as_str()),
         complete,
     )?;
+    let mut parsed = Vec::with_capacity(rows.len());
+    for row in rows {
+        let time = ts(&row.timestamp_ms)?;
+        if time < t0 {
+            continue;
+        }
+        parsed.push(okx_execution::CapturedBill {
+            bill_id: row.bill_id,
+            client_order_id: row.client_order_id,
+            order_id: row.order_id,
+            instrument_id: row.instrument_id,
+            trade_id: row.trade_id,
+            bill_type: row.bill_type,
+            bill_sub_type: row.bill_sub_type,
+            currency: row.ccy,
+            time,
+            fee: source_optional_decimal(&row.fee)?,
+            pnl: source_optional_decimal(&row.pnl)?,
+            balance_change: source_optional_decimal(&row.balance_change)?,
+        });
+    }
     execution
         .store
-        .call(deadline(), move |s| {
-            let mut page = IngestPage {
-                cursor: Some(next),
-                ..Default::default()
-            };
-            for b in rows {
-                let time = ts(&b.timestamp_ms)?;
-                if time < t0 {
-                    continue;
-                }
-                let key = format!("bill:{}", b.bill_id);
-                if !b.order_id.is_empty() && b.order_id != "0" && !b.instrument_id.is_empty() {
-                    page.bill_order_sources.push(BillOrderSource {
-                        bill_id: b.bill_id.clone(),
-                        instrument_id: b.instrument_id.clone(),
-                        exchange_order_id: b.order_id.clone(),
-                        trade_id: b.trade_id.clone(),
-                    });
-                }
-                let owner = s.source_order_owner(&b.client_order_id, &b.order_id)?;
-                let fee = optional_d(&b.fee)?;
-                if fee < Decimal::ZERO
-                    && let Some(i) = owner.as_ref().filter(|i| i.risk_increase)
-                    && i.exchange_order_id.as_deref() == Some(b.order_id.as_str())
-                    && i.instrument_id == b.instrument_id
-                {
-                    if b.ccy != "USDT" {
-                        return Err(StoreError::Invalid("ENTRY_FEE_CURRENCY_UNPROVEN"));
-                    }
-                    page.entry_order_fee_links.push(EntryOrderFeeLink {
-                        bill_id: b.bill_id.clone(),
-                        intent_id: i.intent_id.clone(),
-                        exchange_order_id: b.order_id.clone(),
-                        instrument_id: b.instrument_id.clone(),
-                        bill_at: time,
-                        fee_usdt: fee,
-                    });
-                }
-                let instance = owner.map(|i| i.plan.strategy_instance);
-                let amount = optional_d(&b.balance_change)?;
-                let residual_component = residual_bill_component(&b.bill_type, &b.pnl, &b.fee)?;
-                page.bills.push(Bill {
-                    bill_id: b.bill_id.clone(),
-                    kind: format!("{}:{}", b.bill_type, b.bill_sub_type),
-                    time,
-                    amount,
-                    currency: b.ccy.clone(),
-                    economic_event_key: key.clone(),
-                });
-                let transfer =
-                    b.bill_type == "1" && matches!(b.bill_sub_type.as_str(), "11" | "12");
-                if transfer {
-                    if !b.instrument_id.is_empty() || !b.order_id.is_empty() && b.order_id != "0" {
-                        return Err(StoreError::Invalid("CASH_FLOW_LINKAGE_INVALID"));
-                    }
-                    page.cash_flows.push(CashFlow {
-                        event_id: key.clone(),
-                        kind: if amount >= Decimal::ZERO {
-                            "TRANSFER_IN"
-                        } else {
-                            "TRANSFER_OUT"
-                        }
-                        .into(),
-                        currency: b.ccy.clone(),
-                        amount,
-                        time,
-                        source_ref: key.clone(),
-                    });
-                }
-                for (component, value) in [
-                    ("FEE", optional_d(&b.fee)?),
-                    (
-                        if matches!(b.bill_sub_type.as_str(), "173" | "174") {
-                            "FUNDING"
-                        } else {
-                            "REALIZED_PNL"
-                        },
-                        bill_pnl(&b.bill_sub_type, &b.pnl)?,
-                    ),
-                ] {
-                    if value == Decimal::ZERO {
-                        continue;
-                    }
-                    if component == "FUNDING" {
-                        page.funding_events.push(FundingEvent {
-                            event_id: b.bill_id.clone(),
-                            instrument_id: b.instrument_id.clone(),
-                            time,
-                            amount: value,
-                            currency: b.ccy.clone(),
-                        });
-                        continue;
-                    }
-                    page.finance.push(FinanceEntry {
-                        entry_id: format!("{key}:{component}"),
-                        economic_event_key: key.clone(),
-                        component: component.into(),
-                        allocation_leg: "account".into(),
-                        amount: value,
-                        currency: b.ccy.clone(),
-                        instance_id: instance.clone(),
-                        source_ref: key.clone(),
-                        time,
-                        reverses_entry_id: None,
-                    });
-                }
-                if !transfer
-                    && amount != Decimal::ZERO
-                    && let Some(component) = residual_component
-                {
-                    page.finance.push(FinanceEntry {
-                        entry_id: format!("{key}:unattributed"),
-                        economic_event_key: key.clone(),
-                        component: component.into(),
-                        allocation_leg: "account".into(),
-                        amount,
-                        currency: b.ccy,
-                        instance_id: None,
-                        source_ref: key,
-                        time,
-                        reverses_entry_id: None,
-                    });
-                }
-            }
-            s.ingest_page_with_usd(&page, &fx)
-        })
+        .ingest_captured_bills(
+            deadline(),
+            okx_execution::CapturedBillPage {
+                cursor: next,
+                rows: parsed,
+            },
+            fx,
+        )
         .await?;
     Ok(complete)
 }
