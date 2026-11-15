@@ -172,6 +172,25 @@ impl NativeFinanceRisk {
                     .campaign_summary(self.campaign.clone())
                     .await
                     .map_err(|_| "NATIVE_RISK_SUMMARY_SOURCE_UNAVAILABLE")?;
+                let campaign_origin = summary.opening.as_ref().map(|o| {
+                    okx_protocol::risk_authority::RiskCampaignOrigin {
+                        campaign_id: self.campaign.clone(),
+                        installation_id: self.installation.clone(),
+                        started_at_ms: o.campaign_started_at_ms,
+                    }
+                });
+                let entry_budget = summary.opening.as_ref().map(|o| {
+                    okx_protocol::risk_authority::RiskEntryBudgetSnapshot {
+                        campaign_id: self.campaign.clone(),
+                        limit_usd: summary.entry_limit_usd.clone(),
+                        consumed_usd: summary.consumed_entry_usd.clone(),
+                        reserved_usd: summary.reserved_entry_usd.clone(),
+                        remaining_usd: summary.remaining_entry_usd.clone(),
+                        bound_breach_usd: summary.entry_bound_breach_usd.clone(),
+                        opening_source_digest: o.source_digest.clone(),
+                        opening_as_of_ms: o.as_of_ms,
+                    }
+                });
                 let budget = RiskBudgetSnapshot {
                     campaign_limit_usd: summary.loss_limit_usd,
                     consumed_loss_usd: summary.consumed_loss_usd,
@@ -181,8 +200,8 @@ impl NativeFinanceRisk {
                     // No accepted opening/inception timestamp is in the
                     // imported meta row; never invent it from wall clock.
                     source_as_of_ms: None,
-                    campaign_origin: None,
-                    entry_budget: None,
+                    campaign_origin,
+                    entry_budget,
                 };
                 base(
                     RiskDecisionStatus::Observed,

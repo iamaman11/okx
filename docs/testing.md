@@ -1,3 +1,34 @@
+## #510 - immutable campaign opening provenance and Native Summary readback
+
+Opening installation now commits its canonical full source as a separate
+immutable operation receipt alongside the original installed-money marker.
+This is provenance in the SAME database/transaction, not another financial
+ledger. The original canonical digest calculation is shared with readback.
+No schema migration or activated financial capability is added.
+
+Scoped readback verifies the persisted source schema/fields/digest, campaign,
+first account, timestamp and original installed-money marker. A missing full
+proof (including older imports) remains None: inception must not be inferred
+from process time, account T0 or the monetary marker alone. Native Summary
+projects entry budget and campaign origin only from that persisted source;
+current money still comes from the original RiskBook summary transaction.
+The returned opening timestamp is NOT presented as fresh venue evidence.
+
+Existing real two-account opening contract now checks absent proof after
+rollback, a forced final provenance-write failure rolling back BOTH installed
+marker and budget sequence even if caller commits, full source after actual
+COMMIT/reopen and foreign-installation rejection. Original replay/conflict and
+source-readiness negatives remain. Full execution library: 271 PASS, 0 FAIL,
+2 ignored, 6.96s after build on the final visibility-corrected source. Agent
+all-target compilation and architecture/negative guard pass. Not a new full
+26x/RB/P95 acceptance result.
+
+Remaining Native ingress: actual produced census/opening handoff; source-bound
+Reserve/BeginPost with sender's single-use send ownership (do not repeat the
+account transition after native COMMIT); Resolve terminal and Unknown/Open;
+remaining AccountResources composition, verified RB09 activation/old finance
+endpoint disable and final current-SHA acceptance. Writes remain fail-closed.
+
 ## #510 - typed trading reads and governance capital producer
 
 Actual Execute, Status/Cancel/Close, recovery and terminal-release callers now

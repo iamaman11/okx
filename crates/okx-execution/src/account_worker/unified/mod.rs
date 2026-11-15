@@ -261,6 +261,7 @@ pub struct UnifiedFinanceInventory {
 /// Exact original RiskBook projection, not a second financial calculation.
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub struct UnifiedFinanceCampaignSummary {
+    pub opening: Option<UnifiedFinanceOpeningReadback>,
     pub campaign: String,
     pub book_sequence: u64,
     pub policy_revision: u64,
@@ -274,6 +275,13 @@ pub struct UnifiedFinanceCampaignSummary {
     pub reserved_entry_usd: String,
     pub entry_bound_breach_usd: String,
     pub remaining_entry_usd: String,
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+pub struct UnifiedFinanceOpeningReadback {
+    pub source_digest: String,
+    pub as_of_ms: u64,
+    pub campaign_started_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

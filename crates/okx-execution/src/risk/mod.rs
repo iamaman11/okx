@@ -7,6 +7,7 @@ pub use stops::*;
 // callable only on the ONE installation-owned transaction. A verified
 // cutover/activation source is still required before a live COMMIT.
 mod book;
+pub(crate) use book::read_unified_campaign_opening;
 pub(crate) use book::{
     AccountReadback, EntrySettlementSource, NativeOpeningAccount, NativeOpeningSource,
     PostFenceInput, ReservationReadback, ReserveInput, TerminalResolveInput, UnifiedRiskDecision,

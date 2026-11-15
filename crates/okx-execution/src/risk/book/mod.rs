@@ -4,6 +4,14 @@
 //! No public opening or POST permission exists in this intermediate draft.
 mod owner;
 mod store;
+pub(crate) fn read_unified_campaign_opening(
+    tx: &rusqlite::Transaction<'_>,
+    installation: &str,
+    campaign: &str,
+) -> Result<Option<NativeOpeningSource>, &'static str> {
+    store::read_unified_campaign_opening(tx, installation, campaign)
+        .map_err(|e| original_finance_error(&e))
+}
 pub(crate) use store::{
     AccountReadback, ReservationReadback, read_unified_campaign_account_summary,
     read_unified_campaign_reservation, read_unified_campaign_summary, verify_legacy_import_source,

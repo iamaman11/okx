@@ -152,8 +152,16 @@ impl UnifiedFinanceHandle {
             let original =
                 crate::risk::read_unified_campaign_summary(&tx, &installation, &campaign)
                     .map_err(StoreError::Invalid)?;
+            let opening = crate::risk::read_unified_campaign_opening(&tx, &installation, &campaign)
+                .map_err(|_| StoreError::Invalid("NATIVE_OPENING_SOURCE_UNAVAILABLE"))?
+                .map(|source| super::UnifiedFinanceOpeningReadback {
+                    source_digest: source.source_digest,
+                    as_of_ms: source.as_of_ms,
+                    campaign_started_at_ms: source.campaign_started_at_ms,
+                });
             tx.commit()?;
             Ok(UnifiedFinanceCampaignSummary {
+                opening,
                 campaign,
                 book_sequence: original.book_sequence,
                 policy_revision: original.policy_revision,

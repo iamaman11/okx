@@ -21,6 +21,8 @@ use std::{
 use thiserror::Error;
 mod integrity;
 mod opening;
+mod opening_readback;
+pub(super) use opening_readback::read_unified_campaign_opening;
 mod post;
 mod queries;
 mod settlement;

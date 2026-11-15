@@ -10,7 +10,7 @@ use okx_kernel::risk::money::RiskAmount;
 /// Pure typed native source passed by the authenticated agent adapter.
 /// The external protocol DTO is converted at the agent boundary; execution
 /// never depends on protocol, WS, Cloudflare or the exchange transport.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct NativeOpeningAccount {
     pub account_key: String,
     pub history_from_ms: u64,
@@ -22,7 +22,7 @@ pub(crate) struct NativeOpeningAccount {
     pub finance_provenance_sealed: bool,
     pub source_digest: String,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct NativeOpeningSource {
     pub campaign_id: String,
     pub limit_usd: String,
@@ -33,6 +33,21 @@ pub(crate) struct NativeOpeningSource {
     pub accounts: Vec<NativeOpeningAccount>,
 }
 impl NativeOpeningSource {
+    pub(in crate::risk::book) fn canonical_digest(&self) -> Result<String> {
+        Ok(format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(
+                "okx.campaign-entry-opening/v1",
+                &self.campaign_id,
+                &self.limit_usd,
+                &self.consumed_usd,
+                self.campaign_started_at_ms,
+                self.as_of_ms,
+                &self.accounts,
+            ))?)
+        ))
+    }
+
     pub(crate) fn valid(&self) -> bool {
         self.campaign_id
             .strip_prefix("sha256:")
@@ -105,18 +120,7 @@ impl RiskBookStore {
         {
             return Err(RiskStoreError::Invalid("UNIFIED_OPENING_IDENTITY_INVALID"));
         }
-        let expected = format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(&(
-                "okx.campaign-entry-opening/v1",
-                &source.campaign_id,
-                &source.limit_usd,
-                &source.consumed_usd,
-                source.campaign_started_at_ms,
-                source.as_of_ms,
-                &source.accounts,
-            ))?)
-        );
+        let expected = source.canonical_digest()?;
         if source.source_digest != expected {
             return Err(RiskStoreError::Invalid(
                 "UNIFIED_OPENING_SOURCE_DIGEST_CHANGED",
@@ -276,6 +280,7 @@ impl RiskBookStore {
                 i64::try_from(source.as_of_ms).map_err(|_| RiskStoreError::StaleSequence)?
             ],
         )?;
+        tx.execute("INSERT INTO operation_receipts(installation_id,account_key,operation_id,kind,request_hash,result_ref,committed_at) VALUES(?1,?2,?3,'CAMPAIGN_OPENING_SOURCE',?4,?5,?6)",params![installation,&accounts[0],format!("risk-entry-opening-source:{}",source.campaign_id),source.source_digest,serde_json::to_string(source)?,i64::try_from(source.as_of_ms).map_err(|_|RiskStoreError::Invalid("OPENING_TIME_RANGE"))?])?;
         let verified = read_meta_for_scope(tx, scope)?;
         integrity::verify_reservation_aggregates_for_scope(tx, &verified, scope)?;
         Ok(EntryOpeningReceipt {

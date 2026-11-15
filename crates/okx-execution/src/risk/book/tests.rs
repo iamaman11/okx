@@ -3863,6 +3863,32 @@ fn risk_book_contract_unified_original_opening_requires_exact_two_account_sql_so
     );
     {
         let tx = db.transaction().unwrap();
+        assert!(
+            super::read_unified_campaign_opening(&tx, "test-installation", &campaign)
+                .unwrap()
+                .is_none()
+        );
+        tx.execute_batch("CREATE TEMP TRIGGER reject_opening_source BEFORE INSERT ON operation_receipts WHEN NEW.kind='CAMPAIGN_OPENING_SOURCE' BEGIN SELECT RAISE(ABORT,'fixture provenance write failure'); END").unwrap();
+        assert!(
+            apply_original_unified_finance_transaction(&tx, "test-installation", command())
+                .is_err()
+        );
+        let seq: i64 = tx
+            .query_row(
+                "SELECT book_sequence FROM risk_meta WHERE campaign_id=?1",
+                [&campaign],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(seq, 0);
+        let markers:i64=tx.query_row("SELECT COUNT(*) FROM operation_receipts WHERE kind IN ('CAMPAIGN_OPENING_SOURCE','CAMPAIGN_OPENING_INSTALLED')",[],|r|r.get(0)).unwrap();
+        assert_eq!(markers, 0);
+        tx.execute_batch("DROP TRIGGER reject_opening_source")
+            .unwrap();
+        tx.commit().unwrap();
+    }
+    {
+        let tx = db.transaction().unwrap();
         apply_original_unified_finance_transaction(&tx, "test-installation", command()).unwrap();
         tx.commit().unwrap();
     }
@@ -3871,6 +3897,13 @@ fn risk_book_contract_unified_original_opening_requires_exact_two_account_sql_so
     db.pragma_update(None, "foreign_keys", "ON").unwrap();
     {
         let tx = db.transaction().unwrap();
+        assert_eq!(
+            super::read_unified_campaign_opening(&tx, "test-installation", &campaign).unwrap(),
+            Some(source.clone())
+        );
+        assert!(
+            super::read_unified_campaign_opening(&tx, "foreign-installation", &campaign).is_err()
+        );
         let replay =
             apply_original_unified_finance_transaction(&tx, "test-installation", command())
                 .unwrap();
