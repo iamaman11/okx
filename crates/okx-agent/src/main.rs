@@ -407,8 +407,8 @@ mod native_finance_startup_tests {
         account_catalog_proto,
         accounts::{AccountKey, Environment, VerifiedAccountConfig},
     };
-    use std::sync::atomic::{AtomicU64, Ordering};
     use sha2::Digest;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -497,7 +497,10 @@ mod native_finance_startup_tests {
             Err(AgentError::FinancialCaptureTask(ref reason))
                 if reason == "FINANCE_CUTOVER_NOT_ACCEPTED"
         ));
-        assert_eq!(std::fs::read(&finance).unwrap(), b"not-a-valid-financial-import");
+        assert_eq!(
+            std::fs::read(&finance).unwrap(),
+            b"not-a-valid-financial-import"
+        );
         let legacy_account_sql = path
             .join("accounts")
             .join(format!(
