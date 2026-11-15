@@ -10,10 +10,17 @@ mod owner_startup;
 mod owner_startup_tests;
 pub(crate) use opening_ingress::install_reported_opening_sql;
 pub use opening_ingress::{ReportedOpeningCensus, ReportedOpeningReceipt};
+mod account_initialization;
 mod admission_lifecycle;
 mod authority_reads;
+mod campaign_initialization;
 mod campaign_readiness;
+pub use campaign_initialization::{
+    NativeCampaignAccountPolicy, NativeCampaignPolicy, NativeCampaignPolicyReceipt,
+    NativeCampaignStrategyPolicy,
+};
 mod census_reads;
+mod finance_authority;
 mod financial_admission;
 mod native_admission;
 mod order_observation;
@@ -23,12 +30,15 @@ pub(crate) use native_admission::{
 };
 mod entry_settlement;
 mod posting_recovery;
+mod storage_recovery;
+pub use storage_recovery::NativeRecoveryProof;
 mod protection_cleanup;
 mod protection_resize;
 mod protection_status;
 mod readback;
 mod reduction_submission;
 mod reservation;
+mod source_permission;
 mod source_stops;
 mod terminal_status;
 mod unsent_status;
@@ -41,10 +51,10 @@ pub(crate) use reservation::{native_reservation_receipt_sql, reserve_native_sql}
 mod sources;
 mod trade_reads;
 mod transaction;
+use finance_authority::require_verified_live_finance_authority;
 use sources::{original_bound_entry_settlement_sql, original_bound_unsent_release_sql};
 pub(crate) use sources::{original_bound_entry_source_sql, original_bound_unsent_source_sql};
 pub(crate) use transaction::apply_original_unified_finance_transaction;
-use transaction::require_verified_live_finance_authority;
 /// Test-only assertion against the immutable, independently verified
 /// stopped-import marker. A trial cannot create a live finance grant.
 #[cfg(test)]
@@ -309,6 +319,8 @@ pub struct UnifiedFinanceInventory {
 /// Exact original RiskBook projection, not a second financial calculation.
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub struct UnifiedFinanceCampaignSummary {
+    /// Durable campaign inception, independent of its later money opening.
+    pub campaign_started_at_ms: Option<u64>,
     pub opening: Option<UnifiedFinanceOpeningReadback>,
     pub campaign: String,
     pub book_sequence: u64,

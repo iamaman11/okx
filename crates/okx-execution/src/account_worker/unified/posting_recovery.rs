@@ -1,7 +1,7 @@
 //! Cold-start recovery uses the original joint financial command, never a send grant.
 use super::{
     UnifiedFinanceHandle, UnifiedFinanceWrite, UnifiedFinanceWriteReceipt,
-    apply_original_unified_finance_transaction, require_verified_live_finance_authority,
+    apply_original_unified_finance_transaction,
 };
 use crate::{AccountStore, StoreError, StoreResult};
 use std::time::Instant;
@@ -41,7 +41,7 @@ fn commit_original_posting_recovery(
     account: Option<String>,
 ) -> StoreResult<usize> {
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    require_verified_live_finance_authority(&tx, installation)?;
+    super::source_permission::require_source_account(&tx, installation, account.as_deref())?;
     let now = super::opening_ingress::owner_now_ms()?;
     let command = match account {
         Some(account) => {

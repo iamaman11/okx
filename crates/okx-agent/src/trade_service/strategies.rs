@@ -18,18 +18,19 @@ impl TradeService {
             request,
             StrategyRequest::List {} | StrategyRequest::Status { .. }
         ) {
-            let body = request.clone();
-            let result = r
-                .execution
-                .store
-                .call(deadline(), move |s| match body {
-                    StrategyRequest::Status { instance_id } => {
-                        s.strategy_status(&instance_id, now())
-                    }
-                    _ => Ok(json!({"instances":s.instances()?})),
-                })
-                .await
-                .map_err(err)?;
+            let result = match request {
+                StrategyRequest::Status { instance_id } => {
+                    let instance_id = instance_id.clone();
+                    r.execution
+                        .store
+                        .call(deadline(), move |s| s.strategy_status(&instance_id, now()))
+                        .await
+                        .map_err(err)?
+                }
+                _ => {
+                    json!({"instances":r.execution.store.strategy_instances(deadline()).await.map_err(err)?})
+                }
+            };
             return Ok(completed(result));
         }
 
@@ -370,9 +371,7 @@ impl TradeService {
                     let mut result = r
                         .execution
                         .store
-                        .call(deadline(), move |s| {
-                            s.reconcilable_intents_page(RECOVERY_BATCH, offset)
-                        })
+                        .reconcilable_intents_page(deadline(), RECOVERY_BATCH, offset)
                         .await;
                     if result.as_ref().is_ok_and(Vec::is_empty) && offset != 0 {
                         // The candidate set shrank after successful recovery.
@@ -381,9 +380,7 @@ impl TradeService {
                         result = r
                             .execution
                             .store
-                            .call(deadline(), move |s| {
-                                s.reconcilable_intents_page(RECOVERY_BATCH, 0)
-                            })
+                            .reconcilable_intents_page(deadline(), RECOVERY_BATCH, 0)
                             .await;
                     }
                     match result {
@@ -464,7 +461,7 @@ impl TradeService {
                 };
                 let decisions = async {
                     if let Ok(instances) =
-                        r.execution.store.call(deadline(), |s| s.instances()).await
+                        r.execution.store.strategy_instances(deadline()).await
                     {
                         for instance in instances.into_iter().filter(|i| i.enabled) {
                             let _ = self.strategy_turn(&r, &instance).await;
@@ -567,14 +564,12 @@ impl TradeService {
             let lots = r
                 .execution
                 .store
-                .call(deadline(), move |s| {
-                    Ok(s.active_lots(&inst)?
-                        .into_iter()
-                        .filter(|l| l.instance_id.as_deref() == Some(&instance_id))
-                        .collect::<Vec<_>>())
-                })
+                .active_lots(deadline(), inst)
                 .await
-                .map_err(err)?;
+                .map_err(err)?
+                .into_iter()
+                .filter(|lot| lot.instance_id.as_deref() == Some(&instance_id))
+                .collect::<Vec<_>>();
             let desired_side = if desired > 0 { "long" } else { "short" };
             if lots.iter().any(|l| l.side != desired_side) {
                 for lot in lots.iter().filter(|l| l.side != desired_side) {

@@ -8,21 +8,23 @@ use crate::{
 };
 use okx_api::{AccountApi, Credentials, OkxEnvironment, OkxRestClient, RateBudget};
 use okx_execution::account_worker::UnifiedFinanceHandle;
-use okx_execution::{AccountMeta, AccountStoreHandle, OpeningSnapshot};
+use okx_execution::{AccountMeta, AccountStoreHandle};
 use okx_protocol::{
     account_catalog_proto,
     accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
 };
 use okx_runtime::{LiveWsConnector, PrivateWsCoordinator, PrivateWsHandle, WsConnector};
+#[cfg(test)]
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::str::FromStr;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
-    str::FromStr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -370,20 +372,47 @@ impl AccountRuntimeRegistry {
         rate_budget: RateBudget,
         campaign: &str,
     ) -> AgentResult<(Self, UnifiedFinanceHandle)> {
-        if campaign.is_empty() {
-            return Err(AgentError::FinancialCaptureTask(
-                "FINANCE_EXPECTED_CAMPAIGN_REQUIRED".into(),
-            ));
+        let (registry, owner) = Self::open_native_catalog(root, rate_budget, campaign).await?;
+        for config in registry.list().await {
+            let credentials = load_native_account_credentials(&config.credential_ref)?;
+            let resources = registry
+                .open_resources(config.clone(), credentials, false)
+                .await?;
+            registry
+                .routes
+                .write()
+                .await
+                .insert(config.account_key.wire(), resources);
         }
+        Ok((registry, owner))
+    }
+
+    /// Same startup composition for production and recorded-client tests.
+    /// Loading a verified local installation permits observation/connection,
+    /// never Reserve/BeginPost; those retain their independent policy gate.
+    async fn open_native_catalog(
+        root: &Path,
+        rate_budget: RateBudget,
+        campaign: &str,
+    ) -> AgentResult<(Self, UnifiedFinanceHandle)> {
         let catalog = account_catalog_proto::load(root)?;
         let owner = UnifiedFinanceHandle::open_native(
             root.canonicalize()?,
             catalog.installation_id.clone(),
         )
         .await?;
-        owner
-            .verify_live_authority(Instant::now() + std::time::Duration::from_secs(2))
-            .await?;
+        if !campaign.is_empty() {
+            if let Some(configured) = owner
+                .configured_campaign(Instant::now() + std::time::Duration::from_secs(2))
+                .await?
+            {
+                if configured != campaign {
+                    return Err(AgentError::FinancialCaptureTask(
+                        "FINANCE_CAMPAIGN_IDENTITY_MISMATCH".into(),
+                    ));
+                }
+            }
+        }
         let registry = Self {
             root: root.to_path_buf(),
             installation_id: catalog.installation_id,
@@ -401,17 +430,6 @@ impl AccountRuntimeRegistry {
             native_stopped_finance: false,
             native_finance_owner: Some(owner.clone()),
         };
-        for config in registry.list().await {
-            let credentials = load_native_account_credentials(&config.credential_ref)?;
-            let resources = registry
-                .open_resources(config.clone(), credentials, false)
-                .await?;
-            registry
-                .routes
-                .write()
-                .await
-                .insert(config.account_key.wire(), resources);
-        }
         Ok((registry, owner))
     }
 
@@ -490,7 +508,7 @@ impl AccountRuntimeRegistry {
         operation_id: &str,
         request_digest: &str,
     ) -> AgentResult<VerifiedAccountConfig> {
-        if self.native_stopped_finance || self.native_finance_owner.is_some() {
+        if self.native_stopped_finance {
             return Err(AgentError::FinancialCaptureTask(
                 "FINANCE_STOPPED_ACCOUNT_CONNECTION_DISABLED".into(),
             ));
@@ -612,6 +630,9 @@ impl AccountRuntimeRegistry {
         initialize: bool,
         lease_root: &Path,
     ) -> AgentResult<Arc<AccountResources>> {
+        if !configuration.valid() {
+            return Err(invalid());
+        }
         let uid =
             verify_client_pair(clients.environment, &clients.observer, &clients.executor).await?;
         if uid != configuration.account_key.verified_uid
@@ -633,11 +654,14 @@ impl AccountRuntimeRegistry {
         }
         let database = root.join("account.sqlite");
         let store = if let Some(owner) = &self.native_finance_owner {
-            if initialize {
-                return Err(AgentError::FinancialCaptureTask(
-                    "NATIVE_ACCOUNT_INITIALIZATION_NOT_ACCEPTED".into(),
-                ));
-            }
+            crate::native_account_connection::ensure_account(
+                owner,
+                &configuration,
+                &observer,
+                &uid,
+                initialize,
+            )
+            .await?;
             owner
                 .recover_posting(
                     configuration.account_key.wire(),
@@ -651,95 +675,8 @@ impl AccountRuntimeRegistry {
         } else {
             let legacy = if initialize {
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-                let opening = loop {
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(AgentError::FinancialCaptureTask(
-                            "INITIAL_SNAPSHOT_UNSTABLE".into(),
-                        ));
-                    }
-                    let first = observer.snapshot().await.map_err(|error| {
-                        AgentError::FinancialCaptureTask(
-                            crate::source_capture::snapshot_failure_code(&error).into(),
-                        )
-                    })?;
-                    let algos = observer
-                        .pending_derivative_risk_algos()
-                        .await
-                        .map_err(|_| {
-                            AgentError::FinancialCaptureTask(
-                                "ACCOUNT_ALGO_SOURCE_UNAVAILABLE".into(),
-                            )
-                        })?;
-                    let last = observer.snapshot().await.map_err(|error| {
-                        AgentError::FinancialCaptureTask(
-                            crate::source_capture::snapshot_failure_code(&error).into(),
-                        )
-                    })?;
-                    if first.account_uid_fingerprint != uid || last.account_uid_fingerprint != uid {
-                        return Err(AgentError::FinancialCaptureTask(
-                            "ACCOUNT_IDENTITY_MISMATCH".into(),
-                        ));
-                    }
-                    if !first
-                        .balance
-                        .same_values_ignoring_update_times(&last.balance)
-                        || first.positions != last.positions
-                        || first.pending_orders != last.pending_orders
-                    {
-                        continue;
-                    }
-                    if !algos.complete_within_bound {
-                        return Err(AgentError::FinancialCaptureTask(
-                            "ACCOUNT_ALGO_COVERAGE_INCOMPLETE".into(),
-                        ));
-                    }
-                    let liabilities =
-                        last.balance
-                            .details
-                            .iter()
-                            .try_fold(Decimal::ZERO, |sum, d| {
-                                // OKX documents liab as not applicable to Futures mode (2).
-                                // Other account modes require an explicit observed debt field.
-                                let value = match d.liabilities.as_deref() {
-                                    Some(v) => Decimal::from_str(v).map_err(|_| invalid())?,
-                                    None if last.account_level == "2" => Decimal::ZERO,
-                                    None => return Err(invalid()),
-                                };
-                                sum.checked_add(value).ok_or_else(invalid)
-                            })?;
-                    let positions = last
-                        .positions
-                        .iter()
-                        .filter(|p| Decimal::from_str(&p.position) != Ok(Decimal::ZERO))
-                        .count();
-                    let balances = last
-                        .balance
-                        .details
-                        .iter()
-                        .map(|d| {
-                            Ok((
-                                d.currency.clone(),
-                                Decimal::from_str(&d.equity).map_err(|_| invalid())?,
-                            ))
-                        })
-                        .collect::<AgentResult<Vec<_>>>()?;
-                    let observed_at =
-                        chrono::DateTime::parse_from_rfc3339(&last.source_received_at)
-                            .map_err(|_| invalid())?
-                            .timestamp_millis();
-                    let source_ref = format!("{:x}", Sha256::digest(serde_json::to_vec(&last)?));
-                    break OpeningSnapshot {
-                        opening_equity_usd: Decimal::from_str(&last.balance.total_equity_usd)
-                            .map_err(|_| invalid())?,
-                        source_ref,
-                        observed_at,
-                        positions,
-                        orders: last.pending_orders.len(),
-                        conditional_orders: algos.rows,
-                        liabilities,
-                        balances,
-                    };
-                };
+                let opening =
+                    crate::account_opening::capture_opening(&observer, &uid, deadline).await?;
                 let meta = AccountMeta {
                     account_key: configuration.account_key.wire(),
                     installation_id: self.installation_id.clone(),
@@ -1217,6 +1154,14 @@ pub fn build_release() -> &'static str {
         None => "UNVERIFIED_LOCAL_BUILD",
     }
 }
+
+#[cfg(test)]
+#[path = "accounts_native_connect_tests.rs"]
+mod native_connect_contracts;
+
+#[cfg(test)]
+#[path = "accounts_native_trade_contract_tests.rs"]
+mod native_trade_contracts;
 
 #[cfg(test)]
 pub(crate) mod recorded_support {
@@ -5317,7 +5262,7 @@ pub(crate) mod recorded_support {
 
     pub(crate) fn prepared_with_socket(
         label: &str,
-        feed: Arc<RecordedAccountHttp>,
+        feed: Arc<dyn HttpTransport>,
         ws_connector: Arc<dyn WsConnector>,
         budget: RateBudget,
     ) -> (VerifiedAccountConfig, PreparedAccountClients) {
@@ -6253,6 +6198,74 @@ mod tests {
             verified_uid: "a".repeat(64),
         }
     }
+    /// Same production capture helper, real HTTP parser, no SQL owner or sender.
+    #[tokio::test]
+    async fn account_opening_capture_direct_readonly_and_identity_contract() {
+        use recorded_support::{RecordedAccountHttp, prepared};
+        for wrong_uid in [false, true] {
+            let feed = Arc::new(RecordedAccountHttp::default());
+            let (configuration, clients) = prepared("a", feed.clone(), RateBudget::new());
+            let observer = AccountBootstrapper::new(clients.observer);
+            let expected = if wrong_uid {
+                "f".repeat(64)
+            } else {
+                configuration.account_key.verified_uid
+            };
+            let result = crate::account_opening::capture_opening(
+                &observer,
+                &expected,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+            )
+            .await;
+            if wrong_uid {
+                assert!(
+                    matches!(result, Err(AgentError::FinancialCaptureTask(ref code)) if code=="ACCOUNT_IDENTITY_MISMATCH")
+                );
+            } else {
+                let opening = result.unwrap();
+                assert_eq!(opening.opening_equity_usd, Decimal::from(100));
+                assert_eq!(opening.balances, vec![("USDT".into(), Decimal::from(100))]);
+                assert_eq!(
+                    (
+                        opening.positions,
+                        opening.orders,
+                        opening.conditional_orders
+                    ),
+                    (0, 0, 0)
+                );
+                assert_eq!(opening.liabilities, Decimal::ZERO);
+                assert_eq!(opening.source_ref.len(), 64);
+                assert!(opening.observed_at > 0);
+            }
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+            assert!(
+                feed.requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.contains("orders-algo-pending"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn account_opening_capture_expired_deadline_reads_nothing() {
+        use recorded_support::{RecordedAccountHttp, prepared};
+        let feed = Arc::new(RecordedAccountHttp::default());
+        let (configuration, clients) = prepared("a", feed.clone(), RateBudget::new());
+        let result = crate::account_opening::capture_opening(
+            &AccountBootstrapper::new(clients.observer),
+            &configuration.account_key.verified_uid,
+            tokio::time::Instant::now(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AgentError::FinancialCaptureTask(ref code)) if code=="INITIAL_SNAPSHOT_UNSTABLE")
+        );
+        assert!(feed.requests.lock().unwrap().is_empty());
+        assert!(feed.outbound_posts.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn recovery_prepared_account_reopens_catalog_and_original_sql() {
         use recorded_support::{RecordedAccountHttp, prepared};

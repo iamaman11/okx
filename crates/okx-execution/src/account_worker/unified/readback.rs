@@ -159,8 +159,26 @@ impl UnifiedFinanceHandle {
                     as_of_ms: source.as_of_ms,
                     campaign_started_at_ms: source.campaign_started_at_ms,
                 });
+            use rusqlite::OptionalExtension;
+            let created: Option<i64> = tx
+                .query_row(
+                    "SELECT MIN(committed_at) FROM operation_receipts WHERE installation_id=?1
+                 AND operation_id=?2 AND kind='CAMPAIGN_CREATED'",
+                    rusqlite::params![installation, format!("campaign-created:{campaign}")],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            let campaign_started_at_ms =
+                opening
+                    .as_ref()
+                    .map(|o| o.campaign_started_at_ms)
+                    .or(created
+                        .and_then(|t| u64::try_from(t).ok())
+                        .filter(|t| *t > 0));
             tx.commit()?;
             Ok(UnifiedFinanceCampaignSummary {
+                campaign_started_at_ms,
                 opening,
                 campaign,
                 book_sequence: original.book_sequence,

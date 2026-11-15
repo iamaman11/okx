@@ -1,10 +1,9 @@
 //! #510: original single-writer RiskCommand read ingress.
 //! The local backend never forwards to Cloudflare and never synthesizes a
 //! budget/venue grant. Trading mutations require independently accepted
-//! RB09 activation and a fully source-wired AccountStore/TradeService.
+//! account, policy and original financial opening receipts on the same owner.
 use okx_execution::account_worker::{
     UnifiedFinanceBoundSettlement, UnifiedFinanceBoundUnsent, UnifiedFinanceHandle,
-    UnifiedFinancePolicy, UnifiedFinancePolicyAccount,
 };
 use okx_protocol::account_governance::{AccountEnvironment, CentralGovernanceSnapshot};
 use okx_protocol::risk_authority::{
@@ -36,17 +35,39 @@ impl NativeFinanceRisk {
         })
     }
 
+    /// Standard startup before the first authenticated policy. SQL remains the
+    /// sole owner of campaign identity; absence grants no financial capability.
+    pub fn from_owner(owner: UnifiedFinanceHandle) -> Self {
+        Self {
+            installation: owner.installation_id().to_owned(),
+            owner,
+            campaign: String::new(),
+        }
+    }
+
+    pub(crate) async fn resolved(&self) -> Result<Self, &'static str> {
+        if !self.campaign.is_empty() {
+            return Ok(self.clone());
+        }
+        let campaign = self
+            .owner
+            .configured_campaign(std::time::Instant::now() + std::time::Duration::from_secs(2))
+            .await
+            .map_err(|_| "FINANCE_CAMPAIGN_IDENTITY_UNAVAILABLE")?
+            .ok_or("FINANCE_CAMPAIGN_POLICY_REQUIRED")?;
+        Self::new(self.owner.clone(), self.installation.clone(), campaign)
+    }
+
     /// Apply original native AccountStore account-policy rows and RiskBook
-    /// campaign revision in ONE caller-owned SQL transaction, not one loop
-    /// over legacy account writers. Until RB09 this is denied by the same
-    /// finance manifest gate as every other financial COMMIT.
+    /// campaign revision in ONE caller-owned SQL transaction. A policy creates
+    /// no financial opening, no source-completeness assertion and no POST grant.
     pub async fn apply_governance(
         &self,
         snapshot: &CentralGovernanceSnapshot,
     ) -> Result<(), String> {
         if !snapshot.valid()
             || snapshot.state.installation_id != self.installation
-            || snapshot.state.campaign_id != self.campaign
+            || (!self.campaign.is_empty() && snapshot.state.campaign_id != self.campaign)
             || snapshot.state.accounts.is_empty()
         {
             return Err("UNIFIED_GOVERNANCE_IDENTITY_UNVERIFIED".into());
@@ -61,24 +82,64 @@ impl NativeFinanceRisk {
         {
             return Err("UNIFIED_GOVERNANCE_DEMO_COHORT_UNSUPPORTED".into());
         }
+        use okx_execution::account_worker::{
+            NativeCampaignAccountPolicy, NativeCampaignPolicy, NativeCampaignStrategyPolicy,
+        };
         let mut accounts = snapshot
             .state
             .accounts
             .iter()
-            .map(|account| UnifiedFinancePolicyAccount {
-                account_key: account.account_key.clone(),
-                paused: !account.access_enabled(),
+            .map(|account| {
+                let mut strategies = account
+                    .strategies
+                    .iter()
+                    .map(|strategy| NativeCampaignStrategyPolicy {
+                        strategy_id: strategy.id.clone(),
+                        limit_usdt: strategy.max_modelled_loss_usdt.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                if strategies.iter().any(|s| s.strategy_id == "manual") {
+                    return Err("NATIVE_MANUAL_POLICY_CONFLICT".to_string());
+                }
+                strategies.push(NativeCampaignStrategyPolicy {
+                    strategy_id: "manual".into(),
+                    limit_usdt: account.limits.max_modelled_loss_usdt.clone(),
+                });
+                strategies.sort_by(|a, b| a.strategy_id.cmp(&b.strategy_id));
+                Ok(NativeCampaignAccountPolicy {
+                    account_key: account.account_key.clone(),
+                    paused: !account.access_enabled(),
+                    limit_usdt: account.limits.max_modelled_loss_usdt.clone(),
+                    order_limit_usdt: account.limits.max_order_loss_usdt.clone(),
+                    entry_limit_usd: account
+                        .limits
+                        .max_entry_usd
+                        .clone()
+                        .ok_or("NATIVE_ACCOUNT_ENTRY_LIMIT_MISSING")?,
+                    strategies,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, String>>()?;
         accounts.sort_by(|a, b| a.account_key.cmp(&b.account_key));
         self.owner
-            .apply_governance_policy(UnifiedFinancePolicy {
-                campaign_id: self.campaign.clone(),
-                policy_revision: snapshot.state.revision,
-                campaign_loss_limit_usd: snapshot.state.campaign_loss_limit_usd.clone(),
-                accounts,
-            })
+            .apply_campaign_policy(
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+                NativeCampaignPolicy {
+                    campaign_id: snapshot.state.campaign_id.clone(),
+                    policy_revision: snapshot.state.revision,
+                    generation: snapshot.session_generation,
+                    global_limit_usdt: snapshot.state.max_total_modelled_loss_usdt.clone(),
+                    loss_limit_usd: snapshot.state.campaign_loss_limit_usd.clone(),
+                    entry_limit_usd: snapshot
+                        .state
+                        .campaign_entry_limit_usd
+                        .clone()
+                        .ok_or("NATIVE_CAMPAIGN_ENTRY_LIMIT_MISSING")?,
+                    accounts,
+                },
+            )
             .await
+            .map(|_| ())
             .map_err(|error| error.to_string())
     }
 
@@ -179,6 +240,15 @@ impl NativeFinanceRisk {
                         installation_id: self.installation.clone(),
                         started_at_ms: o.campaign_started_at_ms,
                     }
+                });
+                let campaign_origin = campaign_origin.or_else(|| {
+                    summary.campaign_started_at_ms.map(|started_at_ms| {
+                        okx_protocol::risk_authority::RiskCampaignOrigin {
+                            campaign_id: self.campaign.clone(),
+                            installation_id: self.installation.clone(),
+                            started_at_ms,
+                        }
+                    })
                 });
                 let entry_budget = summary.opening.as_ref().map(|o| {
                     okx_protocol::risk_authority::RiskEntryBudgetSnapshot {

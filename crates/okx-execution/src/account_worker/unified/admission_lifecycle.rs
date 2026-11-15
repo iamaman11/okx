@@ -18,7 +18,7 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_verified_live_finance_authority(&tx, &installation)?;
+            super::finance_authority::require_preparation_authority(&tx, &installation)?;
             if intent.plan.strategy_instance == "manual" {
                 AccountStore::ensure_manual_instance_sql(
                     &tx,
@@ -60,7 +60,7 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_verified_live_finance_authority(&tx, &installation)?;
+            super::finance_authority::require_preparation_authority(&tx, &installation)?;
             let result = AccountStore::ensure_manual_instance_sql(
                 &tx,
                 Some((&installation, &account)),
@@ -83,7 +83,7 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_verified_live_finance_authority(&tx, &installation)?;
+            super::finance_authority::require_preparation_authority(&tx, &installation)?;
             if admission
                 .as_ref()
                 .is_some_and(|proof| quote.intent_id != proof.intent_id)
@@ -112,7 +112,7 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_verified_live_finance_authority(&tx, &installation)?;
+            super::finance_authority::require_preparation_authority(&tx, &installation)?;
             AccountStore::mark_reserve_attempt_sql(
                 &tx,
                 Some((&installation, &account)),
@@ -137,7 +137,7 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_verified_live_finance_authority(&tx, &installation)?;
+            super::finance_authority::require_preparation_authority(&tx, &installation)?;
             let result = AccountStore::reject_unsent_sql(
                 &tx,
                 Some((&installation, &account)),
@@ -163,7 +163,7 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline),move |db| {
             let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_verified_live_finance_authority(&tx,&installation)?;
+            super::finance_authority::require_preparation_authority(&tx,&installation)?;
             // Native denial is independently addressable in the SAME SQL;
             // a caller-supplied reason cannot deny an existing reservation.
             let reserved:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM risk_entries WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3)",rusqlite::params![installation,account,intent],|r|r.get(0))?;
@@ -222,7 +222,7 @@ impl UnifiedFinanceHandle {
             };
             let tx = db.transaction_with_behavior(behavior)?;
             if record_risk_state {
-                require_verified_live_finance_authority(&tx, &installation)?;
+                super::finance_authority::require_preparation_authority(&tx, &installation)?;
             }
             let result = AccountStore::plan_definition_sql(
                 &tx,

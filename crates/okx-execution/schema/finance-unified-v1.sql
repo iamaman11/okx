@@ -741,6 +741,12 @@ CREATE TABLE finance_import_manifest(
 ) STRICT;
 
 -- Original immutable-event rules and scoped source-invalidation triggers.
+CREATE TRIGGER immutable_account_connection_update BEFORE UPDATE ON operation_receipts
+ WHEN OLD.kind IN ('INITIALIZE','ACCOUNT_CONNECTED','CAMPAIGN_CREATED','NATIVE_CAMPAIGN_POLICY')
+ BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ACCOUNT_CONNECTION'); END;
+CREATE TRIGGER immutable_account_connection_delete BEFORE DELETE ON operation_receipts
+ WHEN OLD.kind IN ('INITIALIZE','ACCOUNT_CONNECTED','CAMPAIGN_CREATED','NATIVE_CAMPAIGN_POLICY')
+ BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ACCOUNT_CONNECTION'); END;
 CREATE TRIGGER immutable_finance_import_manifest_update BEFORE UPDATE ON finance_import_manifest
  BEGIN SELECT RAISE(ABORT,'IMMUTABLE_FINANCE_IMPORT'); END;
 CREATE TRIGGER immutable_finance_import_manifest_delete BEFORE DELETE ON finance_import_manifest

@@ -4,6 +4,30 @@ use crate::{AccountStore, StoreResult, StoredIntent, StoredLot, TradeIntentLooku
 use std::time::Instant;
 
 impl UnifiedFinanceHandle {
+    /// Bounded recovery scan on the original account-scoped SQL snapshot.
+    pub async fn reconcilable_intents_page(
+        &self,
+        account: String,
+        limit: usize,
+        offset: usize,
+        deadline: Instant,
+    ) -> StoreResult<Vec<StoredIntent>> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let intents = AccountStore::reconcilable_intents_page_sql(
+                &tx,
+                Some((&installation, &account)),
+                limit,
+                offset,
+                super::opening_ingress::owner_now_ms()?,
+            )?;
+            tx.commit()?;
+            Ok(intents)
+        })
+        .await
+    }
+
     pub async fn lookup_intent(
         &self,
         account: String,

@@ -46,7 +46,7 @@ impl NativeRiskClient {
         match &self.route {
             RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED"),
             RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
-                backend.reserve_produced(packet).await
+                backend.resolved().await?.reserve_produced(packet).await
             }
         }
     }
@@ -58,7 +58,7 @@ impl NativeRiskClient {
         match &self.route {
             RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED"),
             RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
-                backend.post_produced(packet).await
+                backend.resolved().await?.post_produced(packet).await
             }
         }
     }
@@ -70,7 +70,11 @@ impl NativeRiskClient {
         match &self.route {
             RiskRoute::Cloudflare(_) => self.request(packet.into_parts().0).await,
             RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
-                backend.install_produced_opening(packet).await
+                backend
+                    .resolved()
+                    .await?
+                    .install_produced_opening(packet)
+                    .await
             }
         }
     }
@@ -121,7 +125,7 @@ impl NativeRiskClient {
         }
         let tx = match &self.route {
             RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
-                return backend.request(command).await;
+                return backend.resolved().await?.request(command).await;
             }
             RiskRoute::Cloudflare(sender) => sender,
         };

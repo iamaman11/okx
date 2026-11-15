@@ -20,6 +20,53 @@ impl From<AccountStoreHandle> for ExecutionStore {
     }
 }
 impl ExecutionStore {
+    pub async fn financial_readiness(
+        &self,
+        deadline: Instant,
+        instance: Option<String>,
+    ) -> StoreResult<(okx_execution::FinancialRisk, usize)> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    Ok((
+                        sql.financial_risk(
+                            chrono::Utc::now().timestamp_millis(),
+                            instance.as_deref(),
+                        )?,
+                        sql.stops()?.len(),
+                    ))
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .financial_readiness(account.clone(), instance, deadline)
+                    .await
+            }
+        }
+    }
+
+    pub async fn reconcilable_intents_page(
+        &self,
+        deadline: Instant,
+        limit: usize,
+        offset: usize,
+    ) -> StoreResult<Vec<okx_execution::StoredIntent>> {
+        match self {
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.reconcilable_intents_page(limit, offset)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .reconcilable_intents_page(account.clone(), limit, offset, deadline)
+                    .await
+            }
+        }
+    }
+
     pub async fn entry_late_pending(&self, deadline: Instant, id: String) -> StoreResult<bool> {
         match self {
             Self::Legacy(s) => {

@@ -285,13 +285,12 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 let campaign = stopped_finance_campaign
                     .as_deref()
                     .or(native_finance_campaign.as_deref())
-                    .ok_or_else(|| {
-                        AgentError::FinancialCaptureTask(if stopped_finance_mode {
-                            "FINANCE_STOPPED_CAMPAIGN_REQUIRED".into()
-                        } else {
-                            "FINANCE_EXPECTED_CAMPAIGN_REQUIRED".into()
-                        })
-                    })?;
+                    .unwrap_or("");
+                if stopped_finance_mode && campaign.is_empty() {
+                    return Err(AgentError::FinancialCaptureTask(
+                        "FINANCE_STOPPED_CAMPAIGN_REQUIRED".into(),
+                    ));
+                }
                 let (registry, owner) = if stopped_finance_mode {
                     AccountRuntimeRegistry::open_stopped_finance(
                         &config.root,
@@ -307,19 +306,15 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     )
                     .await?
                 };
-                (Arc::new(registry), Some(owner))
+                (Arc::new(registry), owner)
             } else {
-                if stopped_finance_campaign.is_some() || native_finance_campaign.is_some() {
-                    return Err(AgentError::FinancialCaptureTask(if stopped_finance_mode {
-                        "FINANCE_STOPPED_IMPORT_REQUIRED".into()
-                    } else {
-                        "FINANCE_INSTALLATION_NOT_INITIALIZED".into()
-                    }));
-                }
-                (
-                    Arc::new(AccountRuntimeRegistry::open(&config.root, budget.clone()).await?),
-                    None,
-                )
+                // Absence of the canonical SQLite is a stopped installation,
+                // never permission to construct a remote financial owner.
+                return Err(AgentError::FinancialCaptureTask(if stopped_finance_mode {
+                    "FINANCE_STOPPED_IMPORT_REQUIRED".into()
+                } else {
+                    "FINANCE_INSTALLATION_NOT_INITIALIZED".into()
+                }));
             };
             let public_client = OkxPublicClient::with_rate_budget(env, budget.clone())?;
             let reference = bootstrap_reference(public_client.clone()).await?;
@@ -328,25 +323,23 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let market = MarketBootstrapper::new(public_client);
             let analytics = AnalyticsService::new(config.root.join("analytics"), market.clone())
                 .map_err(AgentError::ResearchSessionTask)?;
-            let (risk_tx, risk) = tokio::sync::mpsc::channel(32);
-            let risk_client = match native_owner {
-                Some(owner) => {
-                    let campaign = stopped_finance_campaign
-                        .or(native_finance_campaign)
-                        .expect("finance campaign already required above");
-                    let backend = NativeFinanceRisk::new(
-                        owner,
-                        accounts.installation_id().to_owned(),
-                        campaign,
-                    )
-                    .map_err(|reason| AgentError::FinancialCaptureTask(reason.into()))?;
-                    if stopped_finance_mode {
-                        NativeRiskClient::local_stopped(backend)
-                    } else {
-                        NativeRiskClient::local(backend)
-                    }
-                }
-                None => NativeRiskClient::new(risk_tx),
+            // The receiver remains part of the transport API, but no remote
+            // RiskClient is constructed by production startup.
+            let (_risk_tx, risk) = tokio::sync::mpsc::channel(32);
+            let campaign = stopped_finance_campaign.or(native_finance_campaign);
+            let backend = match campaign {
+                Some(campaign) => NativeFinanceRisk::new(
+                    native_owner,
+                    accounts.installation_id().to_owned(),
+                    campaign,
+                )
+                .map_err(|reason| AgentError::FinancialCaptureTask(reason.into()))?,
+                None => NativeFinanceRisk::from_owner(native_owner),
+            };
+            let risk_client = if stopped_finance_mode {
+                NativeRiskClient::local_stopped(backend)
+            } else {
+                NativeRiskClient::local(backend)
             };
             let trade = Arc::new(TradeService::new(
                 accounts.clone(),
@@ -475,13 +468,23 @@ mod native_finance_startup_tests {
         std::fs::create_dir_all(finance.parent().unwrap()).unwrap();
         std::fs::write(&finance, b"sealed-finance-sentinel").unwrap();
         let result = run(startup(path.clone(), None)).await;
-        assert!(matches!(
-            result,
-            Err(AgentError::FinancialCaptureTask(ref reason))
-                if reason == "FINANCE_EXPECTED_CAMPAIGN_REQUIRED"
-        ));
+        assert!(
+            result.is_err(),
+            "unknown financial file must never start or initialize"
+        );
         assert_eq!(std::fs::read(&finance).unwrap(), b"sealed-finance-sentinel");
         assert!(!path.join("accounts").exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_startup_without_finance_never_creates_legacy_or_remote_owner() {
+        let path = root();
+        assert!(matches!(run(startup(path.clone(), None)).await,
+            Err(AgentError::FinancialCaptureTask(ref reason))
+                if reason == "FINANCE_INSTALLATION_NOT_INITIALIZED"));
+        assert!(!path.join("accounts").exists());
+        assert!(!path.join("finance").exists());
         std::fs::remove_dir_all(path).unwrap();
     }
 

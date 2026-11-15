@@ -30,7 +30,7 @@ PRAGMA user_version=7;
 // Exact canonical tables, columns, constraints, indexes and triggers. Whitespace
 // is normalized for LF/CRLF portability; changes require an intentional version.
 const EXPECTED_SCHEMA_SHA256: &str =
-    "b3e3a9a536e8e4726b3ac01192cdcb32bfa88d65e6a34d79448996d8802fdb05";
+    "0e5a4b39949cb799035d2408af66cbd06022210b7ae7ed366f7e427cfef59594";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewFinanceInstallation {

@@ -622,9 +622,7 @@ impl TradeService {
                     let (financial, stops) = r
                         .execution
                         .store
-                        .call(deadline(), |s| {
-                            Ok((s.financial_risk(now(), None)?, s.stops()?.len()))
-                        })
+                        .financial_readiness(deadline(), None)
                         .await
                         .map_err(err)?;
                     let budget = self.risk_summary().await;
@@ -705,19 +703,25 @@ impl TradeService {
                         plan::requires_independent_strategy_nav(strategy_instance);
                     let binding = strategy_instance.clone();
                     let instance_nav_complete = if independent_capital {
-                        r.execution
+                        let instances = r
+                            .execution
                             .store
-                            .call(deadline(), move |store| {
-                                if store.instances()?.iter().any(|i| i.instance_id == binding) {
-                                    Ok(Some(
-                                        store.financial_risk(now(), Some(&binding))?.nav_complete,
-                                    ))
-                                } else {
-                                    Ok(None)
-                                }
-                            })
+                            .strategy_instances(deadline())
                             .await
-                            .map_err(err)?
+                            .map_err(err)?;
+                        if instances.iter().any(|i| i.instance_id == binding) {
+                            Some(
+                                r.execution
+                                    .store
+                                    .financial_readiness(deadline(), Some(binding))
+                                    .await
+                                    .map_err(err)?
+                                    .0
+                                    .nav_complete,
+                            )
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     };

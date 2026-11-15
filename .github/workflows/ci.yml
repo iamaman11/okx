@@ -199,11 +199,17 @@ jobs:
           cargo test --locked -p okx-agent --lib risk_bridge::tests -- --nocapture
           cargo test --locked -p okx-agent --bin okx-agent --no-run
           cargo test --locked -p okx-agent --bin okx-agent native_finance_startup_tests -- --nocapture
+      - name: Strict price and bounded derivative context regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p okx-observation --lib risk_market_uses_strict_price_and_bounded_derivative_context -- --nocapture | tee "$RUNNER_TEMP/native-market-contract.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-market-contract.log"
       - name: Native admission and existing trading boundary regressions
         shell: bash
         run: |
           set -euo pipefail
-          for contract in storage_commands::tests admission_source::tests native_finance_admission::tests source_capture::tests trade_service::plan::tests entry_settlement::direct_tests strategy_contract_tests protection_cleanup_direct_tests terminal_release::tests unsent_release::tests; do
+          for contract in native_connect_contracts native_trade_contracts account_opening_capture storage_commands::tests admission_source::tests native_finance_admission::tests source_capture::tests trade_service::plan::tests entry_settlement::direct_tests strategy_contract_tests protection_cleanup_direct_tests terminal_release::tests unsent_release::tests; do
             log="$RUNNER_TEMP/native-boundary-${contract//:/_}.log"
             cargo test --locked -p okx-agent --lib "$contract" -- --nocapture | tee "$log"
             grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$log"

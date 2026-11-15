@@ -1,5 +1,5 @@
 //! Original campaign history/readiness rules on the installation writer.
-use super::{UnifiedFinanceHandle, require_verified_live_finance_authority};
+use super::{UnifiedFinanceHandle, finance_authority::require_preparation_authority};
 use crate::{AccountStore, StoreError, StoreResult};
 use std::time::Instant;
 
@@ -49,7 +49,7 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_verified_live_finance_authority(&tx, &installation)?;
+            require_preparation_authority(&tx, &installation)?;
             let result = AccountStore::refresh_campaign_entry_readiness_sql(
                 &tx,
                 Some((&installation, &account)),
@@ -79,7 +79,7 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_verified_live_finance_authority(&tx, &installation)?;
+            require_preparation_authority(&tx, &installation)?;
             let result = AccountStore::seal_captured_campaign_baseline_sql(
                 &tx,
                 Some((&installation, &account)),

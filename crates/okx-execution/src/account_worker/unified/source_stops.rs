@@ -1,5 +1,5 @@
 //! Source evidence resolves a scoped existing stop; never activates authority.
-use super::{UnifiedFinanceHandle, require_verified_live_finance_authority};
+use super::UnifiedFinanceHandle;
 use crate::{AccountStore, StoreError, StoreResult};
 use std::time::Instant;
 impl UnifiedFinanceHandle {
@@ -13,7 +13,7 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_verified_live_finance_authority(&tx, &installation)?;
+            super::source_permission::require_source_account(&tx, &installation, Some(&account))?;
             AccountStore::resolve_source_stop_sql(
                 &tx,
                 Some((&installation, &account)),

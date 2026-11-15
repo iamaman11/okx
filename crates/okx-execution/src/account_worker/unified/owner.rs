@@ -239,7 +239,7 @@ impl UnifiedFinanceHandle {
         // transaction or authorize a blind retry of a financial/venue command.
         self.submit_before(Some(Instant::now() + Duration::from_secs(10)), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            require_verified_live_finance_authority(&tx, &installation)?;
+            super::source_permission::require_command_permission(&tx, &installation, &command)?;
             let result = apply_original_unified_finance_transaction(&tx, &installation, command)?;
             tx.commit().map_err(|_| {
                 StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")

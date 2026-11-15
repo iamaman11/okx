@@ -147,15 +147,19 @@ pub fn initialize(root: &Path, installation_id: &str) -> io::Result<()> {
     result
 }
 pub fn append(root: &Path, config: &VerifiedAccountConfig) -> io::Result<()> {
-    let mut c = load(root)?;
+    let context = |stage: &'static str, error: io::Error| {
+        io::Error::new(error.kind(), format!("{stage}: {error}"))
+    };
+    let mut c = load(root).map_err(|e| context("ACCOUNT_CATALOG_READ", e))?;
     c.accounts.push(config.clone());
-    let tmp = stage(root, &encode(&c)?)?;
+    let bytes = encode(&c).map_err(|e| context("ACCOUNT_CATALOG_ENCODE", e))?;
+    let tmp = stage(root, &bytes).map_err(|e| context("ACCOUNT_CATALOG_STAGE", e))?;
     // Engine serializes writers. Same-volume rename replaces one canonical snapshot.
     let result = fs::rename(&tmp, root.join(CATALOG_FILE));
     if result.is_err() {
         let _ = fs::remove_file(tmp);
     }
-    result
+    result.map_err(|e| context("ACCOUNT_CATALOG_PUBLISH_RENAME", e))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

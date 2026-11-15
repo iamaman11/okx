@@ -1,4 +1,5 @@
 pub mod account_bootstrap;
+pub(crate) mod account_opening;
 pub mod accounts;
 pub mod analytics;
 pub mod cloudflare_auth;
@@ -15,6 +16,7 @@ pub mod github_auth;
 pub mod github_mailbox;
 pub mod identity;
 pub mod market_bootstrap;
+pub(crate) mod native_account_connection;
 pub mod okx_credentials;
 pub mod once;
 mod portfolio;
