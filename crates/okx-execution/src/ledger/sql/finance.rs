@@ -3510,112 +3510,12 @@ impl AccountStore {
         fx: &UsdConversionEvidence,
         limit: usize,
     ) -> StoreResult<usize> {
-        let rows = {
-            let mut q=self.connection.prepare("SELECT event_id,instrument_id,time,amount,currency FROM funding_projection_pending ORDER BY time,event_id LIMIT ?1")?;
-            q.query_map([limit.min(100) as i64], |r| {
-                Ok((
-                    FundingEvent {
-                        event_id: r.get(0)?,
-                        instrument_id: r.get(1)?,
-                        time: r.get(2)?,
-                        amount: Decimal::ZERO,
-                        currency: r.get(4)?,
-                    },
-                    r.get::<_, String>(3)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-        };
+        let rows = Self::pending_funding_sources_sql(&self.connection, None, limit)?;
         let count = rows.len();
-        for (mut event, amount) in rows {
-            event.amount = decimal(amount)?;
-            let mut exposures = std::collections::BTreeMap::<String, Decimal>::new();
-            {
-                let mut q=self.connection.prepare("SELECT d.instance_id,p.operation,p.position_side,f.side,f.qty FROM fills f LEFT JOIN intents i USING(intent_id) LEFT JOIN decisions d USING(decision_id) LEFT JOIN intent_plans p USING(intent_id) WHERE f.instrument_id=?1 AND f.time<=?2 ORDER BY f.time,f.fill_id")?;
-                let mut rows = q.query(params![event.instrument_id, event.time])?;
-                while let Some(r) = rows.next()? {
-                    let owner = r
-                        .get::<_, Option<String>>(0)?
-                        .unwrap_or_else(|| "unattributed".into());
-                    let operation = r.get::<_, Option<String>>(1)?;
-                    let position = r.get::<_, Option<String>>(2)?;
-                    let side: String = r.get(3)?;
-                    let q = decimal(r.get(4)?)?;
-                    let sign = match position.as_deref() {
-                        Some("long") => {
-                            if operation
-                                .as_deref()
-                                .is_some_and(|o| matches!(o, "close" | "reduce"))
-                            {
-                                -Decimal::ONE
-                            } else {
-                                Decimal::ONE
-                            }
-                        }
-                        Some("short") => {
-                            if operation
-                                .as_deref()
-                                .is_some_and(|o| matches!(o, "close" | "reduce"))
-                            {
-                                Decimal::ONE
-                            } else {
-                                -Decimal::ONE
-                            }
-                        }
-                        _ => {
-                            if side == "buy" {
-                                Decimal::ONE
-                            } else {
-                                -Decimal::ONE
-                            }
-                        }
-                    };
-                    let old = *exposures.get(&owner).unwrap_or(&Decimal::ZERO);
-                    exposures.insert(
-                        owner,
-                        old.checked_add(
-                            q.checked_mul(sign)
-                                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
-                        )
-                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?,
-                    );
-                }
-            }
-            let exposure = exposures
-                .into_iter()
-                .filter(|(_, q)| *q != Decimal::ZERO)
-                .collect::<Vec<_>>();
-            let allocations = crate::finance::allocate_funding(event.amount, &exposure, 18)?;
-            let unknown = allocations
-                .iter()
-                .any(|(owner, a)| owner == "unattributed" && *a != Decimal::ZERO);
-            let key = format!("bill:{}", event.event_id);
-            let mut page = IngestPage::default();
-            for (owner, amount) in allocations {
-                if amount == Decimal::ZERO && owner != "rounding_residual" {
-                    continue;
-                }
-                let instance = if owner == "unattributed" || owner == "rounding_residual" {
-                    None
-                } else {
-                    Some(owner.clone())
-                };
-                page.finance.push(FinanceEntry {
-                    entry_id: format!("{key}:funding:{owner}"),
-                    economic_event_key: key.clone(),
-                    component: "FUNDING".into(),
-                    allocation_leg: owner,
-                    amount,
-                    currency: event.currency.clone(),
-                    instance_id: instance,
-                    source_ref: key.clone(),
-                    time: event.time,
-                    reverses_entry_id: None,
-                });
-            }
-            page.attributed_funding_ids.push(event.event_id);
-            self.ingest_page_with_usd(&page, fx)?;
-            if unknown {
+        for event in rows {
+            let projection = Self::project_funding_source_sql(&self.connection, None, &event)?;
+            self.ingest_page_with_usd(&projection.page, fx)?;
+            if projection.unknown {
                 self.latch_stop(
                     "funding-attribution-incomplete",
                     "account",

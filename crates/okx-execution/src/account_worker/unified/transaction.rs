@@ -48,6 +48,65 @@ fn apply_original_unified_finance_inner(
             .map_err(StoreError::Invalid)
     };
     match command {
+        UnifiedFinanceWrite::AttributePendingFunding {
+            account,
+            conversion,
+            limit,
+        } => {
+            if conversion.source_digest.is_empty() || conversion.observed_at <= 0 {
+                return Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE"));
+            }
+            let scope = Some((installation, account.as_str()));
+            let events = AccountStore::pending_funding_sources_sql(tx, scope, limit)?;
+            let mut prepared = Vec::with_capacity(events.len());
+            for event in &events {
+                AccountStore::verify_funding_capture_coverage_sql(
+                    tx,
+                    installation,
+                    &account,
+                    event.time,
+                )?;
+                let projection = AccountStore::project_funding_source_sql(tx, scope, event)?;
+                match AccountStore::normalize_source_page_usd_sql(
+                    tx,
+                    scope,
+                    &projection.page,
+                    &conversion,
+                ) {
+                    Ok(page) => prepared.push((page, projection.unknown, event.time)),
+                    Err(StoreError::Invalid("USD_CONVERSION_SOURCE_UNAVAILABLE")) => {
+                        AccountStore::latch_stop_sql(
+                            tx,
+                            scope,
+                            "usd-conversion-unavailable",
+                            "account",
+                            "USD_CONVERSION_SOURCE_UNAVAILABLE",
+                            conversion.observed_at,
+                        )?;
+                        return Ok(UnifiedFinanceWriteReceipt::SourcePageRejected {
+                            reason: "USD_CONVERSION_SOURCE_UNAVAILABLE",
+                        });
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            for (page, unknown, at) in prepared {
+                AccountStore::ingest_unified_source_page_sql(tx, installation, &account, &page)?;
+                if unknown {
+                    AccountStore::latch_stop_sql(
+                        tx,
+                        scope,
+                        "funding-attribution-incomplete",
+                        "account",
+                        "FUNDING_ATTRIBUTION_INCOMPLETE",
+                        at,
+                    )?;
+                }
+            }
+            Ok(UnifiedFinanceWriteReceipt::FundingAttributed {
+                count: events.len(),
+            })
+        }
         UnifiedFinanceWrite::IngestCapturedBills {
             account,
             input,

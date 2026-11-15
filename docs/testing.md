@@ -1,3 +1,40 @@
+## #510 - scoped historical funding projection and atomic attribution command
+
+Original AccountStore funding attribution now reuses source_funding_projection
+for pending reads and event-time exposure. The SAME allocate_funding math is
+used; unified joins scope fills/intents/decisions/plans by installation/account
+and retain f.time <= funding event time. Shared latch_stop_sql retains original
+stop storage, no second ledger or authority.
+
+Unified AttributePendingFunding is bounded at 100 pending events and requires
+all six historical cursors, empty gaps, coverage through each event and equal
+generations. It prepares all USD-normalized pages before writing any allocation;
+a missing rate records only the USD stop, leaving every event pending. All
+allocations, money and ACKs then commit together. Unknown attribution preserves
+account debit and adds FUNDING_ATTRIBUTION_INCOMPLETE, not false ownership.
+Legacy caller's existing completeness check and per-event commit behavior are
+preserved; the new unified command has an explicitly atomic batch boundary.
+
+Direct test uses original owned account preparation/reserve/POST/ACK and raw
+bill/fill capture. A known manual exposure receives -0.2; B's unowned exposure
+receives -0.2 unattributed with a stop. A later unowned fill at t=20 cannot
+change funding at t=10. Missing gap/mixed generations reject; a second BTC
+funding lacking FX cannot commit the earlier USDT event. Repeat is count 0;
+COMMIT/reopen retains independent 0.2 loss per account. Synthetic venue/FX
+facts do not prove production source authentication or cutover.
+
+Local Windows full execution library: 264 PASS, 0 FAIL, 2 ignored (8.16s
+after build); Agent all-target check, architecture/negative guard, format/diff
+PASS. New direct funding witness passed before additional batch assertions.
+No full RB01-RB16/26x acceptance or installed-state change.
+
+Remaining: pending-fill/position projection, account/strategy NAV reconciliation,
+new-owner resource startup, activation and four risk actions. Production Agent
+still uses the legacy AccountStoreHandle composition; native funding command
+is implemented but not yet selected by that runtime.
+
+---
+
 ## #510 - production bill collector submits typed source batches
 
 Agent capture_bills now decodes raw venue fields to CapturedBillPage and

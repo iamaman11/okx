@@ -468,10 +468,26 @@ impl AccountStore {
         .collect()
     }
     pub fn latch_stop(&mut self, id: &str, scope: &str, reason: &str, now: i64) -> StoreResult<()> {
-        self.connection.execute(
-            "INSERT INTO risk_stops VALUES(?1,?2,?3,?4,NULL) ON CONFLICT(stop_id) DO NOTHING",
-            params![id, scope, reason, now],
-        )?;
+        Self::latch_stop_sql(&self.connection, None, id, scope, reason, now)
+    }
+    pub(crate) fn latch_stop_sql(
+        db: &Connection,
+        account_scope: Option<(&str, &str)>,
+        id: &str,
+        scope: &str,
+        reason: &str,
+        now: i64,
+    ) -> StoreResult<()> {
+        match account_scope {
+            None => db.execute(
+                "INSERT INTO risk_stops VALUES(?1,?2,?3,?4,NULL) ON CONFLICT(stop_id) DO NOTHING",
+                params![id, scope, reason, now],
+            )?,
+            Some((installation, account)) => {
+                Self::verify_source_account_sql(db, installation, account)?;
+                db.execute("INSERT INTO risk_stops VALUES(?1,?2,?3,?4,?5,?6,NULL) ON CONFLICT(installation_id,account_key,stop_id) DO NOTHING",params![installation,account,id,scope,reason,now])?
+            }
+        };
         Ok(())
     }
     pub fn resolve_stop(&mut self, id: &str, evidence: &str) -> StoreResult<()> {

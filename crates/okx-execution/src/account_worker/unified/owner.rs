@@ -206,6 +206,28 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    pub async fn attribute_pending_funding(
+        &self,
+        account: String,
+        conversion: crate::UsdConversionEvidence,
+        limit: usize,
+    ) -> StoreResult<usize> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::AttributePendingFunding {
+                account,
+                conversion,
+                limit,
+            })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::FundingAttributed { count } => Ok(count),
+            UnifiedFinanceWriteReceipt::SourcePageRejected { reason } => {
+                Err(StoreError::Invalid(reason))
+            }
+            _ => Err(StoreError::Invalid("UNIFIED_FUNDING_RECEIPT_UNEXPECTED")),
+        }
+    }
+
     pub async fn ingest_captured_bills(
         &self,
         account: String,
