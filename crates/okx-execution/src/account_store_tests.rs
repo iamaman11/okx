@@ -13152,6 +13152,37 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         ));
     }
     assert_eq!(owner.inventory().await.unwrap(), inventory);
+    // Both live native public mutation entrypoints must reject the stopped
+    // import BEFORE executing any original source query or financial write.
+    let sealed_settle = crate::account_worker::UnifiedFinanceBoundSettlement {
+        campaign: "campaign-X".into(),
+        reservation_key: "same-reservation".into(),
+        plan_sha256: ai.plan_hash.clone(),
+        expected_sequence: 2,
+        cumulative_entry_usd: "1".into(),
+        settlement_revision: 1,
+        source_digest: "c".repeat(64),
+    };
+    assert!(matches!(
+        owner.settle_bound_entry(sealed_settle).await,
+        Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
+    ));
+    let sealed_unsent = crate::account_worker::UnifiedFinanceBoundUnsent {
+        campaign: "campaign-X".into(),
+        reservation_key: "same-unsent".into(),
+        plan_sha256: bi.plan_hash.clone(),
+        expected_sequence: 2,
+        account_key: b_key.clone(),
+        intent_id: bi.intent_id.clone(),
+        request_hash: bi.request_hash.clone(),
+        reason: "COMMAND_EXPIRED".into(),
+        record_digest: "d".repeat(64),
+    };
+    assert!(matches!(
+        owner.release_bound_unsent(sealed_unsent).await,
+        Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
+    ));
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
     // A valid full-cohort policy is a SINGLE ORIGINAL scoped SQL operation,
     // not two per-account commits or an extra RiskBook policy owner.
     let policy = crate::account_worker::UnifiedFinancePolicy {

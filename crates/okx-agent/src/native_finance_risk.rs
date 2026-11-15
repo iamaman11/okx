@@ -204,11 +204,11 @@ impl NativeFinanceRisk {
                     ),
                 }
             }
-            // All six mutation variants are explicitly owned here and never
-            // routed through the legacy remote bridge. The sealed offline
-            // import is NOT an accepted production financial owner. The
-            // AccountStore + native census source producers must first be
-            // fully moved before enabling their existing joint transactions.
+            // Four remaining mutation actions require the original live
+            // account-census/POST/terminal source producers before native
+            // ingress can be accepted. SettleEntry and ReleaseUnsent above
+            // ALREADY use their original SQL sources, but ALL writes still
+            // require an independent RB09 activation receipt. No fallback.
             RiskCommandAction::SettleEntry {
                 reservation_key,
                 plan_sha256,
