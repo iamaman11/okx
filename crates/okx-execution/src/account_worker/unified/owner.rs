@@ -206,6 +206,29 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    /// Store original immutable bills and their venue-order links atomically.
+    /// These raw facts alone cannot advance coverage or debit/release risk.
+    pub async fn record_source_bills(
+        &self,
+        account: String,
+        bills: Vec<crate::Bill>,
+        order_sources: Vec<crate::BillOrderSource>,
+    ) -> StoreResult<()> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::RecordSourceBills {
+                account,
+                bills,
+                order_sources,
+            })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::SourceBillsRecorded => Ok(()),
+            _ => Err(StoreError::Invalid(
+                "UNIFIED_SOURCE_BILL_RECEIPT_UNEXPECTED",
+            )),
+        }
+    }
+
     /// Store raw authenticated-source fills and pending projection atomically.
     /// Coverage is advanced only by complete page ingestion, never here.
     pub async fn record_source_fills(

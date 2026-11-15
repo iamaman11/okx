@@ -103,6 +103,11 @@ pub struct UnifiedFinanceBoundSettlementReceipt {
 
 #[derive(Debug, Clone)]
 pub(crate) enum UnifiedFinanceWrite {
+    RecordSourceBills {
+        account: String,
+        bills: Vec<crate::Bill>,
+        order_sources: Vec<crate::BillOrderSource>,
+    },
     RecordSourceFills {
         account: String,
         fills: Vec<crate::Fill>,
@@ -188,6 +193,7 @@ pub(crate) enum UnifiedFinanceWriteReceipt {
     Recovered { changed: usize },
     OutcomeRecorded,
     SourceFillsRecorded,
+    SourceBillsRecorded,
     BoundEntrySettled(UnifiedFinanceBoundSettlementReceipt),
     BoundUnsentReleased(UnifiedFinanceBoundUnsentReceipt),
 }

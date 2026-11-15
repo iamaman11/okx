@@ -1,3 +1,26 @@
+## #510 - original bill and order-link storage through unified owner
+
+Original AccountStore ingestion and the unified RecordSourceBills dispatcher
+share record_source_bills_sql. Raw bills and their immutable venue-order
+links are scoped by installation/account in the unified original tables.
+The owner retains the activation gate and same transaction/savepoint; these
+facts alone do not advance coverage or change any financial total or grant.
+
+Contracts on full original imported schema verify two accounts with identical
+bill IDs, exact replay, conflicts in time/amount/currency/kind/economic event,
+changed order link, missing bill, foreign-account bill, unknown account and
+rollback of a preceding bill when a later order link is invalid. The stopped
+owner rejects source writes. Raw-source assertions now live together in
+account_raw_source_tests.rs instead of growing account_store_tests.rs.
+
+Local native Windows: full execution library 258 PASS, 0 FAIL, 2 ignored
+(6.31s after build); Agent all-target check PASS; architecture/negative
+self-tests PASS. Full financial projection/cursor commit and production
+source-capture wiring remain incomplete. No RB01-RB16/26x acceptance or
+installed-state activation is claimed by this source-storage slice.
+
+---
+
 ## #510 - shared immutable source-fill storage
 
 Original ingest_page_observed and the unified RecordSourceFills dispatcher

@@ -48,6 +48,19 @@ fn apply_original_unified_finance_inner(
             .map_err(StoreError::Invalid)
     };
     match command {
+        UnifiedFinanceWrite::RecordSourceBills {
+            account,
+            bills,
+            order_sources,
+        } => {
+            AccountStore::record_source_bills_sql(
+                tx,
+                Some((installation, &account)),
+                &bills,
+                &order_sources,
+            )?;
+            Ok(UnifiedFinanceWriteReceipt::SourceBillsRecorded)
+        }
         UnifiedFinanceWrite::RecordSourceFills { account, fills } => {
             AccountStore::record_source_fills_sql(tx, Some((installation, &account)), &fills)?;
             Ok(UnifiedFinanceWriteReceipt::SourceFillsRecorded)
