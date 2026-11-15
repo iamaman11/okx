@@ -1,3 +1,25 @@
+## #510 - account-scoped financial source verification
+
+The original strategy finance provenance verifier now lives in
+ledger/sql/source_finance.rs and is shared by existing account ingestion and
+source checks on unified storage. Legacy callers still use their original
+scope. Unified queries explicitly scope original reversal, fill, bill and
+source-reuse lookups by installation/account. Rule codes and arithmetic
+remain the same; no new financial authority or source projection is added.
+
+Original imported-schema witness verifies local fill/bill positive cases,
+foreign-account source denial, wrong fee amount/currency, same-account
+source reuse denial, absence of false denial from another account's matching
+source_ref, missing correction original and unknown account. Scoped checks
+are not yet a complete unified financial page ingestion implementation.
+
+Local Windows full execution library: 258 PASS, 0 FAIL, 2 ignored (6.24s
+after build). Architecture guard/negative self-tests and rustfmt PASS.
+Financial totals, atomic complete-page cursor and producer wiring remain
+unfinished; no accepted activation, RB01-RB16 or 26/26 claim.
+
+---
+
 ## #510 - original bill and order-link storage through unified owner
 
 Original AccountStore ingestion and the unified RecordSourceBills dispatcher

@@ -216,6 +216,92 @@ pub(super) fn assert_contract(target: &mut Connection, a_key: String, b_key: Str
         AccountStore::source_generation_base_sql(&tx, Some(("installation", &a_key))).unwrap(),
         5
     );
+    let mut finance = FinanceEntry {
+        entry_id: "probe-fee".into(),
+        economic_event_key: "fill:BTC-USDT-SWAP:proof-trade:proof-order".into(),
+        component: "FEE".into(),
+        allocation_leg: "account".into(),
+        amount: -Decimal::ONE,
+        currency: "USDT".into(),
+        instance_id: Some("strategy-probe".into()),
+        source_ref: "fill:proof-fill".into(),
+        time: 8,
+        reverses_entry_id: None,
+    };
+    let proof_fill = Fill {
+        fill_id: "proof-fill".into(),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        trade_id: "proof-trade".into(),
+        exchange_order_id: "proof-order".into(),
+        intent_id: None,
+        time: 8,
+        qty: Decimal::ONE,
+        price: Decimal::from(5),
+        fee: -Decimal::ONE,
+        currency: "USDT".into(),
+        side: "buy".into(),
+    };
+    AccountStore::record_source_fills_sql(&tx, Some(("installation", &a_key)), &[proof_fill])
+        .unwrap();
+    let verify = |account: &str, entry: &FinanceEntry| {
+        AccountStore::verify_strategy_finance_source_sql(
+            &tx,
+            Some(("installation", account)),
+            entry,
+        )
+    };
+    verify(&a_key, &finance).unwrap();
+    assert!(matches!(
+        verify(&b_key, &finance),
+        Err(StoreError::Invalid(
+            "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"
+        ))
+    ));
+    let mut wrong_fee = finance.clone();
+    wrong_fee.amount = Decimal::ZERO;
+    assert!(matches!(
+        verify(&a_key, &wrong_fee),
+        Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"))
+    ));
+    wrong_fee = finance.clone();
+    wrong_fee.currency = "USD".into();
+    assert!(matches!(
+        verify(&a_key, &wrong_fee),
+        Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"))
+    ));
+    // A different account's use of an identical source_ref cannot deny A;
+    // the same account's prior economic event must deny double attribution.
+    for account in [&b_key, &a_key] {
+        tx.execute("INSERT INTO finance_entries VALUES(?1,?2,'proof-prior','prior-event','FEE','account','-1','USDT',NULL,'fill:proof-fill',8,NULL)",
+            rusqlite::params!["installation",account]).unwrap();
+        if account == &b_key {
+            verify(&a_key, &finance).unwrap();
+        }
+    }
+    assert!(matches!(
+        verify(&a_key, &finance),
+        Err(StoreError::Invalid("FINANCE_FILL_SOURCE_REUSED"))
+    ));
+    finance.source_ref = "bill:only-A-bill".into();
+    finance.economic_event_key = finance.source_ref.clone();
+    verify(&a_key, &finance).unwrap();
+    assert!(matches!(
+        verify(&b_key, &finance),
+        Err(StoreError::Invalid(
+            "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"
+        ))
+    ));
+    finance.reverses_entry_id = Some("absent-original".into());
+    assert!(matches!(
+        verify(&a_key, &finance),
+        Err(StoreError::Invalid(
+            "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED"
+        ))
+    ));
+    assert!(matches!(
+        verify("unknown-account", &finance),
+        Err(StoreError::Invalid("UNIFIED_SOURCE_ACCOUNT_NOT_FOUND"))
+    ));
     // The real stopped import cannot be activated by a source-storage witness.
     tx.rollback().unwrap();
 }

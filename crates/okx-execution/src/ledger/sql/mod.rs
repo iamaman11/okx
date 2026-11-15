@@ -6,5 +6,6 @@ mod projections;
 mod schema;
 mod source_bills;
 mod source_fills;
+mod source_finance;
 mod sources;
 pub(in crate::account_store) mod unified_financial;

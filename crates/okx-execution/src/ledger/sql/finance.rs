@@ -13,102 +13,6 @@ fn entry_fee_debit(fee: Decimal) -> Decimal {
     }
 }
 
-type StrategyReversalSource = (String, String, String, Option<String>, Option<String>);
-
-fn verify_strategy_finance_source(db: &Connection, e: &FinanceEntry) -> StoreResult<()> {
-    if e.instance_id.as_deref().is_none_or(|id| id == "manual")
-        || matches!(
-            e.component.as_str(),
-            "INTERNAL_CAPITAL_USD" | "CAMPAIGN_LOSS_USD"
-        )
-    {
-        return Ok(());
-    }
-    if !matches!(
-        e.component.as_str(),
-        "FEE" | "FUNDING" | "REALIZED_PNL" | "LIQUIDATION_COST"
-    ) {
-        return Err(StoreError::Invalid("STRATEGY_NAV_COMPONENT_UNKNOWN"));
-    }
-    if let Some(reversed_id) = e.reverses_entry_id.as_deref() {
-        // A correction derives its provenance from the immutable original.
-        // The write path also checks reversal uniqueness before insert.
-        let original: Option<StrategyReversalSource> = db
-            .query_row(
-                "SELECT component,amount,currency,instance_id,reverses_entry_id FROM finance_entries WHERE entry_id=?1",
-                [reversed_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .optional()?;
-        if !original.is_some_and(|(component, amount, currency, owner, chained)| {
-            component == e.component
-                && currency == e.currency
-                && owner == e.instance_id
-                && chained.is_none()
-                && decimal(amount).ok().and_then(|n| n.checked_add(e.amount)) == Some(Decimal::ZERO)
-        }) {
-            return Err(StoreError::Invalid(
-                "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",
-            ));
-        }
-        // Matching the original does not authenticate the correction.
-        // Its own new bill/fill must also exist in this account ledger.
-    }
-    let found = if let Some(id) = e.source_ref.strip_prefix("fill:") {
-        let fill: Option<(String, String, String, String, String)> = db
-            .query_row(
-                "SELECT instrument_id,trade_id,exchange_order_id,fee,currency FROM fills WHERE fill_id=?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .optional()?;
-        if let Some((instrument, trade, order, fee, fee_currency)) = fill {
-            let canonical = format!("fill:{instrument}:{trade}:{order}");
-            if e.component == "FEE" && (e.currency != fee_currency || e.amount != decimal(fee)?) {
-                return Err(StoreError::Invalid("STRATEGY_NAV_FEE_SOURCE_MISMATCH"));
-            }
-            // The venue fill already proves its fee. Its bill ID may be
-            // known before the bill-history page arrives, so waiting for a
-            // separate bill row would deadlock fills-first source capture.
-            // One fill source cannot claim two different economic fee keys.
-            let canonical_or_bill = e.economic_event_key == canonical
-                || e.economic_event_key
-                    .strip_prefix("bill:")
-                    .is_some_and(|bill_id| !bill_id.is_empty());
-            if canonical_or_bill && e.component == "FEE" {
-                let reused: bool = db.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM finance_entries
-                     WHERE source_ref=?1 AND component='FEE'
-                       AND economic_event_key<>?2 AND reverses_entry_id IS NULL)",
-                    params![e.source_ref, e.economic_event_key],
-                    |row| row.get(0),
-                )?;
-                if reused {
-                    return Err(StoreError::Invalid("FINANCE_FILL_SOURCE_REUSED"));
-                }
-            }
-            canonical_or_bill
-        } else {
-            false
-        }
-    } else if let Some(id) = e.source_ref.strip_prefix("bill:") {
-        e.economic_event_key == e.source_ref
-            && db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM bills WHERE bill_id=?1)",
-                [id],
-                |r| r.get::<_, bool>(0),
-            )?
-    } else {
-        false
-    };
-    if !found {
-        return Err(StoreError::Invalid(
-            "STRATEGY_NAV_ECONOMIC_SOURCE_UNVERIFIED",
-        ));
-    }
-    Ok(())
-}
-
 // Late SWAP fills may not carry billId. Resolve this only from the existing
 // immutable fill and bill-order source records of this ONE account SQL owner.
 // An ambiguous or mismatched source stays unlinked (and cannot settle).
@@ -2935,7 +2839,7 @@ impl AccountStore {
                     time: r.get(8)?,
                     reverses_entry_id: r.get(9)?,
                 };
-                verify_strategy_finance_source(&tx, &entry)?;
+                Self::verify_strategy_finance_source_sql(&tx, None, &entry)?;
             }
         }
         tx.execute(
@@ -4604,7 +4508,7 @@ impl AccountStore {
             }
             // Proof is checked against raw fills/bills already inserted by
             // this same transaction, before a delta reaches durable totals.
-            verify_strategy_finance_source(&tx, e)?;
+            Self::verify_strategy_finance_source_sql(&tx, None, e)?;
             // Reversals are economic facts, not an arbitrary positive credit.
             // Validate the original in this very transaction before changing
             // any totals. A missing/out-of-order original is retryable without
