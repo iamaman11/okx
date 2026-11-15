@@ -206,6 +206,32 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    /// Bind source ownership, normalize USD and commit the page in the same
+    /// transaction. No source attribution can race a separate SQL readback.
+    pub async fn ingest_captured_fills(
+        &self,
+        account: String,
+        input: crate::CapturedFillPage,
+        conversion: crate::UsdConversionEvidence,
+    ) -> StoreResult<()> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::IngestCapturedFills {
+                account,
+                input,
+                conversion,
+            })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::SourcePageIngested => Ok(()),
+            UnifiedFinanceWriteReceipt::SourcePageRejected { reason } => {
+                Err(StoreError::Invalid(reason))
+            }
+            _ => Err(StoreError::Invalid(
+                "UNIFIED_SOURCE_PAGE_RECEIPT_UNEXPECTED",
+            )),
+        }
+    }
+
     /// Same original USD conversion and atomic page ingestion as the source
     /// collector. A missing rate commits only a stop and returns its reason.
     pub async fn ingest_source_page_with_usd(

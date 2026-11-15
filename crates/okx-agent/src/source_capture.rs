@@ -8,8 +8,7 @@ use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
     AccountSqlStatementStat, Bill, BillOrderSource, CashFlow, EntryOrderFeeLink, Fill,
     FinanceEntry, FundingEvent, IngestPage, NavPoint, SourceCursor, StoreError, StoreResult,
-    StrategyValuationEvidence, SwapFillSource, UsdConversionEvidence, ValuationPosition, VenueMark,
-    swap_fill_direction,
+    StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition, VenueMark,
 };
 use okx_runtime::PrivateWsHandle;
 use rust_decimal::Decimal;
@@ -817,80 +816,52 @@ async fn capture_fills(
         rows.last().map(|r| r.bill_id.as_str()),
         complete,
     )?;
+    let mut parsed = Vec::with_capacity(rows.len());
+    for r in rows {
+        let time = ts(if r.fill_time_ms.is_empty() {
+            &r.timestamp_ms
+        } else {
+            &r.fill_time_ms
+        })?;
+        if time < t0 {
+            continue;
+        }
+        let fee = required_d(&r.fee, "FILL_FEE_SOURCE_UNAVAILABLE")?;
+        if r.fee_currency.is_empty() {
+            return Err(StoreError::Invalid("FILL_FEE_CURRENCY_UNAVAILABLE").into());
+        }
+        parsed.push(okx_execution::CapturedFill {
+            client_order_id: r.client_order_id,
+            bill_id: r.bill_id,
+            instrument_type: r.instrument_type,
+            sub_type: r.sub_type,
+            position_side: r.position_side,
+            fill: Fill {
+                fill_id: format!("{}:{}:{}", r.instrument_id, r.trade_id, r.order_id),
+                instrument_id: r.instrument_id,
+                trade_id: r.trade_id,
+                exchange_order_id: r.order_id,
+                intent_id: None,
+                time,
+                qty: d(&r.fill_size)?,
+                price: d(&r.fill_price)?,
+                fee,
+                currency: r.fee_currency,
+                side: r.side,
+            },
+        });
+    }
     execution
         .store
-        .call(deadline(), move |s| {
-            let mut page = IngestPage {
-                cursor: Some(next),
-                ..Default::default()
-            };
-            for r in rows {
-                let time = ts(if r.fill_time_ms.is_empty() {
-                    &r.timestamp_ms
-                } else {
-                    &r.fill_time_ms
-                })?;
-                if time < t0 {
-                    continue;
-                }
-                let owner = s.source_order_owner(&r.client_order_id, &r.order_id)?;
-                let instance = owner.as_ref().map(|i| i.plan.strategy_instance.clone());
-                let fee = required_d(&r.fee, "FILL_FEE_SOURCE_UNAVAILABLE")?;
-                let key = if r.bill_id.is_empty() {
-                    format!("fill:{}:{}:{}", r.instrument_id, r.trade_id, r.order_id)
-                } else {
-                    format!("bill:{}", r.bill_id)
-                };
-                let id = format!("{}:{}:{}", r.instrument_id, r.trade_id, r.order_id);
-                // The raw fill retains the fee, but without billId there
-                // is no final canonical fee event for a SWAP yet.
-                if fee != Decimal::ZERO && !(partition == "SWAP" && r.bill_id.is_empty()) {
-                    page.finance.push(FinanceEntry {
-                        entry_id: format!("{key}:fee"),
-                        economic_event_key: key,
-                        component: "FEE".into(),
-                        allocation_leg: "account".into(),
-                        amount: fee,
-                        currency: r.fee_currency.clone(),
-                        instance_id: instance,
-                        source_ref: format!("fill:{id}"),
-                        time,
-                        reverses_entry_id: None,
-                    });
-                }
-                if partition == "SWAP" {
-                    if r.instrument_type != "SWAP" {
-                        return Err(StoreError::Invalid("SWAP_FILL_SOURCE_TYPE_MISMATCH"));
-                    }
-                    let direction = swap_fill_direction(&r.sub_type, &r.side, &r.position_side)?;
-                    page.swap_fill_sources.push(SwapFillSource {
-                        fill_id: id.clone(),
-                        bill_id: r.bill_id.clone(),
-                        sub_type: r.sub_type.clone(),
-                        position_side: r.position_side.clone(),
-                        direction: direction.into(),
-                    });
-                }
-                page.fills.push(Fill {
-                    fill_id: id,
-                    instrument_id: r.instrument_id,
-                    trade_id: r.trade_id,
-                    exchange_order_id: r.order_id,
-                    intent_id: owner.map(|i| i.intent_id),
-                    time,
-                    qty: d(&r.fill_size)?,
-                    price: d(&r.fill_price)?,
-                    fee,
-                    currency: if r.fee_currency.is_empty() {
-                        return Err(StoreError::Invalid("FILL_FEE_CURRENCY_UNAVAILABLE"));
-                    } else {
-                        r.fee_currency
-                    },
-                    side: r.side,
-                });
-            }
-            s.ingest_page_with_usd(&page, &fx)
-        })
+        .ingest_captured_fills(
+            deadline(),
+            okx_execution::CapturedFillPage {
+                partition: partition.into(),
+                cursor: next,
+                rows: parsed,
+            },
+            fx,
+        )
         .await?;
     Ok(complete)
 }

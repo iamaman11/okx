@@ -1,5 +1,7 @@
 #[path = "account_store_attribution_tests.rs"]
 mod attribution;
+#[path = "account_captured_fill_contract_tests.rs"]
+mod captured_fill_contracts;
 #[path = "account_entry_fee_contract_tests.rs"]
 mod entry_fee_contracts;
 #[path = "account_raw_source_tests.rs"]

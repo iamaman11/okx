@@ -196,6 +196,19 @@ impl std::fmt::Debug for AccountStoreHandle {
     }
 }
 impl AccountStoreHandle {
+    /// Parsed source facts are bound and written by this same SQL owner.
+    pub async fn ingest_captured_fills(
+        &self,
+        deadline: Instant,
+        input: crate::CapturedFillPage,
+        conversion: crate::UsdConversionEvidence,
+    ) -> StoreResult<()> {
+        self.call(deadline, move |store| {
+            store.ingest_captured_fills(&input, &conversion)
+        })
+        .await
+    }
+
     /// Typed coherent source frontier. Raw SQL stays with the account owner.
     pub async fn source_capture_state(
         &self,

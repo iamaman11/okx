@@ -1,3 +1,37 @@
+## #510 - production fill collector submits typed source batches to SQL owner
+
+Agent capture_fills now only decodes venue strings/time/fee presence and
+submits CapturedFillPage to AccountStoreHandle::ingest_captured_fills. Original
+ownership lookup, canonical fill/fee IDs and SWAP labels moved to the shared
+execution binder. The unified IngestCapturedFills command runs this binder,
+USD normalization and complete page ingestion in the SAME SQL transaction,
+removing the need for a separate owner read/attribution gap in this path.
+The ordinary legacy owner calls the same binder and original USD writer.
+
+Binder rejects supplied intent ownership, malformed canonical fill ID,
+partition/cursor mismatch and >100 rows; skips original pre-T0 facts; uses
+current scoped durable client+venue identity. Raw SWAP fee without bill ID
+stays raw and cannot become an early canonical debit. No activation bypass.
+
+New direct witness uses original prepare/reserve/POST/outcome account sources,
+legacy ingestion + replay on A, real import and unified batch ingestion on B.
+It proves scoped ownership, one 0.01 loss per account, forged owner/identity/
+cursor/oversize/conflicting order rejection, delayed SWAP fee behavior and
+missing-FX stop with no failed fill. Actual COMMIT/reopen retains results.
+Venue/FX inputs are explicitly synthetic; not a trading or cutover acceptance.
+
+Local Windows full execution library: 262 PASS, 0 FAIL, 2 ignored (7.14s
+after build); direct captured-fill witness PASS (0.24s before added limit
+assertion). Agent all-target check and architecture/negative guard,
+format/diff PASS. No full RB01-RB16/T09/T10 acceptance.
+
+Remaining collector work: typed bill construction, projection/funding/strategy
+NAV reconciliation and AccountResources/ExecutionRuntime new-owner startup.
+The current Agent composition still holds the legacy handle; full native
+activation and four risk actions remain incomplete.
+
+---
+
 ## #510 - source order ownership contract used by the production collector
 
 Fills and bills now use AccountStore::source_order_owner instead of separate

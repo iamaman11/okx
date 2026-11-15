@@ -103,6 +103,11 @@ pub struct UnifiedFinanceBoundSettlementReceipt {
 
 #[derive(Debug, Clone)]
 pub(crate) enum UnifiedFinanceWrite {
+    IngestCapturedFills {
+        account: String,
+        input: crate::CapturedFillPage,
+        conversion: crate::UsdConversionEvidence,
+    },
     IngestSourcePageUsd {
         account: String,
         page: crate::IngestPage,

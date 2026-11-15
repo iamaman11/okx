@@ -15,6 +15,10 @@ mod tests;
 mod source_state;
 pub use source_state::{AccountSourceCursors, AccountSourceState};
 
+#[path = "account_captured_fills.rs"]
+mod captured_fills;
+pub use captured_fills::{CapturedFill, CapturedFillPage};
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("ACCOUNT_STORAGE_UNAVAILABLE: {0}")]
