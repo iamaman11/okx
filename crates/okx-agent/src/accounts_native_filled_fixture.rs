@@ -132,6 +132,35 @@ pub(super) fn snapshot(feed: &RecordedAccountHttp, equity: &str, quantity: &str)
 /// one independently signed bill page. Later turns may be empty incremental
 /// windows; immutable prior fills and bills remain in the original SQL owner.
 pub(super) fn history(feed: &RecordedAccountHttp, execution: Option<(&str, &str, &str, i64)>) {
+    history_amount(feed, execution, "0.1", "-0.0005");
+}
+
+pub(super) fn history_amount(
+    feed: &RecordedAccountHttp,
+    execution: Option<(&str, &str, &str, i64)>,
+    size: &str,
+    fee: &str,
+) {
+    history_amount_sources(feed, execution, size, fee, true);
+}
+
+/// A real fill page whose independent fee bill has not arrived yet.
+pub(super) fn history_unbilled_amount(
+    feed: &RecordedAccountHttp,
+    execution: (&str, &str, &str, i64),
+    size: &str,
+    fee: &str,
+) {
+    history_amount_sources(feed, Some(execution), size, fee, false);
+}
+
+fn history_amount_sources(
+    feed: &RecordedAccountHttp,
+    execution: Option<(&str, &str, &str, i64)>,
+    size: &str,
+    fee: &str,
+    bill_available: bool,
+) {
     let (fills, bills) = match execution {
         Some((order, event, side, at)) => {
             let subtype = if side == "buy" { "3" } else { "5" };
@@ -139,12 +168,16 @@ pub(super) fn history(feed: &RecordedAccountHttp, execution: Option<(&str, &str,
                 json!([{"instType":"SWAP","instId":INSTRUMENT,
                 "tradeId":format!("{event}-trade"),"ordId":order,"clOrdId":"__REQUEST_CL_ORD_ID__",
                 "billId":format!("{event}-bill"),"subType":subtype,"side":side,"posSide":"long",
-                "fillPx":"1000","fillSz":"0.1","fillPnl":"0","fee":"-0.0005","feeCcy":"USDT",
+                "fillPx":"1000","fillSz":size,"fillPnl":"0","fee":fee,"feeCcy":"USDT",
                 "ts":at.to_string(),"fillTime":at.to_string()}]),
-                json!([{"billId":format!("{event}-bill"),"instType":"SWAP","instId":INSTRUMENT,
+                if bill_available {
+                    json!([{"billId":format!("{event}-bill"),"instType":"SWAP","instId":INSTRUMENT,
                 "ordId":order,"tradeId":format!("{event}-trade"),"clOrdId":"__REQUEST_CL_ORD_ID__",
-                "ccy":"USDT","type":"2","subType":subtype,"balChg":"-0.0005",
-                "fee":"-0.0005","pnl":"0","ts":at.to_string()}]),
+                "ccy":"USDT","type":"2","subType":subtype,"balChg":fee,
+                "fee":fee,"pnl":"0","ts":at.to_string()}])
+                } else {
+                    json!([])
+                },
             )
         }
         None => (json!([]), json!([])),
@@ -172,6 +205,17 @@ pub(super) fn history(feed: &RecordedAccountHttp, execution: Option<(&str, &str,
 }
 
 pub(super) fn order(feed: &RecordedAccountHttp, id: &str, side: &str, at: i64) {
+    order_cumulative(feed, id, side, at, "filled", "0.1");
+}
+
+pub(super) fn order_cumulative(
+    feed: &RecordedAccountHttp,
+    id: &str,
+    side: &str,
+    at: i64,
+    state: &str,
+    cumulative_size: &str,
+) {
     get(
         feed,
         "fixture-executor-a",
@@ -180,8 +224,8 @@ pub(super) fn order(feed: &RecordedAccountHttp, id: &str, side: &str, at: i64) {
         json!([{
         "instId":INSTRUMENT,"ordId":id,"clOrdId":"__REQUEST_CL_ORD_ID__","side":side,
         "posSide":"long","tdMode":"cross","ordType":if side == "buy" {"limit"} else {"ioc"},
-        "px":if side == "buy" {"1000"} else {"999"},"sz":"0.1","accFillSz":"0.1",
-        "avgPx":"1000","state":"filled","cTime":at.to_string(),"uTime":at.to_string()}]),
+        "px":if side == "buy" {"1000"} else {"999"},"sz":"0.1","accFillSz":cumulative_size,
+        "avgPx":"1000","state":state,"cTime":at.to_string(),"uTime":at.to_string()}]),
     );
 }
 

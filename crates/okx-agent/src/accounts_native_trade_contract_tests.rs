@@ -404,3 +404,9 @@ mod native_strategies;
 
 #[path = "accounts_native_crash_contract_tests.rs"]
 mod native_crash;
+
+#[path = "accounts_native_partial_entry_contract_tests.rs"]
+mod native_partial_entry;
+
+#[path = "accounts_native_filled_fixture.rs"]
+mod filled_fixture;

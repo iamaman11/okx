@@ -5,6 +5,8 @@ use crate::{StoreError, StoreResult};
 use std::sync::Arc;
 mod opening_ingress;
 mod owner;
+#[cfg(test)]
+mod owner_queue_tests;
 mod owner_startup;
 #[cfg(test)]
 mod owner_startup_tests;

@@ -223,12 +223,9 @@ impl UnifiedFinanceHandle {
             .map_err(|_| StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY"))?
     }
 
-    /// This is the ONLY future production financial COMMIT entrypoint.
-    /// It uses the very same original AccountStore/RiskBook transaction
-    /// functions as the offline physical tests. In the current schema the
-    /// sealed import is strictly OFFLINE_NOT_AUTHORIZED, so this method
-    /// fails BEFORE applying any financial rule or source mutation.
-    /// RB09 must be accepted before a real activation receipt exists.
+    /// One typed financial write on the installation FIFO. The original
+    /// source/policy/opening gates and AccountStore/RiskBook transitions are
+    /// checked in the same transaction; a lost reply never permits blind replay.
     pub(crate) async fn apply_financial_write(
         &self,
         command: UnifiedFinanceWrite,

@@ -3,12 +3,19 @@
 use super::*;
 use rust_decimal::Decimal;
 
-#[path = "accounts_native_filled_fixture.rs"]
-mod filled_fixture;
-use filled_fixture::*;
+use super::filled_fixture::*;
 
 #[tokio::test]
 async fn risk_book_contract_native_filled_close_settlement_release_and_cold_reopen() {
+    filled_close(false).await;
+}
+
+#[tokio::test]
+async fn risk_book_contract_native_stop_after_fill_blocks_open_but_closes_and_releases() {
+    filled_close(true).await;
+}
+
+async fn filled_close(stop_after_fill: bool) {
     let mut fixture = fixture().await;
     let (market_stop, market_task, socket, public) = opened_market(&mut fixture).await;
     let account = fixture._account.clone();
@@ -126,6 +133,57 @@ async fn risk_book_contract_native_filled_close_settlement_release_and_cold_reop
         .await
         .unwrap();
     assert_eq!(spent.consumed_entry_usd, "1.0005");
+
+    if stop_after_fill {
+        let before_stop = fixture
+            .owner
+            .campaign_summary(fixture.campaign.clone())
+            .await
+            .unwrap();
+        fixture.authority.state.revision += 1;
+        fixture.authority.state.accounts[0].policy_revision = fixture.authority.state.revision;
+        fixture.authority.state.accounts[0].explicit_pause = true;
+        fixture
+            .trade
+            .update_governance(&fixture.authority)
+            .await
+            .unwrap();
+        let paused = fixture
+            .owner
+            .campaign_summary(fixture.campaign.clone())
+            .await
+            .unwrap();
+        assert_eq!(paused.consumed_entry_usd, before_stop.consumed_entry_usd);
+        assert_eq!(paused.reserved_entry_usd, before_stop.reserved_entry_usd);
+        assert_eq!(paused.reserved_loss_usd, before_stop.reserved_loss_usd);
+        let post_count = fixture.feed.outbound_posts.lock().unwrap().len();
+        let mut fresh_open = execute();
+        if let TradeRequest::Execute {
+            idempotency_key, ..
+        } = &mut fresh_open
+        {
+            *idempotency_key = "native_new_open_after_stop".into();
+        }
+        let denied = fixture
+            .trade
+            .trade(&fixture.config.alias, &fresh_open, Some(&fixture.authority))
+            .await
+            .unwrap_err();
+        assert_eq!(denied, "ACCOUNT_NEW_RISK_PAUSED");
+        assert_eq!(
+            fixture.feed.outbound_posts.lock().unwrap().len(),
+            post_count
+        );
+        assert_eq!(
+            fixture
+                .owner
+                .campaign_summary(fixture.campaign.clone())
+                .await
+                .unwrap(),
+            paused,
+            "denied new risk cannot consume or release the existing position budget"
+        );
+    }
 
     // Close is independently authorized from the actual SQL lot, fresh venue
     // exposure and its own public market observation. ACK loss cannot resend.

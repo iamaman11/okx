@@ -55,7 +55,7 @@ marked green or skipped by this change. Ready/merge remains NO-GO.
 
 ### Current local validation and limits
 
-Complete execution library: 329 PASS, 0 FAIL, 2 ignored historical probes, 8.88s.
+Complete execution library with fresh owner queue: 331 PASS, 0 FAIL, 2 ignored historical probes, 9.59s.
 Fresh Native aggregation: 7/7 PASS, 14.68s including actual child death and full
 filled/Close/release/reopen. Named Agent groups plus startup: 98 PASS total
 including those seven. Worker check and actual workerd transport PASS.
@@ -65,6 +65,21 @@ final exact-tree run results are recorded on #510. Formatting, architecture plus
 negative self-tests, SQL schema guard and workflow YAML are required unchanged.
 Build time is separate. The filled and crash probes above are independent times,
 not a combined <=10s claim. #512 whole-matrix P95<=10s is not yet demonstrated.
+
+Additional current contracts: STOP after fill denies a new Open without budget
+mutation or POST but completes source-verified Close/release/reopen (14.32s).
+Partial raw fill without its bill cannot bind settlement; late linked bill
+settles 0.4002, next fill reaches 1.0005 and replay does not debit again; live
+exposure remains reserved (12.33s). This does NOT prove partial-stop resizing.
+Fresh owner queue contracts prove capacity128/FIFO drain, pre-enqueue/queued
+deadlines and dropped callers using read-only jobs; financial commit cancellation
+is proven by the separate original Create/crash tests, not by atomic test markers.
+
+Final new-owner aggregation after STOP/partial additions: 9/9 PASS in 14.99s
+on Windows after build. Full execution: 331 PASS, 0 FAIL, 2 ignored in 9.59s.
+Both targets remain separately timed; complete 26/26 and P95 are NOT claimed.
+The same shared raw fixture serves filled and partial scenarios; no duplicate
+financial test implementation or looser stop verifier was added.
 
 ### Remaining before #510 GO
 
