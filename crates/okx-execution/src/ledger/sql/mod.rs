@@ -8,6 +8,8 @@ mod source_bills;
 mod source_entries;
 mod source_fills;
 mod source_finance;
+mod source_flows;
+mod source_funding;
 mod source_page;
 mod source_provenance;
 mod source_swap;

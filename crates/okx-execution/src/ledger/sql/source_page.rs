@@ -12,10 +12,6 @@ impl AccountStore {
         // These components still require their original scoped projection
         // paths. Never advance a page containing a silently dropped fact.
         if !page.entry_order_fee_links.is_empty()
-            || !page.funding_events.is_empty()
-            || !page.attributed_funding_ids.is_empty()
-            || !page.cash_flows.is_empty()
-            || !page.allocations.is_empty()
             || !page.lots.is_empty()
             || !page.nav.is_empty()
             || !page.projected_fill_ids.is_empty()
@@ -36,6 +32,8 @@ impl AccountStore {
         Self::record_source_fills_sql(tx, scope, &page.fills)?;
         Self::record_swap_sources_sql(tx, scope, &page.swap_fill_sources)?;
         Self::record_source_bills_sql(tx, scope, &page.bills, &page.bill_order_sources)?;
+        Self::record_funding_sources_sql(tx, scope, &page.funding_events)?;
+        Self::record_source_flows_sql(tx, scope, &page.cash_flows, &page.allocations)?;
         let added_loss = Self::record_finance_entries_sql(tx, scope, &page.finance)?;
         Self::link_page_swap_fees_sql(tx, scope, page)?;
         if added_loss > Decimal::ZERO {
@@ -48,6 +46,7 @@ impl AccountStore {
         if let Some(cursor) = &page.cursor {
             Self::upsert_source_cursor_sql(tx, scope, cursor)?;
         }
+        Self::acknowledge_funding_sources_sql(tx, scope, &page.attributed_funding_ids)?;
         Self::advance_finance_provenance_sql(tx, scope, previous)?;
         Ok(())
     }

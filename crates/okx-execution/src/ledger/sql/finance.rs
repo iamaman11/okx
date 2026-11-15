@@ -4238,78 +4238,9 @@ impl AccountStore {
         Self::record_source_fills_sql(&tx, None, &page.fills)?;
         Self::record_swap_sources_sql(&tx, None, &page.swap_fill_sources)?;
         Self::record_source_bills_sql(&tx, None, &page.bills, &page.bill_order_sources)?;
-        for event in &page.funding_events {
-            let completed: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM operation_receipts WHERE operation_id=?1)",
-                [format!("funding:{}", event.event_id)],
-                |r| r.get(0),
-            )?;
-            if !completed {
-                tx.execute("INSERT INTO funding_projection_pending VALUES(?1,?2,?3,?4,?5) ON CONFLICT(event_id) DO NOTHING",params![event.event_id,event.instrument_id,event.time,exact(event.amount),event.currency])?;
-            }
-        }
-        let mut cash_flows_changed = false;
-        for f in &page.cash_flows {
-            if f.currency.is_empty() || f.source_ref.is_empty() {
-                return Err(StoreError::Invalid("INVALID_CASH_FLOW"));
-            }
-            cash_flows_changed |= tx.execute(
-                "INSERT INTO cash_flows VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(event_id) DO NOTHING",
-                params![
-                    f.event_id,
-                    f.kind,
-                    f.currency,
-                    exact(f.amount),
-                    f.time,
-                    f.source_ref
-                ],
-            )? > 0;
-            let old: (String, String, String, i64, String) = tx.query_row(
-                "SELECT kind,currency,amount,time,source_ref FROM cash_flows WHERE event_id=?1",
-                [&f.event_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )?;
-            // A replay cannot silently relocate a deposit or replace its
-            // original provenance while reusing the same event id.
-            if old
-                != (
-                    f.kind.clone(),
-                    f.currency.clone(),
-                    exact(f.amount),
-                    f.time,
-                    f.source_ref.clone(),
-                )
-            {
-                return Err(StoreError::Invalid("IMMUTABLE_CASH_FLOW_CONFLICT"));
-            }
-        }
-        for a in &page.allocations {
-            tx.execute(
-                "INSERT INTO allocations VALUES(?1,?2,?3,?4,?5) ON CONFLICT(event_id) DO NOTHING",
-                params![
-                    a.event_id,
-                    a.instance_id,
-                    exact(a.delta),
-                    a.currency,
-                    a.time
-                ],
-            )?;
-            let old: (String, String, String, i64) = tx.query_row(
-                "SELECT instance_id,delta,currency,time FROM allocations WHERE event_id=?1",
-                [&a.event_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )?;
-            if old
-                != (
-                    a.instance_id.clone(),
-                    exact(a.delta),
-                    a.currency.clone(),
-                    a.time,
-                )
-            {
-                return Err(StoreError::Invalid("IMMUTABLE_ALLOCATION_CONFLICT"));
-            }
-        }
+        Self::record_funding_sources_sql(&tx, None, &page.funding_events)?;
+        let cash_flows_changed =
+            Self::record_source_flows_sql(&tx, None, &page.cash_flows, &page.allocations)?;
         let added_loss = Self::record_finance_entries_sql(&tx, None, &page.finance)?;
         Self::link_page_swap_fees_sql(&tx, None, page)?;
         if added_loss > Decimal::ZERO {
@@ -4533,13 +4464,7 @@ impl AccountStore {
         for id in &page.projected_fill_ids {
             tx.execute("DELETE FROM fill_projection_pending WHERE fill_id=?1", [id])?;
         }
-        for id in &page.attributed_funding_ids {
-            tx.execute(
-                "DELETE FROM funding_projection_pending WHERE event_id=?1",
-                [id],
-            )?;
-            tx.execute("INSERT INTO operation_receipts VALUES(?1,'FUNDING_ATTRIBUTED',?2,'COMMITTED',?3) ON CONFLICT(operation_id) DO NOTHING",params![format!("funding:{id}"),id,wall_time_ms()])?;
-        }
+        Self::acknowledge_funding_sources_sql(&tx, None, &page.attributed_funding_ids)?;
         advance_finance_provenance(&tx, finance_rowid_before)?;
         timing.body_us =
             Some(u64::try_from(timing.body_started.elapsed().as_micros()).unwrap_or(u64::MAX));

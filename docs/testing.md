@@ -1,3 +1,29 @@
+## #510 - flows, allocations and funding in atomic unified history pages
+
+Original AccountStore and unified page ingestion now share source_flows and
+source_funding transaction operations. Immutable cash flows and allocations
+retain their original conflict checks. Funding pending and attribution ACK
+rows are account-scoped; exact replay cannot re-enqueue attributed funding.
+Original AccountStore cash-flow cache invalidation remains after commit.
+Unified funding without an original same-account bill fails explicitly with
+FUNDING_SOURCE_BILL_MISSING before a generic SQLite FK exception.
+
+Page contracts use two original imported accounts with identical event IDs:
+flows/allocations/pending funding replay without duplicates, changed amount
+or allocation fails, prior flow/bill inserts roll back on later error, stale
+cursor rolls back flow, and A funding ACK cannot consume B pending funding.
+The test fixture includes the mandatory raw funding bill; an orphan case
+separately verifies its absence and whole-command rollback.
+
+Local native Windows full execution regression: 258 PASS, 0 FAIL, 2 ignored
+(7.32s after build); direct original-import/page witness PASS (0.99s).
+Architecture/negative guard, formatting and diff PASS. Complete USD producer
+normalization, entry fee ownership, positions/NAV and projection ACK paths,
+native capture, activation and all actions remain unfinished. No full
+RB01-RB16 or 26/26 acceptance is claimed by this slice.
+
+---
+
 ## #510 - SWAP source labels and bounded late fee links in unified pages
 
 Original AccountStore page ingestion and unified IngestSourcePage now share

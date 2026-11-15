@@ -195,6 +195,141 @@ pub(super) fn assert_contract(tx: &rusqlite::Transaction<'_>, a: &str, b: &str) 
         .unwrap(),
         0
     );
+    let history = IngestPage {
+        bills: vec![Bill {
+            bill_id: "source-funding".into(),
+            kind: "FUNDING".into(),
+            time: 10,
+            amount: -Decimal::ONE,
+            currency: "USDT".into(),
+            economic_event_key: "bill:source-funding".into(),
+        }],
+        cash_flows: vec![CashFlow {
+            event_id: "source-deposit".into(),
+            kind: "DEPOSIT".into(),
+            currency: "USDT".into(),
+            amount: Decimal::from(7),
+            time: 10,
+            source_ref: "bill:deposit".into(),
+        }],
+        allocations: vec![Allocation {
+            event_id: "source-allocation".into(),
+            instance_id: "manual".into(),
+            delta: Decimal::from(2),
+            currency: "USDT".into(),
+            time: 10,
+        }],
+        funding_events: vec![FundingEvent {
+            event_id: "source-funding".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            time: 10,
+            amount: -Decimal::ONE,
+            currency: "USDT".into(),
+        }],
+        cursor: Some(SourceCursor {
+            source: "bills".into(),
+            stream_partition: "account".into(),
+            cursor: "history-complete".into(),
+            watermark: 50,
+            generation: 12,
+            coverage_gaps: String::new(),
+        }),
+        ..Default::default()
+    };
+    for account in [a, b] {
+        for _ in 0..2 {
+            apply(account, history.clone()).unwrap();
+        }
+    }
+    for table in ["cash_flows", "allocations", "funding_projection_pending"] {
+        let event = if table == "cash_flows" {
+            "source-deposit"
+        } else if table == "allocations" {
+            "source-allocation"
+        } else {
+            "source-funding"
+        };
+        assert_eq!(
+            tx.query_row::<i64, _, _>(
+                &format!("SELECT COUNT(*) FROM {table} WHERE event_id=?1"),
+                [event],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            2
+        );
+    }
+    let mut missing_bill = history.clone();
+    missing_bill.bills[0].bill_id = "rolled-back-funding-bill".into();
+    missing_bill.funding_events[0].event_id = "missing-original-funding".into();
+    assert!(
+        matches!(
+            apply(a, missing_bill),
+            Err(StoreError::Invalid("FUNDING_SOURCE_BILL_MISSING"))
+        ),
+        "funding without its original bill must fail"
+    );
+    assert_eq!(
+        tx.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM bills WHERE bill_id='rolled-back-funding-bill'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        0
+    );
+    let mut flow_conflict = history.clone();
+    flow_conflict.cash_flows[0].amount = Decimal::from(8);
+    assert!(matches!(
+        apply(a, flow_conflict),
+        Err(StoreError::Invalid("IMMUTABLE_CASH_FLOW_CONFLICT"))
+    ));
+    let mut allocation_conflict = history.clone();
+    allocation_conflict.cash_flows[0].event_id = "rolled-back-flow".into();
+    allocation_conflict.allocations[0].delta = Decimal::from(3);
+    assert!(matches!(
+        apply(a, allocation_conflict),
+        Err(StoreError::Invalid("IMMUTABLE_ALLOCATION_CONFLICT"))
+    ));
+    assert_eq!(
+        tx.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM cash_flows WHERE event_id='rolled-back-flow'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        0
+    );
+    let mut stale = history.clone();
+    stale.cash_flows[0].event_id = "stale-flow".into();
+    stale.cursor.as_mut().unwrap().watermark = 49;
+    assert!(matches!(
+        apply(a, stale),
+        Err(StoreError::Invalid("SOURCE_CURSOR_REGRESSION"))
+    ));
+    assert_eq!(
+        tx.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM cash_flows WHERE event_id='stale-flow'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        0
+    );
+    for _ in 0..2 {
+        apply(
+            a,
+            IngestPage {
+                attributed_funding_ids: vec!["source-funding".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    apply(a, history).unwrap();
+    assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM funding_projection_pending WHERE installation_id='installation' AND account_key=?1 AND event_id='source-funding'",[a],|r|r.get(0)).unwrap(),0,"attributed funding must not be re-enqueued on replay");
+    assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM funding_projection_pending WHERE installation_id='installation' AND account_key=?1 AND event_id='source-funding'",[b],|r|r.get(0)).unwrap(),1,"A acknowledgement cannot consume B pending funding");
+    assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM operation_receipts WHERE installation_id='installation' AND account_key=?1 AND operation_id='funding:source-funding'",[a],|r|r.get(0)).unwrap(),1);
     let mut unsupported = page.clone();
     unsupported.projected_fill_ids.push("not-ported".into());
     assert!(matches!(
