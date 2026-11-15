@@ -2,6 +2,8 @@
 mod attribution;
 #[path = "account_raw_source_tests.rs"]
 mod raw_sources;
+#[path = "account_page_contract_tests.rs"]
+mod source_pages;
 #[path = "account_store_terminal_diagnostic_tests.rs"]
 mod terminal_diagnostics;
 
@@ -13336,6 +13338,10 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     // An immutable 47-table stopped import may NEVER become a venue/finance
     // grant merely because its contents and account roster are valid.
     for action in [
+        crate::account_worker::UnifiedFinanceWrite::IngestSourcePage {
+            account: a_key.clone(),
+            page: IngestPage::default(),
+        },
         crate::account_worker::UnifiedFinanceWrite::RecordSourceBills {
             account: a_key.clone(),
             bills: vec![],

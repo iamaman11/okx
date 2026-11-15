@@ -48,6 +48,10 @@ fn apply_original_unified_finance_inner(
             .map_err(StoreError::Invalid)
     };
     match command {
+        UnifiedFinanceWrite::IngestSourcePage { account, page } => {
+            AccountStore::ingest_unified_source_page_sql(tx, installation, &account, &page)?;
+            Ok(UnifiedFinanceWriteReceipt::SourcePageIngested)
+        }
         UnifiedFinanceWrite::RecordSourceBills {
             account,
             bills,

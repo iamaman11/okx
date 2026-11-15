@@ -1,3 +1,33 @@
+## #510 - unified financial-history page command
+
+UnifiedFinanceWrite::IngestSourcePage and UnifiedFinanceHandle::ingest_source_page
+now dispatch supported original fills/bills/bill-order links/finance entries,
+account loss, source cursor and finance provenance under the existing single
+transaction/savepoint. Source authenticity remains the producer responsibility;
+the normal authority activation gate stays enforced. No second SQL owner.
+
+UNFINISHED COMPONENTS: swap fill labels, entry-order fee links, funding,
+flows/allocations, lots, NAV and projected-fill acknowledgements still require
+scoped paths. A page containing ANY such component is rejected BEFORE writes
+with UNIFIED_SOURCE_PAGE_COMPONENT_NOT_PORTED. Nothing is silently ignored.
+This is a bounded initial history-page ingress, not full native capture wiring.
+
+Direct full-original-schema page contracts verify A/B same IDs, exact replay,
+independent -1 totals, cursor completion, and cursor-regression error rolling
+back an earlier new fill/finance entry and total change through the production
+dispatcher's savepoint. Forged provenance cursor and unsupported projection
+are rejected. The sealed stopped import is restored after the witness and
+normal owner activation still denies, including this new page command.
+
+Local Windows complete execution library: 258 PASS, 0 FAIL, 2 ignored (5.80s
+after build). Direct page/import witness PASS (0.51s). Architecture/negative
+self-tests and formatting PASS. RB01-RB16 and T09/T10 26/26 not accepted.
+
+Next-stage draft requested by owner: GitHub issue #512, whole Rust T09/T10
+acceptance after #510; not a replacement for current acceptance or activation.
+
+---
+
 ## #510 - translate original rowid frontiers during unified import
 
 The stopped importer now copies rows in original rowid order, then translates

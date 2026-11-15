@@ -206,6 +206,24 @@ impl UnifiedFinanceHandle {
         .await
     }
 
+    /// Commit all supported financial history page facts and its cursor in
+    /// one transaction. Unported page fields fail before writes; no fallback.
+    pub async fn ingest_source_page(
+        &self,
+        account: String,
+        page: crate::IngestPage,
+    ) -> StoreResult<()> {
+        match self
+            .apply_financial_write(UnifiedFinanceWrite::IngestSourcePage { account, page })
+            .await?
+        {
+            UnifiedFinanceWriteReceipt::SourcePageIngested => Ok(()),
+            _ => Err(StoreError::Invalid(
+                "UNIFIED_SOURCE_PAGE_RECEIPT_UNEXPECTED",
+            )),
+        }
+    }
+
     /// Store original immutable bills and their venue-order links atomically.
     /// These raw facts alone cannot advance coverage or debit/release risk.
     pub async fn record_source_bills(

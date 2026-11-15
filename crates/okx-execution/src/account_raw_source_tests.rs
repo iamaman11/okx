@@ -6,6 +6,7 @@ pub(super) fn assert_contract(target: &mut Connection, a_key: String, b_key: Str
         apply_original_unified_finance_transaction as dispatch,
     };
     let tx = target.transaction().unwrap();
+    super::source_pages::assert_contract(&tx, &a_key, &b_key);
     let raw = Fill {
         fill_id: "same-raw-fill".into(),
         instrument_id: "BTC-USDT-SWAP".into(),
