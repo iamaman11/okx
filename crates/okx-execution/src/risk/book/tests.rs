@@ -3200,7 +3200,7 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             &original.intent_id,
             2,
             7,
-                super::EntrySettlementSource::Partial,
+            super::EntrySettlementSource::Partial,
         )
         .unwrap();
         assert_eq!(first.book_sequence, 3);
@@ -3214,7 +3214,7 @@ fn risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_de
             &original.intent_id,
             2,
             7,
-                super::EntrySettlementSource::Partial,
+            super::EntrySettlementSource::Partial,
         )
         .unwrap();
         assert!(repeated.replayed);
