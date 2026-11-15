@@ -7224,8 +7224,9 @@ fn k5_child_hard_exit_at_native_claim() {
     }
     // Publish marker after the SQLite FULL WAL commit with the connection
     // still live. Parent must kill this process at the exact boundary.
-    let ready = std::env::var("OKX_K5_CHILD_READY").unwrap();
-    std::fs::write(ready, phase).unwrap();
+    use std::io::Write;
+    println!("OKX_K5_READY:{phase}");
+    std::io::stdout().flush().unwrap();
     loop {
         std::thread::park();
     }
@@ -7233,6 +7234,21 @@ fn k5_child_hard_exit_at_native_claim() {
 
 #[test]
 fn k5_real_os_kill_f0_through_f8_never_reposts_or_duplicates_finance() {
+    // Own the helper even if a readiness assertion fails. An orphaned helper
+    // otherwise holds the Windows test EXE open and blocks the next link.
+    struct KillChildOnDrop {
+        child: std::process::Child,
+        reader: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for KillChildOnDrop {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
+        }
+    }
     // Same Rust binary and exact mounted test DB across the process boundary.
     // The child is deliberately not allowed to connect to OKX or RiskBook.
     for phase in ["F0", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8"] {
@@ -7258,7 +7274,6 @@ fn k5_real_os_kill_f0_through_f8_never_reposts_or_duplicates_finance() {
         let path = store.path.clone();
         let meta = store.meta.clone();
         let venue_log = path.with_extension(format!("{phase}.venue-marker"));
-        let ready = path.with_extension(format!("{phase}.ready"));
         drop(store);
 
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -7269,31 +7284,46 @@ fn k5_real_os_kill_f0_through_f8_never_reposts_or_duplicates_finance() {
             .env("OKX_K5_CHILD_ACCOUNT", &meta.account_key)
             .env("OKX_K5_CHILD_INSTALL", &meta.installation_id)
             .env("OKX_K5_CHILD_VENUE_LOG", &venue_log)
-            .env("OKX_K5_CHILD_READY", &ready)
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("spawn child test executable");
-        let mut witnessed = false;
-        for _ in 0..200 {
-            if ready.exists() {
-                witnessed = true;
-                break;
+        let output = child.stdout.take().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(output).lines() {
+                let Ok(line) = line else { break };
+                if let Some(phase) = line.strip_prefix("OKX_K5_READY:") {
+                    let _ = send.send(Some(phase.to_owned()));
+                    return;
+                }
             }
-            if let Some(status) = child.try_wait().unwrap() {
-                panic!("{phase}: helper stopped before the SQL claim boundary: {status}");
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        assert!(
-            witnessed,
-            "{phase}: child never reported durable SQL boundary"
+            let _ = send.send(None);
+        });
+        let mut helper = KillChildOnDrop {
+            child,
+            reader: Some(reader),
+        };
+        let witnessed = receive
+            .recv_timeout(Duration::from_secs(10))
+            .expect("child must publish a complete durable-boundary message");
+        assert_eq!(
+            witnessed.as_deref(),
+            Some(phase),
+            "{phase}: helper stopped before SQL boundary"
         );
-        assert_eq!(std::fs::read_to_string(&ready).unwrap(), phase);
-        child.kill().expect("OS kill at durable SQL boundary");
-        let status = child.wait().expect("reap killed native process");
+        helper
+            .child
+            .kill()
+            .expect("OS kill at durable SQL boundary");
+        let status = helper.child.wait().expect("reap killed native process");
         assert!(
             !status.success(),
-            "{phase}: child must be killed, not finish normally"
+            "{phase}: helper must be killed, not finish normally"
         );
+        if let Some(reader) = helper.reader.take() {
+            reader.join().unwrap();
+        }
         let mut recovered =
             AccountStore::open_existing(&path, &meta.account_key, &meta.installation_id).unwrap();
         recovered.integrity_check().unwrap();

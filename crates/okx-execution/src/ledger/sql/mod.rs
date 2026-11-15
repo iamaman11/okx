@@ -10,5 +10,6 @@ mod source_fills;
 mod source_finance;
 mod source_page;
 mod source_provenance;
+mod source_swap;
 mod sources;
 pub(in crate::account_store) mod unified_financial;

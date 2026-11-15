@@ -20,6 +20,19 @@ pub(super) fn assert_contract(tx: &rusqlite::Transaction<'_>, a: &str, b: &str) 
             currency: "USDT".into(),
             side: "buy".into(),
         }],
+        swap_fill_sources: vec![SwapFillSource {
+            fill_id: "page-fill".into(),
+            bill_id: String::new(),
+            sub_type: "3".into(),
+            position_side: "long".into(),
+            direction: "OPEN".into(),
+        }],
+        bill_order_sources: vec![BillOrderSource {
+            bill_id: "page-bill".into(),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            exchange_order_id: "page-order".into(),
+            trade_id: "page-trade".into(),
+        }],
         bills: vec![Bill {
             bill_id: "page-bill".into(),
             kind: "FEE".into(),
@@ -114,6 +127,74 @@ pub(super) fn assert_contract(tx: &rusqlite::Transaction<'_>, a: &str, b: &str) 
         0
     );
     assert_eq!(tx.query_row::<String,_,_>("SELECT amount FROM finance_totals WHERE installation_id='installation' AND account_key=?1 AND currency='USDT' AND component='FEE'",[a],|r|r.get(0)).unwrap(),"-1");
+    for account in [a, b] {
+        assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM finance_source_links WHERE installation_id='installation' AND account_key=?1 AND entry_id='page-fee' AND source_ref='fill:page-fill'",[account],|r|r.get(0)).unwrap(),1);
+    }
+    let mut conflict = page.clone();
+    conflict.swap_fill_sources[0].bill_id = "different-bill".into();
+    assert!(matches!(
+        apply(a, conflict),
+        Err(StoreError::Invalid("IMMUTABLE_SWAP_FILL_SOURCE_CONFLICT"))
+    ));
+    let mut late_fill = page.fills[0].clone();
+    late_fill.fill_id = "late-fill".into();
+    late_fill.exchange_order_id = "late-order".into();
+    late_fill.trade_id = "late-trade".into();
+    let mut label = page.swap_fill_sources[0].clone();
+    label.fill_id = late_fill.fill_id.clone();
+    let fill_page = IngestPage {
+        fills: vec![late_fill],
+        swap_fill_sources: vec![label],
+        ..Default::default()
+    };
+    for account in [a, b] {
+        apply(account, fill_page.clone()).unwrap();
+    }
+    let mut late_bill = page.bills[0].clone();
+    late_bill.bill_id = "late-bill".into();
+    late_bill.economic_event_key = "bill:late-bill".into();
+    let mut late_finance = page.finance[0].clone();
+    late_finance.entry_id = "late-fee".into();
+    late_finance.economic_event_key = late_bill.economic_event_key.clone();
+    late_finance.source_ref = late_bill.economic_event_key.clone();
+    let mut origin = page.bill_order_sources[0].clone();
+    origin.bill_id = late_bill.bill_id.clone();
+    origin.exchange_order_id = "late-order".into();
+    origin.trade_id = "late-trade".into();
+    let late_page = IngestPage {
+        bills: vec![late_bill],
+        finance: vec![late_finance],
+        bill_order_sources: vec![origin],
+        ..Default::default()
+    };
+    for _ in 0..2 {
+        apply(a, late_page.clone()).unwrap();
+    }
+    assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM finance_source_links WHERE installation_id='installation' AND account_key=?1 AND source_ref='fill:late-fill'",[a],|r|r.get(0)).unwrap(),1);
+    assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM finance_source_links WHERE installation_id='installation' AND account_key=?1 AND source_ref='fill:late-fill'",[b],|r|r.get(0)).unwrap(),0,"A bill cannot bind B fill");
+    let mut mismatched = late_page;
+    mismatched.bills[0].amount = Decimal::from(-2);
+    mismatched.finance[0].amount = Decimal::from(-2);
+    apply(b, mismatched).unwrap();
+    assert_eq!(tx.query_row::<i64,_,_>("SELECT COUNT(*) FROM finance_source_links WHERE installation_id='installation' AND account_key=?1 AND source_ref='fill:late-fill'",[b],|r|r.get(0)).unwrap(),0,"different fee amount cannot prove a link");
+    let mut invalid = fill_page;
+    invalid.fills[0].fill_id = "invalid-swap-fill".into();
+    invalid.fills[0].trade_id = "invalid-trade".into();
+    invalid.swap_fill_sources[0].fill_id = "invalid-swap-fill".into();
+    invalid.swap_fill_sources[0].direction = "CLOSE".into();
+    assert!(matches!(
+        apply(a, invalid),
+        Err(StoreError::Invalid("SWAP_FILL_SOURCE_INVALID"))
+    ));
+    assert_eq!(
+        tx.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM fills WHERE fill_id='invalid-swap-fill'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        0
+    );
     let mut unsupported = page.clone();
     unsupported.projected_fill_ids.push("not-ported".into());
     assert!(matches!(

@@ -1,3 +1,33 @@
+## #510 - SWAP source labels and bounded late fee links in unified pages
+
+Original AccountStore page ingestion and unified IngestSourcePage now share
+source_swap SQL operations: immutable SWAP labels, direction validation and
+bounded late bill/order/trade-to-fill fee linking. Unified joins scope EVERY
+participating fills/labels/bills/finance/links row by installation/account.
+No new fee debit, copied ledger or source cursor path is introduced.
+
+Direct page witnesses verify two accounts with identical source IDs, exact
+replay, same-page bill/fill linking, fill-first late bill, no foreign-account
+link, mismatched fee staying unlinked, label conflict and invalid direction
+rolling back a preceding new fill. Unported entry fee ownership, funding,
+flows/allocations/lots/NAV still reject before writes. Native capture and
+activation remain incomplete.
+
+Initial full regression found an existing OS-kill harness readiness race:
+parent saw the ready file before its phase bytes and failed F2, leaving a
+parked helper holding the Windows test EXE. Replaced that TEST readiness
+with a complete stdout pipe message and bounded receive. A local owned-child
+Drop guard kills/reaps/joins even on an assertion failure. Actual child OS
+kill and original SQLite reopen assertions remain. The verified stale test
+helper was stopped; installed OKX processes/state were not touched.
+
+Final local Windows full execution library: 258 PASS, 0 FAIL, 2 ignored
+(8.29s after build); direct unified page/import witness PASS (0.69s);
+Agent all-target check, architecture/negative self-tests, format/diff PASS.
+No complete RB01-RB16/T09/T10 acceptance is claimed.
+
+---
+
 ## #510 - unified financial-history page command
 
 UnifiedFinanceWrite::IngestSourcePage and UnifiedFinanceHandle::ingest_source_page
