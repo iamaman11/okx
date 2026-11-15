@@ -14,6 +14,7 @@ pub(crate) struct AccountReadback {
     pub reserved_loss_usdt: String,
     pub reserved_loss_usd: String,
     pub cumulative_loss_usd: String,
+    pub latest_activity_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +104,25 @@ pub(super) fn account_readback(
                 .ok_or(RiskStoreError::Corrupt("ACTIVE_RESERVATION_COUNT"))?;
         }
     }
+    // Original RiskBook receipt time, NOT process clock or a fabricated
+    // freshness indicator. Active reservations require a durable positive
+    // held_at_ms to satisfy the native account-budget wire contract.
+    let activity_sql = if scope.is_some() {
+        "SELECT COALESCE(MAX(held_at_ms),0) FROM risk_entries
+         WHERE account_key=?1 AND installation_id=?2 AND campaign_id=?3"
+    } else {
+        "SELECT COALESCE(MAX(held_at_ms),0) FROM risk_entries WHERE account_key=?1"
+    };
+    let activity: i64 = tx.query_row(
+        activity_sql,
+        params_from_iter(values.iter()),
+        |row| row.get(0),
+    )?;
+    let latest_activity_ms = u64::try_from(activity)
+        .map_err(|_| RiskStoreError::Corrupt("RISK_ACTIVITY_TIME_INVALID"))?;
+    if count > 0 && latest_activity_ms == 0 {
+        return Err(RiskStoreError::Corrupt("RISK_ACTIVE_ACTIVITY_MISSING"));
+    }
     Ok(AccountReadback {
         account_key: account_key.to_owned(),
         policy_revision: meta.policy_revision,
@@ -111,6 +131,7 @@ pub(super) fn account_readback(
         reserved_loss_usdt: amount(reserved)?.canonical()?,
         reserved_loss_usd: usd.canonical()?,
         cumulative_loss_usd: amount(cumulative)?.canonical()?,
+        latest_activity_ms,
     })
 }
 

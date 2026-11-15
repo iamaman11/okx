@@ -195,6 +195,8 @@ jobs:
         run: |
           cargo test --locked -p okx-agent --lib finance_staged_import_never_falls_back_to_old_trade_or_cloudflare_finance -- --nocapture
           cargo test --locked -p okx-agent --lib finance_inspection::tests -- --nocapture
+          cargo test --locked -p okx-agent --lib native_finance_risk::tests -- --nocapture
+          cargo test --locked -p okx-agent --lib risk_bridge::tests -- --nocapture
           cargo test --locked -p okx-agent --bin okx-agent --no-run
 
   architecture:

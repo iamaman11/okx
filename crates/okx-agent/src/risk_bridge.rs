@@ -12,19 +12,34 @@ pub struct OutboundRiskCommand {
 }
 #[derive(Clone)]
 pub struct NativeRiskClient {
-    tx: mpsc::Sender<OutboundRiskCommand>,
+    route: RiskRoute,
+}
+
+#[derive(Clone)]
+enum RiskRoute {
+    Cloudflare(mpsc::Sender<OutboundRiskCommand>),
+    Local(crate::native_finance_risk::NativeFinanceRisk),
 }
 impl NativeRiskClient {
     pub fn new(tx: mpsc::Sender<OutboundRiskCommand>) -> Self {
-        Self { tx }
+        Self { route: RiskRoute::Cloudflare(tx) }
+    }
+    /// Dedicated single-writer native route. No shadow Cloudflare risk call
+    /// or independent SQL owner; installation mode selection is exclusive.
+    pub fn local(backend: crate::native_finance_risk::NativeFinanceRisk) -> Self {
+        Self { route: RiskRoute::Local(backend) }
     }
     pub async fn request(&self, command: RiskCommand) -> Result<RiskResult, &'static str> {
         if !command.valid() {
             return Err("INVALID_RISK_COMMAND");
         }
+        let tx = match &self.route {
+            RiskRoute::Local(backend) => return backend.request(command).await,
+            RiskRoute::Cloudflare(sender) => sender,
+        };
         let id = command.command_id.clone();
         let (reply, rx) = oneshot::channel();
-        self.tx
+        tx
             .try_send(OutboundRiskCommand {
                 command,
                 return_to: reply,

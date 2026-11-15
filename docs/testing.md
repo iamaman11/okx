@@ -1,3 +1,30 @@
+## #510 r4.1 — local RiskCommand ingress, original SQL readback
+
+The existing `NativeRiskClient` now has an explicit local Rust route type
+alongside the legacy WebSocket transport. A local request never queues a
+Cloudflare risk command. The adapter handles the canonical nine
+`RiskCommandAction` variants exhaustively: `Summary`, `AccountSummary`
+and `Inspect` read **original** RiskBook SQL through the existing sole
+bounded `UnifiedFinanceHandle`, preserving account/campaign/plan scope,
+current sequence and original source activity time. An absent exact-plan
+reservation is DENIED, never safe-to-send. Both risk and account summaries
+are built from verified original projections (no new budget arithmetic).
+`InstallEntryOpening`, `Reserve`, `SettleEntry`, `ReleaseUnsent`,
+`BeginPost` and `Resolve` return the explicit
+`FINANCE_CUTOVER_NOT_ACCEPTED` gate. The local ingress is not a new
+financial COMMIT owner.
+
+This is **NOT** production nine-action cutover: the unaccepted source
+producers and staged startup still use the legacy account-local
+`AccountStoreHandle`; the native routing mode must not be selected by
+production startup until original AccountStore actions are all scoped,
+RB09 server finance mutation is disabled and the independently verified
+activation receipt exists. All old Cloudflare finance logic is preserved
+*only for the unswitched legacy install*. No fake 9/9 acceptance, no real/demo
+trading.
+
+---
+
 ## #510 r4.1 — unified original AccountStore+RiskBook policy CAS
 
 New `UnifiedFinanceWrite::ApplyPolicy` is part of the existing original

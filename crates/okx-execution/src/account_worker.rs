@@ -899,7 +899,11 @@ pub struct UnifiedFinanceInventory {
 pub struct UnifiedFinanceCampaignSummary {
     pub campaign: String,
     pub book_sequence: u64,
+    pub policy_revision: u64,
     pub global_reserved_usdt: String,
+    pub loss_limit_usd: String,
+    pub consumed_loss_usd: String,
+    pub reserved_loss_usd: String,
     pub remaining_loss_usd: String,
     pub remaining_entry_usd: String,
 }
@@ -913,6 +917,7 @@ pub struct UnifiedFinanceAccountReadback {
     pub reserved_loss_usdt: String,
     pub reserved_loss_usd: String,
     pub cumulative_loss_usd: String,
+    pub latest_activity_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1188,7 +1193,11 @@ impl UnifiedFinanceHandle {
             Ok(UnifiedFinanceCampaignSummary {
                 campaign,
                 book_sequence: original.book_sequence,
+                policy_revision: original.policy_revision,
                 global_reserved_usdt: original.global_reserved_usdt,
+                loss_limit_usd: original.loss_limit_usd,
+                consumed_loss_usd: original.consumed_loss_usd,
+                reserved_loss_usd: original.reserved_loss_usd,
                 remaining_loss_usd: original.remaining_loss_usd,
                 remaining_entry_usd: original.remaining_entry_usd,
             })
@@ -1239,6 +1248,7 @@ impl UnifiedFinanceHandle {
             reserved_loss_usdt: original.reserved_loss_usdt,
             reserved_loss_usd: original.reserved_loss_usd,
             cumulative_loss_usd: original.cumulative_loss_usd,
+            latest_activity_ms: original.latest_activity_ms,
         })
     }
 
