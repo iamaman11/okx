@@ -101,6 +101,19 @@ fn catalog(root: &Path, key: &AccountKey) -> AgentResult<VerifiedAccountConfig> 
         .find(|a| a.account_key == *key)
         .ok_or_else(|| error("ACCOUNT_CATALOG_INVALID"))
 }
+/// The original stopped AccountStore maintenance path uses the very same
+/// cross-process installation shared mode lock as regular legacy SQL workers.
+/// The guard must live until the command completes; after finance.sqlite
+/// exists, no account-local backup/restore or reinitialization is valid.
+fn legacy_account_maintenance_lease(
+    root: &Path,
+    key: &AccountKey,
+) -> AgentResult<okx_execution::LegacyAccountMaintenanceLease> {
+    let account_sql = account_root(root, key).join("account.sqlite");
+    okx_execution::hold_legacy_account_maintenance(root, &account_sql)
+        .map_err(AgentError::from)
+}
+
 fn parse_key(wire: &str) -> AgentResult<AccountKey> {
     let p = wire.split(':').collect::<Vec<_>>();
     if p.len() != 3 {
@@ -190,6 +203,7 @@ pub async fn initialize_account(
         return Err(error("INITIALIZE_ID_INVALID"));
     }
     let _lease = engine_lease(root)?;
+    let _finance_mode = legacy_account_maintenance_lease(root, key)?;
     if installation(root)? != installation_id {
         return Err(error("INSTALLATION_MISMATCH"));
     }

@@ -3,6 +3,7 @@ pub mod account_store;
 pub use account_store::*;
 pub mod account_worker;
 mod finance_owner_gate;
+pub use finance_owner_gate::{LegacyAccountMaintenanceLease, hold_legacy_account_maintenance};
 pub use account_worker::{AccountStorageReadback, AccountStoreHandle};
 pub mod finance;
 pub mod risk;

@@ -1,3 +1,23 @@
+## #510 — close maintenance bypass on authority-mode gate
+
+Admin `InitializeAccount`, `BackupAccount` and `RestoreAccount`
+are stopped-Engine commands, but previously the restore/backup code could
+call original `AccountStore::open_existing` directly, bypassing the shared
+mode lease already used by the regular `AccountStoreHandle`. New
+`hold_legacy_account_maintenance` reuses the EXACT existing installation
+`authority-mode.lock`, holds a shared OS lease during the FULL stopped
+administrative operation, checks canonical installation/account identity,
+and refuses while native finance.sqlite is present. The native owner needs
+an exclusive lease and therefore cannot enter between an administrative
+preflight check and the backup/restore's SQL/file writes. This adds **no**
+Cloudflare state, no extra SQL owner, no daemon and no bespoke fencing.
+
+Direct native test proves shared maintenance excludes the unified writer,
+finance.sqlite import refuses legacy access even without a live owner,
+and a foreign root cannot borrow another account's maintenance lock.
+
+---
+
 ## #510 — runtime owner selection (actual Run/Once startup)
 
 The canonical `okx-agent Run/Once` path now checks for the installed
