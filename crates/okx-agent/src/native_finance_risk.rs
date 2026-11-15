@@ -94,7 +94,11 @@ impl NativeFinanceRisk {
             || snapshot.state.installation_id != self.installation
             || snapshot.state.campaign_id != self.campaign
             || snapshot.state.accounts.is_empty()
-            || snapshot.state.accounts.iter().any(|a| a.environment != AccountEnvironment::Real)
+            || snapshot
+                .state
+                .accounts
+                .iter()
+                .any(|a| a.environment != AccountEnvironment::Real)
         {
             return Err("FINANCE_STOPPED_OBSERVATION_SCOPE_MISMATCH".into());
         }
@@ -105,21 +109,33 @@ impl NativeFinanceRisk {
         {
             return Err("FINANCE_STOPPED_OBSERVATION_ROSTER_MISMATCH".into());
         }
-        let summary = self.owner.campaign_summary(self.campaign.clone()).await
+        let summary = self
+            .owner
+            .campaign_summary(self.campaign.clone())
+            .await
             .map_err(|e| e.to_string())?;
         if summary.policy_revision != snapshot.state.revision
-            || snapshot.state.campaign_loss_limit_usd.parse::<rust_decimal::Decimal>().ok()
+            || snapshot
+                .state
+                .campaign_loss_limit_usd
+                .parse::<rust_decimal::Decimal>()
+                .ok()
                 != summary.loss_limit_usd.parse::<rust_decimal::Decimal>().ok()
         {
             return Err("FINANCE_STOPPED_OBSERVATION_POLICY_MISMATCH".into());
         }
         for account in &snapshot.state.accounts {
-            let original = self.owner.stopped_account_policy(
-                self.campaign.clone(), account.account_key.clone()
-            ).await.map_err(|e| e.to_string())?;
+            let original = self
+                .owner
+                .stopped_account_policy(self.campaign.clone(), account.account_key.clone())
+                .await
+                .map_err(|e| e.to_string())?;
             if original.revision != account.policy_revision
                 || original.paused == account.access_enabled()
-                || original.campaign_limit_usd.parse::<rust_decimal::Decimal>().ok()
+                || original
+                    .campaign_limit_usd
+                    .parse::<rust_decimal::Decimal>()
+                    .ok()
                     != summary.loss_limit_usd.parse::<rust_decimal::Decimal>().ok()
             {
                 return Err("FINANCE_STOPPED_OBSERVATION_ACCOUNT_MISMATCH".into());

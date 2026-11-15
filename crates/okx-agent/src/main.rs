@@ -12,10 +12,10 @@ use okx_agent::{
         default_key_id, initialize_native_identity, load_native_identity, load_native_private_key,
     },
     market_bootstrap::MarketBootstrapper,
+    native_finance_risk::NativeFinanceRisk,
     query::DispatchContext,
     reference_bootstrap::bootstrap_reference,
     risk_bridge::NativeRiskClient,
-    native_finance_risk::NativeFinanceRisk,
     runtime::{EngineContext, run_engine},
     trade_service::TradeService,
 };
@@ -264,31 +264,38 @@ async fn run(cli: Cli) -> AgentResult<()> {
             // is opened. A finance.sqlite can only open via the single
             // native owner; a legacy Cloudflare finance fallback is never
             // constructed for the same installation.
-            let finance_present = match std::fs::symlink_metadata(
-                config.root.join("finance").join("finance.sqlite")
-            ) {
-                Ok(_) => true,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-                Err(_) => return Err(AgentError::FinancialCaptureTask(
-                    "FINANCE_AUTHORITY_STATUS_UNAVAILABLE".into()
-                )),
-            };
+            let finance_present =
+                match std::fs::symlink_metadata(config.root.join("finance").join("finance.sqlite"))
+                {
+                    Ok(_) => true,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(_) => {
+                        return Err(AgentError::FinancialCaptureTask(
+                            "FINANCE_AUTHORITY_STATUS_UNAVAILABLE".into(),
+                        ));
+                    }
+                };
             let (accounts, native_owner) = if finance_present {
-                let campaign = stopped_finance_campaign.as_deref()
-                    .ok_or_else(|| AgentError::FinancialCaptureTask(
-                        "FINANCE_STOPPED_CAMPAIGN_REQUIRED".into()
-                    ))?;
+                let campaign = stopped_finance_campaign.as_deref().ok_or_else(|| {
+                    AgentError::FinancialCaptureTask("FINANCE_STOPPED_CAMPAIGN_REQUIRED".into())
+                })?;
                 let (registry, owner) = AccountRuntimeRegistry::open_stopped_finance(
-                    &config.root, budget.clone(), campaign
-                ).await?;
+                    &config.root,
+                    budget.clone(),
+                    campaign,
+                )
+                .await?;
                 (Arc::new(registry), Some(owner))
             } else {
                 if stopped_finance_campaign.is_some() {
                     return Err(AgentError::FinancialCaptureTask(
-                        "FINANCE_STOPPED_IMPORT_REQUIRED".into()
+                        "FINANCE_STOPPED_IMPORT_REQUIRED".into(),
                     ));
                 }
-                (Arc::new(AccountRuntimeRegistry::open(&config.root, budget.clone()).await?), None)
+                (
+                    Arc::new(AccountRuntimeRegistry::open(&config.root, budget.clone()).await?),
+                    None,
+                )
             };
             let public_client = OkxPublicClient::with_rate_budget(env, budget.clone())?;
             let reference = bootstrap_reference(public_client.clone()).await?;
@@ -300,11 +307,14 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let (risk_tx, risk) = tokio::sync::mpsc::channel(32);
             let risk_client = match native_owner {
                 Some(owner) => {
-                    let campaign = stopped_finance_campaign
-                        .expect("stopped finance already required above");
+                    let campaign =
+                        stopped_finance_campaign.expect("stopped finance already required above");
                     let backend = NativeFinanceRisk::new(
-                        owner, accounts.installation_id().to_owned(), campaign,
-                    ).map_err(|reason| AgentError::FinancialCaptureTask(reason.into()))?;
+                        owner,
+                        accounts.installation_id().to_owned(),
+                        campaign,
+                    )
+                    .map_err(|reason| AgentError::FinancialCaptureTask(reason.into()))?;
                     NativeRiskClient::local_stopped(backend)
                 }
                 None => NativeRiskClient::new(risk_tx),

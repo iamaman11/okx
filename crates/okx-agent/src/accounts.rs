@@ -7,8 +7,8 @@ use crate::{
     okx_credentials::{NamedAccountCredentials, load_native_account_credentials},
 };
 use okx_api::{AccountApi, Credentials, OkxEnvironment, OkxRestClient, RateBudget};
-use okx_execution::{AccountMeta, AccountStoreHandle, OpeningSnapshot};
 use okx_execution::account_worker::UnifiedFinanceHandle;
+use okx_execution::{AccountMeta, AccountStoreHandle, OpeningSnapshot};
 use okx_protocol::{
     account_catalog_proto,
     accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
@@ -315,20 +315,27 @@ impl AccountRuntimeRegistry {
         }
         let catalog = account_catalog_proto::load(root)?;
         if catalog.accounts.is_empty()
-            || catalog.accounts.iter().any(|c| c.account_key.environment != Environment::Real)
+            || catalog
+                .accounts
+                .iter()
+                .any(|c| c.account_key.environment != Environment::Real)
         {
             return Err(AgentError::FinancialCaptureTask(
                 "FINANCE_STOPPED_CATALOG_COHORT_INVALID".into(),
             ));
         }
         let roster = catalog
-            .accounts.iter().map(|c| c.account_key.wire()).collect::<Vec<_>>();
+            .accounts
+            .iter()
+            .map(|c| c.account_key.wire())
+            .collect::<Vec<_>>();
         let owner = UnifiedFinanceHandle::open_stopped_import(
             root.canonicalize()?,
             catalog.installation_id.clone(),
             roster,
             vec![campaign.to_owned()],
-        ).await?;
+        )
+        .await?;
         if owner.inventory().await?.state != "OFFLINE_NOT_AUTHORIZED" {
             return Err(AgentError::FinancialCaptureTask(
                 "FINANCE_STOPPED_MANIFEST_INVALID".into(),
@@ -339,7 +346,9 @@ impl AccountRuntimeRegistry {
             installation_id: catalog.installation_id,
             routes: RwLock::new(BTreeMap::new()),
             configurations: RwLock::new(
-                catalog.accounts.into_iter()
+                catalog
+                    .accounts
+                    .into_iter()
                     .map(|c| (c.account_key.wire(), c))
                     .collect(),
             ),

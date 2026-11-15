@@ -37,7 +37,9 @@ impl NativeRiskClient {
         }
     }
     pub fn local_stopped(backend: crate::native_finance_risk::NativeFinanceRisk) -> Self {
-        Self { route: RiskRoute::LocalStopped(backend) }
+        Self {
+            route: RiskRoute::LocalStopped(backend),
+        }
     }
 
     /// The native route applies the FULL signed governance roster in its
@@ -69,7 +71,7 @@ impl NativeRiskClient {
         }
         let tx = match &self.route {
             RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
-                return backend.request(command).await
+                return backend.request(command).await;
             }
             RiskRoute::Cloudflare(sender) => sender,
         };

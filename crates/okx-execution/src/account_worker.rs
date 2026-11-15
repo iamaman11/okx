@@ -1669,20 +1669,23 @@ impl UnifiedFinanceHandle {
                 "SELECT revision,paused,campaign_id,campaign_limit
                  FROM account_policy WHERE installation_id=?1 AND account_key=?2 AND singleton=1",
                 rusqlite::params![installation, &account],
-                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?;
             tx.commit()?;
             if row.2 != campaign || !(0..=1).contains(&row.1) {
-                return Err(StoreError::Invalid("UNIFIED_STOPPED_POLICY_IDENTITY_MISMATCH"));
+                return Err(StoreError::Invalid(
+                    "UNIFIED_STOPPED_POLICY_IDENTITY_MISMATCH",
+                ));
             }
             Ok(UnifiedFinanceAccountPolicyReadback {
                 account_key: account,
-                revision: u64::try_from(row.0).map_err(|_|
-                    StoreError::Invalid("UNIFIED_STOPPED_POLICY_REVISION_INVALID"))?,
+                revision: u64::try_from(row.0)
+                    .map_err(|_| StoreError::Invalid("UNIFIED_STOPPED_POLICY_REVISION_INVALID"))?,
                 paused: row.1 == 1,
                 campaign_limit_usd: row.3,
             })
-        }).await
+        })
+        .await
     }
 
     /// Read-only original AccountStore intent (and immutable full plan)
