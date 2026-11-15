@@ -860,8 +860,7 @@ fn require_verified_live_finance_authority(
     Err(StoreError::Invalid("FINANCE_AUTHORITY_STATE_UNVERIFIED"))
 }
 
-#[derive(Debug, PartialEq, Eq)]
-#[derive(serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub struct UnifiedFinanceInventory {
     pub accounts: i64,
     pub campaigns: i64,
@@ -869,8 +868,7 @@ pub struct UnifiedFinanceInventory {
 }
 
 /// Exact original RiskBook projection, not a second financial calculation.
-#[derive(Debug, PartialEq, Eq)]
-#[derive(serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub struct UnifiedFinanceCampaignSummary {
     pub campaign: String,
     pub book_sequence: u64,

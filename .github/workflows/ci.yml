@@ -191,8 +191,11 @@ jobs:
       # 74 filtered risk contracts alone cannot prove zero regressions.
       - name: Regression of complete original execution Rust library
         run: cargo test --locked -p okx-execution --lib
-      - name: Native startup refuses old Cloudflare finance when unified import is staged
-        run: cargo test --locked -p okx-agent --lib finance_staged_import_never_falls_back_to_old_trade_or_cloudflare_finance -- --nocapture
+      - name: Native startup and stopped unified finance readback (no trading)
+        run: |
+          cargo test --locked -p okx-agent --lib finance_staged_import_never_falls_back_to_old_trade_or_cloudflare_finance -- --nocapture
+          cargo test --locked -p okx-agent --lib finance_inspection::tests -- --nocapture
+          cargo test --locked -p okx-agent --bin okx-agent --no-run
 
   architecture:
     name: architecture
