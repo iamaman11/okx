@@ -809,5 +809,6 @@ census.occupied[0].cumulative_loss_usd="17";
 for(let i=0;i<1_000_000;i++)sa.map.set("risk_entry_v2:tombstone_"+i,{state:"RELEASED",key:i});
 let reads=0;const original=sa.get.bind(sa);sa.get=async(k:string)=>{reads++;return original(k);};
 const started=performance.now();check((await reserve()).status==="DENIED","posted retry cannot authorize");
-check(reads<=7,"million history bounded point reads");
+// One additional bounded read is the irreversible legacy-finance retirement marker.
+check(reads<=8,"million history bounded point reads");
 console.log(`million_history_hot_read PASS records=1000000 reads=${reads} elapsed_ms=${(performance.now()-started).toFixed(3)}`);

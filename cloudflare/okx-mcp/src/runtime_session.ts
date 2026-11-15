@@ -1,3 +1,4 @@
+import {disableLegacyFinance, inspectLegacyFinanceCutover} from "./legacy_finance_cutover.js";
 import { executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
 import { initializeGovernance, setAccountLimits, governanceRequest, lowerCampaignLimit, enrollObservedAccount, stopNewRealRisk, setAccountPause, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
 import {validGovernance,accessEnabled,validLimits} from "./account_governance.js";
@@ -21,6 +22,7 @@ import {
   sha256Hex,
   type SocketAttachment,
   transportFailure,
+  workerReleaseSourceTree,
 } from "./shared.js";
 
 export class RuntimeSession {
@@ -46,6 +48,21 @@ export class RuntimeSession {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
+    if(url.pathname==="/installation/disable-legacy-finance"&&request.method==="POST"){
+      const text=await request.text();
+      if(text.length>1024)return Response.json({reason:"REQUEST_TOO_LARGE"},{status:413});
+      let raw:unknown;try{raw=JSON.parse(text);}catch{return Response.json({reason:"INVALID_REQUEST"},{status:400});}
+      const deployedTree=workerReleaseSourceTree(this.env);
+      if(deployedTree===null||raw===null||typeof raw!=="object"||
+        (raw as Record<string,unknown>).source_tree!==deployedTree)
+        return Response.json({reason:"LEGACY_FINANCE_DEPLOYMENT_UNVERIFIED"},{status:409});
+      const result=await disableLegacyFinance(this.state.storage,raw,Date.now());
+      return Response.json(result.body,{status:result.status,headers:{"cache-control":"no-store"}});
+    }
+    if(url.pathname==="/installation/legacy-finance-readback"&&request.method==="GET"){
+      const result=await inspectLegacyFinanceCutover(this.state.storage);
+      return Response.json(result.body,{status:result.status,headers:{"cache-control":"no-store"}});
+    }
     if(url.pathname==="/installation/inspect"&&request.method==="GET"){
       // Owner-authorized readback of the existing DO; never return account names, keys or amounts.
       const governance:unknown=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);

@@ -209,6 +209,13 @@ jobs:
             grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$log"
           done
 
+      - name: Verify stopped legacy finance boundary (isolated, no deployment)
+        working-directory: cloudflare/okx-mcp
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          node scripts/test-legacy-finance-cutover.mjs
+
   architecture:
     name: architecture
     needs: classify

@@ -1,3 +1,4 @@
+import {legacyFinanceDisabled, LEGACY_FINANCE_DISABLED} from "./legacy_finance_cutover.js";
 import {validGovernance,projectRiskPolicy,accessEnabled,GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 import {amount,units,beginRiskPost,readRiskBook,inspectRisk,reserveRisk,transitionRisk,
   type CompleteRiskCensus,type NativeSessionRiskProof,type CausalPostProof,type RiskReservation,
@@ -65,6 +66,7 @@ export async function handleNativeRiskCommand(
   if(!isObject(raw)||raw.schema!==COMMAND_SCHEMA||!TOKEN.test(id)
     ||!isObject(raw.action)||!Number.isSafeInteger(now_ms)||now_ms<=0)
     return deny(id,"INVALID_TYPED_RISK_COMMAND");
+  if(await legacyFinanceDisabled(storage))return deny(id,LEGACY_FINANCE_DISABLED);
   const installation=await storage.get(GOVERNANCE_STORAGE_KEY);
   if(!validGovernance(installation)||raw.installation_id!==installation.installation_id)return deny(id,"INSTALLATION_ID_MISMATCH");
   const a=raw.action;

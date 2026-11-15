@@ -1,3 +1,4 @@
+import {legacyFinanceDisabled, LEGACY_FINANCE_DISABLED} from "./legacy_finance_cutover.js";
 import {GOVERNANCE_STORAGE_KEY,validGovernance,validLimits,accessEnabled,
   reviseGovernance,type GovernanceUpdate,type Governance,type Account,type Limits} from "./account_governance.js";
 import {initializeRiskBook,lowerRiskBookLimit,lowerCampaignEntryLimit,units} from "./risk_book.js";
@@ -30,6 +31,7 @@ export async function initializeGovernance(storage:any,configuration:Governance,
     return fail(400,"INVALID_INSTALLATION_CONFIGURATION");
   const bodyHash=lifecycle?await digest({configuration,...lifecycle}):null;
   return storage.transaction(async(tx:any)=>{
+    if(await legacyFinanceDisabled(tx))return fail(409,LEGACY_FINANCE_DISABLED);
     const receiptKey=lifecycle?"installation_operation:"+lifecycle.operation_id:null;
     const receipt=receiptKey?await tx.get(receiptKey):undefined;
     if(receipt!==undefined)return receipt.hash===bodyHash?receipt.reply:fail(409,"IDEMPOTENCY_CONFLICT");
@@ -65,6 +67,7 @@ async function mutate(storage:any,key:unknown,input:unknown,fn:(policy:Governanc
   if(!operationKey(key))return fail(400,"IDEMPOTENCY_KEY_REQUIRED");
   const hash=await digest(input),receiptKey="access_operation:"+key;
   return storage.transaction(async(tx:any)=>{
+    if(await legacyFinanceDisabled(tx))return fail(409,LEGACY_FINANCE_DISABLED);
     const receipt=await tx.get(receiptKey);
     if(receipt!==undefined)return receipt.hash===hash?receipt.reply:fail(409,"IDEMPOTENCY_CONFLICT");
     const previous:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
@@ -109,6 +112,7 @@ export async function lowerCampaignLimit(storage:any,raw:unknown):Promise<Reply>
  const requested=units(requestedLimit);if(requested===null||requested<=0n)return fail(400,"INVALID_CAMPAIGN_LIMIT_REQUEST");
  const hash=await digest(raw),receiptKey="campaign_limit_operation:"+raw.idempotency_key;
  return storage.transaction(async(tx:any)=>{
+    if(await legacyFinanceDisabled(tx))return fail(409,LEGACY_FINANCE_DISABLED);
    const receipt=await tx.get(receiptKey);if(receipt!==undefined)return receipt.hash===hash?receipt.reply:fail(409,"IDEMPOTENCY_CONFLICT");
    const previous:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
    if(!validGovernance(previous))return fail(503,"INSTALLATION_ACCESS_MISSING_OR_CORRUPT");

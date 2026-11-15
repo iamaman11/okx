@@ -1,4 +1,4 @@
-## #510 - Native Status source/settlement/protection integration candidate
+## #510 - Native Status and stopped legacy finance boundary (Draft / NO-GO)
 
 Baseline b08a24b6; one parent-integrated batch with code subagents. Supersedes
 that checkpoint's list of unported Status operations, NOT its NO-GO decision.
@@ -46,6 +46,45 @@ Local evidence after this batch:
   corrected; no FK, immutable-plan, source or risk guard was relaxed.
 - Existing short CI now includes cleanup/terminal/unsent regressions and rejects
   zero matching tests. GitHub run for THIS candidate still needs verification.
+
+RB09 server boundary implemented after Status commit 65c4e353:
+- Original RuntimeSession/DO owns an irreversible retirement receipt; authenticated
+  owner-only disable request must match the actual deployment source tree.
+- Original RiskBook and policy mutation transactions check retirement inside
+  their transaction; all nine WSS risk actions deny after retirement. No second
+  budget, coordinator, grant service or recurring Rust hot-path RPC was added.
+- Readback exports ALL original durable keys, including unknown old formats,
+  policy receipts and obligations, except transport generation and retirement
+  itself. Pagination is complete or fails; SHA and count are independently checked.
+- Exact replay retains original receipt; conflicting/corrupt markers fail closed.
+  Snapshot is RAW source evidence, NEVER an EMPTY or Rust activation assertion.
+- npm run check: 12 Worker test files, TypeScript, S2 and release bindings PASS.
+- node scripts/test-legacy-finance-cutover.mjs: physical workerd + persisted DO
+  SQLite cold reopen PASS, 18 native WSS denials across both lifetimes, independent
+  snapshot SHA/readback, owner auth and deployment mismatch negatives. Last local
+  run 892ms INCLUDING bundle/setup/reopen/teardown; no P95/full-matrix claim.
+- Existing draft CI runs this bounded witness and Worker regressions, not another
+  full historical Native/Worker campaign. No cloud deployment was performed.
+- Rollback to pre-guard Worker code is UNSAFE/UNSUPPORTED. The durable marker
+  cannot stop old code that ignores it; permitted deployment rollback must retain
+  the guard. Same-code cold reopen is proven, arbitrary rollback is NOT proven.
+
+Exact next production blocker (not a timing/fixture hypothesis):
+The present stopped importer takes original campaign SQLite v5, NOT the TS DO
+snapshot. TS RiskEntry lacks original native_incarnation, Reserve book_sequence,
+BeginPost post_sequence/post_source_digest/post_existing_occupied_usdt and native
+request_digest. Later transition_proof may overwrite the earlier proof. Native
+v5 integrity requires those values. Do NOT synthesize incarnation, sequence or
+hashes. Support explicit imported legacy provenance under the SAME SQL owner,
+recover missing facts only from original account durable records, and reject
+unsupported history; retain all money/UNKNOWN and original immutable snapshot.
+A nonempty legacy source is not an empty new campaign. This mapping/parity is
+still NOT_PROVEN; server disable alone MUST NOT activate Rust.
+Active reopen is also unfinished: offline inspection compares current rows to
+initial import digest. Before live activation, separate immutable import receipt
+from active integrity/roster/campaign checks so the first valid commit does not
+break restart. Activation must bind verified stopped source + complete import;
+never authorize it by a caller-supplied boolean or plain digest.
 
 Still NOT accepted: positive fully activated Native Engine Execute -> Status ->
 Close, concurrency/lost-ACK/reopen on that real runtime composition, RB09 isolated

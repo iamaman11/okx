@@ -1,3 +1,4 @@
+import {legacyFinanceDisabled, LEGACY_FINANCE_DISABLED} from "./legacy_finance_cutover.js";
 import {validGovernance,projectRiskPolicy,accessEnabled,GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 
 /**
@@ -293,6 +294,7 @@ export async function openingDigest(source:CampaignEntryOpeningSource):Promise<s
  * attestation. No production importer is connected until that exists.
  */
 export async function installCampaignEntryProof(tx:any,source:CampaignEntryOpeningSource):Promise<boolean>{
+  if(await legacyFinanceDisabled(tx))return false;
   const meta:RiskMeta=await tx.get(KEY);
   const governance:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
   if(!validMeta(meta)||!validGovernance(governance)||
@@ -347,6 +349,7 @@ function validMeta(v:any):v is RiskMeta {return !!v&&v.schema===RISK_BOOK_SCHEMA
 export async function initializeRiskBook(
  tx:any,installation_id:string,campaign_origin?:CampaignOrigin
 ):Promise<void>{
+ if(await legacyFinanceDisabled(tx))throw Error(LEGACY_FINANCE_DISABLED);
  if(await tx.get(KEY)!==undefined)throw Error("RISK_ALREADY_INITIALIZED");
  if(campaign_origin!==undefined&&!validCampaignOrigin(campaign_origin,installation_id))
    throw Error("CAMPAIGN_ORIGIN_INVALID");
@@ -357,6 +360,7 @@ export async function initializeRiskBook(
 }
 /** A campaign ceiling may only be lowered. Existing loss and held risk remain charged. */
 export async function lowerRiskBookLimit(tx:any,limit:string):Promise<boolean>{
+ if(await legacyFinanceDisabled(tx))return false;
  const meta=await tx.get(KEY),next=units(limit);
  if(!validMeta(meta)||next===null||next<=0n||next>=units(meta.campaign_limit_usd)!||next<units(meta.consumed_loss_usd)!+units(meta.occupied_usd)!)return false;
  await tx.put(KEY,{...meta,campaign_limit_usd:limit,sequence:meta.sequence+1});return true;
@@ -368,6 +372,7 @@ export async function lowerRiskBookLimit(tx:any,limit:string):Promise<boolean>{
 export async function lowerCampaignEntryLimit(
   tx:any,previousCap:string|undefined,nextCap:string|undefined
 ):Promise<boolean>{
+  if(await legacyFinanceDisabled(tx))return false;
   const meta:RiskMeta=await tx.get(KEY);
   if(!validMeta(meta)||!nextCap||units(nextCap)===null||units(nextCap)!<=0n||
      (previousCap!==undefined &&
@@ -522,6 +527,7 @@ export async function reserveRisk(
   const externallyOccupied = censusRisk(census, policy, input.now_ms);
   if (externallyOccupied === null) return {status:"DENIED", reason:"COMPLETE_ACCOUNT_CENSUS_UNPROVEN"};
   return storage.transaction(async (tx: any): Promise<RiskDecision> => {
+    if(await legacyFinanceDisabled(tx))return {status:"DENIED",reason:LEGACY_FINANCE_DISABLED};
     // One transaction snapshots BOTH central policy and risk occupancy.
     // A caller-supplied policy (or a snapshot from a prior CAS revision)
     // can never mint risk capacity independently of the DO's persisted grant.
@@ -669,6 +675,7 @@ export async function releaseUnsentRisk(
     !Number.isSafeInteger(generation)||generation<1)
     return {status:"DENIED",reason:"INVALID_UNSENT_SQL_PROOF"};
   return storage.transaction(async(tx:any)=>{
+    if(await legacyFinanceDisabled(tx))return {status:"DENIED" as const,reason:LEGACY_FINANCE_DISABLED};
     const meta=await tx.get(KEY);
     if(!validMeta(meta))return {status:"DENIED" as const,reason:"RISK_BOOK_MISSING_OR_CORRUPT"};
     if(await tx.get("generation")!==generation||meta.sequence!==expected_sequence)
@@ -726,6 +733,7 @@ export async function transitionRisk(
     RELEASED:[],
   };
   return storage.transaction(async (tx:any) => {
+    if(await legacyFinanceDisabled(tx))return {status:"DENIED" as const,reason:LEGACY_FINANCE_DISABLED};
     const meta=await tx.get(KEY);
     if(!validMeta(meta))return {status:"DENIED" as const,reason:"RISK_BOOK_MISSING_OR_CORRUPT"};
     if(await tx.get("generation")!==native.connection_generation||meta.sequence!==native.expected_book_sequence)return {status:"DENIED" as const,reason:"STALE_SESSION_OR_BOOK_SEQUENCE"};
@@ -808,6 +816,7 @@ export async function settleEntrySpend(
      !Number.isSafeInteger(native.connection_generation)||native.connection_generation<1)
     return {status:"DENIED",reason:"ENTRY_SETTLEMENT_INVALID"};
   return storage.transaction(async(tx:any)=>{
+    if(await legacyFinanceDisabled(tx))return {status:"DENIED" as const,reason:LEGACY_FINANCE_DISABLED};
     const meta:RiskMeta=await tx.get(KEY);
     const entry:RiskEntry|undefined=await tx.get(entryKey(key));
     if(!validMeta(meta)||!meta.entry_budget||!entry||!validEntry(entry)||
@@ -911,6 +920,7 @@ export async function beginRiskPost(
     !validPostProof(native.causal_proof,native.census,key))
     return {status:"DENIED",reason:"INVALID_NATIVE_POST_FENCE"};
   return storage.transaction(async(tx:any)=>{
+    if(await legacyFinanceDisabled(tx))return {status:"DENIED" as const,reason:LEGACY_FINANCE_DISABLED};
     const generation:unknown=await tx.get("generation");
     if(generation!==native.connection_generation)
       return {status:"DENIED" as const,reason:"STALE_RUNTIME_GENERATION"};
