@@ -737,11 +737,7 @@ fn apply_original_unified_finance_inner(
             })
         }
         UnifiedFinanceWrite::ApplyPolicy { policy } => {
-            AccountStore::apply_unified_campaign_policy_sql_transaction(
-                tx,
-                installation,
-                &policy,
-            )?;
+            AccountStore::apply_unified_campaign_policy_sql_transaction(tx, installation, &policy)?;
             Ok(UnifiedFinanceWriteReceipt::PolicyApplied)
         }
         UnifiedFinanceWrite::InstallEntryOpening {
@@ -1113,10 +1109,7 @@ impl UnifiedFinanceHandle {
     /// The original AccountStore account-policies and RiskBook revision are
     /// one local transaction. No per-account owner, second COMMIT or Cloudflare
     /// finance write. Before accepted RB09 this remains strictly fail-closed.
-    pub async fn apply_governance_policy(
-        &self,
-        policy: UnifiedFinancePolicy,
-    ) -> StoreResult<()> {
+    pub async fn apply_governance_policy(&self, policy: UnifiedFinancePolicy) -> StoreResult<()> {
         match self
             .apply_financial_write(UnifiedFinanceWrite::ApplyPolicy { policy })
             .await?

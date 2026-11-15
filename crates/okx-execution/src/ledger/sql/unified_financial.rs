@@ -675,7 +675,6 @@ pub(in crate::account_store) fn import_legacy_partial_source(
     Ok(())
 }
 
-
 /// The ORIGINAL account-policy relation, now with mandatory installation +
 /// account scope. This is one transaction with RiskBook policy revision,
 /// not a second policy store. Reject a partial cohort and preserve the
@@ -701,8 +700,8 @@ impl crate::AccountStore {
         {
             return Err(invalid());
         }
-        let proposed = RiskAmount::parse_positive(&policy.campaign_loss_limit_usd)
-            .map_err(|_| invalid())?;
+        let proposed =
+            RiskAmount::parse_positive(&policy.campaign_loss_limit_usd).map_err(|_| invalid())?;
         // The registered RiskBook roster is authoritative. An authenticated
         // policy frame with a subset of accounts MUST NOT silently unpause
         // or increase budget for the subset alone.
@@ -764,8 +763,7 @@ impl crate::AccountStore {
             if old_campaign != "unconfigured" && old_campaign != policy.campaign_id {
                 return Err(StoreError::Invalid("CAMPAIGN_ID_IMMUTABLE"));
             }
-            let same_limit =
-                RiskAmount::parse(&old_limit).map_err(|_| invalid())? == proposed;
+            let same_limit = RiskAmount::parse(&old_limit).map_err(|_| invalid())? == proposed;
             if revision < old
                 || revision == old
                     && (old_paused != account.paused

@@ -13180,11 +13180,9 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     missing_account.accounts.pop();
     assert!(matches!(
         owner
-            .trial_financial_write(
-                crate::account_worker::UnifiedFinanceWrite::ApplyPolicy {
-                    policy: missing_account,
-                }
-            )
+            .trial_financial_write(crate::account_worker::UnifiedFinanceWrite::ApplyPolicy {
+                policy: missing_account,
+            })
             .await,
         Err(StoreError::Invalid("UNIFIED_POLICY_COHORT_MISMATCH"))
     ));
@@ -13192,9 +13190,9 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     bad_limit.campaign_loss_limit_usd = "101".into();
     assert!(matches!(
         owner
-            .trial_financial_write(
-                crate::account_worker::UnifiedFinanceWrite::ApplyPolicy { policy: bad_limit }
-            )
+            .trial_financial_write(crate::account_worker::UnifiedFinanceWrite::ApplyPolicy {
+                policy: bad_limit
+            })
             .await,
         Err(StoreError::Invalid("UNIFIED_POLICY_LIMIT_CHANGE_UNPROVEN"))
     ));
