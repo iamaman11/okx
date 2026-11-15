@@ -2,7 +2,10 @@
 //! The local backend never forwards to Cloudflare and never synthesizes a
 //! budget/venue grant. Trading mutations require independently accepted
 //! RB09 activation and a fully source-wired AccountStore/TradeService.
-use okx_execution::account_worker::UnifiedFinanceHandle;
+use okx_execution::account_worker::{
+    UnifiedFinanceHandle, UnifiedFinancePolicy, UnifiedFinancePolicyAccount,
+};
+use okx_protocol::account_governance::{AccountEnvironment, CentralGovernanceSnapshot};
 use okx_protocol::risk_authority::{
     RISK_RESULT_SCHEMA_V1, RiskAccountBudget, RiskBudgetSnapshot, RiskCommand, RiskCommandAction,
     RiskDecisionStatus, RiskReservationState, RiskResult,
@@ -29,6 +32,52 @@ impl NativeFinanceRisk {
             installation,
             campaign,
         })
+    }
+
+    /// Apply original native AccountStore account-policy rows and RiskBook
+    /// campaign revision in ONE caller-owned SQL transaction, not one loop
+    /// over legacy account writers. Until RB09 this is denied by the same
+    /// finance manifest gate as every other financial COMMIT.
+    pub async fn apply_governance(
+        &self,
+        snapshot: &CentralGovernanceSnapshot,
+    ) -> Result<(), String> {
+        if !snapshot.valid()
+            || snapshot.state.installation_id != self.installation
+            || snapshot.state.campaign_id != self.campaign
+            || snapshot.state.accounts.is_empty()
+        {
+            return Err("UNIFIED_GOVERNANCE_IDENTITY_UNVERIFIED".into());
+        }
+        // The original RiskBook campaign is a REAL cohort. A demo policy
+        // cannot be silently ignored or rewritten as a real account row.
+        if snapshot
+            .state
+            .accounts
+            .iter()
+            .any(|account| account.environment != AccountEnvironment::Real)
+        {
+            return Err("UNIFIED_GOVERNANCE_DEMO_COHORT_UNSUPPORTED".into());
+        }
+        let mut accounts = snapshot
+            .state
+            .accounts
+            .iter()
+            .map(|account| UnifiedFinancePolicyAccount {
+                account_key: account.account_key.clone(),
+                paused: !account.access_enabled(),
+            })
+            .collect::<Vec<_>>();
+        accounts.sort_by(|a, b| a.account_key.cmp(&b.account_key));
+        self.owner
+            .apply_governance_policy(UnifiedFinancePolicy {
+                campaign_id: self.campaign.clone(),
+                policy_revision: snapshot.state.revision,
+                campaign_loss_limit_usd: snapshot.state.campaign_loss_limit_usd.clone(),
+                accounts,
+            })
+            .await
+            .map_err(|error| error.to_string())
     }
 
     pub async fn request(&self, command: RiskCommand) -> Result<RiskResult, &'static str> {

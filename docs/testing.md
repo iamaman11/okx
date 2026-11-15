@@ -1,3 +1,26 @@
+## #510 r4.1 — native whole-cohort governance route
+
+`NativeFinanceRisk::apply_governance` converts an already validated,
+installation/campaign-bound signed `CentralGovernanceSnapshot` into a
+sorted, full native REAL-account policy roster. It denies unsupported mixed
+Demo cohorts; it never silently drops a policy account. The existing
+`TradeService::update_governance` chooses the native policy path when its
+`NativeRiskClient` is bound to the local finance SQL owner and returns
+immediately on either success or failure: **no per-account legacy writer
+fallback after a native rejection**. That path uses the already implemented
+`AccountStore::apply_unified_campaign_policy_sql_transaction` to change
+every original `account_policy` row plus RiskBook policy revision under ONE
+`BEGIN IMMEDIATE/COMMIT`. The still-unmigrated legacy startup retains its
+historical per-account path and is NOT run in parallel with the native owner.
+
+An offline test now exercises the SUCCESSFUL original whole-cohort policy
+domain transaction while always ROLLING BACK, alongside missing-cohort and
+unproven-ceiling negative cases. RB09 activation and production account source
+migration are still required: this is a source-wiring step, not final 9/9
+or enabled Real/Demo trading.
+
+---
+
 ## #510 r4.1 — local RiskCommand ingress, original SQL readback
 
 The existing `NativeRiskClient` now has an explicit local Rust route type

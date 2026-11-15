@@ -13176,6 +13176,18 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
     ));
     assert_eq!(owner.inventory().await.unwrap(), inventory);
+    assert!(matches!(
+        owner
+            .trial_financial_write(crate::account_worker::UnifiedFinanceWrite::ApplyPolicy {
+                policy: policy.clone(),
+            })
+            .await,
+        Ok(crate::account_worker::UnifiedFinanceWriteReceipt::PolicyApplied)
+    ));
+    // A successful direct original Rust policy transaction in a stopped
+    // import is still a ROLLBACK. Real SQL state remains byte-identical
+    // and no new campaign revision or budget is minted.
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
     let mut missing_account = policy.clone();
     missing_account.accounts.pop();
     assert!(matches!(

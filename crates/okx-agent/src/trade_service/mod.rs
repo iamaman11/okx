@@ -264,6 +264,14 @@ impl TradeService {
         // ceiling for every currently connected account before returning the
         // frame acknowledgement, so a restart or read-only diagnostic cannot
         // retain an older ceiling until somebody submits a trade.
+        // #510: once TradeService is constructed with the new LOCAL finance
+        // route, the original account_policy and RiskBook revision have ONE
+        // SQL transaction owner. Native rejection is FINAL, never a fallback
+        // to the legacy per-account writer loop.
+        if self.risk.apply_native_governance(snapshot).await? {
+            *latest = Some(snapshot.clone());
+            return Ok(());
+        }
         let limit = dec(&snapshot.state.campaign_loss_limit_usd)?;
         for account in &snapshot.state.accounts {
             let Some(resources) = self.accounts.resolve(&account.account_key).await else {

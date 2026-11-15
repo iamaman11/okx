@@ -33,6 +33,23 @@ impl NativeRiskClient {
             route: RiskRoute::Local(backend),
         }
     }
+    /// The native route applies the FULL signed governance roster in its
+    /// single SQL COMMIT; it must never fall back to legacy per-account SQL
+    /// if the native gate rejects. False selects the still-unswitched
+    /// legacy installation only.
+    pub async fn apply_native_governance(
+        &self,
+        snapshot: &okx_protocol::account_governance::CentralGovernanceSnapshot,
+    ) -> Result<bool, String> {
+        match &self.route {
+            RiskRoute::Cloudflare(_) => Ok(false),
+            RiskRoute::Local(backend) => {
+                backend.apply_governance(snapshot).await?;
+                Ok(true)
+            }
+        }
+    }
+
     pub async fn request(&self, command: RiskCommand) -> Result<RiskResult, &'static str> {
         if !command.valid() {
             return Err("INVALID_RISK_COMMAND");
