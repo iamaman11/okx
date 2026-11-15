@@ -1,3 +1,28 @@
+## #510 — explicit unified finance responsibilities (15 Nov 2026)
+
+The installation financial owner was moved out of account_worker.rs into
+its private unified subtree. The existing public account_worker API remains
+an explicit re-export; the same Connection, FIFO, transaction dispatcher,
+authority gate and original receipt readers are used. No new backend, writer,
+activation mode or monetary algorithm was introduced.
+
+Owner lookup:
+- unified/mod.rs: command/result/readback types and narrow facade (240 lines);
+- unified/owner.rs: queue, connection and shutdown lifetime (594, including queue tests);
+- unified/readback.rs: committed-state queries (209);
+- unified/sources.rs: original SQL receipt validation (264);
+- unified/transaction.rs: atomic command dispatch and activation gate (234).
+
+Local Windows regression: full execution library 258 PASS, 0 FAIL,
+2 ignored, execution 6.12s after build. Architecture self-test/guard,
+rustfmt and diff checks PASS. Ignored tests are not proof. Agent all-target
+cargo check is recorded separately in the accompanying implementation report.
+Parent bf4bf2d0 also passed canonical Draft CI 43673703720; full Windows
+T09/T10 was SKIPPED, not accepted. This restructuring does not close RB01–16
+or authorize activation; source/9-action completion and RB09 remain required.
+
+---
+
 ## #510 — settlement domain extraction and diagnostic reason preservation (15 Nov 2026)
 
 The production SQL settlement transaction now calls
