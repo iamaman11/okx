@@ -4,9 +4,9 @@ use okx_protocol::risk_authority::*;
 impl NativeFinanceRisk {
     pub(crate) async fn install_produced_opening(
         &self,
-        command: RiskCommand,
-        census: NativeRiskCensus,
+        packet: crate::trade_service::ProducedOpening,
     ) -> Result<RiskResult, &'static str> {
+        let (command, census) = packet.into_parts();
         if !command.valid() || !census.valid() || command.installation_id != self.installation {
             return Err("NATIVE_OPENING_PRODUCER_INVALID");
         }

@@ -1,3 +1,29 @@
+## #510 - Native opening packet retention and actual stopped-owner gate witness
+
+NativeFinanceRisk::install_produced_opening now consumes ProducedOpening itself,
+not separately supplied wire command/census arguments. The internal producer
+packet remains privately constructed by TradeService after its actual cohort
+read. NativeRiskClient passes it intact to Local/LocalStopped and only extracts
+the command for the unchanged legacy transport route.
+
+The original real stopped-import owner/lock/reopen contract now calls the public
+install_reported_opening API with manually constructed DATA DTOs. It must return
+FINANCE_CUTOVER_NOT_ACCEPTED before any opening/source mutation, leave the exact
+campaign summary unchanged and retain OFFLINE_NOT_AUTHORIZED. The same original
+contract continues to verify import integrity/reopen/exclusive OS owner behavior.
+This proves the stopped gate only; input DTOs do not prove live observation
+origin, and a future activated API still needs authenticated producer acceptance.
+
+Target owner test: 1 PASS, 0 FAIL, 0.71s after build. Full execution regression:
+271 PASS, 0 FAIL, 2 ignored, 7.42s after build. Agent all-target check and
+architecture/negative guard, format/diff PASS. No Agent test binary rebuild or
+full GitHub CI was requested for this signature-only packet change.
+
+Still NOT_PROVEN: actual producer -> activated Native opening -> durable COMMIT
+-> exact Summary as one accepted integration test. Do not count prior bridge
+unit tests as that witness. Remaining Native actions/runtime/one-use POST/RB09
+and current-SHA final acceptance continue to block #510 completion.
+
 ## #510 - opening producer-to-Native handoff (activation remains closed)
 
 TradeService no longer discards its real whole-cohort census before opening

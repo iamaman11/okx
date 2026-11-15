@@ -28,11 +28,10 @@ impl NativeRiskClient {
         &self,
         packet: crate::trade_service::ProducedOpening,
     ) -> Result<RiskResult, &'static str> {
-        let (command, census) = packet.into_parts();
         match &self.route {
-            RiskRoute::Cloudflare(_) => self.request(command).await,
+            RiskRoute::Cloudflare(_) => self.request(packet.into_parts().0).await,
             RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
-                backend.install_produced_opening(command, census).await
+                backend.install_produced_opening(packet).await
             }
         }
     }

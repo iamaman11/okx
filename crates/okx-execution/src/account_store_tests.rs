@@ -13361,6 +13361,53 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         )
     };
     let owner = open().await.unwrap();
+    // Public opening DATA cannot promote the immutable stopped import.
+    // Even structurally valid-looking external facts must hit activation first.
+    {
+        use crate::account_worker::{
+            NativeOpeningAccount, NativeOpeningSource, ReportedOpeningCensus,
+        };
+        let before = owner.campaign_summary("campaign-X".into()).await.unwrap();
+        let source = NativeOpeningSource {
+            campaign_id: format!("sha256:{}", "a".repeat(64)),
+            limit_usd: "10".into(),
+            consumed_usd: "0".into(),
+            source_digest: "b".repeat(64),
+            as_of_ms: 200,
+            campaign_started_at_ms: 1,
+            accounts: vec![NativeOpeningAccount {
+                account_key: a_key.clone(),
+                history_from_ms: 1,
+                history_through_ms: 200,
+                consumed_entry_usd: "0".into(),
+                order_history_complete: true,
+                fill_history_complete: true,
+                bill_history_complete: true,
+                finance_provenance_sealed: true,
+                source_digest: "c".repeat(64),
+            }],
+        };
+        let reported = ReportedOpeningCensus {
+            source_digest: "d".repeat(64),
+            generated_at_ms: 201,
+            read_floor_ms: 201,
+            occupied: std::collections::BTreeMap::from([(a_key.clone(), "0".into())]),
+            cumulative_loss_usd: std::collections::BTreeMap::from([(a_key.clone(), "0".into())]),
+        };
+        assert!(matches!(
+            owner.install_reported_opening(source, reported).await,
+            Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
+        ));
+        assert_eq!(
+            owner.campaign_summary("campaign-X".into()).await.unwrap(),
+            before
+        );
+        assert_eq!(
+            owner.inventory().await.unwrap().state,
+            "OFFLINE_NOT_AUTHORIZED"
+        );
+    }
+
     assert_eq!(
         owner.source_generation_base(a_key.clone()).await.unwrap(),
         5
