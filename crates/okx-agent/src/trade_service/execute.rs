@@ -931,8 +931,11 @@ impl TradeService {
         {
             return Err("STRATEGY_VERSION_CHANGED".into());
         }
+        #[cfg(test)]
         let manual_budget = dec(&state.state.campaign_loss_limit_usd)?;
+        #[cfg(test)]
         let owner_account = r.configuration.account_key.wire();
+        #[cfg(test)]
         let owner_uid = r.execution.uid().to_owned();
         let prepared = if let Some((owner, account)) = r.execution.store.native_scope() {
             owner
@@ -940,8 +943,11 @@ impl TradeService {
                 .await
                 .map_err(err)?
         } else {
-            prepare_on_owner(
-                r.execution.store.legacy().map_err(err)?,
+            // Original per-account owner survives only in historical test fixtures.
+            #[cfg(test)]
+            {
+                prepare_on_owner(
+                    r.execution.store.legacy().map_err(err)?,
                 until,
                 &owner_account,
                 &owner_uid,
@@ -974,8 +980,13 @@ impl TradeService {
                     }
                     s.prepare(&decision, &intent)
                 },
-            )
-            .await?
+                )
+                .await?
+            }
+            #[cfg(not(test))]
+            {
+                return Err("NATIVE_ADMISSION_OWNER_MISSING".into());
+            }
         };
         if Instant::now() >= until {
             return Err("COMMAND_EXPIRED".into());
@@ -1264,9 +1275,16 @@ impl TradeService {
                         }
                     })
             } else {
-                self.reserve_inspect_retry(&state, reserve, &prepared, r)
-                    .await
-                    .map(|held| (held, None))
+                #[cfg(test)]
+                {
+                    self.reserve_inspect_retry(&state, reserve, &prepared, r)
+                        .await
+                        .map(|held| (held, None))
+                }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_RESERVE_ROUTE_REQUIRED".into());
+                }
             };
             let (held, native_receipt) = match reserved {
                 Ok(held) => held,
@@ -1304,6 +1322,7 @@ impl TradeService {
                     // legacy account writer or obtain another send grant.
                     return Ok(uncertain(&prepared.intent_id, &reason));
                 }
+                #[cfg(test)]
                 Err((reason, authoritative_denial)) => {
                     let id = prepared.intent_id.clone();
                     if authoritative_denial {
@@ -1346,6 +1365,8 @@ impl TradeService {
                         )),
                     };
                 }
+                #[cfg(not(test))]
+                Err((_reason, _)) => return Err("NATIVE_RESERVE_ROUTE_REQUIRED".into()),
             };
             let held_received = Instant::now();
             if native_reserve {
@@ -1357,12 +1378,17 @@ impl TradeService {
                     return Err("NATIVE_RESERVE_DURABLE_RECEIPT_MISMATCH".into());
                 }
             } else {
-                let receipt = self.local_receipt(r, &prepared, &held, usd, &conversion)?;
-                r.execution
-                    .store
-                    .call(until, move |s| s.reserve(&receipt, now()))
-                    .await
-                    .map_err(err)?;
+                #[cfg(test)]
+                {
+                    let receipt = self.local_receipt(r, &prepared, &held, usd, &conversion)?;
+                    r.execution
+                        .store
+                        .call(until, move |s| s.reserve(&receipt, now()))
+                        .await
+                        .map_err(err)?;
+                }
+                #[cfg(not(test))]
+                return Err("NATIVE_RESERVE_RECEIPT_REQUIRED".into());
             }
             // TEST-ONLY: the true SQL owner has now persisted Worker HELD.
             // Holding here (rather than withholding the WSS HELD reply)
@@ -1459,6 +1485,7 @@ impl TradeService {
                         "POST_FENCE_OUTCOME_UNCERTAIN_NATIVE_UNSENT",
                     ));
                 }
+                #[cfg(test)]
                 Err(reason) => {
                     // A proven ordinary pre-post denial may be rejected;
                     // only an unambiguous unsent release can retire risk.
@@ -1487,6 +1514,8 @@ impl TradeService {
                         )),
                     };
                 }
+                #[cfg(not(test))]
+                Err(_reason) => return Err("NATIVE_FENCE_ROUTE_REQUIRED_NO_POST".into()),
             }
         } else {
             // Demo and native-confirmed reductions use the same durable marker; no Real global capacity is minted.
@@ -1524,11 +1553,16 @@ impl TradeService {
                     ));
                 }
             } else {
-                r.execution
-                    .store
-                    .call(until, move |s| s.reserve(&receipt, now()))
-                    .await
-                    .map_err(err)?;
+                #[cfg(test)]
+                {
+                    r.execution
+                        .store
+                        .call(until, move |s| s.reserve(&receipt, now()))
+                        .await
+                        .map_err(err)?;
+                }
+                #[cfg(not(test))]
+                return Err("NATIVE_REDUCTION_OWNER_REQUIRED_NO_POST".into());
             }
         }
         let revision = self
@@ -1696,16 +1730,23 @@ impl TradeService {
             )
             .await?
         } else {
-            if increase && self.risk.is_native_finance() {
+            #[cfg(test)]
+            {
+                if increase && self.risk.is_native_finance() {
+                    return Err("NATIVE_SEND_CLAIM_MISSING_NO_POST".into());
+                }
+                post_once(
+                    r.execution.store.legacy().map_err(err)?,
+                    &prepared,
+                    until,
+                    send,
+                )
+                .await?
+            }
+            #[cfg(not(test))]
+            {
                 return Err("NATIVE_SEND_CLAIM_MISSING_NO_POST".into());
             }
-            post_once(
-                r.execution.store.legacy().map_err(err)?,
-                &prepared,
-                until,
-                send,
-            )
-            .await?
         };
 
         drop(_new_risk_admission);
@@ -2111,7 +2152,14 @@ impl TradeService {
                     .map_err(str::to_owned)?;
                 (Ok(result), claim)
             } else {
-                (self.risk.request(command).await, None)
+                #[cfg(test)]
+                {
+                    (self.risk.request(command).await, None)
+                }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_POST_ROUTE_REQUIRED_NO_POST".into());
+                }
             };
             match response {
                 Ok(v) if v.status == RiskDecisionStatus::PostAuthorized => {
@@ -3308,6 +3356,7 @@ fn native_process_incarnation() -> Result<&'static str, String> {
         .map(String::as_str)
         .map_err(Clone::clone)
 }
+#[cfg(test)]
 pub(super) async fn prepare_on_owner<T, F>(
     store: &AccountStoreHandle,
     until: Instant,
@@ -3358,6 +3407,7 @@ fn bounded_unsent_reason(reason: &str) -> String {
     let hash = format!("{:x}", Sha256::digest(reason.as_bytes()));
     format!("{}:sha256:{hash}", &reason[..prefix_end])
 }
+#[cfg(test)]
 async fn reject_prepost_denial(
     store: &AccountStoreHandle,
     intent: &StoredIntent,

@@ -42,6 +42,7 @@ mod terminal_release;
 mod terminal_release_trace;
 pub(crate) use terminal_release_trace::TerminalReleaseTrace;
 mod unsent_release;
+#[cfg(test)]
 pub(crate) use submission::post_once;
 
 // Test-only causal boundary AFTER the genuine Worker HELD receipt has been

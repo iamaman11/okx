@@ -1,6 +1,9 @@
 //! The single durable claim before a possible venue send.
-use super::{AccountStoreHandle, Instant, IntentState, StoredIntent, deadline, err, now};
+use super::{Instant, IntentState, StoredIntent, err, now};
+#[cfg(test)]
+use super::{AccountStoreHandle, deadline};
 
+#[cfg(test)]
 pub(crate) async fn post_once<T, F, Fut>(
     store: &AccountStoreHandle,
     intent: &StoredIntent,
@@ -27,6 +30,7 @@ where
 }
 
 enum OutcomeOwner<'a> {
+    #[cfg(test)]
     Legacy(&'a AccountStoreHandle),
     Native {
         owner: &'a okx_execution::account_worker::UnifiedFinanceHandle,
@@ -36,6 +40,7 @@ enum OutcomeOwner<'a> {
 impl OutcomeOwner<'_> {
     async fn record(&self, outcome: okx_execution::IntentOutcome) -> Result<(), String> {
         match self {
+            #[cfg(test)]
             Self::Legacy(store) => store
                 .record_intent_outcome(deadline(), outcome)
                 .await

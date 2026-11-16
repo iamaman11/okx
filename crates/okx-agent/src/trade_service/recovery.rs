@@ -95,6 +95,7 @@ fn recovery_generation(expected: u64, actual: u64, ready: bool) -> Result<(), St
     }
     Ok(())
 }
+#[cfg(test)]
 fn commit_recovery(
     store: &mut okx_execution::AccountStore,
     local: &okx_execution::RecoverySnapshot,
@@ -537,20 +538,27 @@ impl TradeService {
                 .await
                 .map_err(err);
         }
-        r.execution
-            .store
-            .call(deadline(), move |s| {
-                if s.cursor("account_snapshot", "account")?
-                    .is_none_or(|c| c.generation != generation as i64)
-                {
-                    return Err(okx_execution::StoreError::Invalid(
-                        "STORAGE_RECOVERY_GENERATION_CHANGED",
-                    ));
-                }
-                commit_recovery(s, &local, &central, proof_floor, &exchange, &evidence)
-            })
-            .await
-            .map_err(err)
+        // The historical standalone SQL store is not a production recovery
+        // backend. A missing Native owner cannot clear a recovery gate.
+        #[cfg(test)]
+        {
+            r.execution
+                .store
+                .call(deadline(), move |s| {
+                    if s.cursor("account_snapshot", "account")?
+                        .is_none_or(|c| c.generation != generation as i64)
+                    {
+                        return Err(okx_execution::StoreError::Invalid(
+                            "STORAGE_RECOVERY_GENERATION_CHANGED",
+                        ));
+                    }
+                    commit_recovery(s, &local, &central, proof_floor, &exchange, &evidence)
+                })
+                .await
+                .map_err(err)
+        }
+        #[cfg(not(test))]
+        Err("NATIVE_RECOVERY_OWNER_REQUIRED".into())
     }
 }
 
