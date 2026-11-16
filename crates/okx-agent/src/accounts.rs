@@ -172,6 +172,12 @@ impl PreparedAccountClients {
     }
 }
 
+/// A production installation cannot open a legacy per-account SQL registry.
+/// The old constructor exists only for recorded in-crate tests:
+///
+/// ```compile_fail,E0599
+/// let _ = okx_agent::accounts::AccountRuntimeRegistry::open;
+/// ```
 pub struct AccountRuntimeRegistry {
     root: PathBuf,
     installation_id: String,

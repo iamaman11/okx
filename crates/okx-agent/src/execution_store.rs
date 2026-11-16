@@ -6,6 +6,14 @@ use okx_execution::account_worker::{
 use okx_execution::{AccountStore, AccountStoreHandle, StoreError, StoreResult};
 use std::time::Instant;
 
+/// Shipping code cannot construct the old per-account financial writer.
+///
+/// ```compile_fail,E0599
+/// use okx_agent::execution_store::ExecutionStore;
+/// fn forbidden(legacy: okx_execution::AccountStoreHandle) -> ExecutionStore {
+///     ExecutionStore::Legacy(legacy)
+/// }
+/// ```
 #[derive(Clone)]
 pub enum ExecutionStore {
     #[cfg(test)]
