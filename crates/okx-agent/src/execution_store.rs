@@ -425,14 +425,14 @@ impl ExecutionStore {
     }
     pub async fn cursor(
         &self,
-        deadline: Instant,
+        _deadline: Instant,
         source: String,
         partition: String,
     ) -> StoreResult<Option<okx_execution::SourceCursor>> {
         match self {
             #[cfg(test)]
             Self::Legacy(s) => {
-                s.call(deadline, move |sql| sql.cursor(&source, &partition))
+                s.call(_deadline, move |sql| sql.cursor(&source, &partition))
                     .await
             }
             Self::Native { owner, account } => {
@@ -850,12 +850,12 @@ impl ExecutionStore {
     }
     pub async fn record_intent_outcome(
         &self,
-        deadline: Instant,
+        _deadline: Instant,
         outcome: okx_execution::IntentOutcome,
     ) -> StoreResult<()> {
         match self {
             #[cfg(test)]
-            Self::Legacy(s) => s.record_intent_outcome(deadline, outcome).await,
+            Self::Legacy(s) => s.record_intent_outcome(_deadline, outcome).await,
             Self::Native { owner, account } => {
                 owner.record_intent_outcome(account.clone(), outcome).await
             }
@@ -888,24 +888,24 @@ impl ExecutionStore {
     }
     pub async fn assign_capital(
         &self,
-        deadline: Instant,
+        _deadline: Instant,
         command: okx_execution::CapitalAssignmentCommand,
     ) -> StoreResult<okx_execution::CapitalAssignmentResult> {
         match self {
             #[cfg(test)]
-            Self::Legacy(s) => s.assign_capital(deadline, command).await,
+            Self::Legacy(s) => s.assign_capital(_deadline, command).await,
             Self::Native { owner, account } => owner.assign_capital(account.clone(), command).await,
         }
     }
     pub async fn ingest_captured_bills(
         &self,
-        deadline: Instant,
+        _deadline: Instant,
         input: okx_execution::CapturedBillPage,
         conversion: okx_execution::UsdConversionEvidence,
     ) -> StoreResult<()> {
         match self {
             #[cfg(test)]
-            Self::Legacy(s) => s.ingest_captured_bills(deadline, input, conversion).await,
+            Self::Legacy(s) => s.ingest_captured_bills(_deadline, input, conversion).await,
             Self::Native { owner, account } => {
                 owner
                     .ingest_captured_bills(account.clone(), input, conversion)
@@ -915,13 +915,13 @@ impl ExecutionStore {
     }
     pub async fn ingest_captured_fills(
         &self,
-        deadline: Instant,
+        _deadline: Instant,
         input: okx_execution::CapturedFillPage,
         conversion: okx_execution::UsdConversionEvidence,
     ) -> StoreResult<()> {
         match self {
             #[cfg(test)]
-            Self::Legacy(s) => s.ingest_captured_fills(deadline, input, conversion).await,
+            Self::Legacy(s) => s.ingest_captured_fills(_deadline, input, conversion).await,
             Self::Native { owner, account } => {
                 owner
                     .ingest_captured_fills(account.clone(), input, conversion)
