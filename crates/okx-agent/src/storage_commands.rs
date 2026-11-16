@@ -6,19 +6,18 @@ use crate::{
     okx_credentials::load_native_account_credentials,
 };
 use okx_api::{OkxRestClient, RateBudget};
-use okx_execution::{AccountMeta, AccountStore, AccountStoreHandle, OpeningSnapshot};
+use okx_execution::AccountStore;
+use okx_execution::account_worker::UnifiedFinanceHandle;
 use okx_protocol::{
     account_catalog_proto,
     accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
 };
-use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    str::FromStr,
     time::{Duration, Instant},
 };
 fn valid_operation(id: &str) -> bool {
@@ -240,6 +239,9 @@ pub async fn initialize_installation(
         json!({"finance":finance}),
     ))
 }
+/// Explicit stopped-Engine account initialization on the ONE Native financial
+/// owner. Exact retry is read from original SQL receipts without private HTTP,
+/// new opening facts, or an account.sqlite fallback.
 pub async fn initialize_account(
     root: &Path,
     key: &str,
@@ -253,44 +255,59 @@ pub async fn initialize_account(
     if !valid_operation(operation_id) {
         return Err(error("INITIALIZE_ID_INVALID"));
     }
-    let _lease = engine_lease(root)?;
-    let _finance_mode = legacy_account_maintenance_lease(root, key)?;
+    let _engine = engine_lease(root)?;
     if installation(root)? != installation_id {
         return Err(error("INSTALLATION_MISMATCH"));
     }
-    let _identity_lease = crate::accounts::acquire_identity_lease(
-        &crate::config::default_root().join("account-leases"),
-        key,
-    )?;
     let config = catalog(root, key)?;
     if config.connect_operation_id != operation_id {
         return Err(error("INITIALIZE_OPERATION_CONFLICT"));
     }
-    let dir = account_root(root, key);
-    fs::create_dir_all(&dir)?;
-    let database = dir.join("account.sqlite");
-    if database.exists() {
-        let store =
-            AccountStoreHandle::open_existing(database, key.wire(), installation_id.into()).await?;
-        let op = operation_id.to_string();
-        let rel = expected_release.to_string();
-        store
-            .call(Instant::now() + Duration::from_secs(2), move |s| {
-                if s.meta().initialize_operation_id != op || s.meta().release_id != rel {
-                    return Err(okx_execution::StoreError::Invalid(
-                        "INITIALIZE_OPERATION_CONFLICT",
-                    ));
-                }
-                Ok(())
-            })
-            .await?;
-        return Ok(reply(installation_id, operation_id, Some(key), json!({})));
+    // Fail closed if the finance file is absent, foreign, staged or from the
+    // retired per-account layout. Never create an account-local SQL writer.
+    let owner = UnifiedFinanceHandle::open_native(
+        root.canonicalize()?,
+        installation_id.to_owned(),
+    )
+    .await?;
+    let mut stopped = owner.termination_signal();
+    let result = initialize_account_on_owner(&owner, &config, expected_release).await;
+    drop(owner);
+    // Keep the installation lock until the sole SQL writer has closed.
+    if !*stopped.borrow() {
+        stopped
+            .changed()
+            .await
+            .map_err(|_| error("FINANCE_WORKER_SHUTDOWN_UNCONFIRMED"))?;
+    }
+    result?;
+    Ok(reply(installation_id, operation_id, Some(key), json!({})))
+}
+
+/// Same operation for public CLI and direct original-owner regression tests.
+/// Existing receipt means exact retry, never a fresh exchange snapshot.
+async fn initialize_account_on_owner(
+    owner: &UnifiedFinanceHandle,
+    config: &VerifiedAccountConfig,
+    expected_release: &str,
+) -> AgentResult<()> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    if let Some(meta) = crate::native_account_connection::original_connection(
+        owner, config, deadline,
+    )
+    .await?
+    {
+        if meta.release_id != expected_release {
+            return Err(error("INITIALIZE_OPERATION_CONFLICT"));
+        }
+        return Ok(());
     }
     let credentials = load_native_account_credentials(&config.credential_ref)?;
     let budget = RateBudget::new();
     let uid = verify_credentials(&credentials, budget.clone()).await?;
-    if uid != key.verified_uid
-        || credentials.environment.demo != (key.environment == Environment::Demo)
+    if uid != config.account_key.verified_uid
+        || credentials.environment.demo
+            != (config.account_key.environment == Environment::Demo)
     {
         return Err(error("ACCOUNT_IDENTITY_MISMATCH"));
     }
@@ -299,97 +316,22 @@ pub async fn initialize_account(
         credentials.observer,
         budget,
     )?);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let snapshot = loop {
-        if tokio::time::Instant::now() >= deadline {
-            return Err(error("INITIAL_SNAPSHOT_UNSTABLE"));
-        }
-        let first = observer
-            .snapshot()
-            .await
-            .map_err(|_| error("ACCOUNT_SOURCE_UNAVAILABLE"))?;
-        let algos = observer
-            .pending_derivative_risk_algos()
-            .await
-            .map_err(|_| error("ACCOUNT_ALGO_SOURCE_UNAVAILABLE"))?;
-        let last = observer
-            .snapshot()
-            .await
-            .map_err(|_| error("ACCOUNT_SOURCE_UNAVAILABLE"))?;
-        if first.account_uid_fingerprint != uid || last.account_uid_fingerprint != uid {
-            return Err(error("ACCOUNT_IDENTITY_MISMATCH"));
-        }
-        if !first
-            .balance
-            .same_values_ignoring_update_times(&last.balance)
-            || first.positions != last.positions
-            || first.pending_orders != last.pending_orders
-        {
-            continue;
-        }
-        if !algos.complete_within_bound {
-            return Err(error("ACCOUNT_ALGO_COVERAGE_INCOMPLETE"));
-        }
-        let liabilities = last
-            .balance
-            .details
-            .iter()
-            .try_fold(Decimal::ZERO, |a, b| {
-                let v = match b.liabilities.as_deref() {
-                    Some(v) => Decimal::from_str(v).map_err(|_| error("LIABILITY_INVALID"))?,
-                    None if last.account_level == "2" => Decimal::ZERO,
-                    None => return Err(error("LIABILITY_UNAVAILABLE")),
-                };
-                a.checked_add(v).ok_or_else(|| error("MONEY_OVERFLOW"))
-            })?;
-        let positions = last
-            .positions
-            .iter()
-            .filter(|p| Decimal::from_str(&p.position) != Ok(Decimal::ZERO))
-            .count();
-        let balances = last
-            .balance
-            .details
-            .iter()
-            .map(|b| {
-                Ok((
-                    b.currency.clone(),
-                    Decimal::from_str(&b.equity).map_err(|_| error("BALANCE_INVALID"))?,
-                ))
-            })
-            .collect::<AgentResult<Vec<_>>>()?;
-        let observed_at = chrono::DateTime::parse_from_rfc3339(&last.source_received_at)
-            .map_err(|_| error("SOURCE_TIMESTAMP_INVALID"))?
-            .timestamp_millis();
-        let source_ref = format!("{:x}", Sha256::digest(serde_json::to_vec(&last)?));
-        break OpeningSnapshot {
-            opening_equity_usd: Decimal::from_str(&last.balance.total_equity_usd)
-                .map_err(|_| error("OPENING_USD_INVALID"))?,
-            source_ref,
-            observed_at,
-            positions,
-            orders: last.pending_orders.len(),
-            conditional_orders: algos.rows,
-            liabilities,
-            balances,
-        };
-    };
-    let meta = AccountMeta {
-        account_key: key.wire(),
-        installation_id: installation_id.into(),
-        initialized_at: snapshot.observed_at,
-        opening_source: snapshot.source_ref.clone(),
-        initialize_operation_id: operation_id.into(),
-        release_id: expected_release.into(),
-    };
-    let store = AccountStoreHandle::initialize_flat(database, meta, snapshot).await?;
-    store
-        .call(Instant::now() + Duration::from_secs(2), |s| {
-            s.integrity_check()
-        })
-        .await?;
-    Ok(reply(installation_id, operation_id, Some(key), json!({})))
+    crate::native_account_connection::ensure_account(
+        owner, config, &observer, &uid, true,
+    )
+    .await?;
+    // Even if the original commit reply was lost, require the durable bound
+    // identity and original CONNECT receipt before reporting completion.
+    let confirmed = crate::native_account_connection::original_connection(
+        owner, config, Instant::now() + Duration::from_secs(2),
+    )
+    .await?;
+    if !matches!(confirmed, Some(ref meta) if meta.release_id == expected_release) {
+        return Err(error("ACCOUNT_CONNECTION_RECEIPT_NOT_CONFIRMED"));
+    }
+    Ok(())
 }
+
 fn hash(path: &Path) -> AgentResult<String> {
     let mut f = File::open(path)?;
     let mut hash = Sha256::new();

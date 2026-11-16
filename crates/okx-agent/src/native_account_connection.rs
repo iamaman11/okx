@@ -8,7 +8,7 @@ fn error(reason: &str) -> AgentError {
     AgentError::FinancialCaptureTask(reason.into())
 }
 
-async fn original_connection(
+pub(crate) async fn original_connection(
     owner: &UnifiedFinanceHandle,
     configuration: &VerifiedAccountConfig,
     deadline: Instant,
