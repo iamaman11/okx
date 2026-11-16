@@ -948,38 +948,40 @@ impl TradeService {
             {
                 prepare_on_owner(
                     r.execution.store.legacy().map_err(err)?,
-                until,
-                &owner_account,
-                &owner_uid,
-                move |s| {
-                    if intent.plan.strategy_instance == "manual"
-                        && !s.instances()?.iter().any(|i| i.instance_id == "manual")
-                    {
-                        let manual = StrategyInstance {
-                            instance_id: "manual".into(),
-                            definition_id: "manual".into(),
-                            definition_version: "1".into(),
-                            parameters: "{}".into(),
-                            enabled: false,
-                            policy_revision: 1,
-                            budget: manual_budget,
-                            last_decision_key: None,
-                        };
-                        let h = format!(
-                            "{:x}",
-                            Sha256::digest(format!("{}:manual", s.meta().account_key).as_bytes())
-                        );
-                        s.mutate_instance(
-                            "internal_create_manual",
-                            &h,
-                            "create",
-                            &manual,
-                            None,
-                            now(),
-                        )?;
-                    }
-                    s.prepare(&decision, &intent)
-                },
+                    until,
+                    &owner_account,
+                    &owner_uid,
+                    move |s| {
+                        if intent.plan.strategy_instance == "manual"
+                            && !s.instances()?.iter().any(|i| i.instance_id == "manual")
+                        {
+                            let manual = StrategyInstance {
+                                instance_id: "manual".into(),
+                                definition_id: "manual".into(),
+                                definition_version: "1".into(),
+                                parameters: "{}".into(),
+                                enabled: false,
+                                policy_revision: 1,
+                                budget: manual_budget,
+                                last_decision_key: None,
+                            };
+                            let h = format!(
+                                "{:x}",
+                                Sha256::digest(
+                                    format!("{}:manual", s.meta().account_key).as_bytes()
+                                )
+                            );
+                            s.mutate_instance(
+                                "internal_create_manual",
+                                &h,
+                                "create",
+                                &manual,
+                                None,
+                                now(),
+                            )?;
+                        }
+                        s.prepare(&decision, &intent)
+                    },
                 )
                 .await?
             }

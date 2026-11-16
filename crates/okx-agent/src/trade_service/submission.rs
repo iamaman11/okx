@@ -1,7 +1,7 @@
 //! The single durable claim before a possible venue send.
-use super::{Instant, IntentState, StoredIntent, err, now};
 #[cfg(test)]
 use super::{AccountStoreHandle, deadline};
+use super::{Instant, IntentState, StoredIntent, err, now};
 
 #[cfg(test)]
 pub(crate) async fn post_once<T, F, Fut>(
