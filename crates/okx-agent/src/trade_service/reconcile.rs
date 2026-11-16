@@ -615,27 +615,11 @@ impl TradeService {
             let id = i.intent_id.clone();
             let order_id = o.order_id.clone();
             if !i.state.terminal() {
-                if let Some((owner, account)) = r.execution.store.native_scope() {
-                    owner
-                        .record_order_readback(
-                            deadline(),
-                            account.to_owned(),
-                            id,
-                            order_id,
-                            state,
-                            filled,
-                        )
-                        .await
-                        .map_err(err)?;
-                } else {
-                    r.execution
-                        .store
-                        .call(deadline(), move |s| {
-                            s.record_order_readback(&id, &order_id, state, filled, now())
-                        })
-                        .await
-                        .map_err(err)?;
-                }
+                r.execution
+                    .store
+                    .record_order_readback(deadline(), id, order_id, state, filled)
+                    .await
+                    .map_err(err)?;
             }
             i = self.find_intent(r, &i.intent_id).await?;
         }
@@ -655,20 +639,11 @@ impl TradeService {
         {
             let id = i.intent_id.clone();
             let (quote, admission) =
-                if let Some((owner, account)) = r.execution.store.native_scope() {
-                    owner
-                        .entry_cost_evidence(deadline(), account.to_owned(), id)
-                        .await
-                        .map_err(err)?
-                } else {
-                    r.execution
-                        .store
-                        .call(deadline(), move |s| {
-                            Ok((s.entry_quote(&id)?, s.entry_admission(&id)?))
-                        })
-                        .await
-                        .map_err(err)?
-                };
+                r.execution
+                    .store
+                    .entry_cost_evidence(deadline(), id)
+                    .await
+                    .map_err(err)?;
             entry_cost_status(quote, admission)?
         } else {
             json!(null)
@@ -686,20 +661,11 @@ impl TradeService {
         if matches!(i.state, IntentState::Prepared | IntentState::Reserved) {
             if now() >= i.deadline {
                 let id = i.intent_id.clone();
-                if let Some((owner, account)) = r.execution.store.native_scope() {
-                    owner
-                        .reject_unsent(deadline(), account.to_owned(), id, "COMMAND_EXPIRED".into())
-                        .await
-                        .map_err(err)?;
-                } else {
-                    r.execution
-                        .store
-                        .call(deadline(), move |s| {
-                            s.reject_unsent(&id, "COMMAND_EXPIRED", now())
-                        })
-                        .await
-                        .map_err(err)?;
-                }
+                r.execution
+                    .store
+                    .reject_unsent(deadline(), id, "COMMAND_EXPIRED".into())
+                    .await
+                    .map_err(err)?;
                 i = self.find_intent(r, &i.intent_id).await?;
             } else {
                 return Ok(completed(
@@ -708,18 +674,11 @@ impl TradeService {
             }
         }
         let id = i.intent_id.clone();
-        let declined_reserve = if let Some((owner, account)) = r.execution.store.native_scope() {
-            owner
-                .declined_reserve(deadline(), account.to_owned(), id)
-                .await
-                .map_err(err)?
-        } else {
-            r.execution
-                .store
-                .call(deadline(), move |s| s.declined_reserve(&id))
-                .await
-                .map_err(err)?
-        };
+        let declined_reserve = r.execution
+            .store
+            .declined_reserve(deadline(), id)
+            .await
+            .map_err(err)?;
         if declined_reserve {
             return Ok(completed(json!({
                 "intent":i,"send_state":"NOT_STARTED",
@@ -732,19 +691,11 @@ impl TradeService {
         // and absent reserve marker jointly prove no-send / no central risk;
         // skip unrelated venue and financial I/O.
         let id = i.intent_id.clone();
-        let unsent_before_reserve = if let Some((owner, account)) = r.execution.store.native_scope()
-        {
-            owner
-                .unsent_before_reserve(deadline(), account.to_owned(), id)
-                .await
-                .map_err(err)?
-        } else {
-            r.execution
-                .store
-                .call(deadline(), move |s| s.unsent_before_reserve(&id))
-                .await
-                .map_err(err)?
-        };
+        let unsent_before_reserve = r.execution
+            .store
+            .unsent_before_reserve(deadline(), id)
+            .await
+            .map_err(err)?;
         if unsent_before_reserve {
             return Ok(completed(json!({
                 "intent":i,
@@ -760,18 +711,11 @@ impl TradeService {
         // independently of exchange history/fees. Other rejected intents
         // still require the full authoritative reconciliation below.
         let id = i.intent_id.clone();
-        let no_send = if let Some((owner, account)) = r.execution.store.native_scope() {
-            owner
-                .unsent_release_receipt(deadline(), account.to_owned(), id)
-                .await
-                .map_err(err)?
-        } else {
-            r.execution
-                .store
-                .call(deadline(), move |s| s.unsent_release_receipt(&id))
-                .await
-                .map_err(err)?
-        }
+        let no_send = r.execution
+            .store
+            .unsent_release_receipt(deadline(), id)
+            .await
+            .map_err(err)?
         .is_some();
         if no_send {
             // A completed native SQL REJECTED_UNSENT receipt is proof that

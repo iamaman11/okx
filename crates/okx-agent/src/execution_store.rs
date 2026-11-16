@@ -790,6 +790,150 @@ impl ExecutionStore {
             }
         }
     }
+    /// The original account-scoped order observation is committed by the sole
+    /// finance owner. Callers never select an SQL backend.
+    pub async fn record_order_readback(
+        &self,
+        deadline: Instant,
+        intent: String,
+        order_id: String,
+        state: okx_execution::IntentState,
+        filled: rust_decimal::Decimal,
+    ) -> StoreResult<()> {
+        match self {
+            #[cfg(test)]
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.record_order_readback(
+                        &intent,
+                        &order_id,
+                        state,
+                        filled,
+                        chrono::Utc::now().timestamp_millis(),
+                    )
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .record_order_readback(deadline, account.clone(), intent, order_id, state, filled)
+                    .await
+            }
+        }
+    }
+
+    /// Read the original quote and admission together from one scoped owner.
+    pub async fn entry_cost_evidence(
+        &self,
+        deadline: Instant,
+        intent: String,
+    ) -> StoreResult<(
+        Option<okx_execution::EntryQuoteEvidence>,
+        Option<okx_execution::EntryAdmissionEvidence>,
+    )> {
+        match self {
+            #[cfg(test)]
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    Ok((sql.entry_quote(&intent)?, sql.entry_admission(&intent)?))
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .entry_cost_evidence(deadline, account.clone(), intent)
+                    .await
+            }
+        }
+    }
+
+    pub async fn declined_reserve(&self, deadline: Instant, intent: String) -> StoreResult<bool> {
+        match self {
+            #[cfg(test)]
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| sql.declined_reserve(&intent))
+                    .await
+            }
+            Self::Native { owner, account } => {
+                owner.declined_reserve(deadline, account.clone(), intent).await
+            }
+        }
+    }
+
+    pub async fn unsent_release_receipt(
+        &self,
+        deadline: Instant,
+        intent: String,
+    ) -> StoreResult<Option<okx_execution::UnsentSqlReceipt>> {
+        match self {
+            #[cfg(test)]
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| sql.unsent_release_receipt(&intent))
+                    .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .unsent_release_receipt(deadline, account.clone(), intent)
+                    .await
+            }
+        }
+    }
+
+    pub async fn recovery_snapshot(
+        &self,
+        deadline: Instant,
+    ) -> StoreResult<okx_execution::RecoverySnapshot> {
+        match self {
+            #[cfg(test)]
+            Self::Legacy(s) => {
+                s.call(deadline, |sql| sql.recovery_snapshot(chrono::Utc::now().timestamp_millis()))
+                    .await
+            }
+            Self::Native { owner, account } => {
+                owner.recovery_snapshot(deadline, account.clone()).await
+            }
+        }
+    }
+
+    pub async fn ingest_source_page(&self, page: okx_execution::IngestPage) -> StoreResult<()> {
+        match self {
+            #[cfg(test)]
+            Self::Legacy(s) => {
+                s.call(Instant::now() + std::time::Duration::from_secs(2), move |sql| {
+                    sql.ingest_page(&page)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner.ingest_source_page(account.clone(), page).await
+            }
+        }
+    }
+
+    pub async fn recovery_position_owner(
+        &self,
+        deadline: Instant,
+        intent: String,
+    ) -> StoreResult<(
+        Option<okx_execution::ProtectionReceipt>,
+        Option<okx_execution::StoredIntent>,
+    )> {
+        match self {
+            #[cfg(test)]
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    Ok((sql.protection(&intent)?, sql.intent(&intent)?))
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .recovery_position_owner(deadline, account.clone(), intent)
+                    .await
+            }
+        }
+    }
+
     pub async fn reject_unsent(
         &self,
         deadline: Instant,

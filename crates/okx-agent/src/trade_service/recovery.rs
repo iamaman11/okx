@@ -557,33 +557,13 @@ impl TradeService {
 async fn recovery_snapshot(
     store: &ExecutionStore,
 ) -> Result<okx_execution::RecoverySnapshot, String> {
-    if let Some((owner, account)) = store.native_scope() {
-        owner
-            .recovery_snapshot(deadline(), account.to_owned())
-            .await
-            .map_err(err)
-    } else {
-        store
-            .call(deadline(), |s| s.recovery_snapshot(now()))
-            .await
-            .map_err(err)
-    }
+    store.recovery_snapshot(deadline()).await.map_err(err)
 }
 async fn recovery_ingest(
     store: &ExecutionStore,
     page: okx_execution::IngestPage,
 ) -> Result<(), String> {
-    if let Some((owner, account)) = store.native_scope() {
-        owner
-            .ingest_source_page(account.to_owned(), page)
-            .await
-            .map_err(err)
-    } else {
-        store
-            .call(deadline(), move |s| s.ingest_page(&page))
-            .await
-            .map_err(err)
-    }
+    store.ingest_source_page(page).await.map_err(err)
 }
 async fn recovery_position_owner(
     store: &ExecutionStore,
@@ -595,19 +575,7 @@ async fn recovery_position_owner(
     ),
     String,
 > {
-    if let Some((owner, account)) = store.native_scope() {
-        owner
-            .recovery_position_owner(deadline(), account.to_owned(), id)
-            .await
-            .map_err(err)
-    } else {
-        store
-            .call(deadline(), move |s| {
-                Ok((s.protection(&id)?, s.intent(&id)?))
-            })
-            .await
-            .map_err(err)
-    }
+    store.recovery_position_owner(deadline(), id).await.map_err(err)
 }
 
 #[cfg(test)]
