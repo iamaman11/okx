@@ -1,3 +1,40 @@
+## Integrated completion checkpoint - 16 November 2026
+
+Current Native regression: 35 passed, 0 failed (56.87s after build).
+Rust components: execution 342 passed / 2 ignored (11.91s), kernel 25 passed,
+protocol 41 passed / 1 ignored, runtime 21 passed. Acceptance collector negative
+controls: 6 passed. Ignored tests are not acceptance evidence.
+
+Completed production paths in this slice:
+- Source change after HELD: one SQL transaction rejects a proven unsent intent
+  and releases its original reservation; a fresh plan uses the changed fee.
+  A committed BeginPost cannot use this path, including lost COMMIT replies.
+- Public Add retains the original owned lot and protects only the increment;
+  external venue exposure refuses admission. B can execute while A's fee read
+  is blocked; canceling A releases only A, preserving B's UNKNOWN obligation.
+- Reserve and BeginPost COMMIT/reply loss use the actual owner transaction,
+  exact readback, reopen and original receipt; no second send claim is issued.
+- Fresh instrument metadata comes from bounded real REST reads only when new
+  risk needs it. Generation/revision CAS rejects intervening WS changes;
+  unchanged metadata preserves book state. Reductions keep their existing path.
+- Windows catalog publication retains DELETE-capable staging/target guards;
+  a real incompatible reader refuses publication without changing SQL identity.
+- Read-only diagnostics include durable BeginPost, original receipt state and
+  SQL no-send proof; they never send, release or manufacture current venue truth.
+
+One Rust collector now maps RB01-RB16 to exact production witnesses, executes
+current Cargo artifacts, binds HEAD/tree, rejects ignored/missing/duplicate or
+foreign results, and separates build from setup-through-teardown time. Run:
+`cargo run --locked -p okx-agent --example native_finance_acceptance -- --known`
+for partial evidence. Default full mode MUST exit BLOCKED while required rows
+remain MISSING. The manifest is the explicit executable gap list, not a claim
+that #510 is finished or that full acceptance takes seconds. The old distributed
+financial matrix is not a substitute for this current architecture's contracts.
+
+This section supersedes older statements below that Add, unsent convergence,
+COMMIT-reply loss or the reproduced catalog publication boundary lack witnesses.
+Full RB acceptance, resource budgets and shipped startup composition remain open.
+
 # Cloudflare financial witness retirement - #510
 
 ## Current integrated Native delta (16 November 2026, not full RB acceptance)

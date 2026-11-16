@@ -357,3 +357,75 @@ async fn risk_book_contract_native_catalog_failure_retains_sql_and_retries_origi
     assert!(feed.outbound_posts.lock().unwrap().is_empty());
     stop(registry, owner).await;
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn risk_book_contract_native_catalog_windows_reader_lock_preserves_original_connection() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let root = fresh().await;
+    let feed = Arc::new(RecordedAccountHttp::default());
+    let budget = RateBudget::new();
+    let (registry, owner) =
+        AccountRuntimeRegistry::open_native_catalog(&root, budget.clone(), &campaign())
+            .await
+            .unwrap();
+    let (config, clients) = prepared("a", feed.clone(), budget);
+    let path = root.join(account_catalog_proto::CATALOG_FILE);
+    let original_catalog = std::fs::read(&path).unwrap();
+    // A real Windows reader sharing READ/WRITE but not DELETE deterministically
+    // refuses atomic replacement. This is a physical boundary, not a guessed
+    // explanation of every intermittent host publication error.
+    let reader = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .open(&path)
+        .unwrap();
+    let failure = registry
+        .connect_prepared(config.clone(), clients)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &failure,
+            AgentError::AccountCatalogPublicationPending { .. }
+        ),
+        "{failure}"
+    );
+    assert!(
+        failure
+            .to_string()
+            .contains("ACCOUNT_CATALOG_REPLACE_GUARD"),
+        "{failure}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original_catalog);
+    assert!(registry.list().await.is_empty());
+    assert_eq!(account_count(&root), 1);
+    let original = owner
+        .account_metadata(deadline(), config.account_key.wire())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_original_opening(&root, &config.account_key.wire());
+    drop(reader); // The external obstruction actually ends before exact retry.
+    let (_, clients) = prepared("a", feed.clone(), RateBudget::new());
+    registry
+        .connect_prepared(config.clone(), clients)
+        .await
+        .unwrap();
+    assert_eq!(
+        owner
+            .account_metadata(deadline(), config.account_key.wire())
+            .await
+            .unwrap(),
+        Some(original)
+    );
+    assert_eq!(account_count(&root), 1);
+    assert_original_opening(&root, &config.account_key.wire());
+    assert_eq!(registry.list().await, vec![config.clone()]);
+    assert_eq!(
+        account_catalog_proto::load(&root).unwrap().accounts,
+        vec![config]
+    );
+    assert!(feed.outbound_posts.lock().unwrap().is_empty());
+    stop(registry, owner).await;
+}

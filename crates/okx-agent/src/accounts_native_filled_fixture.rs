@@ -14,6 +14,18 @@ pub(super) async fn opened_market(
     Arc<RecordedWsConnector>,
     okx_runtime::PublicWsHandle,
 ) {
+    opened_market_with_public_client(fixture, None).await
+}
+
+pub(super) async fn opened_market_with_public_client(
+    fixture: &mut NativeFixture,
+    client: Option<okx_api::OkxPublicClient>,
+) -> (
+    watch::Sender<bool>,
+    tokio::task::JoinHandle<()>,
+    Arc<RecordedWsConnector>,
+    okx_runtime::PublicWsHandle,
+) {
     let (stop, stopped) = watch::channel(false);
     let service = fixture.trade.clone();
     let maintenance = tokio::spawn(async move { service.run(stopped).await });
@@ -40,7 +52,7 @@ pub(super) async fn opened_market(
         .await
         .unwrap()
         .unwrap();
-    let (market, public, socket) = raw_market();
+    let (market, public, socket) = raw_market_with_public_client(client);
     let mut updates = public.subscribe_market_updates();
     let (stop, stopped) = watch::channel(false);
     let task = tokio::spawn(async move {

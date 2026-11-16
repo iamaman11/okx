@@ -220,6 +220,20 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npm run check
           node scripts/test-native-finance-retirement-do.mjs
+      - name: Fresh Rust property collector self-tests and known witnesses
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p okx-agent --example native_finance_acceptance
+          cargo run --locked -p okx-agent --example native_finance_acceptance -- --known > "$RUNNER_TEMP/native-finance-known.json"
+          python3 -c 'import json,os; r=json.load(open(os.path.join(os.environ["RUNNER_TEMP"],"native-finance-known.json"))); assert r["overall"] == "PARTIAL"; assert r["observed_witnesses"]; print("FRESH_NATIVE_PROPERTIES=PARTIAL_NOT_FULL")'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: native-finance-properties-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/native-finance-known.json
+          if-no-files-found: error
+          retention-days: 14
 
 
   architecture:
@@ -471,21 +485,25 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Mandatory native Windows T09/T10 recorded acceptance
+      - name: Mandatory current Rust financial property acceptance
         if: github.event_name == 'pull_request'
         shell: pwsh
         run: |
-          $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
-          node scripts/run-trade-integration.mjs --suite t09,t10 --artifacts "$artifacts"
+          # The old Native/Worker finance driver is retired. Its properties
+          # remain in the reviewed current Rust map; missing evidence BLOCKS
+          # this full gate rather than falling back to historical26 results.
+          cargo run --locked -p okx-agent --example native_finance_acceptance > "$env:RUNNER_TEMP\native-finance-full.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content -Raw "$env:RUNNER_TEMP\native-finance-full.json" | ConvertFrom-Json
+          if ($report.overall -ne 'FULL_PASS') { throw 'FULL_NATIVE_PROPERTIES_NOT_PROVEN' }
 
-      - name: Upload T09/T10 acceptance evidence even on failure
+      - name: Upload current Rust property evidence even on failure
         if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: t09-t10-native-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}\trade-integration
-          if-no-files-found: warn
+          name: native-finance-full-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}\native-finance-full.json
+          if-no-files-found: error
           retention-days: 14
 
       - name: K9 native two-heavy cancellation latency evidence

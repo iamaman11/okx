@@ -1,5 +1,6 @@
 mod coordinator;
 mod decode;
+mod reference_refresh;
 mod state;
 mod subscriptions;
 
@@ -58,6 +59,12 @@ pub enum PublicRuntimeError {
 
     #[error("current live state for instrument '{0}' is not FRESH")]
     MarketNotFresh(String),
+
+    #[error("public reference refresh refused: {0}")]
+    ReferenceRefresh(&'static str),
+
+    #[error("public reference REST source failed: {0}")]
+    ReferenceSource(String),
 }
 
 #[cfg(test)]

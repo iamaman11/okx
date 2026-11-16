@@ -154,6 +154,39 @@ async fn risk_book_contract_native_public_cohort_denied_b_does_not_block_held_a_
 
     // A's third observation is a finite new signed source event after B's
     // decision. The gate precedes raw delivery; it never refreshes old pages.
+    let b_denied = fixture
+        .owner
+        .lookup_intent(
+            key_b.clone(),
+            TradeIntentLookup::IdempotencyKey("native_opening_required_001".into()),
+            deadline(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let reads_before_diagnostic = fixture.feed.requests.lock().unwrap().clone();
+    let explanation = crate::diagnostics::native_intent::read(
+        &b,
+        fixture.owner.installation_id(),
+        &format!("intent:{}", b_denied.intent_id),
+    )
+    .await;
+    assert_eq!(explanation["state"], "REJECTED");
+    assert_eq!(
+        explanation["reason_code"],
+        "CAMPAIGN_ENTRY_BUDGET_EXHAUSTED"
+    );
+    assert_eq!(explanation["owner"], "execution.unified_finance");
+    assert_eq!(explanation["send_state"], "NOT_STARTED_IN_SQL");
+    assert_eq!(
+        explanation["durable_receipt"]["state"],
+        "NOT_FOUND_IN_ACCOUNT_SQL"
+    );
+    assert_eq!(
+        fixture.feed.requests.lock().unwrap().as_slice(),
+        reads_before_diagnostic
+    );
+    assert!(fixture.feed.outbound_posts.lock().unwrap().is_empty());
     let at = chrono::Utc::now().timestamp_millis().to_string();
     fee(&fixture.feed, "fixture-observer-a", &at);
     leverage(&fixture.feed, "fixture-observer-a");

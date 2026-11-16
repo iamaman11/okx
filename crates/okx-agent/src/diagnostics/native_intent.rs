@@ -58,13 +58,36 @@ pub(crate) async fn read(account: &AccountResources, installation: &str, referen
     };
     result["state"] = intent.state.as_str().into();
     result["stage"] = intent.state.as_str().into();
-    result["reason_code"] =
+    result["reason_code"] = if let Some(reason) = intent
+        .incident
+        .as_ref()
+        .filter(|_| !matches!(intent.state, IntentState::Posting | IntentState::Unknown))
+    {
+        reason.clone()
+    } else {
         if matches!(intent.state, IntentState::Posting | IntentState::Unknown) {
             "AUTHORITATIVE_ORDER_READBACK_REQUIRED"
         } else {
             "DURABLE_INTENT_STATE_OBSERVED"
         }
-        .into();
+        .into()
+    }
+    .into();
+    result["send_state"] = if snapshot.begin_post_at_ms.is_some() {
+        "POTENTIAL_SEND_COMMITTED"
+    } else {
+        "NOT_STARTED_IN_SQL"
+    }
+    .into();
+    result["begin_post_at_ms"] = json!(snapshot.begin_post_at_ms);
+    result["reservation_state"] = json!(snapshot.receipt_state);
+    result["unsent_proof"] = snapshot.unsent.map_or_else(
+        || json!({"state":"NOT_FOUND_IN_ACCOUNT_SQL"}),
+        |proof| {
+            json!({"state":"DURABLE_SQL_NO_SEND","intent_id":proof.intent_id,
+            "plan_hash":proof.plan_hash,"reason_code":proof.reason})
+        },
+    );
     result["intent"] = json!({
         "intent_id":intent.intent_id, "client_order_id":intent.client_order_id,
         "exchange_order_id":intent.exchange_order_id, "instrument_id":intent.instrument_id,

@@ -56,6 +56,24 @@ async fn risk_book_contract_native_unknown_intent_diagnostic_reads_sql_without_n
         .unwrap();
     let requests = fixture.feed.requests.lock().unwrap().clone();
     let sends = fixture.feed.outbound_posts.lock().unwrap().clone();
+    assert!(
+        matches!(
+            fixture
+                .owner
+                .reject_and_release_unsent(
+                    deadline(),
+                    key.clone(),
+                    id.into(),
+                    before.1.as_ref().unwrap().plan_hash.clone(),
+                    "POST_REPLY_LOST".into()
+                )
+                .await,
+            Err(okx_execution::StoreError::Invalid(
+                "POST_OUTCOME_REQUIRES_RECONCILIATION"
+            ))
+        ),
+        "a possibly sent order must never acquire an unsent proof"
+    );
     let result = read(&account, fixture.owner.installation_id(), &reference).await;
     assert_eq!(result["state"], "UNKNOWN", "{result}");
     assert_eq!(

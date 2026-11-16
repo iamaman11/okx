@@ -185,6 +185,19 @@ impl TradeService {
         if !c.limits.allowed_instruments.iter().any(|s| s == instrument) && increase {
             return Err("INSTRUMENT_NOT_ALLOWED".into());
         }
+        // Instrument updates are event-driven, not a periodic freshness feed.
+        // Acquire real public REST evidence when the reference snapshot ages;
+        // a changed specification must rebuild the coherent market generation.
+        let rules = if increase {
+            Some(
+                self.public_ws
+                    .ensure_fresh_instrument_rules(instrument, until)
+                    .await
+                    .map_err(err)?,
+            )
+        } else {
+            None
+        };
         // Subscribe before the first predicate read: an observation arriving
         // between that read and the wait must remain visible. The existing
         // market version wakes this planner; no 50ms polling or extra GET.
@@ -215,11 +228,17 @@ impl TradeService {
                 _ => return Err("PRICE_FRESHNESS_DEADLINE".into()),
             }
         };
-        let rules = self
-            .public_ws
-            .instrument_rules(instrument)
-            .await
-            .ok_or("INSTRUMENT_RULES_UNAVAILABLE")?;
+        // Closing existing exposure retains the original reduction admission:
+        // it must not wait on a new-risk metadata refresh or a public REST
+        // outage. Its live position, lot, precision and source gates still run.
+        let rules = match rules {
+            Some(rules) => rules,
+            None => self
+                .public_ws
+                .instrument_rules(instrument)
+                .await
+                .ok_or("INSTRUMENT_RULES_UNAVAILABLE")?,
+        };
         if rules.reference_generation != market.market.reference_generation
             || rules.instrument.state != "live"
             || rules.instrument.settle_currency.as_deref() != Some("USDT")

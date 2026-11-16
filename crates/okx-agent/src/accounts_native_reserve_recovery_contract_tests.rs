@@ -231,6 +231,20 @@ async fn risk_book_contract_native_public_cancel_after_held_replays_and_cold_reo
     );
     service.update_governance(&authority).await.unwrap();
     let reads_before = feed.requests.lock().unwrap().clone();
+    let explanation = crate::diagnostics::native_intent::read(
+        &reconnected,
+        owner.installation_id(),
+        &format!("intent:{}", original.intent_id),
+    )
+    .await;
+    assert_eq!(explanation["state"], "RESERVED");
+    assert_eq!(explanation["send_state"], "NOT_STARTED_IN_SQL");
+    assert_eq!(explanation["reservation_state"], "HELD");
+    assert_eq!(
+        explanation["durable_receipt"]["intent_id"],
+        original.intent_id
+    );
+    assert_eq!(*feed.requests.lock().unwrap(), reads_before);
     let cold = service
         .trade(&config.alias, &request, Some(&authority))
         .await
@@ -247,11 +261,14 @@ async fn risk_book_contract_native_public_cancel_after_held_replays_and_cold_reo
     assert_eq!(cold["data"]["intent"]["state"], "RESERVED");
     assert_eq!(cold["data"]["remaining_exposure"], "not_evaluated");
     assert_eq!(*feed.requests.lock().unwrap(), reads_before);
-    assert_eq!(owner.campaign_summary(campaign).await.unwrap(), budget);
+    assert_eq!(
+        owner.campaign_summary(campaign.clone()).await.unwrap(),
+        budget
+    );
     let retained = owner
         .reservation_receipt(
-            key,
-            original.intent_id,
+            key.clone(),
+            original.intent_id.clone(),
             CentralReceiptView::ActiveExposure,
             deadline(),
         )
@@ -268,6 +285,35 @@ async fn risk_book_contract_native_public_cancel_after_held_replays_and_cold_reo
     assert_eq!(feed.unconsumed_posts(), 0);
     assert_eq!(feed.unconsumed_public_clock(), 0);
     assert!(feed.denied_routes.lock().unwrap().is_empty());
+    // An explicit public Cancel can complete recovery of this proven unposted
+    // intent without a clock, venue cancel or unrelated financial source read.
+    let cancel = TradeRequest::Cancel {
+        idempotency_key: "native_cancel_unposted_after_reopen".into(),
+        reference: original.intent_id.clone(),
+    };
+    let cancelled = service.trade(&config.alias, &cancel, None).await.unwrap();
+    assert_eq!(
+        cancelled["data"]["primary_reason"], "USER_CANCELLED_UNSENT",
+        "{cancelled}"
+    );
+    assert_eq!(
+        cancelled["data"]["central_release"]["state"], "verified",
+        "{cancelled}"
+    );
+    assert_eq!(cancelled["data"]["intent"]["state"], "REJECTED");
+    assert_eq!(cancelled["data"]["send_state"], "NOT_STARTED");
+    let released = owner.campaign_summary(campaign.clone()).await.unwrap();
+    assert_eq!(released.reserved_entry_usd, "0");
+    assert_eq!(released.reserved_loss_usd, "0");
+    assert_eq!(released.global_reserved_usdt, "0");
+    assert_eq!(released.consumed_entry_usd, "0");
+    assert_eq!(released.remaining_entry_usd, "10");
+    assert_eq!(released.opening, budget.opening);
+    let replay = service.trade(&config.alias, &cancel, None).await.unwrap();
+    assert_eq!(replay["data"]["central_release"]["state"], "verified");
+    assert_eq!(owner.campaign_summary(campaign).await.unwrap(), released);
+    assert_eq!(*feed.requests.lock().unwrap(), reads_before);
+    assert!(feed.outbound_posts.lock().unwrap().is_empty());
     drop(source_timer);
     drop(reconnected);
     registry.shutdown().await;

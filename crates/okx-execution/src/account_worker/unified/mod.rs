@@ -13,6 +13,8 @@ mod owner_financial_crash_tests;
 mod owner_financial_reply_tests;
 #[cfg(test)]
 mod owner_queue_tests;
+#[cfg(test)]
+mod owner_reserve_reply_tests;
 mod owner_startup;
 #[cfg(test)]
 mod owner_startup_tests;

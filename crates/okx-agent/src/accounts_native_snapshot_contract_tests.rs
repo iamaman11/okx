@@ -158,7 +158,11 @@ async fn risk_book_contract_native_restored_snapshot_blocks_public_execute_until
         .await;
     let reason = match result {
         Err(reason) => reason,
-        Ok(value) => value["reason_code"].as_str().unwrap_or("").to_owned(),
+        Ok(value) => value["reason_code"]
+            .as_str()
+            .or_else(|| value["data"]["primary_reason"].as_str())
+            .unwrap_or("")
+            .to_owned(),
     };
     assert_eq!(
         reason, "STORAGE_RECOVERY_INCOMPLETE",

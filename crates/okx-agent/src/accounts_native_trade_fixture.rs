@@ -24,6 +24,73 @@ pub(super) struct PlanningFeeGate {
     pub(super) entered: tokio::sync::Notify,
     pub(super) release: tokio::sync::Notify,
 }
+impl ExecuteMarketBoundary {
+    /// A named external market event shares the same ordered books sequence
+    /// as inventory-triggered events. This changes only raw venue delivery.
+    pub(super) async fn publish_market_observation(&self, deadline: Instant) {
+        let _delivery = self.market_delivery.lock().await;
+        self.publish_market_observation_locked(deadline).await;
+    }
+
+    // Caller holds market_delivery, including across the inventory GET when
+    // called by HttpTransport. Never acquire the same mutex recursively.
+    async fn publish_market_observation_locked(&self, deadline: Instant) {
+        let market = self.market.lock().unwrap().clone();
+        let Some((socket, public)) = market else {
+            return;
+        };
+        let index = self.updates.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            index < self.market_updates_expected.load(Ordering::SeqCst),
+            "only explicitly budgeted raw market observations are scripted"
+        );
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let mut parsed = public.subscribe_market_updates();
+        socket.send_public_frame(
+            json!({"arg":{"channel":"tickers","instId":"BTC-USDT-SWAP"},
+            "data":[{"instType":"SWAP","instId":"BTC-USDT-SWAP","last":"1000","lastSz":"1",
+            "askPx":"1000","askSz":"10","bidPx":"999.9","bidSz":"10","ts":timestamp.to_string()}]})
+            .to_string(),
+        );
+        socket.send_public_frame(json!({"arg":{"channel":"mark-price","instId":"BTC-USDT-SWAP"},
+            "data":[{"instType":"SWAP","instId":"BTC-USDT-SWAP","markPx":"1000","ts":timestamp.to_string()}]}).to_string());
+        socket.send_public_frame(
+            json!({"arg":{"channel":"index-tickers","instId":"BTC-USDT"},
+            "data":[{"instId":"BTC-USDT","idxPx":"1000","ts":timestamp.to_string()}]})
+            .to_string(),
+        );
+        socket.send_public_frame(
+            json!({"arg":{"channel":"books","instId":"BTC-USDT-SWAP"},"action":"update",
+            "data":[{"asks":[["1000","10","0","1"]],"bids":[["999.9","10","0","1"]],
+            "seqId":11+index,"prevSeqId":10+index,"ts":timestamp.to_string()}]})
+            .to_string(),
+        );
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+            loop {
+                parsed
+                    .changed()
+                    .await
+                    .expect("market task must remain running");
+                if public
+                    .risk_fresh_snapshot(
+                        "BTC-USDT-SWAP",
+                        chrono::Utc::now().timestamp_millis() as u64,
+                        2000,
+                        180000,
+                        chrono::Utc::now().to_rfc3339(),
+                    )
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("finite market observation not parsed: phase={index}"));
+    }
+}
+
 impl HttpTransport for ExecuteMarketBoundary {
     fn send(&self, request: HttpRequest, deadline: Instant) -> HttpSend<'_> {
         Box::pin(async move {
@@ -98,58 +165,8 @@ impl HttpTransport for ExecuteMarketBoundary {
                 raw["data"][0]["clOrdId"] = json!("foreign-client-order");
                 response.body = serde_json::to_vec(&raw).unwrap();
             }
-            let market = if last_inventory {
-                self.market.lock().unwrap().clone()
-            } else {
-                None
-            };
-            if let Some((socket, public)) = market {
-                let index = self.updates.fetch_add(1, Ordering::SeqCst);
-                assert!(
-                    index < self.market_updates_expected.load(Ordering::SeqCst),
-                    "only pre-reserve and post-held inventory observations are scripted"
-                );
-                let timestamp = chrono::Utc::now().timestamp_millis();
-                let mut parsed = public.subscribe_market_updates();
-                socket.send_public_frame(json!({"arg":{"channel":"tickers","instId":"BTC-USDT-SWAP"},
-                    "data":[{"instType":"SWAP","instId":"BTC-USDT-SWAP","last":"1000","lastSz":"1",
-                    "askPx":"1000","askSz":"10","bidPx":"999.9","bidSz":"10","ts":timestamp.to_string()}]}).to_string());
-                socket.send_public_frame(json!({"arg":{"channel":"mark-price","instId":"BTC-USDT-SWAP"},
-                    "data":[{"instType":"SWAP","instId":"BTC-USDT-SWAP","markPx":"1000","ts":timestamp.to_string()}]}).to_string());
-                socket.send_public_frame(
-                    json!({"arg":{"channel":"index-tickers","instId":"BTC-USDT"},
-                    "data":[{"instId":"BTC-USDT","idxPx":"1000","ts":timestamp.to_string()}]})
-                    .to_string(),
-                );
-                socket.send_public_frame(
-                    json!({"arg":{"channel":"books","instId":"BTC-USDT-SWAP"},"action":"update",
-                    "data":[{"asks":[["1000","10","0","1"]],"bids":[["999.9","10","0","1"]],
-                    "seqId":11+index,"prevSeqId":10+index,"ts":timestamp.to_string()}]})
-                    .to_string(),
-                );
-                tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
-                    loop {
-                        parsed
-                            .changed()
-                            .await
-                            .expect("market task must remain running");
-                        if public
-                            .risk_fresh_snapshot(
-                                "BTC-USDT-SWAP",
-                                chrono::Utc::now().timestamp_millis() as u64,
-                                2000,
-                                180000,
-                                chrono::Utc::now().to_rfc3339(),
-                            )
-                            .await
-                            .is_ok()
-                        {
-                            break;
-                        }
-                    }
-                })
-                .await
-                .unwrap_or_else(|_| panic!("finite market observation not parsed: phase={index}"));
+            if last_inventory {
+                self.publish_market_observation_locked(deadline).await;
             }
             Ok(response)
         })
@@ -189,6 +206,16 @@ pub(super) fn record_leverage(feed: &RecordedAccountHttp) {
 
 /// Finite original venue bytes. Only production WS parsing publishes prices.
 pub(super) fn raw_market() -> (
+    okx_runtime::PublicWsCoordinator,
+    okx_runtime::PublicWsHandle,
+    Arc<RecordedWsConnector>,
+) {
+    raw_market_with_public_client(None)
+}
+
+pub(super) fn raw_market_with_public_client(
+    client: Option<okx_api::OkxPublicClient>,
+) -> (
     okx_runtime::PublicWsCoordinator,
     okx_runtime::PublicWsHandle,
     Arc<RecordedWsConnector>,
@@ -263,12 +290,31 @@ pub(super) fn raw_market() -> (
         }
         socket.expect_public_subscription(argument, frames);
     }
-    let (coordinator, handle) = okx_runtime::PublicWsCoordinator::new_with_connector(
-        OkxEnvironment::new(okx_api::Region::Global, false),
-        reference,
-        RateBudget::new(),
-        socket.clone(),
-    );
+    let environment = OkxEnvironment::new(okx_api::Region::Global, false);
+    let (coordinator, handle) = if let Some(client) = client {
+        okx_runtime::PublicWsCoordinator::new_with_connector_and_public_client(
+            environment,
+            reference,
+            client.rate_budget(),
+            socket.clone(),
+            client,
+        )
+    } else {
+        let rate = RateBudget::new();
+        let offline = okx_api::OkxPublicClient::with_http_transport(
+            environment,
+            rate.clone(),
+            Arc::new(RecordedAccountHttp::default()),
+        )
+        .expect("isolated raw market HTTP boundary");
+        okx_runtime::PublicWsCoordinator::new_with_connector_and_public_client(
+            environment,
+            reference,
+            rate,
+            socket.clone(),
+            offline,
+        )
+    };
     (coordinator, handle, socket)
 }
 

@@ -274,76 +274,80 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit_before(
             Some(std::time::Instant::now() + std::time::Duration::from_secs(10)),
-            move |db| {
-                let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                require_verified_live_finance_authority(&tx, &installation)?;
-                let now = super::opening_ingress::owner_now_ms()?;
-                let census = bind_census(&tx, &installation, &campaign, &request.census, now)?;
-                let input = crate::risk::PostFenceInput {
-                    reservation_key: request.reservation_key.clone(),
-                    plan_sha256: request.plan_sha256.clone(),
-                    policy_revision: request.policy_revision,
-                    expected_sequence: request.expected_sequence,
-                    now_ms: now,
-                    source_proof_digest: request.source_proof_digest,
-                    census,
-                    causal: request.causal,
-                };
-                let decision = apply_original_unified_finance_transaction(
-                    &tx,
-                    &installation,
-                    UnifiedFinanceWrite::BeginPost {
-                        campaign: campaign.clone(),
-                        input,
-                    },
-                )?;
-                match decision {
-                    UnifiedFinanceWriteReceipt::Risk(
-                        crate::risk::UnifiedRiskDecision::PostAuthorized {
-                            book_sequence,
-                            existing_modelled_loss_usdt,
-                            ..
-                        },
-                    ) => {
-                        let (account, intent): (String, String) = tx.query_row(
-                            "SELECT account_key,intent_id FROM risk_entries
-                         WHERE installation_id=?1 AND campaign_id=?2
-                         AND reservation_key=?3 AND plan_sha256=?4 AND state='POSTED'",
-                            rusqlite::params![
-                                installation,
-                                campaign,
-                                request.reservation_key,
-                                request.plan_sha256
-                            ],
-                            |r| Ok((r.get(0)?, r.get(1)?)),
-                        )?;
-                        tx.commit().map_err(|_| {
-                            StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
-                        })?;
-                        Ok(NativePostDecision::Authorized {
-                            claim: CommittedVenueSend::after_commit(
-                                installation,
-                                account,
-                                intent,
-                                request.plan_sha256,
-                            ),
-                            book_sequence,
-                            existing_modelled_loss_usdt,
-                        })
-                    }
-                    UnifiedFinanceWriteReceipt::Risk(
-                        crate::risk::UnifiedRiskDecision::Denied { reason },
-                    ) => {
-                        tx.commit().map_err(|_| {
-                            StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
-                        })?;
-                        Ok(NativePostDecision::Denied { reason })
-                    }
-                    _ => Err(StoreError::Invalid("NATIVE_POST_RECEIPT_UNEXPECTED")),
-                }
-            },
+            move |db| begin_post_reported_on_connection(db, installation, campaign, request),
         )
         .await
+    }
+}
+
+// The complete synchronous owner operation: capability construction follows COMMIT.
+pub(super) fn begin_post_reported_on_connection(
+    db: &mut rusqlite::Connection,
+    installation: String,
+    campaign: String,
+    request: NativePostRequest,
+) -> StoreResult<NativePostDecision> {
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    require_verified_live_finance_authority(&tx, &installation)?;
+    let now = super::opening_ingress::owner_now_ms()?;
+    let census = bind_census(&tx, &installation, &campaign, &request.census, now)?;
+    let input = crate::risk::PostFenceInput {
+        reservation_key: request.reservation_key.clone(),
+        plan_sha256: request.plan_sha256.clone(),
+        policy_revision: request.policy_revision,
+        expected_sequence: request.expected_sequence,
+        now_ms: now,
+        source_proof_digest: request.source_proof_digest,
+        census,
+        causal: request.causal,
+    };
+    let decision = apply_original_unified_finance_transaction(
+        &tx,
+        &installation,
+        UnifiedFinanceWrite::BeginPost {
+            campaign: campaign.clone(),
+            input,
+        },
+    )?;
+    match decision {
+        UnifiedFinanceWriteReceipt::Risk(crate::risk::UnifiedRiskDecision::PostAuthorized {
+            book_sequence,
+            existing_modelled_loss_usdt,
+            ..
+        }) => {
+            let (account, intent): (String, String) = tx.query_row(
+                "SELECT account_key,intent_id FROM risk_entries
+             WHERE installation_id=?1 AND campaign_id=?2
+             AND reservation_key=?3 AND plan_sha256=?4 AND state='POSTED'",
+                rusqlite::params![
+                    installation,
+                    campaign,
+                    request.reservation_key,
+                    request.plan_sha256
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            tx.commit().map_err(|_| {
+                StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
+            })?;
+            Ok(NativePostDecision::Authorized {
+                claim: CommittedVenueSend::after_commit(
+                    installation,
+                    account,
+                    intent,
+                    request.plan_sha256,
+                ),
+                book_sequence,
+                existing_modelled_loss_usdt,
+            })
+        }
+        UnifiedFinanceWriteReceipt::Risk(crate::risk::UnifiedRiskDecision::Denied { reason }) => {
+            tx.commit().map_err(|_| {
+                StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
+            })?;
+            Ok(NativePostDecision::Denied { reason })
+        }
+        _ => Err(StoreError::Invalid("NATIVE_POST_RECEIPT_UNEXPECTED")),
     }
 }
 

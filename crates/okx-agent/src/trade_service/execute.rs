@@ -1454,8 +1454,35 @@ impl TradeService {
                     native_send_claim = claim;
                 }
                 Err(reason) if native_reserve => {
-                    // Only the installation SQL owner may resolve this
-                    // outcome. Inspect/readback cannot mint a send capability.
+                    // The sole local owner can prove no BeginPost and atomically
+                    // retire the original HELD obligation. A queued/committed
+                    // BeginPost wins the same writer order and makes rejection
+                    // fail; lost replies must then remain UNKNOWN, never resend.
+                    if let Some((owner, account)) = r.execution.store.native_scope() {
+                        let resolution = owner
+                            .reject_and_release_unsent(
+                                deadline(),
+                                account.into(),
+                                prepared.intent_id.clone(),
+                                prepared.plan_hash.clone(),
+                                reason.clone(),
+                            )
+                            .await;
+                        if resolution.is_ok() {
+                            return Ok(completed(json!({
+                                "intent_id":prepared.intent_id,"state":"REJECTED",
+                                "rejection_origin":"LOCAL","send_state":"NOT_STARTED",
+                                "primary_reason":reason,"risk_release_state":"RELEASED"
+                            })));
+                        }
+                        let mut result = uncertain(&prepared.intent_id, &reason);
+                        result["unsent_resolution"] = json!({
+                            "state":"NOT_PROVEN",
+                            "reason_code":err(resolution.unwrap_err()),
+                            "send_permission":"NOT_GRANTED"
+                        });
+                        return Ok(result);
+                    }
                     return Ok(uncertain(&prepared.intent_id, &reason));
                 }
                 Err(reason)
@@ -1942,9 +1969,9 @@ impl TradeService {
         let admission = source.admission;
         let rules = self
             .public_ws
-            .instrument_rules(&intent.instrument_id)
+            .ensure_fresh_instrument_rules(&intent.instrument_id, until)
             .await
-            .ok_or("POST_ENTRY_RULES_UNAVAILABLE")?;
+            .map_err(err)?;
         plan::verify_entry_rules_match(&rules, &intent.instrument_id, &intent.plan)?;
         let ct = dec(rules
             .instrument

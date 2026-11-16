@@ -9,6 +9,39 @@ use sha2::{Digest, Sha256};
 use std::time::Instant;
 
 impl UnifiedFinanceHandle {
+    /// Resolve a failed pre-send attempt using the original durable state.
+    /// Rejection, its no-send receipt, RiskBook release and acknowledgement
+    /// commit together. A committed BeginPost is an unconditional refusal,
+    /// including when its reply/send capability was lost by the caller.
+    pub async fn reject_and_release_unsent(
+        &self,
+        deadline: Instant,
+        account: String,
+        intent: String,
+        plan: String,
+        reason: String,
+    ) -> StoreResult<()> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            require_verified_live_finance_authority(&tx, &installation)?;
+            AccountStore::reject_unsent_sql(
+                &tx,
+                Some((&installation, &account)),
+                &intent,
+                &reason,
+                super::opening_ingress::owner_now_ms()?,
+                false,
+            )?;
+            release_original_unsent_status_sql(&tx, &installation, &account, &intent, &plan)?;
+            tx.commit().map_err(|_| {
+                StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
+            })?;
+            Ok(())
+        })
+        .await
+    }
+
     /// `true` means a local reduce-only reservation; `false` means the
     /// original RiskBook also atomically acknowledged this no-send release.
     /// This operation never calls the venue or manufactures a source proof.

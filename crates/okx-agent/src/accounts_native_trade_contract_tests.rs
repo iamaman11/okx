@@ -92,7 +92,10 @@ async fn risk_book_contract_native_maintenance_installs_original_opening_before_
         .trade
         .trade(&fixture.config.alias, &request, Some(&fixture.authority))
         .await;
-    assert_eq!(result.unwrap_err(), "PRICE_FRESHNESS_DEADLINE");
+    assert_eq!(
+        result.unwrap_err(),
+        "instrument 'BTC-USDT-SWAP' is not present in reference data"
+    );
     assert!(fixture.feed.outbound_posts.lock().unwrap().is_empty());
     shutdown.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(5), maintenance)
@@ -443,3 +446,9 @@ mod native_changed_source;
 
 #[path = "accounts_native_reserve_recovery_contract_tests.rs"]
 mod native_reserve_recovery;
+
+#[path = "accounts_native_add_contract_tests.rs"]
+mod native_add;
+
+#[path = "accounts_native_public_fairness_contract_tests.rs"]
+mod native_public_fairness;
