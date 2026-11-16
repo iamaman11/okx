@@ -2444,9 +2444,13 @@ impl TradeService {
                         .await
                         .map_err(|e|report("ACCOUNT_SNAPSHOT_POST_HELD",err(e)))?
                 } else if terminal_release.is_some() {
-                    // Terminal release needs the same fresh private GETs as
-                    // the regular census, with bounded LOCAL no-send admission.
-                    r.observer.snapshot_until(deadline()).await
+                    // All terminal census sources must follow the settlement
+                    // frontier. snapshot_until retains the AUTHENTICATED time
+                    // of a cached config observation; relabeling a cache hit
+                    // as fresh would be unsafe and can put the census before
+                    // settlement even when its balances were fetched later.
+                    // Reuse the existing actual fresh-config snapshot ingress.
+                    r.observer.snapshot_after_held_until(deadline()).await
                         .map_err(|e|report("ACCOUNT_SNAPSHOT_TERMINAL",err(e)))?
                 } else if let Some(until) = until {
                     // The managed-protection census retries only authenticated

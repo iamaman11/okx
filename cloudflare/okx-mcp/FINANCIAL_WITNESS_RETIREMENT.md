@@ -1,3 +1,17 @@
+## Terminal census config causality correction
+
+GitHub run43805408497 on4ea11685 failed the emergency terminal release with
+TERMINAL_CENSUS_PRECEDES_SETTLEMENT_SOURCE. The ordinary observer snapshot
+retained the authentic timestamp of a still-valid cached config, which could
+predate settlement even though balances were read later. Terminal census now
+uses the EXISTING forced authenticated config ingress; no source time is
+relabelled and no freshness/census/release guard is relaxed. A deterministic
+cache-frontier unit witness distinguishes the old cached time from the new
+response. The four terminal/Close lifecycle cases plus existing forced-config
+negative contract passed locally5/5 in18.54s. A new full current-SHA collector
+and GitHub validation remain required; the previous59/61 report is Windows
+partial evidence, not cross-platform GO.
+
 ## Native completion boundaries - 16 November 2026, current working slice
 
 The current collector maps 61 atomic properties. Its only intentionally missing

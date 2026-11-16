@@ -19,6 +19,10 @@ pub struct Witness {
     pub package: &'static str,
     pub test: &'static str,
 }
+const TERMINAL_CONFIG_FRONTIER: Witness = Witness {
+    package: "okx-agent",
+    test: "account_bootstrap::tests::terminal_census_fresh_config_follows_settlement_frontier_without_relabeling_cache",
+};
 const EMERGENCY_REMEDIATION: Witness = Witness {
     package: "okx-agent",
     test: "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_failed_stop_emergency_close_and_verified_remediation",
@@ -507,7 +511,11 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB06.cancel_ack_loss_and_successful_emergency_remediation",
-        witnesses: &[CANCEL_ACK_LOSS, EMERGENCY_REMEDIATION],
+        witnesses: &[
+            CANCEL_ACK_LOSS,
+            EMERGENCY_REMEDIATION,
+            TERMINAL_CONFIG_FRONTIER,
+        ],
         missing: None,
     },
     Contract {
