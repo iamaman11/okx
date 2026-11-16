@@ -21,6 +21,15 @@ impl Default for CpuExecutor {
     }
 }
 impl CpuExecutor {
+    #[cfg(test)]
+    pub(super) async fn hold_all_workers_for_test(&self) -> tokio::sync::OwnedSemaphorePermit {
+        let count = u32::try_from(self.cpu.available_permits()).unwrap();
+        assert!(
+            count > 0,
+            "new isolated executor must have its workers available"
+        );
+        self.cpu.clone().acquire_many_owned(count).await.unwrap()
+    }
     pub async fn run<T: Send + 'static>(
         &self,
         cancel: Arc<AtomicBool>,

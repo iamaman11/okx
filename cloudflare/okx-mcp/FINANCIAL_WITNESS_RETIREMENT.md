@@ -1,3 +1,37 @@
+## Current-architecture CI layout and asynchronous research contract
+
+CI43887700047 at c8999955 passed architecture, Linux Rust/core, actual workerd
+transport and the current B1 replacement. Its flat Windows regression failed
+one current Native positive test with safe COHORT_ACCOUNT_SOURCE_STALE/no send
+and two research tests which treated a valid queued job as a completed table.
+Those failures were not waived as obsolete. Local FULL_PASS did not replace CI.
+
+Research fixture tests now accept the actual bounded market contract: a ready
+page OR the original job identity, then durable terminal state and the original
+cached artifact. The publication test deterministically holds the real CPU
+permits until market returns its legitimate pending response, then releases
+workers and verifies the actual result/replay. No synthetic job, longer public
+timeout, new service, changed financial formula, source time, freshness/risk
+rule, extra GET page or POST retry is introduced.11 artifact cases passed in
+2.27s; strict Clippy passed.
+
+The Windows job now executes the exact current Rust financial/physical/resource
+gate FIRST, uploads that evidence when the step ran, then retains ALL native
+regressions partitioned by domain. Trading/SQL/CONTROL/Launcher run separately
+from CPU-heavy analytics; each broad libtest group has2 fixture workers. This
+is host-load isolation between independent test installations, not removal of
+concurrency inside 100-caller/shared-budget/fairness tests. K9 still runs its
+actual2-heavy-job/ingestion/Stop/cancel workload with30 measurements separately;
+it is skipped only in the general analytics group to avoid measuring it twice.
+
+Local exact regression commands:389 Agent trading +CLI6 +execution346 +CONTROL46
++Launcher19 PASS;81 analytics PASS, K9 separately1 PASS. Historical ignored
+probes remain ignored and provide no current property credit. Agent totals
+389+81+K9=471, preserving the complete prior library coverage. Entry-settlement,
+protection-cleanup and unsent-release tests remain in that full library run;
+their duplicate filtered invocations were removed from the same CI job.
+The single current financial gate still requires61/61 atomic rows and fresh
+physical/source witnesses. Historical26 driver results are never reused.
 ## Current CODE checkpoint and replacement of the remaining B1 driver
 
 The full Windows collector at c89ecee8 passed61/61 atomic rows with84 core

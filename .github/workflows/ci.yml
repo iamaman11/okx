@@ -404,45 +404,8 @@ jobs:
         shell: pwsh
         run: ./scripts/test-windows-unify-root.ps1
 
-      - name: Fast entry settlement production-boundary tests (#495)
-        shell: pwsh
-        run: |
-          $output = & cargo test --locked -p okx-agent --lib trade_service::entry_settlement:: -- --nocapture 2>&1
-          $code = $LASTEXITCODE
-          $output | Out-Host
-          if ($code -ne 0) { exit $code }
-          $proof = [regex]::Match(($output -join "`n"), 'test result: ok\.\s+(\d+) passed;')
-          if (-not $proof.Success -or [int]$proof.Groups[1].Value -lt 8) {
-            throw 'ENTRY_SETTLEMENT_DIRECT_TEST_COUNT_INVALID'
-          }
-
-      - name: Fast protection cleanup SQL tests (#500)
-        shell: pwsh
-        run: |
-          $output = & cargo test --locked -p okx-agent --lib trade_service::protection_cleanup::protection_cleanup_direct_tests:: -- --nocapture 2>&1
-          $code = $LASTEXITCODE
-          $output | Out-Host
-          if ($code -ne 0) { exit $code }
-          $proof = [regex]::Match(($output -join "`n"), 'test result: ok\.\s+(\d+) passed;')
-          if (-not $proof.Success -or [int]$proof.Groups[1].Value -lt 6) {
-            throw 'PROTECTION_CLEANUP_DIRECT_TEST_COUNT_INVALID'
-          }
-
       - name: Clippy native Windows crates
         run: cargo clippy --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --all-targets -- -D warnings
-
-      - name: Direct unsent release contract (#501)
-        shell: pwsh
-        run: |
-          $output = & cargo test --locked -p okx-agent --lib trade_service::unsent_release::tests:: -- --nocapture 2>&1
-          $code = $LASTEXITCODE
-          $output | Out-Host
-          if ($code -ne 0) { exit $code }
-          $proof = [regex]::Match(($output -join "`n"), 'test result: ok\.\s+(\d+) passed;')
-          if (-not $proof.Success -or [int]$proof.Groups[1].Value -ne 10) { throw 'UNSENT_RELEASE_TEST_COUNT_INVALID' }
-
-      - name: Test native Windows crates
-        run: cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution
 
       - name: Install locked production workerd test dependencies on Windows
         if: github.event_name == 'pull_request'
@@ -463,6 +426,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Mandatory current Rust financial property acceptance
+        id: native-properties
         if: github.event_name == 'pull_request'
         shell: pwsh
         run: |
@@ -475,7 +439,7 @@ jobs:
           if ($report.overall -ne 'FULL_PASS') { throw 'FULL_NATIVE_PROPERTIES_NOT_PROVEN' }
 
       - name: Upload current Rust property evidence even on failure
-        if: always() && github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request' && steps.native-properties.outcome != 'skipped'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: native-finance-full-${{ github.event.pull_request.head.sha }}
@@ -483,10 +447,22 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # These remain complete regressions, not substitutes for the exact current
+      # property map above. Independent CPU-heavy research fixtures must not age
+      # a separate financial fixture's real-time sources. Concurrency INSIDE
+      # the 100-caller, fairness and two-heavy-job tests is not reduced.
+      - name: Native trading, SQL, CONTROL and Launcher regression
+        run: |
+          cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution -- --skip analytics:: --test-threads 2
+
+      - name: Independent research regression
+        run: |
+          cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --lib analytics:: -- --test-threads 2 --skip two_heavy_research_jobs_ingestion_stop_and_cancel_latency
+
       - name: K9 native two-heavy cancellation latency evidence
         shell: pwsh
         run: |
-          cargo test --locked -p okx-agent --lib two_heavy_research_jobs_ingestion_stop_and_cancel_latency -- --nocapture | Tee-Object -FilePath "$env:RUNNER_TEMP\k9-two-heavy.txt"
+          cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --lib two_heavy_research_jobs_ingestion_stop_and_cancel_latency -- --nocapture | Tee-Object -FilePath "$env:RUNNER_TEMP\k9-two-heavy.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $log = Get-Content -Raw -LiteralPath "$env:RUNNER_TEMP\k9-two-heavy.txt"
           $line = [regex]::Match($log, 'ANALYTICS_PERF_JSON:(\{[^\r\n]+\})')

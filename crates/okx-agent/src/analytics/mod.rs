@@ -920,6 +920,43 @@ mod artifact_job_fixtures {
         .unwrap();
         (root, service)
     }
+    // market() promises a bounded synchronous response, NOT completion within
+    // two seconds under arbitrary simultaneous test CPU load. A queued/running
+    // job is a valid response; wait for its original durable terminal state,
+    // then read the same cached artifact. Failure is reported before row access.
+    async fn completed_market(
+        service: &AnalyticsService,
+        request: MarketRequest,
+        first: Value,
+    ) -> Value {
+        if first["rows"].is_array() {
+            return first;
+        }
+        let id = first["id"]
+            .as_str()
+            .expect("market result must be rows or a typed job")
+            .to_owned();
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(10));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                tick.tick().await;
+                let job = service.jobs.get_async(id.clone()).await.unwrap();
+                match job.state {
+                    jobs::State::Completed => break,
+                    jobs::State::Queued | jobs::State::Running => {}
+                    _ => panic!(
+                        "market job ended before artifact: {:?} {:?}",
+                        job.state, job.error
+                    ),
+                }
+            }
+        })
+        .await
+        .expect("original market job must publish its artifact");
+        let result = service.market(request, None, None).await.unwrap();
+        assert_eq!(result["job_id"], id, "same completed market identity");
+        result
+    }
     #[test]
     fn research_fixture_catalog_roots_are_distinct_even_with_parallel_starts() {
         let roots = (0..128)
@@ -971,7 +1008,15 @@ mod artifact_job_fixtures {
             filters: vec![],
             sort: None,
         };
-        let result = s.market(request.clone(), None, None).await.unwrap();
+        // Reproduce the valid queued response deterministically: the REAL CPU
+        // owner has no worker available until after market's synchronous budget.
+        // No fake job, changed deadline or increased production timeout.
+        let workers = s.cpu.hold_all_workers_for_test().await;
+        let pending = s.market(request.clone(), None, None).await.unwrap();
+        assert!(pending["rows"].is_null());
+        assert!(pending["id"].is_string());
+        drop(workers);
+        let result = completed_market(&s, request.clone(), pending).await;
         assert_eq!(result["returned_rows"], 1);
         assert_eq!(s.market(request, None, None).await.unwrap(), result);
         let page = s
@@ -1040,7 +1085,8 @@ mod artifact_job_fixtures {
             filters: vec![],
             sort: None,
         };
-        let first = service.market(query.clone(), None, None).await.unwrap();
+        let response = service.market(query.clone(), None, None).await.unwrap();
+        let first = completed_market(&service, query.clone(), response).await;
         assert_eq!(first["rows"][0]["instrument"], instruments[0]);
         let job = first["job_id"].as_str().unwrap().to_owned();
         assert_eq!(first["next_cursor"], format!("{job}:1"));
