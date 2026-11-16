@@ -45,8 +45,10 @@ SELECT i.intent_id,i.revision,i.state,r.reservation_key,r.policy_revision,r.stat
        ack.committed_at
 FROM candidates AS r
 JOIN intents AS i ON i.intent_id=r.intent_id
+    AND i.installation_id=r.installation_id AND i.account_key=r.account_key
     AND i.plan_hash=r.plan_hash AND i.policy_revision=r.policy_revision
 LEFT JOIN operation_receipts AS ack ON ack.operation_id='central-release:'||r.reservation_key
+    AND ack.installation_id=r.installation_id AND ack.account_key=r.account_key
     AND ack.kind='CENTRAL_RELEASE' AND ack.request_hash=r.receipt_hash
     AND length(ack.result_ref)>0 AND ack.committed_at>0
 WHERE r.account_key=?2 AND r.installation_id=?3
@@ -2364,6 +2366,51 @@ mod active_receipt_tests {
         assert!(plan.contains("MATERIALIZE candidates"), "{plan}");
         assert!(plan.contains("idx_risk_receipts_active"), "{plan}");
         assert!(!plan.contains("SCAN intents"), "{plan}");
+    }
+
+    #[test]
+    fn terminal_diagnostics_native_join_never_crosses_account_for_reused_ids() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../../../schema/finance-unified-v1.sql"))
+            .unwrap();
+        // A deliberately independent SQL fixture: same intent and release
+        // operation IDs are legal in separate scoped account namespaces.
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 INSERT INTO intents(installation_id,account_key,intent_id,idempotency_key,
+                    request_hash,decision_id,state,revision,client_order_id,deadline,
+                    plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at)
+                 VALUES
+                  ('installation','account-a','same','key-a','hash','decision-a','FILLED',1,'client-a',1000,'plan',1,1,'BTC-USDT-SWAP',100,100),
+                  ('installation','account-b','same','key-b','hash','decision-b','FILLED',1,'client-b',1000,'plan',1,1,'BTC-USDT-SWAP',100,100);
+                 INSERT INTO risk_receipts(reservation_key,intent_id,account_key,installation_id,
+                    plan_hash,policy_revision,receipt_hash,requested_loss_usd,conversion_digest,state)
+                 VALUES
+                  ('reserve','same','account-a','installation','plan',1,'receipt-hash','1','proof','RELEASED'),
+                  ('reserve','same','account-b','installation','plan',1,'receipt-hash','1','proof','RELEASED');
+                 INSERT INTO operation_receipts(installation_id,account_key,operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES
+                  ('installation','account-a','central-release:reserve','CENTRAL_RELEASE','receipt-hash','ACK',111),
+                  ('installation','account-b','central-release:reserve','CENTRAL_RELEASE','receipt-hash','ACK',222);",
+            )
+            .unwrap();
+        let read = |account: &str| -> Vec<(String, Option<i64>)> {
+            let mut statement = connection
+                .prepare(TERMINAL_RELEASE_DIAGNOSTIC_SCOPED_SQL)
+                .unwrap();
+            statement
+                .query_map(params![128, account, "installation"], |row| {
+                    Ok((row.get(0)?, row.get(6)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(read("account-a"), vec![("same".into(), Some(111))]);
+        assert_eq!(read("account-b"), vec![("same".into(), Some(222))]);
+        assert!(read("account-c").is_empty());
     }
 
     #[test]
