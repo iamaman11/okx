@@ -638,12 +638,12 @@ impl TradeService {
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
         {
             let id = i.intent_id.clone();
-            let (quote, admission) =
-                r.execution
-                    .store
-                    .entry_cost_evidence(deadline(), id)
-                    .await
-                    .map_err(err)?;
+            let (quote, admission) = r
+                .execution
+                .store
+                .entry_cost_evidence(deadline(), id)
+                .await
+                .map_err(err)?;
             entry_cost_status(quote, admission)?
         } else {
             json!(null)
@@ -674,7 +674,8 @@ impl TradeService {
             }
         }
         let id = i.intent_id.clone();
-        let declined_reserve = r.execution
+        let declined_reserve = r
+            .execution
             .store
             .declined_reserve(deadline(), id)
             .await
@@ -691,7 +692,8 @@ impl TradeService {
         // and absent reserve marker jointly prove no-send / no central risk;
         // skip unrelated venue and financial I/O.
         let id = i.intent_id.clone();
-        let unsent_before_reserve = r.execution
+        let unsent_before_reserve = r
+            .execution
             .store
             .unsent_before_reserve(deadline(), id)
             .await
@@ -711,12 +713,13 @@ impl TradeService {
         // independently of exchange history/fees. Other rejected intents
         // still require the full authoritative reconciliation below.
         let id = i.intent_id.clone();
-        let no_send = r.execution
+        let no_send = r
+            .execution
             .store
             .unsent_release_receipt(deadline(), id)
             .await
             .map_err(err)?
-        .is_some();
+            .is_some();
         if no_send {
             // A completed native SQL REJECTED_UNSENT receipt is proof that
             // this intent never touched venue. It needs neither a fills

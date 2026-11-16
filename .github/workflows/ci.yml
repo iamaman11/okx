@@ -202,6 +202,10 @@ jobs:
           cargo test --locked -p okx-agent --lib risk_bridge::tests -- --nocapture
           cargo test --locked -p okx-agent --lib risk_book_contract_native_initialize_account -- --nocapture
           cargo test --locked -p okx-agent --lib actual_native_session_binds_risk_reply_to_generation_and_id -- --nocapture
+      - name: Status and Recovery direct operation regressions
+        run: |
+          cargo test --locked -p okx-agent --lib trade_service::reconcile::entry_cost_status_tests -- --nocapture
+          cargo test --locked -p okx-agent --lib trade_service::recovery::tests -- --nocapture
 
   riskbook-draft-rust:
     # Fast, real-source feedback for the active Rust RiskBook draft. Final

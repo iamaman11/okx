@@ -816,7 +816,14 @@ impl ExecutionStore {
             }
             Self::Native { owner, account } => {
                 owner
-                    .record_order_readback(deadline, account.clone(), intent, order_id, state, filled)
+                    .record_order_readback(
+                        deadline,
+                        account.clone(),
+                        intent,
+                        order_id,
+                        state,
+                        filled,
+                    )
                     .await
             }
         }
@@ -855,7 +862,9 @@ impl ExecutionStore {
                     .await
             }
             Self::Native { owner, account } => {
-                owner.declined_reserve(deadline, account.clone(), intent).await
+                owner
+                    .declined_reserve(deadline, account.clone(), intent)
+                    .await
             }
         }
     }
@@ -886,8 +895,10 @@ impl ExecutionStore {
         match self {
             #[cfg(test)]
             Self::Legacy(s) => {
-                s.call(deadline, |sql| sql.recovery_snapshot(chrono::Utc::now().timestamp_millis()))
-                    .await
+                s.call(deadline, |sql| {
+                    sql.recovery_snapshot(chrono::Utc::now().timestamp_millis())
+                })
+                .await
             }
             Self::Native { owner, account } => {
                 owner.recovery_snapshot(deadline, account.clone()).await
@@ -895,14 +906,15 @@ impl ExecutionStore {
         }
     }
 
-    pub async fn ingest_source_page(&self, page: okx_execution::IngestPage) -> StoreResult<()> {
+    pub async fn ingest_source_page(
+        &self,
+        deadline: Instant,
+        page: okx_execution::IngestPage,
+    ) -> StoreResult<()> {
         match self {
             #[cfg(test)]
             Self::Legacy(s) => {
-                s.call(Instant::now() + std::time::Duration::from_secs(2), move |sql| {
-                    sql.ingest_page(&page)
-                })
-                .await
+                s.call(deadline, move |sql| sql.ingest_page(&page)).await
             }
             Self::Native { owner, account } => {
                 owner.ingest_source_page(account.clone(), page).await
