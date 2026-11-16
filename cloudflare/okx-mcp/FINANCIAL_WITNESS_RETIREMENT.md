@@ -4,7 +4,7 @@ Cloudflare owns authentication, MCP, transport and governance configuration. Rus
 
 `npm run check` retains auth, typed schemas, MCP, governance configuration CAS/idempotency, runtime dispatch, backpressure, queue/close priority and shared numeric/semantic checks. `node scripts/test-native-finance-retirement-do.mjs` additionally runs actual workerd/SQLite DO transport: token authentication, session/generation fencing, typed obsolete RPC denial, liveness, dispatch ACK/response, and persisted transport generation after restart. Neither command certifies a Native full trading lifecycle.
 
-The historical files below are **RETIRED, not PASS**. They must not count as proof of a current financial path. Original Native/Worker crash scenarios are retired when their Cloudflare finance transaction boundary disappears. #512 must map current CI scenarios to Native owner witnesses; the active Worker CI now checks the transport-only boundary and Rust component invariants. The complete Windows matrix remains unadapted/NOT_PROVEN, so this does not authorize GO.
+The historical files below are **RETIRED, not PASS**. They must not count as proof of a current financial path. Original Native/Worker crash scenarios are retired when their Cloudflare finance transaction boundary disappears. #510 must map current CI scenarios to Native owner witnesses; the active Worker CI now checks the transport-only boundary and Rust component invariants. #512 is subsequent measured optimization. The complete Windows matrix remains unadapted/NOT_PROVEN, so this does not authorize GO.
 
 | Previous witness | Status and retained invariant | Current Rust boundary / replacement witness |
 | --- | --- | --- |
@@ -20,9 +20,9 @@ The historical files below are **RETIRED, not PASS**. They must not count as pro
 Historical `risk_book.ts` and `legacy_finance_cutover.ts` remain only to compile retained historical evidence. `account_governance.ts` and `execution_tools.ts` use `decimal.ts`, which contains pure numeric contract helpers and no storage. The current esbuild transport test asserts that neither historical financial authority module occurs in the actual runtime module graph. The retained `risk_book_sequence` and optional budget fields are typed legacy wire contracts only; the active adapter always returns a null sequence and no budgets.
 
 
-## #512 prerequisite: current 26-property map (code audit, not acceptance)
+## #510 prerequisite: current 26-property map (code audit, not acceptance)
 
-#510 is not GO while the required full gate invokes removed Worker financial authority or lacks equivalent current Native witnesses. #512 must adapt that gate before GO. The 26 IDs and normative properties below are retained from `scripts/run-trade-integration.mjs` and its current case files. Every old case uses `actualNativeWorker` / the historical Worker finance driver; no historical 26-case result transfers to the new model. `REPLACE / NOT_PROVEN` means the driver must change and this audit supplies no whole-case PASS. `KEEP component` means retain the named narrow test, not promote its result to case acceptance. No Rust test was executed during this mapping audit.
+#510 is not GO while the required full gate invokes removed Worker financial authority or lacks equivalent current Native witnesses. Adapting that gate is part of #510, not a deferred #512 obligation. The 26 IDs and normative properties below are retained from `scripts/run-trade-integration.mjs` and its current case files. Every old case uses `actualNativeWorker` / the historical Worker finance driver; no historical 26-case result transfers to the new model. `REPLACE / NOT_PROVEN` means the driver must change and this audit supplies no whole-case PASS. `KEEP component` means retain the named narrow test, not promote its result to case acceptance. No Rust test was executed during this mapping audit.
 
 Exact inspected symbol locations: `N` = `crates/okx-agent/src/accounts_native_trade_contract_tests.rs`; `F` = `crates/okx-agent/src/accounts_native_filled_close_contract_tests.rs`; `U` = `crates/okx-execution/src/account_worker/unified/`; `A` = `crates/okx-execution/src/account_store_tests.rs`; `R` = `crates/okx-execution/src/risk/book/tests.rs`; `E` = `crates/okx-agent/src/trade_service/execute.rs`; `W` = `crates/okx-agent/src/cloudflare_transport.rs`. These are inspected existing implementations, not proposed test names. The fresh Native fixture (`accounts_native_trade_fixture.rs`) calls `UnifiedFinanceHandle::initialize_new`, `AccountRuntimeRegistry::open_native_catalog` and `NativeRiskClient::local(NativeFinanceRisk::from_owner(...))`. In contrast, imported/original-row SQL fixtures and old per-account AccountStore tests do not establish the fresh Native producer or physical process boundary.
 
@@ -62,3 +62,38 @@ Open without financial mutation and permits the same source-verified Close and
 release; partial-source missing-bill rejection, late bill0.4002, second fill1.0005
 and exact replay retain active exposure. Partial attached-stop sizing and
 independent second-account obligations are not established by these witnesses.
+
+## #510 r6.1 delta: public Execute safety
+
+`accounts_native_execute_safety_contract_tests.rs`, under the existing
+`native_trade_contracts` filter, adds four current fresh-owner witnesses:
+
+- T10-05 / D09: a bound venue rejection persists REJECTED, retains its actual
+  order-level `sCode` (51008, not the successful envelope's code 0), sends once
+  and does not release the reservation merely from that ACK.
+- The same bound rejection is checked with an all-failed envelope (code 1).
+  A successful row inside that failed envelope is never accepted; foreign
+  binding remains UNKNOWN, as covered by the direct ACK classification unit.
+- T10-05 / D09: a raw foreign rejection reaches the PRODUCTION ACK verifier,
+  remains UNKNOWN with no bound venue order, and retains the reservation. The
+  recorded HTTP guard does not substitute its own transport error for this
+  negative witness: the local delivery boundary corrupts exactly one raw ACK.
+- T10-06 / D06: 100 public same-key callers start at one barrier. One real
+  planner pauses before preparation; the other 99 return ACCOUNT_MUTATION_BUSY
+  with no POST. Resuming the planner sends once; a lost ACK leaves the original
+  intent UNKNOWN. Later policy delivery cannot rewrite the persisted intent;
+  stale/conflicting policy revisions fail. An altered payload conflicts without
+  changing its budget.
+
+All 13 current `native_trade_contracts` tests PASS together locally in 15.09s
+after build, including the existing lost-ACK/replay/readback, full Close/reopen,
+STOP, partial-fee and actual child-kill contracts. No new CI filter is needed.
+This is neither the full 26-property gate nor a benchmark of all RB properties.
+The table above is the historical mapping audit; these delta witnesses extend
+its previously missing rejection/concurrency/policy-CAS coverage. Three fresh
+same-binary runs also PASS (15.31s / 15.44s / 15.16s); complete execution is
+332 PASS / 0 FAIL / 2 historical ignored probes (10.89s), separately timed.
+An earlier intermittent child/STOP census failure is not declared fixed by
+these repeats. Child failure output is retained; terminal census now preserves
+its specific failed temporal boundary. Source ordering/repeatability and other
+NOT_PROVEN full-gate obligations remain outstanding.

@@ -7,10 +7,31 @@ pub(super) struct ExecuteMarketBoundary {
     pub(super) feed: Arc<RecordedAccountHttp>,
     pub(super) market: Mutex<Option<(Arc<RecordedWsConnector>, okx_runtime::PublicWsHandle)>>,
     pub(super) updates: AtomicUsize,
+    // Hold one real planner before intent preparation. Other public callers
+    // must return their actual no-send result, not consume spare HTTP pages.
+    pub(super) planning_fee_gate: Mutex<Option<Arc<PlanningFeeGate>>>,
+    // A single corrupt raw ACK must reach the production identity verifier,
+    // rather than becoming a transcript-guard transport error first.
+    pub(super) foreign_create_ack: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Default)]
+pub(super) struct PlanningFeeGate {
+    pub(super) entered: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Notify,
 }
 impl HttpTransport for ExecuteMarketBoundary {
     fn send(&self, request: HttpRequest, deadline: Instant) -> HttpSend<'_> {
         Box::pin(async move {
+            let planning_gate = if request.url().path() == "/api/v5/account/trade-fee" {
+                self.planning_fee_gate.lock().unwrap().take()
+            } else {
+                None
+            };
+            if let Some(gate) = planning_gate {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
             let last_inventory = request.url().path() == "/api/v5/trade/orders-algo-pending"
                 && request
                     .url()
@@ -40,7 +61,12 @@ impl HttpTransport for ExecuteMarketBoundary {
                 std::future::pending::<()>().await;
                 unreachable!();
             }
-            let response = result?;
+            let mut response = result?;
+            if create && self.foreign_create_ack.swap(false, Ordering::SeqCst) {
+                let mut raw: Value = serde_json::from_slice(&response.body).unwrap();
+                raw["data"][0]["clOrdId"] = json!("foreign-client-order");
+                response.body = serde_json::to_vec(&raw).unwrap();
+            }
             let market = if last_inventory {
                 self.market.lock().unwrap().clone()
             } else {
@@ -292,6 +318,8 @@ pub(super) async fn fixture() -> NativeFixture {
         feed: feed.clone(),
         market: Mutex::new(None),
         updates: AtomicUsize::new(0),
+        planning_fee_gate: Mutex::new(None),
+        foreign_create_ack: std::sync::atomic::AtomicBool::new(false),
     });
     let (config, clients) =
         prepared_with_socket("a", market_boundary.clone(), socket, budget.clone());

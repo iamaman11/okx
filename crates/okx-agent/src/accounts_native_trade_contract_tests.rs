@@ -410,3 +410,6 @@ mod native_partial_entry;
 
 #[path = "accounts_native_filled_fixture.rs"]
 mod filled_fixture;
+
+#[path = "accounts_native_execute_safety_contract_tests.rs"]
+mod native_execute_safety;

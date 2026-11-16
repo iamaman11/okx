@@ -1,3 +1,51 @@
+## #510 r6.1 - Public Execute safety checkpoint (Draft / NO-GO)
+
+Current work order: issue #510 sections E-G. #512 is subsequent measured
+optimization. Replacing the retired financial driver belongs to #510; an
+arbitrary <=10s target no longer applies. Build time is separate from the
+complete test wall time, including setup, physical tests and teardown.
+
+Reuse existing direct production contracts rather than rewrite 26 campaigns.
+The existing `native_trade_contracts` CI filter now includes:
+
+- `native_execute_safety::risk_book_contract_native_execute_bound_rejection_preserves_code_and_reserve`:
+  exact bound venue rejection, actual order code 51008, durable REJECTED, one
+  Create, no release inferred solely from ACK.
+- `native_execute_safety::risk_book_contract_native_execute_all_failed_envelope_preserves_bound_rejection`:
+  envelope code 1 with exact bound sCode 51008 is rejection, never acceptance;
+  contradictory/foreign ACKs remain UNKNOWN (also covered by the ACK unit test).
+- `native_execute_safety::risk_book_contract_native_execute_foreign_rejection_remains_unknown`:
+  a raw foreign ACK reaches the production verifier, retains UNKNOWN and the
+  reservation. The transcript guard is not used as a false ACK-rejection oracle.
+- `native_execute_safety::risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict`:
+  100 cold public callers, a barrier before preparation, 99 local no-send
+  denials, one Create/lost ACK and one original UNKNOWN identity. A later policy
+  cannot rewrite that intent; stale/conflicting policies and an altered payload
+  fail without changing the held money. This is not 100 concurrent Status calls.
+
+Current local tree: 13/13 Native trade PASS in 15.09s after build. Three bounded
+fresh re-executions of the same binary also PASS: 15.31s / 15.44s / 15.16s.
+Complete execution library: 332 PASS / 0 FAIL / 2 historical ignored probes,
+10.89s, including the new direct temporal-boundary diagnostic test. These are
+separate targets, not the complete 26-property gate or a p95 claim.
+
+An earlier run had two intermittent failures: child exited before Create and
+STOP/Close reported COMPLETE_ACCOUNT_CENSUS_UNPROVEN. Their original cause is
+NOT claimed fixed merely because subsequent runs passed. Child stderr/stdout
+failure evidence is now retained; terminal census distinguishes exact temporal
+boundaries without relaxing freshness, causality or release requirements.
+Track repeatability/source ordering as an outstanding full-gate concern.
+
+Multi-account/partial-protection/correction obligations, the complete-gate
+self-test and installed CONTROL/WSS lifecycle remain NOT_PROVEN. Full criteria
+are #510 D01-D14 / RB01-RB16; the historical tracing and current delta are in
+`cloudflare/okx-mcp/FINANCIAL_WITNESS_RETIREMENT.md`.
+
+Previous checkpoints below are historical evidence, not extra current scope
+or permission to install/deploy/trade. Current closure rules supersede their
+old performance targets and #512 gate dependencies.
+
+---
 ## #510 r5 - Native lifecycle and financial authority retirement (Draft / NO-GO)
 
 One Rust Engine, one financial SQLite, one bounded writer. New initialization,

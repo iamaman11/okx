@@ -37,6 +37,32 @@ fn sql_source(error: crate::StoreError) -> RiskStoreError {
     }
 }
 
+// Preserve the first failed temporal boundary instead of collapsing every
+// cause into COMPLETE_ACCOUNT_CENSUS_UNPROVEN. These are the original guards.
+fn terminal_census_time_error(
+    read_floor: i64,
+    generated: i64,
+    post_at: i64,
+    settled_through: i64,
+    now: i64,
+) -> Option<&'static str> {
+    if generated <= 0 || now <= 0 || now as u64 > LEGACY_MAX_SAFE_INTEGER {
+        Some("TERMINAL_CENSUS_TIME_INVALID")
+    } else if read_floor <= post_at {
+        Some("TERMINAL_CENSUS_NOT_AFTER_POST")
+    } else if read_floor < settled_through {
+        Some("TERMINAL_CENSUS_PRECEDES_SETTLEMENT_SOURCE")
+    } else if read_floor > generated {
+        Some("TERMINAL_CENSUS_FLOOR_AFTER_GENERATION")
+    } else if generated > now {
+        Some("TERMINAL_CENSUS_GENERATED_IN_FUTURE")
+    } else if now - generated > 5_000 {
+        Some("TERMINAL_CENSUS_EXPIRED")
+    } else {
+        None
+    }
+}
+
 impl RiskBookStore {
     /// A scoped native terminal release is accepted ONLY after the original
     /// AccountStore terminal, immutable entry-spend revision and its ACK are
@@ -326,17 +352,18 @@ impl RiskBookStore {
             return Err(RiskStoreError::Invalid("TERMINAL_LOCAL_EXPOSURE_REMAINS"));
         }
         let census = &input.census;
+        if let Some(reason) = terminal_census_time_error(
+            census.read_floor_ms,
+            census.generated_at_ms,
+            post_at,
+            source.source_covered_through_ms,
+            input.now_ms,
+        ) {
+            return Err(RiskStoreError::Invalid(reason));
+        }
         if !census.complete
             || census.generation != meta.generation
             || !valid_digest(&census.source_digest)
-            || census.generated_at_ms <= 0
-            || census.read_floor_ms <= post_at
-            || census.read_floor_ms < source.source_covered_through_ms
-            || census.read_floor_ms > census.generated_at_ms
-            || census.generated_at_ms > input.now_ms
-            || input.now_ms - census.generated_at_ms > 5_000
-            || input.now_ms <= 0
-            || input.now_ms as u64 > LEGACY_MAX_SAFE_INTEGER
             || census
                 .occupied
                 .get(&input.account)
@@ -530,5 +557,40 @@ impl RiskBookStore {
             book_sequence: accepted.sequence,
             replayed: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::terminal_census_time_error as check;
+
+    #[test]
+    fn risk_book_contract_terminal_census_reports_exact_time_boundary() {
+        assert_eq!(check(101, 102, 100, 101, 103), None);
+        assert_eq!(
+            check(100, 102, 100, 101, 103),
+            Some("TERMINAL_CENSUS_NOT_AFTER_POST")
+        );
+        assert_eq!(
+            check(101, 102, 100, 102, 103),
+            Some("TERMINAL_CENSUS_PRECEDES_SETTLEMENT_SOURCE")
+        );
+        assert_eq!(
+            check(103, 102, 100, 101, 104),
+            Some("TERMINAL_CENSUS_FLOOR_AFTER_GENERATION")
+        );
+        assert_eq!(
+            check(101, 104, 100, 101, 103),
+            Some("TERMINAL_CENSUS_GENERATED_IN_FUTURE")
+        );
+        assert_eq!(
+            check(101, 102, 100, 101, 5103),
+            Some("TERMINAL_CENSUS_EXPIRED")
+        );
+        assert_eq!(check(101, 102, 100, 101, 5102), None);
+        assert_eq!(
+            check(101, 102, 100, 101, 0),
+            Some("TERMINAL_CENSUS_TIME_INVALID")
+        );
     }
 }

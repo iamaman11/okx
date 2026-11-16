@@ -105,7 +105,10 @@ fn place_ack_verdict(
     reply: &okx_api::TradeResponse<okx_api::OrderOperationAck>,
     client_order_id: &str,
 ) -> PlaceAckVerdict {
-    if !reply.top_level_success() || reply.data.len() != 1 {
+    // A single-order failure can use the all-failed envelope (code=1).
+    // It is never acceptance, but an exact bound nonzero sCode can still
+    // prove rejection. Arbitrary envelope errors remain unknown.
+    if !matches!(reply.code.as_str(), "0" | "1") || reply.data.len() != 1 {
         return PlaceAckVerdict::Unknown;
     }
     let ack = &reply.data[0];
@@ -113,7 +116,7 @@ fn place_ack_verdict(
         return PlaceAckVerdict::Unknown;
     }
     if ack.accepted() {
-        if ack.order_id.is_empty() {
+        if !reply.top_level_success() || ack.order_id.is_empty() {
             PlaceAckVerdict::Unknown
         } else {
             PlaceAckVerdict::Accepted
@@ -1725,7 +1728,9 @@ impl TradeService {
                     )
                     .await?;
                     Ok(completed(
-                        json!({"intent_id":id,"state":"REJECTED","exchange_code":response.code,"central_reservation":central}),
+                        // code=0 describes the envelope, not this rejected
+                        // order. Preserve its exact bound sCode for callers.
+                        json!({"intent_id":id,"state":"REJECTED","exchange_code":response.data[0].status_code,"central_reservation":central}),
                     ))
                 }
                 PlaceAckVerdict::Unknown => {
@@ -3575,7 +3580,13 @@ mod tests {
             place_ack_verdict(&denied, client),
             PlaceAckVerdict::ExplicitRejected,
         );
+        assert_eq!(
+            place_ack_verdict(&venue_ack_fixture("1", client, "51008", ""), client),
+            PlaceAckVerdict::ExplicitRejected,
+        );
         let ambiguous = [
+            venue_ack_fixture("1", client, "0", "venue_order_1"),
+            venue_ack_fixture("1", "different_client", "51008", ""),
             venue_ack_fixture("0", "different_client", "0", "venue_order_1"),
             venue_ack_fixture("0", client, "0", ""),
             venue_ack_fixture("0", client, "", ""),

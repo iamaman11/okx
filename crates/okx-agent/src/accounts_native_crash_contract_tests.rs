@@ -53,20 +53,21 @@ async fn risk_book_contract_native_os_kill_after_create_recovers_original_unknow
         .env("OKX_NATIVE_CRASH_CHILD", "POST_CREATE_PRE_RESULT")
         .env("OKX_NATIVE_CRASH_ROOT", &root)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .kill_on_drop(true);
     let mut child = command.spawn().unwrap();
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     tokio::time::timeout(Duration::from_secs(25), async {
+        let mut tail = std::collections::VecDeque::with_capacity(16);
         loop {
-            let line = lines
-                .next_line()
-                .await
-                .unwrap()
-                .expect("Native child exited before the post-Create crash boundary");
+            let Some(line) = lines.next_line().await.unwrap() else {
+                panic!("Native child exited before the post-Create crash boundary: status={:?}, stdout_tail={tail:?}", child.try_wait().unwrap());
+            };
             if line.contains(MARKER) {
                 break;
             }
+            if tail.len() == 16 { tail.pop_front(); }
+            tail.push_back(line);
         }
     })
     .await
