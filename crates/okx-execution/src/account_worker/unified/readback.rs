@@ -6,6 +6,38 @@ use super::{
 };
 use crate::{AccountStore, StoreError, StoreResult};
 impl UnifiedFinanceHandle {
+    /// One bounded, account-scoped read of durable protection and terminal
+    /// traces from the SAME finance FIFO. No secondary writer/Connection, no POST.
+    pub async fn durable_operation_diagnostics(
+        &self,
+        deadline: std::time::Instant,
+        account: String,
+        cleanup_limit: usize,
+        terminal_limit: usize,
+    ) -> StoreResult<(
+        Vec<crate::ProtectionCleanupOperationReceipt>,
+        Vec<crate::TerminalReleaseDiagnosticReceipt>,
+    )> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let scope = (&installation[..], &account[..]);
+            let cleanup = AccountStore::recent_cleanup_diagnostics_sql(
+                &tx,
+                Some(scope),
+                cleanup_limit,
+            )?;
+            let terminal = AccountStore::recent_terminal_release_diagnostics_sql(
+                &tx,
+                scope,
+                terminal_limit,
+            )?;
+            tx.commit()?;
+            Ok((cleanup, terminal))
+        })
+        .await
+    }
+
     pub async fn finance_report(
         &self,
         account: String,

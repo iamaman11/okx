@@ -653,6 +653,41 @@ impl ExecutionStore {
             .call_with_timing_observed(deadline, operation, observed)
             .await
     }
+    /// Durable read-only traces for both supported diagnostic projections.
+    /// This is one owner operation, not a general SQL callback.
+    pub async fn durable_operation_diagnostics(
+        &self,
+        deadline: Instant,
+        cleanup_limit: usize,
+        terminal_limit: usize,
+    ) -> StoreResult<(
+        Vec<okx_execution::ProtectionCleanupOperationReceipt>,
+        Vec<okx_execution::TerminalReleaseDiagnosticReceipt>,
+    )> {
+        match self {
+            #[cfg(test)]
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    Ok((
+                        sql.recent_cleanup_diagnostics(cleanup_limit)?,
+                        sql.recent_terminal_release_diagnostics(terminal_limit)?,
+                    ))
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .durable_operation_diagnostics(
+                        deadline,
+                        account.clone(),
+                        cleanup_limit,
+                        terminal_limit,
+                    )
+                    .await
+            }
+        }
+    }
+
     pub fn termination_signal(&self) -> tokio::sync::watch::Receiver<bool> {
         match self {
             #[cfg(test)]

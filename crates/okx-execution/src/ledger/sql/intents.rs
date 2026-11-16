@@ -40,16 +40,27 @@ impl AccountStore {
         &self,
         limit: usize,
     ) -> StoreResult<Vec<TerminalReleaseDiagnosticReceipt>> {
+        Self::recent_terminal_release_diagnostics_sql(
+            &self.connection,
+            (&self.meta.installation_id, &self.meta.account_key),
+            limit,
+        )
+    }
+
+    /// Read the same original bounded terminal facts under an explicit
+    /// installation/account scope. This never edits or creates a receipt.
+    pub(crate) fn recent_terminal_release_diagnostics_sql(
+        db: &rusqlite::Connection,
+        scope: (&str, &str),
+        limit: usize,
+    ) -> StoreResult<Vec<TerminalReleaseDiagnosticReceipt>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut statement = self.connection.prepare(TERMINAL_RELEASE_DIAGNOSTIC_SQL)?;
+        Self::verify_source_account_sql(db, scope.0, scope.1)?;
+        let mut statement = db.prepare(TERMINAL_RELEASE_DIAGNOSTIC_SQL)?;
         let rows = statement.query_map(
-            params![
-                limit.min(128) as i64,
-                self.meta.account_key,
-                self.meta.installation_id
-            ],
+            params![limit.min(128) as i64, scope.1, scope.0],
             |row| {
                 Ok((
                     TerminalReleaseDiagnosticReceipt {

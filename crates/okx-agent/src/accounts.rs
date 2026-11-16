@@ -1162,11 +1162,10 @@ fn start_diagnostic_restore(
             tokio::select! {
                 biased;
                 _ = shutdown.changed() => Err("DIAGNOSTIC_RESTORE_CANCELLED"),
-                result = store.call(
+                result = store.durable_operation_diagnostics(
                     Instant::now() + std::time::Duration::from_secs(2),
-                    |sql| Ok((sql.recent_cleanup_diagnostics(
-                        crate::diagnostics::ProtectionOperationTrace::CAPACITY,
-                    )?, sql.recent_terminal_release_diagnostics(128)?)),
+                    crate::diagnostics::ProtectionOperationTrace::CAPACITY,
+                    128,
                 ) => result.map_err(|error| match error {
                     okx_execution::StoreError::Invalid(code) => code,
                     _ => "DIAGNOSTIC_RESTORE_STORAGE_UNAVAILABLE",

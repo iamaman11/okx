@@ -191,6 +191,8 @@ jobs:
         run: cargo check --locked -p okx-agent --all-targets
       - name: Negative compile contracts for retired public financial APIs
         run: cargo test --locked -p okx-agent --doc
+      - name: Finance owner durable diagnostic restore across two accounts
+        run: cargo test --locked -p okx-execution --lib risk_book_contract_native_durable_operation_diagnostics_scoped_readback -- --nocapture
       - name: Existing risk client and bound raw-frame regressions
         run: |
           cargo test --locked -p okx-agent --lib risk_bridge::tests -- --nocapture

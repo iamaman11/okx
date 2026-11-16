@@ -79,6 +79,69 @@ async fn counts(owner: &UnifiedFinanceHandle) -> (i64, i64, i64) {
         .unwrap()
 }
 
+/// Original one-owner diagnostic restore: same account scope for both
+/// projections, no second SQL owner, no inferred absence on foreign scope.
+#[tokio::test]
+async fn risk_book_contract_native_durable_operation_diagnostics_scoped_readback() {
+    let root = root();
+    let owner = owner(&root).await;
+    let (a, opening_a) = source('a');
+    let (b, opening_b) = source('b');
+    owner
+        .initialize_account(deadline(), a.clone(), opening_a, "c".repeat(64))
+        .await
+        .unwrap();
+    owner
+        .initialize_account(deadline(), b.clone(), opening_b, "d".repeat(64))
+        .await
+        .unwrap();
+    let account_a = a.account_key.clone();
+    let account_b = b.account_key.clone();
+    let row_account = account_a.clone();
+    owner
+        .submit(move |db| {
+            db.execute(
+                "INSERT INTO operation_receipts
+                    (installation_id,account_key,operation_id,kind,request_hash,result_ref,committed_at)
+                 VALUES(?1,?2,'cleanup_venue-a','protection_cleanup',?3,'ACK',100)",
+                rusqlite::params!["installation_native", row_account, "f".repeat(64)],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let first = owner
+        .durable_operation_diagnostics(deadline(), account_a.clone(), 128, 128)
+        .await
+        .unwrap();
+    assert_eq!(first.0.len(), 1);
+    assert_eq!(first.0[0].operation_id, "cleanup_venue-a");
+    assert!(first.1.is_empty());
+    let replay = owner
+        .durable_operation_diagnostics(deadline(), account_a, 128, 128)
+        .await
+        .unwrap();
+    assert_eq!(replay.0.len(), 1);
+    assert!(replay.1.is_empty());
+    let other = owner
+        .durable_operation_diagnostics(deadline(), account_b, 128, 128)
+        .await
+        .unwrap();
+    assert!(other.0.is_empty());
+    assert!(other.1.is_empty());
+    assert!(owner
+        .durable_operation_diagnostics(
+            deadline(),
+            format!("okx:real:{}", "0".repeat(64)),
+            128,
+            128,
+        )
+        .await
+        .is_err());
+    close(owner).await;
+    assert!(!root.join("accounts").exists(), "no per-account financial SQL");
+}
+
 #[tokio::test]
 async fn risk_book_contract_native_account_initialization_scoped_replay_and_reopen() {
     let root = root();
