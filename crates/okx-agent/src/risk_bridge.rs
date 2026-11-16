@@ -78,6 +78,10 @@ impl NativeRiskClient {
             }
         }
     }
+    // The retired remote financial route survives only in historical raw-frame
+    // tests. Production must not be able to construct it; the native owner is
+    // installed exclusively through local/local_stopped.
+    #[cfg(test)]
     pub fn new(tx: mpsc::Sender<OutboundRiskCommand>) -> Self {
         Self {
             route: RiskRoute::Cloudflare(tx),
