@@ -8,12 +8,14 @@ use std::time::Instant;
 
 #[derive(Clone)]
 pub enum ExecutionStore {
+    #[cfg(test)]
     Legacy(AccountStoreHandle),
     Native {
         owner: UnifiedFinanceHandle,
         account: String,
     },
 }
+#[cfg(test)]
 impl From<AccountStoreHandle> for ExecutionStore {
     fn from(value: AccountStoreHandle) -> Self {
         Self::Legacy(value)
@@ -27,6 +29,7 @@ impl ExecutionStore {
         time: i64,
     ) -> StoreResult<serde_json::Value> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| sql.strategy_status(&instance, time))
                     .await
@@ -44,6 +47,7 @@ impl ExecutionStore {
         command: okx_execution::account_worker::StrategyMutationCommand,
     ) -> StoreResult<okx_execution::OperationReceipt> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     let mut command = command;
@@ -84,6 +88,7 @@ impl ExecutionStore {
         command: okx_execution::account_worker::StrategyDecisionClaimCommand,
     ) -> StoreResult<Option<String>> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     if sql.strategy_definition(&command.instance_id)?.version
@@ -117,6 +122,7 @@ impl ExecutionStore {
         time: i64,
     ) -> StoreResult<()> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     if sql.strategy_definition(&instance)?.version != expected_version {
@@ -146,6 +152,7 @@ impl ExecutionStore {
         instance: Option<String>,
     ) -> StoreResult<(okx_execution::FinancialRisk, usize)> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     Ok((
@@ -173,6 +180,7 @@ impl ExecutionStore {
         offset: usize,
     ) -> StoreResult<Vec<okx_execution::StoredIntent>> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.reconcilable_intents_page(limit, offset)
@@ -189,6 +197,7 @@ impl ExecutionStore {
 
     pub async fn entry_late_pending(&self, deadline: Instant, id: String) -> StoreResult<bool> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| sql.entry_late_pending(&id))
                     .await
@@ -206,6 +215,7 @@ impl ExecutionStore {
         id: String,
     ) -> StoreResult<bool> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| sql.partial_entry_ack_pending(&id))
                     .await
@@ -226,6 +236,7 @@ impl ExecutionStore {
         covered: i64,
     ) -> StoreResult<okx_execution::EntrySettlementEvidence> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.bind_partial_entry_settlement(&id, at, filled, covered)
@@ -255,6 +266,7 @@ impl ExecutionStore {
         covered: i64,
     ) -> StoreResult<okx_execution::EntrySettlementEvidence> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.bind_terminal_entry_settlement(&id, at, filled, covered)
@@ -284,6 +296,7 @@ impl ExecutionStore {
         covered: i64,
     ) -> StoreResult<okx_execution::EntrySettlementEvidence> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.bind_late_entry_settlement(&id, at, filled, covered)
@@ -303,6 +316,7 @@ impl ExecutionStore {
         proof: okx_execution::EntrySettlementEvidence,
     ) -> StoreResult<()> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.acknowledge_partial_entry_settlement(&proof)
@@ -322,6 +336,7 @@ impl ExecutionStore {
         proof: okx_execution::EntrySettlementEvidence,
     ) -> StoreResult<()> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.acknowledge_late_entry_settlement(&proof)
@@ -342,6 +357,7 @@ impl ExecutionStore {
         through: i64,
     ) -> StoreResult<okx_execution::IntentFillCostEvidence> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.intent_fill_cost_evidence(&id, through)
@@ -362,6 +378,7 @@ impl ExecutionStore {
         through: i64,
     ) -> StoreResult<okx_execution::IntentFeeBillEvidence> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.intent_fee_bill_evidence(&id, through)
@@ -381,6 +398,7 @@ impl ExecutionStore {
         intent: String,
     ) -> StoreResult<Option<okx_execution::CentralReceipt>> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| sql.central_receipt(&intent))
                     .await
@@ -404,6 +422,7 @@ impl ExecutionStore {
         partition: String,
     ) -> StoreResult<Option<okx_execution::SourceCursor>> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| sql.cursor(&source, &partition))
                     .await
@@ -421,6 +440,7 @@ impl ExecutionStore {
         id: String,
     ) -> StoreResult<Option<okx_execution::OperationReceipt>> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.call(deadline, move |sql| sql.operation(&id)).await,
             Self::Native { owner, account } => owner.operation(deadline, account.clone(), id).await,
         }
@@ -433,6 +453,7 @@ impl ExecutionStore {
         kind: String,
     ) -> StoreResult<bool> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.begin_operation(&id, &hash, &kind, chrono::Utc::now().timestamp_millis())
@@ -455,6 +476,7 @@ impl ExecutionStore {
         result: String,
     ) -> StoreResult<okx_execution::OperationReceipt> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.operation_receipt(
@@ -481,6 +503,7 @@ impl ExecutionStore {
         filled: rust_decimal::Decimal,
     ) -> StoreResult<Option<rust_decimal::Decimal>> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.effective_protected_quantity(&intent, filled)
@@ -500,6 +523,7 @@ impl ExecutionStore {
         receipt: okx_execution::ProtectionReceipt,
     ) -> StoreResult<()> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| sql.verify_protection(&receipt))
                     .await
@@ -518,6 +542,7 @@ impl ExecutionStore {
         reason: String,
     ) -> StoreResult<()> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.protection_incident(&intent, &reason, chrono::Utc::now().timestamp_millis())
@@ -538,6 +563,7 @@ impl ExecutionStore {
         digest: String,
     ) -> StoreResult<bool> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.resolve_protection_incident_after_flat(
@@ -566,6 +592,7 @@ impl ExecutionStore {
         intent: String,
     ) -> StoreResult<Option<okx_execution::ProtectionReceipt>> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.call(deadline, move |sql| sql.protection(&intent)).await,
             Self::Native { owner, account } => {
                 owner.protection(deadline, account.clone(), intent).await
@@ -580,6 +607,7 @@ impl ExecutionStore {
     }
     pub fn legacy(&self) -> StoreResult<&AccountStoreHandle> {
         match self {
+            #[cfg(test)]
             Self::Legacy(store) => Ok(store),
             Self::Native { .. } => Err(StoreError::Invalid(
                 "NATIVE_LEGACY_ACCOUNT_WRITER_FORBIDDEN",
@@ -589,6 +617,7 @@ impl ExecutionStore {
     pub(crate) fn native_scope(&self) -> Option<(&UnifiedFinanceHandle, &str)> {
         match self {
             Self::Native { owner, account } => Some((owner, account)),
+            #[cfg(test)]
             Self::Legacy(_) => None,
         }
     }
@@ -618,12 +647,14 @@ impl ExecutionStore {
     }
     pub fn termination_signal(&self) -> tokio::sync::watch::Receiver<bool> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.termination_signal(),
             Self::Native { owner, .. } => owner.termination_signal(),
         }
     }
     pub fn diagnostic_storage_snapshot(&self) -> AccountStorageReadback {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.diagnostic_storage_snapshot(),
             Self::Native { owner, .. } => AccountStorageReadback {
                 schema: "okx.account-storage-observation/v1",
@@ -640,6 +671,7 @@ impl ExecutionStore {
     }
     pub fn maintenance_timing(&self) -> AccountMaintenanceTimingV1 {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.maintenance_timing(),
             Self::Native { .. } => AccountMaintenanceTimingV1 {
                 schema: "okx.account-maintenance/v1",
@@ -651,6 +683,7 @@ impl ExecutionStore {
     }
     pub fn sql_timing(&self) -> AccountSqlTimingV1 {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.sql_timing(),
             Self::Native { owner, .. } => owner.sql_timing(),
         }
@@ -661,6 +694,7 @@ impl ExecutionStore {
         lookup: okx_execution::TradeIntentLookup,
     ) -> StoreResult<Option<okx_execution::StoredIntent>> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.lookup_intent(deadline, lookup).await,
             Self::Native { owner, account } => {
                 owner.lookup_intent(account.clone(), lookup, deadline).await
@@ -674,6 +708,7 @@ impl ExecutionStore {
         admission: Option<okx_execution::EntryAdmissionEvidence>,
     ) -> StoreResult<()> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.bind_entry_quote(&quote)?;
@@ -698,6 +733,7 @@ impl ExecutionStore {
         key: String,
     ) -> StoreResult<()> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.mark_reserve_attempt(&intent, &key, chrono::Utc::now().timestamp_millis())
@@ -718,6 +754,7 @@ impl ExecutionStore {
         reason: String,
     ) -> StoreResult<bool> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| {
                     sql.reject_unsent(&intent, &reason, chrono::Utc::now().timestamp_millis())
@@ -737,6 +774,7 @@ impl ExecutionStore {
         intent: String,
     ) -> StoreResult<bool> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => {
                 s.call(deadline, move |sql| sql.unsent_before_reserve(&intent))
                     .await
@@ -754,6 +792,7 @@ impl ExecutionStore {
         intent: String,
     ) -> StoreResult<okx_execution::AccountReserveSource> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.reserve_source(deadline, intent).await,
             Self::Native { owner, account } => {
                 owner
@@ -767,6 +806,7 @@ impl ExecutionStore {
         deadline: Instant,
     ) -> StoreResult<Vec<okx_execution::StrategyInstance>> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.call(deadline, |sql| sql.instances()).await,
             Self::Native { owner, account } => {
                 owner.strategy_instances(deadline, account.clone()).await
@@ -779,6 +819,7 @@ impl ExecutionStore {
         instrument: String,
     ) -> StoreResult<Vec<okx_execution::StoredLot>> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.active_lots(deadline, instrument).await,
             Self::Native { owner, account } => {
                 owner
@@ -792,6 +833,7 @@ impl ExecutionStore {
         deadline: Instant,
     ) -> StoreResult<okx_execution::AccountPolicySnapshot> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.account_policy(deadline).await,
             Self::Native { owner, account } => {
                 owner.account_policy(account.clone(), deadline).await
@@ -804,6 +846,7 @@ impl ExecutionStore {
         outcome: okx_execution::IntentOutcome,
     ) -> StoreResult<()> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.record_intent_outcome(deadline, outcome).await,
             Self::Native { owner, account } => {
                 owner.record_intent_outcome(account.clone(), outcome).await
@@ -815,6 +858,7 @@ impl ExecutionStore {
         deadline: Instant,
     ) -> StoreResult<okx_execution::AccountSourceState> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.source_capture_state(deadline).await,
             Self::Native { owner, account } => {
                 owner.source_capture_state(account.clone(), deadline).await
@@ -827,6 +871,7 @@ impl ExecutionStore {
         query: okx_execution::FinanceReportQuery,
     ) -> StoreResult<okx_execution::FinanceReportSnapshot> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.finance_report(deadline, query).await,
             Self::Native { owner, account } => {
                 owner.finance_report(account.clone(), query, deadline).await
@@ -839,6 +884,7 @@ impl ExecutionStore {
         command: okx_execution::CapitalAssignmentCommand,
     ) -> StoreResult<okx_execution::CapitalAssignmentResult> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.assign_capital(deadline, command).await,
             Self::Native { owner, account } => owner.assign_capital(account.clone(), command).await,
         }
@@ -850,6 +896,7 @@ impl ExecutionStore {
         conversion: okx_execution::UsdConversionEvidence,
     ) -> StoreResult<()> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.ingest_captured_bills(deadline, input, conversion).await,
             Self::Native { owner, account } => {
                 owner
@@ -865,6 +912,7 @@ impl ExecutionStore {
         conversion: okx_execution::UsdConversionEvidence,
     ) -> StoreResult<()> {
         match self {
+            #[cfg(test)]
             Self::Legacy(s) => s.ingest_captured_fills(deadline, input, conversion).await,
             Self::Native { owner, account } => {
                 owner
