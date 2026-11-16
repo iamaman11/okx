@@ -1,3 +1,29 @@
+## Current CODE checkpoint and replacement of the remaining B1 driver
+
+The full Windows collector at c89ecee8 passed61/61 atomic rows with84 core
+witnesses plus the measured-budget witness in82.759s after build. The genuine
+64-COMMIT/16-concurrent/reopen/replay workload passed in0.662s with128 legs,
+p50 47.572ms/p95 107.337ms/max122.831ms, queue116ms/SQL19ms. Declared direct
+CPU/RAM/IO, storage and same-workload regression budgets passed. These are CODE
+properties, not installed/physical-host/live-market acceptance. Historical
+checkpoint sections below remain historical; authoritative current status is
+GitHub #510 and the executed manifest/report, not old NOT_PROVEN prose.
+
+A full workflow review then found an obsolete independent B1 job still calling
+the removed distributed Native/Worker financial driver. That job is replaced,
+under the same check name, by FIVE exact current public Rust witnesses: shared
+A/B denial preserving A's send, positive B while A source is blocked, B Status/
+Cancel independence,100-callers replay/conflict/policy-CAS, and strategy CRUD/
+claim/CAS. TWO current single-writer queue tests replace the separate-owner
+queue prerequisite. Counts must be5/2; absent/zero tests fail. Retained actual
+workerd auth/session/generation/dispatch/denial and genuine child kill/reopen
+remain in the mandatory full gate. Remote financial CAS/old WSS money ACK is
+retired because that authority no longer exists, not because a test failed.
+
+Only workflow/docs changed after c89ecee8; rerun the full current collector and
+all required GitHub jobs on the final committed SHA. The prematurely launched
+old-workflow CI was cancelled to avoid spending time on its obsolete driver.
+No merge, deployment, install, credential or financial-history change occurred.
 ## Production boundary cleanup and strict verification - 16 November 2026
 
 Strict Clippy with -D warnings now passes for Agent, CONTROL, Launcher and

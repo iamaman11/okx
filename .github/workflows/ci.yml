@@ -901,14 +901,13 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-# B1 uses its own Windows OS process/runner. Its source/SQL/workerd test
-  # must not alter the workload or maintenance cadence of mandatory ALL26.
-  # This is a PARTIAL Native prerequisite, not T09-MA/T10-07 acceptance.
+  # Current Native A/B and semantic/CAS prerequisite on an isolated runner.
+  # Full property/physical/resource acceptance remains windows-native-full.
   b1-native:
+    # Preserve the existing check name; its obsolete remote-finance driver is
+    # replaced by the actual current Native public contracts, not an exemption.
     name: windows-b1-native-prerequisite
     needs: classify
-    # The same exact native-source proof applies to this partial prerequisite.
-    # Any source change or unproven Cloudflare change still runs the real B1.
     if: github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true' && needs.classify.outputs.native_required != 'false'
     runs-on: windows-latest
     timeout-minutes: 18
@@ -922,56 +921,45 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-      - name: Install locked production workerd test dependencies
-        run: npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
-      - name: Precompile actual Native/Worker child
-        run: cargo test --locked -p okx-agent --lib native_to_workerd_risk_summary_over_actual_websocket --no-run
-      - name: T10-14 isolated Native SQL owners prerequisite (not a required case PASS)
+      - name: Precompile current Rust property targets
+        run: cargo test --locked -p okx-agent -p okx-execution -p okx-kernel -p okx-protocol -p okx-runtime --lib --no-run
+      - name: Public Native A/B cap, independent progress, replay and policy CAS
         shell: pwsh
         run: |
-          cargo test --locked -p okx-execution --lib blocked_a_sql_owner_does_not_delay_b_cancel_receipt -- --nocapture |
-            Tee-Object -FilePath "$env:RUNNER_TEMP\t10-14-native-sql.log"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $evidence = Get-Content -Raw -LiteralPath "$env:RUNNER_TEMP\t10-14-native-sql.log"
-          if ($evidence -notmatch 'T10_14_NATIVE_SQL_PREREQUISITE_V1:') {
-            throw "T10_14_NATIVE_SQL_RECEIPT_MISSING"
+          $names = @(
+            'accounts::native_trade_contracts::native_public_cohort::risk_book_contract_native_public_cohort_denied_b_does_not_block_held_a_post'
+            'accounts::native_trade_contracts::native_public_fairness::risk_book_contract_native_public_b_executes_and_keeps_reserve_while_a_source_blocked'
+            'accounts::native_trade_contracts::native_public_fairness::risk_book_contract_native_public_b_status_and_cancel_leave_blocked_a_held'
+            'accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict'
+            'accounts::native_trade_contracts::native_strategies::risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner'
+          )
+          $packages = @('-p','okx-agent','-p','okx-execution','-p','okx-kernel','-p','okx-protocol','-p','okx-runtime')
+          $output = & cargo test --locked @packages --lib -- --exact --test-threads 4 --nocapture @names 2>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object -FilePath "$env:RUNNER_TEMP\native-b1-current.log" | Out-Host
+          if ($code -ne 0) { exit $code }
+          $proof = [regex]::Matches(($output -join "`n"), 'test result: ok\.\s+([1-9]\d*) passed;')
+          if ($proof.Count -ne 1 -or [int]$proof[0].Groups[1].Value -ne $names.Count) {
+            throw 'CURRENT_NATIVE_B1_PUBLIC_WITNESSES_MISSING'
+          }
+      - name: Current single-writer queue deadlines and FIFO drain
+        shell: pwsh
+        run: |
+          $packages = @('-p','okx-agent','-p','okx-execution','-p','okx-kernel','-p','okx-protocol','-p','okx-runtime')
+          $output = & cargo test --locked @packages --lib owner_queue_tests:: -- --nocapture 2>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object -FilePath "$env:RUNNER_TEMP\native-queue-current.log" | Out-Host
+          if ($code -ne 0) { exit $code }
+          $proof = [regex]::Matches(($output -join "`n"), 'test result: ok\.\s+([1-9]\d*) passed;')
+          if ($proof.Count -ne 1 -or [int]$proof[0].Groups[1].Value -ne 2) {
+            throw 'CURRENT_SINGLE_WRITER_QUEUE_WITNESSES_MISSING'
           }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: t10-14-sql-prerequisite-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}\t10-14-native-sql.log
-          if-no-files-found: warn
-          retention-days: 7
-      - name: B1 Native A/B independent order ACK and central shared-cap denial (partial only)
-        env:
-          OKX_B1_SECOND_POSITIVE_PROBE: "1"
-        shell: pwsh
-        run: |
-          $artifacts = Join-Path $env:RUNNER_TEMP "b1-native"
-          node scripts/trade-integration/b1-native-cap.mjs --artifacts "$artifacts"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: b1-native-partial-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}\b1-native
-          if-no-files-found: warn
-          retention-days: 7
-      # Actual Worker governance CAS after a signed Native ACK; T09.5
-      # verifies preserved original identity/hash/deadline and zero extra POST.
-      - name: S2-05 live Native/Worker policy CAS and semantic replay
-        shell: pwsh
-        env:
-          OKX_S2_05_POLICY_CAS_PROBE: "1"
-        run: |
-          $artifacts = Join-Path $env:RUNNER_TEMP "s2-05-policy-cas"
-          node scripts/run-trade-integration.mjs --case T09.5 --artifacts "$artifacts"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        with:
-          name: s2-05-native-worker-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}\s2-05-policy-cas
-          if-no-files-found: warn
+          name: native-b1-current-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}\native-b1-current.log
+            ${{ runner.temp }}\native-queue-current.log
+          if-no-files-found: error
           retention-days: 14
