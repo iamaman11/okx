@@ -496,7 +496,7 @@ mod tests {
         let first = initialize_finance(&root, "installation_test", "initialize_test_001", &tree)
             .await
             .unwrap();
-        assert_eq!(first["schema_version"], 7);
+        assert_eq!(first["schema_version"], 8);
         let replay = initialize_finance(&root, "installation_test", "initialize_test_001", &tree)
             .await
             .unwrap();

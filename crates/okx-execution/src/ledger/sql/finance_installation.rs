@@ -19,18 +19,30 @@ CREATE TABLE finance_installation(
  request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64),
  source_tree TEXT NOT NULL CHECK(length(source_tree)=40),
  created_at_ms INTEGER NOT NULL CHECK(created_at_ms>0),
- schema_version INTEGER NOT NULL CHECK(schema_version=7)
+ schema_version INTEGER NOT NULL CHECK(schema_version=8)
 ) STRICT;
 CREATE TRIGGER immutable_finance_installation_update BEFORE UPDATE ON finance_installation
  BEGIN SELECT RAISE(ABORT,'IMMUTABLE_FINANCE_INSTALLATION'); END;
 CREATE TRIGGER immutable_finance_installation_delete BEFORE DELETE ON finance_installation
  BEGIN SELECT RAISE(ABORT,'IMMUTABLE_FINANCE_INSTALLATION'); END;
-PRAGMA user_version=7;
+CREATE TRIGGER immutable_entry_fee_owner_update BEFORE UPDATE ON operation_receipts
+ WHEN OLD.kind IN ('ENTRY_ORDER_FEE_PROVEN','ENTRY_ORDER_FEE_INDEX')
+ BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_FEE_OWNER'); END;
+CREATE TRIGGER immutable_entry_fee_owner_delete BEFORE DELETE ON operation_receipts
+ WHEN OLD.kind IN ('ENTRY_ORDER_FEE_PROVEN','ENTRY_ORDER_FEE_INDEX')
+ BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_FEE_OWNER'); END;
+CREATE TRIGGER immutable_entry_late_update BEFORE UPDATE ON operation_receipts
+ WHEN OLD.kind IN ('ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED')
+ BEGIN SELECT RAISE(ABORT,'IMMUTABLE_LATE_ENTRY'); END;
+CREATE TRIGGER immutable_entry_late_delete BEFORE DELETE ON operation_receipts
+ WHEN OLD.kind IN ('ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED')
+ BEGIN SELECT RAISE(ABORT,'IMMUTABLE_LATE_ENTRY'); END;
+PRAGMA user_version=8;
 ";
 // Exact canonical tables, columns, constraints, indexes and triggers. Whitespace
 // is normalized for LF/CRLF portability; changes require an intentional version.
 const EXPECTED_SCHEMA_SHA256: &str =
-    "0e5a4b39949cb799035d2408af66cbd06022210b7ae7ed366f7e427cfef59594";
+    "dab72aee8c7d48c7f6372ddcfcde717cf610224f33ee6226ffbb881dd8e8ef06";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewFinanceInstallation {
@@ -151,7 +163,7 @@ impl AccountStore {
         )
         .map_err(|_| StoreError::Invalid("FINANCE_INITIALIZATION_CLOCK_INVALID"))?;
         tx.execute(
-            "INSERT INTO finance_installation VALUES(1,?1,?2,?3,?4,?5,7)",
+            "INSERT INTO finance_installation VALUES(1,?1,?2,?3,?4,?5,8)",
             params![
                 request.installation_id,
                 request.initialize_request_id,
@@ -184,7 +196,7 @@ impl AccountStore {
             |r| r.get(0),
         )?;
         if application_id != FINANCE_APPLICATION_ID
-            || version != 7
+            || version != 8
             || count != 48
             || schema_digest(&tx)? != EXPECTED_SCHEMA_SHA256
         {
@@ -214,7 +226,7 @@ impl AccountStore {
             source_tree: receipt.source_tree.clone(),
         };
         if receipt.installation_id != installation
-            || receipt.schema_version != 7
+            || receipt.schema_version != 8
             || receipt.created_at_ms <= 0
             || original.request_sha256()? != receipt.request_sha256
         {

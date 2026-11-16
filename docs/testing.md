@@ -1,3 +1,55 @@
+## #510 r7 - Parallel financial safety checkpoint (Draft / NO-GO)
+
+Issue #510 r7 is the single current plan; prior sections below are historical.
+One Rust owner, one financial SQLite, no Cloudflare financial grant. Reuse
+existing production tests; unsupported markets and unknown state fail closed.
+
+Current complete Native trade target:20 PASS/0FAIL/0ignored,21.88s after build.
+Complete execution library:337 PASS/0FAIL/2 historical ignored probes,10.53s.
+Separate adjacent groups also PASS: coverage verifier4, native connect5,
+plan13, diagnostics29, storage7, native risk1, native admission2, capture8.
+No full26/RB01-RB16 gate or combined runtime/p95 claim is made by those totals.
+
+New exact witnesses and their limits:
+- accounts_native_partial_protection_contract_tests: actual partial stop,
+  failure+late fill durable fence; partial-reduce stop resize requires independent
+  exact GET, ACK alone cannot verify; no second safety/amend POST.
+- accounts_native_fee_correction_contract_tests: late fee, independent bill,
+  immutable revisions and replay; real rebate does not refund breach/capacity.
+- accounts_native_multiaccount_contract_tests: verified initial A/B roster,
+  same-key public capital preparation isolation and B progress after A source loss.
+- accounts_native_multiaccount_reserve_contract_tests: concurrent original
+  typed owner reserves share1.5 cap (one1.0005 Held, one denied); exact scoped
+  replay and retained obligation. It is not full public A/B Execute/census.
+- owner_financial_reply_tests: accepted financial transfer still commits after
+  caller cancellation; commit/reply loss readback preserves all source/ledger legs.
+- owner_financial_crash_tests: REAL child death before/after financial COMMIT,
+  same SQLite/WAL reopen, zero partial legs, exact replay, second-writer refusal.
+  This transfer proof does not replace venue/Reserve-specific fault evidence.
+- diagnostics/native_intent.rs: production operation reference intent:<id>,
+  durable scoped SQL snapshot, explicit unknown evidence, no HTTP/POST. The
+  original actual venue-kill test also checks this diagnostic after reconnect.
+- native_acceptance_coverage_tests: negative checks for a declared result set;
+  full runtime collector and complete property-to-witness manifest still missing.
+
+A real defect was reproduced by independent late-fee data: lazy guard DDL changed
+canonical Native schema and caused FINANCE_INSTALLATION_SCHEMA_MISMATCH on the
+next public command. Schema v8 creates all four fee/late immutable guards at
+bootstrap. Native fee/late settlement is DML-only; original guard constraints and
+freshness are preserved. Unknown/prior v7 refuses without automatic upgrade or
+reset. Existing installed C:\okx was not read or modified.
+
+Planner waits on existing versioned market notifications before rechecking the
+predicate, replacing50ms polling without changing market freshness/deadline.
+
+Current scope is OKX linear USDT swaps; census max32 accounts and owner queue128.
+This is an extensible bounded application, not evidence of arbitrary markets,
+instruments or unbounded accounts/trades. Full current acceptance, remaining
+public Add/source/multi-close/post-release correction paths, financial fairness,
+Native backup/restore and installed lifecycle remain open. Earlier intermittent
+census/child failure is not declared fixed by subsequent successful repeats.
+
+---
 ## #510 r6.1 - Public Execute safety checkpoint (Draft / NO-GO)
 
 Current work order: issue #510 sections E-G. #512 is subsequent measured

@@ -256,6 +256,20 @@ pub(super) struct NativeFixture {
 }
 
 pub(super) async fn fixture() -> NativeFixture {
+    fixture_for_accounts(&["a"]).await
+}
+
+/// Connect the entire desired roster before strict policy application. This
+/// exercises the same source/bootstrap path for every account, not SQL seeds.
+pub(super) async fn fixture_for_accounts(labels: &[&str]) -> NativeFixture {
+    assert_eq!(labels.first(), Some(&"a"));
+    assert_eq!(
+        labels
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        labels.len()
+    );
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce).unwrap();
     let root = if std::env::var("OKX_NATIVE_CRASH_CHILD").as_deref() == Ok("POST_CREATE_PRE_RESULT")
@@ -313,7 +327,6 @@ pub(super) async fn fixture() -> NativeFixture {
             .unwrap();
     let registry = Arc::new(registry);
     let feed = Arc::new(RecordedAccountHttp::default());
-    let socket = Arc::new(RecordedWsConnector::default());
     let market_boundary = Arc::new(ExecuteMarketBoundary {
         feed: feed.clone(),
         market: Mutex::new(None),
@@ -321,8 +334,18 @@ pub(super) async fn fixture() -> NativeFixture {
         planning_fee_gate: Mutex::new(None),
         foreign_create_ack: std::sync::atomic::AtomicBool::new(false),
     });
-    let (config, clients) =
-        prepared_with_socket("a", market_boundary.clone(), socket, budget.clone());
+    let prepared = labels
+        .iter()
+        .map(|label| {
+            prepared_with_socket(
+                label,
+                market_boundary.clone(),
+                Arc::new(RecordedWsConnector::default()),
+                budget.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let config = prepared[0].0.clone();
     let environment = OkxEnvironment::new(okx_api::Region::Global, false);
     let (market, public_ws) = okx_runtime::PublicWsCoordinator::new_with_connector(
         environment,
@@ -341,7 +364,7 @@ pub(super) async fn fixture() -> NativeFixture {
         public_ws,
         NativeRiskClient::local(NativeFinanceRisk::from_owner(owner.clone())),
     ));
-    let authority: CentralGovernanceSnapshot = serde_json::from_value(serde_json::json!({
+    let mut authority: CentralGovernanceSnapshot = serde_json::from_value(serde_json::json!({
         "state":{"schema":"okx.governance/v3","revision":2,
             "installation_id":installation,"campaign_id":campaign,
             "campaign_loss_limit_usd":"10","campaign_entry_limit_usd":"10",
@@ -357,6 +380,19 @@ pub(super) async fn fixture() -> NativeFixture {
         "issued_at_ms":chrono::Utc::now().timestamp_millis(),"session_generation":1
     }))
     .unwrap();
+    let account_policy = authority.state.accounts[0].clone();
+    authority.state.accounts = prepared
+        .iter()
+        .zip(labels)
+        .map(|((config, _), label)| {
+            let mut policy = account_policy.clone();
+            policy.id = format!("account_{label}");
+            policy.label = format!("Recorded {label}");
+            policy.account_key = config.account_key.wire();
+            policy.uid_fingerprint = config.account_key.verified_uid.clone();
+            policy
+        })
+        .collect();
     assert!(authority.valid());
     // Same callback used by authenticated PolicySnapshot delivery: first an
     // empty initial configuration, then the desired roster BEFORE connection.
@@ -405,47 +441,49 @@ pub(super) async fn fixture() -> NativeFixture {
             .is_err()
     );
     assert!(feed.outbound_posts.lock().unwrap().is_empty());
-    registry
-        .connect_prepared(config.clone(), clients)
+    for (connected_config, clients) in prepared {
+        registry
+            .connect_prepared(connected_config.clone(), clients)
+            .await
+            .unwrap();
+        let account = registry.resolve(&connected_config.alias).await.unwrap();
+        // Only production login, identity validation and capture publish readiness.
+        // No fixture mutates verified_source_generation, SQL cursors or NAV.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !account.source_identity_ready().await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
         .await
-        .unwrap();
-    let account = registry.resolve(&config.alias).await.unwrap();
-
-    // Only production login, identity validation and capture publish readiness.
-    // No fixture mutates verified_source_generation, SQL cursors or NAV.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !account.source_identity_ready().await {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        .expect("Native private source identity must be independently verified");
+        crate::source_capture::capture_account_sources_measured(
+            &account.observer,
+            &account.private_ws,
+            &account.execution,
+        )
+        .await
+        .expect("original Native source capture must reach its original SQL owner");
+        let frontier = account
+            .execution
+            .store
+            .source_capture_state(Instant::now() + Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(frontier.account_key, connected_config.account_key.wire());
+        for cursor in [
+            frontier.cursors.spot,
+            frontier.cursors.margin,
+            frontier.cursors.swap,
+            frontier.cursors.futures,
+            frontier.cursors.options,
+            frontier.cursors.bills,
+        ] {
+            let cursor = cursor.expect("all six original monetary history frontiers persisted");
+            assert!(cursor.generation > 0);
+            assert!(cursor.coverage_gaps.is_empty());
         }
-    })
-    .await
-    .expect("Native private source identity must be independently verified");
-    crate::source_capture::capture_account_sources_measured(
-        &account.observer,
-        &account.private_ws,
-        &account.execution,
-    )
-    .await
-    .expect("original Native source capture must reach its original SQL owner");
-    let frontier = account
-        .execution
-        .store
-        .source_capture_state(Instant::now() + Duration::from_secs(3))
-        .await
-        .unwrap();
-    assert_eq!(frontier.account_key, config.account_key.wire());
-    for cursor in [
-        frontier.cursors.spot,
-        frontier.cursors.margin,
-        frontier.cursors.swap,
-        frontier.cursors.futures,
-        frontier.cursors.options,
-        frontier.cursors.bills,
-    ] {
-        let cursor = cursor.expect("all six original monetary history frontiers persisted");
-        assert!(cursor.generation > 0);
-        assert!(cursor.coverage_gaps.is_empty());
     }
+    let account = registry.resolve(&config.alias).await.unwrap();
 
     trade.update_governance(&authority).await.unwrap();
     assert_eq!(

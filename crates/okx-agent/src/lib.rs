@@ -33,6 +33,10 @@ pub mod risk_bridge;
 
 pub mod runtime;
 
+#[cfg(test)]
+#[path = "native_acceptance_coverage_tests.rs"]
+mod native_acceptance_coverage;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

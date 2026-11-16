@@ -21,8 +21,15 @@ impl AccountStore {
         // transaction. A source cursor cannot advance without identical
         // immutable bill, finance event, venue order and account owner.
         if !links.is_empty() {
-            tx.execute_batch(
-                "CREATE TRIGGER IF NOT EXISTS immutable_entry_fee_owner_update
+            // Native schema v8 installs these guards at initialization.
+            // Financial ingestion must never mutate its canonical schema.
+            let native: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='finance_installation')",
+                [], |r| r.get(0),
+            )?;
+            if !native {
+                tx.execute_batch(
+                    "CREATE TRIGGER IF NOT EXISTS immutable_entry_fee_owner_update
                  BEFORE UPDATE ON operation_receipts
                  WHEN OLD.kind IN ('ENTRY_ORDER_FEE_PROVEN','ENTRY_ORDER_FEE_INDEX')
                  BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_FEE_OWNER'); END;
@@ -30,7 +37,8 @@ impl AccountStore {
                  BEFORE DELETE ON operation_receipts
                  WHEN OLD.kind IN ('ENTRY_ORDER_FEE_PROVEN','ENTRY_ORDER_FEE_INDEX')
                  BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_FEE_OWNER'); END;",
-            )?;
+                )?;
+            }
         }
         for link in links {
             if link.bill_id.is_empty()

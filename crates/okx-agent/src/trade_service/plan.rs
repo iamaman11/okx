@@ -185,6 +185,10 @@ impl TradeService {
         if !c.limits.allowed_instruments.iter().any(|s| s == instrument) && increase {
             return Err("INSTRUMENT_NOT_ALLOWED".into());
         }
+        // Subscribe before the first predicate read: an observation arriving
+        // between that read and the wait must remain visible. The existing
+        // market version wakes this planner; no 50ms polling or extra GET.
+        let mut market_updates = self.public_ws.subscribe_market_updates();
         self.public_ws
             .demand_instrument(instrument)
             .await
@@ -203,7 +207,10 @@ impl TradeService {
             {
                 Ok(m) => break m,
                 Err(_) if Instant::now() < until => {
-                    tokio::time::sleep(Duration::from_millis(50)).await
+                    tokio::time::timeout_at(until.into(), market_updates.changed())
+                        .await
+                        .map_err(|_| "PRICE_FRESHNESS_DEADLINE")?
+                        .map_err(|_| "PUBLIC_MARKET_UPDATES_CLOSED")?;
                 }
                 _ => return Err("PRICE_FRESHNESS_DEADLINE".into()),
             }

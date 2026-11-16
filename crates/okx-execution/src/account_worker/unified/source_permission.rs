@@ -16,7 +16,7 @@ pub(super) fn require_source_account(
     }
     let valid: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM finance_installation WHERE singleton=1
-         AND installation_id=?1 AND schema_version=7)",
+         AND installation_id=?1 AND schema_version=8)",
         [installation],
         |r| r.get(0),
     )?;

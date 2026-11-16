@@ -239,6 +239,32 @@ async fn risk_book_contract_native_os_kill_after_create_recovers_original_unknow
         .reconnect_prepared(config.clone(), clients)
         .await
         .unwrap();
+    // A new process has no volatile operation trace. Durable diagnostics must
+    // still explain the original UNKNOWN without reading the queued venue GET.
+    let reconnected = registry.resolve(&config.alias).await.unwrap();
+    let source_gate = reconnected.recorded_capture_gate.write().await;
+    let reads_before = feed.requests.lock().unwrap().clone();
+    let diagnostic = crate::diagnostics::native_intent::read(
+        &reconnected,
+        owner.installation_id(),
+        &format!("intent:{}", before.intent_id),
+    )
+    .await;
+    assert_eq!(diagnostic["state"], "UNKNOWN", "{diagnostic}");
+    assert_eq!(diagnostic["intent"]["plan_hash"], before.plan_hash);
+    assert_eq!(
+        diagnostic["missing_evidence"],
+        json!(["AUTHORITATIVE_VENUE_ORDER_READBACK"])
+    );
+    assert_eq!(feed.requests.lock().unwrap().as_slice(), reads_before);
+    assert_eq!(
+        feed.unconsumed_reads(),
+        1,
+        "read-only explanation cannot consume the future Status readback"
+    );
+    assert!(feed.outbound_posts.lock().unwrap().is_empty());
+    drop(source_gate);
+    drop(reconnected);
     let (_market, public) = okx_runtime::PublicWsCoordinator::new_with_connector(
         OkxEnvironment::new(okx_api::Region::Global, false),
         okx_observation::ReferenceRegistry::from_public("native-crash-readback", vec![]).unwrap(),

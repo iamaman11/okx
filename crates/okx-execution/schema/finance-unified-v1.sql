@@ -1,9 +1,11 @@
--- #510 r4.0 single-file canonical target from all 47 ORIGINAL finance tables.
+-- #510 shared domain DDL from all 47 ORIGINAL finance tables.
 -- 39 AccountStore + 8 RiskBook source tables; no parallel shadow ledger.
 -- All former account/campaign-local PK/UNIQUE/FK are namespace-scoped.
--- This is a PRIVATE, NOT-ACTIVATED candidate. Do NOT upgrade live account
--- SQLite or grant finance authority before migration, triggers, writer cutover
--- and physically confirmed legacy fencing. Existing source schema remains.
+-- New Native installations apply finance_installation.rs atomically on top
+-- of this domain DDL: canonical version, immutable guards and explicit identity.
+-- The import manifest below belongs only to historical source-contract fixtures;
+-- it is removed by Native initialization and never grants Native authority.
+-- Never apply this file as an upgrade or reset of existing financial data.
 
 CREATE TABLE account_meta(
  singleton INTEGER CHECK(singleton=1),

@@ -981,8 +981,16 @@ impl AccountStore {
         };
         let encoded = serde_json::to_string(&new)
             .map_err(|_| StoreError::Invalid("LATE_ENTRY_SERIALIZATION_FAILED"))?;
-        db.execute_batch(
-            "CREATE TRIGGER IF NOT EXISTS immutable_entry_late_update
+        // Current Native installations already own their immutable guards;
+        // keep financial settlement DML-only. Historical fixtures retain
+        // their existing initialization behaviour.
+        let native: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='finance_installation')",
+            [], |r| r.get(0),
+        )?;
+        if !native {
+            db.execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS immutable_entry_late_update
              BEFORE UPDATE ON operation_receipts
              WHEN OLD.kind IN ('ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED')
              BEGIN SELECT RAISE(ABORT,'IMMUTABLE_LATE_ENTRY'); END;
@@ -990,7 +998,8 @@ impl AccountStore {
              BEFORE DELETE ON operation_receipts
              WHEN OLD.kind IN ('ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED')
              BEGIN SELECT RAISE(ABORT,'IMMUTABLE_LATE_ENTRY'); END;",
-        )?;
+            )?;
+        }
         Self::persist_entry_settlement_record_sql(
             tx,
             scope,

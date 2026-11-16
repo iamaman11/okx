@@ -413,3 +413,18 @@ mod filled_fixture;
 
 #[path = "accounts_native_execute_safety_contract_tests.rs"]
 mod native_execute_safety;
+
+#[path = "accounts_native_partial_protection_contract_tests.rs"]
+mod native_partial_protection;
+
+#[path = "accounts_native_multiaccount_contract_tests.rs"]
+mod native_multiaccount;
+
+#[path = "accounts_native_multiaccount_reserve_contract_tests.rs"]
+mod native_multiaccount_reserve;
+
+#[path = "accounts_native_fee_correction_contract_tests.rs"]
+mod native_fee_correction;
+
+#[path = "accounts_native_diagnostic_contract_tests.rs"]
+mod native_diagnostics;

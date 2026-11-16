@@ -6,6 +6,10 @@ use std::sync::Arc;
 mod opening_ingress;
 mod owner;
 #[cfg(test)]
+mod owner_financial_crash_tests;
+#[cfg(test)]
+mod owner_financial_reply_tests;
+#[cfg(test)]
 mod owner_queue_tests;
 mod owner_startup;
 #[cfg(test)]

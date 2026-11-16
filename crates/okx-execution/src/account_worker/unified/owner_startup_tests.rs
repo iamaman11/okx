@@ -47,7 +47,7 @@ async fn risk_book_contract_new_owner_exact_replay_reopen_and_no_trade_permissio
         .unwrap();
     let initial = owner.installation_receipt(deadline()).await.unwrap();
     assert_eq!(initial.installation_id, r.installation_id);
-    assert_eq!(initial.schema_version, 7);
+    assert_eq!(initial.schema_version, 8);
     assert!(matches!(
         owner.verify_live_authority(deadline()).await,
         Err(StoreError::Invalid("FINANCE_ACCOUNT_BOOTSTRAP_REQUIRED"))

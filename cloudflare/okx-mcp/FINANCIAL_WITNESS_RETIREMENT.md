@@ -1,5 +1,50 @@
 # Cloudflare financial witness retirement - #510
 
+## Current r7 delta (isolated Native tests, not full gate)
+
+- `accounts_native_partial_protection_contract_tests`: actual 0.04 partial stop,
+  failed protection plus independently billed late fill, retained incident/STOP
+  and no speculative safety POST; partial reduce 0.04 leaves exact 0.06 stop,
+  amendment ACK alone stays pending, independent GET verifies it and replay
+  sends no second amendment. Cancel-ACK loss/emergency-success remain separate.
+- `accounts_native_fee_correction_contract_tests`: independent late fee changes
+  immutable cumulative entry revision 0.4002 -> 1.4002, exact bound breach
+  0.3997, economic replay is read-only; real rebate changes cash but does not
+  refund conservative spent capacity/breach; new Execute is fenced.
+- `accounts_native_multiaccount_contract_tests`: same operation IDs on A/B
+  retain different scoped capital receipts; actual source shutdown A permits
+  public preparation B. This is not proof of trading fairness under lost A.
+- `accounts_native_multiaccount_reserve_contract_tests`: source-backed typed
+  competing owner commands share cap1.5: one Held1.0005 and one denied, exact
+  remaining0.4995/loss0.1, original receipt/replay/cross-account refusal. Reported
+  census is a reviewed input, not the full public multi-account producer path.
+- `owner_financial_reply_tests` / `owner_financial_crash_tests`: fresh typed
+  capital transfer, all ledger legs/source links, lost reply/caller cancellation
+  after enqueue/commit and REAL OS child kill before/after commit; same-file
+  recovery/second-writer refusal/replay. This does not certify Reserve/BeginPost
+  lost-owner-reply or a second venue-send crash point.
+- `diagnostics/native_intent.rs`: existing operation route `intent:<id>` reads
+  one scoped durable snapshot without network or mutation; absent current
+  venue/receipt evidence is explicit. Tests cover actual UNKNOWN, A/B scope and
+  same readback after a real OS kill/reconnect; no full causal-history claim.
+- Native canonical schema v8 installs immutable fee-owner/late-settlement guards
+  at initialization. Runtime fee ingestion no longer mutates that schema. v7 is
+  refused without migration/reset; installed data was not opened or changed.
+- Pure coverage self-tests reject missing/duplicate/foreign/skipped results and
+  distinguish full DECLARED manifest from subset. They are NOT an executing
+  complete gate or proof that its declared manifest covers every invariant.
+
+Current local validation: Native20 PASS/0FAIL/0ignored in21.88s; complete
+execution337 PASS/0FAIL/2 historical ignored probes in10.53s, separately timed.
+Mandatory full coverage, public Add/remaining source variants, post-release
+corrections, trading fairness, current backup/restore and installed lifecycle
+remain NOT_PROVEN. Historical tables below are preserved audit snapshots,
+superseded only by the exact properties of these newer executed witnesses.
+
+Supported execution remains OKX linear USDT swaps, with a32-account census cap
+and bounded owner queue128. Neither universal market support nor unlimited
+accounts/trades follows from these PASS results.
+
 Cloudflare owns authentication, MCP, transport and governance configuration. Rust Engine and its single `finance.sqlite` owner enforce financial constraints. This changes the witness boundary, not the financial invariants of #449. Old DO financial data is neither read as authority, migrated, reset, nor deleted by the current runtime.
 
 `npm run check` retains auth, typed schemas, MCP, governance configuration CAS/idempotency, runtime dispatch, backpressure, queue/close priority and shared numeric/semantic checks. `node scripts/test-native-finance-retirement-do.mjs` additionally runs actual workerd/SQLite DO transport: token authentication, session/generation fencing, typed obsolete RPC denial, liveness, dispatch ACK/response, and persisted transport generation after restart. Neither command certifies a Native full trading lifecycle.
