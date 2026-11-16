@@ -563,7 +563,10 @@ async fn recovery_ingest(
     store: &ExecutionStore,
     page: okx_execution::IngestPage,
 ) -> Result<(), String> {
-    store.ingest_source_page(deadline(), page).await.map_err(err)
+    store
+        .ingest_source_page(deadline(), page)
+        .await
+        .map_err(err)
 }
 async fn recovery_position_owner(
     store: &ExecutionStore,

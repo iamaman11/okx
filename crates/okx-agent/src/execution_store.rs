@@ -913,9 +913,7 @@ impl ExecutionStore {
     ) -> StoreResult<()> {
         match self {
             #[cfg(test)]
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| sql.ingest_page(&page)).await
-            }
+            Self::Legacy(s) => s.call(deadline, move |sql| sql.ingest_page(&page)).await,
             Self::Native { owner, account } => {
                 owner.ingest_source_page(account.clone(), page).await
             }
