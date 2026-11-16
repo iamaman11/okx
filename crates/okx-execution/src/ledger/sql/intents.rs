@@ -15,6 +15,27 @@ fn strategy_owner_matches_plan(owner: Option<&str>, plan_owner: &str) -> bool {
 const TERMINAL_RELEASE_DIAGNOSTIC_SQL: &str = "
 WITH candidates AS MATERIALIZED (
     SELECT * FROM risk_receipts INDEXED BY idx_risk_receipts_active
+    WHERE state IN ('TERMINAL_PENDING_CENTRAL','RELEASED','LATE_SETTLEMENT_PENDING')
+    ORDER BY state,intent_id
+    LIMIT ?1
+)
+SELECT i.intent_id,i.revision,i.state,r.reservation_key,r.policy_revision,r.state,
+       ack.committed_at
+FROM candidates AS r
+JOIN intents AS i ON i.intent_id=r.intent_id
+    AND i.plan_hash=r.plan_hash AND i.policy_revision=r.policy_revision
+LEFT JOIN operation_receipts AS ack ON ack.operation_id='central-release:'||r.reservation_key
+    AND ack.kind='CENTRAL_RELEASE' AND ack.request_hash=r.receipt_hash
+    AND length(ack.result_ref)>0 AND ack.committed_at>0
+WHERE r.account_key=?2 AND r.installation_id=?3
+    AND length(r.reservation_key)>0 AND length(r.receipt_hash)>0
+    AND i.state IN ('FILLED','CANCELLED','REJECTED')";
+
+// Native: scope installation/account inside the indexed candidate bound.
+// The historical local account path retains its original candidate semantics.
+const TERMINAL_RELEASE_DIAGNOSTIC_SCOPED_SQL: &str = "
+WITH candidates AS MATERIALIZED (
+    SELECT * FROM risk_receipts INDEXED BY idx_risk_receipts_active
     WHERE account_key=?2 AND installation_id=?3
       AND state IN ('TERMINAL_PENDING_CENTRAL','RELEASED','LATE_SETTLEMENT_PENDING')
     ORDER BY state,intent_id
@@ -41,10 +62,11 @@ impl AccountStore {
         &self,
         limit: usize,
     ) -> StoreResult<Vec<TerminalReleaseDiagnosticReceipt>> {
-        Self::recent_terminal_release_diagnostics_sql(
+        Self::terminal_release_diagnostics_query(
             &self.connection,
             (&self.meta.installation_id, &self.meta.account_key),
             limit,
+            TERMINAL_RELEASE_DIAGNOSTIC_SQL,
         )
     }
 
@@ -55,11 +77,25 @@ impl AccountStore {
         scope: (&str, &str),
         limit: usize,
     ) -> StoreResult<Vec<TerminalReleaseDiagnosticReceipt>> {
+        Self::terminal_release_diagnostics_query(
+            db,
+            scope,
+            limit,
+            TERMINAL_RELEASE_DIAGNOSTIC_SCOPED_SQL,
+        )
+    }
+
+    fn terminal_release_diagnostics_query(
+        db: &rusqlite::Connection,
+        scope: (&str, &str),
+        limit: usize,
+        sql: &str,
+    ) -> StoreResult<Vec<TerminalReleaseDiagnosticReceipt>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         Self::verify_source_account_sql(db, scope.0, scope.1)?;
-        let mut statement = db.prepare(TERMINAL_RELEASE_DIAGNOSTIC_SQL)?;
+        let mut statement = db.prepare(sql)?;
         let rows =
             statement.query_map(params![limit.min(128) as i64, scope.1, scope.0], |row| {
                 Ok((
@@ -2308,7 +2344,7 @@ mod active_receipt_tests {
             .execute_batch(include_str!("../../../schema/finance-unified-v1.sql"))
             .unwrap();
         let mut statement = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {TERMINAL_RELEASE_DIAGNOSTIC_SQL}"))
+            .prepare(&format!("EXPLAIN QUERY PLAN {TERMINAL_RELEASE_DIAGNOSTIC_SCOPED_SQL}"))
             .unwrap();
         let plan = statement
             .query_map(params![128, "okx:real:account", "installation_native"], |row| {
@@ -2318,7 +2354,7 @@ mod active_receipt_tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
             .join(" ");
-        assert!(TERMINAL_RELEASE_DIAGNOSTIC_SQL.contains(
+        assert!(TERMINAL_RELEASE_DIAGNOSTIC_SCOPED_SQL.contains(
             "WHERE account_key=?2 AND installation_id=?3"
         ));
         assert!(plan.contains("MATERIALIZE candidates"), "{plan}");
