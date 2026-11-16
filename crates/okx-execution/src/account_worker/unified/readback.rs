@@ -316,6 +316,7 @@ impl UnifiedFinanceHandle {
     /// Read-only original AccountStore intent (and immutable full plan)
     /// via the installation's single SQL FIFO. Raw venue IDs are scoped by
     /// account; no second account store, mutable SQL or venue capability.
+    #[cfg(test)]
     pub(crate) async fn account_intent(
         &self,
         account: String,

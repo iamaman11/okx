@@ -38,6 +38,14 @@ pub(super) fn require_command_permission(
 ) -> StoreResult<()> {
     use UnifiedFinanceWrite::*;
     match command {
+        #[cfg(test)]
+        InstallEntryOpening { .. } => {
+            super::finance_authority::require_preparation_authority(tx, installation)
+        }
+        #[cfg(test)]
+        Reserve { .. } | SettleEntry { .. } | ReleaseUnsent { .. } => {
+            require_verified_live_finance_authority(tx, installation)
+        }
         ProjectAccountNav { account, .. }
         | ProjectPendingFills { account, .. }
         | AttributePendingFunding { account, .. }
@@ -51,7 +59,6 @@ pub(super) fn require_command_permission(
         | RecordOutcome { account, .. } => require_source_account(tx, installation, Some(account)),
         RecoverInstallation { .. } => require_source_account(tx, installation, None),
         InstallReportedOpening { .. }
-        | InstallEntryOpening { .. }
         | Prepare { .. }
         | AssignBoundCapital { .. }
         | AssignCapital { .. }
@@ -60,12 +67,9 @@ pub(super) fn require_command_permission(
         }
         ReserveNative { .. }
         | ApplyPolicy { .. }
-        | Reserve { .. }
         | BeginPost { .. }
-        | SettleEntry { .. }
         | SettleBoundEntry { .. }
         | ReleaseBoundUnsent { .. }
-        | ResolveTerminal { .. }
-        | ReleaseUnsent { .. } => require_verified_live_finance_authority(tx, installation),
+        | ResolveTerminal { .. } => require_verified_live_finance_authority(tx, installation),
     }
 }

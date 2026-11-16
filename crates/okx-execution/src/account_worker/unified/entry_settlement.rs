@@ -15,6 +15,10 @@ enum SettlementKind {
 }
 
 impl UnifiedFinanceHandle {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep SQL scope, original proof and CAS fields explicit at this bounded boundary."
+    )]
     async fn bind_entry_source(
         &self,
         deadline: Instant,

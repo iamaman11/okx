@@ -29,7 +29,7 @@ impl AccountStore {
                         return Err(StoreError::Invalid("FUNDING_SOURCE_BILL_MISSING"));
                     }
                 }
-                tx.execute(match scope {None=>"INSERT INTO funding_projection_pending VALUES(?1,?2,?3,?4,?5) ON CONFLICT(event_id) DO NOTHING",Some(_)=>"INSERT INTO funding_projection_pending VALUES(?6,?7,?1,?2,?3,?4,?5) ON CONFLICT(installation_id,account_key,event_id) DO NOTHING"}, params_from_iter(values(vec![event.event_id.clone().into(),event.instrument_id.clone().into(),event.time.clone().into(),exact(event.amount).clone().into(),event.currency.clone().into()])))?;
+                tx.execute(match scope {None=>"INSERT INTO funding_projection_pending VALUES(?1,?2,?3,?4,?5) ON CONFLICT(event_id) DO NOTHING",Some(_)=>"INSERT INTO funding_projection_pending VALUES(?6,?7,?1,?2,?3,?4,?5) ON CONFLICT(installation_id,account_key,event_id) DO NOTHING"}, params_from_iter(values(vec![event.event_id.clone().into(),event.instrument_id.clone().into(),event.time.into(),exact(event.amount).clone().into(),event.currency.clone().into()])))?;
             }
         }
         Ok(())
@@ -54,7 +54,7 @@ impl AccountStore {
             tx.execute(
                 match scope {None=>"DELETE FROM funding_projection_pending WHERE event_id=?1",Some(_)=>"DELETE FROM funding_projection_pending WHERE event_id=?1 AND installation_id=?2 AND account_key=?3"}, params_from_iter(values(vec![id.clone().into()])),
             )?;
-            tx.execute(match scope {None=>"INSERT INTO operation_receipts VALUES(?1,'FUNDING_ATTRIBUTED',?2,'COMMITTED',?3) ON CONFLICT(operation_id) DO NOTHING",Some(_)=>"INSERT INTO operation_receipts VALUES(?4,?5,?1,'FUNDING_ATTRIBUTED',?2,'COMMITTED',?3) ON CONFLICT(installation_id,account_key,operation_id) DO NOTHING"}, params_from_iter(values(vec![format!("funding:{id}").clone().into(),id.clone().into(),wall_time_ms().clone().into()])))?;
+            tx.execute(match scope {None=>"INSERT INTO operation_receipts VALUES(?1,'FUNDING_ATTRIBUTED',?2,'COMMITTED',?3) ON CONFLICT(operation_id) DO NOTHING",Some(_)=>"INSERT INTO operation_receipts VALUES(?4,?5,?1,'FUNDING_ATTRIBUTED',?2,'COMMITTED',?3) ON CONFLICT(installation_id,account_key,operation_id) DO NOTHING"}, params_from_iter(values(vec![format!("funding:{id}").clone().into(),id.clone().into(),wall_time_ms().into()])))?;
         }
         Ok(())
     }

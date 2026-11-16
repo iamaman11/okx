@@ -119,7 +119,7 @@ async fn execute(
     if !built.success {
         return Err(built.failure.unwrap_or("BUILD_FAILED"));
     }
-    let binaries = artifacts(repo, &built.stdout).map_err(|code| {
+    let binaries = artifacts(repo, &built.stdout).inspect_err(|code| {
         failure(
             report,
             "build_artifact_verification",
@@ -127,7 +127,6 @@ async fn execute(
             code,
             Some(&built),
         );
-        code
     })?;
     let mut observed = Witnesses::new();
     let runtime_start = Instant::now();
@@ -179,7 +178,7 @@ async fn execute(
             if !out.success {
                 return Err(out.failure.unwrap_or("LIBTEST_PROCESS_FAILED"));
             }
-            let verified = verify_output(&out.stdout, &names).map_err(|code| {
+            let verified = verify_output(&out.stdout, &names).inspect_err(|code| {
                 failure(
                     report,
                     "libtest_output_verification",
@@ -187,7 +186,6 @@ async fn execute(
                     code,
                     Some(&out),
                 );
-                code
             })?;
             for name in verified {
                 observed.insert((package.to_owned(), name));

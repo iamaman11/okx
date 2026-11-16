@@ -3,6 +3,20 @@
 //! MUST be inspected; repeating BEGIN_POST cannot grant another send.
 //! Production ingress remains private until authenticated source construction,
 //! policy epoch and legacy Worker fence are proven.
+/// Exact column shape of the address-scoped SELECT below.
+type PostReservationRow = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    i64,
+);
+
 use super::{
     LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, VerifiedCensus, amount,
     apply_census_loss_for_scope, read_meta_for_scope, safe_integer, valid_digest,
@@ -12,9 +26,9 @@ use okx_kernel::risk::{
     money::RiskAmount,
     rules::{RiskRuleError, validate_account_occupancy, validate_post_causality},
 };
-use rusqlite::{
-    OptionalExtension, Transaction, TransactionBehavior, params_from_iter, types::Value,
-};
+#[cfg(test)]
+use rusqlite::TransactionBehavior;
+use rusqlite::{OptionalExtension, Transaction, params_from_iter, types::Value};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PostFenceInput {
@@ -47,6 +61,7 @@ pub(in crate::risk::book) enum PostDecision {
 impl RiskBookStore {
     /// Legacy v5 and scoped v6 run ONE Rust policy/monotonic-loss algorithm.
     /// Only the legacy owner commits here; v6 callers own their transaction.
+    #[cfg(test)]
     pub(in crate::risk::book) fn begin_post(
         &mut self,
         request: &PostFenceInput,
@@ -178,18 +193,7 @@ fn begin_post_transaction(
         return Err(RiskStoreError::StaleSequence);
     }
 
-    let entry: Option<(
-        String,
-        String,
-        String,
-        String,
-        i64,
-        i64,
-        String,
-        String,
-        String,
-        i64,
-    )> = tx
+    let entry: Option<PostReservationRow> = tx
         .query_row(
             if scope.is_some() {
                 "SELECT plan_sha256,state,account_key,intent_id,held_at_ms,reserve_read_floor_ms,

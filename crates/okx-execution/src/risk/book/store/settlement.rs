@@ -4,6 +4,19 @@
 //! This module does NOT calculate fill, bill, fee, FX or venue facts; those
 //! economic facts are produced and sealed by the existing AccountStore owner.
 //! No arbitrary network settlement or capital release is accepted.
+/// Named row decoded by the explicit SELECT below; column order stays unchanged.
+type SettlementReservationRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+);
+
 use super::{
     LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, amount, integrity,
     read_meta_for_scope, reserve_scope_values, valid_digest,
@@ -17,9 +30,9 @@ use okx_kernel::risk::{
         calculate_entry_settlement, entry_overage,
     },
 };
-use rusqlite::{
-    OptionalExtension, Transaction, TransactionBehavior, params_from_iter, types::Value,
-};
+#[cfg(test)]
+use rusqlite::TransactionBehavior;
+use rusqlite::{OptionalExtension, Transaction, params_from_iter, types::Value};
 
 #[derive(Debug, Clone)]
 pub(in crate::risk::book) struct PartialEntrySqlProof {
@@ -81,6 +94,7 @@ impl PartialEntrySqlProof {
 impl RiskBookStore {
     /// Idempotent partial entry settlement, only from current native AccountStore.
     /// A lost campaign reply does not debit again; a newer revision has one CAS.
+    #[cfg(test)]
     pub(in crate::risk::book) fn settle_partial_entry(
         &mut self,
         proof: &PartialEntrySqlProof,
@@ -108,6 +122,10 @@ impl RiskBookStore {
     /// entry-budget debit inside ONE installation-owned SQLite transaction.
     /// The source is queried from the very SAME snapshot, not reconstructed
     /// from caller-provided money, flags or network JSON. No COMMIT here.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep SQL scope, original proof and CAS fields explicit at this bounded boundary."
+    )]
     pub(in crate::risk::book) fn settle_unified_entry_from_account_sql_transaction(
         tx: &Transaction<'_>,
         installation: &str,
@@ -250,17 +268,7 @@ impl RiskBookStore {
         };
         let read_args =
             reserve_scope_values(vec![Value::Text(proof.reservation_key.clone())], scope);
-        let entry: Option<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            i64,
-            String,
-            String,
-        )> = tx
+        let entry: Option<SettlementReservationRow> = tx
             .query_row(read_sql, params_from_iter(read_args.iter()), |r| {
                 Ok((
                     r.get(0)?,
@@ -297,8 +305,8 @@ impl RiskBookStore {
         // the order (OPEN). These states retain the SAME held money. A
         // HELD cannot record fills. RELEASED may only accept a *late*
         // immutable fee revision, never a partial/terminal claim or POST.
-        if !matches!(state.as_str(), "POSTED" | "UNKNOWN" | "OPEN")
-            && !(state == "RELEASED" && proof.source == EntrySettlementSource::Late)
+        if !(matches!(state.as_str(), "POSTED" | "UNKNOWN" | "OPEN")
+            || state == "RELEASED" && proof.source == EntrySettlementSource::Late)
         {
             return Err(RiskStoreError::AlreadyResolved);
         }

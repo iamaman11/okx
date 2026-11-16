@@ -27,26 +27,26 @@ impl AccountStore {
         } else {
             Self::find_intent_sql(db, scope, "exchange_order_id", venue)?
         };
-        if let (Some(a), Some(b)) = (&by_client, &by_venue) {
-            if a.intent_id != b.intent_id {
-                return Err(StoreError::Invalid("SOURCE_ORDER_IDENTITY_CONFLICT"));
-            }
+        if let (Some(a), Some(b)) = (&by_client, &by_venue)
+            && a.intent_id != b.intent_id
+        {
+            return Err(StoreError::Invalid("SOURCE_ORDER_IDENTITY_CONFLICT"));
         }
-        if let Some(known) = &by_client {
-            if !venue.is_empty()
-                && venue != "0"
-                && known
-                    .exchange_order_id
-                    .as_deref()
-                    .is_some_and(|id| id != venue)
-            {
-                return Err(StoreError::Invalid("SOURCE_ORDER_IDENTITY_CONFLICT"));
-            }
+        if let Some(known) = &by_client
+            && !venue.is_empty()
+            && venue != "0"
+            && known
+                .exchange_order_id
+                .as_deref()
+                .is_some_and(|id| id != venue)
+        {
+            return Err(StoreError::Invalid("SOURCE_ORDER_IDENTITY_CONFLICT"));
         }
-        if let Some(known) = &by_venue {
-            if !client.is_empty() && known.client_order_id != client {
-                return Err(StoreError::Invalid("SOURCE_ORDER_IDENTITY_CONFLICT"));
-            }
+        if let Some(known) = &by_venue
+            && !client.is_empty()
+            && known.client_order_id != client
+        {
+            return Err(StoreError::Invalid("SOURCE_ORDER_IDENTITY_CONFLICT"));
         }
         Ok(by_client.or(by_venue))
     }

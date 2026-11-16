@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 // transaction, preserving immutable POST causality and all reserved money.
 // No resolved/terminal outcome refunds budget without a separate release.
 // RELEASED rows are protected by SQLite CHECK and excluded from this scan.
+#[cfg(test)]
 pub(super) fn verify_reservation_aggregates(
     tx: &rusqlite::Transaction<'_>,
     meta: &BookMeta,

@@ -99,7 +99,7 @@ impl AccountStore {
                 }
             }
             let added=tx.execute(match account_scope { None => "INSERT INTO finance_entries VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(economic_event_key,component,allocation_leg) DO NOTHING", Some(_) => "INSERT INTO finance_entries VALUES(?11,?12,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(installation_id,account_key,economic_event_key,component,allocation_leg) DO NOTHING" },
- params_from_iter(values(vec![e.entry_id.clone().into(),e.economic_event_key.clone().into(),e.component.clone().into(),e.allocation_leg.clone().into(),exact(e.amount).clone().into(),e.currency.clone().into(),e.instance_id.clone().into(),e.source_ref.clone().into(),e.time.clone().into(),e.reverses_entry_id.clone().into()])))?;
+ params_from_iter(values(vec![e.entry_id.clone().into(),e.economic_event_key.clone().into(),e.component.clone().into(),e.allocation_leg.clone().into(),exact(e.amount).clone().into(),e.currency.clone().into(),e.instance_id.clone().into(),e.source_ref.clone().into(),e.time.into(),e.reverses_entry_id.clone().into()])))?;
             if added == 1
                 && let Some(instance) = &e.instance_id
             {
@@ -179,7 +179,7 @@ impl AccountStore {
                     let prior: Option<String> = tx
                         .query_row(
                             match account_scope { None => "SELECT loss_usd FROM daily_losses WHERE scope_id=?1 AND utc_day=?2", Some(_) => "SELECT loss_usd FROM daily_losses WHERE scope_id=?1 AND utc_day=?2 AND installation_id=?3 AND account_key=?4" },
- params_from_iter(values(vec![risk_scope.clone().into(),day.clone().into()])),
+ params_from_iter(values(vec![risk_scope.clone().into(),day.into()])),
                             |r| r.get(0),
                         )
                         .optional()?;
@@ -190,7 +190,7 @@ impl AccountStore {
                         .checked_add(e.amount)
                         .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
                     tx.execute(match account_scope { None => "INSERT INTO daily_losses VALUES(?1,?2,?3) ON CONFLICT(scope_id,utc_day) DO UPDATE SET loss_usd=excluded.loss_usd", Some(_) => "INSERT INTO daily_losses VALUES(?4,?5,?1,?2,?3) ON CONFLICT(installation_id,account_key,scope_id,utc_day) DO UPDATE SET loss_usd=excluded.loss_usd" },
- params_from_iter(values(vec![risk_scope.clone().into(),day.clone().into(),exact(total).clone().into()])))?;
+ params_from_iter(values(vec![risk_scope.clone().into(),day.into(),exact(total).clone().into()])))?;
                 }
             }
         }

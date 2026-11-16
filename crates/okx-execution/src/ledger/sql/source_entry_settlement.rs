@@ -143,6 +143,10 @@ impl AccountStore {
         }
         Ok(())
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep SQL scope, original proof and CAS fields explicit at this bounded boundary."
+    )]
     fn persist_entry_settlement_record_sql(
         tx: &rusqlite::Transaction<'_>,
         scope: Option<(&str, &str)>,

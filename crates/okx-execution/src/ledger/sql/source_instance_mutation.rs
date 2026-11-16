@@ -92,6 +92,10 @@ impl AccountStore {
         }
         Ok(())
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep SQL scope, original proof and CAS fields explicit at this bounded boundary."
+    )]
     pub(crate) fn mutate_instance_sql(
         tx: &rusqlite::Transaction<'_>,
         scope: Option<(&str, &str)>,

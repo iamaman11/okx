@@ -11,6 +11,8 @@ pub use stops::*;
 // cutover/activation source is still required before a live COMMIT.
 mod book;
 pub(crate) use book::read_unified_campaign_opening;
+#[cfg(test)]
+pub(crate) use book::verify_legacy_import_source;
 pub(crate) use book::{
     AccountReadback, EntrySettlementSource, PostFenceInput, ReservationReadback, ReserveInput,
     TerminalResolveInput, UnifiedRiskDecision, VerifiedCensus, begin_post_unified_native,
@@ -18,7 +20,7 @@ pub(crate) use book::{
     read_unified_campaign_reservation, read_unified_campaign_summary,
     reconcile_outcome_unified_native, recover_posting_unified_native,
     release_unsent_unified_native, reserve_unified_native, resolve_terminal_unified_native,
-    settle_entry_unified_native, verify_legacy_import_source, verify_unified_import_campaign,
+    settle_entry_unified_native, verify_unified_import_campaign,
 };
 pub use book::{NativeOpeningAccount, NativeOpeningSource};
 

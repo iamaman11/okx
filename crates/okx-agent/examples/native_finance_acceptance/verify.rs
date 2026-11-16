@@ -237,13 +237,14 @@ pub(super) fn selected() -> Result<Witnesses> {
     let mut witnesses = BTreeSet::new();
     for c in CONTRACTS {
         for w in c.witnesses {
-            if (!PACKAGES.contains(&w.package)
-                && !(w.package == "repository"
+            let supported = PACKAGES.contains(&w.package)
+                || (w.package == "repository"
                     && [
                         super::repository_guards::WITNESS,
                         super::repository_guards::TRANSPORT_WITNESS,
                     ]
-                    .contains(&w.test)))
+                    .contains(&w.test));
+            if !supported
                 || w.test.is_empty()
                 || !w
                     .test

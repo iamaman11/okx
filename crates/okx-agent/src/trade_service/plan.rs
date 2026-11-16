@@ -597,7 +597,7 @@ impl TradeService {
                 .map_err(err)?
         };
         if let Some(reason) = decision {
-            return Err(reason.into());
+            return Err(reason);
         }
         Ok(())
     }

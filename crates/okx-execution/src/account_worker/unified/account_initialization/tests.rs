@@ -18,9 +18,9 @@ fn root() -> PathBuf {
     std::fs::create_dir(&path).unwrap();
     path
 }
-async fn owner(root: &PathBuf) -> UnifiedFinanceHandle {
+async fn owner(root: &std::path::Path) -> UnifiedFinanceHandle {
     UnifiedFinanceHandle::initialize_new(
-        root.clone(),
+        root.to_path_buf(),
         NewFinanceInstallation {
             installation_id: "installation_native".into(),
             initialize_request_id: "initialize_native_001".into(),

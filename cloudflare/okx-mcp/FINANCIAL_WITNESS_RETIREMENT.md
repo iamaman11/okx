@@ -1,3 +1,34 @@
+## Production boundary cleanup and strict verification - 16 November 2026
+
+Strict Clippy with -D warnings now passes for Agent, CONTROL, Launcher and
+execution, all targets. Full library regression: Agent471 PASS/4 historical
+ignored/45.01s; execution345 PASS/2 ignored/16.00s; kernel25 PASS; protocol41
+PASS/1 ignored; runtime21 PASS. Agent CLI startup6 PASS/0.08s; CONTROL46 PASS/
+8.25s; Launcher19 PASS/10.71s. Zero-test binary/doctest targets add no evidence.
+Ignored historical cases never satisfy mandatory current properties.
+
+The old standalone campaign worker/Connection, mutating offline import helpers
+and unbound fixture-only command variants compile only under cfg(test). Current
+source-bound Reserve/BeginPost/settlement/release continue using the one live
+installation transaction. Read-only legacy inventory inspection is unchanged.
+SQL decoder rows have local names; automatic style fixes preserve predicates,
+column order and amounts. No allow(dead_code), weaker schema, reset/import,
+changed source time, money limit or lost-ACK rule was introduced. Narrow expect
+annotations document existing eight-argument SQL/receipt boundaries and keeping
+the bounded232-byte receipt inline; they are style decisions, not safety waivers.
+
+The Windows CI no longer gates on the retired JavaScript Native/Worker finance
+SCENARIO DRIVER's8/5 lifecycle tests. Those test driver metadata/PID handoff,
+not the current shipped Engine. Current Rust child/SQLite/real process and
+Engine drain witnesses plus real workerd auth/session/generation/typed-denial
+remain in the mandatory fresh gate. CONTROL/Launcher tests and #449 installed/
+physical lifecycle acceptance remain mandatory. No old driver result is reused.
+Collector negative controls now execute explicitly in the full Windows job.
+
+RB16 workload/resource/percentile evidence is still NOT_PROVEN. Neither strict
+Clippy nor the903 passing library tests can close those rows or the full CODE
+acceptance. The current collector must be rerun on the committed cleanup SHA.
+
 ## Terminal census config causality correction
 
 GitHub run43805408497 on4ea11685 failed the emergency terminal release with

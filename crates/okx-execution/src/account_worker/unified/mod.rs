@@ -24,6 +24,7 @@ mod owner_startup;
 mod owner_startup_tests;
 #[cfg(test)]
 mod owner_terminal_rollback_tests;
+#[cfg(test)]
 pub(crate) use opening_ingress::install_reported_opening_sql;
 pub use opening_ingress::{ReportedOpeningCensus, ReportedOpeningReceipt};
 mod account_initialization;
@@ -73,6 +74,7 @@ mod trade_reads;
 mod transaction;
 use finance_authority::require_verified_live_finance_authority;
 use sources::{original_bound_entry_settlement_sql, original_bound_unsent_release_sql};
+#[cfg(test)]
 pub(crate) use sources::{original_bound_entry_source_sql, original_bound_unsent_source_sql};
 pub(crate) use transaction::apply_original_unified_finance_transaction;
 /// Test-only assertion against the immutable, independently verified
@@ -249,11 +251,13 @@ pub(crate) enum UnifiedFinanceWrite {
     ApplyPolicy {
         policy: UnifiedFinancePolicy,
     },
+    #[cfg(test)]
     InstallEntryOpening {
         source: crate::risk::NativeOpeningSource,
         census: crate::risk::VerifiedCensus,
         now_ms: i64,
     },
+    #[cfg(test)]
     Reserve {
         campaign: String,
         input: crate::risk::ReserveInput,
@@ -264,6 +268,7 @@ pub(crate) enum UnifiedFinanceWrite {
         campaign: String,
         input: crate::risk::PostFenceInput,
     },
+    #[cfg(test)]
     SettleEntry {
         campaign: String,
         account: String,
@@ -285,6 +290,7 @@ pub(crate) enum UnifiedFinanceWrite {
         campaign: String,
         input: crate::risk::TerminalResolveInput,
     },
+    #[cfg(test)]
     ReleaseUnsent {
         campaign: String,
         account: String,

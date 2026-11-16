@@ -227,10 +227,6 @@ impl AccountStore {
         CampaignCapture::campaign_source_generations(frontiers)
     }
 
-    /// Only the indexed derived changes; no JOIN on historical fills/bills.
-    /// The caller must validate the original terminal and latest late
-    /// settlement from the immutable SQL owner before advancing this cursor.
-
     /// The POST path reads only an addressable campaign receipt, a mutation
     /// epoch and six source cursors. It NEVER joins archived fills/bills.
     /// An unseen bill, UNKNOWN transition or recaptured source generation
@@ -251,6 +247,10 @@ impl AccountStore {
     /// The ORIGINAL AccountStore's sealed campaign baseline, read under the
     /// installation's single SQL transaction. This validates persisted
     /// source evidence, not a WS caller's reported spend or completeness flags.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep SQL scope, original proof and CAS fields explicit at this bounded boundary."
+    )]
     pub(crate) fn verify_unified_campaign_entry_source_sql(
         tx: &rusqlite::Transaction<'_>,
         installation: &str,
@@ -559,6 +559,7 @@ impl AccountStore {
     /// never the full amount again. A completed account-wide source witness
     /// is independently recomputed before this transaction; any mismatch
     /// rolls back event IDs, money and the applied frontier together.
+    #[cfg(test)]
     pub(crate) fn apply_captured_campaign_deltas(
         &self,
         campaign_id: &str,

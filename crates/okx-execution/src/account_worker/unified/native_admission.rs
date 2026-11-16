@@ -44,6 +44,10 @@ pub struct NativePostRequest {
     pub census: ReportedRiskCensus,
     pub causal: PostCausalProof,
 }
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep the bounded 232-byte durable receipt inline instead of allocating on every admitted order."
+)]
 pub enum NativeReserveDecision {
     Held {
         receipt: CentralReceipt,

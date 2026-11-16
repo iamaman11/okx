@@ -2,14 +2,28 @@
 //! The input is NOT a proof constructor. The authenticated account SQL owner
 //! must verify and construct the receipt before production callers can use it.
 //! No absence, timeout, caller flag or source digest alone is evidence of no send.
+/// Named row decoded by the explicit SELECT below; column order stays unchanged.
+type UnsentReservationRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+
 use super::{
     LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, amount, integrity,
     read_meta_for_scope, reserve_scope_values, valid_digest, valid_token,
 };
 use crate::account_store::UnsentSqlReceipt;
-use rusqlite::{
-    OptionalExtension, Transaction, TransactionBehavior, params_from_iter, types::Value,
-};
+#[cfg(test)]
+use rusqlite::TransactionBehavior;
+use rusqlite::{OptionalExtension, Transaction, params_from_iter, types::Value};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +113,7 @@ fn next_sequence(current: u64) -> Result<i64> {
 impl RiskBookStore {
     /// Internal SQL mutation. Cannot be wired to an arbitrary network proof:
     /// the native AccountStore must first verify its own durable no-send CAS.
+    #[cfg(test)]
     pub(in crate::risk::book) fn release_unsent(
         &mut self,
         proof: &UnsentSqlProof,
@@ -244,18 +259,7 @@ impl RiskBookStore {
                     reserved_usdt,reserved_loss_usd,release_proof_digest,release_request_hash,release_reason
              FROM risk_entries WHERE reservation_key=?1"
         };
-        let entry: Option<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-        )> = tx
+        let entry: Option<UnsentReservationRow> = tx
             .query_row(
                 risk_entry_sql,
                 params_from_iter(entry_address.iter()),

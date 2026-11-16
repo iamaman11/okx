@@ -1,6 +1,16 @@
 //! Immutable raw fills and pending projection, shared by legacy and unified storage.
 //! This operation never advances a coverage cursor or grants settlement/release.
 use super::super::*;
+type StoredFillRow = (
+    String,
+    Option<String>,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
 impl AccountStore {
     pub(crate) fn record_source_fills_sql(
         tx: &rusqlite::Transaction<'_>,
@@ -80,18 +90,7 @@ impl AccountStore {
         Ok(())
     }
 
-    fn source_fill_row(
-        row: &rusqlite::Row<'_>,
-    ) -> rusqlite::Result<(
-        String,
-        Option<String>,
-        i64,
-        String,
-        String,
-        String,
-        String,
-        String,
-    )> {
+    fn source_fill_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredFillRow> {
         Ok((
             row.get(0)?,
             row.get(1)?,

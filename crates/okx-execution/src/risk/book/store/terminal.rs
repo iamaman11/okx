@@ -2,6 +2,39 @@
 //! This is the final capital refund, never an alternative entry debit or a
 //! venue order sender. A complete fresh native census is still required.
 //! No Cloudflare grant, ledger replica, independent COMMIT or extra SQL owner.
+/// Named row decoded by the explicit SELECT below; column order stays unchanged.
+type TerminalReservationRow = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+
+/// Named row decoded by the explicit SELECT below; column order stays unchanged.
+type TerminalIntentBindingRow = (
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    String,
+);
+
 use super::{
     LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, VerifiedCensus, amount,
     apply_census_loss_for_scope, integrity, read_meta_for_scope, valid_digest,
@@ -97,17 +130,7 @@ impl RiskBookStore {
         if meta.generation != input.generation {
             return Err(RiskStoreError::StaleGeneration);
         }
-        let original: Option<(
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            String,
-            String,
-            String,
-            String,
-        )> = tx
+        let original: Option<TerminalIntentBindingRow> = tx
             .query_row(
                 "SELECT i.plan_hash,i.state,i.request_hash,i.risk_increase,
                     COALESCE(i.begin_post_at,0),i.instrument_id,
@@ -164,24 +187,7 @@ impl RiskBookStore {
                 "TERMINAL_RESOLVE_ORIGINAL_INTENT_UNPROVEN",
             ));
         }
-        let entry: Option<(
-            String,
-            String,
-            String,
-            String,
-            i64,
-            String,
-            String,
-            String,
-            String,
-            i64,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-        )> = tx
+        let entry: Option<TerminalReservationRow> = tx
             .query_row(
                 "SELECT account_key,intent_id,plan_sha256,state,post_authorized_at_ms,
                     strategy_id,reserved_usdt,reserved_loss_usd,reserved_entry_usd,

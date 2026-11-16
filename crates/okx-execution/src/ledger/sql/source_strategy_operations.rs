@@ -78,6 +78,10 @@ impl AccountStore {
             Some((i,a))=>db.query_row("SELECT EXISTS(SELECT 1 FROM intents WHERE installation_id=?1 AND account_key=?2 AND idempotency_key=?3)",params![i,a,key],|r|r.get(0))?,
         })
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep SQL scope, original proof and CAS fields explicit at this bounded boundary."
+    )]
     fn insert_strategy_decision_sql(
         tx: &rusqlite::Transaction<'_>,
         scope: Option<(&str, &str)>,
@@ -121,6 +125,10 @@ impl AccountStore {
         };
         Ok(())
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep SQL scope, original proof and CAS fields explicit at this bounded boundary."
+    )]
     pub(crate) fn claim_strategy_decision_sql(
         tx: &rusqlite::Transaction<'_>,
         scope: Option<(&str, &str)>,

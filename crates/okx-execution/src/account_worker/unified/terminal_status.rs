@@ -34,6 +34,10 @@ impl UnifiedFinanceHandle {
     /// Actual signed-observer census is data, not release authority. The owner
     /// binds it to original NAV/loss/policy rows and rechecks terminal source,
     /// settled debit, lots, CAS and immutable receipts in the SAME transaction.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep SQL scope, original proof and CAS fields explicit at this bounded boundary."
+    )]
     pub async fn resolve_terminal_status(
         &self,
         deadline: Instant,

@@ -1,6 +1,13 @@
 //! Original billed partial reduction and stop-resize ownership in one SQL snapshot.
 use super::super::*;
 use super::source_entry_costs::{entry_read, entry_source_values};
+type ProtectionResizeSource = (
+    StoredIntent,
+    ProtectionReceipt,
+    String,
+    Option<OperationReceipt>,
+    Option<OperationReceipt>,
+);
 impl AccountStore {
     pub fn protection_resize_source(
         &self,
@@ -9,13 +16,7 @@ impl AccountStore {
         filled: Decimal,
         venue_at: i64,
         position: Decimal,
-    ) -> StoreResult<(
-        StoredIntent,
-        ProtectionReceipt,
-        String,
-        Option<OperationReceipt>,
-        Option<OperationReceipt>,
-    )> {
+    ) -> StoreResult<ProtectionResizeSource> {
         Self::protection_resize_source_sql(
             &self.connection,
             None,
@@ -34,13 +35,7 @@ impl AccountStore {
         filled: Decimal,
         venue_at: i64,
         position_qty: Decimal,
-    ) -> StoreResult<(
-        StoredIntent,
-        ProtectionReceipt,
-        String,
-        Option<OperationReceipt>,
-        Option<OperationReceipt>,
-    )> {
+    ) -> StoreResult<ProtectionResizeSource> {
         let reduction = Self::find_intent_sql(db, scope, "intent_id", id)?
             .ok_or(StoreError::Invalid("LOCAL_REDUCE_INTENT_MISSING"))?;
         if reduction.risk_increase

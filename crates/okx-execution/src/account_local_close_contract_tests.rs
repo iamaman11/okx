@@ -124,7 +124,8 @@ fn imported_close_source(planned: Decimal, state: IntentState) -> Connection {
         db.execute("INSERT INTO fills VALUES('installation',?1,'same-fill','BTC-USDT-SWAP','same-trade','same-order','close-intent',5,'1','100','-0.01','USDT','sell')",[account]).unwrap();
         db.execute("INSERT INTO swap_fill_sources VALUES('installation',?1,'same-fill','same-bill','4','long','CLOSE')",[account]).unwrap();
     }
-    for account in ["close-B"] {
+    {
+        let account = "close-B";
         bill(&db, account);
     }
     db

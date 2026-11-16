@@ -3,13 +3,19 @@
 //! projection. Only an authorized stopped/fenced legacy owner may supply the
 //! immutable source snapshots. No production import or trade entrypoint uses
 //! this helper until the campaign import and cross-host authority cutover.
+/// Exact column shape of the address-scoped SELECT below.
+type ImportMarkerRow = (String, String, String, String, i64, i64, i64, i64);
+
 use crate::{StoreError, StoreResult};
-use rusqlite::{
-    Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
-    types::Value,
-};
+#[cfg(test)]
+use rusqlite::TransactionBehavior;
+use rusqlite::{Connection, OptionalExtension, params, types::Value};
+#[cfg(test)]
+use rusqlite::{Transaction, params_from_iter};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, path::Path};
+use std::collections::BTreeSet;
+#[cfg(test)]
+use std::path::Path;
 
 #[path = "unified_import_frontiers.rs"]
 mod frontiers;
@@ -299,6 +305,7 @@ fn columns(db: &Connection, name: &str) -> StoreResult<Vec<String>> {
 fn quote(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
+#[cfg(test)]
 fn count_scoped(
     tx: &Transaction<'_>,
     table: &str,
@@ -316,6 +323,7 @@ fn count_scoped(
         |r| r.get(0),
     )?)
 }
+#[cfg(test)]
 fn verify_original_source(source: &Connection, installation: &str) -> StoreResult<String> {
     let version: i64 = source.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version != 2 {
@@ -356,6 +364,7 @@ fn verify_original_source(source: &Connection, installation: &str) -> StoreResul
     Ok(account)
 }
 
+#[cfg(test)]
 fn verify_original_campaign(source: &Connection, installation: &str) -> StoreResult<String> {
     let version: i64 = source.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version != 5 {
@@ -415,6 +424,7 @@ fn verify_original_campaign(source: &Connection, installation: &str) -> StoreRes
 /// Mutable rowid scan frontiers are translated to the same economic prefix
 /// after copying; monetary facts, identities and immutable receipts are unchanged.
 /// SQL foreign keys, immutable monetary values and legacy IDs are preserved.
+#[cfg(test)]
 fn copy_one_scope(
     source: &Connection,
     tx: &Transaction<'_>,
@@ -534,6 +544,7 @@ fn stop_at_os_import_witness(phase: &str) {
     }
 }
 
+#[cfg(test)]
 fn import_sources(
     target: &mut Connection,
     installation: &str,
@@ -735,6 +746,7 @@ fn import_sources(
 
 /// Offline migration witness only. Not wired into active account/RiskBook
 /// owners until original authority is physically fenced and inventoried.
+#[cfg(test)]
 pub(in crate::account_store) fn import_stopped_finance_into_empty(
     target: &mut Connection,
     expected: &ExpectedFinanceInventory<'_>,
@@ -793,7 +805,7 @@ pub(in crate::account_store) fn inspect_stopped_finance_import(
     if found_accounts != accounts || found_campaigns != campaigns {
         return Err(StoreError::Invalid("UNIFIED_IMPORT_INVENTORY_MISMATCH"));
     }
-    let marker: Option<(String, String, String, String, i64, i64, i64, i64)> = tx
+    let marker: Option<ImportMarkerRow> = tx
         .query_row(
             "SELECT installation_id,inventory_sha256,content_sha256,state,
                     account_count,campaign_count,account_rows,campaign_rows

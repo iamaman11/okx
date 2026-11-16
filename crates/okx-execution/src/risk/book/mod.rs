@@ -1,7 +1,7 @@
-//! Native SQLite campaign owner, not a second policy authority.
-//! The module is private until authenticated initialization, legacy fencing,
-//! full terminal rules and production callers are proved by #510.
-//! No public opening or POST permission exists in this intermediate draft.
+//! Campaign risk rules on the installation owner's existing transaction.
+//! Production has no campaign database or separate worker. The historical
+//! standalone writer is compiled only for original component test fixtures.
+#[cfg(test)]
 mod owner;
 mod store;
 pub(crate) fn read_unified_campaign_opening(
@@ -12,9 +12,11 @@ pub(crate) fn read_unified_campaign_opening(
     store::read_unified_campaign_opening(tx, installation, campaign)
         .map_err(|e| original_finance_error(&e))
 }
+#[cfg(test)]
+pub(crate) use store::verify_legacy_import_source;
 pub(crate) use store::{
     AccountReadback, ReservationReadback, read_unified_campaign_account_summary,
-    read_unified_campaign_reservation, read_unified_campaign_summary, verify_legacy_import_source,
+    read_unified_campaign_reservation, read_unified_campaign_summary,
     verify_unified_import_campaign,
 };
 
@@ -83,17 +85,25 @@ fn original_finance_error(error: &store::RiskStoreError) -> &'static str {
         E::PolicyConflict => "POLICY_SNAPSHOT_NOT_AUTHORITATIVE",
         E::CensusUnproven => "COMPLETE_ACCOUNT_CENSUS_UNPROVEN",
         E::EntrySqlUnproven => "DURABLE_ENTRY_SQL_PROOF_MISSING",
+        #[cfg(test)]
         E::EntrySqlUnavailable => "ENTRY_SQL_PROOF_UNAVAILABLE",
         E::UnsentSqlUnproven => "DURABLE_UNSENT_SQL_PROOF_MISSING",
+        #[cfg(test)]
         E::UnsentSqlUnavailable => "UNSENT_SQL_PROOF_UNAVAILABLE",
         E::LossRegression => "CUMULATIVE_LOSS_SOURCE_REGRESSION",
         E::IdempotencyConflict => "IDEMPOTENCY_CONFLICT",
         E::AlreadyResolved => "INTENT_ALREADY_POSTED_OR_RESOLVED",
+        #[cfg(test)]
         E::WriterBusy => "RISK_WRITER_ALREADY_RUNNING",
+        #[cfg(test)]
         E::QueueFull => "RISK_OWNER_QUEUE_FULL",
+        #[cfg(test)]
         E::WorkerStopped => "RISK_OWNER_STOPPED",
+        #[cfg(test)]
         E::OutcomeUnknown => "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY",
+        #[cfg(test)]
         E::IdentityMismatch => "RISK_BOOK_IDENTITY_MISMATCH",
+        #[cfg(test)]
         E::Uninitialized => "RISK_BOOK_UNINITIALIZED",
         E::Denied(reason) => reason.code(),
         E::Money(reason) => reason.code(),
@@ -177,6 +187,10 @@ pub(crate) fn begin_post_unified_native(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep SQL scope, original proof and CAS fields explicit at this bounded boundary."
+)]
 pub(crate) fn settle_entry_unified_native(
     tx: &rusqlite::Transaction<'_>,
     installation: &str,

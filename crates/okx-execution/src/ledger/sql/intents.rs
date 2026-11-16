@@ -301,13 +301,11 @@ impl AccountStore {
         if let Some(ack) = read_operation(format!(
             "entry-partial-settled:{id}:r{}",
             proof.settlement_revision,
-        ))? {
-            if ack.0 != "ENTRY_PARTIAL_SETTLED"
-                || ack.1 != proof.plan_hash
-                || ack.2 != proof.source_digest
-            {
-                return Err(StoreError::Invalid("PARTIAL_ENTRY_ACK_CONFLICT"));
-            }
+        ))? && (ack.0 != "ENTRY_PARTIAL_SETTLED"
+            || ack.1 != proof.plan_hash
+            || ack.2 != proof.source_digest)
+        {
+            return Err(StoreError::Invalid("PARTIAL_ENTRY_ACK_CONFLICT"));
         }
         Ok(Some(proof))
     }
@@ -1564,14 +1562,13 @@ impl AccountStore {
         now: i64,
     ) -> StoreResult<()> {
         use rusqlite::{params_from_iter, types::Value};
-        if let Some((installation, account)) = scope {
-            if installation.is_empty()
+        if let Some((installation, account)) = scope
+            && (installation.is_empty()
                 || account.is_empty()
                 || receipt.installation_id != installation
-                || receipt.account_key != account
-            {
-                return Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"));
-            }
+                || receipt.account_key != account)
+        {
+            return Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"));
         }
         let scoped_values = |mut values: Vec<Value>| {
             if let Some((installation, account)) = scope {
@@ -2285,6 +2282,7 @@ fn verified_durable_post_fence(
 }
 
 /// SQL risk receipt state is read under the existing single AccountStore owner.
+#[cfg(test)]
 fn risk_receipt_covers_exposure(state: &str) -> bool {
     AccountStore::receipt_covers_exposure(state)
 }

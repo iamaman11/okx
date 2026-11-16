@@ -1,6 +1,7 @@
-//! One campaign's SQLite transaction owner, no account ledger duplication.
-//! Only trusted native evidence may enter reserve; this WIP exposes no
-//! production bootstrap, venue POST authorization or legacy transfer.
+//! Risk operations on the caller's installation-wide SQLite transaction.
+//! Production owns no Connection here. Historical standalone storage and
+//! leases exist only in component tests; live proofs come from AccountStore.
+#[cfg(test)]
 use crate::finance_owner_gate::{self, AuthorityModeError, AuthorityModeLease};
 use okx_kernel::risk::{
     model::{CampaignCapacity, RiskProposal, ScopeCapacity},
@@ -10,15 +11,35 @@ use okx_kernel::risk::{
         validate_account_occupancy,
     },
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+#[cfg(test)]
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+#[cfg(test)]
 use std::{
-    collections::BTreeMap,
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
     time::Duration,
 };
 use thiserror::Error;
+/// Campaign metadata column order shared by scoped and fixture SELECTs.
+type CampaignMetaRow = (
+    i64,
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+
 mod integrity;
 mod opening;
 mod opening_readback;
@@ -28,15 +49,18 @@ mod queries;
 mod settlement;
 mod terminal;
 mod unsent;
+#[cfg(test)]
 use integrity::verify_reservation_aggregates;
-pub(crate) use opening::EntryOpeningReceipt;
 pub use opening::{NativeOpeningAccount, NativeOpeningSource};
+#[cfg(test)]
 pub(super) use post::PostAuthorized;
 pub(crate) use post::PostFenceInput;
 pub(in crate::risk::book) use post::{PostDecision, begin_unified_post_and_account_transaction};
 pub(crate) use queries::{AccountReadback, ReservationReadback};
+#[cfg(test)]
 pub(super) use settlement::{EntrySettlementReceipt, PartialEntrySqlProof};
-pub(crate) use terminal::{TerminalResolveInput, TerminalResolveReceipt};
+pub(crate) use terminal::TerminalResolveInput;
+#[cfg(test)]
 pub(super) use unsent::{UnsentReceipt, UnsentSqlProof};
 
 #[derive(Debug, Error)]
@@ -52,16 +76,22 @@ pub(super) enum RiskStoreError {
     #[error("{0}")]
     Denied(#[from] RiskRuleError),
     #[error("RISK_BOOK_UNINITIALIZED")]
+    #[cfg(test)]
     Uninitialized,
     #[error("RISK_OWNER_QUEUE_FULL")]
+    #[cfg(test)]
     QueueFull,
     #[error("RISK_OWNER_STOPPED")]
+    #[cfg(test)]
     WorkerStopped,
     #[error("RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY")]
+    #[cfg(test)]
     OutcomeUnknown,
     #[error("RISK_WRITER_ALREADY_RUNNING")]
+    #[cfg(test)]
     WriterBusy,
     #[error("RISK_BOOK_IDENTITY_MISMATCH")]
+    #[cfg(test)]
     IdentityMismatch,
     #[error("POLICY_SNAPSHOT_NOT_AUTHORITATIVE")]
     PolicyConflict,
@@ -74,10 +104,12 @@ pub(super) enum RiskStoreError {
     #[error("DURABLE_ENTRY_SQL_PROOF_MISSING")]
     EntrySqlUnproven,
     #[error("ENTRY_SQL_PROOF_UNAVAILABLE")]
+    #[cfg(test)]
     EntrySqlUnavailable,
     #[error("DURABLE_UNSENT_SQL_PROOF_MISSING")]
     UnsentSqlUnproven,
     #[error("UNSENT_SQL_PROOF_UNAVAILABLE")]
+    #[cfg(test)]
     UnsentSqlUnavailable,
     #[error("CUMULATIVE_LOSS_SOURCE_REGRESSION")]
     LossRegression,
@@ -99,6 +131,7 @@ fn safe_integer(value: i64) -> bool {
 /// Unique campaign SQLite location within the already-owned installation
 /// runtime root (Windows C:\\okx\\runtime; equally valid on a native VPS).
 /// This is a path derivation, NOT initialization or proof of legacy fencing.
+#[cfg(test)]
 pub(super) fn campaign_db_path(runtime_root: &Path, campaign_id: &str) -> Result<PathBuf> {
     let digest = campaign_id
         .strip_prefix("sha256:")
@@ -115,6 +148,7 @@ pub(super) fn campaign_db_path(runtime_root: &Path, campaign_id: &str) -> Result
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(super) struct AccountPolicy {
     pub account_key: String,
     pub account_limit: RiskAmount,
@@ -124,6 +158,7 @@ pub(super) struct AccountPolicy {
     pub strategy_limit: RiskAmount,
 }
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(super) struct CampaignOpening {
     pub installation_id: String,
     pub campaign_id: String,
@@ -316,6 +351,7 @@ struct BookMeta {
     entry_reserved: RiskAmount,
     entry_breach: RiskAmount,
 }
+#[cfg(test)]
 fn read_meta(tx: &rusqlite::Transaction<'_>) -> Result<BookMeta> {
     read_meta_for_scope(tx, None)
 }
@@ -342,37 +378,24 @@ fn read_meta_for_scope(
     // Choose the scoped query only when its two identity arguments are present.
     // The legacy v5 source retains the original, singleton-only SQL.
     let query = if scope.is_some() { scoped_query } else { query };
-    let row: (
-        i64,
-        i64,
-        i64,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-    ) = tx.query_row(query, rusqlite::params_from_iter(args.iter()), |r| {
-        Ok((
-            r.get(0)?,
-            r.get(1)?,
-            r.get(2)?,
-            r.get(3)?,
-            r.get(4)?,
-            r.get(5)?,
-            r.get(6)?,
-            r.get(7)?,
-            r.get(8)?,
-            r.get(9)?,
-            r.get(10)?,
-            r.get(11)?,
-            r.get(12)?,
-        ))
-    })?;
+    let row: CampaignMetaRow =
+        tx.query_row(query, rusqlite::params_from_iter(args.iter()), |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
+                r.get(11)?,
+                r.get(12)?,
+            ))
+        })?;
     Ok(BookMeta {
         policy_revision: u64::try_from(row.0)
             .map_err(|_| RiskStoreError::Corrupt("POLICY_REVISION"))?,
@@ -605,6 +628,7 @@ pub(crate) fn read_unified_campaign_reservation(
 }
 
 /// Validate stopped v5 source with the ORIGINAL invariant checker.
+#[cfg(test)]
 pub(crate) fn verify_legacy_import_source(
     source: &Connection,
 ) -> std::result::Result<(), &'static str> {
@@ -617,8 +641,11 @@ pub(crate) fn verify_legacy_import_source(
 }
 
 pub(super) struct RiskBookStore {
+    #[cfg(test)]
     connection: Connection,
+    #[cfg(test)]
     _lease: File,
+    #[cfg(test)]
     _mode_lease: Option<AuthorityModeLease>,
 }
 
@@ -628,6 +655,7 @@ pub(in crate::risk::book) enum ReserveDecision {
     Rejected(RiskStoreError),
 }
 impl ReserveDecision {
+    #[cfg(test)]
     fn into_result(self) -> Result<HeldReceipt> {
         match self {
             Self::Held(receipt) => Ok(receipt),
@@ -652,6 +680,7 @@ impl RiskBookStore {
     /// Connection first, explicit lock release second. Only after returning
     /// may the bounded worker publish its termination witness. This is NOT
     /// another writer or a parallel finance authority.
+    #[cfg(test)]
     pub(super) fn close(self) {
         let Self {
             connection,
@@ -665,6 +694,7 @@ impl RiskBookStore {
         drop(_mode_lease);
     }
 
+    #[cfg(test)]
     pub(super) fn open_existing(path: &Path, installation: &str, campaign: &str) -> Result<Self> {
         if !path.is_file() {
             return Err(RiskStoreError::Uninitialized);
@@ -724,6 +754,7 @@ impl RiskBookStore {
             _mode_lease: mode_lease,
         })
     }
+    #[cfg(test)]
     pub(super) fn readback(&mut self) -> Result<BookReadback> {
         let tx = self
             .connection
@@ -735,6 +766,7 @@ impl RiskBookStore {
     }
     /// Read-only, verified account SQL observation. Policy authorization is the
     /// responsibility of the future production adapter, not this private API.
+    #[cfg(test)]
     pub(super) fn account_readback(&mut self, account_key: &str) -> Result<AccountReadback> {
         let tx = self
             .connection
@@ -748,6 +780,7 @@ impl RiskBookStore {
 
     /// Missing is unknown, not proof that a request was never sent.
     /// This cannot stand in for the durable no-reserve fence operation.
+    #[cfg(test)]
     pub(super) fn inspect(
         &mut self,
         reservation_key: &str,
@@ -881,6 +914,7 @@ impl RiskBookStore {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn reserve(
         &mut self,
         input: &ReserveInput,

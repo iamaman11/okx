@@ -3,14 +3,25 @@
 //! second Connection, writer, account ACK, venue client or bootstrap here.
 //! This first slice cannot be production-enabled until the full v2 account
 //! schema is scoped/imported and original source producers are wired.
+/// Named row decoded by the explicit SELECT below; column order stays unchanged.
+#[cfg(test)]
+type FixtureEntryRow = (String, String, String, String, String, String, i64, String);
+
+/// Named row decoded by the explicit SELECT below; column order stays unchanged.
+#[cfg(test)]
+type FixtureCampaignRow = (i64, i64, i64, String, String, String, String, String);
+
 use crate::{StoreError, StoreResult};
+#[cfg(test)]
 use okx_kernel::risk::money::RiskAmount;
 use rusqlite::{OptionalExtension, Transaction, params};
 
+#[cfg(test)]
 pub(super) const CORE_SCHEMA: &str = include_str!("finance-v1.sql");
 const MAX_SAFE_SEQUENCE: i64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(in crate::account_store) struct EntryRef<'a> {
     pub installation: &'a str,
     pub campaign: &'a str,
@@ -23,33 +34,40 @@ pub(in crate::account_store) struct EntryRef<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(in crate::account_store) struct EntryCommit {
     pub book_sequence: i64,
     pub cumulative_entry_usd: String,
     pub replayed: bool,
 }
 
+#[cfg(test)]
 fn money(raw: &str) -> StoreResult<RiskAmount> {
     RiskAmount::parse(raw).map_err(|_| StoreError::Invalid("UNIFIED_MONEY_INVALID"))
 }
+#[cfg(test)]
 fn canonical(value: &RiskAmount) -> StoreResult<String> {
     value
         .canonical()
         .map_err(|_| StoreError::Invalid("UNIFIED_MONEY_RANGE"))
 }
+#[cfg(test)]
 fn digest_ok(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
+#[cfg(test)]
 fn checked_add(a: &RiskAmount, b: &RiskAmount) -> StoreResult<RiskAmount> {
     a.checked_add(b)
         .map_err(|_| StoreError::Invalid("UNIFIED_MONEY_RANGE"))
 }
+#[cfg(test)]
 fn checked_sub(a: &RiskAmount, b: &RiskAmount) -> StoreResult<RiskAmount> {
     a.checked_sub(b)
         .map_err(|_| StoreError::Invalid("UNIFIED_AMOUNT_REGRESSION"))
 }
+#[cfg(test)]
 fn remainder(upper: &RiskAmount, used: &RiskAmount) -> StoreResult<RiskAmount> {
     if upper > used {
         checked_sub(upper, used)
@@ -57,6 +75,7 @@ fn remainder(upper: &RiskAmount, used: &RiskAmount) -> StoreResult<RiskAmount> {
         Ok(RiskAmount::zero())
     }
 }
+#[cfg(test)]
 fn overage(value: &RiskAmount, limit: &RiskAmount) -> StoreResult<RiskAmount> {
     if value > limit {
         checked_sub(value, limit)
@@ -68,6 +87,7 @@ fn overage(value: &RiskAmount, limit: &RiskAmount) -> StoreResult<RiskAmount> {
 /// Scope-keyed primary rows are checked before a mutable campaign cache may
 /// grant headroom. This is an O(active entries) proof for the initial slice;
 /// production performance/index evidence remains a checkpoint, not assumed.
+#[cfg(test)]
 fn verify_campaign(
     tx: &Transaction<'_>,
     scope: &EntryRef<'_>,
@@ -103,7 +123,7 @@ fn verify_campaign(
             if !used.is_zero() || !digest.is_empty() {
                 return Err(StoreError::Invalid("UNIFIED_PRIMARY_REVISION_CORRUPT"));
             }
-        } else if revision < 0 || revision > MAX_SAFE_SEQUENCE || !digest_ok(&digest) {
+        } else if !(0..=MAX_SAFE_SEQUENCE).contains(&revision) || !digest_ok(&digest) {
             return Err(StoreError::Invalid("UNIFIED_PRIMARY_REVISION_CORRUPT"));
         }
         if revision > 0 {
@@ -151,6 +171,7 @@ fn verify_campaign(
 /// It reads the original immutable source revision, intent, fill and bill
 /// from the SAME SQLite snapshot as the campaign CAS. Existing source
 /// capture must populate these primary rows before this can be used live.
+#[cfg(test)]
 pub(in crate::account_store) fn settle_entry(
     tx: &Transaction<'_>,
     scope: &EntryRef<'_>,
@@ -173,7 +194,7 @@ pub(in crate::account_store) fn settle_entry(
         return Err(StoreError::Invalid("UNIFIED_SCOPE_INVALID"));
     }
 
-    let campaign: Option<(i64, i64, i64, String, String, String, String, String)> = tx
+    let campaign: Option<FixtureCampaignRow> = tx
         .query_row(
             "SELECT policy_revision,generation,book_sequence,entry_limit_usd,
                     entry_consumed_usd,entry_opening_consumed_usd,entry_reserved_usd,entry_breach_usd
@@ -199,7 +220,7 @@ pub(in crate::account_store) fn settle_entry(
     let prior_breach = money(&breach)?;
     verify_campaign(tx, scope, &opening, &consumed, &reserved)?;
 
-    let row: Option<(String, String, String, String, String, String, i64, String)> = tx
+    let row: Option<FixtureEntryRow> = tx
         .query_row(
             "SELECT account_key,intent_id,plan_sha256,state,entry_upper_usd,
                     entry_settled_usd,settlement_revision,source_digest
@@ -442,6 +463,7 @@ pub(in crate::account_store) fn settle_entry(
 /// This is import evidence, not an alternative producer of monetary amounts.
 /// Multi-fill/late histories require the complete future normalized importer.
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(in crate::account_store) struct LegacyPartialSource {
     receipt: crate::EntrySettlementEvidence,
     installation: String,
@@ -453,6 +475,7 @@ pub(in crate::account_store) struct LegacyPartialSource {
 
 /// Read the SAME AccountStore authority already computing fills, fees and FX.
 /// Reject unverifiable links instead of rebuilding finance calculations.
+#[cfg(test)]
 pub(in crate::account_store) fn inspect_legacy_partial_source(
     account: &mut crate::AccountStore,
     intent_id: &str,
@@ -512,6 +535,7 @@ pub(in crate::account_store) fn inspect_legacy_partial_source(
 /// account/campaign scope into the destination's single SQLite transaction.
 /// The historical account writer must be fenced before a real migration;
 /// this function does not create/free budget or transfer the ledger itself.
+#[cfg(test)]
 pub(in crate::account_store) fn import_legacy_partial_source(
     tx: &Transaction<'_>,
     source: &LegacyPartialSource,

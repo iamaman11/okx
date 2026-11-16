@@ -401,17 +401,15 @@ impl AccountRuntimeRegistry {
             catalog.installation_id.clone(),
         )
         .await?;
-        if !campaign.is_empty() {
-            if let Some(configured) = owner
+        if !campaign.is_empty()
+            && let Some(configured) = owner
                 .configured_campaign(Instant::now() + std::time::Duration::from_secs(2))
                 .await?
-            {
-                if configured != campaign {
-                    return Err(AgentError::FinancialCaptureTask(
-                        "FINANCE_CAMPAIGN_IDENTITY_MISMATCH".into(),
-                    ));
-                }
-            }
+            && configured != campaign
+        {
+            return Err(AgentError::FinancialCaptureTask(
+                "FINANCE_CAMPAIGN_IDENTITY_MISMATCH".into(),
+            ));
         }
         let registry = Self {
             root: root.to_path_buf(),

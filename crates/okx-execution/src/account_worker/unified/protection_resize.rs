@@ -7,6 +7,10 @@ use rust_decimal::Decimal;
 use std::time::Instant;
 
 impl UnifiedFinanceHandle {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep SQL scope, original proof and CAS fields explicit at this bounded boundary."
+    )]
     pub async fn protection_resize_source(
         &self,
         deadline: Instant,

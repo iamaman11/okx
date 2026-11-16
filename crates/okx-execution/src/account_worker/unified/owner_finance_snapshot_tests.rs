@@ -46,9 +46,9 @@ async fn close(owner: UnifiedFinanceHandle) {
             .unwrap();
     }
 }
-async fn fresh(path: &PathBuf) -> UnifiedFinanceHandle {
+async fn fresh(path: &std::path::Path) -> UnifiedFinanceHandle {
     let owner = UnifiedFinanceHandle::initialize_new(
-        path.clone(),
+        path.to_path_buf(),
         NewFinanceInstallation {
             installation_id: INSTALLATION.into(),
             initialize_request_id: "snapshot_initialize_001".into(),

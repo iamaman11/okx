@@ -482,20 +482,21 @@ async fn risk_book_contract_native_partial_reduce_stop_resize_needs_signed_readb
         before,
         "reducing exposure must not refund spent entry capacity or release the opening reservation"
     );
-    let posts = fixture.feed.outbound_posts.lock().unwrap();
-    assert_eq!(
-        posts.len(),
-        3,
-        "entry Create, reduce Create and exactly one stop amendment"
-    );
-    assert_eq!(
-        posts
-            .iter()
-            .filter(|(_, path, _)| path == "/api/v5/trade/amend-algos")
-            .count(),
-        1
-    );
-    drop(posts);
+    {
+        let posts = fixture.feed.outbound_posts.lock().unwrap();
+        assert_eq!(
+            posts.len(),
+            3,
+            "entry Create, reduce Create and exactly one stop amendment"
+        );
+        assert_eq!(
+            posts
+                .iter()
+                .filter(|(_, path, _)| path == "/api/v5/trade/amend-algos")
+                .count(),
+            1
+        );
+    }
     assert_transcript_consumed(&fixture);
     market_stop.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(3), market_task)

@@ -1,5 +1,7 @@
 //! Translate mutable scan frontiers; immutable source facts/receipts stay unchanged.
+#[cfg(test)]
 use super::*;
+#[cfg(test)]
 use std::collections::BTreeMap;
 const REFERENCES: [(&str, &str, &str); 5] = [
     ("fills", "fill_id", "reviewed_fill_rowid"),
@@ -15,6 +17,7 @@ const REFERENCES: [(&str, &str, &str); 5] = [
 pub(super) fn references_rowid(table: &str) -> bool {
     REFERENCES.iter().any(|(name, _, _)| *name == table)
 }
+#[cfg(test)]
 fn translated(map: &BTreeMap<i64, i64>, previous: i64) -> StoreResult<i64> {
     let highest = map.last_key_value().map_or(0, |(old, _)| *old);
     if previous < 0 || previous > highest {
@@ -25,6 +28,7 @@ fn translated(map: &BTreeMap<i64, i64>, previous: i64) -> StoreResult<i64> {
         .next_back()
         .map_or(0, |(_, new)| *new))
 }
+#[cfg(test)]
 pub(super) fn rebase(
     source: &Connection,
     tx: &Transaction<'_>,

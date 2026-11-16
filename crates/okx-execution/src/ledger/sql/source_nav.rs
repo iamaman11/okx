@@ -36,12 +36,12 @@ impl AccountStore {
             if n.mark_source.is_empty() {
                 return Err(StoreError::Invalid("NAV_MARK_SOURCE_REQUIRED"));
             }
-            tx.execute(match scope {None=>"INSERT INTO nav_points VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(scope_id,time,source_version) DO NOTHING",Some(_)=>"INSERT INTO nav_points VALUES(?10,?11,?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(installation_id,account_key,scope_id,time,source_version) DO NOTHING"}, params_from_iter(values(vec![n.scope_id.clone().into(),n.time.clone().into(),n.source_version.clone().into(),exact(n.equity).clone().into(),exact(n.pnl).clone().into(),exact(n.flows).clone().into(),n.currency.clone().into(),n.coverage.clone().into(),n.mark_source.clone().into()])))?;
+            tx.execute(match scope {None=>"INSERT INTO nav_points VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(scope_id,time,source_version) DO NOTHING",Some(_)=>"INSERT INTO nav_points VALUES(?10,?11,?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(installation_id,account_key,scope_id,time,source_version) DO NOTHING"}, params_from_iter(values(vec![n.scope_id.clone().into(),n.time.into(),n.source_version.clone().into(),exact(n.equity).clone().into(),exact(n.pnl).clone().into(),exact(n.flows).clone().into(),n.currency.clone().into(),n.coverage.clone().into(),n.mark_source.clone().into()])))?;
             // A replay may not change a previously accepted mark while
             // updating its derived high-water or advancing its source cursor.
             // A legitimate correction needs a distinct immutable source version.
             let saved: (String, String, String, String, String, String) = tx.query_row(
-                match scope {None=>"SELECT equity,pnl,flows,currency,coverage,mark_source FROM nav_points WHERE scope_id=?1 AND time=?2 AND source_version=?3",Some(_)=>"SELECT equity,pnl,flows,currency,coverage,mark_source FROM nav_points WHERE scope_id=?1 AND time=?2 AND source_version=?3 AND installation_id=?4 AND account_key=?5"}, params_from_iter(values(vec![n.scope_id.clone().into(),n.time.clone().into(),n.source_version.clone().into()])),
+                match scope {None=>"SELECT equity,pnl,flows,currency,coverage,mark_source FROM nav_points WHERE scope_id=?1 AND time=?2 AND source_version=?3",Some(_)=>"SELECT equity,pnl,flows,currency,coverage,mark_source FROM nav_points WHERE scope_id=?1 AND time=?2 AND source_version=?3 AND installation_id=?4 AND account_key=?5"}, params_from_iter(values(vec![n.scope_id.clone().into(),n.time.into(),n.source_version.clone().into()])),
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )?;
             if saved
@@ -73,7 +73,7 @@ impl AccountStore {
                         .transpose()?
                         .unwrap_or(adjusted)
                         .max(adjusted);
-                    tx.execute(match scope {None=>"INSERT INTO nav_watermarks VALUES(?1,?2,?3,?4,?5) ON CONFLICT(scope_id) DO UPDATE SET highwater=excluded.highwater,adjusted_equity=excluded.adjusted_equity,time=excluded.time,coverage=excluded.coverage",Some(_)=>"INSERT INTO nav_watermarks VALUES(?6,?7,?1,?2,?3,?4,?5) ON CONFLICT(installation_id,account_key,scope_id) DO UPDATE SET highwater=excluded.highwater,adjusted_equity=excluded.adjusted_equity,time=excluded.time,coverage=excluded.coverage"}, params_from_iter(values(vec![n.scope_id.clone().into(),exact(peak).clone().into(),exact(adjusted).clone().into(),n.time.clone().into(),n.coverage.clone().into()])))?;
+                    tx.execute(match scope {None=>"INSERT INTO nav_watermarks VALUES(?1,?2,?3,?4,?5) ON CONFLICT(scope_id) DO UPDATE SET highwater=excluded.highwater,adjusted_equity=excluded.adjusted_equity,time=excluded.time,coverage=excluded.coverage",Some(_)=>"INSERT INTO nav_watermarks VALUES(?6,?7,?1,?2,?3,?4,?5) ON CONFLICT(installation_id,account_key,scope_id) DO UPDATE SET highwater=excluded.highwater,adjusted_equity=excluded.adjusted_equity,time=excluded.time,coverage=excluded.coverage"}, params_from_iter(values(vec![n.scope_id.clone().into(),exact(peak).clone().into(),exact(adjusted).clone().into(),n.time.into(),n.coverage.clone().into()])))?;
                 }
             }
         }

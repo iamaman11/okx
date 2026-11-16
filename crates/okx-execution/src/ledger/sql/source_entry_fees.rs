@@ -108,7 +108,7 @@ impl AccountStore {
                  VALUES(?1,'ENTRY_ORDER_FEE_PROVEN',?2,?3,?4)
                  ON CONFLICT(operation_id) DO NOTHING",Some(_)=>"INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at,installation_id,account_key)
                  VALUES(?1,'ENTRY_ORDER_FEE_PROVEN',?2,?3,?4,?5,?6)
-                 ON CONFLICT(installation_id,account_key,operation_id) DO NOTHING"}, params_from_iter(values(vec![operation_id.clone().into(),plan_hash.clone().into(),encoded.clone().into(),link.bill_at.clone().into()])),
+                 ON CONFLICT(installation_id,account_key,operation_id) DO NOTHING"}, params_from_iter(values(vec![operation_id.clone().into(),plan_hash.clone().into(),encoded.clone().into(),link.bill_at.into()])),
             )?;
             let old: (String, String, String, i64) = tx.query_row(
                 match scope {None=>"SELECT kind,request_hash,result_ref,committed_at
@@ -135,7 +135,7 @@ impl AccountStore {
                  VALUES(?1,'ENTRY_ORDER_FEE_INDEX',?2,?3,?4)
                  ON CONFLICT(operation_id) DO NOTHING",Some(_)=>"INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at,installation_id,account_key)
                  VALUES(?1,'ENTRY_ORDER_FEE_INDEX',?2,?3,?4,?5,?6)
-                 ON CONFLICT(installation_id,account_key,operation_id) DO NOTHING"}, params_from_iter(values(vec![bill_index.clone().into(),plan_hash.clone().into(),encoded.clone().into(),link.bill_at.clone().into()])),
+                 ON CONFLICT(installation_id,account_key,operation_id) DO NOTHING"}, params_from_iter(values(vec![bill_index.clone().into(),plan_hash.clone().into(),encoded.clone().into(),link.bill_at.into()])),
             )?;
             let indexed: (String, String, String, i64) = tx.query_row(
                 match scope {None=>"SELECT kind,request_hash,result_ref,committed_at

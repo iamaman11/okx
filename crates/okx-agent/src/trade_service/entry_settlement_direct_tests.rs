@@ -208,7 +208,7 @@ async fn reserved_fixture(
     (root, account, store, saved)
 }
 async fn fixture(label: &str, finance: bool) -> Fixture {
-    let (root, account, store, saved) = reserved_fixture(label).await;
+    let (_root, account, store, saved) = reserved_fixture(label).await;
     let account_wire = account.wire();
     let sends = std::sync::atomic::AtomicUsize::new(0);
     let mut wrong_plan = saved.clone();

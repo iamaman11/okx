@@ -95,7 +95,7 @@ fn apply_original_unified_finance_inner(
                 || cursor.watermark != evidence.as_of
                 || !cursor.coverage_gaps.is_empty()
                 || !cursor.cursor.is_empty()
-                || !snapshot.is_some_and(|s| s.generation == cursor.generation)
+                || snapshot.is_none_or(|s| s.generation != cursor.generation)
             {
                 return Err(StoreError::Invalid("STRATEGY_NAV_CURSOR_INVALID"));
             }
@@ -322,6 +322,7 @@ fn apply_original_unified_finance_inner(
             AccountStore::apply_unified_campaign_policy_sql_transaction(tx, installation, &policy)?;
             Ok(UnifiedFinanceWriteReceipt::PolicyApplied)
         }
+        #[cfg(test)]
         UnifiedFinanceWrite::InstallEntryOpening {
             source,
             census,
@@ -333,6 +334,7 @@ fn apply_original_unified_finance_inner(
             &census,
             now_ms,
         )),
+        #[cfg(test)]
         UnifiedFinanceWrite::Reserve {
             campaign,
             input,
@@ -349,6 +351,7 @@ fn apply_original_unified_finance_inner(
         UnifiedFinanceWrite::BeginPost { campaign, input } => risk_operation(
             risk::begin_post_unified_native(tx, installation, &campaign, &input),
         ),
+        #[cfg(test)]
         UnifiedFinanceWrite::SettleEntry {
             campaign,
             account,
@@ -377,6 +380,7 @@ fn apply_original_unified_finance_inner(
         UnifiedFinanceWrite::ResolveTerminal { campaign, input } => risk_operation(
             risk::resolve_terminal_unified_native(tx, installation, &campaign, &input),
         ),
+        #[cfg(test)]
         UnifiedFinanceWrite::ReleaseUnsent {
             campaign,
             account,
