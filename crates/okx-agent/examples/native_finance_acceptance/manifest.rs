@@ -132,7 +132,7 @@ const SOURCE_CENSUS: Witness = Witness {
 };
 const SOURCE_NAV: Witness = Witness {
     package: "okx-execution",
-    test: "account_worker::unified::native_admission::tests::native_census_rejects_missing_stale_incomplete_or_pre_floor_nav",
+    test: "account_worker::unified::native_admission::census_tests::native_census_rejects_missing_stale_incomplete_or_pre_floor_nav",
 };
 const TERMINAL_ROLLBACK: Witness = Witness {
     package: "okx-execution",
