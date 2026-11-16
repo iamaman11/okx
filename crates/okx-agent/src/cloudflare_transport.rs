@@ -1,4 +1,4 @@
-//! One authenticated connection multiplexes bounded independent native work.
+//! Authenticated product transport. Remote financial grants are retired.
 use crate::{
     AgentError, AgentResult,
     query::{DispatchContext, dispatch_with_governance, response},
@@ -233,9 +233,9 @@ async fn run_session(
     outcome
 }
 
-/// This is the same production session loop for live WSS and raw-frame tests.
-/// Only delivery can be substituted: identity, session generation, risk replies,
-/// authorization, dispatch, and all financial ownership remain unchanged.
+/// Production owns authenticated product dispatch; obsolete financial replies
+/// are rejected. Historical raw-frame financial delivery remains test-only
+/// until its assertions are ported to the current local SQL owner.
 async fn run_connected_session<S>(
     socket: S,
     hello: F,

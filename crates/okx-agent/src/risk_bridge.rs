@@ -1,5 +1,6 @@
-//! One bounded native requester over the existing authenticated WS ownership chain.
-//! Timeout is UNKNOWN. Never retry a risk mutation or an exchange POST.
+//! One local financial authority backed by the unified SQL owner.
+//! Historical remote financial delivery exists only in unit tests.
+//! UNKNOWN must never cause a repeated exchange POST.
 use okx_protocol::risk_authority::{
     RiskCommand, RiskCommandAction, RiskDecisionStatus, RiskResult,
 };

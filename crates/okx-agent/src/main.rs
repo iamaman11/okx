@@ -356,8 +356,8 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let market = MarketBootstrapper::new(public_client);
             let analytics = AnalyticsService::new(config.root.join("analytics"), market.clone())
                 .map_err(AgentError::ResearchSessionTask)?;
-            // The receiver remains part of the transport API, but no remote
-            // RiskClient is constructed by production startup.
+            // Financial authority is the single local SQL owner. Cloudflare
+            // transports authenticated product commands, never risk grants.
             let campaign = stopped_finance_campaign.or(native_finance_campaign);
             let backend = match campaign {
                 Some(campaign) => NativeFinanceRisk::new(
