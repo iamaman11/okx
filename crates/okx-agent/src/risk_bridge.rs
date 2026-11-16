@@ -5,10 +5,12 @@ use okx_protocol::risk_authority::{
 };
 #[cfg(test)]
 use std::time::Duration;
+#[cfg(test)]
 use tokio::sync::oneshot;
 #[cfg(test)]
 use tokio::sync::mpsc;
 
+#[cfg(test)]
 pub struct OutboundRiskCommand {
     pub command: RiskCommand,
     pub return_to: oneshot::Sender<RiskResult>,

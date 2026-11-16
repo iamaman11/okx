@@ -2,7 +2,6 @@
 use crate::{
     AgentError, AgentResult,
     query::{DispatchContext, dispatch_with_governance, response},
-    risk_bridge::OutboundRiskCommand,
 };
 use futures_util::{
     FutureExt, Sink, SinkExt, Stream, StreamExt, future::BoxFuture, stream::FuturesUnordered,
@@ -18,10 +17,11 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::{
-    sync::{mpsc, oneshot, watch},
-    time::Instant,
-};
+use tokio::{sync::watch, time::Instant};
+#[cfg(test)]
+use tokio::sync::{mpsc, oneshot};
+#[cfg(test)]
+use crate::risk_bridge::OutboundRiskCommand;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -166,6 +166,7 @@ where
 pub async fn run_cloudflare_transport(
     config: &CloudflareTransportConfig,
     ctx: DispatchContext,
+    #[cfg(test)]
     mut risk: mpsc::Receiver<OutboundRiskCommand>,
     mut shutdown: watch::Receiver<bool>,
 ) -> AgentResult<()> {
@@ -174,7 +175,10 @@ pub async fn run_cloudflare_transport(
         if *shutdown.borrow() {
             return Ok(());
         }
+        #[cfg(test)]
         let result = run_session(config, ctx.clone(), &mut risk, shutdown.clone()).await;
+        #[cfg(not(test))]
+        let result = run_session(config, ctx.clone(), shutdown.clone()).await;
         if *shutdown.borrow() {
             return Ok(());
         }
@@ -191,6 +195,7 @@ pub async fn run_cloudflare_transport(
 async fn run_session(
     config: &CloudflareTransportConfig,
     ctx: DispatchContext,
+    #[cfg(test)]
     risk: &mut mpsc::Receiver<OutboundRiskCommand>,
     shutdown: watch::Receiver<bool>,
 ) -> AgentResult<()> {
@@ -221,7 +226,11 @@ async fn run_session(
         agent_incarnation: std::env::var("OKX_CONTROL_AGENT_INCAR")
             .map_err(|_| transport("CONTROL_INCARNATION_UNAVAILABLE"))?,
     };
-    run_connected_session(socket, hello, ctx, risk, shutdown).await
+    #[cfg(test)]
+    let outcome = run_connected_session(socket, hello, ctx, risk, shutdown).await;
+    #[cfg(not(test))]
+    let outcome = run_connected_session(socket, hello, ctx, shutdown).await;
+    outcome
 }
 
 /// This is the same production session loop for live WSS and raw-frame tests.
@@ -231,6 +240,7 @@ async fn run_connected_session<S>(
     socket: S,
     hello: F,
     ctx: DispatchContext,
+    #[cfg(test)]
     risk: &mut mpsc::Receiver<OutboundRiskCommand>,
     mut shutdown: watch::Receiver<bool>,
 ) -> AgentResult<()>
@@ -259,6 +269,7 @@ where
     // Same-ID + same-payload callers share the single actual Worker request
     // and each receives its bound result. Same ID with different contents
     // is a fatal protocol conflict; it can never inherit the first grant.
+    #[cfg(test)]
     let mut pending: HashMap<
         String,
         (
@@ -276,6 +287,16 @@ where
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_seen = Instant::now();
     loop {
+        // Historical remote financial frames are exercised only in unit tests.
+        // Shipping Engine has no financial outbound channel and never polls one.
+        #[cfg(test)]
+        let risk_source = risk.recv();
+        #[cfg(not(test))]
+        let risk_source = std::future::pending::<Option<()>>();
+        #[cfg(test)]
+        let legacy_finance_admitted = pending.len() < 32;
+        #[cfg(not(test))]
+        let legacy_finance_admitted = false;
         tokio::select! {
         _=shutdown.changed()=>{
         // Work already accepted by an account SQL owner remains awaited; graceful shutdown is bounded.
@@ -283,7 +304,9 @@ where
         while !flights.is_empty(){tokio::select!{_= &mut deadline=>break,_=flights.next()=>{}}}return Ok(());
         },
         _=heartbeat.tick()=>{if last_seen.elapsed()>Duration::from_secs(35){return Err(transport("HEARTBEAT_TIMEOUT"));}send(&mut sink,F::Ping{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,nonce:format!("native_ping_{:032x}",nonce())}).await?;},
-        Some(outbound)=risk.recv(),if pending.len()<32=>{
+        Some(outbound)=risk_source,if legacy_finance_admitted=>{
+            #[cfg(test)]
+            {
             // Never take a queued command only to drop its one-shot sender
             // when the in-flight window is full. Backpressure remains on
             // the bounded risk channel; an unsent command receives a local
@@ -315,6 +338,9 @@ where
                 schema:SCHEMA.into(),session_id:session_id.clone(),
                 connection_generation,command
             }).await?;
+            }
+            #[cfg(not(test))]
+            { let _ = outbound; unreachable!("retired financial channel cannot be polled"); }
         },
         Some((id,result))=flights.next(),if !flights.is_empty()=>{active.remove(&id);send(&mut sink,F::Response{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,response:result}).await?;},
         message=source.next()=>{
@@ -329,6 +355,10 @@ where
         F::Pong{..}=>{},
         F::PolicySnapshot{snapshot,..}=>{ctx.trade.update_governance(&snapshot).await.map_err(|_|transport("INVALID_POLICY_SNAPSHOT"))?;},
         F::RiskControlResult{result,..}=>{
+            #[cfg(not(test))]
+            { let _ = result; return Err(transport("RETIRED_FINANCIAL_FRAME")); }
+            #[cfg(test)]
+            {
             #[cfg(test)]
             raw_native_session_tests::t10_11_hold_unsent_reply(
                 &result,pending.get(&result.command_id).map(|(cmd,_)|cmd),&ctx,
@@ -403,6 +433,7 @@ where
             // must verify their own command ID in NativeRiskClient::request.
             // Late/cancelled receivers safely discard only their own copy.
             for sender in waiters {let _=sender.send(result.clone());}
+            }
         },
         F::Request{request,operator_governance,..}=>{
         let id=request.request_id.clone();send(&mut sink,F::DeliveryAck{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,request_id:id.clone()}).await?;

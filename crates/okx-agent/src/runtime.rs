@@ -5,7 +5,6 @@ use crate::{
     cloudflare_transport::{CloudflareTransportConfig, run_cloudflare_transport},
     github_mailbox::{GitHubMailboxClient, MailboxQueryRuntimeContext},
     query::DispatchContext,
-    risk_bridge::OutboundRiskCommand,
 };
 use okx_protocol::{
     NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX, NATIVE_CHILD_CONTROL_SCHEMA_V1,
@@ -17,10 +16,13 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, watch};
+#[cfg(test)]
+use crate::risk_bridge::OutboundRiskCommand;
 pub struct EngineContext {
     pub dispatch: DispatchContext,
     pub public: PublicWsCoordinator,
     pub transport: Option<CloudflareTransportConfig>,
+    #[cfg(test)]
     pub risk: mpsc::Receiver<OutboundRiskCommand>,
     pub mailbox: Option<GitHubMailboxClient>,
     pub private_key: zeroize::Zeroizing<[u8; 32]>,
@@ -68,16 +70,18 @@ pub(crate) async fn run_engine_until<F>(ctx: EngineContext, until: F) -> AgentRe
 where
     F: std::future::Future<Output = Option<NativeChildRequest>>,
 {
+    #[cfg(test)]
+    let risk = ctx.risk;
     let EngineContext {
         dispatch,
         public,
         transport,
-        risk,
         mailbox,
         private_key,
         key_id,
         poll_seconds,
         native_child_control_stdio: _,
+        ..
     } = ctx;
     let (tx, shutdown) = watch::channel(false);
     let mut tasks = tokio::task::JoinSet::new();
@@ -97,7 +101,11 @@ where
         let signal = shutdown.clone();
         let d = dispatch.clone();
         tasks.spawn(async move {
-            let _ = run_cloudflare_transport(&config, d, risk, signal).await;
+            #[cfg(test)]
+            let result = run_cloudflare_transport(&config, d, risk, signal).await;
+            #[cfg(not(test))]
+            let result = run_cloudflare_transport(&config, d, signal).await;
+            let _ = result;
         });
     }
     if let Some(mailbox) = mailbox {

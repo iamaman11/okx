@@ -358,7 +358,6 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 .map_err(AgentError::ResearchSessionTask)?;
             // The receiver remains part of the transport API, but no remote
             // RiskClient is constructed by production startup.
-            let (_risk_tx, risk) = tokio::sync::mpsc::channel(32);
             let campaign = stopped_finance_campaign.or(native_finance_campaign);
             let backend = match campaign {
                 Some(campaign) => NativeFinanceRisk::new(
@@ -439,7 +438,6 @@ async fn run(cli: Cli) -> AgentResult<()> {
                         dispatch,
                         public,
                         transport,
-                        risk,
                         mailbox,
                         private_key,
                         key_id: config.key_id,
