@@ -129,17 +129,22 @@ async fn risk_book_contract_native_durable_operation_diagnostics_scoped_readback
         .unwrap();
     assert!(other.0.is_empty());
     assert!(other.1.is_empty());
-    assert!(owner
-        .durable_operation_diagnostics(
-            deadline(),
-            format!("okx:real:{}", "0".repeat(64)),
-            128,
-            128,
-        )
-        .await
-        .is_err());
+    assert!(
+        owner
+            .durable_operation_diagnostics(
+                deadline(),
+                format!("okx:real:{}", "0".repeat(64)),
+                128,
+                128,
+            )
+            .await
+            .is_err()
+    );
     close(owner).await;
-    assert!(!root.join("accounts").exists(), "no per-account financial SQL");
+    assert!(
+        !root.join("accounts").exists(),
+        "no per-account financial SQL"
+    );
 }
 
 #[tokio::test]

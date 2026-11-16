@@ -59,9 +59,8 @@ impl AccountStore {
         }
         Self::verify_source_account_sql(db, scope.0, scope.1)?;
         let mut statement = db.prepare(TERMINAL_RELEASE_DIAGNOSTIC_SQL)?;
-        let rows = statement.query_map(
-            params![limit.min(128) as i64, scope.1, scope.0],
-            |row| {
+        let rows =
+            statement.query_map(params![limit.min(128) as i64, scope.1, scope.0], |row| {
                 Ok((
                     TerminalReleaseDiagnosticReceipt {
                         intent_id: row.get(0)?,
@@ -74,8 +73,7 @@ impl AccountStore {
                     },
                     row.get::<_, String>(2)?,
                 ))
-            },
-        )?;
+            })?;
         rows.map(|row| {
             let (mut receipt, state) = row?;
             receipt.intent_state = IntentState::parse(&state)?;

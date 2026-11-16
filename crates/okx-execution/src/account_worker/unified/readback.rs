@@ -22,16 +22,10 @@ impl UnifiedFinanceHandle {
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
             let scope = (&installation[..], &account[..]);
-            let cleanup = AccountStore::recent_cleanup_diagnostics_sql(
-                &tx,
-                Some(scope),
-                cleanup_limit,
-            )?;
-            let terminal = AccountStore::recent_terminal_release_diagnostics_sql(
-                &tx,
-                scope,
-                terminal_limit,
-            )?;
+            let cleanup =
+                AccountStore::recent_cleanup_diagnostics_sql(&tx, Some(scope), cleanup_limit)?;
+            let terminal =
+                AccountStore::recent_terminal_release_diagnostics_sql(&tx, scope, terminal_limit)?;
             tx.commit()?;
             Ok((cleanup, terminal))
         })
