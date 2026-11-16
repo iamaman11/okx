@@ -1,3 +1,35 @@
+## Bounded workload and measured acceptance stages - 16 November 2026
+
+The fresh installation writer now has a declared financial workload: four
+batches of sixteen concurrent typed capital assignments (64 genuine COMMITs),
+then shutdown/reopen and all64 exact receipt replays. Independent assertions
+require128 balanced ledger legs, assigned0.64 from equity100, residual99.36,
+no new legs on replay, exactly65 observed jobs before shutdown, per-operation
+and max queue/owner5s watchdogs, complete setup/reopen/cleanup30s watchdog,
+and at most32MiB in the isolated finance directory. These debug CODE budgets
+are not an exchange throughput SLA, census32 stress test or power-loss proof.
+The first direct execution passed in1.11s; the exact candidate collector must
+execute it again. The mandatory RB16 row remains MISSING until the complete
+public workload and resource budgets are established.
+
+The existing Rust collector records wall time per package, static guard and
+retained real workerd transport. On Windows it duplicates each direct child's
+kernel handle, records process CPU100ns and I/O counters, samples the observed
+peak working set every20ms, joins the sampler and closes the owned handle.
+Descendants are explicitly excluded; Windows I/O includes pipes, not just disk.
+Unavailable or incomplete counters are explicit, never converted into zero.
+This does not claim complete crash-child/workerd-tree resource accounting.
+
+`cargo run --locked -p okx-agent --example native_finance_acceptance -- --known --samples 20`
+executes twenty fresh collections on the same clean HEAD/tree. Build time is
+reported separately for every sample; setup, child exit/readers and retained
+physical/transport checks stay inside runtime. Any witness failure stops the
+run. p50 requires3samples; empirical nearest-rank p95 requires20samples and
+makes no population-tail guarantee. One run yields no percentile. Old binaries
+cannot certify modified collector sources, including the new resources module.
+The known subset remains PARTIAL and default full mode remains BLOCKED while
+mandatory resource/budget rows are missing. No new runtime financial component,
+release installation, credential access or trading action is introduced.
 ## Production boundary cleanup and strict verification - 16 November 2026
 
 Strict Clippy with -D warnings now passes for Agent, CONTROL, Launcher and

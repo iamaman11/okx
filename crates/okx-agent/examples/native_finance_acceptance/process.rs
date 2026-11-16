@@ -14,6 +14,7 @@ struct Capture {
     failure: Option<&'static str>,
 }
 pub(super) struct Output {
+    pub resources: serde_json::Value,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,
@@ -73,6 +74,7 @@ pub(super) async fn command(mut command: Command, guard: Duration) -> Result<Out
     let stderr = child.stderr.take().ok_or("CHILD_STDERR_MISSING")?;
     let out = tokio::spawn(read(stdout));
     let err = tokio::spawn(read(stderr));
+    let resources = super::resources::start(&child);
     let mut failures = Vec::new();
     let status = match tokio::time::timeout_at(deadline, child.wait()).await {
         Ok(Ok(status)) => Some(status),
@@ -110,6 +112,7 @@ pub(super) async fn command(mut command: Command, guard: Duration) -> Result<Out
     failures.extend(err.failure);
     let failure = failures.first().copied();
     Ok(Output {
+        resources: resources.finish().await,
         stdout: out.bytes,
         stderr: err.bytes,
         exit_code: status.and_then(|s| s.code()),
@@ -134,5 +137,18 @@ mod tests {
         let pending = tokio::spawn(std::future::pending::<Capture>());
         let capture = finish(pending, tokio::time::Instant::now()).await;
         assert_eq!(capture.failure, Some("CHILD_READER_TEARDOWN_TIMEOUT"));
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_resources_measure_real_child_without_claiming_descendants() {
+        let mut cmd = Command::new("cmd.exe");
+        cmd.args(["/d", "/c", "exit", "0"]);
+        let output = command(cmd, Duration::from_secs(5)).await.unwrap();
+        assert!(output.success);
+        assert_eq!(output.resources["scope"], "direct_process_only");
+        assert_eq!(output.resources["descendants_included"], false);
+        assert!(output.resources["cpu_100ns"].is_u64());
+        assert!(output.resources["read_bytes"].is_u64());
+        assert!(output.resources["write_bytes"].is_u64());
     }
 }

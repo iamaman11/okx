@@ -7,6 +7,8 @@ mod manifest;
 mod process;
 #[path = "native_finance_acceptance/repository_guards.rs"]
 mod repository_guards;
+#[path = "native_finance_acceptance/resources.rs"]
+mod resources;
 #[path = "native_finance_acceptance/verify.rs"]
 mod verify;
 use manifest::CONTRACTS;
@@ -32,6 +34,29 @@ const PACKAGES: [&str; 5] = [
 ];
 type Witnesses = BTreeSet<(String, String)>;
 type Result<T> = std::result::Result<T, &'static str>;
+fn timing_distribution(mut times: Vec<u64>) -> Value {
+    times.sort_unstable();
+    json!({"sample_count":times.len(),
+        "method":"empirical nearest rank; no population tail guarantee",
+        "p50_ms":(times.len()>=3).then(||times[(times.len()*50).div_ceil(100)-1]),
+        "p95_ms":(times.len()>=20).then(||times[(times.len()*95).div_ceil(100)-1]),
+        "p95_minimum_samples":20,"max_ms":times.last(),"build_excluded":true})
+}
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+    #[test]
+    fn timing_requires_samples_and_uses_nearest_rank() {
+        assert!(timing_distribution(vec![])["max_ms"].is_null());
+        assert!(timing_distribution(vec![42])["p95_ms"].is_null());
+        assert!(timing_distribution(vec![42])["p50_ms"].is_null());
+        assert_eq!(timing_distribution(vec![3, 1, 2])["p50_ms"], 2);
+        let r = timing_distribution((1..=20).rev().collect());
+        assert_eq!(r["p50_ms"], 10);
+        assert_eq!(r["p95_ms"], 19);
+        assert_eq!(r["max_ms"], 20);
+    }
+}
 async fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let mut cmd = Command::new("git");
     cmd.current_dir(repo).args(args);
@@ -159,7 +184,14 @@ async fn execute(
                 "OKX_NATIVE_ACCEPTANCE_RUN_ID",
                 report["run_id"].as_str().unwrap(),
             );
+            let stage_started = Instant::now();
             let out = command(cmd, Duration::from_secs(180)).await;
+            report["stages"].as_array_mut().unwrap().push(json!({
+                "stage":"libtest", "package":package, "witness_count":names.len(),
+                "wall_ms":stage_started.elapsed().as_millis(),
+                "success":out.as_ref().is_ok_and(|o|o.success),
+                "direct_process_resources":out.as_ref().ok().map(|o|&o.resources)
+            }));
             match &out {
                 Ok(out) if !out.success => failure(
                     report,
@@ -237,10 +269,17 @@ async fn execute(
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mode = match args.as_slice() {
-        [] => "full",
-        [arg] if arg == "--known" => "known",
-        [arg] if arg == "--list" => "list",
+    let (mode, samples) = match args.as_slice() {
+        [] => ("full", 1),
+        [arg] if arg == "--known" => ("known", 1),
+        [arg] if arg == "--list" => ("list", 1),
+        [arg, flag, count]
+            if arg == "--known"
+                && flag == "--samples"
+                && count.parse::<usize>().is_ok_and(|n| (2..=100).contains(&n)) =>
+        {
+            ("known", count.parse::<usize>().unwrap())
+        }
         _ => {
             eprintln!("ARGUMENTS_INVALID");
             std::process::exit(1);
@@ -263,7 +302,7 @@ async fn main() {
     let run_id: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
     let mut report = json!({"schema":"okx.native-finance-acceptance/v1", "run_id":run_id,"mode":mode,
         "head":null,"tree":null,"git_clean":false,"build_ms":null,"runtime_setup_to_teardown_ms":null,
-        "observed_witnesses":[],"repository_guards":[],"contracts":[],"overall":"FAIL","timeout_guards_seconds":{"build":1800,"per_package_libtest":180},"test_threads":4});
+        "observed_witnesses":[],"repository_guards":[],"stages":[],"contracts":[],"overall":"FAIL","timeout_guards_seconds":{"build":1800,"per_package_libtest":180},"test_threads":4});
     let result: Result<Witnesses> = async {
         collector_sources_match(repo)?;
         report["collector_source_binding"] = json!("VERIFIED");
@@ -276,7 +315,25 @@ async fn main() {
             report["overall"] = json!("BLOCKED");
             return Ok(Witnesses::new());
         }
-        let observed = execute(repo, &baseline, &wanted, &mut report).await?;
+        let mut observed = Witnesses::new();
+        let mut measurements = Vec::new();
+        let root_run_id = report["run_id"].as_str().unwrap().to_owned();
+        for sample in 0..samples {
+            report["run_id"] = json!(format!("{root_run_id}_{sample}"));
+            report["stages"] = json!([]);
+            report["repository_guards"] = json!([]);
+            observed = execute(repo, &baseline, &wanted, &mut report).await?;
+            measurements.push(json!({"sample":sample,"run_id":report["run_id"],
+                "head":baseline.0,"tree":baseline.1,"build_ms":report["build_ms"],
+                "runtime_setup_to_teardown_ms":report["runtime_setup_to_teardown_ms"],
+                "stages":report["stages"],"executed_witnesses":observed.len()}));
+            report["samples"] = json!(measurements);
+        }
+        let times: Vec<u64> = measurements
+            .iter()
+            .map(|m| m["runtime_setup_to_teardown_ms"].as_u64().unwrap())
+            .collect();
+        report["timing_distribution"] = timing_distribution(times);
         report["overall"] = json!(if mode == "full" {
             "FULL_PASS"
         } else {

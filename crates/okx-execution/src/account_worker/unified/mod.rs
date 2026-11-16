@@ -25,6 +25,8 @@ mod owner_startup_tests;
 #[cfg(test)]
 mod owner_terminal_rollback_tests;
 #[cfg(test)]
+mod owner_workload_tests;
+#[cfg(test)]
 pub(crate) use opening_ingress::install_reported_opening_sql;
 pub use opening_ingress::{ReportedOpeningCensus, ReportedOpeningReceipt};
 mod account_initialization;

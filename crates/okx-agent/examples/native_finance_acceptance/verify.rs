@@ -37,6 +37,10 @@ pub(super) fn collector_sources_match(repo: &Path) -> Result<()> {
             "native_finance_acceptance/repository_guards.rs",
             include_bytes!("repository_guards.rs").as_slice(),
         ),
+        (
+            "native_finance_acceptance/resources.rs",
+            include_bytes!("resources.rs").as_slice(),
+        ),
     ] {
         let path = repo.join("crates/okx-agent/examples").join(relative);
         let actual = std::fs::read(path).map_err(|_| "COLLECTOR_SOURCE_UNAVAILABLE")?;

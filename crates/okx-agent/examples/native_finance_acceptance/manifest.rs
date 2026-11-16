@@ -19,6 +19,10 @@ pub struct Witness {
     pub package: &'static str,
     pub test: &'static str,
 }
+const BOUNDED_WORKLOAD: Witness = Witness {
+    package: "okx-execution",
+    test: "account_worker::unified::owner_workload_tests::risk_book_contract_fresh_owner_bounded_financial_workload_and_reopen",
+};
 const TERMINAL_CONFIG_FRONTIER: Witness = Witness {
     package: "okx-agent",
     test: "account_bootstrap::tests::terminal_census_fresh_config_follows_settlement_frontier_without_relabeling_cache",
@@ -739,9 +743,9 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB16.declared_numeric_workload_deadline_and_resource_budgets",
-        witnesses: &[],
+        witnesses: &[BOUNDED_WORKLOAD],
         missing: Some(
-            "Census32 and queue128 are product bounds, not a complete acceptance workload. Numerical operation deadlines, repetitions and SQL/queue/I/O/CPU/RAM budgets must be declared and justified before full acceptance.",
+            "A declared 64-transfer/16-concurrent/reopen/replay workload checks 5s operation, 30s complete and 32MiB storage budgets. It does not yet establish complete public-trading workload or SQL/queue/I/O/CPU/RAM budgets; census32/queue128 alone are not capacity acceptance.",
         ),
     },
     Contract {

@@ -2,7 +2,10 @@
 //! This adds no trading implementation and no replacement architecture checker.
 use super::{Result, command, failure};
 use serde_json::{Value, json};
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 use tokio::process::Command;
 
 pub(super) const WITNESS: &str = "architecture_and_research_negative_guards";
@@ -13,7 +16,14 @@ pub(super) async fn run_transport(repo: &Path, report: &mut Value) -> Result<()>
     let mut cmd = Command::new("node");
     cmd.current_dir(repo.join("cloudflare/okx-mcp"))
         .arg("scripts/test-native-finance-retirement-do.mjs");
-    let output = command(cmd, Duration::from_secs(120)).await?;
+    let started = Instant::now();
+    let result = command(cmd, Duration::from_secs(120)).await;
+    report["stages"].as_array_mut().unwrap().push(json!({
+        "stage":"retained_transport", "wall_ms":started.elapsed().as_millis(),
+        "success":result.as_ref().is_ok_and(|o|o.success),
+        "direct_process_resources":result.as_ref().ok().map(|o|&o.resources)
+    }));
+    let output = result?;
     let marker = "actual_workerd_native_finance_retirement_transport PASS";
     if !output.success
         || !String::from_utf8_lossy(&output.stdout)
@@ -51,7 +61,15 @@ pub(super) async fn run(repo: &Path, report: &mut Value) -> Result<()> {
     ] {
         let mut cmd = Command::new(python);
         cmd.current_dir(repo).args(&arguments);
-        let output = command(cmd, Duration::from_secs(30)).await?;
+        let started = Instant::now();
+        let result = command(cmd, Duration::from_secs(30)).await;
+        report["stages"].as_array_mut().unwrap().push(json!({
+            "stage":"repository_guard", "command":arguments,
+            "wall_ms":started.elapsed().as_millis(),
+            "success":result.as_ref().is_ok_and(|o|o.success),
+            "direct_process_resources":result.as_ref().ok().map(|o|&o.resources)
+        }));
+        let output = result?;
         if !output.success
             || !String::from_utf8_lossy(&output.stdout)
                 .lines()
