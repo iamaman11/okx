@@ -4,11 +4,11 @@ use crate::{
     risk_bridge::NativeRiskClient,
 };
 use chrono::Utc;
+#[cfg(test)]
+use okx_execution::AccountStoreHandle;
 use okx_execution::{
     CentralReceipt, Decision, IntentPlan, IntentState, NewIntent, StoredIntent, StrategyInstance,
 };
-#[cfg(test)]
-use okx_execution::AccountStoreHandle;
 use okx_protocol::{
     account_governance::{AccountControl, CentralGovernanceSnapshot},
     risk_authority::*,
