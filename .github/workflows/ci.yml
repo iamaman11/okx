@@ -206,6 +206,12 @@ jobs:
         run: |
           cargo test --locked -p okx-agent --lib trade_service::reconcile::entry_cost_status_tests -- --nocapture
           cargo test --locked -p okx-agent --lib trade_service::recovery::tests -- --nocapture
+      - name: Original Native campaign, governance and Execute operation contracts
+        run: |
+          cargo test --locked -p okx-agent --lib risk_book_contract_native_maintenance_ -- --nocapture
+          cargo test --locked -p okx-agent --lib risk_book_contract_native_public_execute_lost_ack_and_replay_send_once -- --nocapture
+          cargo test --locked -p okx-agent --lib risk_book_contract_native_execute_bound_rejection_preserves_code_and_reserve -- --nocapture
+          cargo test --locked -p okx-agent --lib risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner -- --nocapture
 
   riskbook-draft-rust:
     # Fast, real-source feedback for the active Rust RiskBook draft. Final
