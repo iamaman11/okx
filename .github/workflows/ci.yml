@@ -161,6 +161,39 @@ jobs:
           echo "BUILD_REQUIRED=${{ steps.classify.outputs.build_required }}"
           echo "REASON=${{ steps.classify.outputs.reason }}"
 
+  # #512: one bounded compiler/test cycle while its PR is Draft. This job
+  # verifies real production and test configurations; it is NOT full acceptance.
+  draft-512-rust:
+    name: draft-512-rust
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.pull_request.head.ref == 'work/512-rust-boundaries-20261116' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+      - name: Existing architecture rules and negative self-tests
+        run: |
+          python3 scripts/check_architecture.py --self-test
+          python3 scripts/check_architecture.py
+      - name: Compile shipping Engine without retired finance path
+        run: cargo check --locked -p okx-agent --bin okx-agent
+      - name: Compile exact Agent Rust unit-test source
+        run: cargo test --locked -p okx-agent --lib --no-run
+      - name: Existing risk client and bound raw-frame regressions
+        run: |
+          cargo test --locked -p okx-agent --lib risk_bridge::tests -- --nocapture
+          cargo test --locked -p okx-agent --lib actual_native_session_binds_risk_reply_to_generation_and_id -- --nocapture
+      - name: Formatting (not a substitute for compile/test)
+        run: cargo fmt --all -- --check
+
   riskbook-draft-rust:
     # Fast, real-source feedback for the active Rust RiskBook draft. Final
     # acceptance remains the existing full required CI after Ready for review.
