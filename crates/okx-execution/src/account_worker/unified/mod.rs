@@ -6,6 +6,10 @@ use std::sync::Arc;
 mod opening_ingress;
 mod owner;
 #[cfg(test)]
+mod owner_account_source_scope_tests;
+#[cfg(test)]
+mod owner_diagnostic_busy_tests;
+#[cfg(test)]
 mod owner_finance_snapshot_tests;
 #[cfg(test)]
 mod owner_financial_crash_tests;
@@ -18,6 +22,8 @@ mod owner_reserve_reply_tests;
 mod owner_startup;
 #[cfg(test)]
 mod owner_startup_tests;
+#[cfg(test)]
+mod owner_terminal_rollback_tests;
 pub(crate) use opening_ingress::install_reported_opening_sql;
 pub use opening_ingress::{ReportedOpeningCensus, ReportedOpeningReceipt};
 mod account_initialization;

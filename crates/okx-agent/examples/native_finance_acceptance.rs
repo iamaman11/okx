@@ -18,7 +18,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::process::Command;
-use verify::{absent_umbrellas, artifacts, incomplete, manifest_json, selected, verify_output};
+use verify::{
+    absent_umbrellas, artifacts, collector_sources_match, incomplete, manifest_json, selected,
+    verify_output,
+};
 
 const PACKAGES: [&str; 5] = [
     "okx-kernel",
@@ -200,6 +203,22 @@ async fn execute(
             }
             observed.insert(("repository".into(), repository_guards::WITNESS.into()));
         }
+        if wanted.contains(&(
+            "repository".into(),
+            repository_guards::TRANSPORT_WITNESS.into(),
+        )) {
+            if snapshot(repo).await? != *baseline {
+                return Err("GIT_TREE_CHANGED");
+            }
+            repository_guards::run_transport(repo, report).await?;
+            if snapshot(repo).await? != *baseline {
+                return Err("GIT_TREE_CHANGED");
+            }
+            observed.insert((
+                "repository".into(),
+                repository_guards::TRANSPORT_WITNESS.into(),
+            ));
+        }
         if observed != *wanted {
             return Err("SELECTED_WITNESS_MISSING");
         }
@@ -248,6 +267,8 @@ async fn main() {
         "head":null,"tree":null,"git_clean":false,"build_ms":null,"runtime_setup_to_teardown_ms":null,
         "observed_witnesses":[],"repository_guards":[],"contracts":[],"overall":"FAIL","timeout_guards_seconds":{"build":1800,"per_package_libtest":180},"test_threads":4});
     let result: Result<Witnesses> = async {
+        collector_sources_match(repo)?;
+        report["collector_source_binding"] = json!("VERIFIED");
         let baseline = snapshot(repo).await?;
         report["head"] = json!(baseline.0);
         report["tree"] = json!(baseline.1);

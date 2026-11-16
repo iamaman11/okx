@@ -43,6 +43,190 @@ fn leverage(feed: &RecordedAccountHttp, actor: &str) {
 }
 
 #[tokio::test]
+async fn risk_book_contract_native_public_b_status_and_cancel_leave_blocked_a_held() {
+    let mut fixture = fixture_for_accounts(&["a", "b"]).await;
+    let (stop, market, _socket, _public) = opened_market(&mut fixture).await;
+    fixture
+        .market_boundary
+        .market_updates_expected
+        .store(4, Ordering::SeqCst);
+    let mut callers = Vec::new();
+    let mut gates = Vec::new();
+    for label in ["a", "b"] {
+        let gate = Arc::new(PlanningFeeGate::default());
+        *fixture
+            .market_boundary
+            .planning_fee_gate_actor
+            .lock()
+            .unwrap() = Some(format!("fixture-observer-{label}"));
+        fixture
+            .market_boundary
+            .planning_fee_skip
+            .store(2, Ordering::SeqCst);
+        *fixture.market_boundary.planning_fee_gate.lock().unwrap() = Some(gate.clone());
+        let actor = format!("fixture-observer-{label}");
+        let at = chrono::Utc::now().timestamp_millis().to_string();
+        fee(&fixture.feed, &actor, &at);
+        leverage(&fixture.feed, &actor);
+        leverage(&fixture.feed, &actor);
+        fee(&fixture.feed, &actor, &at);
+        let trade = fixture.trade.clone();
+        let authority = fixture.authority.clone();
+        let alias = format!("fixture-{label}");
+        callers.push(tokio::spawn(async move {
+            trade.trade(&alias, &request(), Some(&authority)).await
+        }));
+        tokio::time::timeout(Duration::from_secs(8), gate.entered.notified())
+            .await
+            .expect("actual account fee read must block only after its original HELD");
+        gates.push(gate);
+    }
+    let a = fixture.registry.resolve("fixture-a").await.unwrap();
+    let b = fixture.registry.resolve("fixture-b").await.unwrap();
+    let key_a = a.configuration.account_key.wire();
+    let key_b = b.configuration.account_key.wire();
+    let held_a = fixture
+        .owner
+        .lookup_intent(
+            key_a.clone(),
+            TradeIntentLookup::IdempotencyKey("native_opening_required_001".into()),
+            deadline(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let held_b = fixture
+        .owner
+        .lookup_intent(
+            key_b.clone(),
+            TradeIntentLookup::IdempotencyKey("native_opening_required_001".into()),
+            deadline(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(held_a.state, IntentState::Reserved);
+    assert_eq!(held_b.state, IntentState::Reserved);
+    let both = fixture
+        .owner
+        .campaign_summary(fixture.campaign.clone())
+        .await
+        .unwrap();
+    assert_eq!(both.reserved_entry_usd, "2.001");
+    assert_eq!(both.reserved_loss_usd, "0.204");
+    let timer_a = a.recorded_capture_gate.write().await;
+    let timer_b = b.recorded_capture_gate.write().await;
+    let reads = fixture.feed.requests.lock().unwrap().clone();
+    let status = tokio::time::timeout(
+        Duration::from_secs(3),
+        fixture.trade.trade(
+            "fixture-b",
+            &TradeRequest::Status {
+                reference: held_b.intent_id.clone(),
+            },
+            None,
+        ),
+    )
+    .await
+    .expect("B Status must not await A's external source")
+    .unwrap();
+    assert_eq!(status["data"]["intent"]["intent_id"], held_b.intent_id);
+    assert_eq!(status["data"]["intent"]["state"], "RESERVED");
+    let pending_b = callers.pop().unwrap();
+    pending_b.abort();
+    assert!(pending_b.await.unwrap_err().is_cancelled());
+    let cancel = TradeRequest::Cancel {
+        idempotency_key: "native_fairness_cancel_b_held_001".into(),
+        reference: held_b.intent_id.clone(),
+    };
+    let cancelled = tokio::time::timeout(
+        Duration::from_secs(3),
+        fixture.trade.trade("fixture-b", &cancel, None),
+    )
+    .await
+    .expect("B Cancel must not await A's external source")
+    .unwrap();
+    assert_eq!(
+        cancelled["data"]["central_release"]["state"], "verified",
+        "{cancelled}"
+    );
+    assert_eq!(cancelled["data"]["primary_reason"], "USER_CANCELLED_UNSENT");
+    let after = fixture
+        .owner
+        .campaign_summary(fixture.campaign.clone())
+        .await
+        .unwrap();
+    assert_eq!(after.reserved_entry_usd, "1.0005");
+    assert_eq!(after.reserved_loss_usd, "0.102");
+    assert_eq!(after.remaining_entry_usd, "8.9995");
+    assert_eq!(after.consumed_entry_usd, "0");
+    assert_eq!(after.opening, both.opening);
+    let unchanged_a = fixture
+        .owner
+        .lookup_intent(
+            key_a.clone(),
+            TradeIntentLookup::IntentId(held_a.intent_id.clone()),
+            deadline(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&unchanged_a).unwrap(),
+        serde_json::to_value(&held_a).unwrap()
+    );
+    let receipt_a = fixture
+        .owner
+        .reservation_receipt(
+            key_a,
+            held_a.intent_id.clone(),
+            CentralReceiptView::Retained,
+            deadline(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt_a.intent_id, held_a.intent_id);
+    assert!(
+        !callers[0].is_finished(),
+        "A remains blocked; B completion did not release its source gate"
+    );
+    let replay = fixture
+        .trade
+        .trade("fixture-b", &cancel, None)
+        .await
+        .unwrap();
+    assert_eq!(replay["data"]["central_release"]["state"], "verified");
+    assert_eq!(
+        fixture
+            .owner
+            .campaign_summary(fixture.campaign.clone())
+            .await
+            .unwrap(),
+        after
+    );
+    assert_eq!(*fixture.feed.requests.lock().unwrap(), reads);
+    assert!(fixture.feed.outbound_posts.lock().unwrap().is_empty());
+    assert_eq!(fixture.feed.unconsumed_reads(), 0);
+    assert!(fixture.feed.denied_routes.lock().unwrap().is_empty());
+    for caller in callers {
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+    }
+    drop(gates);
+    drop(timer_a);
+    drop(timer_b);
+    drop(a);
+    drop(b);
+    stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), market)
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn risk_book_contract_native_public_b_executes_and_keeps_reserve_while_a_source_blocked() {
     let mut fixture = fixture_for_accounts(&["a", "b"]).await;
     let (stop, market, _socket, _public) = opened_market(&mut fixture).await;
@@ -209,6 +393,57 @@ async fn risk_book_contract_native_public_b_executes_and_keeps_reserve_while_a_s
     assert_eq!(both.consumed_entry_usd, "0");
     assert_eq!(both.consumed_loss_usd, "0");
     assert_eq!(both.opening, before_b.opening);
+    // The actual account STOP policy must not rewrite another account's live
+    // UNKNOWN identity, original receipt or outstanding financial obligation.
+    let mut stopped_a = fixture.authority.clone();
+    stopped_a.state.revision += 1;
+    let policy_a = stopped_a
+        .state
+        .accounts
+        .iter_mut()
+        .find(|c| c.account_key == key_a)
+        .unwrap();
+    policy_a.policy_revision = stopped_a.state.revision;
+    policy_a.explicit_pause = true;
+    fixture.trade.update_governance(&stopped_a).await.unwrap();
+    let stopped_book = fixture
+        .owner
+        .campaign_summary(fixture.campaign.clone())
+        .await
+        .unwrap();
+    assert_eq!(stopped_book.reserved_entry_usd, both.reserved_entry_usd);
+    assert_eq!(stopped_book.reserved_loss_usd, both.reserved_loss_usd);
+    assert_eq!(stopped_book.consumed_entry_usd, both.consumed_entry_usd);
+    assert_eq!(stopped_book.opening, both.opening);
+    let stopped_b = fixture
+        .owner
+        .lookup_intent(
+            key_b.clone(),
+            TradeIntentLookup::IntentId(unknown_b.intent_id.clone()),
+            deadline(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&stopped_b).unwrap(),
+        serde_json::to_value(&unknown_b).unwrap()
+    );
+    let stopped_receipt_b = fixture
+        .owner
+        .reservation_receipt(
+            key_b.clone(),
+            unknown_b.intent_id.clone(),
+            CentralReceiptView::Retained,
+            deadline(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&stopped_receipt_b).unwrap(),
+        serde_json::to_value(&receipt_b).unwrap()
+    );
     let unchanged_a = fixture
         .owner
         .lookup_intent(

@@ -6,6 +6,7 @@ use super::*;
 pub(super) struct ExecuteMarketBoundary {
     pub(super) feed: Arc<RecordedAccountHttp>,
     pub(super) market: Mutex<Option<(Arc<RecordedWsConnector>, okx_runtime::PublicWsHandle)>>,
+    pub(super) market_quote: Mutex<Option<ExecuteMarketQuote>>,
     pub(super) updates: AtomicUsize,
     // Hold one real planner before intent preparation. Other public callers
     // must return their actual no-send result, not consume spare HTTP pages.
@@ -17,6 +18,14 @@ pub(super) struct ExecuteMarketBoundary {
     // A single corrupt raw ACK must reach the production identity verifier,
     // rather than becoming a transcript-guard transport error first.
     pub(super) foreign_create_ack: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ExecuteMarketQuote {
+    pub(super) instrument: &'static str,
+    pub(super) index: &'static str,
+    pub(super) ask: &'static str,
+    pub(super) bid: &'static str,
 }
 
 #[derive(Default)]
@@ -45,23 +54,33 @@ impl ExecuteMarketBoundary {
             "only explicitly budgeted raw market observations are scripted"
         );
         let timestamp = chrono::Utc::now().timestamp_millis();
+        let quote = self
+            .market_quote
+            .lock()
+            .unwrap()
+            .unwrap_or(ExecuteMarketQuote {
+                instrument: "BTC-USDT-SWAP",
+                index: "BTC-USDT",
+                ask: "1000",
+                bid: "999.9",
+            });
         let mut parsed = public.subscribe_market_updates();
         socket.send_public_frame(
-            json!({"arg":{"channel":"tickers","instId":"BTC-USDT-SWAP"},
-            "data":[{"instType":"SWAP","instId":"BTC-USDT-SWAP","last":"1000","lastSz":"1",
-            "askPx":"1000","askSz":"10","bidPx":"999.9","bidSz":"10","ts":timestamp.to_string()}]})
+            json!({"arg":{"channel":"tickers","instId":quote.instrument},
+            "data":[{"instType":"SWAP","instId":quote.instrument,"last":quote.ask,"lastSz":"1",
+            "askPx":quote.ask,"askSz":"10","bidPx":quote.bid,"bidSz":"10","ts":timestamp.to_string()}]})
             .to_string(),
         );
-        socket.send_public_frame(json!({"arg":{"channel":"mark-price","instId":"BTC-USDT-SWAP"},
-            "data":[{"instType":"SWAP","instId":"BTC-USDT-SWAP","markPx":"1000","ts":timestamp.to_string()}]}).to_string());
+        socket.send_public_frame(json!({"arg":{"channel":"mark-price","instId":quote.instrument},
+            "data":[{"instType":"SWAP","instId":quote.instrument,"markPx":quote.ask,"ts":timestamp.to_string()}]}).to_string());
         socket.send_public_frame(
-            json!({"arg":{"channel":"index-tickers","instId":"BTC-USDT"},
-            "data":[{"instId":"BTC-USDT","idxPx":"1000","ts":timestamp.to_string()}]})
+            json!({"arg":{"channel":"index-tickers","instId":quote.index},
+            "data":[{"instId":quote.index,"idxPx":quote.ask,"ts":timestamp.to_string()}]})
             .to_string(),
         );
         socket.send_public_frame(
-            json!({"arg":{"channel":"books","instId":"BTC-USDT-SWAP"},"action":"update",
-            "data":[{"asks":[["1000","10","0","1"]],"bids":[["999.9","10","0","1"]],
+            json!({"arg":{"channel":"books","instId":quote.instrument},"action":"update",
+            "data":[{"asks":[[quote.ask,"10","0","1"]],"bids":[[quote.bid,"10","0","1"]],
             "seqId":11+index,"prevSeqId":10+index,"ts":timestamp.to_string()}]})
             .to_string(),
         );
@@ -73,7 +92,7 @@ impl ExecuteMarketBoundary {
                     .expect("market task must remain running");
                 if public
                     .risk_fresh_snapshot(
-                        "BTC-USDT-SWAP",
+                        quote.instrument,
                         chrono::Utc::now().timestamp_millis() as u64,
                         2000,
                         180000,
@@ -407,6 +426,7 @@ pub(super) async fn fixture_for_accounts(labels: &[&str]) -> NativeFixture {
     let market_boundary = Arc::new(ExecuteMarketBoundary {
         feed: feed.clone(),
         market: Mutex::new(None),
+        market_quote: Mutex::new(None),
         updates: AtomicUsize::new(0),
         planning_fee_gate: Mutex::new(None),
         planning_fee_gate_actor: Mutex::new(None),

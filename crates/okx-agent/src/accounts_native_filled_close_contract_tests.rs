@@ -7,15 +7,20 @@ use super::filled_fixture::*;
 
 #[tokio::test]
 async fn risk_book_contract_native_filled_close_settlement_release_and_cold_reopen() {
-    filled_close(false).await;
+    filled_close(false, false).await;
 }
 
 #[tokio::test]
 async fn risk_book_contract_native_stop_after_fill_blocks_open_but_closes_and_releases() {
-    filled_close(true).await;
+    filled_close(true, false).await;
 }
 
-async fn filled_close(stop_after_fill: bool) {
+#[tokio::test]
+async fn risk_book_contract_native_failed_stop_emergency_close_and_verified_remediation() {
+    filled_close(false, true).await;
+}
+
+async fn filled_close(stop_after_fill: bool, emergency: bool) {
     let mut fixture = fixture().await;
     let (market_stop, market_task, socket, public) = opened_market(&mut fixture).await;
     let account = fixture._account.clone();
@@ -192,6 +197,20 @@ async fn filled_close(stop_after_fill: bool) {
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));
+    if emergency {
+        order(&fixture.feed, OPEN_ORDER, "buy", opened_at);
+        get(
+            &fixture.feed,
+            "fixture-executor-a",
+            "/api/v5/trade/order-algo",
+            vec![("algoClOrdId", &stop_client)],
+            json!([{"instId":INSTRUMENT,"algoId":STOP,"algoClOrdId":stop_client,"state":"canceled",
+                "sz":"0.1","side":"sell","posSide":"long","tdMode":"cross","ordType":"conditional",
+                "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"}]),
+        );
+        snapshot(&fixture.feed, "99.9995", "0.1"); // original failed-stop Status
+        order(&fixture.feed, OPEN_ORDER, "buy", opened_at); // independent emergency readback
+    }
     snapshot(&fixture.feed, "99.9995", "0.1"); // plan
     snapshot(&fixture.feed, "99.9995", "0.1"); // final mode/position
     fixture.feed.expect_post(RecordedPost{access_key:"fixture-executor-a".into(),path:"/api/v5/trade/order".into(),
@@ -200,15 +219,45 @@ async fn filled_close(stop_after_fill: bool) {
         raw_response:envelope(json!([{"ordId":CLOSE_ORDER,"clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]))});
     fixture.feed.arm_lost_next_create_ack();
     let close_request = TradeRequest::Close {
-        idempotency_key: "native_filled_close_001".into(),
+        idempotency_key: if emergency {
+            format!("safety_close_{}", original.client_order_id)
+        } else {
+            "native_filled_close_001".into()
+        },
         reference: entry.clone(),
-        expires_in_ms: 10_000,
+        expires_in_ms: if emergency { 2_000 } else { 10_000 },
     };
-    let close = fixture
-        .trade
-        .trade(&fixture.config.alias, &close_request, None)
-        .await
-        .expect("public Native Close from attributed lot");
+    let close = if emergency {
+        snapshot(&fixture.feed, "99.9995", "0.1"); // finance after the bounded protective action
+        history(&fixture.feed, None);
+        let result = fixture
+            .trade
+            .trade(
+                &fixture.config.alias,
+                &TradeRequest::Status {
+                    reference: entry.clone(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result["data"]["compensation"]["state"], "attempted",
+            "{result}"
+        );
+        assert_eq!(
+            result["data"]["compensation"]["action"]["sql_owned_quantity"], "0.1",
+            "{result}"
+        );
+        assert_eq!(result["data"]["protection_incident"], true, "{result}");
+        result["data"]["compensation"]["action"]["outcome"].clone()
+    } else {
+        fixture
+            .trade
+            .trade(&fixture.config.alias, &close_request, None)
+            .await
+            .expect("public Native Close from attributed lot")
+    };
     assert_eq!(
         close["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
         "{close}"
@@ -233,7 +282,31 @@ async fn filled_close(stop_after_fill: bool) {
         &fixture.feed,
         Some((CLOSE_ORDER, "native-close-fill", "sell", closed_at)),
     );
-    capture(&fixture).await;
+    if emergency {
+        crate::source_capture::capture_account_sources_measured(
+            &account.observer,
+            &account.private_ws,
+            &account.execution,
+        )
+        .await
+        .unwrap();
+        let (risk, stops) = fixture
+            .owner
+            .financial_readiness(
+                fixture.config.account_key.wire(),
+                None,
+                Instant::now() + Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
+        assert!(risk.nav_complete);
+        assert_eq!(
+            stops, 1,
+            "the protection incident must survive capture alone until verified remediation"
+        );
+    } else {
+        capture(&fixture).await;
+    }
     order(&fixture.feed, CLOSE_ORDER, "sell", closed_at);
     snapshot(&fixture.feed, "99.999", "0");
     snapshot(&fixture.feed, "99.999", "0");
@@ -265,6 +338,10 @@ async fn filled_close(stop_after_fill: bool) {
     snapshot(&fixture.feed, "99.999", "0"); // cleanup after signed ACK
     snapshot(&fixture.feed, "99.999", "0"); // finance capture
     snapshot(&fixture.feed, "99.999", "0"); // full terminal census
+    if emergency {
+        snapshot(&fixture.feed, "99.999", "0"); // remediation bracket before algo census
+        snapshot(&fixture.feed, "99.999", "0"); // remediation bracket after algo census
+    }
     history(&fixture.feed, None);
     let released = fixture
         .trade
@@ -282,6 +359,13 @@ async fn filled_close(stop_after_fill: bool) {
         "{released}"
     );
     assert_eq!(released["data"]["financial_complete"], true, "{released}");
+    if emergency {
+        assert_eq!(
+            released["data"]["protection_remediation"]["state"], "verified_flat_no_orphans",
+            "{released}"
+        );
+        assert_eq!(released["data"]["protection_incident"], false, "{released}");
+    }
     assert_eq!(
         fixture.feed.outbound_posts.lock().unwrap().len(),
         3,
@@ -368,6 +452,43 @@ async fn filled_close(stop_after_fill: bool) {
         "100 minus two independently billed 0.0005 fees"
     );
 
+    // Extend this same verified public release, rather than constructing a
+    // synthetic RELEASED reservation or repeating the full lifecycle elsewhere.
+    let correction_receipts = if !stop_after_fill && !emergency {
+        super::native_post_release_correction::verify_post_release_correction(
+            &fixture, &account, &entry, opened_at,
+        )
+        .await
+    } else {
+        Vec::new()
+    };
+    let final_summary = fixture
+        .owner
+        .campaign_summary(fixture.campaign.clone())
+        .await
+        .unwrap();
+    let final_account = fixture
+        .owner
+        .stopped_account_summary(fixture.campaign.clone(), account_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        final_summary.consumed_entry_usd,
+        if stop_after_fill || emergency {
+            "1.0005"
+        } else {
+            "2.0005"
+        }
+    );
+    assert_eq!(
+        final_summary.entry_bound_breach_usd,
+        if stop_after_fill || emergency {
+            "0"
+        } else {
+            "1"
+        }
+    );
+
     market_stop.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(3), market_task)
         .await
@@ -393,6 +514,15 @@ async fn filled_close(stop_after_fill: bool) {
         owner.campaign_summary(campaign.clone()).await.unwrap(),
         final_summary
     );
+    if !correction_receipts.is_empty() {
+        super::native_post_release_correction::verify_reopened_correction(
+            &owner,
+            &campaign,
+            &account_key,
+            correction_receipts,
+        )
+        .await;
+    }
     assert_eq!(
         owner
             .stopped_account_summary(campaign, account_key.clone())

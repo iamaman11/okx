@@ -6,6 +6,32 @@ use std::{path::Path, time::Duration};
 use tokio::process::Command;
 
 pub(super) const WITNESS: &str = "architecture_and_research_negative_guards";
+pub(super) const TRANSPORT_WITNESS: &str =
+    "retained_workerd_auth_session_transport_no_financial_owner";
+
+pub(super) async fn run_transport(repo: &Path, report: &mut Value) -> Result<()> {
+    let mut cmd = Command::new("node");
+    cmd.current_dir(repo.join("cloudflare/okx-mcp"))
+        .arg("scripts/test-native-finance-retirement-do.mjs");
+    let output = command(cmd, Duration::from_secs(120)).await?;
+    let marker = "actual_workerd_native_finance_retirement_transport PASS";
+    if !output.success
+        || !String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.starts_with(marker))
+    {
+        failure(
+            report,
+            "retained_transport",
+            Some(TRANSPORT_WITNESS),
+            "RETAINED_TRANSPORT_FAILED",
+            Some(&output),
+        );
+        return Err("RETAINED_TRANSPORT_FAILED");
+    }
+    report["repository_guards"].as_array_mut().unwrap().push(json!({"command":["node","scripts/test-native-finance-retirement-do.mjs"],"marker":marker,"status":"PASS"}));
+    Ok(())
+}
 
 pub(super) async fn run(repo: &Path, report: &mut Value) -> Result<()> {
     let python = if cfg!(windows) { "python" } else { "python3" };

@@ -50,6 +50,24 @@ fn control_reader(tx: mpsc::Sender<NativeChildRequest>) {
     }
 }
 pub async fn run_engine(ctx: EngineContext) -> AgentResult<()> {
+    let native_child_control_stdio = ctx.native_child_control_stdio;
+    run_engine_until(ctx, async move {
+        let (control_tx, mut control) = mpsc::channel(1);
+        if native_child_control_stdio {
+            std::thread::spawn(move || control_reader(control_tx));
+        }
+        tokio::select! {_=tokio::signal::ctrl_c()=>None,request=control.recv(),if native_child_control_stdio=>request}
+    })
+    .await
+}
+
+/// The shipped Engine task composition and drain, with only its external
+/// shutdown signal supplied by the caller. Tests can exercise this exact body
+/// without a process-wide Ctrl-C or an inherited Windows stdin handle.
+pub(crate) async fn run_engine_until<F>(ctx: EngineContext, until: F) -> AgentResult<()>
+where
+    F: std::future::Future<Output = Option<NativeChildRequest>>,
+{
     let EngineContext {
         dispatch,
         public,
@@ -59,7 +77,7 @@ pub async fn run_engine(ctx: EngineContext) -> AgentResult<()> {
         private_key,
         key_id,
         poll_seconds,
-        native_child_control_stdio,
+        native_child_control_stdio: _,
     } = ctx;
     let (tx, shutdown) = watch::channel(false);
     let mut tasks = tokio::task::JoinSet::new();
@@ -87,11 +105,7 @@ pub async fn run_engine(ctx: EngineContext) -> AgentResult<()> {
         let d = dispatch.clone();
         tasks.spawn(async move{let mut interval=tokio::time::interval(Duration::from_secs(poll_seconds.clamp(1,60)));interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);loop{tokio::select!{_=signal.changed()=>break,_=interval.tick()=>{if mailbox.process_pending(MailboxQueryRuntimeContext{expected_key_id:&key_id,agent_private_key:&private_key,dispatch:&d}).await.is_err(){eprintln!("mailbox temporarily unavailable");}}}}});
     }
-    let (control_tx, mut control) = mpsc::channel(1);
-    if native_child_control_stdio {
-        std::thread::spawn(move || control_reader(control_tx));
-    }
-    let request = tokio::select! {_=tokio::signal::ctrl_c()=>None,request=control.recv(),if native_child_control_stdio=>request};
+    let request = until.await;
     let _ = tx.send(true);
     let drained = tokio::time::timeout(Duration::from_secs(9), async {
         while tasks.join_next().await.is_some() {}

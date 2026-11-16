@@ -1,3 +1,46 @@
+## Native completion boundaries - 16 November 2026, current working slice
+
+The current collector maps 61 atomic properties. Its only intentionally missing
+rows are RB16 workload/resource budgets and comparable complete measurements.
+Missing stays BLOCKED in full mode; --known reports PARTIAL, never FULL_PASS.
+Do not infer acceptance from the number of tests or old distributed26 results.
+
+Additional current production witnesses:
+- A second DOGE linear-USDT contract uses its actual multiplier/tick/lot/minimum
+  and explicit permission. Invalid grid/subminimum/permission grant no intent
+  or money. BTC defaults remain unchanged; quote input uses the original parser.
+- Signed-source settlement of A consumes the shared budget before B admission;
+  B sees remaining0.4995 and cannot reserve another1.0005. Its complete census
+  includes the original A lot and independently observed live stop.
+- Account STOP A and release/cancel A preserve B's original UNKNOWN receipt.
+  B Status and Cancel also finish while A's separate HTTP read remains blocked.
+- Identical venue fill/bill IDs across A/B pass through the actual scoped source
+  ingestion APIs, deduplicate independently and preserve exact fees on reopen.
+- Successful terminal Resolve is staged with both ledger and RiskBook ACK,
+  rolled back with no residue, then committed/reopened/replayed exactly once.
+- The existing full public lifecycle now receives an actual late -1 bill AFTER
+  verified release: immutable correction, exact debit/breach, no refunded entry
+  budget, exact replay and +1 rebate; original release receipt survives reopen.
+- An unavailable safety-cancel ACK keeps its durable POSTING marker; replay
+  cannot send another cancel or release exposure. A separate failed-stop path
+  performs the original public emergency Close and only clears its incident
+  after independently proved flat/finance/release/orphan-free remediation.
+- Native intent diagnostics bound ONLY the read-only snapshot wait; a busy owner
+  returns explicit incompleteness, not NOT_FOUND. Busy/reopen and stale-tariff
+  drills read original identity/receipt/reason without network or permission.
+- Shipped Engine task composition now accepts an injected shutdown notification
+  for direct CODE testing; public run_engine retains the original Ctrl-C/stdin
+  path. Actual maintenance installs opening and drain retains the same owner.
+  This is not installed CONTROL or physical stdin/WSS acceptance.
+
+Rust collector source bytes are bound to its build as well as current clean
+HEAD/tree: a saved old collector cannot certify a new manifest. Exact current
+artifacts/results and negative controls remain required. Retained workerd
+transport/auth/session/typed-financial-denial verification runs inside the same
+fresh collection. Removed Cloudflare finance-owner OS-kill repetitions are
+RETIRED: workerd dispose is not claimed as OS death or money durability.
+Native real OS-kill/SQLite/reopen witnesses retain their original guarantees.
+
 ## Integrated completion checkpoint - 16 November 2026
 
 Current Native regression: 35 passed, 0 failed (56.87s after build).

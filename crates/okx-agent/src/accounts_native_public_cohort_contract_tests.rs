@@ -6,6 +6,10 @@ use super::*;
 use okx_execution::{CentralReceiptView, IntentState, TradeIntentLookup};
 use rust_decimal::Decimal;
 
+fn deadline() -> Instant {
+    Instant::now() + Duration::from_secs(3)
+}
+
 fn request() -> TradeRequest {
     let mut request = execute();
     if let TradeRequest::Execute { expires_in_ms, .. } = &mut request {
@@ -39,6 +43,240 @@ fn leverage(feed: &RecordedAccountHttp, actor: &str) {
             {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"long","lever":"2"},
             {"instId":"BTC-USDT-SWAP","mgnMode":"cross","posSide":"short","lever":"2"}])),
     });
+}
+
+#[tokio::test]
+async fn risk_book_contract_native_public_b_uses_remaining_budget_after_a_settlement() {
+    use super::filled_fixture::*;
+    let mut fixture = fixture_for_accounts(&["a", "b"]).await;
+    fixture.authority.state.revision = 3;
+    fixture.authority.state.campaign_entry_limit_usd = Some("1.5".into());
+    for control in &mut fixture.authority.state.accounts {
+        control.policy_revision = 3;
+    }
+    fixture
+        .trade
+        .update_governance(&fixture.authority)
+        .await
+        .unwrap();
+    let reference = Arc::new(super::native_add::AddReferenceHttp::new());
+    let reference_client = okx_api::OkxPublicClient::with_http_transport(
+        OkxEnvironment::new(okx_api::Region::Global, false),
+        RateBudget::new(),
+        reference,
+    )
+    .unwrap();
+    let (stop, market, socket, public) =
+        opened_market_with_public_client(&mut fixture, Some(reference_client)).await;
+    fixture
+        .market_boundary
+        .market_updates_expected
+        .store(4, Ordering::SeqCst);
+    let at = chrono::Utc::now().timestamp_millis().to_string();
+    fixture
+        .feed
+        .expect_public_clock(envelope(json!([{"ts":at}])));
+    fee(&fixture.feed, "fixture-observer-a", &at);
+    leverage(&fixture.feed, "fixture-observer-a");
+    leverage(&fixture.feed, "fixture-observer-a");
+    fee(&fixture.feed, "fixture-observer-a", &at);
+    fee(&fixture.feed, "fixture-observer-a", &at);
+    leverage(&fixture.feed, "fixture-observer-a");
+    fixture.feed.expect_post(RecordedPost {access_key:"fixture-executor-a".into(),path:"/api/v5/trade/order".into(),
+        expected_body:json!({"instId":INSTRUMENT,"tdMode":"cross","clOrdId":"__REQUEST_CL_ORD_ID__","side":"buy","posSide":"long","ordType":"limit","sz":"0.1","px":"1000", "attachAlgoOrds":[{"attachAlgoClOrdId":"__REQUEST_ATTACH_ALGO_ID__","tpTriggerPxType":"mark","slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"}]}),
+        raw_response:envelope(json!([{"ordId":OPEN_ORDER,"clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]))});
+    fixture.feed.arm_lost_next_create_ack();
+    let first = fixture
+        .trade
+        .trade("fixture-a", &request(), Some(&fixture.authority))
+        .await
+        .unwrap();
+    assert_eq!(
+        first["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
+        "{first}"
+    );
+    let entry = first["intent_id"].as_str().unwrap().to_owned();
+    let a = fixture.registry.resolve("fixture-a").await.unwrap();
+    let b = fixture.registry.resolve("fixture-b").await.unwrap();
+    let timer_a = a.recorded_capture_gate.write().await;
+    let timer_b = b.recorded_capture_gate.write().await;
+    *fixture.market_boundary.market.lock().unwrap() = None;
+    let filled_at = chrono::Utc::now().timestamp_millis();
+    snapshot(&fixture.feed, "99.9995", "0.1");
+    history(
+        &fixture.feed,
+        Some((OPEN_ORDER, "native-open-fill", "buy", filled_at)),
+    );
+    capture(&fixture).await;
+    let original = fixture
+        .owner
+        .lookup_intent(
+            a.configuration.account_key.wire(),
+            TradeIntentLookup::IntentId(entry.clone()),
+            deadline(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    order(&fixture.feed, OPEN_ORDER, "buy", filled_at);
+    protection(
+        &fixture.feed,
+        &format!("s{}", &original.client_order_id[..31]),
+    );
+    snapshot(&fixture.feed, "99.9995", "0.1");
+    snapshot(&fixture.feed, "99.9995", "0.1");
+    history(&fixture.feed, None);
+    let filled = fixture
+        .trade
+        .trade(
+            "fixture-a",
+            &TradeRequest::Status {
+                reference: entry.clone(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        filled["data"]["incremental_entry_settlement"]["state"], "verified_or_no_change",
+        "{filled}"
+    );
+    let before = fixture
+        .owner
+        .campaign_summary(fixture.campaign.clone())
+        .await
+        .unwrap();
+    assert_eq!(before.consumed_entry_usd, "1.0005");
+    assert_eq!(before.reserved_entry_usd, "0");
+    assert_eq!(before.remaining_entry_usd, "0.4995");
+    let closes_at = chrono::Utc::now()
+        .timestamp_millis()
+        .checked_add(2_000)
+        .unwrap();
+    let remaining = closes_at
+        .saturating_sub(chrono::Utc::now().timestamp_millis())
+        .max(0) as u64;
+    tokio::time::sleep_until(tokio::time::Instant::now() + Duration::from_millis(remaining)).await;
+    snapshot(&fixture.feed, "99.9995", "0.1");
+    history(
+        &fixture.feed,
+        Some((OPEN_ORDER, "native-open-fill", "buy", filled_at)),
+    );
+    capture(&fixture).await;
+    // The fixture stops maintenance after its opening. Do the ordinary
+    // maintenance turn before this independent command, using actual captured
+    // cursors and the original campaign origin, never a synthetic READY row.
+    crate::source_capture::capture_account_sources_measured(
+        &b.observer,
+        &b.private_ws,
+        &b.execution,
+    )
+    .await
+    .unwrap();
+    for account in [&a, &b] {
+        let key = account.configuration.account_key.wire();
+        let source = fixture
+            .owner
+            .source_cursor(key.clone(), "bills".into(), "account".into())
+            .await
+            .unwrap()
+            .unwrap();
+        fixture
+            .owner
+            .refresh_campaign_entry_readiness(
+                deadline(),
+                key,
+                fixture.campaign.clone(),
+                before.campaign_started_at_ms.unwrap() as i64,
+                source
+                    .watermark
+                    .min(chrono::Utc::now().timestamp_millis().saturating_sub(2_000)),
+            )
+            .await
+            .unwrap();
+    }
+    let a_intent = fixture
+        .owner
+        .lookup_intent(
+            a.configuration.account_key.wire(),
+            TradeIntentLookup::IntentId(entry.clone()),
+            deadline(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    // B's planning observer and the A/B admission census see the original A
+    // position. The consumed entry capacity, not an old HELD reservation,
+    // refuses this otherwise valid new order.
+    *fixture.market_boundary.market.lock().unwrap() = Some((socket, public));
+    fixture
+        .market_boundary
+        .market_updates_expected
+        .store(6, Ordering::SeqCst);
+    fixture
+        .market_boundary
+        .publish_market_observation(deadline())
+        .await;
+    fixture
+        .market_boundary
+        .market_updates_expected
+        .store(7, Ordering::SeqCst);
+    let at = chrono::Utc::now().timestamp_millis().to_string();
+    fee(&fixture.feed, "fixture-observer-b", &at);
+    leverage(&fixture.feed, "fixture-observer-b");
+    leverage(&fixture.feed, "fixture-observer-b");
+    fee(&fixture.feed, "fixture-observer-b", &at);
+    snapshot(&fixture.feed, "99.9995", "0.1");
+    super::native_add::inventory(
+        &fixture.feed,
+        &[(STOP, &format!("s{}", &original.client_order_id[..31]))],
+    );
+    let denied = fixture
+        .trade
+        .trade("fixture-b", &request(), Some(&fixture.authority))
+        .await
+        .unwrap();
+    assert!(
+        denied.to_string().contains("CAMPAIGN_ENTRY_BUDGET"),
+        "{denied}"
+    );
+    let after = fixture
+        .owner
+        .campaign_summary(fixture.campaign.clone())
+        .await
+        .unwrap();
+    assert_eq!(after.consumed_entry_usd, before.consumed_entry_usd);
+    assert_eq!(after.reserved_entry_usd, before.reserved_entry_usd);
+    assert_eq!(after.remaining_entry_usd, before.remaining_entry_usd);
+    assert_eq!(after.reserved_loss_usd, before.reserved_loss_usd);
+    assert_eq!(after.opening, before.opening);
+    let unchanged = fixture
+        .owner
+        .lookup_intent(
+            a.configuration.account_key.wire(),
+            TradeIntentLookup::IntentId(entry),
+            deadline(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(unchanged).unwrap(),
+        serde_json::to_value(a_intent).unwrap()
+    );
+    assert_eq!(fixture.feed.outbound_posts.lock().unwrap().len(), 1);
+    assert_eq!(fixture.feed.unconsumed_reads(), 0);
+    assert!(fixture.feed.denied_routes.lock().unwrap().is_empty());
+    drop(timer_a);
+    drop(timer_b);
+    drop(a);
+    drop(b);
+    stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), market)
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.finish().await;
 }
 
 #[tokio::test]

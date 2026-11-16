@@ -452,3 +452,15 @@ mod native_add;
 
 #[path = "accounts_native_public_fairness_contract_tests.rs"]
 mod native_public_fairness;
+
+#[path = "accounts_native_second_instrument_contract_tests.rs"]
+mod native_second_instrument;
+
+#[path = "accounts_native_post_release_correction_contract_tests.rs"]
+mod native_post_release_correction;
+
+#[path = "accounts_native_stale_diagnostic_contract_tests.rs"]
+mod native_stale_diagnostic;
+
+#[path = "accounts_native_engine_contract_tests.rs"]
+mod native_engine;

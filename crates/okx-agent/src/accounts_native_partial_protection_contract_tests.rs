@@ -4,6 +4,122 @@ use super::*;
 use rust_decimal::Decimal;
 
 #[tokio::test]
+async fn risk_book_contract_native_safety_cancel_unavailable_ack_is_not_reposted_or_released() {
+    let mut fixture = fixture().await;
+    let (stop, market, _socket, _public) = opened_market(&mut fixture).await;
+    let entry = create_entry(&fixture).await;
+    let account = fixture._account.clone();
+    let timer = account.recorded_capture_gate.write().await;
+    *fixture.market_boundary.market.lock().unwrap() = None;
+    let original = intent(&fixture, &entry).await;
+    let stop_client = format!("s{}", &original.client_order_id[..31]);
+    let at = chrono::Utc::now().timestamp_millis();
+    snapshot(&fixture.feed, "99.9998", "0.04");
+    history_amount(
+        &fixture.feed,
+        Some((OPEN_ORDER, "cancel-loss-partial", "buy", at)),
+        "0.04",
+        "-0.0002",
+    );
+    capture(&fixture).await;
+    let before = fixture
+        .owner
+        .campaign_summary(fixture.campaign.clone())
+        .await
+        .unwrap();
+    let mut stopped_expected = serde_json::to_value(&before).unwrap();
+    stopped_expected["book_sequence"] = json!(before.book_sequence + 1); // real protection STOP
+    fixture.feed.expect_post(RecordedPost {
+        access_key: "fixture-executor-a".into(),
+        path: "/api/v5/trade/cancel-order".into(),
+        expected_body: json!({"instId":INSTRUMENT,"clOrdId":original.client_order_id}),
+        // The exact POST has happened, but its response cannot be decoded.
+        // This is an unavailable acknowledgement, never a negative grant.
+        raw_response: vec![0xff],
+    });
+    for turn in 0..2 {
+        // Each explicit safety assessment obtains its own real clock evidence
+        // before the durable claim; the second claim must still refuse POST.
+        fixture.feed.expect_public_clock(envelope(
+            json!([{"ts":chrono::Utc::now().timestamp_millis().to_string()}]),
+        ));
+        order_cumulative(
+            &fixture.feed,
+            OPEN_ORDER,
+            "buy",
+            at,
+            "partially_filled",
+            "0.04",
+        );
+        if turn == 0 {
+            live_stop(&fixture.feed, &stop_client, "0.04", "canceled");
+        }
+        snapshot(&fixture.feed, "99.9998", "0.04");
+        order_cumulative(
+            &fixture.feed,
+            OPEN_ORDER,
+            "buy",
+            at,
+            "partially_filled",
+            "0.04",
+        );
+        let result = status(&fixture, &entry).await;
+        assert_eq!(result["status"], "partial", "{result}");
+        assert_eq!(result["data"]["protection_incident"], true, "{result}");
+        assert_eq!(result["data"]["financial_complete"], false, "{result}");
+        assert_eq!(
+            result["data"]["central_release"]["state"], "blocked",
+            "{result}"
+        );
+        assert_eq!(
+            result["data"]["compensation"]["reason_code"],
+            "SAFETY_CANCEL_OUTCOME_UNKNOWN_NO_RESUBMIT",
+            "{result}"
+        );
+        assert_eq!(
+            fixture.feed.outbound_posts.lock().unwrap().len(),
+            2,
+            "entry Create plus one cancellation, never another Create/cancel"
+        );
+        assert_eq!(
+            serde_json::to_value(
+                fixture
+                    .owner
+                    .campaign_summary(fixture.campaign.clone())
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            stopped_expected
+        );
+        let operation = account
+            .execution
+            .store
+            .operation(
+                Instant::now() + Duration::from_secs(3),
+                format!("safety_cancel_{}", original.client_order_id),
+            )
+            .await
+            .unwrap();
+        let operation = operation.expect("durable possible-send marker survives missing ACK");
+        assert_eq!(operation.kind, "safety_cancel");
+        assert_eq!(
+            operation.result_ref, "POSTING",
+            "unknown cancellation cannot manufacture terminal verification"
+        );
+    }
+    assert_transcript_consumed(&fixture);
+    drop(timer);
+    drop(account);
+    stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), market)
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn risk_book_contract_native_partial_stop_and_late_fill_keep_durable_failure_fence() {
     let mut fixture = fixture().await;
     let (market_stop, market_task, _socket, _public) = opened_market(&mut fixture).await;

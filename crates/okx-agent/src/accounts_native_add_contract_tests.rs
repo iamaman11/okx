@@ -379,13 +379,13 @@ async fn public_add(external_increment: bool) {
 
 // Two real public REST envelopes for one stale-reference refresh. This source
 // never fabricates WS instrument events or supplies financial/private routes.
-struct AddReferenceHttp {
+pub(super) struct AddReferenceHttp {
     pages: Mutex<std::collections::VecDeque<(&'static str, Vec<u8>)>>,
     delivered: AtomicUsize,
 }
 
 impl AddReferenceHttp {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let instrument = json!({"instType":"SWAP","instId":INSTRUMENT,
             "instFamily":"BTC-USDT","uly":"BTC-USDT","state":"live","ruleType":"normal",
             "settleCcy":"USDT","tickSz":"0.1","lotSz":"0.01","minSz":"0.01",
@@ -484,7 +484,7 @@ fn create_post(feed: &RecordedAccountHttp, order_id: &str) {
 }
 
 // Exactly one complete production scan, not spare copies for arbitrary retries.
-fn inventory(feed: &RecordedAccountHttp, stops: &[(&str, &str)]) {
+pub(super) fn inventory(feed: &RecordedAccountHttp, stops: &[(&str, &str)]) {
     for kind in ["SWAP", "FUTURES"] {
         for order_type in [
             "conditional",

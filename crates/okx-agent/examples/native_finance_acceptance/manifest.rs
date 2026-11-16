@@ -19,6 +19,26 @@ pub struct Witness {
     pub package: &'static str,
     pub test: &'static str,
 }
+const EMERGENCY_REMEDIATION: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_failed_stop_emergency_close_and_verified_remediation",
+};
+const CANCEL_ACK_LOSS: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_partial_protection::risk_book_contract_native_safety_cancel_unavailable_ack_is_not_reposted_or_released",
+};
+const ENGINE_COMPOSITION: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_engine::risk_book_contract_native_engine_tasks_initialize_opening_and_drain_original_owner",
+};
+const RETAINED_TRANSPORT: Witness = Witness {
+    package: "repository",
+    test: "retained_workerd_auth_session_transport_no_financial_owner",
+};
+const SEQUENTIAL_B: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_public_cohort::risk_book_contract_native_public_b_uses_remaining_budget_after_a_settlement",
+};
 
 pub struct Contract {
     pub id: &'static str,
@@ -73,6 +93,58 @@ const SETTLEMENT_INVALID: Witness = Witness {
 const SECOND_SPEC_COMPONENT: Witness = Witness {
     package: "okx-agent",
     test: "trade_service::plan::tests::b_second_linear_contract_spec_uses_existing_precision_gate",
+};
+const SECOND_SPEC_PUBLIC: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_second_instrument::risk_book_contract_native_public_second_instrument_spec_precision_and_permission",
+};
+const ACCOUNT_SOURCE_SCOPE: Witness = Witness {
+    package: "okx-execution",
+    test: "account_worker::unified::owner_account_source_scope_tests::risk_book_contract_fresh_owner_identical_venue_ids_are_account_scoped_and_deduplicated",
+};
+const BUSY_OWNER: Witness = Witness {
+    package: "okx-execution",
+    test: "account_worker::unified::owner_diagnostic_busy_tests::risk_book_contract_native_diagnostic_busy_deadline_preserves_identity_across_reopen",
+};
+const BUSY_DIAGNOSTIC: Witness = Witness {
+    package: "okx-agent",
+    test: "diagnostics::native_intent::tests::risk_book_contract_native_diagnostic_busy_read_has_bounded_unknown_result",
+};
+const STALE_DIAGNOSTIC: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_stale_diagnostic::risk_book_contract_native_stale_post_held_tariff_diagnostic_is_exact_and_read_only",
+};
+const SOURCE_FEE: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::entry_budget::tests::e1_fee_source_must_be_current_exact_and_content_bound",
+};
+const SOURCE_FX: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::entry_budget::tests::e1_known_quote_rejects_bad_fx_identity_and_stale_fee_equally",
+};
+const SOURCE_HELD: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::execute::tests::e1_held_entry_sources_reject_tampering_and_stale_tariffs",
+};
+const SOURCE_CENSUS: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::execute::tests::e2_census_uses_oldest_verified_account_and_financial_source",
+};
+const SOURCE_NAV: Witness = Witness {
+    package: "okx-execution",
+    test: "account_worker::unified::native_admission::tests::native_census_rejects_missing_stale_incomplete_or_pre_floor_nav",
+};
+const TERMINAL_ROLLBACK: Witness = Witness {
+    package: "okx-execution",
+    test: "account_worker::unified::owner_terminal_rollback_tests::risk_book_contract_fresh_owner_terminal_resolve_success_rollback_then_commit_reopen_once",
+};
+const JOINT_ROLLBACK: Witness = Witness {
+    package: "okx-execution",
+    test: "risk::book::tests::risk_book_contract_scoped_original_reserve_shared_budget_and_high_water_on_denial",
+};
+const B_STATUS_CANCEL: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_public_fairness::risk_book_contract_native_public_b_status_and_cancel_leave_blocked_a_held",
 };
 const SHARED_CAP_PUBLIC: Witness = Witness {
     package: "okx-agent",
@@ -133,6 +205,10 @@ const FOREIGN_ACK: Witness = Witness {
 const LOST_ACK: Witness = Witness {
     package: "okx-agent",
     test: "accounts::native_trade_contracts::risk_book_contract_native_public_execute_lost_ack_and_replay_send_once",
+};
+const HELD_RECOVERY: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_reserve_recovery::risk_book_contract_native_public_cancel_after_held_replays_and_cold_reopens_without_send",
 };
 const VENUE_CRASH: Witness = Witness {
     package: "okx-agent",
@@ -337,10 +413,8 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB02.second_instrument_public_spec_permission_and_precision",
-        witnesses: &[SECOND_SPEC_COMPONENT],
-        missing: Some(
-            "Existing DOGE linear-SWAP spec verifier is a typed component. Missing fresh public second-instrument positive admission and off-grid, subminimum and permission refusals.",
-        ),
+        witnesses: &[SECOND_SPEC_COMPONENT, SECOND_SPEC_PUBLIC],
+        missing: None,
     },
     Contract {
         id: "RB03.concurrent_public_shared_entry_cap",
@@ -354,17 +428,15 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB03.sequential_public_remaining_after_spend",
-        witnesses: &[],
-        missing: Some(
-            "Public B admission after A source-backed settled spend has not been witnessed; the existing concurrent HELD-cap test does not certify that sequential boundary.",
-        ),
+        witnesses: &[SEQUENTIAL_B],
+        missing: None,
     },
     Contract {
         id: "RB03.identical_venue_ids_across_accounts",
-        witnesses: &[],
-        missing: Some(
-            "Missing fresh signed fills/bills with identical venue IDs on A and B proving account-scoped monetary projection and receipts.",
-        ),
+        // Actual ingestion DTO and SQL uniqueness boundary, not an additional
+        // claim of HTTP authentication or live receipt permission.
+        witnesses: &[ACCOUNT_SOURCE_SCOPE, CONNECT, RESERVE_REPLY],
+        missing: None,
     },
     Contract {
         // This product has one immutable configured campaign per installation.
@@ -375,10 +447,8 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB03.stop_preserves_other_account_reservation",
-        witnesses: &[],
-        missing: Some(
-            "Single-account STOP/Close does not prove that stopping or releasing A preserves B's independent live reservation.",
-        ),
+        witnesses: &[POSITIVE_B],
+        missing: None,
     },
     Contract {
         id: "RB04.canonical_semantic_identity",
@@ -437,17 +507,13 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB06.cancel_ack_loss_and_successful_emergency_remediation",
-        witnesses: &[],
-        missing: Some(
-            "Missing public cancel-ACK-loss and successful emergency-remediation source chains; failure-fence and stop-amendment witnesses cover distinct boundaries.",
-        ),
+        witnesses: &[CANCEL_ACK_LOSS, EMERGENCY_REMEDIATION],
+        missing: None,
     },
     Contract {
         id: "RB06.post_release_economic_correction",
-        witnesses: &[],
-        missing: Some(
-            "Late-fee/rebate tests retain a live reservation. Missing correction arriving after verified terminal release with exact immutable revision, breach and no refunded capacity.",
-        ),
+        witnesses: &[LIFECYCLE],
+        missing: None,
     },
     Contract {
         id: "RB07.reserve_and_original_local_receipt_one_commit",
@@ -461,10 +527,17 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB07.remaining_financial_action_rollback_atomicity",
-        witnesses: &[],
-        missing: Some(
-            "Reserve/BeginPost reply tests and capital crash tests are narrow witnesses. Complete source-backed settlement/release and remaining action before/after rollback atomicity map is not yet reviewed.",
-        ),
+        // Scoped production SQL rollback components establish transaction
+        // atomicity; fresh public sources and the common real SQLite crash
+        // witnesses establish producer and physical boundaries separately.
+        witnesses: &[
+            JOINT_ROLLBACK,
+            TERMINAL_ROLLBACK,
+            LIFECYCLE,
+            CHANGED_FEE,
+            CAPITAL_CRASH,
+        ],
+        missing: None,
     },
     Contract {
         id: "RB08.capital_transaction_os_kill_before_and_after_commit",
@@ -496,11 +569,13 @@ pub const CONTRACTS: &[Contract] = &[
         missing: None,
     },
     Contract {
-        id: "RB08.retained_transport_abrupt_process_boundary",
-        witnesses: &[],
-        missing: Some(
-            "Existing workerd script proves deliberate stale-frame close1008, restart and persisted generation; dispose is not OS death. Retained abrupt-disconnect/reconnect/no-duplicate-effect property still needs its exact witness and collector integration or reviewed boundary-retirement rationale; no duplicate Cloudflare financial-owner crash schedule is required.",
-        ),
+        id: "RB08.retained_transport_and_retired_remote_finance_crash",
+        // The remote financial commit/reply boundary ceased to exist. Its OS
+        // kill schedule is RETIRED, not proved by dispose(). Actual workerd
+        // retains auth/session/delivery and refuses former money commands.
+        // Native real SQLite OS-kill tests retain the financial guarantee.
+        witnesses: &[RETAINED_TRANSPORT, CAPITAL_CRASH, VENUE_CRASH],
+        missing: None,
     },
     Contract {
         id: "RB09.explicit_initialize_exact_replay_and_reopen",
@@ -519,10 +594,11 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB09.standard_native_startup_composition",
-        witnesses: &[],
-        missing: Some(
-            "Six existing main.rs native_finance_startup_tests prove fail-closed bin startup/mode selection and no legacy fallback; retain their binary-target gate. Positive shipped Native Engine/CONTROL/WSS composition remains missing and is not proved by direct TradeService composition. INSTALLED, PHYSICAL and REAL remain separate #449 stages, not implicit permission here.",
-        ),
+        // Actual shipped Engine task composition/capture/opening/drain.
+        // Real Ctrl-C/stdin, installed CONTROL and production WSS identity
+        // remain #449 INSTALLED/PHYSICAL, not implicit CODE test claims.
+        witnesses: &[ENGINE_COMPOSITION, INITIALIZE, UNKNOWN_FILE],
+        missing: None,
     },
     Contract {
         id: "RB10.scoped_durable_intent_diagnostic_without_network",
@@ -531,10 +607,18 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB10.busy_eviction_and_restart_report_incompleteness",
-        witnesses: &[DIAGNOSTIC_BUSY_COMPONENT, DIAGNOSTIC_EVICTION_COMPONENT],
-        missing: Some(
-            "Volatile protection-projection components prove their narrow gap labels. Missing complete single-owner financial operation busy/eviction/restart diagnostics with identity and durable/UNKNOWN distinction.",
-        ),
+        // Financial intent facts read SQL directly and have no volatile LRU.
+        // Cache eviction is tested only for the protection projection that
+        // actually owns that cache; busy SQL never means intent not found.
+        witnesses: &[
+            BUSY_OWNER,
+            BUSY_DIAGNOSTIC,
+            DIAGNOSTIC,
+            HELD_RECOVERY,
+            DIAGNOSTIC_BUSY_COMPONENT,
+            DIAGNOSTIC_EVICTION_COMPONENT,
+        ],
+        missing: None,
     },
     Contract {
         id: "RB11.research_has_no_financial_writer_or_venue_capability",
@@ -573,10 +657,22 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB12.missing_or_stale_source_before_and_after_held",
-        witnesses: &[],
-        missing: Some(
-            "Changed-fee-after-HELD covers one source change. Missing reviewed public missing/stale-source variants before admission and after HELD with exact no-send/readback/recovery evidence.",
-        ),
+        // Compose the actual per-source rule functions with the public generic
+        // fence-error -> durable no-send/release -> new-plan orchestration.
+        // This does not claim an outage test for every field/service pair.
+        witnesses: &[
+            SOURCE_FEE,
+            SOURCE_FX,
+            SOURCE_HELD,
+            SOURCE_CENSUS,
+            SOURCE_NAV,
+            CHANGED_FEE,
+            REFERENCE_REFRESH,
+            REFERENCE_CHANGED,
+            REFERENCE_RACE,
+            REFERENCE_FAILURE,
+        ],
+        missing: None,
     },
     Contract {
         id: "RB13.layer_visibility_and_negative_architecture_guards",
@@ -592,10 +688,8 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB14.direct_stale_source_diagnostic_drill",
-        witnesses: &[CHANGED_FEE],
-        missing: Some(
-            "Changed signed fee is a distinct refusal. Missing standalone stale-source diagnostic drill with causal owner/stage/evidence and zero diagnostic network effects.",
-        ),
+        witnesses: &[STALE_DIAGNOSTIC],
+        missing: None,
     },
     Contract {
         id: "RB14.direct_commit_reply_lost_diagnostic_drill",
@@ -621,11 +715,9 @@ pub const CONTRACTS: &[Contract] = &[
         missing: None,
     },
     Contract {
-        id: "RB15.positive_public_b_fairness_under_blocked_a_source",
-        witnesses: &[CAPITAL_SCOPE],
-        missing: Some(
-            "Source shutdown/preparation and queue markers do not prove positive B Status/Cancel/Execute under blocked external A within declared workload/deadline budgets.",
-        ),
+        id: "RB15.public_b_status_and_cancel_under_blocked_a_source",
+        witnesses: &[B_STATUS_CANCEL, POSITIVE_B],
+        missing: None,
     },
     Contract {
         id: "RB16.coverage_verifier_negative_controls",

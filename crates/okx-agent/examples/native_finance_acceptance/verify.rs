@@ -5,6 +5,45 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
+
+// An old manually copied collector must not certify a newer source tree with
+// its embedded older manifest. Cargo-run is the supported entrypoint; this
+// additionally binds every part of that collector to the inspected checkout.
+fn check_source_bytes(actual: &[u8], embedded: &[u8]) -> Result<()> {
+    if actual != embedded {
+        return Err("COLLECTOR_SOURCE_BUILD_MISMATCH");
+    }
+    Ok(())
+}
+pub(super) fn collector_sources_match(repo: &Path) -> Result<()> {
+    for (relative, embedded) in [
+        (
+            "native_finance_acceptance.rs",
+            include_bytes!("../native_finance_acceptance.rs").as_slice(),
+        ),
+        (
+            "native_finance_acceptance/manifest.rs",
+            include_bytes!("manifest.rs").as_slice(),
+        ),
+        (
+            "native_finance_acceptance/verify.rs",
+            include_bytes!("verify.rs").as_slice(),
+        ),
+        (
+            "native_finance_acceptance/process.rs",
+            include_bytes!("process.rs").as_slice(),
+        ),
+        (
+            "native_finance_acceptance/repository_guards.rs",
+            include_bytes!("repository_guards.rs").as_slice(),
+        ),
+    ] {
+        let path = repo.join("crates/okx-agent/examples").join(relative);
+        let actual = std::fs::read(path).map_err(|_| "COLLECTOR_SOURCE_UNAVAILABLE")?;
+        check_source_bytes(&actual, embedded)?;
+    }
+    Ok(())
+}
 pub(super) fn artifacts(repo: &Path, bytes: &[u8]) -> Result<BTreeMap<String, PathBuf>> {
     let mut binaries = BTreeMap::new();
     for line in bytes.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
@@ -116,6 +155,21 @@ pub(super) fn verify_output(bytes: &[u8], expected: &BTreeSet<String>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn collector_rejects_changed_manifest_instead_of_reporting_new_head() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        collector_sources_match(repo).unwrap();
+        let original = include_bytes!("manifest.rs");
+        assert_eq!(check_source_bytes(original, original), Ok(()));
+        assert_eq!(
+            check_source_bytes(b"old or substituted manifest", original),
+            Err("COLLECTOR_SOURCE_BUILD_MISMATCH")
+        );
+    }
     fn expected() -> BTreeSet<String> {
         BTreeSet::from(["scope::a".into(), "scope::b".into()])
     }
@@ -184,7 +238,12 @@ pub(super) fn selected() -> Result<Witnesses> {
     for c in CONTRACTS {
         for w in c.witnesses {
             if (!PACKAGES.contains(&w.package)
-                && !(w.package == "repository" && w.test == super::repository_guards::WITNESS))
+                && !(w.package == "repository"
+                    && [
+                        super::repository_guards::WITNESS,
+                        super::repository_guards::TRANSPORT_WITNESS,
+                    ]
+                    .contains(&w.test)))
                 || w.test.is_empty()
                 || !w
                     .test
