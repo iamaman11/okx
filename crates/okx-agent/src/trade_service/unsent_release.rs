@@ -1,6 +1,7 @@
 //! Release only a durably rejected, never-sent intent. AccountStore owns the
 //! no-send proof/ack; RiskBook owns the reservation. No venue adapter is needed.
 use super::{build_risk_command, digest};
+use crate::execution_store::ExecutionStore;
 use crate::risk_bridge::NativeRiskClient;
 use okx_execution::{AccountStoreHandle, StoredIntent};
 use okx_protocol::{
@@ -42,7 +43,7 @@ pub(super) enum UnsentReleaseOutcome {
 /// Explicit handles to existing owners, not another execution context. A fresh
 /// SQL deadline is obtained per call, preserving the original operation bounds.
 pub(super) struct UnsentReleaseDependencies<'a> {
-    pub store: &'a AccountStoreHandle,
+    pub store: &'a ExecutionStore,
     pub risk: &'a NativeRiskClient,
     pub governance: &'a RwLock<Option<CentralGovernanceSnapshot>>,
     pub sql_deadline: fn() -> Instant,
@@ -62,9 +63,48 @@ pub(super) async fn release_unsent(
         intent_id: intent.intent_id.clone(),
         reservation_key: reservation_key.map(str::to_owned),
     };
-    let id = intent.intent_id.clone();
-    let proof = deps
+    if let Some((owner, account)) = deps.store.native_scope() {
+        let state = deps.governance.read().await.clone().ok_or_else(|| {
+            failure(
+                UnsentReleaseStage::Authority,
+                "AUTHORITY_UNAVAILABLE".into(),
+                None,
+            )
+        })?;
+        if !deps.risk.is_native_finance() || state.state.installation_id != owner.installation_id()
+        {
+            return Err(failure(
+                UnsentReleaseStage::Authority,
+                "NATIVE_UNSENT_AUTHORITY_MISMATCH".into(),
+                None,
+            ));
+        }
+        // Original SQL proof, current sequence, RiskBook release/tombstone
+        // and account acknowledgement are read/committed by the SAME owner.
+        // There is no second ACK or generic transport mutation on this path.
+        return owner
+            .release_unsent_status(
+                (deps.sql_deadline)(),
+                account.into(),
+                intent.intent_id.clone(),
+                intent.plan_hash.clone(),
+            )
+            .await
+            .map(|local| {
+                if local {
+                    UnsentReleaseOutcome::LocalAcknowledged
+                } else {
+                    UnsentReleaseOutcome::CentralAcknowledged
+                }
+            })
+            .map_err(|e| failure(UnsentReleaseStage::Release, e.to_string(), None));
+    }
+    let store = deps
         .store
+        .legacy()
+        .map_err(|e| failure(UnsentReleaseStage::SqlProof, e.to_string(), None))?;
+    let id = intent.intent_id.clone();
+    let proof = store
         .call((deps.sql_deadline)(), move |s| {
             s.unsent_release_receipt(&id)
         })
@@ -87,7 +127,7 @@ pub(super) async fn release_unsent(
     let reservation = &proof.reservation_key;
     if reservation.starts_with("local:") {
         let id = intent.intent_id.clone();
-        deps.store
+        store
             .call((deps.sql_deadline)(), move |s| {
                 s.acknowledge_local_unsent_release(&id)
             })
@@ -120,7 +160,7 @@ pub(super) async fn release_unsent(
         }
         if observed.reservation_state == Some(RiskReservationState::Released) {
             let evidence = digest(&observed).map_err(|e| fail(UnsentReleaseStage::SqlAck, e))?;
-            acknowledge(deps.store, reservation, evidence, deps.sql_deadline)
+            acknowledge(store, reservation, evidence, deps.sql_deadline)
                 .await
                 .map_err(|e| fail(UnsentReleaseStage::SqlAck, e))?;
             return Ok(UnsentReleaseOutcome::CentralAcknowledged);
@@ -163,7 +203,7 @@ pub(super) async fn release_unsent(
             .map_err(|e| fail(UnsentReleaseStage::Release, e.into()))?;
         if result.status == RiskDecisionStatus::Updated {
             let evidence = digest(&result).map_err(|e| fail(UnsentReleaseStage::SqlAck, e))?;
-            acknowledge(deps.store, reservation, evidence, deps.sql_deadline)
+            acknowledge(store, reservation, evidence, deps.sql_deadline)
                 .await
                 .map_err(|e| fail(UnsentReleaseStage::SqlAck, e))?;
             return Ok(UnsentReleaseOutcome::CentralAcknowledged);

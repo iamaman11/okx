@@ -1567,6 +1567,7 @@ dependencies = [
 name = "okx-execution"
 version = "0.1.0"
 dependencies = [
+ "okx-kernel",
  "rusqlite",
  "rust_decimal",
  "serde",
@@ -1625,6 +1626,7 @@ dependencies = [
 name = "okx-kernel"
 version = "0.1.0"
 dependencies = [
+ "num-bigint",
  "serde",
  "serde_json",
  "sha2 0.10.9",

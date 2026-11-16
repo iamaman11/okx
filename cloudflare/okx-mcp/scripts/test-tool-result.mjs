@@ -15,8 +15,12 @@ try {
     [tsc, "--rootDir", "src", "--outDir", output, "--noEmit", "false"],
     { stdio: "inherit" },
   );
+  // These historical tests require a Cloudflare financial owner that no longer exists.
+  // They are not current acceptance passes; invariant replacements are tracked in
+  // FINANCIAL_WITNESS_RETIREMENT.md and the Native finance owner suite.
+  console.log("RETIRED financial witnesses (not PASS): risk_book.test, legacy_finance_cutover.test, acceptance_composed.test; old financial cases of risk_authority.test replaced by retirement denial checks");
   let executed=0;
-  for (const file of ["auth.test.js", "shared.test.js", "execution_tools.test.js", "risk_book.test.js", "account_governance.test.js", "account_governance_store.test.js", "risk_authority.test.js", "runtime_session.test.js", "runtime_backpressure.test.js", "mcp.test.js", "acceptance_composed.test.js"]) {
+  for (const file of ["auth.test.js", "shared.test.js", "execution_tools.test.js", "account_governance.test.js", "account_governance_store.test.js", "risk_authority.test.js", "runtime_session.test.js", "runtime_backpressure.test.js", "mcp.test.js"]) {
     execFileSync(process.execPath, [join(output, file)], {
       stdio: "inherit",
     });
@@ -26,7 +30,7 @@ try {
   // are consumed by Rust protocol tests through include_str!.
   const fixture=JSON.parse(readFileSync(resolve(
     "../../contracts/trade-semantic-golden.json"),"utf8"));
-  const risk=await import(pathToFileURL(join(output,"risk_book.js")));
+  const risk=await import(pathToFileURL(join(output,"decimal.js")));
   const semantic=await import(pathToFileURL(join(output,"execution_tools.js")));
   for(const [input,expected] of fixture.numeric.positive){
     const result=risk.normalizeDecimal(input);

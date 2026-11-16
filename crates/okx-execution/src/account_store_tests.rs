@@ -1,7 +1,47 @@
+#[path = "account_admission_lifecycle_contract_tests.rs"]
+mod admission_lifecycle_contracts;
 #[path = "account_store_attribution_tests.rs"]
 mod attribution;
+#[path = "account_authority_read_contract_tests.rs"]
+mod authority_read_contracts;
+#[path = "account_capital_assignment_contract_tests.rs"]
+mod capital_assignment_contracts;
+#[path = "account_captured_bill_contract_tests.rs"]
+mod captured_bill_contracts;
+#[path = "account_captured_fill_contract_tests.rs"]
+mod captured_fill_contracts;
+#[path = "account_entry_fee_contract_tests.rs"]
+mod entry_fee_contracts;
+#[path = "account_fill_projection_contract_tests.rs"]
+mod fill_projection_contracts;
+#[path = "account_finance_report_contract_tests.rs"]
+mod finance_report_contracts;
+#[path = "account_funding_projection_contract_tests.rs"]
+mod funding_projection_contracts;
+#[path = "account_local_close_contract_tests.rs"]
+mod local_close_contracts;
+#[path = "account_native_admission_contract_tests.rs"]
+mod native_admission_contracts;
+#[path = "account_nav_projection_contract_tests.rs"]
+mod nav_projection_contracts;
+#[path = "account_protection_status_contract_tests.rs"]
+mod protection_status_contracts;
+#[path = "account_raw_source_tests.rs"]
+mod raw_sources;
+#[path = "account_reserve_source_contract_tests.rs"]
+mod reserve_source_contracts;
+#[path = "account_scoped_entry_settlement_contract_tests.rs"]
+mod scoped_entry_settlement_contracts;
+#[path = "account_page_contract_tests.rs"]
+mod source_pages;
+#[path = "account_strategy_nav_contract_tests.rs"]
+mod strategy_nav_contracts;
 #[path = "account_store_terminal_diagnostic_tests.rs"]
 mod terminal_diagnostics;
+#[path = "account_trade_read_contract_tests.rs"]
+mod trade_read_contracts;
+#[path = "account_usd_page_contract_tests.rs"]
+mod usd_page_contracts;
 
 #[test]
 fn t10_09_partial_reduce_proof_cannot_accept_an_opening_intent() {
@@ -2941,7 +2981,8 @@ fn k5_recovery_pages_over_100_intents_are_disjoint_and_bounded() {
 #[test]
 fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
     let mut s = store();
-    let i = intent(&mut s);
+    // A canonical digest is needed for the new scoped finance migration.
+    let i = intent_with_plan_hash(&mut s, &"e".repeat(64));
     let quote = e1_source_quote(&s, &i);
     s.bind_entry_quote(&quote).unwrap();
     s.bind_entry_admission(&EntryAdmissionEvidence {
@@ -3046,10 +3087,151 @@ fn e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted() {
             assert_eq!(partial.settlement_revision, 1);
             assert_eq!(partial.cumulative_entry_usd, Decimal::new(5001, 2));
             assert_eq!(
+                s.partial_entry_settlement_receipt("intent").unwrap(),
+                Some(partial.clone()),
+                "native SQL owner returns only original immutable source revision"
+            );
+            assert_eq!(
                 s.bind_partial_entry_settlement("intent", at, qty, at)
                     .unwrap(),
                 partial
             );
+            // One-time source migration: actual original AccountStore fill,
+            // fee and FX calculation, not a second synthetic money engine.
+            // An isolated destination DB has one scoped SQL transaction that
+            // imports the original sealed receipt and debits RiskBook once.
+            let migration =
+                super::sql::unified_financial::inspect_legacy_partial_source(&mut s, "intent")
+                    .unwrap();
+            let target = s.path.with_extension("r4-finance.sqlite");
+            let mut unified = rusqlite::Connection::open(&target).unwrap();
+            unified.pragma_update(None, "journal_mode", "WAL").unwrap();
+            unified.pragma_update(None, "synchronous", "FULL").unwrap();
+            unified.pragma_update(None, "foreign_keys", "ON").unwrap();
+            unified
+                .execute_batch(include_str!("ledger/sql/finance-v1.sql"))
+                .unwrap();
+            unified
+                .execute(
+                    "INSERT INTO finance_installations VALUES(?1,1)",
+                    [&s.meta.installation_id],
+                )
+                .unwrap();
+            unified
+                .execute(
+                    "INSERT INTO finance_accounts VALUES(?1,?2)",
+                    rusqlite::params![&s.meta.installation_id, &s.meta.account_key],
+                )
+                .unwrap();
+            unified
+                .execute(
+                    "INSERT INTO finance_campaigns(
+                   installation_id,campaign_id,policy_revision,generation,book_sequence,
+                   entry_limit_usd,entry_consumed_usd,entry_opening_consumed_usd,
+                   entry_reserved_usd,entry_breach_usd)
+                 VALUES(?1,'campaign-20',1,7,0,'200','0','0','100.05','0')",
+                    [&s.meta.installation_id],
+                )
+                .unwrap();
+            unified
+                .execute(
+                    "INSERT INTO finance_campaign_accounts VALUES(?1,'campaign-20',?2)",
+                    rusqlite::params![&s.meta.installation_id, &s.meta.account_key],
+                )
+                .unwrap();
+            let scope = super::sql::unified_financial::EntryRef {
+                installation: &s.meta.installation_id,
+                campaign: "campaign-20",
+                reservation: &partial.reservation_key,
+                account: &s.meta.account_key,
+                intent: "intent",
+                source_revision: 1,
+                expected_sequence: 0,
+                generation: 7,
+            };
+            {
+                let tx = unified
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .unwrap();
+                super::sql::unified_financial::import_legacy_partial_source(&tx, &migration)
+                    .unwrap();
+                tx.execute(
+                    "INSERT INTO finance_risk_entries(
+                   installation_id,campaign_id,reservation_key,account_key,
+                   intent_id,plan_sha256,state,entry_upper_usd,reserved_entry_usd)
+                 VALUES(?1,'campaign-20',?2,?3,'intent',?4,'POSTED','100.05','100.05')",
+                    rusqlite::params![
+                        &s.meta.installation_id,
+                        &partial.reservation_key,
+                        &s.meta.account_key,
+                        &partial.plan_hash
+                    ],
+                )
+                .unwrap();
+                let accepted = super::sql::unified_financial::settle_entry(&tx, &scope).unwrap();
+                assert!(!accepted.replayed);
+                assert_eq!(accepted.book_sequence, 1);
+                assert_eq!(accepted.cumulative_entry_usd, "50.01");
+                tx.commit().unwrap();
+            }
+            let imported: (String, String, i64) = unified
+                .query_row(
+                    "SELECT entry_consumed_usd,entry_reserved_usd,book_sequence
+                 FROM finance_campaigns
+                 WHERE installation_id=?1 AND campaign_id='campaign-20'",
+                    [&s.meta.installation_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(imported, ("50.01".into(), "50.04".into(), 1));
+            let exact_json: String = unified
+                .query_row(
+                    "SELECT original_receipt_json FROM finance_entry_sources
+                 WHERE installation_id=?1 AND account_key=?2
+                   AND intent_id='intent' AND settlement_revision=1",
+                    rusqlite::params![&s.meta.installation_id, &s.meta.account_key],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<EntrySettlementEvidence>(&exact_json).unwrap(),
+                partial
+            );
+            {
+                let tx = unified
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .unwrap();
+                super::sql::unified_financial::import_legacy_partial_source(&tx, &migration)
+                    .unwrap();
+                assert!(
+                    super::sql::unified_financial::settle_entry(&tx, &scope)
+                        .unwrap()
+                        .replayed
+                );
+                tx.commit().unwrap();
+            }
+            let receipts: i64 = unified
+                .query_row("SELECT COUNT(*) FROM finance_entry_receipts", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                receipts, 1,
+                "legacy re-import and replay never charge twice"
+            );
+            drop(unified);
+            let reopened = rusqlite::Connection::open(&target).unwrap();
+            let committed: (String, String) = reopened
+                .query_row(
+                    "SELECT entry_consumed_usd,entry_reserved_usd FROM finance_campaigns
+                 WHERE installation_id=?1 AND campaign_id='campaign-20'",
+                    [&s.meta.installation_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(committed, ("50.01".into(), "50.04".into()));
+            drop(reopened);
+            let _ = std::fs::remove_file(target);
             // Even an equal-money replacement economic event is NOT
             // permitted: the original fill is append-only. Validate the
             // actual SQL immutable trigger, then verify the settled digest
@@ -6011,9 +6193,19 @@ fn sqlite_million_history_bounded_rss() {
     std::fs::remove_file(path).unwrap();
 }
 fn path() -> PathBuf {
+    // Windows may reuse a PID while files from a previous test run remain.
+    // A new run must never open those files as its freshly initialized state.
+    static RUN: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    let run = RUN.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    });
     std::env::temp_dir().join(format!(
-        "okx-t0-{}-{}.db",
+        "okx-t0-{}-{}-{}.db",
         std::process::id(),
+        run,
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ))
 }
@@ -6160,6 +6352,9 @@ fn store() -> AccountStore {
 }
 
 fn store_with_account(account_key: &str) -> AccountStore {
+    store_with_account_campaign(account_key, "campaign-20")
+}
+fn store_with_account_campaign(account_key: &str, campaign: &str) -> AccountStore {
     let p = path();
     let m = AccountMeta {
         initialize_operation_id: "connect-op".into(),
@@ -6180,12 +6375,22 @@ fn store_with_account(account_key: &str) -> AccountStore {
         balances: vec![("USDT".into(), Decimal::from(100))],
     };
     let mut a = AccountStore::initialize_flat(p, m, &s).unwrap();
-    a.apply_authority_policy(1, false, "campaign-20", Decimal::from(20))
+    a.apply_authority_policy(1, false, campaign, Decimal::from(20))
         .unwrap();
     a.ensure_manual_instance(1).unwrap();
     a
 }
 fn intent(s: &mut AccountStore) -> StoredIntent {
+    intent_with_plan_hash(s, "plan")
+}
+fn intent_with_plan_hash(s: &mut AccountStore, plan_hash: &str) -> StoredIntent {
+    intent_with_plan_hash_and_id(s, plan_hash, "intent")
+}
+fn intent_with_plan_hash_and_id(
+    s: &mut AccountStore,
+    plan_hash: &str,
+    intent_id: &str,
+) -> StoredIntent {
     let definition = s.ensure_manual_instance(1).unwrap();
     let d = Decision {
         decision_id: "decision".into(),
@@ -6214,12 +6419,12 @@ fn intent(s: &mut AccountStore) -> StoredIntent {
             planned_loss_usd: Decimal::from(5),
             source_generation: 1,
         },
-        intent_id: "intent".into(),
+        intent_id: intent_id.into(),
         idempotency_key: "request".into(),
         request_hash: "body".into(),
         client_order_id: "stableclient".into(),
         deadline: 100,
-        plan_hash: "plan".into(),
+        plan_hash: plan_hash.into(),
         policy_revision: 1,
         risk_increase: true,
         instrument_id: "BTC-USDT-SWAP".into(),
@@ -7065,8 +7270,9 @@ fn k5_child_hard_exit_at_native_claim() {
     }
     // Publish marker after the SQLite FULL WAL commit with the connection
     // still live. Parent must kill this process at the exact boundary.
-    let ready = std::env::var("OKX_K5_CHILD_READY").unwrap();
-    std::fs::write(ready, phase).unwrap();
+    use std::io::Write;
+    println!("OKX_K5_READY:{phase}");
+    std::io::stdout().flush().unwrap();
     loop {
         std::thread::park();
     }
@@ -7074,6 +7280,21 @@ fn k5_child_hard_exit_at_native_claim() {
 
 #[test]
 fn k5_real_os_kill_f0_through_f8_never_reposts_or_duplicates_finance() {
+    // Own the helper even if a readiness assertion fails. An orphaned helper
+    // otherwise holds the Windows test EXE open and blocks the next link.
+    struct KillChildOnDrop {
+        child: std::process::Child,
+        reader: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for KillChildOnDrop {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
+        }
+    }
     // Same Rust binary and exact mounted test DB across the process boundary.
     // The child is deliberately not allowed to connect to OKX or RiskBook.
     for phase in ["F0", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8"] {
@@ -7099,7 +7320,6 @@ fn k5_real_os_kill_f0_through_f8_never_reposts_or_duplicates_finance() {
         let path = store.path.clone();
         let meta = store.meta.clone();
         let venue_log = path.with_extension(format!("{phase}.venue-marker"));
-        let ready = path.with_extension(format!("{phase}.ready"));
         drop(store);
 
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -7110,31 +7330,46 @@ fn k5_real_os_kill_f0_through_f8_never_reposts_or_duplicates_finance() {
             .env("OKX_K5_CHILD_ACCOUNT", &meta.account_key)
             .env("OKX_K5_CHILD_INSTALL", &meta.installation_id)
             .env("OKX_K5_CHILD_VENUE_LOG", &venue_log)
-            .env("OKX_K5_CHILD_READY", &ready)
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("spawn child test executable");
-        let mut witnessed = false;
-        for _ in 0..200 {
-            if ready.exists() {
-                witnessed = true;
-                break;
+        let output = child.stdout.take().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(output).lines() {
+                let Ok(line) = line else { break };
+                if let Some(phase) = line.strip_prefix("OKX_K5_READY:") {
+                    let _ = send.send(Some(phase.to_owned()));
+                    return;
+                }
             }
-            if let Some(status) = child.try_wait().unwrap() {
-                panic!("{phase}: helper stopped before the SQL claim boundary: {status}");
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        assert!(
-            witnessed,
-            "{phase}: child never reported durable SQL boundary"
+            let _ = send.send(None);
+        });
+        let mut helper = KillChildOnDrop {
+            child,
+            reader: Some(reader),
+        };
+        let witnessed = receive
+            .recv_timeout(Duration::from_secs(10))
+            .expect("child must publish a complete durable-boundary message");
+        assert_eq!(
+            witnessed.as_deref(),
+            Some(phase),
+            "{phase}: helper stopped before SQL boundary"
         );
-        assert_eq!(std::fs::read_to_string(&ready).unwrap(), phase);
-        child.kill().expect("OS kill at durable SQL boundary");
-        let status = child.wait().expect("reap killed native process");
+        helper
+            .child
+            .kill()
+            .expect("OS kill at durable SQL boundary");
+        let status = helper.child.wait().expect("reap killed native process");
         assert!(
             !status.success(),
-            "{phase}: child must be killed, not finish normally"
+            "{phase}: helper must be killed, not finish normally"
         );
+        if let Some(reader) = helper.reader.take() {
+            reader.join().unwrap();
+        }
         let mut recovered =
             AccountStore::open_existing(&path, &meta.account_key, &meta.installation_id).unwrap();
         recovered.integrity_check().unwrap();
@@ -11046,4 +11281,4251 @@ async fn sql_job_timing_is_returned_with_its_own_result() {
     // The first job owns its immutable timing even after later work.
     assert_eq!(first, account);
     assert_eq!(counters.last_sql_owner_ms, timing.sql_owner_ms);
+}
+
+#[test]
+fn risk_book_contract_unified_full_original_account_import_two_accounts() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let one = intent(&mut a);
+    let two = intent(&mut b);
+    assert_eq!(one.intent_id, two.intent_id);
+    assert_eq!(one.plan_hash, two.plan_hash);
+    for source in [&mut a, &mut b] {
+        source
+            .ingest_page(&IngestPage {
+                finance: (1..=2)
+                    .map(|n| FinanceEntry {
+                        entry_id: format!("fee-{n}"),
+                        economic_event_key: format!("event-{n}"),
+                        component: "FEE".into(),
+                        allocation_leg: "account".into(),
+                        amount: -Decimal::ONE,
+                        currency: "USDT".into(),
+                        instance_id: Some("manual".into()),
+                        source_ref: format!("bill:{n}"),
+                        time: n,
+                        reverses_entry_id: None,
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .unwrap();
+        source.connection.execute("INSERT INTO campaign_entry_readiness(campaign_id,from_ms,covered_through_ms,source_revision,source_generations,reviewed_finance_rowid) VALUES('campaign-X',1,2,0,'fixture',1)",[]).unwrap();
+    }
+    // B has a partial, NOT sealed original history. Import must retain that.
+    b.connection
+        .execute(
+            "UPDATE source_cursors SET watermark=1 WHERE source='finance_provenance'",
+            [],
+        )
+        .unwrap();
+    let a_path = a.path.clone();
+    let b_path = b.path.clone();
+    drop(a);
+    drop(b); // Both original account writer leases closed before import.
+    let sa = Connection::open_with_flags(&a_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&b_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut unified = Connection::open(&destination).unwrap();
+    unified.pragma_update(None, "journal_mode", "WAL").unwrap();
+    unified.pragma_update(None, "synchronous", "FULL").unwrap();
+    unified.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let outcome =
+        super::sql::unified_financial::importer::import_stopped_accounts_into_empty_finance(
+            &mut unified,
+            "installation",
+            &[&sa, &sb],
+        )
+        .unwrap();
+    assert!(
+        AccountStore::finance_proof_sealed_sql(&unified, Some(("installation", "acct-A"))).unwrap()
+    );
+    assert!(
+        !AccountStore::finance_proof_sealed_sql(&unified, Some(("installation", "acct-B")))
+            .unwrap()
+    );
+    for account in ["acct-A", "acct-B"] {
+        let first:i64=unified.query_row("SELECT rowid FROM finance_entries WHERE installation_id='installation' AND account_key=?1 AND entry_id='fee-1'",[account],|r|r.get(0)).unwrap();
+        let reviewed:i64=unified.query_row("SELECT reviewed_finance_rowid FROM campaign_entry_readiness WHERE installation_id='installation' AND account_key=?1",[account],|r|r.get(0)).unwrap();
+        assert_eq!(
+            reviewed, first,
+            "frontier must refer to the same original economic prefix"
+        );
+        if account == "acct-B" {
+            assert!(
+                first > 1,
+                "the regression requires reassigned physical rowids"
+            );
+            assert_eq!(
+                AccountStore::provenance_watermark_sql(&unified, Some(("installation", account)))
+                    .unwrap(),
+                Some(first)
+            );
+        }
+    }
+    assert_eq!(outcome.accounts, 2);
+    assert_eq!(outcome.tables_per_account, 39);
+    assert!(
+        outcome.imported_rows >= 20,
+        "all original source rows are preserved"
+    );
+    for table in [
+        "account_meta",
+        "strategy_instances",
+        "strategy_definition_versions",
+        "decisions",
+        "intents",
+        "account_policy",
+        "operation_receipts",
+        "campaign_source_epoch",
+        "campaign_late_head_epoch",
+        "storage_recovery",
+    ] {
+        let target_count: i64 = unified
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        let originals: i64 = [&sa, &sb]
+            .into_iter()
+            .map(|source| {
+                source
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .unwrap()
+            })
+            .sum();
+        assert_eq!(
+            target_count, originals,
+            "{table} exactly preserves both source accounts"
+        );
+    }
+    let copied: i64 = unified
+        .query_row(
+            "SELECT COUNT(*) FROM intents WHERE intent_id=?1",
+            [&one.intent_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        copied, 2,
+        "same source intent can exist on two separate accounts"
+    );
+    let snapshot: String = unified
+        .query_row(
+            "SELECT source_ref FROM cash_flows
+         WHERE installation_id='installation' AND account_key='acct-B'
+           AND event_id='opening:USDT'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(snapshot, "authenticated-flat");
+    let version: i64 = unified
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 6);
+    let mut fk = unified.prepare("PRAGMA foreign_key_check").unwrap();
+    assert!(fk.query([]).unwrap().next().unwrap().is_none());
+    drop(fk);
+    drop(unified);
+    let reopened = Connection::open(&destination).unwrap();
+    let count: i64 = reopened
+        .query_row(
+            "SELECT COUNT(*) FROM account_meta
+         WHERE installation_id='installation'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2);
+    drop(reopened);
+    // The same shifted B rowids must also preserve a fully sealed source.
+    let source_writer = Connection::open(&b_path).unwrap();
+    source_writer
+        .execute(
+            "UPDATE source_cursors SET watermark=2 WHERE source='finance_provenance'",
+            [],
+        )
+        .unwrap();
+    let import_again = |mark: i64| {
+        source_writer
+            .execute(
+                "UPDATE source_cursors SET watermark=?1 WHERE source='finance_provenance'",
+                [mark],
+            )
+            .unwrap();
+        let file = path();
+        let mut db = Connection::open(file).unwrap();
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
+        db.pragma_update(None, "synchronous", "FULL").unwrap();
+        db.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let result =
+            super::sql::unified_financial::importer::import_stopped_accounts_into_empty_finance(
+                &mut db,
+                "installation",
+                &[&sa, &sb],
+            );
+        (db, result)
+    };
+    let (sealed, result) = import_again(2);
+    result.unwrap();
+    assert!(
+        AccountStore::finance_proof_sealed_sql(&sealed, Some(("installation", "acct-B"))).unwrap()
+    );
+    assert_eq!(
+        AccountStore::provenance_watermark_sql(&sealed, Some(("installation", "acct-B"))).unwrap(),
+        Some(4)
+    );
+    let (invalid, result) = import_again(99);
+    assert!(matches!(
+        result,
+        Err(StoreError::Invalid("UNIFIED_IMPORT_FRONTIER_OUT_OF_RANGE"))
+    ));
+    assert_eq!(
+        invalid
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+        0,
+        "failed translation must roll back the whole import"
+    );
+    let _ = std::fs::remove_file(&destination);
+}
+
+#[test]
+fn risk_book_contract_unified_offline_import_rejects_active_native_writer() {
+    use rusqlite::{Connection, OpenFlags};
+    let source_owner = store();
+    let source =
+        Connection::open_with_flags(&source_owner.path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    assert!(
+        matches!(
+            super::sql::unified_financial::importer::import_stopped_accounts_into_empty_finance(
+                &mut target,
+                "installation",
+                &[&source],
+            ),
+            Err(StoreError::Invalid("ACCOUNT_WRITER_ALREADY_RUNNING"))
+        ),
+        "original native AccountStore writer must close BEFORE any source import"
+    );
+    let count: i64 = target
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+         AND name NOT LIKE 'sqlite_%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "refused import must not initialize even one new table"
+    );
+    drop(source);
+    drop(source_owner);
+    drop(target);
+    let _ = std::fs::remove_file(destination);
+}
+
+/// Genuine v5 RiskBook SQL (the same schema the old native owner opens),
+/// with a live HELD budget obligation and a separate immutable no-reserve
+/// fence. Accounts/intents/plans come from original AccountStore producers.
+fn unified_original_campaign_fixture(
+    path: &std::path::Path,
+    campaign: &str,
+    primary: (&str, &str, &str),
+    other: (&str, &str, &str),
+) {
+    use rusqlite::{Connection, params};
+    let source = Connection::open(path).unwrap();
+    source.pragma_update(None, "journal_mode", "WAL").unwrap();
+    source.pragma_update(None, "synchronous", "FULL").unwrap();
+    source.pragma_update(None, "foreign_keys", "ON").unwrap();
+    source
+        .execute_batch(include_str!("risk/book/schema.sql"))
+        .unwrap();
+    source
+        .execute(
+            "INSERT INTO risk_meta VALUES
+         (1,?1,'installation',1,7,2,1,'10','1','100','0','1',
+          '100','0','0','2','0')",
+            [campaign],
+        )
+        .unwrap();
+    for (key, reserved) in [(primary.0, "1"), (other.0, "0")] {
+        source
+            .execute(
+                "INSERT INTO risk_account_occupied VALUES(?1,?2)",
+                params![key, reserved],
+            )
+            .unwrap();
+        source
+            .execute(
+                "INSERT INTO risk_policy_account VALUES(?1,'10','8','5')",
+                [key],
+            )
+            .unwrap();
+        source
+            .execute(
+                "INSERT INTO risk_loss_source VALUES(?1,'0',?2)",
+                params![key, "d".repeat(64)],
+            )
+            .unwrap();
+        source
+            .execute(
+                "INSERT INTO risk_policy_strategy VALUES(?1,'strategy_test','8')",
+                [key],
+            )
+            .unwrap();
+        source
+            .execute(
+                "INSERT INTO risk_strategy_occupied VALUES(?1,'strategy_test',?2)",
+                params![key, reserved],
+            )
+            .unwrap();
+    }
+    source
+        .execute(
+            "INSERT INTO risk_entries(
+           reservation_key,account_key,strategy_id,intent_id,plan_sha256,
+           request_digest,policy_revision,state,loss_usdt,loss_usd,
+           entry_upper_usd,reserved_usdt,reserved_loss_usd,reserved_entry_usd,
+           entry_proof_digest,source_digest,book_sequence,held_at_ms,
+           reserve_read_floor_ms,native_incarnation)
+         VALUES ('same-reservation',?1,'strategy_test',?2,?3,?4,1,'HELD',
+                 '1','1','2','1','1','2',?5,?6,1,10000,9995,?7)",
+            params![
+                primary.0,
+                primary.1,
+                primary.2,
+                "a".repeat(64),
+                "b".repeat(64),
+                "c".repeat(64),
+                "f".repeat(32)
+            ],
+        )
+        .unwrap();
+    source
+        .execute(
+            "INSERT INTO risk_no_reserve(
+           reservation_key,account_key,intent_id,plan_sha256,request_hash,
+           record_digest,reason,policy_revision,book_sequence)
+         VALUES ('same-unsent',?1,?2,?3,?4,?5,'PROVEN_NOT_SENT',1,2)",
+            params![other.0, other.1, other.2, "a".repeat(64), "b".repeat(64)],
+        )
+        .unwrap();
+    let check: String = source
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(check, "ok");
+    let mut fk = source.prepare("PRAGMA foreign_key_check").unwrap();
+    assert!(fk.query([]).unwrap().next().unwrap().is_none());
+}
+
+#[test]
+fn risk_book_contract_unified_offline_import_all_47_original_tables_and_obligations() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent_with_plan_hash(&mut a, &"a".repeat(64));
+    let bi = intent_with_plan_hash(&mut b, &"b".repeat(64));
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let x = path();
+    let y = path();
+    unified_original_campaign_fixture(
+        &x,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    unified_original_campaign_fixture(
+        &y,
+        "campaign-Y",
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sx = Connection::open_with_flags(&x, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sy = Connection::open_with_flags(&y, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let report = super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+        &mut target,
+        &super::sql::unified_financial::importer::ExpectedFinanceInventory {
+            installation: "installation",
+            accounts: &["acct-A", "acct-B"],
+            campaigns: &["campaign-X", "campaign-Y"],
+        },
+        &[&sa, &sb],
+        &[&sx, &sy],
+    )
+    .unwrap();
+    assert_eq!((report.accounts, report.campaigns), (2, 2));
+    assert_eq!(
+        (report.tables_per_account, report.tables_per_campaign),
+        (39, 8)
+    );
+    assert!(report.account_rows >= 20);
+    assert_eq!(report.campaign_rows, 2 * (1 + 2 * 5 + 1 + 1));
+    for (table, expected) in [
+        ("risk_meta", 2_i64),
+        ("risk_policy_account", 4),
+        ("risk_account_occupied", 4),
+        ("risk_loss_source", 4),
+        ("risk_policy_strategy", 4),
+        ("risk_strategy_occupied", 4),
+        ("risk_entries", 2),
+        ("risk_no_reserve", 2),
+    ] {
+        let actual: i64 = target
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(actual, expected, "{table} exact original row count");
+    }
+    let obligations: (String, String, String, String) = target
+        .query_row(
+            "SELECT m.global_reserved_usdt,m.loss_reserved_usd,
+                m.entry_reserved_usd,e.reserved_entry_usd
+         FROM risk_meta m JOIN risk_entries e
+         ON e.installation_id=m.installation_id
+         AND e.campaign_id=m.campaign_id
+         WHERE m.campaign_id='campaign-X'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        obligations,
+        ("1".into(), "1".into(), "2".into(), "2".into())
+    );
+    let shared_keys: i64 = target
+        .query_row(
+            "SELECT COUNT(*) FROM risk_entries WHERE reservation_key='same-reservation'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        shared_keys, 2,
+        "same historical key must remain campaign-scoped"
+    );
+    // Original scoped INSPECT reads both identical historical reservation
+    // keys separately; a foreign campaign's plan is never disclosed.
+    {
+        let tx = target.unchecked_transaction().unwrap();
+        let x = crate::risk::read_unified_campaign_reservation(
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &ai.plan_hash,
+        )
+        .unwrap()
+        .unwrap();
+        let y = crate::risk::read_unified_campaign_reservation(
+            &tx,
+            "installation",
+            "campaign-Y",
+            "same-reservation",
+            &bi.plan_hash,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(x.state, okx_kernel::risk::model::RiskEntryState::Held);
+        assert_eq!(y.state, okx_kernel::risk::model::RiskEntryState::Held);
+        assert_eq!(x.reservation_sequence, 1);
+        assert_eq!(y.reservation_sequence, 1);
+        assert_eq!(x.plan_sha256, ai.plan_hash);
+        assert_eq!(y.plan_sha256, bi.plan_hash);
+        assert!(
+            crate::risk::read_unified_campaign_reservation(
+                &tx,
+                "installation",
+                "campaign-X",
+                "same-reservation",
+                &bi.plan_hash,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            crate::risk::read_unified_campaign_reservation(
+                &tx,
+                "installation",
+                "campaign-Y",
+                "same-reservation",
+                &ai.plan_hash,
+            )
+            .unwrap()
+            .is_none()
+        );
+        tx.commit().unwrap();
+    }
+    let mut fk = target.prepare("PRAGMA foreign_key_check").unwrap();
+    assert!(fk.query([]).unwrap().next().unwrap().is_none());
+    drop(fk);
+    drop(target);
+    let reopened = Connection::open(&destination).unwrap();
+    let (accounts, debts): (i64, i64) = (
+        reopened
+            .query_row("SELECT COUNT(*) FROM account_meta", [], |r| r.get(0))
+            .unwrap(),
+        reopened
+            .query_row(
+                "SELECT COUNT(*) FROM risk_entries WHERE state='HELD'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+    );
+    assert_eq!((accounts, debts), (2, 2));
+    let expected = super::sql::unified_financial::importer::ExpectedFinanceInventory {
+        installation: "installation",
+        accounts: &["acct-B", "acct-A"],
+        campaigns: &["campaign-Y", "campaign-X"],
+    };
+    let recovered = super::sql::unified_financial::importer::inspect_stopped_finance_import(
+        &reopened, &expected,
+    )
+    .unwrap();
+    assert_eq!(
+        recovered, report,
+        "ACK lost after COMMIT is a read-only recovery"
+    );
+    assert_eq!(recovered.inventory_sha256.len(), 64);
+    assert_eq!(recovered.content_sha256.len(), 64);
+}
+
+#[test]
+fn risk_book_contract_unified_offline_import_rejects_live_campaign_writer() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let campaign = path();
+    unified_original_campaign_fixture(
+        &campaign,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sc = Connection::open_with_flags(&campaign, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    // Exactly the original RiskBookStore::open_existing OS writer lock path.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(format!(
+            "{}.writer.lock",
+            campaign.canonicalize().unwrap().display()
+        ))
+        .unwrap();
+    lock.try_lock().unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    assert!(matches!(
+        super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+            &mut target,
+            &super::sql::unified_financial::importer::ExpectedFinanceInventory {
+                installation: "installation",
+                accounts: &["acct-A", "acct-B"],
+                campaigns: &["campaign-X"],
+            },
+            &[&sa, &sb],
+            &[&sc],
+        ),
+        Err(StoreError::Invalid("ACCOUNT_WRITER_ALREADY_RUNNING"))
+    ));
+    let tables: i64 = target
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+         AND name NOT LIKE 'sqlite_%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0, "must reject before creating finance schema");
+}
+
+#[test]
+fn risk_book_contract_unified_offline_import_bad_campaign_plan_rolls_back() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let campaign = path();
+    unified_original_campaign_fixture(
+        &campaign,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let tamper = Connection::open(&campaign).unwrap();
+    tamper
+        .execute("UPDATE risk_entries SET plan_sha256=?1", ["f".repeat(64)])
+        .unwrap();
+    drop(tamper);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sc = Connection::open_with_flags(&campaign, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    assert!(
+        super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+            &mut target,
+            &super::sql::unified_financial::importer::ExpectedFinanceInventory {
+                installation: "installation",
+                accounts: &["acct-A", "acct-B"],
+                campaigns: &["campaign-X"],
+            },
+            &[&sa, &sb],
+            &[&sc],
+        )
+        .is_err(),
+        "campaign must not import an intent with a forged plan digest"
+    );
+    let tables: i64 = target
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+         AND name NOT LIKE 'sqlite_%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        tables, 0,
+        "account and campaign import must roll back together"
+    );
+}
+
+#[test]
+fn risk_book_contract_unified_offline_import_rejects_corrupt_legacy_risk_aggregates() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let campaign = path();
+    unified_original_campaign_fixture(
+        &campaign,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    // Both original SQLite integrity and foreign-key checks can be green
+    // while a mutable cached capacity has been tampered with.
+    let tamper = Connection::open(&campaign).unwrap();
+    tamper
+        .execute("UPDATE risk_meta SET global_reserved_usdt='0'", [])
+        .unwrap();
+    drop(tamper);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sc = Connection::open_with_flags(&campaign, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    assert!(matches!(
+        super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+            &mut target,
+            &super::sql::unified_financial::importer::ExpectedFinanceInventory {
+                installation: "installation",
+                accounts: &["acct-A", "acct-B"],
+                campaigns: &["campaign-X"],
+            },
+            &[&sa, &sb],
+            &[&sc],
+        ),
+        Err(StoreError::Invalid(
+            "UNIFIED_LEGACY_CAMPAIGN_AGGREGATES_INVALID"
+        ))
+    ));
+    let tables: i64 = target
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+         AND name NOT LIKE 'sqlite_%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        tables, 0,
+        "corrupt source must not initialize the unified database"
+    );
+}
+
+#[test]
+fn risk_book_contract_unified_manifest_refuses_missing_account_or_campaign_before_schema() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let x = path();
+    let y = path();
+    unified_original_campaign_fixture(
+        &x,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    unified_original_campaign_fixture(
+        &y,
+        "campaign-Y",
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sx = Connection::open_with_flags(&x, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sy = Connection::open_with_flags(&y, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let importer = super::sql::unified_financial::importer::import_stopped_finance_into_empty;
+    for (accounts, campaigns) in [
+        (vec!["acct-A"], vec!["campaign-X", "campaign-Y"]),
+        (vec!["acct-A", "acct-B"], vec!["campaign-X"]),
+        (vec!["acct-A", "acct-A"], vec!["campaign-X", "campaign-Y"]),
+    ] {
+        let destination = path();
+        let mut target = Connection::open(&destination).unwrap();
+        target.pragma_update(None, "journal_mode", "WAL").unwrap();
+        target.pragma_update(None, "synchronous", "FULL").unwrap();
+        target.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let expected = super::sql::unified_financial::importer::ExpectedFinanceInventory {
+            installation: "installation",
+            accounts: &accounts,
+            campaigns: &campaigns,
+        };
+        assert!(importer(&mut target, &expected, &[&sa, &sb], &[&sx, &sy]).is_err());
+        let count: i64 = target
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+             AND name NOT LIKE 'sqlite_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "incomplete/duplicate inventory must not create target schema"
+        );
+    }
+}
+
+#[test]
+fn risk_book_contract_unified_manifest_detects_modified_financial_fact_after_reopen() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let campaign = path();
+    unified_original_campaign_fixture(
+        &campaign,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sc = Connection::open_with_flags(&campaign, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let expected = super::sql::unified_financial::importer::ExpectedFinanceInventory {
+        installation: "installation",
+        accounts: &["acct-A", "acct-B"],
+        campaigns: &["campaign-X"],
+    };
+    let import = super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+        &mut target,
+        &expected,
+        &[&sa, &sb],
+        &[&sc],
+    )
+    .unwrap();
+    assert_eq!(
+        super::sql::unified_financial::importer::inspect_stopped_finance_import(
+            &target, &expected,
+        ).unwrap(),
+        import
+    );
+    // A retry must not overwrite a committed source inventory or duplicate debt.
+    assert!(matches!(
+        super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+            &mut target,
+            &expected,
+            &[&sa, &sb],
+            &[&sc],
+        ),
+        Err(StoreError::Invalid("UNIFIED_IMPORT_TARGET_NOT_EMPTY"))
+    ));
+    assert!(
+        target
+            .execute(
+                "UPDATE finance_import_manifest SET content_sha256=?1",
+                ["0".repeat(64)]
+            )
+            .is_err(),
+        "completed offline marker is immutable"
+    );
+    drop(target);
+    let reopened = Connection::open(&destination).unwrap();
+    assert_eq!(
+        super::sql::unified_financial::importer::inspect_stopped_finance_import(
+            &reopened, &expected,
+        )
+        .unwrap(),
+        import
+    );
+    // SQL integrity, FKs and schema version remain valid, but financial
+    // content is no longer what the single committed import recorded.
+    reopened
+        .execute(
+            "UPDATE risk_meta SET global_limit_usdt='11' WHERE campaign_id='campaign-X'",
+            [],
+        )
+        .unwrap();
+    let check: String = reopened
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(check, "ok");
+    assert!(matches!(
+        super::sql::unified_financial::importer::inspect_stopped_finance_import(
+            &reopened, &expected,
+        ),
+        Err(StoreError::Invalid(
+            "UNIFIED_IMPORT_CONTENT_DIGEST_MISMATCH"
+        ))
+    ));
+}
+
+#[test]
+fn risk_book_contract_child_full_original_import_os_boundary() {
+    use rusqlite::{Connection, OpenFlags};
+    let Ok(destination) = std::env::var("OKX_510_FULL_IMPORT_TARGET") else {
+        return;
+    };
+    let a = std::env::var("OKX_510_FULL_IMPORT_ACCOUNT_A").unwrap();
+    let b = std::env::var("OKX_510_FULL_IMPORT_ACCOUNT_B").unwrap();
+    let campaign = std::env::var("OKX_510_FULL_IMPORT_CAMPAIGN").unwrap();
+    let sa = Connection::open_with_flags(&a, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&b, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sc = Connection::open_with_flags(&campaign, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let expected = super::sql::unified_financial::importer::ExpectedFinanceInventory {
+        installation: "installation",
+        accounts: &["acct-A", "acct-B"],
+        campaigns: &["campaign-X"],
+    };
+    // The importer itself blocks at an actual SQLite transaction boundary.
+    // A return before the injected point is a broken test, not a success.
+    super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+        &mut target,
+        &expected,
+        &[&sa, &sb],
+        &[&sc],
+    )
+    .expect("the child must be killed at the actual SQL commit barrier");
+    panic!("OS kill fault injection was not reached");
+}
+
+fn full_import_os_kill(
+    destination: &std::path::Path,
+    a: &std::path::Path,
+    b: &std::path::Path,
+    campaign: &std::path::Path,
+    phase: &str,
+) {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+        sync::mpsc,
+        time::Duration,
+    };
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "risk_book_contract_child_full_original_import_os_boundary",
+            "--nocapture",
+        ])
+        .env("OKX_510_FULL_IMPORT_TARGET", destination)
+        .env("OKX_510_FULL_IMPORT_ACCOUNT_A", a)
+        .env("OKX_510_FULL_IMPORT_ACCOUNT_B", b)
+        .env("OKX_510_FULL_IMPORT_CAMPAIGN", campaign)
+        .env("OKX_510_FULL_IMPORT_FAULT", phase)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = child.stdout.take().unwrap();
+    let marker = format!("OKX_510_FULL_IMPORT_REACHED_{phase}");
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if line.unwrap_or_default().contains(&marker) {
+                let _ = sender.send(());
+                return;
+            }
+        }
+    });
+    let observed = receiver.recv_timeout(Duration::from_secs(15));
+    child.kill().unwrap();
+    assert!(
+        !child.wait().unwrap().success(),
+        "child must physically terminate abnormally"
+    );
+    reader.join().unwrap();
+    assert!(
+        observed.is_ok(),
+        "full SQL importer did not reach requested physical COMMIT barrier {phase}"
+    );
+}
+
+#[test]
+fn risk_book_contract_full_original_import_os_kill_before_after_commit() {
+    use rusqlite::Connection;
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let campaign = path();
+    unified_original_campaign_fixture(
+        &campaign,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let expected = super::sql::unified_financial::importer::ExpectedFinanceInventory {
+        installation: "installation",
+        accounts: &["acct-A", "acct-B"],
+        campaigns: &["campaign-X"],
+    };
+    let rolled_back = path();
+    full_import_os_kill(&rolled_back, &ap, &bp, &campaign, "BEFORE_COMMIT");
+    let db = Connection::open(&rolled_back).unwrap();
+    let table_count: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+         AND name NOT LIKE 'sqlite_%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        table_count, 0,
+        "kill before COMMIT must roll back all 47 financial tables"
+    );
+    assert!(
+        super::sql::unified_financial::importer::inspect_stopped_finance_import(&db, &expected,)
+            .is_err(),
+        "a partial import cannot appear committed"
+    );
+    drop(db);
+
+    let durable = path();
+    full_import_os_kill(&durable, &ap, &bp, &campaign, "AFTER_COMMIT");
+    let db = Connection::open(&durable).unwrap();
+    let verified =
+        super::sql::unified_financial::importer::inspect_stopped_finance_import(&db, &expected)
+            .unwrap();
+    assert_eq!((verified.accounts, verified.campaigns), (2, 1));
+    assert!(verified.account_rows >= 20);
+    assert_eq!(verified.campaign_rows, 1 + 2 * 5 + 1 + 1);
+    let (remaining_entry, reserved_loss): (String, String) = db
+        .query_row(
+            "SELECT entry_reserved_usd,loss_reserved_usd FROM risk_meta
+         WHERE installation_id='installation' AND campaign_id='campaign-X'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((remaining_entry, reserved_loss), ("2".into(), "1".into()));
+    let status: String = db
+        .query_row(
+            "SELECT state FROM finance_import_manifest WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        status, "OFFLINE_NOT_AUTHORIZED",
+        "commit never grants live trading authority"
+    );
+}
+
+#[test]
+fn risk_book_contract_scoped_original_risk_aggregate_checker_is_campaign_isolated() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let x = path();
+    let y = path();
+    unified_original_campaign_fixture(
+        &x,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    unified_original_campaign_fixture(
+        &y,
+        "campaign-Y",
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sx = Connection::open_with_flags(&x, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sy = Connection::open_with_flags(&y, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let expected = super::sql::unified_financial::importer::ExpectedFinanceInventory {
+        installation: "installation",
+        accounts: &["acct-A", "acct-B"],
+        campaigns: &["campaign-X", "campaign-Y"],
+    };
+    super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+        &mut target,
+        &expected,
+        &[&sa, &sb],
+        &[&sx, &sy],
+    )
+    .unwrap();
+    {
+        let tx = target.transaction().unwrap();
+        let x =
+            crate::risk::read_unified_campaign_summary(&tx, "installation", "campaign-X").unwrap();
+        let y =
+            crate::risk::read_unified_campaign_summary(&tx, "installation", "campaign-Y").unwrap();
+        assert_eq!((x.book_sequence, y.book_sequence), (2, 2));
+        assert_eq!(
+            (
+                x.global_reserved_usdt.as_str(),
+                y.global_reserved_usdt.as_str()
+            ),
+            ("1", "1")
+        );
+        assert_eq!(
+            (x.reserved_loss_usd.as_str(), y.reserved_loss_usd.as_str()),
+            ("1", "1")
+        );
+        assert_eq!(
+            (
+                x.remaining_entry_usd.as_str(),
+                y.remaining_entry_usd.as_str()
+            ),
+            ("98", "98")
+        );
+        crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
+        crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-Y").unwrap();
+        assert!(
+            crate::risk::verify_unified_import_campaign(&tx, "foreign-installation", "campaign-X",)
+                .is_err(),
+            "wrong installation can never inspect a campaign"
+        );
+        tx.rollback().unwrap();
+    }
+    // Out-of-band damage in only campaign Y must not contaminate X's
+    // legitimate obligations or silently pass Y's primary-vs-cache proof.
+    target
+        .execute(
+            "UPDATE risk_account_occupied SET reserved_usdt='3'
+         WHERE installation_id='installation' AND campaign_id='campaign-Y'
+           AND account_key='acct-B'",
+            [],
+        )
+        .unwrap();
+    let tx = target.transaction().unwrap();
+    crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
+    assert_eq!(
+        crate::risk::read_unified_campaign_summary(&tx, "installation", "campaign-X")
+            .unwrap()
+            .global_reserved_usdt,
+        "1"
+    );
+    assert!(
+        crate::risk::read_unified_campaign_summary(&tx, "installation", "campaign-Y",).is_err(),
+        "a corrupt campaign cannot expose a misleading summary"
+    );
+    assert!(
+        crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-Y",).is_err()
+    );
+    tx.rollback().unwrap();
+    assert!(super::sql::unified_financial::importer::inspect_stopped_finance_import(
+        &target, &expected,
+    ).is_err(), "cold readback must detect changed reserves");
+}
+
+#[test]
+fn risk_book_contract_unified_original_begin_post_and_account_intent_one_commit() {
+    use rusqlite::{Connection, OpenFlags};
+    let mut a = store_with_account_campaign("acct-A", "campaign-X");
+    let mut b = store_with_account_campaign("acct-B", "campaign-Y");
+    // POST causal inputs require an actual 64-hex native plan identity.
+    let ai = intent_with_plan_hash(&mut a, &"e".repeat(64));
+    let bi = intent_with_plan_hash(&mut b, &"e".repeat(64));
+    for (store, prepared) in [(&mut a, &ai), (&mut b, &bi)] {
+        // Source v2 AccountStore owns these rows and receipts BEFORE import.
+        // There are no handwritten RESERVED states in the combined test.
+        store
+            .connection
+            .execute(
+                "UPDATE intents SET deadline=20000 WHERE intent_id=?1",
+                [&prepared.intent_id],
+            )
+            .unwrap();
+        store
+            .reserve(
+                &CentralReceipt {
+                    reservation_key: "same-reservation".into(),
+                    account_key: store.meta.account_key.clone(),
+                    installation_id: store.meta.installation_id.clone(),
+                    instance_id: None,
+                    intent_id: prepared.intent_id.clone(),
+                    plan_hash: prepared.plan_hash.clone(),
+                    policy_revision: 1,
+                    receipt_hash: "b".repeat(64),
+                    requested_loss_usd: Decimal::ONE,
+                    conversion_digest: "c".repeat(64),
+                },
+                3,
+            )
+            .unwrap();
+    }
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let x = path();
+    let y = path();
+    unified_original_campaign_fixture(
+        &x,
+        "campaign-X",
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+    );
+    unified_original_campaign_fixture(
+        &y,
+        "campaign-Y",
+        ("acct-B", &bi.intent_id, &bi.plan_hash),
+        ("acct-A", &ai.intent_id, &ai.plan_hash),
+    );
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sx = Connection::open_with_flags(&x, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sy = Connection::open_with_flags(&y, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let destination = path();
+    let mut target = Connection::open(&destination).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let expected = super::sql::unified_financial::importer::ExpectedFinanceInventory {
+        installation: "installation",
+        accounts: &["acct-A", "acct-B"],
+        campaigns: &["campaign-X", "campaign-Y"],
+    };
+    super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+        &mut target,
+        &expected,
+        &[&sa, &sb],
+        &[&sx, &sy],
+    )
+    .unwrap();
+
+    let cohort = &["acct-A", "acct-B"];
+    // Missing ORIGINAL receipt must reject even when RiskBook is HELD.
+    {
+        let tx = target.transaction().unwrap();
+        tx.execute(
+            "DELETE FROM risk_receipts WHERE installation_id='installation'
+             AND account_key='acct-A' AND reservation_key='same-reservation'",
+            [],
+        )
+        .unwrap();
+        let denied = crate::risk::test_stage_scoped_begin_post(
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &ai.plan_hash,
+            cohort,
+            2,
+        );
+        assert_eq!(denied.unwrap_err(), "ACCOUNT_POST_ORIGINAL_RECEIPT_MISSING");
+        tx.rollback().unwrap();
+    }
+    // Wrong/paused source policy must not consume a campaign reserve.
+    {
+        let tx = target.transaction().unwrap();
+        tx.execute(
+            "UPDATE account_policy SET paused=1 WHERE installation_id='installation'
+             AND account_key='acct-A' AND singleton=1",
+            [],
+        )
+        .unwrap();
+        let denied = crate::risk::test_stage_scoped_begin_post(
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &ai.plan_hash,
+            cohort,
+            2,
+        );
+        assert_eq!(denied.unwrap_err(), "RISK_INCREASE_STOPPED");
+        tx.rollback().unwrap();
+    }
+
+    // Original deadline, policy revision and SQL recovery fences must
+    // reject a transition without any persistent RiskBook POST or account ACK.
+    for (sql, expected_reason) in [
+        (
+            "UPDATE intents SET deadline=10002
+             WHERE installation_id='installation' AND account_key='acct-A'
+               AND intent_id='intent'",
+            "COMMAND_EXPIRED",
+        ),
+        (
+            "UPDATE account_policy SET revision=2
+             WHERE installation_id='installation' AND account_key='acct-A'",
+            "POLICY_CHANGED",
+        ),
+        (
+            "UPDATE storage_recovery SET requires_reconcile=1
+             WHERE installation_id='installation' AND account_key='acct-A'",
+            "STORAGE_RECOVERY_INCOMPLETE",
+        ),
+    ] {
+        let tx = target.transaction().unwrap();
+        assert_eq!(tx.execute(sql, []).unwrap(), 1);
+        let denied = crate::risk::test_stage_scoped_begin_post(
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &ai.plan_hash,
+            cohort,
+            2,
+        );
+        assert_eq!(denied.unwrap_err(), expected_reason);
+        tx.rollback().unwrap();
+    }
+    assert!(matches!(
+        AccountStore::post_fence_evidence_sql(
+            &target,
+            "installation",
+            "acct-A",
+            &ai.intent_id,
+            Some("same-reservation")
+        ),
+        Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED"))
+    ));
+
+    // Force a storage failure AFTER the RiskBook POSTED change, in the
+    // original account intent write. Even COMMIT after Err must not persist
+    // half a grant: the production command savepoint owns the rollback.
+    {
+        let tx = target.transaction().unwrap();
+        let snapshot = |tx: &rusqlite::Transaction<'_>| {
+            tx.query_row(
+                "SELECT e.state,i.state,m.book_sequence,r.state
+                 FROM risk_entries e JOIN intents i
+                  ON i.installation_id=e.installation_id AND i.account_key=e.account_key AND i.intent_id=e.intent_id
+                 JOIN risk_meta m ON m.installation_id=e.installation_id AND m.campaign_id=e.campaign_id
+                 JOIN risk_receipts r ON r.installation_id=i.installation_id AND r.account_key=i.account_key AND r.intent_id=i.intent_id
+                 WHERE e.installation_id='installation' AND e.campaign_id='campaign-X' AND e.reservation_key='same-reservation'",
+                [], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,i64>(2)?, row.get::<_,String>(3)?))
+            ).unwrap()
+        };
+        let before = snapshot(&tx);
+        tx.execute_batch(
+            "CREATE TEMP TRIGGER fail_original_account_post BEFORE UPDATE ON intents
+            WHEN NEW.state='POSTING' AND NEW.account_key='acct-A'
+            BEGIN SELECT RAISE(ABORT,'INJECTED_ACCOUNT_POST_FAILURE'); END;",
+        )
+        .unwrap();
+        let result = crate::risk::test_stage_scoped_begin_post(
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &ai.plan_hash,
+            cohort,
+            2,
+        );
+        assert_eq!(result.unwrap_err(), "RISK_STORAGE_UNAVAILABLE");
+        assert_eq!(
+            snapshot(&tx),
+            before,
+            "the whole financial command rolled back"
+        );
+        tx.execute_batch("DROP TRIGGER fail_original_account_post")
+            .unwrap();
+        tx.commit().unwrap();
+    }
+
+    // First execute a true ROLLBACK after both RiskBook and native intent
+    // changed, proving neither half survives on a shared SQLite file.
+    {
+        let tx = target.transaction().unwrap();
+        assert_eq!(
+            crate::risk::test_stage_scoped_begin_post(
+                &tx,
+                "installation",
+                "campaign-X",
+                "same-reservation",
+                &ai.plan_hash,
+                cohort,
+                2,
+            )
+            .unwrap(),
+            3
+        );
+        tx.rollback().unwrap();
+    }
+    let before: (String, String, i64) = target
+        .query_row(
+            "SELECT e.state,i.state,m.book_sequence
+         FROM risk_entries e JOIN intents i
+           ON e.installation_id=i.installation_id AND e.account_key=i.account_key
+          AND e.intent_id=i.intent_id JOIN risk_meta m
+           ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
+         WHERE e.campaign_id='campaign-X' AND e.reservation_key='same-reservation'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(before, ("HELD".into(), "RESERVED".into(), 2));
+
+    // Independently of ordinary ROLLBACK, OS-kill the actual Rust child
+    // during a coupled original AccountStore + native RiskBook transaction.
+    // The installed Windows witness remains separate/NOT_PROVEN.
+    kill_unified_native_post_at_commit(&destination, &ai.plan_hash, &ai.intent_id, "BEFORE_COMMIT");
+    let rolled_back: (String, String, i64) = target
+        .query_row(
+            "SELECT e.state,i.state,m.book_sequence
+         FROM risk_entries e JOIN intents i
+           ON e.installation_id=i.installation_id AND e.account_key=i.account_key
+          AND e.intent_id=i.intent_id JOIN risk_meta m
+           ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
+         WHERE e.campaign_id='campaign-X' AND e.reservation_key='same-reservation'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(rolled_back, ("HELD".into(), "RESERVED".into(), 2));
+
+    kill_unified_native_post_at_commit(&destination, &ai.plan_hash, &ai.intent_id, "AFTER_COMMIT");
+    drop(target);
+    let mut recovered = Connection::open(&destination).unwrap();
+    let state: (String, String, i64) = recovered
+        .query_row(
+            "SELECT e.state,i.state,m.book_sequence
+         FROM risk_entries e JOIN intents i
+           ON e.installation_id=i.installation_id AND e.account_key=i.account_key
+          AND e.intent_id=i.intent_id JOIN risk_meta m
+           ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
+         WHERE e.campaign_id='campaign-X' AND e.reservation_key='same-reservation'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(state, ("POSTED".into(), "POSTING".into(), 3));
+    // Verify the *original* AccountStore acknowledgement witness too, not
+    // only a changed intent enum or RiskBook sequence. A lost ACK recovers
+    // one exact durable begin_post_at and one original POSTED receipt.
+    assert_eq!(
+        AccountStore::post_fence_evidence_sql(
+            &recovered,
+            "installation",
+            "acct-A",
+            &ai.intent_id,
+            Some("same-reservation")
+        )
+        .unwrap(),
+        (10_002, "POSTED".into()),
+    );
+    assert!(matches!(
+        AccountStore::post_fence_evidence_sql(
+            &recovered,
+            "installation",
+            "acct-B",
+            &bi.intent_id,
+            Some("same-reservation")
+        ),
+        Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED"))
+    ));
+    assert!(matches!(
+        AccountStore::post_fence_evidence_sql(
+            &recovered,
+            "installation",
+            "acct-A",
+            &ai.intent_id,
+            Some("wrong-reservation")
+        ),
+        Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED"))
+    ));
+
+    let foreign: (String, i64) = recovered
+        .query_row(
+            "SELECT e.state,m.book_sequence FROM risk_entries e JOIN risk_meta m
+           ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
+         WHERE e.campaign_id='campaign-Y' AND e.reservation_key='same-reservation'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        foreign,
+        ("HELD".into(), 2),
+        "same reservation key in Y is untouched"
+    );
+    {
+        let tx = recovered.transaction().unwrap();
+        crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
+        crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-Y").unwrap();
+        let retry = crate::risk::test_stage_scoped_begin_post(
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &ai.plan_hash,
+            cohort,
+            3,
+        );
+        assert_eq!(retry.unwrap_err(), "INTENT_ALREADY_POSTED_OR_RESOLVED");
+        tx.rollback().unwrap();
+    }
+    let count: i64 = recovered
+        .query_row(
+            "SELECT COUNT(*) FROM risk_entries
+         WHERE campaign_id='campaign-X' AND state='POSTED'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "lost ACK must never create a second POST grant");
+
+    // Crash recovery must no longer leave AccountStore UNKNOWN alongside a
+    // RiskBook POSTED record. Exercise the EXACT original production SQL
+    // dispatch, first with a real rollback and then with one COMMIT.
+    // Neither path can authorize another venue POST or refund any reserve.
+    use crate::account_worker::{
+        UnifiedFinanceWrite, UnifiedFinanceWriteReceipt, apply_original_unified_finance_transaction,
+    };
+    for commit in [false, true] {
+        let tx = recovered
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let receipt = apply_original_unified_finance_transaction(
+            &tx,
+            "installation",
+            UnifiedFinanceWrite::RecoverPosting {
+                account: "acct-A".into(),
+                now: 10_003,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            receipt,
+            UnifiedFinanceWriteReceipt::Recovered { changed: 1 }
+        );
+        let state: (String, String, String, i64) = tx
+            .query_row(
+                "SELECT e.state,i.state,r.state,m.book_sequence
+                 FROM risk_entries e JOIN intents i
+                   ON e.installation_id=i.installation_id
+                  AND e.account_key=i.account_key AND e.intent_id=i.intent_id
+                 JOIN risk_receipts r ON r.installation_id=i.installation_id
+                   AND r.account_key=i.account_key AND r.intent_id=i.intent_id
+                 JOIN risk_meta m ON m.installation_id=e.installation_id
+                   AND m.campaign_id=e.campaign_id
+                 WHERE e.campaign_id='campaign-X'
+                   AND e.reservation_key='same-reservation'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            ("UNKNOWN".into(), "UNKNOWN".into(), "UNKNOWN".into(), 4)
+        );
+        crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
+        if commit {
+            tx.commit().unwrap();
+        } else {
+            tx.rollback().unwrap();
+        }
+    }
+    drop(recovered);
+    let mut recovered = Connection::open(&destination).unwrap();
+    recovered.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let joint: (String, String, String, i64) = recovered
+        .query_row(
+            "SELECT e.state,i.state,r.state,m.book_sequence
+         FROM risk_entries e JOIN intents i
+           ON e.installation_id=i.installation_id
+          AND e.account_key=i.account_key AND e.intent_id=i.intent_id
+         JOIN risk_receipts r ON r.installation_id=i.installation_id
+           AND r.account_key=i.account_key AND r.intent_id=i.intent_id
+         JOIN risk_meta m ON m.installation_id=e.installation_id
+           AND m.campaign_id=e.campaign_id
+         WHERE e.campaign_id='campaign-X' AND e.reservation_key='same-reservation'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        joint,
+        ("UNKNOWN".into(), "UNKNOWN".into(), "UNKNOWN".into(), 4)
+    );
+    assert_eq!(
+        apply_original_unified_finance_transaction(
+            &recovered.transaction().unwrap(),
+            "installation",
+            UnifiedFinanceWrite::RecoverPosting {
+                account: "acct-A".into(),
+                now: 10_004,
+            },
+        )
+        .unwrap(),
+        UnifiedFinanceWriteReceipt::Recovered { changed: 0 },
+        "exact recovery replay may not change a recorded UNKNOWN"
+    );
+    let tx = recovered.transaction().unwrap();
+    for campaign in ["campaign-X", "campaign-Y"] {
+        crate::risk::verify_unified_import_campaign(&tx, "installation", campaign).unwrap();
+    }
+    let foreign: (String, i64) = tx
+        .query_row(
+            "SELECT e.state,m.book_sequence FROM risk_entries e JOIN risk_meta m
+         ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
+         WHERE e.campaign_id='campaign-Y' AND e.reservation_key='same-reservation'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(foreign, ("HELD".into(), 2));
+    tx.rollback().unwrap();
+
+    // Force an ORIGINAL cross-owner identity failure AFTER the native
+    // AccountStore accepts the venue result. Even if the caller tries to
+    // COMMIT after Err, the dispatch's nested savepoint must undo the
+    // intermediate account outcome and revision. The corrupted receipt is
+    // repaired OUTSIDE the savepoint before this real SQL COMMIT.
+    {
+        let tx = recovered
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let before: (String, i64, String, Option<String>) = tx
+            .query_row(
+                "SELECT i.state,i.revision,r.state,i.exchange_order_id
+                 FROM intents i JOIN risk_receipts r
+                   ON r.installation_id=i.installation_id
+                  AND r.account_key=i.account_key AND r.intent_id=i.intent_id
+                 WHERE i.installation_id='installation'
+                   AND i.account_key='acct-A' AND i.intent_id=?1",
+                [&ai.intent_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(before.0, "UNKNOWN");
+        assert_eq!(before.2, "UNKNOWN");
+        assert_eq!(
+            tx.execute(
+                "UPDATE risk_receipts SET reservation_key='wrong-reservation'
+             WHERE installation_id='installation' AND account_key='acct-A'
+               AND intent_id=?1",
+                [&ai.intent_id],
+            )
+            .unwrap(),
+            1
+        );
+        assert!(matches!(
+            apply_original_unified_finance_transaction(
+                &tx,
+                "installation",
+                UnifiedFinanceWrite::RecordOutcome {
+                    account: "acct-A".into(),
+                    intent: ai.intent_id.clone(),
+                    state: IntentState::Acknowledged,
+                    exchange_order_id: Some("should-never-persist".into()),
+                    evidence: "verified-source-but-risk-address-conflicts".into(),
+                    now: 10_005,
+                }
+            ),
+            Err(StoreError::Invalid("UNIFIED_OUTCOME_RISK_ENTRY_MISSING"))
+        ));
+        let after: (String, i64, String, Option<String>) = tx
+            .query_row(
+                "SELECT i.state,i.revision,r.state,i.exchange_order_id
+                 FROM intents i JOIN risk_receipts r
+                   ON r.installation_id=i.installation_id
+                  AND r.account_key=i.account_key AND r.intent_id=i.intent_id
+                 WHERE i.installation_id='installation'
+                   AND i.account_key='acct-A' AND i.intent_id=?1",
+                [&ai.intent_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(after, before, "risk rejection rolls back AccountStore");
+        assert_eq!(
+            tx.execute(
+                "UPDATE risk_receipts SET reservation_key='same-reservation'
+             WHERE installation_id='installation' AND account_key='acct-A'
+               AND intent_id=?1",
+                [&ai.intent_id],
+            )
+            .unwrap(),
+            1
+        );
+        tx.commit().unwrap();
+    }
+
+    // A confirmed venue ACK after a killed POST must move the original
+    // AccountStore + RiskBook to OPEN together, without refund or another
+    // exchange POST. Exercise rollback and one actual COMMIT.
+    for commit in [false, true] {
+        let tx = recovered
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let result = apply_original_unified_finance_transaction(
+            &tx,
+            "installation",
+            UnifiedFinanceWrite::RecordOutcome {
+                account: "acct-A".into(),
+                intent: ai.intent_id.clone(),
+                state: IntentState::Acknowledged,
+                exchange_order_id: Some("venue-original-order".into()),
+                evidence: "venue-readback-validated-by-original-agent".into(),
+                now: 10_005,
+            },
+        )
+        .unwrap();
+        assert_eq!(result, UnifiedFinanceWriteReceipt::OutcomeRecorded);
+        let observed: (String, String, String, i64, String) = tx
+            .query_row(
+                "SELECT e.state,i.state,r.state,m.book_sequence,m.global_reserved_usdt
+                 FROM risk_entries e JOIN intents i
+                   ON e.installation_id=i.installation_id
+                  AND e.account_key=i.account_key AND e.intent_id=i.intent_id
+                 JOIN risk_receipts r
+                   ON r.installation_id=i.installation_id
+                  AND r.account_key=i.account_key AND r.intent_id=i.intent_id
+                 JOIN risk_meta m
+                   ON m.installation_id=e.installation_id
+                  AND m.campaign_id=e.campaign_id
+                 WHERE e.campaign_id='campaign-X'
+                   AND e.reservation_key='same-reservation'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            observed,
+            (
+                "OPEN".into(),
+                "ACKNOWLEDGED".into(),
+                "OPEN".into(),
+                5,
+                "1".into()
+            )
+        );
+        crate::risk::verify_unified_import_campaign(&tx, "installation", "campaign-X").unwrap();
+        if commit {
+            tx.commit().unwrap();
+        } else {
+            tx.rollback().unwrap();
+        }
+    }
+    drop(recovered);
+    let mut recovered = Connection::open(&destination).unwrap();
+    recovered.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let tx = recovered.transaction().unwrap();
+    assert_eq!(
+        tx.query_row::<(String, String, i64, String), _, _>(
+            "SELECT e.state,r.state,m.book_sequence,m.global_reserved_usdt
+             FROM risk_entries e JOIN risk_receipts r
+               ON r.installation_id=e.installation_id
+              AND r.account_key=e.account_key AND r.intent_id=e.intent_id
+             JOIN risk_meta m ON m.installation_id=e.installation_id
+              AND m.campaign_id=e.campaign_id
+             WHERE e.campaign_id='campaign-X'
+               AND e.reservation_key='same-reservation'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        )
+        .unwrap(),
+        ("OPEN".into(), "OPEN".into(), 5, "1".into())
+    );
+    assert_eq!(
+        apply_original_unified_finance_transaction(
+            &tx,
+            "installation",
+            UnifiedFinanceWrite::RecordOutcome {
+                account: "acct-A".into(),
+                intent: ai.intent_id.clone(),
+                state: IntentState::Acknowledged,
+                exchange_order_id: Some("venue-original-order".into()),
+                evidence: "venue-readback-validated-by-original-agent".into(),
+                now: 10_006,
+            }
+        )
+        .unwrap(),
+        UnifiedFinanceWriteReceipt::OutcomeRecorded
+    );
+    let exact_replay_seq: i64 = tx
+        .query_row(
+            "SELECT book_sequence FROM risk_meta
+         WHERE installation_id='installation' AND campaign_id='campaign-X'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(exact_replay_seq, 5);
+    let foreign: (String, i64) = tx
+        .query_row(
+            "SELECT e.state,m.book_sequence FROM risk_entries e JOIN risk_meta m
+         ON e.installation_id=m.installation_id AND e.campaign_id=m.campaign_id
+         WHERE e.campaign_id='campaign-Y' AND e.reservation_key='same-reservation'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(foreign, ("HELD".into(), 2));
+    tx.rollback().unwrap();
+}
+
+#[test]
+fn risk_book_contract_child_unified_native_post_os_kill_barrier() {
+    use rusqlite::{Connection, TransactionBehavior};
+    let Ok(path) = std::env::var("OKX_510_POST_CHILD_SQLITE") else {
+        return;
+    };
+    let plan = std::env::var("OKX_510_POST_CHILD_PLAN").unwrap();
+    let _intent = std::env::var("OKX_510_POST_CHILD_INTENT").unwrap();
+    let phase = std::env::var("OKX_510_POST_CHILD_PHASE").unwrap();
+    let mut db = Connection::open(path).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    assert_eq!(
+        crate::risk::test_stage_scoped_begin_post(
+            &tx,
+            "installation",
+            "campaign-X",
+            "same-reservation",
+            &plan,
+            &["acct-A", "acct-B"],
+            2,
+        )
+        .unwrap(),
+        3
+    );
+    match phase.as_str() {
+        "BEFORE_COMMIT" => std::mem::forget(tx),
+        "AFTER_COMMIT" => tx.commit().unwrap(),
+        _ => panic!("unknown import phase"),
+    }
+    use std::io::Write;
+    println!("OKX_510_UNIFIED_POST_REACHED_{phase}");
+    std::io::stdout().flush().unwrap();
+    std::thread::park();
+    unreachable!("parent must OS-kill child at real finance commit");
+}
+
+fn kill_unified_native_post_at_commit(
+    destination: &std::path::Path,
+    plan: &str,
+    intent: &str,
+    phase: &str,
+) {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+        sync::mpsc,
+        time::Duration,
+    };
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "risk_book_contract_child_unified_native_post_os_kill_barrier",
+            "--nocapture",
+        ])
+        .env("OKX_510_POST_CHILD_SQLITE", destination)
+        .env("OKX_510_POST_CHILD_PLAN", plan)
+        .env("OKX_510_POST_CHILD_INTENT", intent)
+        .env("OKX_510_POST_CHILD_PHASE", phase)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let marker = format!("OKX_510_UNIFIED_POST_REACHED_{phase}");
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if line.unwrap_or_default().contains(&marker) {
+                let _ = sender.send(());
+                return;
+            }
+        }
+    });
+    let observed = receiver.recv_timeout(Duration::from_secs(15));
+    child.kill().unwrap();
+    assert!(
+        !child.wait().unwrap().success(),
+        "actual native Rust subprocess must OS-exit"
+    );
+    reader.join().unwrap();
+    assert!(
+        observed.is_ok(),
+        "original account + RiskBook child never reached {phase}"
+    );
+}
+
+#[test]
+fn risk_book_contract_scoped_original_account_reserve_is_atomic_and_replay_exact() {
+    use rusqlite::{Connection, OpenFlags};
+
+    // Two genuine native v2 account producers use the SAME raw intent ID.
+    // Transfer their original rows into one unactivated v6 finance SQLite.
+    let mut a = store_with_account("acct-A");
+    let mut b = store_with_account("acct-B");
+    let ai = intent(&mut a);
+    let bi = intent(&mut b);
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let file = path();
+    let mut db = Connection::open(&file).unwrap();
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    db.pragma_update(None, "synchronous", "FULL").unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    super::sql::unified_financial::importer::import_stopped_accounts_into_empty_finance(
+        &mut db,
+        "installation",
+        &[&sa, &sb],
+    )
+    .unwrap();
+
+    let receipt = |account: &str, prepared: &StoredIntent| CentralReceipt {
+        reservation_key: "same-key".into(),
+        account_key: account.into(),
+        installation_id: "installation".into(),
+        instance_id: None,
+        intent_id: prepared.intent_id.clone(),
+        plan_hash: prepared.plan_hash.clone(),
+        policy_revision: 1,
+        receipt_hash: "b".repeat(64),
+        requested_loss_usd: Decimal::ONE,
+        conversion_digest: "c".repeat(64),
+    };
+    let ra = receipt("acct-A", &ai);
+    let rb = receipt("acct-B", &bi);
+    // Staged rows are invisible after rollback: neither account is reserved.
+    {
+        let tx = db.transaction().unwrap();
+        AccountStore::reserve_sql_transaction(&tx, Some(("installation", "acct-A")), &ra, 3)
+            .unwrap();
+        AccountStore::reserve_sql_transaction(&tx, Some(("installation", "acct-B")), &rb, 3)
+            .unwrap();
+        tx.rollback().unwrap();
+    }
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM risk_receipts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    // One caller-owned commit covers both scoped original account receipts.
+    {
+        let tx = db.transaction().unwrap();
+        AccountStore::reserve_sql_transaction(&tx, Some(("installation", "acct-A")), &ra, 3)
+            .unwrap();
+        AccountStore::reserve_sql_transaction(&tx, Some(("installation", "acct-B")), &rb, 3)
+            .unwrap();
+        tx.commit().unwrap();
+    }
+    assert_eq!(
+        db.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM risk_receipts WHERE reservation_key='same-key'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap(),
+        2,
+        "same venue-side IDs may coexist in distinct account scopes"
+    );
+    for account in ["acct-A", "acct-B"] {
+        let state: (String, String, i64) = db
+            .query_row(
+                "SELECT i.state,r.state,i.revision FROM intents i
+                 JOIN risk_receipts r ON i.installation_id=r.installation_id
+                   AND i.account_key=r.account_key AND i.intent_id=r.intent_id
+                 WHERE i.installation_id='installation' AND i.account_key=?1",
+                [account],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state.0, "RESERVED");
+        assert_eq!(state.1, "HELD");
+        assert_eq!(state.2, 1);
+    }
+    drop(db);
+    let mut reopened = Connection::open(&file).unwrap();
+    reopened.pragma_update(None, "foreign_keys", "ON").unwrap();
+    {
+        let tx = reopened.transaction().unwrap();
+        AccountStore::reserve_sql_transaction(&tx, Some(("installation", "acct-A")), &ra, 4)
+            .unwrap(); // Exact lost ACK returns the original receipt.
+        assert!(matches!(
+            AccountStore::reserve_sql_transaction(&tx, Some(("installation", "acct-B")), &ra, 4),
+            Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"))
+        ));
+        let mut altered = ra.clone();
+        altered.receipt_hash = "d".repeat(64);
+        assert!(matches!(
+            AccountStore::reserve_sql_transaction(
+                &tx,
+                Some(("installation", "acct-A")),
+                &altered,
+                4
+            ),
+            Err(StoreError::Invalid("CENTRAL_RECEIPT_CONFLICT"))
+        ));
+        tx.rollback().unwrap();
+    }
+    assert_eq!(
+        reopened
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_receipts", [], |r| r.get(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        reopened
+            .query_row::<String, _, _>("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap(),
+        "ok"
+    );
+}
+
+#[tokio::test]
+async fn risk_book_contract_one_installation_finance_owner_reuses_original_import_and_lock() {
+    use rusqlite::{Connection, OpenFlags};
+    use std::time::Duration;
+
+    // These are genuine original v2 account writers and the existing RiskBook
+    // campaign fixture. Nothing here mints a live owner epoch or trade permit.
+    let a_key = format!("okx:real:{}", "a".repeat(64));
+    let b_key = format!("okx:real:{}", "b".repeat(64));
+    let original_plan = "a".repeat(64);
+    let mut a = store_with_account_campaign(&a_key, "campaign-X");
+    let mut b = store_with_account_campaign(&b_key, "campaign-X");
+    let ai = intent_with_plan_hash_and_id(&mut a, &original_plan, "intent0001");
+    let bi = intent_with_plan_hash_and_id(&mut b, &original_plan, "intent0001");
+    for (store, generation, value) in [(&mut a, 5, "cursor-A"), (&mut b, 11, "cursor-B")] {
+        store
+            .ingest_page(&IngestPage {
+                cursor: Some(SourceCursor {
+                    source: "fills".into(),
+                    stream_partition: "SWAP".into(),
+                    cursor: value.into(),
+                    watermark: 20,
+                    generation,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    let original_capture_a = a.source_capture_state().unwrap();
+    let original_capture_b = b.source_capture_state().unwrap();
+    assert_eq!(original_capture_a.generation_base, 5);
+    assert_eq!(original_capture_b.generation_base, 11);
+    let original_manual_definition = a.strategy_definition("manual").unwrap();
+    let (ap, bp) = (a.path.clone(), b.path.clone());
+    let campaign = path();
+    unified_original_campaign_fixture(
+        &campaign,
+        "campaign-X",
+        (&a_key, &ai.intent_id, &ai.plan_hash),
+        (&b_key, &bi.intent_id, &bi.plan_hash),
+    );
+    // The legacy campaign fixture was written with strategy_test, whereas
+    // genuine native AccountStore::prepare uses the original "manual"
+    // instance. For this offline witness, translate the TEST campaign policy
+    // before source import so both ORIGINAL owners agree on strategy identity.
+    // Do not silently translate real migration data in production.
+    {
+        let source = Connection::open(&campaign).unwrap();
+        source
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 PRAGMA defer_foreign_keys=ON;
+                 UPDATE risk_entries SET strategy_id='manual';
+                 UPDATE risk_strategy_occupied SET strategy_id='manual';
+                 UPDATE risk_policy_strategy SET strategy_id='manual';
+                 COMMIT;",
+            )
+            .unwrap();
+        let mut fk = source.prepare("PRAGMA foreign_key_check").unwrap();
+        assert!(fk.query([]).unwrap().next().unwrap().is_none());
+    }
+    drop(a);
+    drop(b);
+    let sa = Connection::open_with_flags(&ap, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sb = Connection::open_with_flags(&bp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let sc = Connection::open_with_flags(&campaign, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let root = path().with_extension("finance-owner-root");
+    std::fs::create_dir_all(root.join("finance")).unwrap();
+    let finance = root.join("finance").join("finance.sqlite");
+    let mut target = Connection::open(&finance).unwrap();
+    target.pragma_update(None, "journal_mode", "WAL").unwrap();
+    target.pragma_update(None, "synchronous", "FULL").unwrap();
+    target.pragma_update(None, "foreign_keys", "ON").unwrap();
+    super::sql::unified_financial::importer::import_stopped_finance_into_empty(
+        &mut target,
+        &super::sql::unified_financial::importer::ExpectedFinanceInventory {
+            installation: "installation",
+            accounts: &[&a_key, &b_key],
+            campaigns: &["campaign-X"],
+        },
+        &[&sa, &sb],
+        &[&sc],
+    )
+    .unwrap();
+    raw_sources::assert_contract(&mut target, a_key.clone(), b_key.clone());
+    drop(target);
+    drop(sa);
+    drop(sb);
+    drop(sc);
+
+    let open = || {
+        crate::account_worker::UnifiedFinanceHandle::open_stopped_import(
+            root.clone(),
+            "installation".into(),
+            vec![a_key.clone(), b_key.clone()],
+            vec!["campaign-X".into()],
+        )
+    };
+    let owner = open().await.unwrap();
+    // Public opening DATA cannot promote the immutable stopped import.
+    // Even structurally valid-looking external facts must hit activation first.
+    {
+        use crate::account_worker::{
+            NativeOpeningAccount, NativeOpeningSource, ReportedOpeningCensus,
+        };
+        let before = owner.campaign_summary("campaign-X".into()).await.unwrap();
+        let source = NativeOpeningSource {
+            campaign_id: format!("sha256:{}", "a".repeat(64)),
+            limit_usd: "10".into(),
+            consumed_usd: "0".into(),
+            source_digest: "b".repeat(64),
+            as_of_ms: 200,
+            campaign_started_at_ms: 1,
+            accounts: vec![NativeOpeningAccount {
+                account_key: a_key.clone(),
+                history_from_ms: 1,
+                history_through_ms: 200,
+                consumed_entry_usd: "0".into(),
+                order_history_complete: true,
+                fill_history_complete: true,
+                bill_history_complete: true,
+                finance_provenance_sealed: true,
+                source_digest: "c".repeat(64),
+            }],
+        };
+        let reported = ReportedOpeningCensus {
+            source_digest: "d".repeat(64),
+            generated_at_ms: 201,
+            read_floor_ms: 201,
+            occupied: std::collections::BTreeMap::from([(a_key.clone(), "0".into())]),
+            cumulative_loss_usd: std::collections::BTreeMap::from([(a_key.clone(), "0".into())]),
+        };
+        assert!(matches!(
+            owner.install_reported_opening(source, reported).await,
+            Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
+        ));
+        assert_eq!(
+            owner.campaign_summary("campaign-X".into()).await.unwrap(),
+            before
+        );
+        assert_eq!(
+            owner.inventory().await.unwrap().state,
+            "OFFLINE_NOT_AUTHORIZED"
+        );
+    }
+
+    assert_eq!(
+        owner.source_generation_base(a_key.clone()).await.unwrap(),
+        5
+    );
+    assert_eq!(
+        owner.source_generation_base(b_key.clone()).await.unwrap(),
+        11
+    );
+    for (account, expected) in [(&a_key, "cursor-A"), (&b_key, "cursor-B")] {
+        let cursor = owner
+            .source_cursor(account.clone(), "fills".into(), "SWAP".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cursor.cursor, expected);
+        assert_eq!(cursor.watermark, 20);
+        assert!(
+            owner
+                .source_cursor(account.clone(), "bills".into(), "SWAP".into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert!(matches!(
+        owner.source_generation_base("foreign-account".into()).await,
+        Err(StoreError::Invalid("UNIFIED_SOURCE_ACCOUNT_NOT_FOUND"))
+    ));
+    assert!(matches!(
+        owner
+            .source_cursor("foreign-account".into(), "fills".into(), "SWAP".into())
+            .await,
+        Err(StoreError::Invalid("UNIFIED_SOURCE_ACCOUNT_NOT_FOUND"))
+    ));
+    for (account, expected) in [(&a_key, &original_capture_a), (&b_key, &original_capture_b)] {
+        let state = owner
+            .source_capture_state(
+                account.clone(),
+                std::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.account_key, *account);
+        assert_eq!(state.initialized_at, expected.initialized_at);
+        assert_eq!(state.generation_base, expected.generation_base);
+        assert_eq!(
+            state.cursors.swap.as_ref().unwrap().cursor,
+            expected.cursors.swap.as_ref().unwrap().cursor
+        );
+        assert!(state.cursors.spot.is_none() && state.cursors.bills.is_none());
+    }
+    assert!(matches!(
+        owner
+            .source_capture_state(
+                "foreign-account".into(),
+                std::time::Instant::now() + Duration::from_secs(2)
+            )
+            .await,
+        Err(StoreError::Invalid("UNIFIED_SOURCE_ACCOUNT_NOT_FOUND"))
+    ));
+    assert!(matches!(
+        owner
+            .source_capture_state(a_key.clone(), std::time::Instant::now())
+            .await,
+        Err(StoreError::Invalid("UNIFIED_FINANCE_QUEUE_DEADLINE"))
+    ));
+    let source_owner = owner
+        .source_order_owner(
+            a_key.clone(),
+            "stableclient".into(),
+            String::new(),
+            std::time::Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(source_owner.intent_id, ai.intent_id);
+    assert_eq!(source_owner.plan_hash, ai.plan_hash);
+    assert!(
+        owner
+            .source_order_owner(
+                a_key.clone(),
+                String::new(),
+                "foreign-order".into(),
+                std::time::Instant::now() + Duration::from_secs(2)
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        owner
+            .source_order_owner(
+                "foreign-account".into(),
+                "stableclient".into(),
+                String::new(),
+                std::time::Instant::now() + Duration::from_secs(2)
+            )
+            .await,
+        Err(StoreError::Invalid("UNIFIED_SOURCE_ACCOUNT_NOT_FOUND"))
+    ));
+    let inventory = owner.inventory().await.unwrap();
+    assert_eq!(inventory.accounts, 2);
+    assert_eq!(inventory.campaigns, 1);
+    assert_eq!(inventory.state, "OFFLINE_NOT_AUTHORIZED");
+    // The new production-shaped unified finance dispatcher is the exact
+    // SAME single writer and domain transaction as the offline witnesses.
+    // An immutable 47-table stopped import may NEVER become a venue/finance
+    // grant merely because its contents and account roster are valid.
+    for action in [
+        crate::account_worker::UnifiedFinanceWrite::IngestSourcePageUsd {
+            account: a_key.clone(),
+            page: IngestPage::default(),
+            conversion: UsdConversionEvidence {
+                observed_at: 1,
+                source_digest: "fixture".into(),
+                usd_per_currency: Default::default(),
+            },
+        },
+        crate::account_worker::UnifiedFinanceWrite::IngestSourcePage {
+            account: a_key.clone(),
+            page: IngestPage::default(),
+        },
+        crate::account_worker::UnifiedFinanceWrite::RecordSourceBills {
+            account: a_key.clone(),
+            bills: vec![],
+            order_sources: vec![],
+        },
+        crate::account_worker::UnifiedFinanceWrite::RecordSourceFills {
+            account: a_key.clone(),
+            fills: vec![],
+        },
+        crate::account_worker::UnifiedFinanceWrite::RecoverInstallation { now: 100 },
+        crate::account_worker::UnifiedFinanceWrite::RecoverPosting {
+            account: a_key.clone(),
+            now: 100,
+        },
+        crate::account_worker::UnifiedFinanceWrite::RecordOutcome {
+            account: a_key.clone(),
+            intent: ai.intent_id.clone(),
+            state: IntentState::Acknowledged,
+            exchange_order_id: Some("unauthorized-venue-order".into()),
+            evidence: "not-a-verified-source".into(),
+            now: 100,
+        },
+    ] {
+        assert!(matches!(
+            owner.apply_financial_write(action).await,
+            Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
+        ));
+    }
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
+    // Both live native public mutation entrypoints must reject the stopped
+    // import BEFORE executing any original source query or financial write.
+    let sealed_settle = crate::account_worker::UnifiedFinanceBoundSettlement {
+        campaign: "campaign-X".into(),
+        reservation_key: "same-reservation".into(),
+        plan_sha256: ai.plan_hash.clone(),
+        expected_sequence: 2,
+        cumulative_entry_usd: "1".into(),
+        settlement_revision: 1,
+        source_digest: "c".repeat(64),
+    };
+    assert!(matches!(
+        owner.settle_bound_entry(sealed_settle).await,
+        Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
+    ));
+    let sealed_unsent = crate::account_worker::UnifiedFinanceBoundUnsent {
+        campaign: "campaign-X".into(),
+        reservation_key: "same-unsent".into(),
+        plan_sha256: bi.plan_hash.clone(),
+        expected_sequence: 2,
+        account_key: b_key.clone(),
+        intent_id: bi.intent_id.clone(),
+        request_hash: bi.request_hash.clone(),
+        reason: "COMMAND_EXPIRED".into(),
+        record_digest: "d".repeat(64),
+    };
+    assert!(matches!(
+        owner.release_bound_unsent(sealed_unsent).await,
+        Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
+    ));
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
+    // A valid full-cohort policy is a SINGLE ORIGINAL scoped SQL operation,
+    // not two per-account commits or an extra RiskBook policy owner.
+    let policy = crate::account_worker::UnifiedFinancePolicy {
+        campaign_id: "campaign-X".into(),
+        policy_revision: 8,
+        campaign_loss_limit_usd: "100".into(),
+        accounts: vec![
+            crate::account_worker::UnifiedFinancePolicyAccount {
+                account_key: a_key.clone(),
+                paused: true,
+            },
+            crate::account_worker::UnifiedFinancePolicyAccount {
+                account_key: b_key.clone(),
+                paused: true,
+            },
+        ],
+    };
+    // Offline is a sealed snapshot, not authority. This is the ACTUAL
+    // production method and must refuse before touching the imported policy.
+    assert!(matches!(
+        owner.apply_governance_policy(policy.clone()).await,
+        Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
+    ));
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
+    assert!(matches!(
+        owner
+            .trial_financial_write(crate::account_worker::UnifiedFinanceWrite::ApplyPolicy {
+                policy: policy.clone(),
+            })
+            .await,
+        Ok(crate::account_worker::UnifiedFinanceWriteReceipt::PolicyApplied)
+    ));
+    // A successful direct original Rust policy transaction in a stopped
+    // import is still a ROLLBACK. Real SQL state remains byte-identical
+    // and no new campaign revision or budget is minted.
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
+    let mut missing_account = policy.clone();
+    missing_account.accounts.pop();
+    assert!(matches!(
+        owner
+            .trial_financial_write(crate::account_worker::UnifiedFinanceWrite::ApplyPolicy {
+                policy: missing_account,
+            })
+            .await,
+        Err(StoreError::Invalid("UNIFIED_POLICY_COHORT_MISMATCH"))
+    ));
+    let mut bad_limit = policy.clone();
+    bad_limit.campaign_loss_limit_usd = "101".into();
+    assert!(matches!(
+        owner
+            .trial_financial_write(crate::account_worker::UnifiedFinanceWrite::ApplyPolicy {
+                policy: bad_limit
+            })
+            .await,
+        Err(StoreError::Invalid("UNIFIED_POLICY_LIMIT_CHANGE_UNPROVEN"))
+    ));
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
+    // Read the original RiskBook summary through that very same owner.
+    // No copied risk formulas or independently opened campaign SQL handle.
+    let summary = owner.campaign_summary("campaign-X".into()).await.unwrap();
+    assert_eq!(summary.campaign, "campaign-X");
+    assert_eq!(summary.book_sequence, 2);
+    assert_eq!(summary.global_reserved_usdt, "1");
+    assert_eq!(summary.remaining_loss_usd, "99");
+    assert_eq!(summary.remaining_entry_usd, "98");
+    assert_eq!(summary.entry_limit_usd, "100");
+    assert_eq!(summary.consumed_entry_usd, "0");
+    assert_eq!(summary.reserved_entry_usd, "2");
+    assert_eq!(summary.entry_bound_breach_usd, "0");
+    let serialized = serde_json::to_value(&summary).unwrap();
+    assert_eq!(serialized["reserved_entry_usd"], "2");
+    assert_eq!(serialized["entry_limit_usd"], "100");
+    assert!(
+        owner
+            .campaign_summary("foreign-campaign".into())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        owner.campaign_summary("campaign-X".into()).await.unwrap(),
+        summary
+    );
+
+    // AccountStore intent/plan readback uses this same installation SQL FIFO.
+    // A/B original intent IDs may coincide, but a third account cannot read
+    // either row and no read provides a budget/venue write capability.
+    for (account, prepared) in [(&a_key, &ai), (&b_key, &bi)] {
+        let observed = owner
+            .account_intent(account.clone(), prepared.intent_id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.intent_id, prepared.intent_id);
+        assert_eq!(observed.plan, prepared.plan);
+    }
+    assert!(
+        owner
+            .account_intent("foreign-account".into(), ai.intent_id.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        owner.account_intent(a_key.clone(), "".into()).await,
+        Err(StoreError::Invalid("UNIFIED_FINANCE_INTENT_SCOPE_INVALID"))
+    ));
+    assert_eq!(
+        owner
+            .trial_original_recover_posting(a_key.clone(), 10)
+            .await
+            .unwrap(),
+        0,
+        "a PREPARED original intent cannot be recovered as POSTING"
+    );
+    assert_eq!(
+        owner.trial_original_recover_installation(10).await.unwrap(),
+        0,
+        "no unfinished POSTING in the imported two-account source"
+    );
+    assert!(matches!(
+        owner
+            .trial_original_record_outcome(
+                a_key.clone(),
+                ai.intent_id.clone(),
+                IntentState::Acknowledged,
+                Some("unverified-order".into()),
+                "not-a-real-venue-readback".into(),
+                10,
+            )
+            .await,
+        Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"))
+    ));
+
+    // The ORIGINAL PREPARE decision+intent+plan algorithm now executes
+    // through this same installation FIFO, with exact A/B composite scopes.
+    // This is an offline trial; every mutation MUST roll back.
+    let trial_decision = Decision {
+        decision_id: "trial-decision".into(),
+        instance_id: None,
+        decision_at: 2,
+        input_digest: "trial-input".into(),
+        policy_revision: 1,
+        code_version: "test".into(),
+    };
+    let trial_intent = NewIntent {
+        plan: IntentPlan {
+            strategy_definition_id: original_manual_definition.definition_id,
+            strategy_definition_version: original_manual_definition.version,
+            strategy_parameters_digest: original_manual_definition.parameters_digest,
+            contract_value: Decimal::ONE,
+            inverse: false,
+            settlement_currency: "USDT".into(),
+            position_side: "long".into(),
+            private_source_generation: 1,
+            operation: "open".into(),
+            side: "buy".into(),
+            quantity: Decimal::ONE,
+            limit_price: Decimal::from(100),
+            stop_price: Some(Decimal::from(95)),
+            strategy_instance: "manual".into(),
+            planned_loss_usd: Decimal::from(5),
+            source_generation: 1,
+        },
+        intent_id: "trial-intent".into(),
+        idempotency_key: "trial-request".into(),
+        request_hash: "trial-body".into(),
+        client_order_id: "trial-client".into(),
+        deadline: 100,
+        plan_hash: original_plan.clone(),
+        policy_revision: 1,
+        risk_increase: true,
+        instrument_id: "BTC-USDT-SWAP".into(),
+    };
+    for account in [&a_key, &b_key] {
+        assert!(
+            owner
+                .trial_original_prepare(
+                    account.clone(),
+                    trial_decision.clone(),
+                    trial_intent.clone()
+                )
+                .await
+                .unwrap()
+        );
+    }
+    // This same typed PREPARE is now an original production-shaped finance
+    // command, not a separate test-only SQL algorithm. A verified 47-table
+    // OFFLINE import may not persist a real decision, even before Reserve.
+    assert!(matches!(
+        owner
+            .apply_financial_write(crate::account_worker::UnifiedFinanceWrite::Prepare {
+                account: a_key.clone(),
+                decision: trial_decision.clone(),
+                intent: trial_intent.clone(),
+            })
+            .await,
+        Err(StoreError::Invalid("FINANCE_CUTOVER_NOT_ACCEPTED"))
+    ));
+    assert!(matches!(
+        owner
+            .trial_original_prepare(
+                "foreign-account".into(),
+                trial_decision.clone(),
+                trial_intent.clone(),
+            )
+            .await,
+        Err(StoreError::Invalid("UNIFIED_PREPARE_ACCOUNT_MISSING"))
+    ));
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
+    assert_eq!(
+        owner.campaign_summary("campaign-X".into()).await.unwrap(),
+        summary
+    );
+
+    // PROVE that the existing original joint Reserve is exercised by the
+    // installation's single bounded FIFO and one BEGIN IMMEDIATE. No
+    // authenticated census producer or Cloudflare epoch exists yet, so this
+    // test-only operation ALWAYS ROLLS BACK and must preserve the offline
+    // import manifest across cold reopen.
+    let zero = okx_kernel::risk::money::RiskAmount::zero();
+    let five = okx_kernel::risk::money::RiskAmount::parse("5").unwrap();
+    let mut source_occupied = std::collections::BTreeMap::new();
+    let mut source_loss = std::collections::BTreeMap::new();
+    for key in [&a_key, &b_key] {
+        source_occupied.insert(key.clone(), zero.clone());
+        source_loss.insert(key.clone(), zero.clone());
+    }
+    let census = crate::risk::VerifiedCensus {
+        complete: true,
+        generation: 7,
+        source_digest: "d".repeat(64),
+        generated_at_ms: 3,
+        read_floor_ms: 2,
+        occupied: source_occupied,
+        cumulative_loss_usd: source_loss,
+    };
+    let input = crate::risk::ReserveInput {
+        venue: "okx".into(),
+        uid: "b".repeat(64),
+        run_id: "trial001".into(),
+        intent_id: bi.intent_id.clone(),
+        strategy_id: "manual".into(),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        plan_sha256: bi.plan_hash.clone(),
+        entry_proof_digest: "b".repeat(64),
+        conversion_digest: "c".repeat(64),
+        conversion_observed_at_ms: 3,
+        conversion_rate: okx_kernel::risk::money::RiskAmount::parse("1").unwrap(),
+        native_incarnation: "f".repeat(32),
+        proposal: okx_kernel::risk::model::RiskProposal {
+            loss_usdt: five.clone(),
+            loss_usd: five.clone(),
+            entry_upper_usd: okx_kernel::risk::money::RiskAmount::parse("1").unwrap(),
+        },
+        policy_revision: 1,
+        now_ms: 4,
+    };
+    let receipt = CentralReceipt {
+        reservation_key: input.reservation_key(),
+        account_key: b_key.clone(),
+        installation_id: "installation".into(),
+        instance_id: None,
+        intent_id: bi.intent_id.clone(),
+        plan_hash: bi.plan_hash.clone(),
+        policy_revision: 1,
+        receipt_hash: "e".repeat(64),
+        requested_loss_usd: Decimal::from(5),
+        conversion_digest: input.conversion_digest.clone(),
+    };
+    assert_eq!(
+        owner
+            .trial_original_reserve(
+                "campaign-X".into(),
+                input.clone(),
+                census.clone(),
+                receipt.clone(),
+            )
+            .await
+            .unwrap(),
+        "HELD_UNCOMMITTED"
+    );
+    let mut wrong_strategy = input.clone();
+    wrong_strategy.strategy_id = "strategy_test".into();
+    assert!(matches!(
+        owner
+            .trial_original_reserve(
+                "campaign-X".into(),
+                wrong_strategy,
+                census.clone(),
+                receipt.clone(),
+            )
+            .await,
+        Err(StoreError::Invalid(
+            "UNIFIED_ORIGINAL_RESERVE_TRIAL_REJECTED"
+        ))
+    ));
+    assert_eq!(
+        owner.campaign_summary("campaign-X".into()).await.unwrap(),
+        summary
+    );
+
+    // Source-linked settlement and no-send cannot proceed from a merely
+    // imported historical row or a caller flag. Both original SQL source
+    // receipts are absent in this REAL account-v2 import: fail closed under
+    // the one installation FIFO, with no durable ledger/risk mutation.
+    assert!(matches!(
+        owner
+            .trial_original_partial_from_account(
+                "campaign-X".into(),
+                a_key.clone(),
+                ai.intent_id.clone(),
+                2,
+                7,
+            )
+            .await,
+        Err(StoreError::Invalid("UNIFIED_PARTIAL_SOURCE_OR_RISK_DENIED"))
+    ));
+    assert!(matches!(
+        owner
+            .trial_original_unsent_from_account(
+                "campaign-X".into(),
+                b_key.clone(),
+                bi.intent_id.clone(),
+                2,
+                7,
+            )
+            .await,
+        Err(StoreError::Invalid("UNIFIED_UNSENT_SOURCE_OR_RISK_DENIED"))
+    ));
+    assert_eq!(owner.inventory().await.unwrap(), inventory);
+    assert_eq!(
+        owner.campaign_summary("campaign-X".into()).await.unwrap(),
+        summary
+    );
+
+    // The ORIGINAL RiskBook AccountSummary SQL must distinguish these two
+    // canonical account identities inside the shared campaign scope.
+    let a_read = owner
+        .account_summary("campaign-X".into(), a_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(a_read.account_key, a_key);
+    assert_eq!(a_read.book_sequence, 2);
+    assert_eq!(a_read.active_reservations, 1);
+    assert_eq!(a_read.reserved_loss_usdt, "1");
+    assert_eq!(a_read.reserved_loss_usd, "1");
+    // This is the PUBLIC, read-only projection consumed by the new native
+    // stopped-finance CLI. It reads the same imported original RiskBook rows.
+    let public_a = owner
+        .stopped_account_summary("campaign-X".into(), a_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(public_a.account_key, a_key);
+    assert_eq!(public_a.active_reservations, 1);
+    assert_eq!(public_a.reserved_loss_usdt, "1");
+    assert_eq!(
+        serde_json::to_value(&public_a).unwrap()["cumulative_loss_usd"],
+        a_read.cumulative_loss_usd
+    );
+    let b_read = owner
+        .account_summary("campaign-X".into(), b_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(b_read.account_key, b_key);
+    assert_eq!(b_read.active_reservations, 0);
+    assert_eq!(b_read.reserved_loss_usdt, "0");
+    assert_eq!(b_read.reserved_loss_usd, "0");
+    let public_b = owner
+        .stopped_account_summary("campaign-X".into(), b_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(public_b.active_reservations, 0);
+    assert_eq!(public_b.reserved_loss_usdt, "0");
+    assert_ne!(public_a.account_key, public_b.account_key);
+    assert!(matches!(
+        owner
+            .account_summary("campaign-X".into(), "acct-A".into())
+            .await,
+        Err(StoreError::Invalid("UNIFIED_ACCOUNT_RISK_READBACK_INVALID"))
+    ));
+    assert!(matches!(
+        owner
+            .account_summary("campaign-Y".into(), a_key.clone())
+            .await,
+        Err(StoreError::Invalid("UNIFIED_ACCOUNT_RISK_READBACK_INVALID"))
+    ));
+
+    // One original immutable RiskBook HELD and one no-send tombstone.
+    // An absent row/foreign campaign/wrong plan never grants permission.
+    let held = owner
+        .inspect_reservation(
+            "campaign-X".into(),
+            "same-reservation".into(),
+            ai.plan_hash.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.state, okx_kernel::risk::model::RiskEntryState::Held);
+    assert_eq!(held.reservation_sequence, 1);
+    assert_eq!(held.current_book_sequence, 2);
+    let public_held = owner
+        .stopped_inspect_reservation(
+            "campaign-X".into(),
+            "same-reservation".into(),
+            ai.plan_hash.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(public_held.state, "HELD");
+    assert_eq!(public_held.reservation_sequence, held.reservation_sequence);
+    assert_eq!(serde_json::to_value(&public_held).unwrap()["state"], "HELD");
+    let unsent = owner
+        .inspect_reservation(
+            "campaign-X".into(),
+            "same-unsent".into(),
+            bi.plan_hash.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        unsent.state,
+        okx_kernel::risk::model::RiskEntryState::Released
+    );
+    assert_eq!(unsent.reservation_sequence, 2);
+    let public_unsent = owner
+        .stopped_inspect_reservation(
+            "campaign-X".into(),
+            "same-unsent".into(),
+            bi.plan_hash.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(public_unsent.state, "RELEASED");
+    assert_eq!(public_unsent.reservation_sequence, 2);
+    assert!(
+        owner
+            .inspect_reservation(
+                "campaign-X".into(),
+                "same-reservation".into(),
+                "b".repeat(64)
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        owner
+            .inspect_reservation(
+                "campaign-X".into(),
+                "not-recorded".into(),
+                ai.plan_hash.clone()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        owner
+            .stopped_inspect_reservation(
+                "campaign-X".into(),
+                "same-reservation".into(),
+                "b".repeat(64)
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "wrong immutable plan must remain UNKNOWN to the external adapter"
+    );
+    assert!(matches!(
+        owner
+            .inspect_reservation(
+                "campaign-Y".into(),
+                "same-reservation".into(),
+                ai.plan_hash.clone()
+            )
+            .await,
+        Err(StoreError::Invalid("UNIFIED_RESERVATION_READBACK_INVALID"))
+    ));
+
+    assert!(matches!(
+        owner.campaign_summary("campaign-Y".into()).await,
+        Err(StoreError::Invalid(
+            "UNIFIED_CAMPAIGN_PRIMARY_AGGREGATES_INVALID"
+        ))
+    ));
+
+    // The same installation cannot spawn a second simultaneous SQL owner,
+    // even when both handles present the exact same complete import roster.
+    assert!(matches!(
+        open().await,
+        Err(StoreError::Invalid("UNIFIED_FINANCE_WRITER_BUSY"))
+    ));
+    // A separate OS process, not a second Tokio task, must also be unable
+    // to take this exact installation's finance writer lease.
+    let child_probe = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "risk_book_contract_one_installation_finance_owner_child",
+            "--nocapture",
+        ])
+        .env("OKX_510_FINANCE_OWNER_ROOT", &root)
+        .env("OKX_510_FINANCE_OWNER_MODE", "PROBE")
+        .output()
+        .unwrap();
+    assert!(
+        child_probe.status.success()
+            && String::from_utf8_lossy(&child_probe.stdout).contains("1 passed"),
+        "independent OS finance owner contention failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&child_probe.stdout),
+        String::from_utf8_lossy(&child_probe.stderr)
+    );
+    let mut closed = owner.termination_signal();
+    drop(owner);
+    tokio::time::timeout(Duration::from_secs(2), closed.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        *closed.borrow(),
+        "owner closed all SQLite and lease handles"
+    );
+
+    // A new owner can reopen the same original finance SQLite only after
+    // genuine close and complete 47-table/manifest re-verification.
+    let reopened = open().await.unwrap();
+    assert_eq!(
+        reopened
+            .source_generation_base(a_key.clone())
+            .await
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        reopened
+            .source_generation_base(b_key.clone())
+            .await
+            .unwrap(),
+        11
+    );
+    assert_eq!(
+        reopened
+            .source_cursor(a_key.clone(), "fills".into(), "SWAP".into())
+            .await
+            .unwrap()
+            .unwrap()
+            .cursor,
+        "cursor-A"
+    );
+    assert_eq!(reopened.inventory().await.unwrap(), inventory);
+    assert_eq!(
+        reopened
+            .campaign_summary("campaign-X".into())
+            .await
+            .unwrap(),
+        summary,
+        "staged Reserve cannot alter the original immutable import on reopen"
+    );
+    let mut finished = reopened.termination_signal();
+    drop(reopened);
+    tokio::time::timeout(Duration::from_secs(2), finished.changed())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The owner's startup roster is mandatory; no "scan installed IDs"
+    // shortcut can silently omit a finance account.
+    assert!(matches!(
+        crate::account_worker::UnifiedFinanceHandle::open_stopped_import(
+            root.clone(),
+            "installation".into(),
+            vec![a_key.clone()],
+            vec!["campaign-X".into()],
+        )
+        .await,
+        Err(StoreError::Invalid("UNIFIED_IMPORT_INVENTORY_MISMATCH"))
+    ));
+    // The kernel, not an orderly handle drop, must free the same exclusive
+    // writer lease after an actual OS kill. A cold owner re-verifies every
+    // original financial table and the immutable offline manifest.
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    let mut killed = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "risk_book_contract_one_installation_finance_owner_child",
+            "--nocapture",
+        ])
+        .env("OKX_510_FINANCE_OWNER_ROOT", &root)
+        .env("OKX_510_FINANCE_OWNER_MODE", "HOLD")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stream = killed.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stream).lines() {
+            if line
+                .unwrap_or_default()
+                .contains("FINANCE_510_EXCLUSIVE_LEASE_HELD")
+            {
+                let _ = sender.send(());
+                return;
+            }
+        }
+    });
+    let saw_lease = receiver.recv_timeout(Duration::from_secs(15));
+    let kill_result = killed.kill();
+    let exit = killed.wait().unwrap();
+    reader.join().unwrap();
+    assert!(
+        saw_lease.is_ok(),
+        "child did not own original finance SQLite"
+    );
+    assert!(
+        kill_result.is_ok() && !exit.success(),
+        "failed to physically kill finance SQL owner"
+    );
+    let after_kill = open().await.unwrap();
+    assert_eq!(after_kill.inventory().await.unwrap(), inventory);
+    assert_eq!(
+        after_kill
+            .campaign_summary("campaign-X".into())
+            .await
+            .unwrap(),
+        summary
+    );
+    let mut terminated = after_kill.termination_signal();
+    drop(after_kill);
+    tokio::time::timeout(Duration::from_secs(2), terminated.changed())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Physical original AccountStore + RiskBook joint COMMIT witness after
+    // ALL native owner handles are stopped. This directly invokes the SAME
+    // production transaction dispatcher on the imported 47-table SQLite;
+    // it never creates an activation marker or a simulated financial owner.
+    // The imported OFFLINE_NOT_AUTHORIZED file is consumed by this test and
+    // deleted below, so it cannot accidentally become a startup authority.
+    let assert_committed = |source: &rusqlite::Connection, revision: i64, paused: i64| {
+        for account in [&a_key, &b_key] {
+            let row: (i64, i64, String, String) = source
+                .query_row(
+                    "SELECT revision,paused,campaign_id,campaign_limit
+                     FROM account_policy
+                     WHERE installation_id='installation' AND account_key=?1 AND singleton=1",
+                    [account],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(row, (revision, paused, "campaign-X".into(), "100".into()));
+        }
+        let campaign_revision: i64 = source
+            .query_row(
+                "SELECT policy_revision FROM risk_meta
+                 WHERE installation_id='installation' AND campaign_id='campaign-X' AND singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(campaign_revision, revision);
+    };
+    {
+        let mut connection = Connection::open(&finance).unwrap();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(
+            crate::account_worker::apply_original_unified_finance_transaction(
+                &tx,
+                "installation",
+                crate::account_worker::UnifiedFinanceWrite::ApplyPolicy {
+                    policy: policy.clone(),
+                },
+            )
+            .unwrap(),
+            crate::account_worker::UnifiedFinanceWriteReceipt::PolicyApplied
+        );
+        // One SQL snapshot sees A + B + campaign revision together.
+        assert_committed(&tx, 8, 1);
+        tx.commit().unwrap();
+    }
+    let mut cold = Connection::open(&finance).unwrap();
+    assert_committed(&cold, 8, 1);
+    {
+        let tx = cold
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(
+            crate::account_worker::apply_original_unified_finance_transaction(
+                &tx,
+                "installation",
+                crate::account_worker::UnifiedFinanceWrite::ApplyPolicy {
+                    policy: policy.clone(),
+                },
+            )
+            .unwrap(),
+            crate::account_worker::UnifiedFinanceWriteReceipt::PolicyApplied,
+            "exact governance replay cannot create another policy revision"
+        );
+        tx.commit().unwrap();
+    }
+    assert_committed(&cold, 8, 1);
+    {
+        let tx = cold
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let mut stale = policy;
+        stale.policy_revision = 7;
+        assert!(matches!(
+            crate::account_worker::apply_original_unified_finance_transaction(
+                &tx,
+                "installation",
+                crate::account_worker::UnifiedFinanceWrite::ApplyPolicy { policy: stale }
+            ),
+            Err(StoreError::Invalid("POLICY_REVISION_CONFLICT"))
+        ));
+        tx.rollback().unwrap();
+    }
+    assert_committed(&cold, 8, 1);
+    drop(cold);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn risk_book_contract_one_installation_finance_owner_child() {
+    let Ok(root) = std::env::var("OKX_510_FINANCE_OWNER_ROOT") else {
+        return;
+    };
+    let mode = std::env::var("OKX_510_FINANCE_OWNER_MODE").unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(
+        crate::account_worker::UnifiedFinanceHandle::open_stopped_import(
+            std::path::PathBuf::from(root),
+            "installation".into(),
+            vec![
+                format!("okx:real:{}", "a".repeat(64)),
+                format!("okx:real:{}", "b".repeat(64)),
+            ],
+            vec!["campaign-X".into()],
+        ),
+    );
+    if mode == "PROBE" {
+        assert!(matches!(
+            result,
+            Err(StoreError::Invalid("UNIFIED_FINANCE_WRITER_BUSY"))
+        ));
+        return;
+    }
+    assert_eq!(mode, "HOLD");
+    let _owner = result.unwrap();
+    use std::io::Write;
+    println!("FINANCE_510_EXCLUSIVE_LEASE_HELD");
+    std::io::stdout().flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(60));
+    unreachable!("the parent must OS-kill this live finance writer")
+}
+
+#[test]
+fn risk_book_contract_unified_bound_unsent_reads_original_sql_without_fake_no_send() {
+    use rusqlite::{Connection, TransactionBehavior, params};
+    use sha2::Digest;
+    let file = path();
+    let mut db = Connection::open(&file).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    db.execute_batch(include_str!("../schema/finance-unified-v1.sql"))
+        .unwrap();
+    let account = format!("okx:real:{}", "a".repeat(64));
+    let installation = "installation";
+    let intent = "unsent-native-source";
+    let plan = "b".repeat(64);
+    let request_hash = "c".repeat(64);
+    let reason = "COMMAND_EXPIRED";
+    let run = "continuous_engine";
+    let reserve_key = [
+        "okx".to_owned(),
+        "real".to_owned(),
+        "a".repeat(64),
+        run.to_owned(),
+        intent.to_owned(),
+    ]
+    .iter()
+    .map(|part| format!("{}:{part}", part.len()))
+    .collect::<String>();
+    db.execute(
+        "INSERT INTO account_meta(
+           singleton,account_key,installation_id,schema_version,
+           initialized_at,opening_source,initialize_operation_id,release_id)
+         VALUES(1,?1,?2,2,1,'source','init','release')",
+        params![&account, installation],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO account_policy(
+           installation_id,account_key,singleton,revision,paused,
+           campaign_id,campaign_limit,campaign_loss)
+         VALUES(?1,?2,1,1,1,'campaign-X','100','0')",
+        params![installation, &account],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO decisions(
+           installation_id,account_key,decision_id,instance_id,
+           decision_at,input_digest,policy_revision,code_version)
+         VALUES(?1,?2,'decision',NULL,1,'input',1,'fixture')",
+        params![installation, &account],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO intents(
+           installation_id,account_key,intent_id,idempotency_key,request_hash,
+           decision_id,state,revision,client_order_id,deadline,plan_hash,
+           policy_revision,risk_increase,instrument_id,created_at,updated_at,
+           begin_post_at,exchange_order_id,incident)
+         VALUES(?1,?2,?3,'idempotency',?4,'decision',
+           'REJECTED',1,'client',1000,?5,1,1,'BTC-USDT-SWAP',1,2,
+           NULL,NULL,?6)",
+        params![installation, &account, intent, &request_hash, &plan, reason],
+    )
+    .unwrap();
+    for (id, kind, result) in [
+        (
+            format!("risk-reserve:{intent}"),
+            "RISK_RESERVE_ATTEMPT",
+            reserve_key.as_str(),
+        ),
+        (format!("terminal:{intent}"), "REJECTED_UNSENT", reason),
+    ] {
+        db.execute(
+            "INSERT INTO operation_receipts(
+               installation_id,account_key,operation_id,kind,request_hash,result_ref,committed_at)
+             VALUES(?1,?2,?3,?4,?5,?6,2)",
+            params![installation, &account, id, kind, &request_hash, result],
+        )
+        .unwrap();
+    }
+    let original =
+        AccountStore::unsent_release_receipt_sql(&db, Some(installation), &account, intent)
+            .unwrap()
+            .unwrap();
+    let digest = format!(
+        "{:x}",
+        sha2::Sha256::digest(serde_json::to_vec(&original).unwrap())
+    );
+    let request = crate::account_worker::UnifiedFinanceBoundUnsent {
+        campaign: "campaign-X".into(),
+        reservation_key: reserve_key.clone(),
+        plan_sha256: plan.clone(),
+        expected_sequence: 0,
+        account_key: account.clone(),
+        intent_id: intent.into(),
+        request_hash: request_hash.clone(),
+        reason: reason.into(),
+        record_digest: digest,
+    };
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let read = |r: &crate::account_worker::UnifiedFinanceBoundUnsent| {
+        crate::account_worker::original_bound_unsent_source_sql(&tx, installation, r)
+    };
+    read(&request).unwrap();
+    let mut foreign = request.clone();
+    foreign.account_key = format!("okx:real:{}", "d".repeat(64));
+    assert!(read(&foreign).is_err());
+    let mut changed = request.clone();
+    changed.reason = "OTHER".into();
+    assert!(matches!(
+        read(&changed),
+        Err(StoreError::Invalid("UNIFIED_UNSENT_WIRE_SOURCE_CONFLICT"))
+    ));
+    changed = request.clone();
+    changed.record_digest = "f".repeat(64);
+    assert!(matches!(
+        read(&changed),
+        Err(StoreError::Invalid("UNIFIED_UNSENT_WIRE_SOURCE_CONFLICT"))
+    ));
+    changed = request.clone();
+    changed.plan_sha256 = "e".repeat(64);
+    assert!(matches!(
+        read(&changed),
+        Err(StoreError::Invalid("UNIFIED_UNSENT_WIRE_SOURCE_CONFLICT"))
+    ));
+    changed = request.clone();
+    changed.campaign = "campaign-Y".into();
+    assert!(matches!(
+        read(&changed),
+        Err(StoreError::Invalid(
+            "UNIFIED_UNSENT_ACCOUNT_CAMPAIGN_MISMATCH"
+        ))
+    ));
+    tx.rollback().unwrap();
+    // Read-only proof matching must never manufacture a risk tombstone or ACK.
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT COUNT(*) FROM risk_no_reserve", [], |row| row.get(0),)
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn risk_book_contract_unified_original_unknown_partial_ack_has_exact_source_and_replay() {
+    use rusqlite::{Connection, TransactionBehavior, params};
+    let file = path();
+    let mut db = Connection::open(&file).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    db.execute_batch(include_str!("../schema/finance-unified-v1.sql"))
+        .unwrap();
+    let installation = "installation";
+    let account = format!("okx:real:{}", "a".repeat(64));
+    let plan = "b".repeat(64);
+    let source = "c".repeat(64);
+    let reservation = "scope-reserve";
+    let intent = "original-partial-intent";
+    // SQL primary state and immutable receipt are fixtures, not a claimed
+    // production fill/bill producer or authority cutover witness.
+    db.execute(
+        "INSERT INTO account_meta(
+           singleton,account_key,installation_id,schema_version,
+           initialized_at,opening_source,initialize_operation_id,release_id)
+         VALUES(1,?1,?2,2,1,'fixture-source','fixture-init','fixture-release')",
+        params![&account, installation],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO decisions(
+           installation_id,account_key,decision_id,instance_id,
+           decision_at,input_digest,policy_revision,code_version)
+         VALUES(?1,?2,'fixture-decision',NULL,1,'fixture-input',1,'fixture')",
+        params![installation, &account],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO intents(
+           installation_id,account_key,intent_id,idempotency_key,request_hash,
+           decision_id,state,revision,client_order_id,deadline,plan_hash,
+           policy_revision,risk_increase,instrument_id,created_at,updated_at,
+           begin_post_at,exchange_order_id,incident)
+         VALUES(?1,?2,?3,'fixture-idempotency','fixture-hash','fixture-decision',
+           'UNKNOWN',1,'fixture-client',1000,?4,1,1,'BTC-USDT-SWAP',1,2,2,
+           'verified-venue-order',NULL)",
+        params![installation, &account, intent, &plan],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO risk_receipts(
+           reservation_key,intent_id,account_key,installation_id,instance_id,
+           plan_hash,policy_revision,receipt_hash,requested_loss_usd,
+           conversion_digest,state)
+         VALUES(?1,?2,?3,?4,NULL,?5,1,'fixture-risk-receipt','1',
+                'fixture-conversion','UNKNOWN')",
+        params![reservation, intent, &account, installation, &plan],
+    )
+    .unwrap();
+    let proof = EntrySettlementEvidence {
+        schema: "okx.entry-partial-settlement/v1".into(),
+        account_key: account.clone(),
+        intent_id: intent.into(),
+        plan_hash: plan.clone(),
+        reservation_key: reservation.into(),
+        venue_order_id: "verified-venue-order".into(),
+        venue_update_ms: 3,
+        source_covered_through_ms: 4,
+        venue_filled_quantity: Decimal::ONE,
+        booked_notional_and_fee_usdt: Decimal::ONE,
+        cumulative_entry_usd: Decimal::new(40, 2),
+        settlement_revision: 1,
+        source_digest: source.clone(),
+    };
+    let serialized = serde_json::to_string(&proof).unwrap();
+    for (id, kind) in [
+        (format!("entry-partial-head:{intent}"), "ENTRY_PARTIAL_HEAD"),
+        (
+            format!("entry-partial:{intent}:r1"),
+            "ENTRY_PARTIAL_SETTLEMENT_PROVEN",
+        ),
+    ] {
+        db.execute(
+            "INSERT INTO operation_receipts(
+                installation_id,account_key,operation_id,kind,
+                request_hash,result_ref,committed_at)
+             VALUES(?1,?2,?3,?4,?5,?6,4)",
+            params![installation, &account, id, kind, &plan, &serialized],
+        )
+        .unwrap();
+    }
+    // The exact WIRE SettleEntry settlement fields are NOT trusted money.
+    // This is the SAME production original AccountStore source reader
+    // selected inside the one owned SQL transaction. No separate test
+    // implementation and no account/campaign budget can be debited here.
+    let request = crate::account_worker::UnifiedFinanceBoundSettlement {
+        campaign: "campaign-X".into(),
+        reservation_key: reservation.into(),
+        plan_sha256: plan.clone(),
+        expected_sequence: 3,
+        cumulative_entry_usd: "0.4".into(),
+        settlement_revision: 1,
+        source_digest: source.clone(),
+    };
+    {
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let read = |request: &crate::account_worker::UnifiedFinanceBoundSettlement| {
+            crate::account_worker::original_bound_entry_source_sql(
+                &tx,
+                installation,
+                &account,
+                intent,
+                request,
+            )
+        };
+        assert_eq!(
+            read(&request).unwrap(),
+            crate::risk::EntrySettlementSource::Partial
+        );
+        let mut changed = request.clone();
+        changed.cumulative_entry_usd = "0.5".into();
+        assert!(matches!(
+            read(&changed),
+            Err(StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_MISMATCH"))
+        ));
+        changed = request.clone();
+        changed.plan_sha256 = "a".repeat(64);
+        assert!(matches!(
+            read(&changed),
+            Err(StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_MISMATCH"))
+        ));
+        changed = request.clone();
+        changed.source_digest = "d".repeat(64);
+        assert!(matches!(
+            read(&changed),
+            Err(StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_MISMATCH"))
+        ));
+        changed = request.clone();
+        changed.settlement_revision = 2;
+        assert!(matches!(
+            read(&changed),
+            Err(StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_MISMATCH"))
+        ));
+        // A second account, even if intent IDs collide, has no source in
+        // this account's original SQL scope.
+        assert!(matches!(
+            crate::account_worker::original_bound_entry_source_sql(
+                &tx,
+                installation,
+                &format!("okx:real:{}", "d".repeat(64)),
+                intent,
+                &request
+            ),
+            Err(StoreError::Invalid("UNIFIED_SETTLEMENT_SOURCE_MISMATCH"))
+        ));
+        tx.rollback().unwrap();
+    }
+    for attempt in 0..2 {
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        AccountStore::acknowledge_unified_partial_entry_sql(&tx, installation, &account, &proof)
+            .unwrap();
+        tx.commit().unwrap();
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM operation_receipts
+             WHERE installation_id=?1 AND account_key=?2
+               AND operation_id=?3 AND kind='ENTRY_PARTIAL_SETTLED'
+               AND request_hash=?4 AND result_ref=?5",
+                params![
+                    installation,
+                    &account,
+                    format!("entry-partial-settled:{intent}:r1"),
+                    &plan,
+                    &source
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "UNKNOWN source ACK replay {attempt} cannot double-book"
+        );
+    }
+    let mut forged = proof.clone();
+    forged.cumulative_entry_usd = Decimal::new(50, 2);
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    assert!(matches!(
+        AccountStore::acknowledge_unified_partial_entry_sql(&tx, installation, &account, &forged,),
+        Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_SOURCE_MISMATCH"))
+    ));
+    tx.rollback().unwrap();
+    assert_eq!(
+        db.query_row::<String, _, _>(
+            "SELECT state FROM risk_receipts
+             WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
+            params![installation, &account, intent],
+            |row| row.get(0),
+        )
+        .unwrap(),
+        "UNKNOWN",
+        "even exact financial acknowledgement does not invent a venue outcome"
+    );
+
+    // Terminal and post-terminal late fee tests use synthetic sealed rows
+    // ONLY to test the new scoped reader/ACK identity invariants. The
+    // original fill/bill/cursor financial producer is tested separately.
+    db.execute(
+        "UPDATE intents SET state='FILLED' WHERE
+         installation_id=?1 AND account_key=?2 AND intent_id=?3",
+        params![installation, &account, intent],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE risk_receipts SET state='TERMINAL_PENDING_CENTRAL' WHERE
+         installation_id=?1 AND account_key=?2 AND intent_id=?3",
+        params![installation, &account, intent],
+    )
+    .unwrap();
+    let terminal = EntrySettlementEvidence {
+        schema: "okx.entry-terminal-settlement/v1".into(),
+        venue_update_ms: 7,
+        source_covered_through_ms: 8,
+        booked_notional_and_fee_usdt: Decimal::ONE,
+        cumulative_entry_usd: Decimal::new(70, 2),
+        settlement_revision: 2,
+        source_digest: "d".repeat(64),
+        ..proof.clone()
+    };
+    db.execute(
+        "INSERT INTO operation_receipts(
+             installation_id,account_key,operation_id,kind,
+             request_hash,result_ref,committed_at)
+         VALUES(?1,?2,?3,'ENTRY_SETTLEMENT_PROVEN',?4,?5,7)",
+        params![
+            installation,
+            &account,
+            format!("entry-settlement:{intent}"),
+            &plan,
+            serde_json::to_string(&terminal).unwrap()
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        AccountStore::final_entry_settlement_receipt_sql(
+            &db,
+            installation,
+            &account,
+            intent,
+            false,
+        )
+        .unwrap(),
+        Some(terminal.clone())
+    );
+    assert!(
+        AccountStore::final_entry_settlement_receipt_sql(
+            &db,
+            installation,
+            "other-account",
+            intent,
+            false,
+        )
+        .unwrap()
+        .is_none()
+    );
+    {
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        AccountStore::acknowledge_unified_final_entry_sql(
+            &tx,
+            installation,
+            &account,
+            &terminal,
+            false,
+        )
+        .unwrap();
+        AccountStore::acknowledge_unified_final_entry_sql(
+            &tx,
+            installation,
+            &account,
+            &terminal,
+            false,
+        )
+        .unwrap();
+        let mut forged = terminal.clone();
+        forged.cumulative_entry_usd = Decimal::new(80, 2);
+        assert!(matches!(
+            AccountStore::acknowledge_unified_final_entry_sql(
+                &tx,
+                installation,
+                &account,
+                &forged,
+                false,
+            ),
+            Err(StoreError::Invalid("UNIFIED_FINAL_ACK_SOURCE_CHANGED"))
+        ));
+        tx.commit().unwrap();
+    }
+    let terminal_acks: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM operation_receipts
+         WHERE installation_id=?1 AND account_key=?2
+           AND operation_id=?3 AND kind='ENTRY_TERMINAL_SETTLED'",
+            params![
+                installation,
+                &account,
+                format!("entry-terminal-settled:{intent}:r2")
+            ],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(terminal_acks, 1);
+    assert_eq!(
+        db.query_row::<String, _, _>(
+            "SELECT state FROM risk_receipts WHERE
+             installation_id=?1 AND account_key=?2 AND intent_id=?3",
+            params![installation, &account, intent],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        "TERMINAL_PENDING_CENTRAL",
+        "terminal charge must never release capital on its own"
+    );
+    db.execute(
+        "UPDATE risk_receipts SET state='LATE_SETTLEMENT_PENDING' WHERE
+         installation_id=?1 AND account_key=?2 AND intent_id=?3",
+        params![installation, &account, intent],
+    )
+    .unwrap();
+    let late = EntrySettlementEvidence {
+        schema: "okx.entry-late-settlement/v1".into(),
+        source_covered_through_ms: 11,
+        booked_notional_and_fee_usdt: Decimal::new(12, 1),
+        cumulative_entry_usd: Decimal::new(9, 1),
+        settlement_revision: 3,
+        source_digest: "e".repeat(64),
+        ..terminal.clone()
+    };
+    let late_json = serde_json::to_string(&late).unwrap();
+    for (operation, kind) in [
+        (format!("entry-late-head:{intent}"), "ENTRY_LATE_HEAD"),
+        (
+            format!("entry-late:{intent}:r3"),
+            "ENTRY_LATE_SETTLEMENT_PROVEN",
+        ),
+    ] {
+        db.execute(
+            "INSERT INTO operation_receipts(
+                installation_id,account_key,operation_id,kind,
+                request_hash,result_ref,committed_at)
+             VALUES(?1,?2,?3,?4,?5,?6,11)",
+            params![installation, &account, operation, kind, &plan, &late_json],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        AccountStore::final_entry_settlement_receipt_sql(
+            &db, installation, &account, intent, true,
+        ).unwrap(),
+        Some(late.clone())
+    );
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    AccountStore::acknowledge_unified_final_entry_sql(&tx, installation, &account, &late, true)
+        .unwrap();
+    AccountStore::acknowledge_unified_final_entry_sql(&tx, installation, &account, &late, true)
+        .unwrap();
+    let mut changed = late.clone();
+    changed.source_digest = "f".repeat(64);
+    assert!(matches!(
+        AccountStore::acknowledge_unified_final_entry_sql(
+            &tx,
+            installation,
+            &account,
+            &changed,
+            true,
+        ),
+        Err(StoreError::Invalid("UNIFIED_FINAL_ACK_SOURCE_CHANGED"))
+    ));
+    tx.commit().unwrap();
+    let saved: (String, i64) = db
+        .query_row(
+            "SELECT state,(SELECT COUNT(*) FROM operation_receipts
+          WHERE installation_id=?1 AND account_key=?2
+          AND operation_id=?4 AND kind='ENTRY_LATE_SETTLED')
+         FROM risk_receipts WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
+            params![
+                installation,
+                &account,
+                intent,
+                format!("entry-late-settled:{intent}:r3"),
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(saved, ("LATE_SETTLEMENT_PENDING".into(), 1));
+}
+
+#[test]
+fn risk_book_contract_unified_original_prepare_is_scoped_atomic_and_idempotent() {
+    use rusqlite::{Connection, TransactionBehavior, params};
+    let file = path();
+    let mut db = Connection::open(&file).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    db.pragma_update(None, "synchronous", "FULL").unwrap();
+    // The real 47-table installation schema, not the old 10-table pilot.
+    db.execute_batch(include_str!("../schema/finance-unified-v1.sql"))
+        .unwrap();
+    for account in ["acct-A", "acct-B"] {
+        db.execute(
+            "INSERT INTO account_meta VALUES(1,?1,'installation',2,1,'source','init','release')",
+            [account],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO strategy_definition_versions VALUES(
+             'installation',?1,'manual','v1','{}','immutable-digest',1)",
+            [account],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO strategy_instances VALUES(
+             'installation',?1,'manual','manual','v1','{}',1,1,'100',NULL,'immutable-digest')",
+            [account],
+        )
+        .unwrap();
+    }
+    let decision = Decision {
+        decision_id: "same-decision".into(),
+        instance_id: None,
+        decision_at: 2,
+        input_digest: "same-input".into(),
+        policy_revision: 1,
+        code_version: "native".into(),
+    };
+    let intent = NewIntent {
+        plan: IntentPlan {
+            strategy_definition_id: "manual".into(),
+            strategy_definition_version: "v1".into(),
+            strategy_parameters_digest: "immutable-digest".into(),
+            contract_value: Decimal::ONE,
+            inverse: false,
+            settlement_currency: "USDT".into(),
+            position_side: "long".into(),
+            private_source_generation: 1,
+            operation: "open".into(),
+            side: "buy".into(),
+            quantity: Decimal::ONE,
+            limit_price: Decimal::from(100),
+            stop_price: Some(Decimal::from(95)),
+            strategy_instance: "manual".into(),
+            planned_loss_usd: Decimal::from(5),
+            source_generation: 1,
+        },
+        intent_id: "same-intent".into(),
+        idempotency_key: "same-request".into(),
+        request_hash: "same-body".into(),
+        client_order_id: "same-client".into(),
+        deadline: 100,
+        plan_hash: "a".repeat(64),
+        policy_revision: 1,
+        risk_increase: true,
+        instrument_id: "BTC-USDT-SWAP".into(),
+    };
+    // Both original account actions stage against ONE physical writer and
+    // transaction. Identical IDs are unique only within account scope.
+    {
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        for account in ["acct-A", "acct-B"] {
+            assert!(
+                AccountStore::prepare_sql_transaction(
+                    &tx,
+                    Some(("installation", account)),
+                    &decision,
+                    &intent
+                )
+                .unwrap()
+            );
+            assert!(
+                !AccountStore::prepare_sql_transaction(
+                    &tx,
+                    Some(("installation", account)),
+                    &decision,
+                    &intent
+                )
+                .unwrap()
+            );
+        }
+        let mut conflict = intent.clone();
+        conflict.request_hash = "altered-body".into();
+        assert!(matches!(
+            AccountStore::prepare_sql_transaction(
+                &tx,
+                Some(("installation", "acct-A")),
+                &decision,
+                &conflict
+            ),
+            Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"))
+        ));
+        let mut stale_definition = intent.clone();
+        stale_definition.intent_id = "different-intent".into();
+        stale_definition.idempotency_key = "different-request".into();
+        stale_definition.client_order_id = "different-client".into();
+        stale_definition.plan.strategy_definition_version = "nonexistent".into();
+        assert!(matches!(
+            AccountStore::prepare_sql_transaction(
+                &tx,
+                Some(("installation", "acct-A")),
+                &decision,
+                &stale_definition
+            ),
+            Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"))
+        ));
+        assert!(matches!(
+            AccountStore::prepare_sql_transaction(
+                &tx,
+                Some(("installation", "foreign-account")),
+                &decision,
+                &intent
+            ),
+            Err(StoreError::Invalid("UNIFIED_PREPARE_ACCOUNT_MISSING"))
+        ));
+        assert_eq!(
+            tx.query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM intents WHERE intent_id='same-intent'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            2
+        );
+        tx.rollback().unwrap();
+    }
+    assert_eq!(
+        db.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM intents WHERE intent_id='same-intent'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        0,
+        "rollback removes BOTH accounts' decision/intent/plan rows"
+    );
+    {
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        for account in ["acct-A", "acct-B"] {
+            assert!(
+                AccountStore::prepare_sql_transaction(
+                    &tx,
+                    Some(("installation", account)),
+                    &decision,
+                    &intent
+                )
+                .unwrap()
+            );
+        }
+        tx.commit().unwrap();
+    }
+    drop(db);
+    let mut reopened = Connection::open(&file).unwrap();
+    reopened.pragma_update(None, "foreign_keys", "ON").unwrap();
+    for account in ["acct-A", "acct-B"] {
+        for table in ["decisions", "intents", "intent_plans"] {
+            let sql =
+                format!("SELECT COUNT(*) FROM {table} WHERE installation_id=?1 AND account_key=?2");
+            let count: i64 = reopened
+                .query_row(&sql, params!["installation", account], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "original {table} account scope must survive cold reopen"
+            );
+        }
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(
+            !AccountStore::prepare_sql_transaction(
+                &tx,
+                Some(("installation", account)),
+                &decision,
+                &intent
+            )
+            .unwrap(),
+            "exact replay cannot create a second decision"
+        );
+        tx.rollback().unwrap();
+    }
+    // Source-only v6 recovery test: these are explicitly synthetic SQL
+    // POSTING fixtures, not an authenticated venue POST or authority epoch.
+    // This checks that a shared intent_id cannot cause cross-account UNKNOWN,
+    // ACK, terminal receipt or revision changes in the real finance schema.
+    for account in ["acct-A", "acct-B"] {
+        reopened.execute(
+            "INSERT INTO risk_receipts(
+             reservation_key,intent_id,account_key,installation_id,instance_id,
+             plan_hash,policy_revision,receipt_hash,requested_loss_usd,conversion_digest,state)
+             VALUES('same-reservation','same-intent',?1,'installation',NULL,?2,1,'receipt','1','conversion','POSTED')",
+            params![account, intent.plan_hash],
+        ).unwrap();
+        reopened
+            .execute(
+                "UPDATE intents SET state='POSTING',begin_post_at=4
+             WHERE installation_id='installation' AND account_key=?1 AND intent_id='same-intent'",
+                [account],
+            )
+            .unwrap();
+    }
+    // Fail-closed recovery: POSTING is not enough. The original native
+    // durable POST fence and matching account risk receipt must be present
+    // before changing either SQL state. Faults never mint budget headroom.
+    for corrupt_sql in [
+        "DELETE FROM risk_receipts WHERE installation_id='installation' AND account_key='acct-A'",
+        "UPDATE risk_receipts SET state='OPEN' WHERE installation_id='installation' AND account_key='acct-A'",
+        "UPDATE risk_receipts SET plan_hash='foreign-plan' WHERE installation_id='installation' AND account_key='acct-A'",
+        "UPDATE risk_receipts SET policy_revision=2 WHERE installation_id='installation' AND account_key='acct-A'",
+        "UPDATE intents SET begin_post_at=NULL WHERE installation_id='installation' AND account_key='acct-A'",
+    ] {
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute_batch(corrupt_sql).unwrap();
+        assert!(matches!(
+            AccountStore::recover_posting_sql_transaction(&tx, Some(("installation", "acct-A")), 5),
+            Err(StoreError::Invalid(
+                "UNIFIED_RECOVERY_ORIGINAL_POST_UNPROVEN"
+            ))
+        ));
+        let unchanged: String = tx.query_row(
+            "SELECT state FROM intents WHERE installation_id='installation' AND account_key='acct-A'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(unchanged, "POSTING");
+        tx.rollback().unwrap();
+    }
+    // A foreign account cannot recover A/B, even if its raw venue IDs match.
+    {
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(
+            AccountStore::recover_posting_sql_transaction(
+                &tx,
+                Some(("installation", "foreign-account")),
+                5
+            )
+            .unwrap(),
+            0
+        );
+        tx.rollback().unwrap();
+    }
+    {
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(
+            AccountStore::recover_posting_sql_transaction(&tx, Some(("installation", "acct-A")), 5)
+                .unwrap(),
+            1
+        );
+        AccountStore::record_outcome_sql_transaction(
+            &tx,
+            Some(("installation", "acct-A")),
+            "same-intent",
+            IntentState::Acknowledged,
+            Some("venue-order"),
+            "venue-readback",
+            6,
+        )
+        .unwrap();
+        let mut foreign = AccountStore::find_intent_sql(
+            &tx,
+            Some(("installation", "foreign-account")),
+            "intent_id",
+            "same-intent",
+        )
+        .unwrap();
+        assert!(foreign.take().is_none());
+        assert!(matches!(
+            AccountStore::record_outcome_sql_transaction(
+                &tx,
+                Some(("installation", "foreign-account")),
+                "same-intent",
+                IntentState::Acknowledged,
+                Some("venue-order"),
+                "venue-readback",
+                6,
+            ),
+            Err(StoreError::Invalid("INTENT_MISSING"))
+        ));
+        tx.commit().unwrap();
+    }
+    assert_eq!(
+        reopened.query_row::<String, _, _>(
+            "SELECT state FROM intents WHERE installation_id='installation' AND account_key='acct-B'",
+            [], |r| r.get(0),
+        ).unwrap(),
+        "POSTING",
+        "B's identical intent cannot be recovered by A's transaction"
+    );
+    assert_eq!(
+        reopened.query_row::<String, _, _>(
+            "SELECT state FROM risk_receipts WHERE installation_id='installation' AND account_key='acct-B'",
+            [], |r| r.get(0),
+        ).unwrap(),
+        "POSTED",
+        "B's RiskBook-linked original receipt remains untouched"
+    );
+    {
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(matches!(
+            AccountStore::record_outcome_sql_transaction(
+                &tx,
+                Some(("installation", "acct-A")),
+                "same-intent",
+                IntentState::Acknowledged,
+                Some("foreign-venue-id"),
+                "venue-readback",
+                7,
+            ),
+            Err(StoreError::Invalid("EXCHANGE_ID_CONFLICT"))
+        ));
+        AccountStore::record_outcome_sql_transaction(
+            &tx,
+            Some(("installation", "acct-A")),
+            "same-intent",
+            IntentState::Filled,
+            Some("venue-order"),
+            "terminal-proof",
+            8,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    {
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(
+            AccountStore::recover_posting_sql_transaction(
+                &tx, Some(("installation", "acct-B")), 9,
+            ).unwrap(),
+            1
+        );
+        AccountStore::record_outcome_sql_transaction(
+            &tx,
+            Some(("installation", "acct-B")),
+            "same-intent",
+            IntentState::Acknowledged,
+            Some("venue-order"),
+            "venue-readback",
+            10,
+        )
+        .unwrap();
+        AccountStore::record_outcome_sql_transaction(
+            &tx,
+            Some(("installation", "acct-B")),
+            "same-intent",
+            IntentState::Filled,
+            Some("venue-order"),
+            "terminal-proof",
+            11,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    // Exact recovery replay cannot overwrite terminal receipt or consume
+    // another account's POSTING fence after both are resolved.
+    {
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        for account in ["acct-A", "acct-B"] {
+            assert_eq!(
+                AccountStore::recover_posting_sql_transaction(
+                    &tx,
+                    Some(("installation", account)),
+                    12
+                )
+                .unwrap(),
+                0,
+            );
+        }
+        tx.commit().unwrap();
+    }
+    assert_eq!(
+        reopened
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM operation_receipts
+             WHERE operation_id='terminal:same-intent' AND kind='TERMINAL'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+        2,
+        "A/B identical durable terminal receipt IDs must coexist"
+    );
+    {
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(matches!(
+            AccountStore::record_outcome_sql_transaction(
+                &tx,
+                Some(("installation", "acct-A")),
+                "same-intent",
+                IntentState::Filled,
+                Some("venue-order"),
+                "altered-terminal-proof",
+                12,
+            ),
+            Err(StoreError::Invalid("UNIFIED_TERMINAL_RECEIPT_CONFLICT"))
+        ));
+        tx.rollback().unwrap();
+    }
+    for account in ["acct-A", "acct-B"] {
+        let terminal: (String, String) = reopened
+            .query_row(
+                "SELECT state,exchange_order_id FROM intents
+             WHERE installation_id='installation' AND account_key=?1",
+                [account],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(terminal, ("FILLED".into(), "venue-order".into()));
+    }
+    // Installation-wide recovery must be all-or-nothing even if account B's
+    // source is broken AFTER account A has already been staged in the batch.
+    // The original decision/intent creation code is shared with account-v2.
+    let mut batch_decision = decision.clone();
+    batch_decision.decision_id = "batch-decision".into();
+    let mut batch_intent = intent.clone();
+    batch_intent.intent_id = "batch-intent".into();
+    batch_intent.idempotency_key = "batch-idempotency".into();
+    batch_intent.client_order_id = "batch-client".into();
+    {
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        for account in ["acct-A", "acct-B"] {
+            assert!(
+                AccountStore::prepare_sql_transaction(
+                    &tx,
+                    Some(("installation", account)),
+                    &batch_decision,
+                    &batch_intent
+                )
+                .unwrap()
+            );
+            tx.execute(
+                "INSERT INTO risk_receipts(
+                 reservation_key,intent_id,account_key,installation_id,instance_id,
+                 plan_hash,policy_revision,receipt_hash,requested_loss_usd,
+                 conversion_digest,state)
+                 VALUES('batch-reservation','batch-intent',?1,'installation',
+                 NULL,?2,1,'batch-receipt','1','conversion','POSTED')",
+                params![account, batch_intent.plan_hash],
+            )
+            .unwrap();
+            tx.execute(
+                "UPDATE intents SET state='POSTING',begin_post_at=14
+                 WHERE installation_id='installation' AND account_key=?1
+                   AND intent_id='batch-intent'",
+                [account],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    {
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "UPDATE risk_receipts SET state='OPEN'
+             WHERE installation_id='installation' AND account_key='acct-B'
+               AND intent_id='batch-intent'",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            AccountStore::recover_installation_posting_sql_transaction(&tx, "installation", 15),
+            Err(StoreError::Invalid(
+                "UNIFIED_RECOVERY_ORIGINAL_POST_UNPROVEN"
+            ))
+        ));
+        // The helper's SAVEPOINT undid A already; the caller can still
+        // explicitly roll back this deliberately corrupted B source.
+        assert_eq!(
+            tx.query_row::<String, _, _>(
+                "SELECT state FROM intents WHERE installation_id='installation'
+                   AND account_key='acct-A' AND intent_id='batch-intent'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            "POSTING"
+        );
+        assert_eq!(
+            tx.query_row::<String, _, _>(
+                "SELECT state FROM risk_receipts WHERE installation_id='installation'
+                   AND account_key='acct-A' AND intent_id='batch-intent'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            "POSTED"
+        );
+        tx.rollback().unwrap();
+    }
+    {
+        let tx = reopened
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(
+            AccountStore::recover_installation_posting_sql_transaction(&tx, "installation", 16)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            AccountStore::recover_installation_posting_sql_transaction(&tx, "installation", 17)
+                .unwrap(),
+            0
+        );
+        tx.commit().unwrap();
+    }
+    drop(reopened);
+    let reopened = Connection::open(&file).unwrap();
+    for account in ["acct-A", "acct-B"] {
+        assert_eq!(
+            reopened
+                .query_row::<(String, String), _, _>(
+                    "SELECT i.state,r.state FROM intents i JOIN risk_receipts r
+                 ON r.installation_id=i.installation_id AND r.account_key=i.account_key
+                 AND r.intent_id=i.intent_id
+                 WHERE i.installation_id='installation' AND i.account_key=?1
+                   AND i.intent_id='batch-intent'",
+                    [account],
+                    |r| Ok((r.get(0)?, r.get(1)?))
+                )
+                .unwrap(),
+            ("UNKNOWN".into(), "UNKNOWN".into())
+        );
+        assert_eq!(
+            reopened
+                .query_row::<String, _, _>(
+                    "SELECT state FROM intents WHERE installation_id='installation'
+                   AND account_key=?1 AND intent_id='same-intent'",
+                    [account],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            "FILLED"
+        );
+    }
+    let mut fk = reopened.prepare("PRAGMA foreign_key_check").unwrap();
+    assert!(
+        fk.query([]).unwrap().next().unwrap().is_none(),
+        "all 47-table scoped FK remain valid"
+    );
+}
+
+#[test]
+fn risk_book_contract_source_capture_state_reads_all_partitions() {
+    let mut store = store();
+    let streams = [
+        ("fills", "SPOT"),
+        ("fills", "MARGIN"),
+        ("fills", "SWAP"),
+        ("fills", "FUTURES"),
+        ("fills", "OPTION"),
+        ("bills", "account"),
+    ];
+    for (index, (source, partition)) in streams.iter().enumerate() {
+        store
+            .ingest_page(&IngestPage {
+                cursor: Some(SourceCursor {
+                    source: (*source).into(),
+                    stream_partition: (*partition).into(),
+                    cursor: format!("cursor-{index}"),
+                    watermark: 20 + index as i64,
+                    generation: 3 + index as i64,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    let state = store.source_capture_state().unwrap();
+    assert_eq!(state.account_key, store.meta.account_key);
+    assert_eq!(state.initialized_at, store.meta.initialized_at);
+    assert_eq!(state.generation_base, 8);
+    let cursors = [
+        state.cursors.spot,
+        state.cursors.margin,
+        state.cursors.swap,
+        state.cursors.futures,
+        state.cursors.options,
+        state.cursors.bills,
+    ];
+    for (index, ((source, partition), cursor)) in streams.iter().zip(cursors).enumerate() {
+        let cursor = cursor.unwrap();
+        assert_eq!(cursor.source, *source);
+        assert_eq!(cursor.stream_partition, *partition);
+        assert_eq!(cursor.cursor, format!("cursor-{index}"));
+        assert_eq!(cursor.watermark, 20 + index as i64);
+    }
 }

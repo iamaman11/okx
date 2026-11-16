@@ -1,6 +1,6 @@
 import {GOVERNANCE_STORAGE_KEY,validGovernance,validLimits,accessEnabled,
   reviseGovernance,type GovernanceUpdate,type Governance,type Account,type Limits} from "./account_governance.js";
-import {initializeRiskBook,lowerRiskBookLimit,lowerCampaignEntryLimit,units} from "./risk_book.js";
+import {units} from "./decimal.js";
 export {GOVERNANCE_STORAGE_KEY} from "./account_governance.js";
 
 type Reply={status:number;body:Record<string,unknown>};
@@ -35,26 +35,10 @@ export async function initializeGovernance(storage:any,configuration:Governance,
     if(receipt!==undefined)return receipt.hash===bodyHash?receipt.reply:fail(409,"IDEMPOTENCY_CONFLICT");
     const previous:unknown=await tx.get(GOVERNANCE_STORAGE_KEY);
     if(previous!==undefined)return fail(409,"INSTALLATION_ALREADY_INITIALIZED");
-    if(await tx.get("risk_meta_v2")!==undefined||await tx.get("installation_release_v1")!==undefined)
+    if(await tx.get("installation_release_v1")!==undefined)
       return fail(409,"INSTALLATION_STORAGE_ALREADY_INITIALIZED");
-    // One-time retirement belongs to the authenticated clean-install lifecycle.
-    // Never inspect old values, convert them, or repeat deletion on receipt replay.
-    let retired:number|undefined;
-    if(lifecycle){
-      const removed=await tx.delete(["risk_book_v1","account_governance_v2","account_policy_v1"]);
-      if(!Number.isInteger(removed)||removed<0||removed>3)throw Error("RETIREMENT_DELETE_UNCONFIRMED");
-      retired=removed;
-    }
-    // Canonical campaign inception belongs to the same authenticated,
-    // one-time installation transaction as governance and RiskBook. The
-    // existing installation cannot retroactively claim this timestamp.
-    await initializeRiskBook(tx,configuration.installation_id,{
-      installation_id:configuration.installation_id,
-      campaign_id:configuration.campaign_id,
-      started_at_ms:Date.now()
-    });
     await tx.put(GOVERNANCE_STORAGE_KEY,configuration);
-    const reply={status:200,body:{...result(configuration),...(retired===undefined?{}:{retired_financial_keys_removed:retired})}};
+    const reply={status:200,body:result(configuration)};
     if(receiptKey)await tx.put(receiptKey,{hash:bodyHash,reply});
     if(lifecycle)await tx.put("installation_release_v1",{release_sha256:lifecycle.release_sha256,contract:lifecycle.contract,installation_id:configuration.installation_id});
     return reply;
@@ -92,17 +76,13 @@ export async function governanceRequest(storage:any,method:string,raw?:unknown):
   if(Object.keys(raw).sort().join(",")!==fields.sort().join(","))
     return fail(400,"INVALID_ACCESS_REQUEST");
   if(new TextEncoder().encode(JSON.stringify(raw)).byteLength>32768)return fail(413,"ACCESS_REQUEST_TOO_LARGE");
-  return mutate(storage,raw.idempotency_key,raw,async(policy,tx)=>{
+  return mutate(storage,raw.idempotency_key,raw,policy=>{
     const revised=reviseGovernance(policy,raw as unknown as GovernanceUpdate);
     if(!revised)return fail(409,"ACCESS_REVISION_OR_LIMITS_REJECTED");
-    if(revised.campaign_entry_limit_usd!==policy.campaign_entry_limit_usd &&
-      !await lowerCampaignEntryLimit(tx,policy.campaign_entry_limit_usd,
-        revised.campaign_entry_limit_usd))
-      return fail(409,"ENTRY_LIMIT_BELOW_CONSUMED_OR_RESERVED");
     return {status:200,body:{...result(revised),configuration:revised}};
   });
 }
-/** Owner-only, body-bound, monotonic campaign reduction. It never resets risk. */
+/** Owner-only, body-bound, monotonic campaign reduction. Financial enforcement belongs to the native finance owner. */
 export async function lowerCampaignLimit(storage:any,raw:unknown):Promise<Reply>{
  if(!record(raw)||Object.keys(raw).sort().join(",")!=="campaign_loss_limit_usd,expected_revision,idempotency_key"||typeof raw.campaign_loss_limit_usd!=="string"||!Number.isSafeInteger(raw.expected_revision)||!operationKey(raw.idempotency_key))return fail(400,"INVALID_CAMPAIGN_LIMIT_REQUEST");
  const requestedLimit=raw.campaign_loss_limit_usd as string;
@@ -115,7 +95,7 @@ export async function lowerCampaignLimit(storage:any,raw:unknown):Promise<Reply>
    if(previous.revision!==raw.expected_revision)return fail(409,"STALE_ACCESS_REVISION");
    if(requested>=units(previous.campaign_loss_limit_usd)!)return fail(409,"CAMPAIGN_LIMIT_MUST_STRICTLY_DECREASE");
    const next:Governance={...previous,revision:previous.revision+1,campaign_loss_limit_usd:requestedLimit};
-   if(!validGovernance(next)||!await lowerRiskBookLimit(tx,requestedLimit))return fail(409,"CAMPAIGN_LIMIT_BELOW_CONSUMED_OR_RESERVED_RISK");
+   if(!validGovernance(next))return fail(409,"INVALID_CAMPAIGN_LIMIT_REQUEST");
    const reply={status:200,body:{...result(next),campaign_limit_change:{previous_usd:previous.campaign_loss_limit_usd,current_usd:requestedLimit}}};
    await tx.put(GOVERNANCE_STORAGE_KEY,next);await tx.put(receiptKey,{hash,reply});return reply;
  });

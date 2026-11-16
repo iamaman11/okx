@@ -6,6 +6,7 @@ use crate::account_bootstrap::AccountBootstrapper;
 use crate::diagnostics::{
     ProtectionCleanupInvocation, ProtectionOperationTrace, ProtectionTraceEvent,
 };
+use crate::execution_store::ExecutionStore;
 use tokio::sync::Semaphore;
 
 // A signed flat position is NOT permission to remove a stop while the
@@ -35,7 +36,7 @@ pub(super) struct CleanupOrderFacts<'a> {
 }
 
 pub(super) struct CleanupDependencies<'a> {
-    pub store: &'a AccountStoreHandle,
+    pub store: &'a ExecutionStore,
     pub observer: &'a AccountBootstrapper,
     pub trade: &'a okx_api::TradeApi,
     pub clock: &'a okx_api::OkxRestClient,
@@ -115,12 +116,37 @@ enum ProtectionCleanupStep {
 // BEGIN and its receipt are the only authority to send. A repeated BEGIN is
 // never permission to repeat a possibly accepted exchange cancellation.
 async fn protection_cleanup_step(
-    store: &AccountStoreHandle,
+    store: &ExecutionStore,
     key: &str,
     hash: &str,
 ) -> Result<ProtectionCleanupStep, String> {
     let key = key.to_owned();
     let hash = hash.to_owned();
+    if let Some((owner, account)) = store.native_scope() {
+        if owner
+            .begin_operation(
+                deadline(),
+                account.into(),
+                key.clone(),
+                hash.clone(),
+                "protection_cleanup".into(),
+            )
+            .await
+            .map_err(err)?
+        {
+            return Ok(ProtectionCleanupStep::SendOnce);
+        }
+        let old = owner
+            .operation(deadline(), account.into(), key)
+            .await
+            .map_err(err)?
+            .ok_or("PROTECTION_CLEANUP_BEGIN_MISSING")?;
+        return match old.result_ref.as_str() {
+            "POSTING" => Ok(ProtectionCleanupStep::Inspect),
+            "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
+            _ => Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into()),
+        };
+    }
     store
         .call(deadline(), move |s| {
             if s.begin_operation(&key, &hash, "protection_cleanup", now())? {
@@ -248,9 +274,23 @@ fn evaluate_cleanup_readback(
 }
 
 async fn commit_cleanup_confirmation(
-    store: &AccountStoreHandle,
+    store: &ExecutionStore,
     proof: VerifiedCleanup,
 ) -> Result<(), String> {
+    if let Some((owner, account)) = store.native_scope() {
+        owner
+            .operation_receipt(
+                deadline(),
+                account.into(),
+                proof.operation_key,
+                proof.request_hash,
+                "protection_cleanup".into(),
+                "VERIFIED_CANCELED".into(),
+            )
+            .await
+            .map_err(err)?;
+        return Ok(());
+    }
     store
         .call(deadline(), move |s| {
             s.operation_receipt(
@@ -266,16 +306,31 @@ async fn commit_cleanup_confirmation(
     Ok(())
 }
 
+async fn cleanup_operation(
+    store: &ExecutionStore,
+    key: String,
+) -> Result<Option<okx_execution::OperationReceipt>, String> {
+    if let Some((owner, account)) = store.native_scope() {
+        owner
+            .operation(deadline(), account.into(), key)
+            .await
+            .map_err(err)
+    } else {
+        store
+            .call(deadline(), move |s| s.operation(&key))
+            .await
+            .map_err(err)
+    }
+}
+
 async fn protection_cleanup_readback(
-    store: &AccountStoreHandle,
+    store: &ExecutionStore,
     target: ProtectionCleanupIdentity<'_>,
     observed: ProtectionCleanupObservation<'_>,
 ) -> Result<(), String> {
     let op_key = target.key.to_owned();
-    let operation = store
-        .call(deadline(), move |s| s.operation(&op_key))
-        .await
-        .map_err(err)?
+    let operation = cleanup_operation(store, op_key)
+        .await?
         .ok_or(CleanupBlocker::MissingBegin.reason())?;
     let proof = evaluate_cleanup_readback(&operation, target, observed)
         .map_err(|blocker| blocker.reason().to_owned())?;
@@ -289,7 +344,7 @@ async fn protection_cleanup_readback(
 // and by the direct recorded-wire regression. The test supplies only venue
 // bytes; neither the readback nor its durable decision is mocked.
 async fn observe_protection_cleanup_sources(
-    store: &AccountStoreHandle,
+    store: &ExecutionStore,
     observer: &crate::account_bootstrap::AccountBootstrapper,
     target: ProtectionCleanupIdentity<'_>,
     trace: Option<(&ProtectionOperationTrace, CleanupOrderFacts<'_>)>,
@@ -384,11 +439,17 @@ pub(super) async fn cleanup_flat_protection(
         .try_acquire()
         .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
     let id = facts.intent_id.to_owned();
-    let saved = deps
-        .store
-        .call(deadline(), move |s| s.protection(&id))
-        .await
-        .map_err(err)?;
+    let saved = if let Some((owner, account)) = deps.store.native_scope() {
+        owner
+            .protection(deadline(), account.into(), id)
+            .await
+            .map_err(err)?
+    } else {
+        deps.store
+            .call(deadline(), move |s| s.protection(&id))
+            .await
+            .map_err(err)?
+    };
     let Some(saved) = saved else {
         trace_cleanup(&deps, facts, ProtectionTraceEvent::NoProtection);
         return Ok(());
@@ -415,11 +476,7 @@ pub(super) async fn cleanup_flat_protection(
     // obtaining a new send permit. The former path returned UNKNOWN here
     // forever even when the signed post-cancel inventory became complete.
     let op_key = key.clone();
-    let prior = deps
-        .store
-        .call(deadline(), move |s| s.operation(&op_key))
-        .await
-        .map_err(err)?;
+    let prior = cleanup_operation(deps.store, op_key).await?;
     match decide_cleanup(facts, prior.as_ref(), &hash)
         .map_err(|blocked| blocked.reason().to_owned())?
     {

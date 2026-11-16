@@ -161,7 +161,7 @@ impl Fixture {
             Environment::Real,
             &self.intent,
             UnsentReleaseDependencies {
-                store: &self.store,
+                store: &self.store.clone().into(),
                 risk,
                 governance: &self.governance,
                 sql_deadline: deadline,
@@ -524,7 +524,7 @@ async fn ur09_local_and_demo_paths_never_contact_worker() {
             Environment::Demo,
             &f.intent,
             UnsentReleaseDependencies {
-                store: &f.store,
+                store: &f.store.clone().into(),
                 risk: &risk,
                 governance: &f.governance,
                 sql_deadline: expired,

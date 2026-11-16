@@ -37,7 +37,7 @@ zeroize = { version = "1", features = ["derive"] }
 # Keep Tokio process support test-only; production Agent features are unchanged.
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false }
-tokio = { version = "1", features = ["process"] }
+tokio = { version = "1", features = ["process", "io-util"] }
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "4.2", default-features = false, features = ["v1"] }

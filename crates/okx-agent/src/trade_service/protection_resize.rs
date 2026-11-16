@@ -25,98 +25,33 @@ impl TradeService {
         if venue_filled != reduction.plan.quantity || venue_filled <= Decimal::ZERO {
             return Err("PROTECTION_SHRINK_REDUCE_FILL_UNVERIFIED".into());
         }
-        let instrument = reduction.instrument_id.clone();
-        let id = reduction.intent_id.clone();
         let plan_hash = reduction.plan_hash.clone();
-        let reduce_order_id = venue.order_id.clone();
-        let reduce_instance = reduction.plan.strategy_instance.clone();
-        let reduce_position_side = reduction.plan.position_side.clone();
         let account_key = r.configuration.account_key.wire();
-        let (opening, old_stop, key, prior, verified) = r
-            .execution
-            .store
-            .call(deadline(), move |s| {
-                let (fee, fill_count, _) =
-                    s.prove_local_partial_reduce(&id, &reduce_order_id, venue_filled, update)?;
-                if fill_count == 0 || fee > Decimal::ZERO {
-                    return Err(okx_execution::StoreError::Invalid(
-                        "PROTECTION_SHRINK_FINANCIAL_PROOF_INCOMPLETE",
-                    ));
-                }
-                let lots = s.active_lots(&instrument)?;
-                if lots.len() != 1
-                    || lots[0].remaining_qty != position_qty
-                    || lots[0].side != reduce_position_side
-                    || lots[0].instance_id.as_deref() != Some(reduce_instance.as_str())
-                {
-                    return Err(okx_execution::StoreError::Invalid(
-                        "PROTECTION_SHRINK_OWNERSHIP_UNVERIFIED",
-                    ));
-                }
-                let origin =
-                    lots[0]
-                        .intent_id
-                        .as_ref()
-                        .ok_or(okx_execution::StoreError::Invalid(
-                            "PROTECTION_SHRINK_ORIGINAL_INTENT_UNATTRIBUTED",
-                        ))?;
-                if origin == &id {
-                    return Err(okx_execution::StoreError::Invalid(
-                        "PROTECTION_SHRINK_OWNERSHIP_UNVERIFIED",
-                    ));
-                }
-                let opening = s.intent(origin)?.ok_or(okx_execution::StoreError::Invalid(
-                    "PROTECTION_SHRINK_ORIGINAL_INTENT_MISSING",
-                ))?;
-                if !opening.risk_increase
-                    || opening.instrument_id != instrument
-                    || opening.plan.strategy_instance != reduce_instance
-                    || opening.plan.position_side != reduce_position_side
-                    || opening.incident.is_some()
-                    || s.active_central_receipt(origin)?.is_none()
-                {
-                    return Err(okx_execution::StoreError::Invalid(
-                        "PROTECTION_SHRINK_ORIGINAL_RISK_UNVERIFIED",
-                    ));
-                }
-                let old = s
-                    .protection(origin)?
-                    .ok_or(okx_execution::StoreError::Invalid(
-                        "PROTECTION_SHRINK_ORIGINAL_STOP_MISSING",
-                    ))?;
-                let covered =
-                    s.cursor("fills", "SWAP")?
-                        .ok_or(okx_execution::StoreError::Invalid(
-                            "PROTECTION_SHRINK_ORIGINAL_FILL_CURSOR_MISSING",
-                        ))?;
-                let original_fill = s.intent_fill_cost_evidence(origin, covered.watermark)?;
-                let original_bills = s.intent_fee_bill_evidence(origin, covered.watermark)?;
-                if original_bills.linked_bill_count != original_fill.fill_count
-                    || original_fill.filled_quantity
-                        != position_qty.checked_add(venue_filled).ok_or(
-                            okx_execution::StoreError::Invalid(
-                                "PROTECTION_SHRINK_QUANTITY_OVERFLOW",
-                            ),
-                        )?
-                {
-                    return Err(okx_execution::StoreError::Invalid(
-                        "PROTECTION_SHRINK_GROSS_NET_QUANTITY_UNVERIFIED",
-                    ));
-                }
-                let key = format!("protection-shrink:{}:{}", origin, exact(position_qty));
-                let op = s.operation(&key)?;
-                let verified = s.operation(&format!("{key}:verified"))?;
-                if old.quantity != original_fill.filled_quantity
-                    && (old.quantity != position_qty || verified.is_none())
-                {
-                    return Err(okx_execution::StoreError::Invalid(
-                        "PROTECTION_SHRINK_STOP_VOLUME_CHANGED",
-                    ));
-                }
-                Ok((opening, old, key, op, verified))
-            })
-            .await
-            .map_err(err)?;
+        let (opening, old_stop, key, prior, verified) =
+            if let Some((owner, account)) = r.execution.store.native_scope() {
+                owner
+                    .protection_resize_source(
+                        deadline(),
+                        account.into(),
+                        reduction.intent_id.clone(),
+                        venue.order_id.clone(),
+                        venue_filled,
+                        update,
+                        position_qty,
+                    )
+                    .await
+                    .map_err(err)?
+            } else {
+                let id = reduction.intent_id.clone();
+                let order = venue.order_id.clone();
+                r.execution
+                    .store
+                    .call(deadline(), move |s| {
+                        s.protection_resize_source(&id, &order, venue_filled, update, position_qty)
+                    })
+                    .await
+                    .map_err(err)?
+            };
         let hash = digest(&(
             "protection-shrink/v1",
             &account_key,
@@ -194,21 +129,34 @@ impl TradeService {
                 source_digest: digest(&live)?,
             };
             let verification = format!("{key}:verified");
-            r.execution
-                .store
-                .call(deadline(), move |s| {
-                    s.verify_protection(&new_protection)?;
-                    s.operation_receipt(
-                        &verification,
-                        &hash,
-                        "protection_shrink_verified",
-                        "VERIFIED",
-                        now(),
-                    )?;
-                    Ok(())
-                })
-                .await
-                .map_err(err)?;
+            if let Some((owner, account)) = r.execution.store.native_scope() {
+                owner
+                    .confirm_protection_resize(
+                        deadline(),
+                        account.into(),
+                        new_protection,
+                        verification,
+                        hash,
+                    )
+                    .await
+                    .map_err(err)?;
+            } else {
+                r.execution
+                    .store
+                    .call(deadline(), move |s| {
+                        s.verify_protection(&new_protection)?;
+                        s.operation_receipt(
+                            &verification,
+                            &hash,
+                            "protection_shrink_verified",
+                            "VERIFIED",
+                            now(),
+                        )?;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(err)?;
+            }
             return Ok(json!({
                 "state":"verified",
                 "original_intent_id":opening.intent_id,
@@ -251,9 +199,12 @@ impl TradeService {
         let fresh = r
             .execution
             .store
-            .call(deadline(), move |s| {
-                s.begin_operation(&operation_key, &operation_hash, "protection_shrink", now())
-            })
+            .begin_operation(
+                deadline(),
+                operation_key,
+                operation_hash,
+                "protection_shrink".into(),
+            )
             .await
             .map_err(err)?;
         if !fresh {
@@ -279,15 +230,13 @@ impl TradeService {
         }
         r.execution
             .store
-            .call(deadline(), move |s| {
-                s.operation_receipt(
-                    &key,
-                    &hash,
-                    "protection_shrink",
-                    "ACK_SOURCE_PENDING",
-                    now(),
-                )
-            })
+            .operation_receipt(
+                deadline(),
+                key,
+                hash,
+                "protection_shrink".into(),
+                "ACK_SOURCE_PENDING".into(),
+            )
             .await
             .map_err(err)?;
         Ok(json!({

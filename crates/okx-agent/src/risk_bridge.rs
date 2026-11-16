@@ -12,24 +12,148 @@ pub struct OutboundRiskCommand {
 }
 #[derive(Clone)]
 pub struct NativeRiskClient {
-    tx: mpsc::Sender<OutboundRiskCommand>,
+    route: RiskRoute,
+}
+
+#[derive(Clone)]
+enum RiskRoute {
+    Cloudflare(mpsc::Sender<OutboundRiskCommand>),
+    Local(crate::native_finance_risk::NativeFinanceRisk),
+    /// Installed finance snapshot, real Engine route, ZERO private SQL/POST
+    /// producers and ZERO financial COMMIT permission.
+    LocalStopped(crate::native_finance_risk::NativeFinanceRisk),
 }
 impl NativeRiskClient {
-    pub fn new(tx: mpsc::Sender<OutboundRiskCommand>) -> Self {
-        Self { tx }
+    pub(crate) fn is_native_finance(&self) -> bool {
+        !matches!(&self.route, RiskRoute::Cloudflare(_))
     }
+
+    pub(crate) fn native_finance_owner(
+        &self,
+    ) -> Option<okx_execution::account_worker::UnifiedFinanceHandle> {
+        match &self.route {
+            RiskRoute::Cloudflare(_) => None,
+            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
+                Some(backend.owner.clone())
+            }
+        }
+    }
+
+    pub(crate) async fn reserve_produced(
+        &self,
+        packet: crate::trade_service::ProducedReserve,
+    ) -> Result<(RiskResult, Option<okx_execution::CentralReceipt>), &'static str> {
+        match &self.route {
+            RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED"),
+            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
+                backend.resolved().await?.reserve_produced(packet).await
+            }
+        }
+    }
+
+    pub(crate) async fn post_produced(
+        &self,
+        packet: crate::trade_service::ProducedPost,
+    ) -> Result<(RiskResult, Option<okx_execution::CommittedVenueSend>), &'static str> {
+        match &self.route {
+            RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED"),
+            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
+                backend.resolved().await?.post_produced(packet).await
+            }
+        }
+    }
+
+    pub(crate) async fn install_produced_opening(
+        &self,
+        packet: crate::trade_service::ProducedOpening,
+    ) -> Result<RiskResult, &'static str> {
+        match &self.route {
+            RiskRoute::Cloudflare(_) => self.request(packet.into_parts().0).await,
+            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
+                backend
+                    .resolved()
+                    .await?
+                    .install_produced_opening(packet)
+                    .await
+            }
+        }
+    }
+    pub fn new(tx: mpsc::Sender<OutboundRiskCommand>) -> Self {
+        Self {
+            route: RiskRoute::Cloudflare(tx),
+        }
+    }
+    /// Dedicated single-writer native route. No shadow Cloudflare risk call
+    /// or independent SQL owner; installation mode selection is exclusive.
+    pub fn local(backend: crate::native_finance_risk::NativeFinanceRisk) -> Self {
+        Self {
+            route: RiskRoute::Local(backend),
+        }
+    }
+    pub fn local_stopped(backend: crate::native_finance_risk::NativeFinanceRisk) -> Self {
+        Self {
+            route: RiskRoute::LocalStopped(backend),
+        }
+    }
+
+    /// Transport policy observation precedes account connection on a new
+    /// installation; it is distinct from strict financial policy application.
+    pub async fn observe_native_governance(
+        &self,
+        snapshot: &okx_protocol::account_governance::CentralGovernanceSnapshot,
+    ) -> Result<Option<crate::native_finance_risk::NativePolicyObservation>, String> {
+        match &self.route {
+            RiskRoute::Cloudflare(_) => Ok(None),
+            RiskRoute::Local(backend) => backend.observe_governance(snapshot).await.map(Some),
+            RiskRoute::LocalStopped(backend) => {
+                backend.verify_stopped_observation(snapshot).await?;
+                Ok(Some(
+                    crate::native_finance_risk::NativePolicyObservation::Applied,
+                ))
+            }
+        }
+    }
+
+    /// The native route applies the FULL signed governance roster in its
+    /// single SQL COMMIT; it must never fall back to legacy per-account SQL
+    /// if the native gate rejects. False selects the still-unswitched
+    /// legacy installation only.
+    pub async fn apply_native_governance(
+        &self,
+        snapshot: &okx_protocol::account_governance::CentralGovernanceSnapshot,
+    ) -> Result<bool, String> {
+        match &self.route {
+            RiskRoute::Cloudflare(_) => Ok(false),
+            RiskRoute::Local(backend) => {
+                backend.apply_governance(snapshot).await?;
+                Ok(true)
+            }
+            RiskRoute::LocalStopped(backend) => {
+                // Only compare an authenticated policy to original imported
+                // SQL; do NOT write it or promote the sealed import to LIVE.
+                backend.verify_stopped_observation(snapshot).await?;
+                Ok(true)
+            }
+        }
+    }
+
     pub async fn request(&self, command: RiskCommand) -> Result<RiskResult, &'static str> {
         if !command.valid() {
             return Err("INVALID_RISK_COMMAND");
         }
+        let tx = match &self.route {
+            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
+                return backend.resolved().await?.request(command).await;
+            }
+            RiskRoute::Cloudflare(sender) => sender,
+        };
         let id = command.command_id.clone();
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .try_send(OutboundRiskCommand {
-                command,
-                return_to: reply,
-            })
-            .map_err(|_| "RISK_TRANSPORT_UNAVAILABLE")?;
+        tx.try_send(OutboundRiskCommand {
+            command,
+            return_to: reply,
+        })
+        .map_err(|_| "RISK_TRANSPORT_UNAVAILABLE")?;
         let response = tokio::time::timeout(Duration::from_secs(5), rx)
             .await
             .map_err(|_| "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY")?

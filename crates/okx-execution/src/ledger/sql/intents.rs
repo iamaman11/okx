@@ -1,5 +1,4 @@
 use super::super::*;
-use sha2::{Digest, Sha256};
 
 /// Older manual SQL commands persist NULL as the decision/receipt owner while
 /// their plan is explicitly manual. Preserve that representation and its replay;
@@ -76,237 +75,23 @@ impl AccountStore {
     /// No second ledger/table: one immutable, idempotent record in the existing
     /// operation_receipts journal, bound to the original saved intent/plan.
     /// Its kind explicitly denies any claim of ALL-IN cost authorization.
-    fn verified_stored_entry_quote(&self, quote: &EntryQuoteEvidence) -> StoreResult<StoredIntent> {
-        let intent = self
-            .intent(&quote.intent_id)?
-            .ok_or(StoreError::Invalid("ENTRY_QUOTE_INTENT_MISSING"))?;
-        let maker = Decimal::from_str(&quote.maker_rate)
-            .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_FEE_RATE_INVALID"))?;
-        let taker = Decimal::from_str(&quote.taker_rate)
-            .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_FEE_RATE_INVALID"))?;
-        if quote.schema != "okx.entry-known-quote/v1"
-            || quote.account_key != self.meta.account_key
-            || quote.installation_id != self.meta.installation_id
-            || quote.plan_hash != intent.plan_hash
-            || quote.policy_revision != intent.policy_revision
-            || quote.instrument_id != intent.instrument_id
-            || !intent.risk_increase
-            || quote.quantity != intent.plan.quantity
-            || quote.limit_price != intent.plan.limit_price
-            || quote.contract_value != intent.plan.contract_value
-            || quote.quantity <= Decimal::ZERO
-            || quote.limit_price <= Decimal::ZERO
-            || quote.contract_value <= Decimal::ZERO
-            || quote.fee_rate < Decimal::ZERO
-            || quote.fee_rate != maker.abs().max(taker.abs())
-            || quote.fee_level.is_empty()
-            || quote.fee_exchange_at <= 0
-            || quote.usd_per_usdt <= Decimal::ZERO
-            || quote.fee_received_at <= 0
-            || quote.conversion_received_at <= 0
-            || quote.observed_at <= 0
-            || quote.fee_received_at > quote.observed_at
-            || quote.fee_exchange_at > quote.observed_at
-            || quote.conversion_received_at > quote.observed_at
-            || quote.observed_at - quote.fee_received_at > 5_000
-            || quote.observed_at - quote.fee_exchange_at > 5_000
-            || quote.observed_at - quote.conversion_received_at > 5_000
-            || quote.fee_generation.len() != 71
-            || !quote.fee_generation.starts_with("sha256:")
-            || !quote.fee_generation[7..]
-                .bytes()
-                .all(|c| c.is_ascii_hexdigit())
-            || quote.reference_generation.is_empty()
-            || quote.conversion_digest.len() != 64
-            || !quote
-                .conversion_digest
-                .bytes()
-                .all(|c| c.is_ascii_hexdigit())
-        {
-            return Err(StoreError::Invalid("ENTRY_QUOTE_SCOPE_UNVERIFIED"));
-        }
-        let tariff_bytes = serde_json::to_vec(&(
-            &quote.instrument_id,
-            &quote.reference_generation,
-            &quote.fee_level,
-            &quote.maker_rate,
-            &quote.taker_rate,
-            true,
-        ))
-        .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"))?;
-        let tariff_digest = format!("sha256:{:x}", Sha256::digest(tariff_bytes));
-        if tariff_digest != quote.fee_generation {
-            return Err(StoreError::Invalid("ENTRY_QUOTE_FEE_HASH_INVALID"));
-        }
-        let notional = quote
-            .quantity
-            .checked_mul(quote.contract_value)
-            .and_then(|v| v.checked_mul(quote.limit_price))
-            .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?;
-        let fee = notional
-            .checked_mul(quote.fee_rate)
-            .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?
-            .round_dp_with_strategy(6, rust_decimal::RoundingStrategy::ToPositiveInfinity);
-        let total_usdt = notional
-            .checked_add(fee)
-            .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?;
-        let usd = total_usdt
-            .checked_mul(quote.usd_per_usdt)
-            .ok_or(StoreError::Invalid("ENTRY_QUOTE_OVERFLOW"))?
-            .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity);
-        if (notional, fee, total_usdt, usd)
-            != (
-                quote.notional_usdt,
-                quote.fee_usdt,
-                quote.total_usdt,
-                quote.total_usd,
-            )
-        {
-            return Err(StoreError::Invalid("ENTRY_QUOTE_ARITHMETIC_MISMATCH"));
-        }
-        Ok(intent)
-    }
-
     pub fn bind_entry_quote(&mut self, quote: &EntryQuoteEvidence) -> StoreResult<()> {
-        let intent = self.verified_stored_entry_quote(quote)?;
-        if intent.state != IntentState::Prepared {
-            return Err(StoreError::Invalid("ENTRY_QUOTE_INTENT_STATE_INVALID"));
-        }
-        let name = format!("entry-quote:{}", intent.intent_id);
-        let encoded = serde_json::to_string(quote)
-            .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_SERIALIZATION_FAILED"))?;
-        if let Some(prior) = self.operation(&name)? {
-            if prior.kind != "ENTRY_QUOTE_UNPROVEN"
-                || prior.request_hash != intent.plan_hash
-                || prior.result_ref != encoded
-            {
-                return Err(StoreError::Invalid("ENTRY_QUOTE_IDEMPOTENCY_CONFLICT"));
-            }
-            return Ok(());
-        }
-        self.connection.execute(
-            "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
-             VALUES(?1,'ENTRY_QUOTE_UNPROVEN',?2,?3,?4)",
-            params![name, intent.plan_hash, encoded, quote.observed_at],
-        )?;
-        Ok(())
+        Self::bind_entry_quote_sql(&self.connection, None, quote)
     }
 
     pub fn entry_quote(&self, intent_id: &str) -> StoreResult<Option<EntryQuoteEvidence>> {
-        let name = format!("entry-quote:{intent_id}");
-        let Some(receipt) = self.operation(&name)? else {
-            return Ok(None);
-        };
-        if receipt.kind != "ENTRY_QUOTE_UNPROVEN" {
-            return Err(StoreError::Invalid("ENTRY_QUOTE_INVALID_RECEIPT"));
-        }
-        let quote: EntryQuoteEvidence = serde_json::from_str(&receipt.result_ref)
-            .map_err(|_| StoreError::Invalid("ENTRY_QUOTE_CORRUPT"))?;
-        if quote.intent_id != intent_id
-            || quote.plan_hash != receipt.request_hash
-            || quote.observed_at != receipt.committed_at
-        {
-            return Err(StoreError::Invalid("ENTRY_QUOTE_CORRUPT"));
-        }
-        // Revalidate against the actual durable plan and exact arithmetic on
-        // EVERY read, including after Windows restart and v2 DB reopen.
-        self.verified_stored_entry_quote(&quote)?;
-        Ok(Some(quote))
+        Self::entry_quote_sql(&self.connection, None, intent_id)
     }
     /// Validate the independently produced native cost proof against the
     /// immutable quote on EVERY read, including after a Windows restart.
     /// The digest here is a binding to the native source witness, not a
     /// cryptographic claim that arbitrary user-supplied evidence is trusted.
-    fn verified_entry_admission(&self, proof: &EntryAdmissionEvidence) -> StoreResult<()> {
-        let quote = self
-            .entry_quote(&proof.intent_id)?
-            .ok_or(StoreError::Invalid("ENTRY_ADMISSION_QUOTE_MISSING"))?;
-        let bytes = serde_json::to_vec(&quote)
-            .map_err(|_| StoreError::Invalid("ENTRY_ADMISSION_QUOTE_DIGEST_INVALID"))?;
-        let expected_quote_digest = format!("{:x}", Sha256::digest(bytes));
-        let computed = quote
-            .total_usdt
-            .checked_mul(proof.admission_usd_per_usdt)
-            .ok_or(StoreError::Invalid("ENTRY_ADMISSION_UPPER_OVERFLOW"))?
-            .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity)
-            .checked_add(proof.other_entry_costs_upper_usd)
-            .ok_or(StoreError::Invalid("ENTRY_ADMISSION_UPPER_OVERFLOW"))?;
-        let digest_valid = |v: &str| {
-            v.len() == 64
-                && v.bytes()
-                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-        };
-        if proof.schema != "okx.entry-admission/v2"
-            || proof.account_key != self.meta.account_key
-            || proof.installation_id != self.meta.installation_id
-            || proof.intent_id != quote.intent_id
-            || proof.plan_hash != quote.plan_hash
-            || !digest_valid(&proof.quote_digest)
-            || proof.quote_digest != expected_quote_digest
-            || !digest_valid(&proof.entry_proof_digest)
-            || proof.admission_usd_per_usdt != quote.usd_per_usdt
-            || proof.admission_usd_per_usdt <= Decimal::ZERO
-            || proof.other_entry_costs_upper_usd < Decimal::ZERO
-            || proof.entry_upper_usd != computed
-            || proof.entry_upper_usd < quote.total_usd
-            || proof.entry_upper_usd <= Decimal::ZERO
-            || proof.observed_at < quote.observed_at
-            || proof.observed_at - quote.observed_at > 5_000
-        {
-            return Err(StoreError::Invalid("ENTRY_ADMISSION_SOURCE_UNVERIFIED"));
-        }
-        Ok(())
-    }
-
-    /// A fully admitted entry is a native, source-bound quote + USD upper +
-    /// proof digest. Replays are exact; source tampering is never an update.
     pub fn bind_entry_admission(&mut self, proof: &EntryAdmissionEvidence) -> StoreResult<()> {
-        self.verified_entry_admission(proof)?;
-        let key = format!("entry-admission:{}", proof.intent_id);
-        let body = serde_json::to_string(proof)
-            .map_err(|_| StoreError::Invalid("ENTRY_ADMISSION_SERIALIZATION_FAILED"))?;
-        if let Some(prior) = self.operation(&key)? {
-            if prior.kind != "ENTRY_ADMISSION_PROVEN"
-                || prior.request_hash != proof.plan_hash
-                || prior.result_ref != body
-                || prior.committed_at != proof.observed_at
-            {
-                return Err(StoreError::Invalid("ENTRY_ADMISSION_IDEMPOTENCY_CONFLICT"));
-            }
-            return Ok(());
-        }
-        let intent = self
-            .intent(&proof.intent_id)?
-            .ok_or(StoreError::Invalid("ENTRY_ADMISSION_INTENT_MISSING"))?;
-        if intent.state != IntentState::Prepared {
-            return Err(StoreError::Invalid("ENTRY_ADMISSION_INTENT_STATE_INVALID"));
-        }
-        self.connection.execute(
-            "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
-             VALUES(?1,'ENTRY_ADMISSION_PROVEN',?2,?3,?4)",
-            params![key, proof.plan_hash, body, proof.observed_at],
-        )?;
-        Ok(())
+        Self::bind_entry_admission_sql(&self.connection, None, proof)
     }
 
     pub fn entry_admission(&self, id: &str) -> StoreResult<Option<EntryAdmissionEvidence>> {
-        let key = format!("entry-admission:{id}");
-        let Some(receipt) = self.operation(&key)? else {
-            return Ok(None);
-        };
-        if receipt.kind != "ENTRY_ADMISSION_PROVEN" {
-            return Err(StoreError::Invalid("ENTRY_ADMISSION_INVALID_RECEIPT"));
-        }
-        let proof: EntryAdmissionEvidence = serde_json::from_str(&receipt.result_ref)
-            .map_err(|_| StoreError::Invalid("ENTRY_ADMISSION_CORRUPT"))?;
-        if proof.intent_id != id
-            || proof.plan_hash != receipt.request_hash
-            || proof.observed_at != receipt.committed_at
-        {
-            return Err(StoreError::Invalid("ENTRY_ADMISSION_CORRUPT"));
-        }
-        self.verified_entry_admission(&proof)?;
-        Ok(Some(proof))
+        Self::entry_admission_sql(&self.connection, None, id)
     }
 
     /// A source-complete venue cancellation with ZERO executed quantity.
@@ -321,149 +106,18 @@ impl AccountStore {
         venue_updated_at: i64,
         covered_through: i64,
     ) -> StoreResult<EntrySettlementEvidence> {
-        let intent = self
-            .intent(id)?
-            .ok_or(StoreError::Invalid("ZERO_ENTRY_INTENT_MISSING"))?;
-        if intent.state != IntentState::Cancelled
-            || !intent.risk_increase
-            || !intent.instrument_id.ends_with("-USDT-SWAP")
-            || venue_updated_at <= 0
-            || covered_through < venue_updated_at
-        {
-            return Err(StoreError::Invalid("ZERO_ENTRY_VENUE_TERMINAL_UNVERIFIED"));
-        }
-        let venue_id = intent
-            .exchange_order_id
-            .as_deref()
-            .ok_or(StoreError::Invalid("ZERO_ENTRY_ORDER_ID_MISSING"))?;
-        let post: Option<i64> = self.connection.query_row(
-            "SELECT begin_post_at FROM intents WHERE intent_id=?1",
-            [id],
-            |r| r.get(0),
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result = Self::bind_zero_fill_terminal_entry_settlement_sql(
+            &tx,
+            None,
+            id,
+            venue_updated_at,
+            covered_through,
         )?;
-        let admission = self
-            .entry_admission(id)?
-            .ok_or(StoreError::Invalid("ZERO_ENTRY_ADMISSION_MISSING"))?;
-        let central = self
-            .central_receipt(id)?
-            .ok_or(StoreError::Invalid("ZERO_ENTRY_RESERVATION_MISSING"))?;
-        if post.is_none_or(|t| t <= 0 || t < admission.observed_at || venue_updated_at < t)
-            || admission.other_entry_costs_upper_usd != Decimal::ZERO
-            || admission.plan_hash != intent.plan_hash
-            || admission.account_key != self.meta.account_key
-            || central.plan_hash != intent.plan_hash
-            || central.account_key != self.meta.account_key
-        {
-            return Err(StoreError::Invalid("ZERO_ENTRY_CAUSAL_PROOF_INVALID"));
-        }
-        // Replays preserve the ORIGINAL covered source frontier even if
-        // ongoing capture has advanced for other orders or later bills.
-        let key = format!("entry-settlement:{id}");
-        let prior = self.operation(&key)?;
-        let proof_through = if let Some(prior) = prior.as_ref() {
-            let original: EntrySettlementEvidence = serde_json::from_str(&prior.result_ref)
-                .map_err(|_| StoreError::Invalid("ZERO_ENTRY_REPLAY_CORRUPT"))?;
-            if original.source_covered_through_ms > covered_through {
-                return Err(StoreError::Invalid("ZERO_ENTRY_COVERAGE_REGRESSION"));
-            }
-            original.source_covered_through_ms
-        } else {
-            covered_through
-        };
-        // Independently completed stream frontiers, NOT a missing page.
-        for (source, partition) in [("fills", "SWAP"), ("bills", "account")] {
-            let cursor = self
-                .cursor(source, partition)?
-                .ok_or(StoreError::Invalid("ZERO_ENTRY_COVERAGE_UNPROVEN"))?;
-            if cursor.generation <= 0
-                || !cursor.cursor.is_empty()
-                || !cursor.coverage_gaps.is_empty()
-                || cursor.watermark < proof_through
-            {
-                return Err(StoreError::Invalid("ZERO_ENTRY_COVERAGE_UNPROVEN"));
-            }
-        }
-        let unexplained: i64 = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM fills
-                 WHERE (intent_id=?1 OR exchange_order_id=?2)
-                   AND time<=?4)
-               OR EXISTS(SELECT 1 FROM bill_order_sources o
-                 JOIN bills b ON b.bill_id=o.bill_id
-                 WHERE o.exchange_order_id=?2
-                   AND b.time>=?3 AND b.time<=?4)
-               OR EXISTS(SELECT 1 FROM bills b
-                 LEFT JOIN bill_order_sources o ON o.bill_id=b.bill_id
-                 WHERE o.bill_id IS NULL
-                   AND b.time>=?3 AND b.time<=?4
-                   AND b.amount!='0'
-                   AND b.kind NOT IN ('1:11','1:12','8:173','8:174')
-                   AND b.kind NOT LIKE '7:%')",
-            params![id, venue_id, post.unwrap(), proof_through],
-            |r| r.get(0),
-        )?;
-        if unexplained != 0 {
-            return Err(StoreError::Invalid("ZERO_ENTRY_MONEY_UNRECONCILED"));
-        }
-        let source = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&(
-                    "okx.entry-zero-fill-terminal/v1",
-                    self.meta.account_key.as_str(),
-                    self.meta.installation_id.as_str(),
-                    id,
-                    intent.plan_hash.as_str(),
-                    admission.entry_proof_digest.as_str(),
-                    central.reservation_key.as_str(),
-                    venue_id,
-                    venue_updated_at,
-                    proof_through,
-                ))
-                .map_err(|_| StoreError::Invalid("ZERO_ENTRY_DIGEST_FAILED"))?
-            )
-        );
-        let evidence = EntrySettlementEvidence {
-            schema: "okx.entry-terminal-settlement/v1".into(),
-            account_key: self.meta.account_key.clone(),
-            intent_id: id.into(),
-            plan_hash: intent.plan_hash,
-            reservation_key: central.reservation_key,
-            venue_order_id: venue_id.into(),
-            venue_update_ms: venue_updated_at,
-            source_covered_through_ms: proof_through,
-            venue_filled_quantity: Decimal::ZERO,
-            booked_notional_and_fee_usdt: Decimal::ZERO,
-            cumulative_entry_usd: Decimal::ZERO,
-            settlement_revision: 1,
-            source_digest: source,
-        };
-        let encoded = serde_json::to_string(&evidence)
-            .map_err(|_| StoreError::Invalid("ZERO_ENTRY_SERIALIZE_FAILED"))?;
-        if let Some(saved) = prior {
-            if saved.kind != "ENTRY_SETTLEMENT_PROVEN" || saved.request_hash != evidence.plan_hash {
-                return Err(StoreError::Invalid("ZERO_ENTRY_REPLAY_CONFLICT"));
-            }
-            let original: EntrySettlementEvidence = serde_json::from_str(&saved.result_ref)
-                .map_err(|_| StoreError::Invalid("ZERO_ENTRY_REPLAY_CORRUPT"))?;
-            // Advancing source frontiers does not rewrite this proof. Caller
-            // replays the SAME frozen coverage snapshot after a lost ACK.
-            if original != evidence || saved.committed_at != venue_updated_at {
-                return Err(StoreError::Invalid("ZERO_ENTRY_REPLAY_CONFLICT"));
-            }
-            return Ok(original);
-        }
-        if self
-            .operation(&format!("entry-partial-head:{id}"))?
-            .is_some()
-        {
-            return Err(StoreError::Invalid("ZERO_ENTRY_PRIOR_PARTIAL_CONFLICT"));
-        }
-        self.connection.execute(
-            "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
-             VALUES(?1,'ENTRY_SETTLEMENT_PROVEN',?2,?3,?4)",
-            params![key, evidence.plan_hash, encoded, venue_updated_at],
-        )?;
-        Ok(evidence)
+        tx.commit()?;
+        Ok(result)
     }
 
     /// E1.4 final source: only a terminal, independently read-back exchange
@@ -479,20 +133,19 @@ impl AccountStore {
         venue_filled_quantity: Decimal,
         covered_through: i64,
     ) -> StoreResult<EntrySettlementEvidence> {
-        if venue_filled_quantity == Decimal::ZERO {
-            return self.bind_zero_fill_terminal_entry_settlement(
-                id,
-                venue_updated_at,
-                covered_through,
-            );
-        }
-        self.bind_cumulative_entry_settlement(
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result = Self::bind_terminal_entry_settlement_sql(
+            &tx,
+            None,
             id,
             venue_updated_at,
             venue_filled_quantity,
             covered_through,
-            true,
-        )
+        )?;
+        tx.commit()?;
+        Ok(result)
     }
 
     /// Incremental fills and their independently linked bills are settled
@@ -505,354 +158,493 @@ impl AccountStore {
         venue_filled_quantity: Decimal,
         covered_through: i64,
     ) -> StoreResult<EntrySettlementEvidence> {
-        self.bind_cumulative_entry_settlement(
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result = Self::bind_partial_entry_settlement_sql(
+            &tx,
+            None,
             id,
             venue_updated_at,
             venue_filled_quantity,
             covered_through,
-            false,
-        )
+        )?;
+        tx.commit()?;
+        Ok(result)
     }
 
-    fn bind_cumulative_entry_settlement(
-        &mut self,
+    /// Existing original AccountStore partial-entry receipt. v5 and v6
+    /// share the same verification rule, with the exact owner identity
+    /// selected by the source SQLite scope.
+    pub fn partial_entry_settlement_receipt(
+        &self,
         id: &str,
-        venue_updated_at: i64,
-        venue_filled_quantity: Decimal,
-        covered_through: i64,
-        terminal: bool,
-    ) -> StoreResult<EntrySettlementEvidence> {
-        let intent = self
-            .intent(id)?
-            .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_INTENT_MISSING"))?;
-        if (terminal && !matches!(intent.state, IntentState::Filled | IntentState::Cancelled))
-            || (!terminal
-                && !matches!(
-                    intent.state,
-                    IntentState::PartiallyFilled | IntentState::Filled | IntentState::Cancelled
-                ))
-            || venue_updated_at <= 0
-            || covered_through < venue_updated_at
-            || venue_filled_quantity <= Decimal::ZERO
-            || venue_filled_quantity > intent.plan.quantity
-        {
+    ) -> StoreResult<Option<EntrySettlementEvidence>> {
+        let result = Self::partial_entry_settlement_receipt_sql(
+            &self.connection,
+            None,
+            &self.meta.account_key,
+            id,
+        )?;
+        if result.is_some() {
+            self.partial_entry_ack_pending(id)?;
+        }
+        Ok(result)
+    }
+
+    /// Original immutable entry/fee/fill source-linked revision readback,
+    /// performed ON THE CALLER'S SQLite transaction for installation v6.
+    /// Every join and operation ID is scoped to both installation+account:
+    /// external IDs/intent IDs from a second account can never authorize
+    /// settlement in this one. Read-only; source receipts are constructed
+    /// by the original AccountStore fill/bill producer, never by caller flags.
+    pub(crate) fn partial_entry_settlement_receipt_sql(
+        db: &rusqlite::Connection,
+        installation: Option<&str>,
+        account: &str,
+        id: &str,
+    ) -> StoreResult<Option<EntrySettlementEvidence>> {
+        use rusqlite::{params_from_iter, types::Value};
+        if account.is_empty() || id.is_empty() || installation.is_some_and(str::is_empty) {
             return Err(StoreError::Invalid(
-                "ENTRY_SETTLEMENT_TERMINAL_SOURCE_UNVERIFIED",
+                "ENTRY_PARTIAL_SQL_SOURCE_SCOPE_INVALID",
             ));
         }
-        let admission = self
-            .entry_admission(id)?
-            .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_ADMISSION_MISSING"))?;
-        let began_post: Option<i64> = self.connection.query_row(
-            "SELECT begin_post_at FROM intents WHERE intent_id=?1",
-            [id],
+        let read_operation =
+            |operation_id: String| -> StoreResult<Option<(String, String, String)>> {
+                let mut args = vec![Value::Text(operation_id)];
+                if let Some(scope) = installation {
+                    args.push(Value::Text(scope.to_owned()));
+                    args.push(Value::Text(account.to_owned()));
+                }
+                db.query_row(
+                    if installation.is_some() {
+                        "SELECT kind,request_hash,result_ref FROM operation_receipts
+                     WHERE operation_id=?1 AND installation_id=?2 AND account_key=?3"
+                    } else {
+                        "SELECT kind,request_hash,result_ref FROM operation_receipts
+                     WHERE operation_id=?1"
+                    },
+                    params_from_iter(args.iter()),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(StoreError::from)
+            };
+        let Some(head) = read_operation(format!("entry-partial-head:{id}"))? else {
+            return Ok(None);
+        };
+        let proof: EntrySettlementEvidence = serde_json::from_str(&head.2)
+            .map_err(|_| StoreError::Invalid("ENTRY_PARTIAL_HEAD_CORRUPT"))?;
+        let immutable =
+            read_operation(format!("entry-partial:{id}:r{}", proof.settlement_revision,))?
+                .ok_or(StoreError::Invalid("ENTRY_PARTIAL_REVISION_MISSING"))?;
+        let mut args = vec![Value::Text(id.to_owned())];
+        if let Some(scope) = installation {
+            args.extend([
+                Value::Text(scope.to_owned()),
+                Value::Text(account.to_owned()),
+            ]);
+        }
+        let intent: Option<(String, Option<String>)> = db
+            .query_row(
+                if installation.is_some() {
+                    "SELECT plan_hash,exchange_order_id FROM intents
+                 WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
+                } else {
+                    "SELECT plan_hash,exchange_order_id FROM intents WHERE intent_id=?1"
+                },
+                params_from_iter(args.iter()),
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (plan, order_id) = intent.ok_or(StoreError::Invalid("ENTRY_PARTIAL_INTENT_MISSING"))?;
+        let reservation: Option<(String, String)> = db
+            .query_row(
+                if installation.is_some() {
+                    "SELECT reservation_key,account_key FROM risk_receipts
+                 WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
+                } else {
+                    "SELECT reservation_key,account_key FROM risk_receipts WHERE intent_id=?1"
+                },
+                params_from_iter(args.iter()),
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (reservation_key, reservation_account) =
+            reservation.ok_or(StoreError::Invalid("ENTRY_PARTIAL_RESERVATION_MISSING"))?;
+        if proof.schema != "okx.entry-partial-settlement/v1"
+            || proof.account_key != account
+            || proof.intent_id != id
+            || proof.plan_hash != plan
+            || proof.reservation_key != reservation_key
+            || proof.account_key != reservation_account
+            || proof.venue_order_id.is_empty()
+            || order_id.as_deref() != Some(proof.venue_order_id.as_str())
+            || proof.settlement_revision == 0
+            || proof.cumulative_entry_usd <= Decimal::ZERO
+            || proof.source_digest.len() != 64
+            || !proof
+                .source_digest
+                .bytes()
+                .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
+            || head.0 != "ENTRY_PARTIAL_HEAD"
+            || head.1 != proof.plan_hash
+            || immutable.0 != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
+            || immutable.1 != proof.plan_hash
+            || immutable.2 != head.2
+        {
+            return Err(StoreError::Invalid("ENTRY_PARTIAL_SOURCE_UNPROVEN"));
+        }
+        // An ACK is not required for a first financial debit, but a
+        // conflicting or forged ACK can never authorize an additional debit.
+        if let Some(ack) = read_operation(format!(
+            "entry-partial-settled:{id}:r{}",
+            proof.settlement_revision,
+        ))? && (ack.0 != "ENTRY_PARTIAL_SETTLED"
+            || ack.1 != proof.plan_hash
+            || ack.2 != proof.source_digest)
+        {
+            return Err(StoreError::Invalid("PARTIAL_ENTRY_ACK_CONFLICT"));
+        }
+        Ok(Some(proof))
+    }
+
+    /// Read the ORIGINAL immutable terminal/late SQL money producer on the
+    /// same scoped financial snapshot. The caller supplies ONLY the address
+    /// and kind, never a debit amount, fake fee, zero-fill flag or JSON proof.
+    /// A late revision is bound to the original terminal receipt and its
+    /// immutable revision; mutable head pointers cannot mint new money.
+    pub(crate) fn final_entry_settlement_receipt_sql(
+        db: &rusqlite::Connection,
+        installation: &str,
+        account: &str,
+        id: &str,
+        late: bool,
+    ) -> StoreResult<Option<EntrySettlementEvidence>> {
+        if installation.is_empty() || account.is_empty() || id.is_empty() {
+            return Err(StoreError::Invalid("UNIFIED_FINAL_SOURCE_SCOPE_INVALID"));
+        }
+        let read = |operation: &str| -> StoreResult<Option<(String, String, String, i64)>> {
+            db.query_row(
+                "SELECT kind,request_hash,result_ref,committed_at
+                 FROM operation_receipts
+                 WHERE installation_id=?1 AND account_key=?2 AND operation_id=?3",
+                params![installation, account, operation],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(StoreError::from)
+        };
+        let terminal_operation = format!("entry-settlement:{id}");
+        let Some(terminal_row) = read(&terminal_operation)? else {
+            return Ok(None);
+        };
+        let terminal: EntrySettlementEvidence = serde_json::from_str(&terminal_row.2)
+            .map_err(|_| StoreError::Invalid("UNIFIED_TERMINAL_SOURCE_CORRUPT"))?;
+        if terminal_row.0 != "ENTRY_SETTLEMENT_PROVEN"
+            || terminal.schema != "okx.entry-terminal-settlement/v1"
+            || terminal.account_key != account
+            || terminal.intent_id != id
+            || terminal_row.1 != terminal.plan_hash
+            || terminal_row.3 != terminal.venue_update_ms
+            || terminal.settlement_revision == 0
+            || terminal.source_covered_through_ms < terminal.venue_update_ms
+            || terminal.cumulative_entry_usd < Decimal::ZERO
+        {
+            return Err(StoreError::Invalid("UNIFIED_TERMINAL_SOURCE_INVALID"));
+        }
+        let (proof, head, immutable) = if late {
+            let Some(head) = read(&format!("entry-late-head:{id}"))? else {
+                return Ok(None);
+            };
+            let proof: EntrySettlementEvidence = serde_json::from_str(&head.2)
+                .map_err(|_| StoreError::Invalid("UNIFIED_LATE_HEAD_CORRUPT"))?;
+            let immutable = read(&format!("entry-late:{id}:r{}", proof.settlement_revision))?
+                .ok_or(StoreError::Invalid("UNIFIED_LATE_REVISION_MISSING"))?;
+            if head.0 != "ENTRY_LATE_HEAD"
+                || immutable.0 != "ENTRY_LATE_SETTLEMENT_PROVEN"
+                || proof.schema != "okx.entry-late-settlement/v1"
+                || head.1 != terminal.plan_hash
+                || immutable.1 != head.1
+                || immutable.2 != head.2
+                || immutable.3 != proof.source_covered_through_ms
+                || head.3 != proof.source_covered_through_ms
+                || proof.account_key != terminal.account_key
+                || proof.intent_id != terminal.intent_id
+                || proof.plan_hash != terminal.plan_hash
+                || proof.reservation_key != terminal.reservation_key
+                || proof.venue_order_id != terminal.venue_order_id
+                || proof.venue_update_ms != terminal.venue_update_ms
+                || proof.venue_filled_quantity != terminal.venue_filled_quantity
+                || proof.settlement_revision <= terminal.settlement_revision
+                || proof.source_covered_through_ms <= terminal.source_covered_through_ms
+                || proof.cumulative_entry_usd <= terminal.cumulative_entry_usd
+            {
+                return Err(StoreError::Invalid("UNIFIED_LATE_SOURCE_INVALID"));
+            }
+            (proof, head, immutable)
+        } else {
+            (terminal.clone(), terminal_row.clone(), terminal_row)
+        };
+        if head.2 != immutable.2
+            || proof.account_key != account
+            || proof.intent_id != id
+            || proof.reservation_key.is_empty()
+            || proof.reservation_key.starts_with("local:")
+            || proof.venue_order_id.is_empty()
+            || proof.venue_update_ms <= 0
+            || proof.source_covered_through_ms < proof.venue_update_ms
+            || proof.settlement_revision == 0
+            || proof.source_digest.len() != 64
+            || !proof
+                .source_digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || proof.plan_hash.len() != 64
+            || !proof
+                .plan_hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(StoreError::Invalid("UNIFIED_FINAL_SOURCE_INVALID"));
+        }
+        let intent: Option<(String, Option<String>, String, i64)> = db
+            .query_row(
+                "SELECT plan_hash,exchange_order_id,state,risk_increase
+                 FROM intents
+                 WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
+                params![installation, account, id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let receipt: Option<(String, String)> = db
+            .query_row(
+                "SELECT reservation_key,plan_hash FROM risk_receipts
+                 WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
+                params![installation, account, id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if !matches!(
+            intent,
+            Some((ref plan, Some(ref venue), ref state, 1))
+                if *plan == proof.plan_hash
+                    && *venue == proof.venue_order_id
+                    && matches!(state.as_str(), "FILLED" | "CANCELLED")
+        ) || !matches!(receipt,
+            Some((ref reservation, ref plan))
+                if *reservation == proof.reservation_key && *plan == proof.plan_hash)
+        {
+            return Err(StoreError::Invalid("UNIFIED_FINAL_INTENT_SOURCE_UNPROVEN"));
+        }
+        Ok(Some(proof))
+    }
+
+    /// The RiskBook debit and this ORIGINAL native ACK live in the SAME
+    /// installation transaction. A late fee cannot clear a newer pending
+    /// bill marker by merely updating the old SQL head.
+    pub(crate) fn acknowledge_unified_final_entry_sql(
+        tx: &rusqlite::Transaction<'_>,
+        installation: &str,
+        account: &str,
+        accepted: &EntrySettlementEvidence,
+        late: bool,
+    ) -> StoreResult<()> {
+        let stored = Self::final_entry_settlement_receipt_sql(
+            tx,
+            installation,
+            account,
+            &accepted.intent_id,
+            late,
+        )?
+        .ok_or(StoreError::Invalid("UNIFIED_FINAL_ACK_SOURCE_MISSING"))?;
+        if stored != *accepted {
+            return Err(StoreError::Invalid("UNIFIED_FINAL_ACK_SOURCE_CHANGED"));
+        }
+        let state: String = tx.query_row(
+            "SELECT state FROM risk_receipts
+             WHERE installation_id=?1 AND account_key=?2
+               AND intent_id=?3 AND plan_hash=?4 AND reservation_key=?5",
+            params![
+                installation,
+                account,
+                &accepted.intent_id,
+                &accepted.plan_hash,
+                &accepted.reservation_key
+            ],
             |row| row.get(0),
         )?;
-        if began_post
-            .is_none_or(|at| at <= 0 || at < admission.observed_at || venue_updated_at < at)
-        {
-            return Err(StoreError::Invalid(
-                "ENTRY_SETTLEMENT_POST_CAUSALITY_UNVERIFIED",
-            ));
-        }
-        // Re-read the ORIGINAL immutable SQL cut-off on lost-ACK replay,
-        // even if the ongoing source-capture cursor has advanced. Verify
-        // the original source digest again; no new amount or different bill
-        // witness may silently inherit the previous Worker authority.
-        let key = format!("entry-settlement:{id}");
-        let terminal_receipt = self.operation(&key)?;
-        let partial_head_key = format!("entry-partial-head:{id}");
-        let partial_head = self.operation(&partial_head_key)?;
-        let previous = terminal_receipt.as_ref().or(partial_head.as_ref());
-        let saved = previous
-            .map(|receipt| {
-                serde_json::from_str::<EntrySettlementEvidence>(&receipt.result_ref)
-                    .map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_RECEIPT_CORRUPT"))
-            })
-            .transpose()?;
-        if let Some(old) = saved.as_ref() {
-            if old.intent_id != id
-                || old.plan_hash != intent.plan_hash
-                || old.account_key != self.meta.account_key
-                || old.settlement_revision == 0
-                || (terminal_receipt.is_some() && old.schema != "okx.entry-terminal-settlement/v1")
-                || (terminal_receipt.is_none() && old.schema != "okx.entry-partial-settlement/v1")
-                || previous.is_some_and(|receipt| receipt.request_hash != intent.plan_hash)
-            {
-                return Err(StoreError::Invalid("ENTRY_SETTLEMENT_PREVIOUS_INVALID"));
-            }
-            // A mutable pointer is not evidence. Every revision must also
-            // have its original immutable receipt with the identical bytes.
-            if terminal_receipt.is_none() {
-                let witness = self
-                    .operation(&format!("entry-partial:{id}:r{}", old.settlement_revision))?
-                    .ok_or(StoreError::Invalid("ENTRY_PARTIAL_RECEIPT_MISSING"))?;
-                if witness.kind != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
-                    || witness.result_ref != previous.unwrap().result_ref
-                    || witness.request_hash != old.plan_hash
-                {
-                    return Err(StoreError::Invalid("ENTRY_PARTIAL_RECEIPT_MISMATCH"));
-                }
-            }
-        }
-        // Recheck old immutable source facts at their original frontier.
-        // A later bill/fill cannot rewrite the first accepted revision.
-        if let Some(old) = saved.as_ref() {
-            let historical = self.intent_fee_bill_evidence(id, old.source_covered_through_ms)?;
-            let (historical_extra, historical_extra_digest) =
-                self.intent_additional_entry_fee_evidence(id, old.source_covered_through_ms)?;
-            let original_total = historical
-                .fill
-                .gross_notional_usdt
-                .checked_add(historical.conservative_verified_fee_usdt)
-                .and_then(|v| v.checked_add(historical_extra))
-                .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?;
-            let original_usd = original_total
-                .checked_mul(admission.admission_usd_per_usdt)
-                .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?
-                .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity)
-                .checked_add(admission.other_entry_costs_upper_usd)
-                .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?;
-            // Amount equality alone cannot prove immutable economic events:
-            // a replacement fill or bill could have the same total. Rebuild
-            // the exact original digest at its frozen source frontier.
-            let original_bytes = if historical_extra > Decimal::ZERO {
-                serde_json::to_vec(&(
-                    old.schema.as_str(),
-                    &self.meta.account_key,
-                    &self.meta.installation_id,
-                    id,
-                    &intent.plan_hash,
-                    &admission.entry_proof_digest,
-                    &historical.fill.source_digest,
-                    &historical.source_digest,
-                    &historical.fill.reservation_key,
-                    &historical.fill.exchange_order_id,
-                    old.venue_update_ms,
-                    old.venue_filled_quantity,
-                    original_total,
-                    original_usd,
-                    historical_extra_digest,
+        if (late && !matches!(state.as_str(), "LATE_SETTLEMENT_PENDING" | "RELEASED"))
+            || (!late
+                && !matches!(
+                    state.as_str(),
+                    "OPEN" | "POSTED" | "UNKNOWN" | "TERMINAL_PENDING_CENTRAL" | "RELEASED"
                 ))
-            } else {
-                serde_json::to_vec(&(
-                    old.schema.as_str(),
-                    &self.meta.account_key,
-                    &self.meta.installation_id,
-                    id,
-                    &intent.plan_hash,
-                    &admission.entry_proof_digest,
-                    &historical.fill.source_digest,
-                    &historical.source_digest,
-                    &historical.fill.reservation_key,
-                    &historical.fill.exchange_order_id,
-                    old.venue_update_ms,
-                    old.venue_filled_quantity,
-                    original_total,
-                    original_usd,
-                ))
-            }
-            .map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_SOURCE_DIGEST_INVALID"))?;
-            let original_digest = format!("{:x}", Sha256::digest(original_bytes));
-            if historical.fill.filled_quantity != old.venue_filled_quantity
-                || original_total != old.booked_notional_and_fee_usdt
-                || original_usd != old.cumulative_entry_usd
-                || historical.fill.exchange_order_id != old.venue_order_id
-                || historical.fill.reservation_key != old.reservation_key
-                || original_digest != old.source_digest
-            {
-                return Err(StoreError::Invalid("ENTRY_SETTLEMENT_PRIOR_SOURCE_CHANGED"));
-            }
-        }
-        let witness_through = if terminal_receipt.is_some() {
-            saved.as_ref().unwrap().source_covered_through_ms
-        } else {
-            covered_through
-        };
-        if witness_through < venue_updated_at || witness_through > covered_through {
-            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_COVERAGE_REGRESSION"));
-        }
-        let bill = self.intent_fee_bill_evidence(id, witness_through)?;
-        let fill = &bill.fill;
-        if fill.intent_id != id
-            || fill.plan_hash != intent.plan_hash
-            || fill.filled_quantity != venue_filled_quantity
-            || fill.exchange_order_id.is_empty()
-            || fill.fill_count == 0
-            || bill.linked_bill_count != fill.fill_count
-            || bill.conservative_verified_fee_usdt != fill.conservative_fee_usdt
-            || bill.bills_covered_through < venue_updated_at
         {
-            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_FILL_BILL_INCOMPLETE"));
+            return Err(StoreError::Invalid("UNIFIED_FINAL_ACK_STATE_INVALID"));
         }
-        let central = self.central_receipt(id)?.ok_or(StoreError::Invalid(
-            "ENTRY_SETTLEMENT_CENTRAL_RECEIPT_MISSING",
-        ))?;
-        if central.reservation_key != fill.reservation_key
-            || central.account_key != admission.account_key
-            || central.plan_hash != admission.plan_hash
+        let (operation, kind) = if late {
+            (
+                format!(
+                    "entry-late-settled:{}:r{}",
+                    accepted.intent_id, accepted.settlement_revision
+                ),
+                "ENTRY_LATE_SETTLED",
+            )
+        } else {
+            (
+                format!(
+                    "entry-terminal-settled:{}:r{}",
+                    accepted.intent_id, accepted.settlement_revision
+                ),
+                "ENTRY_TERMINAL_SETTLED",
+            )
+        };
+        tx.execute(
+            "INSERT INTO operation_receipts(
+                 installation_id,account_key,operation_id,kind,
+                 request_hash,result_ref,committed_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(installation_id,account_key,operation_id) DO NOTHING",
+            params![
+                installation,
+                account,
+                &operation,
+                kind,
+                &accepted.plan_hash,
+                &accepted.source_digest,
+                wall_time_ms()
+            ],
+        )?;
+        let observed: (String, String, String) = tx.query_row(
+            "SELECT kind,request_hash,result_ref FROM operation_receipts
+             WHERE installation_id=?1 AND account_key=?2 AND operation_id=?3",
+            params![installation, account, &operation],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if observed
+            != (
+                kind.to_owned(),
+                accepted.plan_hash.clone(),
+                accepted.source_digest.clone(),
+            )
         {
-            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_RESERVATION_MISMATCH"));
+            return Err(StoreError::Invalid("UNIFIED_FINAL_ACK_CONFLICT"));
         }
-        let (extra_fee, extra_digest) =
-            self.intent_additional_entry_fee_evidence(id, witness_through)?;
-        let full_usdt = fill
-            .gross_notional_usdt
-            .checked_add(bill.conservative_verified_fee_usdt)
-            .and_then(|v| v.checked_add(extra_fee))
-            .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?;
-        let usd = full_usdt
-            .checked_mul(admission.admission_usd_per_usdt)
-            .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?
-            .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity)
-            .checked_add(admission.other_entry_costs_upper_usd)
-            .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_OVERFLOW"))?;
-        if full_usdt <= Decimal::ZERO || usd <= Decimal::ZERO {
-            return Err(StoreError::Invalid("ENTRY_SETTLEMENT_MONEY_INVALID"));
-        }
-        // A genuine exchange debit above the approved quote is not permission
-        // to hide it. The cumulative proof retains the full native amount;
-        // RiskBook records the breach atomically and bans new entry grants.
-        let next_revision = if let Some(old) = saved.as_ref() {
-            if terminal_receipt.is_some() {
-                old.settlement_revision
-            } else if !terminal
-                && old.cumulative_entry_usd == usd
-                && old.venue_filled_quantity == venue_filled_quantity
-            {
-                // A later cursor with no new economic amount is a read-only
-                // acknowledgement, not an additional debit or book revision.
-                return Ok(old.clone());
-            } else {
-                if usd < old.cumulative_entry_usd
-                    || venue_filled_quantity < old.venue_filled_quantity
-                {
-                    return Err(StoreError::Invalid("ENTRY_SETTLEMENT_REGRESSION"));
-                }
-                old.settlement_revision
-                    .checked_add(1)
-                    .ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_REVISION_OVERFLOW"))?
+        // The original post-release late marker is cleared only if the
+        // campaign itself is ALREADY released in this same transaction.
+        // A pending terminal exposure can never be discharged by a fee ACK.
+        if late && state == "LATE_SETTLEMENT_PENDING" {
+            let entry: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM risk_entries
+                     WHERE installation_id=?1 AND account_key=?2
+                       AND intent_id=?3 AND plan_sha256=?4
+                       AND reservation_key=?5",
+                    params![
+                        installation,
+                        account,
+                        &accepted.intent_id,
+                        &accepted.plan_hash,
+                        &accepted.reservation_key
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if entry.as_deref() == Some("RELEASED") {
+                tx.execute(
+                    "UPDATE risk_receipts SET state='RELEASED'
+                     WHERE installation_id=?1 AND account_key=?2
+                       AND intent_id=?3 AND state='LATE_SETTLEMENT_PENDING'",
+                    params![installation, account, &accepted.intent_id],
+                )?;
             }
-        } else {
-            1
-        };
-        let schema = if terminal {
-            "okx.entry-terminal-settlement/v1"
-        } else {
-            "okx.entry-partial-settlement/v1"
-        };
-        let bytes = if extra_fee > Decimal::ZERO {
-            serde_json::to_vec(&(
-                schema,
-                &self.meta.account_key,
-                &self.meta.installation_id,
-                id,
-                &intent.plan_hash,
-                &admission.entry_proof_digest,
-                &fill.source_digest,
-                &bill.source_digest,
-                &fill.reservation_key,
-                &fill.exchange_order_id,
-                venue_updated_at,
-                venue_filled_quantity,
-                full_usdt,
-                usd,
-                extra_digest,
-            ))
-        } else {
-            serde_json::to_vec(&(
-                schema,
-                &self.meta.account_key,
-                &self.meta.installation_id,
-                id,
-                &intent.plan_hash,
-                &admission.entry_proof_digest,
-                &fill.source_digest,
-                &bill.source_digest,
-                &fill.reservation_key,
-                &fill.exchange_order_id,
-                venue_updated_at,
-                venue_filled_quantity,
-                full_usdt,
-                usd,
-            ))
         }
-        .map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_SOURCE_DIGEST_INVALID"))?;
-        let settlement = EntrySettlementEvidence {
-            schema: schema.into(),
-            account_key: self.meta.account_key.clone(),
-            intent_id: id.into(),
-            plan_hash: intent.plan_hash,
-            reservation_key: fill.reservation_key.clone(),
-            venue_order_id: fill.exchange_order_id.clone(),
-            venue_update_ms: venue_updated_at,
-            source_covered_through_ms: witness_through,
-            venue_filled_quantity,
-            booked_notional_and_fee_usdt: full_usdt,
-            cumulative_entry_usd: usd,
-            settlement_revision: next_revision,
-            source_digest: format!("{:x}", Sha256::digest(bytes)),
-        };
-        if let Some(prior) = terminal_receipt {
-            let saved = saved.ok_or(StoreError::Invalid("ENTRY_SETTLEMENT_RECEIPT_CORRUPT"))?;
-            if prior.kind != "ENTRY_SETTLEMENT_PROVEN" || prior.request_hash != settlement.plan_hash
-            {
-                return Err(StoreError::Invalid("ENTRY_SETTLEMENT_IDEMPOTENCY_CONFLICT"));
-            }
-            // Cursor watermark can advance even when all immutable economic
-            // facts stay unchanged. An ACK replay must use the original
-            // durable digest/revision, but cannot accept a changed venue
-            // filled quantity, cost, account, reservation or order.
-            if saved.schema != settlement.schema
-                || saved.account_key != settlement.account_key
-                || saved.intent_id != settlement.intent_id
-                || saved.plan_hash != settlement.plan_hash
-                || saved.reservation_key != settlement.reservation_key
-                || saved.venue_order_id != settlement.venue_order_id
-                || saved.venue_update_ms != settlement.venue_update_ms
-                || saved.source_covered_through_ms != settlement.source_covered_through_ms
-                || saved.venue_filled_quantity != settlement.venue_filled_quantity
-                || saved.booked_notional_and_fee_usdt != settlement.booked_notional_and_fee_usdt
-                || saved.cumulative_entry_usd != settlement.cumulative_entry_usd
-                || saved.settlement_revision != settlement.settlement_revision
-                || saved.source_digest != settlement.source_digest
-                || prior.committed_at != saved.venue_update_ms
-            {
-                return Err(StoreError::Invalid("ENTRY_SETTLEMENT_IDEMPOTENCY_CONFLICT"));
-            }
-            return Ok(saved);
+        Ok(())
+    }
+
+    /// The ORIGINAL AccountStore ACK is written in the SAME installation
+    /// SQL transaction as the RiskBook budget debit. The existing immutable
+    /// source/head/intent/receipt verification is rerun on this same snapshot,
+    /// and any ACK conflict fails the entire caller-owned transaction.
+    /// The legacy two-SQL method remains only for the pre-cutover owner.
+    pub(crate) fn acknowledge_unified_partial_entry_sql(
+        tx: &rusqlite::Transaction<'_>,
+        installation: &str,
+        account: &str,
+        accepted: &EntrySettlementEvidence,
+    ) -> StoreResult<()> {
+        if installation.is_empty() || account.is_empty() || accepted.account_key != account {
+            return Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_IDENTITY_INVALID"));
         }
-        let encoded = serde_json::to_string(&settlement)
-            .map_err(|_| StoreError::Invalid("ENTRY_SETTLEMENT_SERIALIZATION_FAILED"))?;
-        if terminal {
-            // The canonical terminal receipt is the ONLY amount counted by
-            // historical campaign reconstruction; earlier partial receipts
-            // never appear as extra historical entry purchases.
-            self.connection.execute(
-                "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
-                 VALUES(?1,'ENTRY_SETTLEMENT_PROVEN',?2,?3,?4)",
-                params![key, settlement.plan_hash, encoded, settlement.venue_update_ms],
-            )?;
-        } else {
-            let revision_key = format!("entry-partial:{id}:r{}", settlement.settlement_revision);
-            let tx = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            tx.execute(
-                "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
-                 VALUES(?1,'ENTRY_PARTIAL_SETTLEMENT_PROVEN',?2,?3,?4)",
-                params![revision_key, settlement.plan_hash, encoded, settlement.venue_update_ms],
-            )?;
-            tx.execute(
-                "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
-                 VALUES(?1,'ENTRY_PARTIAL_HEAD',?2,?3,?4)
-                 ON CONFLICT(operation_id) DO UPDATE SET result_ref=excluded.result_ref,
-                    committed_at=excluded.committed_at",
-                params![partial_head_key, settlement.plan_hash, encoded, settlement.venue_update_ms],
-            )?;
-            tx.commit()?;
+        let stored = Self::partial_entry_settlement_receipt_sql(
+            tx,
+            Some(installation),
+            account,
+            &accepted.intent_id,
+        )?
+        .ok_or(StoreError::Invalid("UNIFIED_PARTIAL_ACK_SOURCE_MISSING"))?;
+        if stored != *accepted || stored.reservation_key.starts_with("local:") {
+            return Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_SOURCE_MISMATCH"));
         }
-        Ok(settlement)
+        let state: Option<String> = tx
+            .query_row(
+                "SELECT state FROM risk_receipts
+             WHERE installation_id=?1 AND account_key=?2
+               AND intent_id=?3 AND plan_hash=?4 AND reservation_key=?5",
+                rusqlite::params![
+                    installation,
+                    account,
+                    &accepted.intent_id,
+                    &accepted.plan_hash,
+                    &accepted.reservation_key,
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        // A lost venue ACK leaves this original receipt UNKNOWN, even when
+        // independently captured immutable fills/bills prove a real partial
+        // debit. Preserve the risk obligation and accept only that exact
+        // AccountStore source revision; UNKNOWN itself grants no second POST.
+        if !matches!(state.as_deref(), Some("OPEN" | "POSTED" | "UNKNOWN")) {
+            return Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_RESERVATION_STATE"));
+        }
+        let operation = format!(
+            "entry-partial-settled:{}:r{}",
+            accepted.intent_id, accepted.settlement_revision,
+        );
+        tx.execute(
+            "INSERT INTO operation_receipts(
+                 installation_id,account_key,operation_id,kind,
+                 request_hash,result_ref,committed_at)
+             VALUES(?1,?2,?3,'ENTRY_PARTIAL_SETTLED',?4,?5,?6)
+             ON CONFLICT(installation_id,account_key,operation_id) DO NOTHING",
+            rusqlite::params![
+                installation,
+                account,
+                &operation,
+                &accepted.plan_hash,
+                &accepted.source_digest,
+                wall_time_ms(),
+            ],
+        )?;
+        let ack: (String, String, String) = tx.query_row(
+            "SELECT kind,request_hash,result_ref FROM operation_receipts
+             WHERE installation_id=?1 AND account_key=?2 AND operation_id=?3",
+            rusqlite::params![installation, account, &operation],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if ack
+            != (
+                "ENTRY_PARTIAL_SETTLED".to_owned(),
+                accepted.plan_hash.clone(),
+                accepted.source_digest.clone(),
+            )
+        {
+            return Err(StoreError::Invalid("UNIFIED_PARTIAL_ACK_CONFLICT"));
+        }
+        Ok(())
     }
 
     /// Read-only check of the latest durable partial settlement. A lost
@@ -860,49 +652,7 @@ impl AccountStore {
     /// immutable SQL revision. No head means no partial claim to reconcile.
     /// A corrupted head/revision/ACK never becomes permission to release.
     pub fn partial_entry_ack_pending(&self, id: &str) -> StoreResult<bool> {
-        let Some(head) = self.operation(&format!("entry-partial-head:{id}"))? else {
-            return Ok(false);
-        };
-        let proof: EntrySettlementEvidence = serde_json::from_str(&head.result_ref)
-            .map_err(|_| StoreError::Invalid("PARTIAL_ENTRY_HEAD_CORRUPT"))?;
-        if head.kind != "ENTRY_PARTIAL_HEAD"
-            || head.request_hash != proof.plan_hash
-            || proof.schema != "okx.entry-partial-settlement/v1"
-            || proof.account_key != self.meta.account_key
-            || proof.intent_id != id
-            || proof.settlement_revision == 0
-            || proof.source_digest.len() != 64
-            || !proof.source_digest.bytes().all(|c| c.is_ascii_hexdigit())
-        {
-            return Err(StoreError::Invalid("PARTIAL_ENTRY_HEAD_INVALID"));
-        }
-        let immutable = self
-            .operation(&format!(
-                "entry-partial:{id}:r{}",
-                proof.settlement_revision
-            ))?
-            .ok_or(StoreError::Invalid("PARTIAL_ENTRY_REVISION_MISSING"))?;
-        if immutable.kind != "ENTRY_PARTIAL_SETTLEMENT_PROVEN"
-            || immutable.result_ref != head.result_ref
-            || immutable.request_hash != proof.plan_hash
-        {
-            return Err(StoreError::Invalid("PARTIAL_ENTRY_REVISION_MISMATCH"));
-        }
-        let ack = self.operation(&format!(
-            "entry-partial-settled:{id}:r{}",
-            proof.settlement_revision
-        ))?;
-        match ack {
-            None => Ok(true),
-            Some(receipt)
-                if receipt.kind == "ENTRY_PARTIAL_SETTLED"
-                    && receipt.request_hash == proof.plan_hash
-                    && receipt.result_ref == proof.source_digest =>
-            {
-                Ok(false)
-            }
-            _ => Err(StoreError::Invalid("PARTIAL_ENTRY_ACK_CONFLICT")),
-        }
+        Self::partial_entry_ack_pending_sql(&self.connection, None, id)
     }
 
     /// The sole Native SQL owner records the exact cumulative revision only
@@ -1010,213 +760,25 @@ impl AccountStore {
         venue_filled_quantity: Decimal,
         covered_through: i64,
     ) -> StoreResult<EntrySettlementEvidence> {
-        let terminal_key = format!("entry-settlement:{id}");
-        let receipt = self
-            .operation(&terminal_key)?
-            .ok_or(StoreError::Invalid("LATE_ENTRY_TERMINAL_RECEIPT_MISSING"))?;
-        if receipt.kind != "ENTRY_SETTLEMENT_PROVEN" {
-            return Err(StoreError::Invalid("LATE_ENTRY_TERMINAL_RECEIPT_INVALID"));
-        }
-        let terminal: EntrySettlementEvidence = serde_json::from_str(&receipt.result_ref)
-            .map_err(|_| StoreError::Invalid("LATE_ENTRY_TERMINAL_RECEIPT_INVALID"))?;
-        if terminal.intent_id != id
-            || terminal.venue_update_ms != venue_updated_at
-            || terminal.venue_filled_quantity != venue_filled_quantity
-            || terminal.source_covered_through_ms > covered_through
-        {
-            return Err(StoreError::Invalid("LATE_ENTRY_VENUE_IDENTITY_CHANGED"));
-        }
-        // Re-attest the immutable terminal source and admission before
-        // creating any new money proof, including retries after a lost ACK.
-        self.bind_terminal_entry_settlement(
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result = Self::bind_late_entry_settlement_sql(
+            &tx,
+            None,
             id,
             venue_updated_at,
             venue_filled_quantity,
             covered_through,
         )?;
-        let admission = self
-            .entry_admission(id)?
-            .ok_or(StoreError::Invalid("LATE_ENTRY_ADMISSION_MISSING"))?;
-        let (base_extra, _) =
-            self.intent_additional_entry_fee_evidence(id, terminal.source_covered_through_ms)?;
-        let (all_extra, extra_digest) =
-            self.intent_additional_entry_fee_evidence(id, covered_through)?;
-        if all_extra < base_extra {
-            return Err(StoreError::Invalid("LATE_ENTRY_FEE_REGRESSION"));
-        }
-        let added = all_extra
-            .checked_sub(base_extra)
-            .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-        let total = terminal
-            .booked_notional_and_fee_usdt
-            .checked_add(added)
-            .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-        let usd = total
-            .checked_mul(admission.admission_usd_per_usdt)
-            .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?
-            .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity)
-            .checked_add(admission.other_entry_costs_upper_usd)
-            .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-        let head_key = format!("entry-late-head:{id}");
-        let previous = self.operation(&head_key)?;
-        let old = previous
-            .as_ref()
-            .map(|r| {
-                serde_json::from_str::<EntrySettlementEvidence>(&r.result_ref)
-                    .map_err(|_| StoreError::Invalid("LATE_ENTRY_HEAD_CORRUPT"))
-            })
-            .transpose()?;
-        if let Some(prior) = old.as_ref() {
-            let witness = self
-                .operation(&format!("entry-late:{id}:r{}", prior.settlement_revision))?
-                .ok_or(StoreError::Invalid("LATE_ENTRY_REVISION_MISSING"))?;
-            if prior.schema != "okx.entry-late-settlement/v1"
-                || prior.intent_id != id
-                || prior.plan_hash != terminal.plan_hash
-                || prior.reservation_key != terminal.reservation_key
-                || prior.venue_order_id != terminal.venue_order_id
-                || prior.venue_filled_quantity != terminal.venue_filled_quantity
-                || witness.kind != "ENTRY_LATE_SETTLEMENT_PROVEN"
-                || witness.result_ref != previous.as_ref().unwrap().result_ref
-                || witness.request_hash != terminal.plan_hash
-            {
-                return Err(StoreError::Invalid("LATE_ENTRY_RECEIPT_IDENTITY_CHANGED"));
-            }
-            let (at_extra, prior_digest) =
-                self.intent_additional_entry_fee_evidence(id, prior.source_covered_through_ms)?;
-            let prior_total = terminal
-                .booked_notional_and_fee_usdt
-                .checked_add(
-                    at_extra
-                        .checked_sub(base_extra)
-                        .ok_or(StoreError::Invalid("LATE_ENTRY_FEE_REGRESSION"))?,
-                )
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            let prior_usd = prior_total
-                .checked_mul(admission.admission_usd_per_usdt)
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?
-                .round_dp_with_strategy(9, rust_decimal::RoundingStrategy::ToPositiveInfinity)
-                .checked_add(admission.other_entry_costs_upper_usd)
-                .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-            let prior_bytes = serde_json::to_vec(&(
-                "okx.entry-late-settlement/v1",
-                terminal.source_digest.as_str(),
-                self.meta.account_key.as_str(),
-                id,
-                terminal.plan_hash.as_str(),
-                terminal.venue_order_id.as_str(),
-                prior.source_covered_through_ms,
-                prior_total,
-                prior_usd,
-                prior_digest,
-            ))
-            .map_err(|_| StoreError::Invalid("LATE_ENTRY_SOURCE_SERIALIZATION_FAILED"))?;
-            if prior_total != prior.booked_notional_and_fee_usdt
-                || prior_usd != prior.cumulative_entry_usd
-                || format!("{:x}", Sha256::digest(prior_bytes)) != prior.source_digest
-            {
-                return Err(StoreError::Invalid("LATE_ENTRY_PRIOR_SOURCE_CHANGED"));
-            }
-        }
-        let previous_amount = old
-            .as_ref()
-            .map_or(terminal.cumulative_entry_usd, |v| v.cumulative_entry_usd);
-        if usd < previous_amount {
-            return Err(StoreError::Invalid("LATE_ENTRY_FEE_REGRESSION"));
-        }
-        if usd == previous_amount {
-            return Ok(old.unwrap_or(terminal));
-        }
-        if covered_through
-            <= old
-                .as_ref()
-                .map_or(terminal.source_covered_through_ms, |v| {
-                    v.source_covered_through_ms
-                })
-        {
-            return Err(StoreError::Invalid("LATE_ENTRY_FRONTIER_NOT_ADVANCED"));
-        }
-        let revision = old
-            .as_ref()
-            .map_or(terminal.settlement_revision, |v| v.settlement_revision)
-            .checked_add(1)
-            .ok_or(StoreError::Invalid("LATE_ENTRY_REVISION_OVERFLOW"))?;
-        let digest_bytes = serde_json::to_vec(&(
-            "okx.entry-late-settlement/v1",
-            terminal.source_digest.as_str(),
-            self.meta.account_key.as_str(),
-            id,
-            terminal.plan_hash.as_str(),
-            terminal.venue_order_id.as_str(),
-            covered_through,
-            total,
-            usd,
-            extra_digest,
-        ))
-        .map_err(|_| StoreError::Invalid("LATE_ENTRY_SOURCE_SERIALIZATION_FAILED"))?;
-        let new = EntrySettlementEvidence {
-            schema: "okx.entry-late-settlement/v1".into(),
-            account_key: terminal.account_key,
-            intent_id: id.to_owned(),
-            plan_hash: terminal.plan_hash,
-            reservation_key: terminal.reservation_key,
-            venue_order_id: terminal.venue_order_id,
-            venue_update_ms: venue_updated_at,
-            source_covered_through_ms: covered_through,
-            venue_filled_quantity,
-            booked_notional_and_fee_usdt: total,
-            cumulative_entry_usd: usd,
-            settlement_revision: revision,
-            source_digest: format!("{:x}", Sha256::digest(digest_bytes)),
-        };
-        let encoded = serde_json::to_string(&new)
-            .map_err(|_| StoreError::Invalid("LATE_ENTRY_SERIALIZATION_FAILED"))?;
-        self.connection.execute_batch(
-            "CREATE TRIGGER IF NOT EXISTS immutable_entry_late_update
-             BEFORE UPDATE ON operation_receipts
-             WHEN OLD.kind IN ('ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED')
-             BEGIN SELECT RAISE(ABORT,'IMMUTABLE_LATE_ENTRY'); END;
-             CREATE TRIGGER IF NOT EXISTS immutable_entry_late_delete
-             BEFORE DELETE ON operation_receipts
-             WHEN OLD.kind IN ('ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED')
-             BEGIN SELECT RAISE(ABORT,'IMMUTABLE_LATE_ENTRY'); END;",
-        )?;
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
-             VALUES(?1,'ENTRY_LATE_SETTLEMENT_PROVEN',?2,?3,?4)",
-            params![
-                format!("entry-late:{id}:r{revision}"),
-                new.plan_hash,
-                encoded,
-                covered_through
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO operation_receipts(operation_id,kind,request_hash,result_ref,committed_at)
-             VALUES(?1,'ENTRY_LATE_HEAD',?2,?3,?4)
-             ON CONFLICT(operation_id) DO UPDATE SET result_ref=excluded.result_ref,
-                committed_at=excluded.committed_at",
-            params![head_key, new.plan_hash, encoded, covered_through],
-        )?;
         tx.commit()?;
-        Ok(new)
+        Ok(result)
     }
 
     /// One indexed read for the existing maintenance owner. The marker is
     /// installed atomically with a previously unseen independent fee bill.
     pub fn entry_late_pending(&self, id: &str) -> StoreResult<bool> {
-        Ok(self
-            .connection
-            .query_row(
-                "SELECT state='LATE_SETTLEMENT_PENDING' FROM risk_receipts WHERE intent_id=?1",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(false))
+        Self::entry_late_pending_sql(&self.connection, None, id)
     }
 
     /// Only after central SETTLE_ENTRY has accepted this exact revision can
@@ -1293,38 +855,10 @@ impl AccountStore {
     /// Durable address of a central reservation attempt, committed before
     /// any WSS RESERVE. A crash or lost ACK cannot orphan the Worker grant.
     pub fn mark_reserve_attempt(&mut self, id: &str, key: &str, now: i64) -> StoreResult<()> {
-        if key.is_empty() || key.len() > 512 {
-            return Err(StoreError::Invalid("INVALID_RESERVE_IDENTITY"));
-        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (state, hash, begin): (String, String, Option<i64>) = tx.query_row(
-            "SELECT state,request_hash,begin_post_at FROM intents WHERE intent_id=?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
-        if state != "PREPARED" || begin.is_some() {
-            return Err(StoreError::Invalid("INVALID_RESERVE_ATTEMPT_STATE"));
-        }
-        let name = format!("risk-reserve:{id}");
-        let previous: Option<(String, String, String)> = tx
-            .query_row(
-                "SELECT kind,request_hash,result_ref FROM operation_receipts WHERE operation_id=?1",
-                [&name],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        if let Some((kind, prior_hash, prior_key)) = previous {
-            if kind != "RISK_RESERVE_ATTEMPT" || prior_hash != hash || prior_key != key {
-                return Err(StoreError::Invalid("RESERVE_ATTEMPT_IDEMPOTENCY_CONFLICT"));
-            }
-        } else {
-            tx.execute(
-                "INSERT INTO operation_receipts VALUES(?1,'RISK_RESERVE_ATTEMPT',?2,?3,?4)",
-                params![name, hash, key, now],
-            )?;
-        }
+        Self::mark_reserve_attempt_sql(&tx, None, id, key, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -1354,23 +888,7 @@ impl AccountStore {
     /// F1: the prepare transaction committed, but no central RESERVE was
     /// attempted. A matching terminal SQL receipt proves no native POST.
     pub fn unsent_before_reserve(&self, id: &str) -> StoreResult<bool> {
-        self.connection
-            .query_row(
-                "SELECT EXISTS(
-                   SELECT 1 FROM intents i
-                   JOIN operation_receipts t ON t.operation_id='terminal:'||i.intent_id
-                   WHERE i.intent_id=?1 AND i.state='REJECTED'
-                     AND i.begin_post_at IS NULL AND i.exchange_order_id IS NULL
-                     AND t.kind='REJECTED_UNSENT'
-                     AND t.request_hash=i.request_hash AND t.result_ref=i.incident
-                     AND NOT EXISTS(SELECT 1 FROM risk_receipts r
-                       WHERE r.intent_id=i.intent_id)
-                     AND NOT EXISTS(SELECT 1 FROM operation_receipts a
-                       WHERE a.operation_id='risk-reserve:'||i.intent_id))",
-                [id],
-                |r| r.get(0),
-            )
-            .map_err(StoreError::from)
+        Self::unsent_before_reserve_sql(&self.connection, None, id)
     }
 
     pub fn reconcilable_intents(&self, limit: usize) -> StoreResult<Vec<StoredIntent>> {
@@ -1384,119 +902,35 @@ impl AccountStore {
         limit: usize,
         offset: usize,
     ) -> StoreResult<Vec<StoredIntent>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let ids = {
-            let mut q=self.connection.prepare(
-              "SELECT intent_id FROM (
-                SELECT intent_id,CASE WHEN state='UNSENT_PENDING_CENTRAL' THEN 0 ELSE 3 END AS priority
-                FROM risk_receipts
-                WHERE state IN('HELD','POSTED','UNKNOWN','OPEN','TERMINAL_PENDING_CENTRAL','UNSENT_PENDING_CENTRAL','LATE_SETTLEMENT_PENDING')
-                UNION ALL
-                SELECT i.intent_id,1 AS priority FROM intents i
-                JOIN operation_receipts o ON o.operation_id='risk-reserve:'||i.intent_id
-                WHERE o.kind='RISK_RESERVE_ATTEMPT' AND o.request_hash=i.request_hash
-                  AND i.state IN('PREPARED','REJECTED')
-                  AND NOT EXISTS(SELECT 1 FROM risk_receipts r WHERE r.intent_id=i.intent_id)
-                  AND NOT EXISTS(SELECT 1 FROM operation_receipts ack
-                    WHERE ack.operation_id='central-release:'||o.result_ref
-                      AND ack.kind='CENTRAL_RELEASE')
-                UNION ALL
-                SELECT i.intent_id,2 AS priority FROM intents i
-                WHERE i.state='PREPARED' AND i.deadline<=?2
-                  AND NOT EXISTS(SELECT 1 FROM risk_receipts r
-                    WHERE r.intent_id=i.intent_id)
-                  AND NOT EXISTS(SELECT 1 FROM operation_receipts a
-                    WHERE a.operation_id='risk-reserve:'||i.intent_id)
-               ) GROUP BY intent_id ORDER BY MIN(priority),intent_id LIMIT ?1 OFFSET ?3"
-            )?;
-            q.query_map(
-                params![
-                    limit.min(100) as i64,
-                    wall_time_ms(),
-                    offset.min(100_000) as i64
-                ],
-                |r| r.get::<_, String>(0),
-            )?
-            .collect::<Result<Vec<_>, _>>()?
-        };
-        ids.iter()
-            .map(|id| {
-                self.intent(id)?
-                    .ok_or(StoreError::Invalid("INTENT_MISSING"))
-            })
-            .collect()
+        Self::reconcilable_intents_page_sql(&self.connection, None, limit, offset, wall_time_ms())
     }
     /// A reduce-only local: reservation never reached Worker RiskBook.
     /// Its SQL no-send obligation must still leave risk_census_intents;
     /// success without a durable release ACK is not settlement.
     pub fn acknowledge_local_unsent_release(&mut self, id: &str) -> StoreResult<()> {
-        let proof = self
-            .unsent_release_receipt(id)?
-            .ok_or(StoreError::Invalid("LOCAL_UNSENT_SQL_PROOF_REQUIRED"))?;
-        let intent = self
-            .intent(id)?
-            .ok_or(StoreError::Invalid("LOCAL_UNSENT_INTENT_MISSING"))?;
-        let local_key = format!("local:{id}");
-        let receipt = self
-            .central_receipt(id)?
-            .ok_or(StoreError::Invalid("LOCAL_UNSENT_RECEIPT_MISSING"))?;
-        if intent.risk_increase
-            || intent.state != IntentState::Rejected
-            || intent.exchange_order_id.is_some()
-            || proof.reservation_key != local_key
-            || proof.intent_id != id
-            || proof.account_key != self.meta.account_key
-            || proof.plan_hash != intent.plan_hash
-            || proof.request_hash != intent.request_hash
-            || receipt.reservation_key != local_key
-            || receipt.account_key != self.meta.account_key
-            || receipt.plan_hash != intent.plan_hash
-            || self.operation(&format!("risk-reserve:{id}"))?.is_some()
-        {
-            return Err(StoreError::Invalid("LOCAL_UNSENT_RELEASE_PROOF_MISMATCH"));
-        }
-        let bytes = serde_json::to_vec(&proof)
-            .map_err(|_| StoreError::Invalid("LOCAL_UNSENT_PROOF_SERIALIZATION_FAILED"))?;
-        let evidence = format!("local-unsent-sql:{:x}", Sha256::digest(bytes));
-        self.acknowledge_central_release(&local_key, &evidence)
-    }
-
-    pub fn acknowledge_central_release(&mut self, key: &str, evidence: &str) -> StoreResult<()> {
-        if evidence.is_empty() {
-            return Err(StoreError::Invalid("CENTRAL_RELEASE_EVIDENCE_REQUIRED"));
-        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let hash: String = tx.query_row(
-            "SELECT receipt_hash FROM risk_receipts WHERE reservation_key=?1
-             UNION ALL SELECT request_hash FROM operation_receipts
-               WHERE kind='RISK_RESERVE_ATTEMPT' AND result_ref=?1
-             LIMIT 1",
-            [key],
-            |r| r.get(0),
+        Self::acknowledge_local_unsent_release_sql(
+            &tx,
+            None,
+            id,
+            &self.meta.account_key,
+            wall_time_ms(),
         )?;
-        tx.execute(
-            "UPDATE risk_receipts SET state='RELEASED' WHERE reservation_key=?1",
-            [key],
-        )?;
-        tx.execute("INSERT INTO operation_receipts VALUES(?1,'CENTRAL_RELEASE',?2,?3,?4) ON CONFLICT(operation_id) DO NOTHING",params![format!("central-release:{key}"),hash,evidence,wall_time_ms()])?;
         tx.commit()?;
         Ok(())
     }
 
-    /// A real reduce-only Close holds a local SQL lifecycle marker, not a
-    /// Worker reservation. Terminal venue evidence alone is insufficient:
-    /// its exact fill quantity and independently captured linked fee bill
-    /// must be durable before this marker can leave the cohort census.
-    /// The caller additionally proves a fresh flat venue position and
-    /// absence of remaining attributed lots; this method validates the
-    /// immutable native finance sources under the sole AccountStore owner.
-    /// Read-only exact source witness shared with the real terminal Close
-    /// settlement. Signed fill and fee bill linkage are checked under the
-    /// one SQLite owner; this method cannot acknowledge or release capital.
+    pub fn acknowledge_central_release(&mut self, key: &str, evidence: &str) -> StoreResult<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::acknowledge_central_release_sql(&tx, None, key, evidence, wall_time_ms())?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn local_terminal_close_evidence(
         &self,
         id: &str,
@@ -1504,141 +938,14 @@ impl AccountStore {
         venue_filled: Decimal,
         venue_updated_at: i64,
     ) -> StoreResult<(Decimal, u64, u64, Decimal, String)> {
-        let intent = self
-            .intent(id)?
-            .ok_or(StoreError::Invalid("LOCAL_CLOSE_INTENT_MISSING"))?;
-        if intent.risk_increase
-            || !intent.state.terminal()
-            || intent.exchange_order_id.as_deref() != Some(order_id)
-            || intent.plan.quantity != venue_filled
-            || venue_filled <= Decimal::ZERO
-            || venue_updated_at <= 0
-            || !intent.instrument_id.ends_with("-USDT-SWAP")
-        {
-            return Err(StoreError::Invalid("LOCAL_CLOSE_TERMINAL_PROOF_INVALID"));
-        }
-        let receipt = self
-            .central_receipt(id)?
-            .ok_or(StoreError::Invalid("LOCAL_CLOSE_RECEIPT_MISSING"))?;
-        let local_key = format!("local:{id}");
-        if receipt.reservation_key != local_key
-            || receipt.account_key != self.meta.account_key
-            || receipt.plan_hash != intent.plan_hash
-        {
-            return Err(StoreError::Invalid("LOCAL_CLOSE_RECEIPT_MISMATCH"));
-        }
-        for (source, partition) in [("fills", "SWAP"), ("bills", "account")] {
-            let cursor = self
-                .cursor(source, partition)?
-                .ok_or(StoreError::Invalid("LOCAL_CLOSE_SOURCE_MISSING"))?;
-            if cursor.generation <= 0
-                || !cursor.cursor.is_empty()
-                || !cursor.coverage_gaps.is_empty()
-                || cursor.watermark < venue_updated_at
-            {
-                return Err(StoreError::Invalid("LOCAL_CLOSE_SOURCE_INCOMPLETE"));
-            }
-        }
-        // Read each attributed close fill (including unmatched records) so
-        // an INNER JOIN cannot silently conceal an unpaid or unlinked fee.
-        let mut total = Decimal::ZERO;
-        let mut proof_rows = Vec::new();
-        {
-            let mut q = self.connection.prepare(
-                "SELECT f.fill_id,f.qty,f.fee,f.currency,f.trade_id,
-                        s.bill_id,s.direction
-                 FROM fills f LEFT JOIN swap_fill_sources s ON s.fill_id=f.fill_id
-                 WHERE f.intent_id=?1 AND f.exchange_order_id=?2
-                 ORDER BY f.fill_id LIMIT 1001",
-            )?;
-            let mut rows = q.query(params![id, order_id])?;
-            while let Some(row) = rows.next()? {
-                if proof_rows.len() >= 1000 {
-                    return Err(StoreError::Invalid("LOCAL_CLOSE_FILLS_UNBOUNDED"));
-                }
-                let fill_id: String = row.get(0)?;
-                let qty = decimal(row.get::<_, String>(1)?)?;
-                let fee = decimal(row.get::<_, String>(2)?)?;
-                let currency: String = row.get(3)?;
-                let trade: String = row.get(4)?;
-                let bill: Option<String> = row.get(5)?;
-                let direction: Option<String> = row.get(6)?;
-                if qty <= Decimal::ZERO
-                    || direction.as_deref() != Some("CLOSE")
-                    || bill.as_deref().is_none_or(str::is_empty)
-                    || trade.is_empty()
-                {
-                    return Err(StoreError::Invalid("LOCAL_CLOSE_FILL_OR_BILL_UNVERIFIED"));
-                }
-                let bill = bill.unwrap();
-                // Verify the separate bill's exact trade/order provenance and
-                // canonical fee entry; two candidate bills never count as one.
-                let mut evidence = self.connection.prepare(
-                    "SELECT e.amount,e.currency FROM bill_order_sources o
-                     JOIN bills b ON b.bill_id=o.bill_id
-                     JOIN finance_entries e ON e.economic_event_key=b.economic_event_key
-                       AND e.component='FEE' AND e.allocation_leg='account'
-                     WHERE o.bill_id=?1 AND o.instrument_id=?2
-                       AND o.exchange_order_id=?3 AND o.trade_id=?4
-                     LIMIT 2",
-                )?;
-                let matched = evidence
-                    .query_map(
-                        params![&bill, &intent.instrument_id, order_id, &trade],
-                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-                    )?
-                    .collect::<Result<Vec<_>, _>>()?;
-                if matched.len() != 1
-                    || decimal(matched[0].0.clone())? != fee
-                    || matched[0].1 != currency
-                {
-                    return Err(StoreError::Invalid("LOCAL_CLOSE_FEE_BILL_UNVERIFIED"));
-                }
-                total = total
-                    .checked_add(qty)
-                    .ok_or(StoreError::Invalid("LOCAL_CLOSE_QUANTITY_OVERFLOW"))?;
-                proof_rows.push((
-                    fill_id,
-                    trade,
-                    bill,
-                    qty.to_string(),
-                    fee.to_string(),
-                    currency,
-                ));
-            }
-        }
-        if proof_rows.is_empty() || total != venue_filled {
-            return Err(StoreError::Invalid("LOCAL_CLOSE_FILL_SUM_MISMATCH"));
-        }
-        let fill_count = proof_rows.len() as u64;
-        let mut fee_usdt = Decimal::ZERO;
-        let mut linked_bills = std::collections::BTreeSet::new();
-        for row in &proof_rows {
-            fee_usdt = fee_usdt
-                .checked_add(decimal(row.4.clone())?)
-                .ok_or(StoreError::Invalid("LOCAL_CLOSE_FEE_OVERFLOW"))?;
-            if !linked_bills.insert(row.2.clone()) {
-                return Err(StoreError::Invalid("LOCAL_CLOSE_DUPLICATE_BILL"));
-            }
-        }
-        let bill_count = linked_bills.len() as u64;
-        let proof = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&(
-                    "okx.local-terminal-close/v1",
-                    self.meta.account_key.as_str(),
-                    self.meta.installation_id.as_str(),
-                    id,
-                    order_id,
-                    intent.plan_hash.as_str(),
-                    venue_filled.to_string(),
-                    proof_rows
-                ))
-                .map_err(|_| StoreError::Invalid("LOCAL_CLOSE_PROOF_SERIALIZATION"))?
-            )
-        );
-        Ok((total, fill_count, bill_count, fee_usdt, proof))
+        Self::local_terminal_close_evidence_sql(
+            &self.connection,
+            None,
+            id,
+            order_id,
+            venue_filled,
+            venue_updated_at,
+        )
     }
 
     /// The single production mutation uses the SAME read-only local Close
@@ -1650,42 +957,17 @@ impl AccountStore {
         venue_filled: Decimal,
         venue_updated_at: i64,
     ) -> StoreResult<()> {
-        let (_, _, _, _, proof) =
-            self.local_terminal_close_evidence(id, order_id, venue_filled, venue_updated_at)?;
-        let intent = self
-            .intent(id)?
-            .ok_or(StoreError::Invalid("LOCAL_CLOSE_INTENT_MISSING"))?;
-        let local_key = format!("local:{id}");
-        let key = format!("local-terminal-release:{id}");
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<(String, String)> = tx
-            .query_row(
-                "SELECT request_hash,result_ref FROM operation_receipts WHERE operation_id=?1",
-                [&key],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if existing
-            .as_ref()
-            .is_some_and(|(hash, source)| hash != &intent.request_hash || source != &proof)
-        {
-            return Err(StoreError::Invalid("LOCAL_CLOSE_PROOF_CONFLICT"));
-        }
-        let changed = tx.execute(
-            "UPDATE risk_receipts SET state='RELEASED'
-             WHERE intent_id=?1 AND reservation_key=?2
-               AND state IN('TERMINAL_PENDING_CENTRAL','RELEASED')",
-            params![id, &local_key],
-        )?;
-        if changed != 1 {
-            return Err(StoreError::Invalid("LOCAL_CLOSE_STATE_NOT_TERMINAL"));
-        }
-        tx.execute(
-            "INSERT INTO operation_receipts VALUES(?1,'LOCAL_TERMINAL_RELEASE',?2,?3,?4)
-             ON CONFLICT(operation_id) DO NOTHING",
-            params![key, intent.request_hash, proof, wall_time_ms()],
+        Self::acknowledge_local_terminal_close_sql(
+            &tx,
+            None,
+            id,
+            order_id,
+            venue_filled,
+            venue_updated_at,
+            wall_time_ms(),
         )?;
         tx.commit()?;
         Ok(())
@@ -1701,70 +983,36 @@ impl AccountStore {
         now: i64,
         proven_not_reserved: bool,
     ) -> StoreResult<bool> {
-        if reason.is_empty() {
-            return Err(StoreError::Invalid("UNSENT_REASON_REQUIRED"));
-        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (state, begin, hash): (String, Option<i64>, String) = tx.query_row(
-            "SELECT state,begin_post_at,request_hash FROM intents WHERE intent_id=?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
-        if begin.is_some() {
-            return Err(StoreError::Invalid("POST_OUTCOME_REQUIRES_RECONCILIATION"));
-        }
-        let first = state != "REJECTED";
-        if first {
-            if !matches!(state.as_str(), "PREPARED" | "RESERVED") {
-                return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
-            }
-            tx.execute("UPDATE intents SET state='REJECTED',incident=?2,updated_at=?3,revision=revision+1 WHERE intent_id=?1",params![id,reason,now])?;
-            tx.execute(
-                "UPDATE risk_receipts SET state='UNSENT_PENDING_CENTRAL' WHERE intent_id=?1",
-                [id],
-            )?;
-            tx.execute(
-                "INSERT INTO operation_receipts VALUES(?1,'REJECTED_UNSENT',?2,?3,?4)",
-                params![format!("terminal:{id}"), hash, reason, now],
-            )?;
-        }
-        if proven_not_reserved {
-            let original: Option<(String, String)> = tx
-                .query_row(
-                    "SELECT kind,request_hash FROM operation_receipts WHERE operation_id=?1",
-                    [format!("terminal:{id}")],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            if original
-                .as_ref()
-                .is_none_or(|(kind, request)| kind != "REJECTED_UNSENT" || request != &hash)
-            {
-                return Err(StoreError::Invalid("UNSENT_TERMINAL_RECEIPT_MISSING"));
-            }
-            let operation = format!("risk-reserve:{id}");
-            let changed = tx.execute(
-                "UPDATE operation_receipts SET kind='RISK_RESERVE_DENIED'
-                 WHERE operation_id=?1
-                   AND kind IN('RISK_RESERVE_ATTEMPT','RISK_RESERVE_DENIED')",
-                [&operation],
-            )?;
-            if changed != 1 {
-                return Err(StoreError::Invalid("RESERVE_ATTEMPT_MARKER_MISSING"));
-            }
-        }
+        let result = Self::reject_unsent_sql(&tx, None, id, reason, now, proven_not_reserved)?;
         tx.commit()?;
-        Ok(first)
+        Ok(result)
     }
-    /// A no-send release requires the existing durable rejection receipt,
-    /// matching the original request, with no committed post claim.
-    /// A gateway timeout or venue rejection can never produce this witness.
+
+    /// A no-send release requires the ORIGINAL durable rejection receipt,
+    /// matching the request with no committed POST claim. The same query
+    /// and rule now support both the legacy single-account v2 DB and the
+    /// installation-wide v6 account scope. Caller data is NEVER a receipt.
     pub fn unsent_release_receipt(&self, id: &str) -> StoreResult<Option<UnsentSqlReceipt>> {
-        self.connection
-            .query_row(
-                "SELECT COALESCE(r.reservation_key,a.result_ref),
+        Self::unsent_release_receipt_sql(&self.connection, None, &self.meta.account_key, id)
+    }
+
+    /// Read the original AccountStore proof from the SAME caller-owned SQL
+    /// snapshot. v6 must bind installation+account on every joined table,
+    /// not simply filter the final row by intent_id.
+    pub(crate) fn unsent_release_receipt_sql(
+        db: &rusqlite::Connection,
+        installation: Option<&str>,
+        account: &str,
+        id: &str,
+    ) -> StoreResult<Option<UnsentSqlReceipt>> {
+        use rusqlite::{params_from_iter, types::Value};
+        if account.is_empty() || id.is_empty() || installation.is_some_and(str::is_empty) {
+            return Err(StoreError::Invalid("UNSENT_SQL_SOURCE_SCOPE_INVALID"));
+        }
+        let original_sql = "SELECT COALESCE(r.reservation_key,a.result_ref),
                         COALESCE(r.account_key,?2),
                         i.intent_id,i.plan_hash,i.request_hash,i.incident
                  FROM intents i
@@ -1777,67 +1025,120 @@ impl AccountStore {
                    AND (r.state IN('UNSENT_PENDING_CENTRAL','RELEASED') OR
                         (r.reservation_key IS NULL AND a.result_ref IS NOT NULL))
                    AND o.kind='REJECTED_UNSENT'
-                   AND o.request_hash=i.request_hash AND o.result_ref=i.incident",
-                params![id, self.meta.account_key],
-                |r| {
-                    Ok(UnsentSqlReceipt {
-                        reservation_key: r.get(0)?,
-                        account_key: r.get(1)?,
-                        intent_id: r.get(2)?,
-                        plan_hash: r.get(3)?,
-                        request_hash: r.get(4)?,
-                        reason: r.get(5)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(StoreError::from)
+                   AND o.request_hash=i.request_hash AND o.result_ref=i.incident
+                   AND (r.reservation_key IS NULL OR
+                        (r.account_key=?2 AND r.plan_hash=i.plan_hash))";
+        let scoped_sql = "SELECT COALESCE(r.reservation_key,a.result_ref),
+                        COALESCE(r.account_key,?2),
+                        i.intent_id,i.plan_hash,i.request_hash,i.incident
+                 FROM intents i
+                 LEFT JOIN risk_receipts r
+                   ON r.intent_id=i.intent_id
+                  AND r.installation_id=i.installation_id AND r.account_key=i.account_key
+                 LEFT JOIN operation_receipts a
+                   ON a.operation_id='risk-reserve:'||i.intent_id
+                  AND a.installation_id=i.installation_id AND a.account_key=i.account_key
+                  AND a.kind='RISK_RESERVE_ATTEMPT' AND a.request_hash=i.request_hash
+                 JOIN operation_receipts o
+                   ON o.operation_id='terminal:'||i.intent_id
+                  AND o.installation_id=i.installation_id AND o.account_key=i.account_key
+                 WHERE i.intent_id=?1 AND i.account_key=?2 AND i.installation_id=?3
+                   AND i.state='REJECTED'
+                   AND i.begin_post_at IS NULL AND i.exchange_order_id IS NULL
+                   AND (r.state IN('UNSENT_PENDING_CENTRAL','RELEASED') OR
+                        (r.reservation_key IS NULL AND a.result_ref IS NOT NULL))
+                   AND o.kind='REJECTED_UNSENT'
+                   AND o.request_hash=i.request_hash AND o.result_ref=i.incident
+                   AND (r.reservation_key IS NULL OR
+                        (r.account_key=?2 AND r.plan_hash=i.plan_hash))";
+        let mut args = vec![Value::Text(id.to_owned()), Value::Text(account.to_owned())];
+        if let Some(installation) = installation {
+            args.push(Value::Text(installation.to_owned()));
+        }
+        db.query_row(
+            if installation.is_some() {
+                scoped_sql
+            } else {
+                original_sql
+            },
+            params_from_iter(args.iter()),
+            |r| {
+                Ok(UnsentSqlReceipt {
+                    reservation_key: r.get(0)?,
+                    account_key: r.get(1)?,
+                    intent_id: r.get(2)?,
+                    plan_hash: r.get(3)?,
+                    request_hash: r.get(4)?,
+                    reason: r.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::from)
     }
     pub fn central_receipt(&self, id: &str) -> StoreResult<Option<CentralReceipt>> {
-        let row=self.connection.query_row("SELECT reservation_key,account_key,installation_id,instance_id,plan_hash,policy_revision,receipt_hash,requested_loss_usd,conversion_digest FROM risk_receipts WHERE intent_id=?1",[id],|r|Ok((CentralReceipt{reservation_key:r.get(0)?,account_key:r.get(1)?,installation_id:r.get(2)?,instance_id:r.get(3)?,intent_id:id.into(),plan_hash:r.get(4)?,policy_revision:r.get(5)?,receipt_hash:r.get(6)?,requested_loss_usd:Decimal::ZERO,conversion_digest:r.get(8)?},r.get::<_,String>(7)?))).optional()?;
-        row.map(|(mut receipt, amount)| {
-            receipt.requested_loss_usd = decimal(amount)?;
-            Ok(receipt)
-        })
-        .transpose()
+        self.reservation_receipt(id, CentralReceiptView::Retained)
     }
-    /// Only a central reservation still charged to the risk book can cover
-    /// exchange exposure. A historically retained RELEASED SQL receipt is
-    /// not permission to consider its position/order centrally reserved.
+    /// RELEASED receipts remain observable, but cannot cover exposure.
     pub fn active_central_receipt(&self, id: &str) -> StoreResult<Option<CentralReceipt>> {
-        let state: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT state FROM risk_receipts WHERE intent_id=?1",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if state.as_deref().is_some_and(risk_receipt_covers_exposure) {
-            self.central_receipt(id)
-        } else {
-            Ok(None)
-        }
+        self.reservation_receipt(id, CentralReceiptView::ActiveExposure)
     }
     pub fn by_exchange_order_id(&self, key: &str) -> StoreResult<Option<StoredIntent>> {
         self.find_intent("exchange_order_id", key)
     }
-    pub fn prepare(
-        &mut self,
+    /// The ORIGINAL AccountStore PREPARE rules, on either legacy account-v2
+    /// or the installation-wide v6 finance transaction. All original intent,
+    /// decision, plan and strategy-version reads/writes share the caller's
+    /// snapshot. In v6 every lookup and key is scoped to this exact account.
+    /// This method never opens a second connection or commits a transaction.
+    pub(crate) fn prepare_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        scope: Option<(&str, &str)>,
         decision: &Decision,
         intent: &NewIntent,
-    ) -> StoreResult<StoredIntent> {
+    ) -> StoreResult<bool> {
         if intent.plan.contract_value <= Decimal::ZERO
             || intent.plan.settlement_currency.is_empty()
             || !matches!(intent.plan.position_side.as_str(), "long" | "short")
         {
             return Err(StoreError::Invalid("INVALID_CONTRACT_MECHANICS"));
         }
-        if let Some(existing) = self.by_idempotency(&intent.idempotency_key)? {
-            if existing.request_hash != intent.request_hash {
+        if let Some((installation, account)) = scope {
+            if installation.is_empty() || account.is_empty() {
+                return Err(StoreError::Invalid("UNIFIED_PREPARE_SCOPE_INVALID"));
+            }
+            let known: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM account_meta
+                 WHERE installation_id=?1 AND account_key=?2)",
+                params![installation, account],
+                |row| row.get(0),
+            )?;
+            if !known {
+                return Err(StoreError::Invalid("UNIFIED_PREPARE_ACCOUNT_MISSING"));
+            }
+        }
+        let existing: Option<String> = match scope {
+            Some((installation, account)) => tx
+                .query_row(
+                    "SELECT request_hash FROM intents
+                     WHERE installation_id=?1 AND account_key=?2 AND idempotency_key=?3",
+                    params![installation, account, intent.idempotency_key],
+                    |row| row.get(0),
+                )
+                .optional()?,
+            None => tx
+                .query_row(
+                    "SELECT request_hash FROM intents WHERE idempotency_key=?1",
+                    [&intent.idempotency_key],
+                    |row| row.get(0),
+                )
+                .optional()?,
+        };
+        if let Some(hash) = existing {
+            if hash != intent.request_hash {
                 return Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
             }
-            return Ok(existing);
+            return Ok(false);
         }
         if intent.deadline <= decision.decision_at
             || intent.policy_revision != decision.policy_revision
@@ -1852,10 +1153,33 @@ impl AccountStore {
         {
             return Err(StoreError::Invalid("INVALID_INTENT_PLAN"));
         }
-        let definition = self.strategy_definition(&intent.plan.strategy_instance)?;
-        if definition.definition_id != intent.plan.strategy_definition_id
-            || definition.version != intent.plan.strategy_definition_version
-            || definition.parameters_digest != intent.plan.strategy_parameters_digest
+        let definition: (String, String, String) = match scope {
+            Some((installation, account)) => tx.query_row(
+                "SELECT v.definition_id,v.version,v.parameters_digest
+                 FROM strategy_instances i JOIN strategy_definition_versions v
+                   ON v.installation_id=i.installation_id
+                  AND v.account_key=i.account_key
+                  AND v.definition_id=i.definition_id
+                  AND v.version=i.definition_version
+                  AND v.parameters_digest=i.parameters_digest
+                 WHERE i.installation_id=?1 AND i.account_key=?2 AND i.instance_id=?3",
+                params![installation, account, intent.plan.strategy_instance],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?,
+            None => tx.query_row(
+                "SELECT v.definition_id,v.version,v.parameters_digest
+                 FROM strategy_instances i JOIN strategy_definition_versions v
+                   ON v.definition_id=i.definition_id
+                  AND v.version=i.definition_version
+                  AND v.parameters_digest=i.parameters_digest
+                 WHERE i.instance_id=?1",
+                [&intent.plan.strategy_instance],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?,
+        };
+        if definition.0 != intent.plan.strategy_definition_id
+            || definition.1 != intent.plan.strategy_definition_version
+            || definition.2 != intent.plan.strategy_parameters_digest
         {
             return Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"));
         }
@@ -1865,21 +1189,21 @@ impl AccountStore {
         ) {
             return Err(StoreError::Invalid("STRATEGY_OWNER_MISMATCH"));
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Manual commands insert their decision with the intent. Autonomous
-        // strategies instead reuse the exact pending SQL decision already
-        // durably claimed before planning; no second decision is permitted.
         let claimed_strategy = decision.decision_id.starts_with("strategy:");
         if claimed_strategy {
-            let prior: Option<(Option<String>, String, i64)> = tx
-                .query_row(
+            let prior: Option<(Option<String>, String, i64)> = match scope {
+                Some((installation, account)) => tx.query_row(
+                    "SELECT instance_id,input_digest,policy_revision FROM decisions
+                     WHERE installation_id=?1 AND account_key=?2 AND decision_id=?3",
+                    params![installation, account, decision.decision_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                ).optional()?,
+                None => tx.query_row(
                     "SELECT instance_id,input_digest,policy_revision FROM decisions WHERE decision_id=?1",
                     [&decision.decision_id],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?;
+                ).optional()?,
+            };
             let (owner, digest, revision) =
                 prior.ok_or(StoreError::Invalid("STRATEGY_CLAIM_MISSING"))?;
             if owner != decision.instance_id
@@ -1888,60 +1212,169 @@ impl AccountStore {
             {
                 return Err(StoreError::Invalid("STRATEGY_CLAIM_MISMATCH"));
             }
-            let already_bound: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM intents WHERE decision_id=?1)",
-                [&decision.decision_id],
-                |r| r.get(0),
-            )?;
+            let already_bound: bool = match scope {
+                Some((installation, account)) => tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM intents
+                     WHERE installation_id=?1 AND account_key=?2 AND decision_id=?3)",
+                    params![installation, account, decision.decision_id],
+                    |r| r.get(0),
+                )?,
+                None => tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM intents WHERE decision_id=?1)",
+                    [&decision.decision_id],
+                    |r| r.get(0),
+                )?,
+            };
             if already_bound {
                 return Err(StoreError::Invalid("STRATEGY_DECISION_ALREADY_BOUND"));
             }
         } else {
-            tx.execute(
-                "INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,?6)",
-                params![
-                    decision.decision_id,
-                    decision.instance_id,
-                    decision.decision_at,
-                    decision.input_digest,
-                    decision.policy_revision,
-                    decision.code_version
-                ],
-            )?;
+            match scope {
+                Some((installation, account)) => {
+                    tx.execute(
+                        "INSERT INTO decisions(installation_id,account_key,decision_id,instance_id,decision_at,input_digest,policy_revision,code_version)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                        params![
+                            installation, account, decision.decision_id, decision.instance_id,
+                            decision.decision_at, decision.input_digest,
+                            decision.policy_revision, decision.code_version
+                        ],
+                    )?;
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,?6)",
+                        params![
+                            decision.decision_id,
+                            decision.instance_id,
+                            decision.decision_at,
+                            decision.input_digest,
+                            decision.policy_revision,
+                            decision.code_version
+                        ],
+                    )?;
+                }
+            }
         }
-        tx.execute("INSERT INTO intents(intent_id,idempotency_key,request_hash,decision_id,state,revision,client_order_id,deadline,plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at) VALUES(?1,?2,?3,?4,'PREPARED',0,?5,?6,?7,?8,?9,?10,?11,?11)",params![intent.intent_id,intent.idempotency_key,intent.request_hash,decision.decision_id,intent.client_order_id,intent.deadline,intent.plan_hash,intent.policy_revision,intent.risk_increase,intent.instrument_id,decision.decision_at])?;
-        tx.execute(
-            "INSERT INTO intent_plans VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
-            params![
-                intent.intent_id,
-                intent.plan.operation,
-                intent.plan.side,
-                exact(intent.plan.quantity),
-                exact(intent.plan.limit_price),
-                intent.plan.stop_price.map(exact),
-                intent.plan.strategy_instance,
-                exact(intent.plan.planned_loss_usd),
-                intent.plan.source_generation,
-                intent.plan.position_side,
-                intent.plan.private_source_generation,
-                exact(intent.plan.contract_value),
-                intent.plan.inverse,
-                intent.plan.settlement_currency,
-                intent.plan.strategy_definition_id, intent.plan.strategy_definition_version,intent.plan.strategy_parameters_digest
-            ],
-        )?;
+        match scope {
+            Some((installation, account)) => {
+                tx.execute(
+                    "INSERT INTO intents(
+                     installation_id,account_key,intent_id,idempotency_key,request_hash,decision_id,
+                     state,revision,client_order_id,deadline,plan_hash,policy_revision,
+                     risk_increase,instrument_id,created_at,updated_at)
+                     VALUES(?1,?2,?3,?4,?5,?6,'PREPARED',0,?7,?8,?9,?10,?11,?12,?13,?13)",
+                    params![
+                        installation,
+                        account,
+                        intent.intent_id,
+                        intent.idempotency_key,
+                        intent.request_hash,
+                        decision.decision_id,
+                        intent.client_order_id,
+                        intent.deadline,
+                        intent.plan_hash,
+                        intent.policy_revision,
+                        intent.risk_increase,
+                        intent.instrument_id,
+                        decision.decision_at
+                    ],
+                )?;
+                tx.execute(
+                    "INSERT INTO intent_plans VALUES(
+                     ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                    params![
+                        installation,
+                        account,
+                        intent.intent_id,
+                        intent.plan.operation,
+                        intent.plan.side,
+                        exact(intent.plan.quantity),
+                        exact(intent.plan.limit_price),
+                        intent.plan.stop_price.map(exact),
+                        intent.plan.strategy_instance,
+                        exact(intent.plan.planned_loss_usd),
+                        intent.plan.source_generation,
+                        intent.plan.position_side,
+                        intent.plan.private_source_generation,
+                        exact(intent.plan.contract_value),
+                        intent.plan.inverse,
+                        intent.plan.settlement_currency,
+                        intent.plan.strategy_definition_id,
+                        intent.plan.strategy_definition_version,
+                        intent.plan.strategy_parameters_digest
+                    ],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO intents(intent_id,idempotency_key,request_hash,decision_id,state,revision,client_order_id,deadline,plan_hash,policy_revision,risk_increase,instrument_id,created_at,updated_at)
+                     VALUES(?1,?2,?3,?4,'PREPARED',0,?5,?6,?7,?8,?9,?10,?11,?11)",
+                    params![
+                        intent.intent_id, intent.idempotency_key, intent.request_hash,
+                        decision.decision_id, intent.client_order_id, intent.deadline,
+                        intent.plan_hash, intent.policy_revision, intent.risk_increase,
+                        intent.instrument_id, decision.decision_at
+                    ],
+                )?;
+                tx.execute(
+                    "INSERT INTO intent_plans VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                    params![
+                        intent.intent_id, intent.plan.operation, intent.plan.side,
+                        exact(intent.plan.quantity), exact(intent.plan.limit_price),
+                        intent.plan.stop_price.map(exact), intent.plan.strategy_instance,
+                        exact(intent.plan.planned_loss_usd), intent.plan.source_generation,
+                        intent.plan.position_side, intent.plan.private_source_generation,
+                        exact(intent.plan.contract_value), intent.plan.inverse,
+                        intent.plan.settlement_currency, intent.plan.strategy_definition_id,
+                        intent.plan.strategy_definition_version, intent.plan.strategy_parameters_digest
+                    ],
+                )?;
+            }
+        }
         if claimed_strategy {
-            // Binding and bar completion are one transaction. A crash before
-            // commit leaves a retriable claim; after commit the intent itself
-            // is the unique persisted decision outcome.
-            tx.execute(
-                "UPDATE strategy_instances SET last_decision_key=?2 WHERE instance_id=?1",
-                params![intent.plan.strategy_instance, intent.idempotency_key],
-            )?;
+            match scope {
+                Some((installation, account)) => {
+                    tx.execute(
+                        "UPDATE strategy_instances SET last_decision_key=?4
+                         WHERE installation_id=?1 AND account_key=?2 AND instance_id=?3",
+                        params![
+                            installation,
+                            account,
+                            intent.plan.strategy_instance,
+                            intent.idempotency_key
+                        ],
+                    )?;
+                }
+                None => {
+                    tx.execute(
+                        "UPDATE strategy_instances SET last_decision_key=?2 WHERE instance_id=?1",
+                        params![intent.plan.strategy_instance, intent.idempotency_key],
+                    )?;
+                }
+            }
         }
+        Ok(true)
+    }
+
+    pub fn prepare(
+        &mut self,
+        decision: &Decision,
+        intent: &NewIntent,
+    ) -> StoreResult<StoredIntent> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let inserted = Self::prepare_sql_transaction(&tx, None, decision, intent)?;
         tx.commit()?;
-        self.intent(&intent.intent_id)?
-            .ok_or(StoreError::Invalid("INTENT_MISSING"))
+        // The original idempotency contract returns the FIRST stored intent,
+        // even when a repeated request uses a different proposed intent_id.
+        if inserted {
+            self.intent(&intent.intent_id)?
+        } else {
+            self.by_idempotency(&intent.idempotency_key)?
+        }
+        .ok_or(StoreError::Invalid("INTENT_MISSING"))
     }
     pub fn intent(&self, id: &str) -> StoreResult<Option<StoredIntent>> {
         self.find_intent("intent_id", id)
@@ -1953,8 +1386,9 @@ impl AccountStore {
         self.find_intent("client_order_id", key)
     }
     pub fn operation(&self, id: &str) -> StoreResult<Option<OperationReceipt>> {
-        Ok(self.connection.query_row("SELECT kind,request_hash,result_ref,committed_at FROM operation_receipts WHERE operation_id=?1",[id],|r|Ok(OperationReceipt{operation_id:id.into(),kind:r.get(0)?,request_hash:r.get(1)?,result_ref:r.get(2)?,committed_at:r.get(3)?})).optional()?)
+        Self::operation_sql(&self.connection, None, id)
     }
+
     /// Return a bounded, read-only projection of this account's existing
     /// protection-cleanup receipts. The kind/time/id index keeps the scan
     /// within the cleanup receipt range; the LEFT JOIN preserves orphaned
@@ -1963,35 +1397,7 @@ impl AccountStore {
         &self,
         limit: usize,
     ) -> StoreResult<Vec<ProtectionCleanupOperationReceipt>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let mut statement = self.connection.prepare(
-            "SELECT o.operation_id,i.intent_id,
-                    CASE WHEN substr(o.operation_id,1,8)='cleanup_'
-                         THEN substr(o.operation_id,9) END,
-                    o.kind,o.request_hash,o.result_ref,o.committed_at
-             FROM operation_receipts AS o
-             LEFT JOIN intents AS i ON i.client_order_id=
-               CASE WHEN substr(o.operation_id,1,8)='cleanup_'
-                    THEN substr(o.operation_id,9) END
-             WHERE o.kind='protection_cleanup'
-             ORDER BY o.committed_at DESC,o.operation_id DESC
-             LIMIT ?1",
-        )?;
-        Ok(statement
-            .query_map([limit.min(128) as i64], |row| {
-                Ok(ProtectionCleanupOperationReceipt {
-                    operation_id: row.get(0)?,
-                    intent_id: row.get(1)?,
-                    client_order_id: row.get(2)?,
-                    kind: row.get(3)?,
-                    request_hash: row.get(4)?,
-                    result_ref: row.get(5)?,
-                    committed_at: row.get(6)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?)
+        Self::recent_cleanup_diagnostics_sql(&self.connection, None, limit)
     }
     // Durable marker is committed before any cancel/amend exchange mutation.
     pub fn begin_operation(
@@ -2001,17 +1407,7 @@ impl AccountStore {
         kind: &str,
         now: i64,
     ) -> StoreResult<bool> {
-        if let Some(old) = self.operation(id)? {
-            if old.request_hash != hash || old.kind != kind {
-                return Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
-            }
-            return Ok(false);
-        }
-        self.connection.execute(
-            "INSERT INTO operation_receipts VALUES(?1,?2,?3,'POSTING',?4)",
-            params![id, kind, hash, now],
-        )?;
-        Ok(true)
+        Self::begin_operation_sql(&self.connection, None, id, hash, kind, now)
     }
     pub fn operation_receipt(
         &mut self,
@@ -2021,25 +1417,48 @@ impl AccountStore {
         result: &str,
         now: i64,
     ) -> StoreResult<OperationReceipt> {
-        if let Some(old) = self.operation(id)? {
-            if old.request_hash != hash || old.kind != kind {
-                return Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
-            }
-            if old.result_ref != "POSTING" && old.result_ref != result {
-                return Err(StoreError::Invalid("OPERATION_RESULT_CONFLICT"));
-            }
-        }
-        self.connection.execute("INSERT INTO operation_receipts VALUES(?1,?2,?3,?4,?5) ON CONFLICT(operation_id) DO UPDATE SET result_ref=excluded.result_ref,committed_at=excluded.committed_at",params![id,kind,hash,result,now])?;
-        self.operation(id)?
-            .ok_or(StoreError::Invalid("OPERATION_MISSING"))
+        Self::operation_receipt_sql(&self.connection, None, id, hash, kind, result, now)
     }
     pub(super) fn find_intent(&self, column: &str, key: &str) -> StoreResult<Option<StoredIntent>> {
-        let sql = format!(
-            "SELECT intent_id,idempotency_key,request_hash,client_order_id,state,revision,deadline,plan_hash,policy_revision,risk_increase,instrument_id,exchange_order_id,incident FROM intents WHERE {column}=?1"
-        );
-        let raw = self
-            .connection
-            .query_row(&sql, [key], |r| {
+        Self::find_intent_sql(&self.connection, None, column, key)
+    }
+
+    /// Decode the ORIGINAL stored intent and its full original SQL plan,
+    /// under the same v2 or v6 account scope as the caller's transaction.
+    /// A partial row projection is not sufficient for an outcome/POST fence.
+    pub(crate) fn find_intent_sql(
+        db: &rusqlite::Connection,
+        scope: Option<(&str, &str)>,
+        column: &str,
+        key: &str,
+    ) -> StoreResult<Option<StoredIntent>> {
+        if !matches!(
+            column,
+            "intent_id" | "idempotency_key" | "client_order_id" | "exchange_order_id"
+        ) {
+            return Err(StoreError::Invalid("INTENT_IDENTITY_COLUMN_INVALID"));
+        }
+        let sql = if scope.is_some() {
+            format!(
+                "SELECT intent_id,idempotency_key,request_hash,client_order_id,state,revision,deadline,plan_hash,policy_revision,risk_increase,instrument_id,exchange_order_id,incident
+                 FROM intents WHERE {column}=?1 AND installation_id=?2 AND account_key=?3"
+            )
+        } else {
+            format!(
+                "SELECT intent_id,idempotency_key,request_hash,client_order_id,state,revision,deadline,plan_hash,policy_revision,risk_increase,instrument_id,exchange_order_id,incident
+                 FROM intents WHERE {column}=?1"
+            )
+        };
+        let mut args = vec![rusqlite::types::Value::Text(key.to_owned())];
+        if let Some((installation, account)) = scope {
+            if installation.is_empty() || account.is_empty() {
+                return Err(StoreError::Invalid("UNIFIED_INTENT_SCOPE_INVALID"));
+            }
+            args.push(rusqlite::types::Value::Text(installation.to_owned()));
+            args.push(rusqlite::types::Value::Text(account.to_owned()));
+        }
+        let raw = db
+            .query_row(&sql, rusqlite::params_from_iter(args.iter()), |r| {
                 Ok((
                     StoredIntent {
                         plan: IntentPlan::default(),
@@ -2061,15 +1480,55 @@ impl AccountStore {
                 ))
             })
             .optional()?;
-        raw.map(|(mut i, s)| {
-            i.state = IntentState::parse(&s)?;
-            i.plan = self.plan(&i.intent_id)?;
-            Ok(i)
+        raw.map(|(mut intent, state)| {
+            intent.state = IntentState::parse(&state)?;
+            intent.plan = Self::plan_sql(db, scope, &intent.intent_id)?;
+            Ok(intent)
         })
         .transpose()
     }
-    pub(super) fn plan(&self, id: &str) -> StoreResult<IntentPlan> {
-        let (mut p,q,price,stop,loss,cv)=self.connection.query_row("SELECT operation,side,quantity,limit_price,stop_price,strategy_instance,planned_loss_usd,source_generation,position_side,private_source_generation,contract_value,inverse,settlement_currency,strategy_definition_id,strategy_definition_version,strategy_parameters_digest FROM intent_plans WHERE intent_id=?1",[id],|r|Ok((IntentPlan{operation:r.get(0)?,side:r.get(1)?,strategy_instance:r.get(5)?,source_generation:r.get(7)?,position_side:r.get(8)?,private_source_generation:r.get(9)?,inverse:r.get(11)?,settlement_currency:r.get(12)?,strategy_definition_id:r.get(13)?,strategy_definition_version:r.get(14)?,strategy_parameters_digest:r.get(15)?,..Default::default()},r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,String>(6)?,r.get::<_,String>(10)?)))?;
+    // The original native plan decoder, shared by per-account v2 and scoped v6
+    // SQL. Reserve validates the entire original plan under its caller's lock.
+    pub(crate) fn plan_sql(
+        db: &rusqlite::Connection,
+        scope: Option<(&str, &str)>,
+        id: &str,
+    ) -> StoreResult<IntentPlan> {
+        use rusqlite::{params_from_iter, types::Value};
+        let sql = if scope.is_some() {
+            "SELECT operation,side,quantity,limit_price,stop_price,strategy_instance,planned_loss_usd,source_generation,position_side,private_source_generation,contract_value,inverse,settlement_currency,strategy_definition_id,strategy_definition_version,strategy_parameters_digest FROM intent_plans WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
+        } else {
+            "SELECT operation,side,quantity,limit_price,stop_price,strategy_instance,planned_loss_usd,source_generation,position_side,private_source_generation,contract_value,inverse,settlement_currency,strategy_definition_id,strategy_definition_version,strategy_parameters_digest FROM intent_plans WHERE intent_id=?1"
+        };
+        let mut values = vec![Value::Text(id.to_owned())];
+        if let Some((installation, account)) = scope {
+            values.push(Value::Text(installation.to_owned()));
+            values.push(Value::Text(account.to_owned()));
+        }
+        let (mut p, q, price, stop, loss, cv) =
+            db.query_row(sql, params_from_iter(values.iter()), |r| {
+                Ok((
+                    IntentPlan {
+                        operation: r.get(0)?,
+                        side: r.get(1)?,
+                        strategy_instance: r.get(5)?,
+                        source_generation: r.get(7)?,
+                        position_side: r.get(8)?,
+                        private_source_generation: r.get(9)?,
+                        inverse: r.get(11)?,
+                        settlement_currency: r.get(12)?,
+                        strategy_definition_id: r.get(13)?,
+                        strategy_definition_version: r.get(14)?,
+                        strategy_parameters_digest: r.get(15)?,
+                        ..Default::default()
+                    },
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(10)?,
+                ))
+            })?;
         p.contract_value = decimal(cv)?;
         p.quantity = decimal(q)?;
         p.limit_price = decimal(price)?;
@@ -2077,55 +1536,129 @@ impl AccountStore {
         p.planned_loss_usd = decimal(loss)?;
         Ok(p)
     }
+
     pub fn reserve(&mut self, receipt: &CentralReceipt, now: i64) -> StoreResult<()> {
-        let i = self
-            .intent(&receipt.intent_id)?
-            .ok_or(StoreError::Invalid("INTENT_MISSING"))?;
         if receipt.account_key != self.meta.account_key
             || receipt.installation_id != self.meta.installation_id
-            || receipt.plan_hash != i.plan_hash
-            || receipt.policy_revision != i.policy_revision
+        {
+            return Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::reserve_sql_transaction(&tx, None, receipt, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The ORIGINAL AccountStore receipt, strategy and intent state machine,
+    /// executed by the caller's single SQL transaction for either the
+    /// legacy v2 account database or one scope in the v6 financial database.
+    /// Does not create a Connection, independently COMMIT, or grant venue POST.
+    pub(crate) fn reserve_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        scope: Option<(&str, &str)>,
+        receipt: &CentralReceipt,
+        now: i64,
+    ) -> StoreResult<()> {
+        use rusqlite::{params_from_iter, types::Value};
+        if let Some((installation, account)) = scope
+            && (installation.is_empty()
+                || account.is_empty()
+                || receipt.installation_id != installation
+                || receipt.account_key != account)
+        {
+            return Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"));
+        }
+        let scoped_values = |mut values: Vec<Value>| {
+            if let Some((installation, account)) = scope {
+                values.push(Value::Text(installation.to_owned()));
+                values.push(Value::Text(account.to_owned()));
+            }
+            values
+        };
+        let intent_sql = if scope.is_some() {
+            "SELECT state,plan_hash,policy_revision FROM intents
+             WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
+        } else {
+            "SELECT state,plan_hash,policy_revision FROM intents WHERE intent_id=?1"
+        };
+        let values = scoped_values(vec![Value::Text(receipt.intent_id.clone())]);
+        let original: Option<(String, String, i64)> = tx
+            .query_row(intent_sql, params_from_iter(values.iter()), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .optional()?;
+        let (state, plan_hash, policy_revision) =
+            original.ok_or(StoreError::Invalid("INTENT_MISSING"))?;
+        let state = IntentState::parse(&state)?;
+        let plan = Self::plan_sql(tx, scope, &receipt.intent_id)?;
+        if receipt.plan_hash != plan_hash
+            || receipt.policy_revision != policy_revision
             || receipt.receipt_hash.is_empty()
             || receipt.requested_loss_usd < Decimal::ZERO
             || receipt.conversion_digest.is_empty()
         {
             return Err(StoreError::Invalid("CENTRAL_RECEIPT_MISMATCH"));
         }
-        if i.state == IntentState::Reserved {
-            let saved: String = self.connection.query_row(
-                "SELECT receipt_hash FROM risk_receipts WHERE reservation_key=?1",
-                [&receipt.reservation_key],
-                |r| r.get(0),
-            )?;
+        if state == IntentState::Reserved {
+            let hash_sql = if scope.is_some() {
+                "SELECT receipt_hash FROM risk_receipts
+                 WHERE reservation_key=?1 AND installation_id=?2 AND account_key=?3"
+            } else {
+                "SELECT receipt_hash FROM risk_receipts WHERE reservation_key=?1"
+            };
+            let values = scoped_values(vec![Value::Text(receipt.reservation_key.clone())]);
+            let saved: String =
+                tx.query_row(hash_sql, params_from_iter(values.iter()), |r| r.get(0))?;
             return if saved == receipt.receipt_hash {
                 Ok(())
             } else {
                 Err(StoreError::Invalid("CENTRAL_RECEIPT_CONFLICT"))
             };
         }
-        if i.state != IntentState::Prepared {
+        if state != IntentState::Prepared {
             return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
         }
-        let owner: Option<String> = self.connection.query_row(
-            "SELECT instance_id FROM decisions JOIN intents USING(decision_id) WHERE intent_id=?1",
-            [&i.intent_id],
-            |r| r.get(0),
-        )?;
+        let decision_sql = if scope.is_some() {
+            "SELECT d.instance_id FROM decisions d JOIN intents i
+                ON d.decision_id=i.decision_id
+               AND d.installation_id=i.installation_id
+               AND d.account_key=i.account_key
+             WHERE i.intent_id=?1 AND i.installation_id=?2 AND i.account_key=?3"
+        } else {
+            "SELECT d.instance_id FROM decisions d JOIN intents i USING(decision_id)
+             WHERE i.intent_id=?1"
+        };
+        let owner: Option<String> = tx
+            .query_row(decision_sql, params_from_iter(values.iter()), |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .optional()?
+            .flatten();
         if owner != receipt.instance_id
-            || !strategy_owner_matches_plan(owner.as_deref(), &i.plan.strategy_instance)
+            || !strategy_owner_matches_plan(owner.as_deref(), &plan.strategy_instance)
         {
             return Err(StoreError::Invalid("CENTRAL_INSTANCE_MISMATCH"));
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let insert_sql = if scope.is_some() {
+            "INSERT INTO risk_receipts(
+             installation_id,account_key,reservation_key,intent_id,instance_id,plan_hash,
+             policy_revision,receipt_hash,requested_loss_usd,conversion_digest,state)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'HELD')"
+        } else {
+            "INSERT INTO risk_receipts(
+             reservation_key,intent_id,account_key,installation_id,instance_id,plan_hash,
+             policy_revision,receipt_hash,requested_loss_usd,conversion_digest,state)
+             VALUES (?3,?4,?2,?1,?5,?6,?7,?8,?9,?10,'HELD')"
+        };
         tx.execute(
-            "INSERT INTO risk_receipts VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'HELD')",
+            insert_sql,
             params![
+                receipt.installation_id,
+                receipt.account_key,
                 receipt.reservation_key,
                 receipt.intent_id,
-                receipt.account_key,
-                receipt.installation_id,
                 receipt.instance_id,
                 receipt.plan_hash,
                 receipt.policy_revision,
@@ -2134,8 +1667,21 @@ impl AccountStore {
                 receipt.conversion_digest
             ],
         )?;
-        tx.execute("UPDATE intents SET state='RESERVED',revision=revision+1,updated_at=?2 WHERE intent_id=?1 AND state='PREPARED'",params![i.intent_id,now])?;
-        tx.commit()?;
+        let update_sql = if scope.is_some() {
+            "UPDATE intents SET state='RESERVED',revision=revision+1,updated_at=?2
+             WHERE intent_id=?1 AND state='PREPARED'
+               AND installation_id=?3 AND account_key=?4"
+        } else {
+            "UPDATE intents SET state='RESERVED',revision=revision+1,updated_at=?2
+             WHERE intent_id=?1 AND state='PREPARED'"
+        };
+        let values = scoped_values(vec![
+            Value::Text(receipt.intent_id.clone()),
+            Value::Integer(now),
+        ]);
+        if tx.execute(update_sql, params_from_iter(values.iter()))? != 1 {
+            return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
+        }
         Ok(())
     }
     /// Read-only proof of the durable BEGIN_POST fence and its coherent
@@ -2143,18 +1689,51 @@ impl AccountStore {
     /// requiring POSTED *after* that transition would reject a real ACK.
     /// Neither ACK nor OPEN by itself proves that BEGIN_POST was committed.
     pub fn post_fence_evidence(&self, id: &str) -> StoreResult<(i64, String)> {
-        let recorded: Option<(Option<i64>, String, String, Option<String>)> = self
-            .connection
-            .query_row(
-                "SELECT i.begin_post_at,r.state,i.state,i.exchange_order_id
-                 FROM intents i JOIN risk_receipts r
-                   ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
-                  AND r.account_key=?2 AND r.installation_id=?3
-                 WHERE i.intent_id=?1 AND i.risk_increase=1",
-                params![id, self.meta.account_key, self.meta.installation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
+        Self::post_fence_evidence_sql(
+            &self.connection,
+            &self.meta.installation_id,
+            &self.meta.account_key,
+            id,
+            None,
+        )
+    }
+
+    /// Existing ORIGINAL AccountStore durable POST witness for both old
+    /// account-local v2 and unified v6 finance. V6 binds all identity scopes
+    /// including reservation; never infer authorization from a different
+    /// account's identical venue or intent ID.
+    pub(crate) fn post_fence_evidence_sql(
+        db: &rusqlite::Connection,
+        installation: &str,
+        account: &str,
+        id: &str,
+        reservation: Option<&str>,
+    ) -> StoreResult<(i64, String)> {
+        let recorded: Option<(Option<i64>, String, String, Option<String>)> =
+            if let Some(reservation) = reservation {
+                db.query_row(
+                    "SELECT i.begin_post_at,r.state,i.state,i.exchange_order_id
+                     FROM intents i JOIN risk_receipts r
+                       ON r.installation_id=i.installation_id AND r.account_key=i.account_key
+                      AND r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
+                     WHERE i.installation_id=?1 AND i.account_key=?2 AND i.intent_id=?3
+                       AND r.reservation_key=?4 AND i.risk_increase=1",
+                    params![installation, account, id, reservation],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?
+            } else {
+                db.query_row(
+                    "SELECT i.begin_post_at,r.state,i.state,i.exchange_order_id
+                     FROM intents i JOIN risk_receipts r
+                       ON r.intent_id=i.intent_id AND r.plan_hash=i.plan_hash
+                      AND r.account_key=?2 AND r.installation_id=?3
+                     WHERE i.intent_id=?1 AND i.risk_increase=1",
+                    params![id, account, installation],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?
+            };
         match recorded {
             Some((Some(at), state, intent_state, order_id))
                 if verified_durable_post_fence(at, &state, &intent_state, order_id.as_deref()) =>
@@ -2164,69 +1743,194 @@ impl AccountStore {
             _ => Err(StoreError::Invalid("POST_FENCE_NOT_DURABLY_COMMITTED")),
         }
     }
-    // Returns true exactly once. The caller must never POST when this returns false/error.
+    // Returns true exactly once. Only the owner commits; neither a queued
+    // result nor an uncommitted RiskBook decision permits venue submission.
     pub fn begin_post(&mut self, id: &str, policy_revision: i64, now: i64) -> StoreResult<bool> {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (state, deadline, revision, increase): (String, i64, i64, bool) = tx.query_row(
-            "SELECT state,deadline,policy_revision,risk_increase FROM intents WHERE intent_id=?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )?;
+        let permitted =
+            Self::begin_post_sql_transaction(&tx, None, id, policy_revision, now, None)?;
+        if permitted {
+            tx.commit()?;
+        }
+        Ok(permitted)
+    }
+
+    /// SAME production AccountStore validation and durable receipt transition
+    /// for v2 single-account and v6 scoped multi-account SQLite.
+    ///
+    /// A caller owns the BEGIN IMMEDIATE/COMMIT; this function never opens
+    /// another connection or transaction. It is NOT venue permission until
+    /// the finance owner has committed *both* account and campaign states.
+    pub(crate) fn begin_post_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        scope: Option<(&str, &str)>,
+        id: &str,
+        policy_revision: i64,
+        now: i64,
+        required_reservation: Option<&str>,
+    ) -> StoreResult<bool> {
+        use rusqlite::{params_from_iter, types::Value};
+
+        // Legacy account-local SQL intentionally has no installation/account
+        // columns. Finance-v6 always requires BOTH original scope keys.
+        fn bind(mut base: Vec<Value>, scope: Option<(&str, &str)>) -> Vec<Value> {
+            if let Some((installation, account)) = scope {
+                base.push(Value::Text(installation.to_owned()));
+                base.push(Value::Text(account.to_owned()));
+            }
+            base
+        }
+        if id.is_empty()
+            || now <= 0
+            || policy_revision <= 0
+            || (scope.is_some()
+                && (required_reservation.is_none()
+                    || scope.is_some_and(|(installation, account)| {
+                        installation.is_empty() || account.is_empty()
+                    })))
+        {
+            return Err(StoreError::Invalid("ACCOUNT_POST_INPUT_INVALID"));
+        }
+        let intent_sql = if scope.is_some() {
+            "SELECT state,deadline,policy_revision,risk_increase FROM intents
+             WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3"
+        } else {
+            "SELECT state,deadline,policy_revision,risk_increase FROM intents WHERE intent_id=?1"
+        };
+        let intent_bind = bind(vec![Value::Text(id.to_owned())], scope);
+        let (state, deadline, revision, increase): (String, i64, i64, bool) =
+            tx.query_row(intent_sql, params_from_iter(intent_bind.iter()), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?;
         if state != "RESERVED" {
             return Ok(false);
         }
         if now >= deadline {
             return Err(StoreError::Invalid("COMMAND_EXPIRED"));
         }
-        let (current, paused): (i64, bool) = tx.query_row(
-            "SELECT revision,paused FROM account_policy WHERE singleton=1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let policy_sql = if scope.is_some() {
+            "SELECT revision,paused FROM account_policy
+             WHERE singleton=1 AND installation_id=?1 AND account_key=?2"
+        } else {
+            "SELECT revision,paused FROM account_policy WHERE singleton=1"
+        };
+        let scope_bind = bind(Vec::new(), scope);
+        let (current, paused): (i64, bool) =
+            tx.query_row(policy_sql, params_from_iter(scope_bind.iter()), |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
         if revision != policy_revision || current != revision {
             return Err(StoreError::Invalid("POLICY_CHANGED"));
         }
         if increase {
-            let same:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM intent_plans p JOIN strategy_instances i ON i.instance_id=p.strategy_instance WHERE p.intent_id=?1 AND i.definition_id=p.strategy_definition_id AND i.definition_version=p.strategy_definition_version AND i.parameters_digest=p.strategy_parameters_digest AND (i.enabled=1 OR i.instance_id='manual'))",[id],|r|r.get(0))?;
+            let strategy_sql = if scope.is_some() {
+                "SELECT EXISTS(SELECT 1 FROM intent_plans p
+                 JOIN strategy_instances i
+                   ON i.installation_id=p.installation_id
+                  AND i.account_key=p.account_key
+                  AND i.instance_id=p.strategy_instance
+                 WHERE p.intent_id=?1 AND p.installation_id=?2 AND p.account_key=?3
+                   AND i.definition_id=p.strategy_definition_id
+                   AND i.definition_version=p.strategy_definition_version
+                   AND i.parameters_digest=p.strategy_parameters_digest
+                   AND (i.enabled=1 OR i.instance_id='manual'))"
+            } else {
+                "SELECT EXISTS(SELECT 1 FROM intent_plans p
+                 JOIN strategy_instances i ON i.instance_id=p.strategy_instance
+                 WHERE p.intent_id=?1 AND i.definition_id=p.strategy_definition_id
+                   AND i.definition_version=p.strategy_definition_version
+                   AND i.parameters_digest=p.strategy_parameters_digest
+                   AND (i.enabled=1 OR i.instance_id='manual'))"
+            };
+            let same: bool =
+                tx.query_row(strategy_sql, params_from_iter(intent_bind.iter()), |r| {
+                    r.get(0)
+                })?;
             if !same {
                 return Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"));
             }
-            let stops: i64 = tx.query_row(
-                "SELECT count(*) FROM risk_stops WHERE resolution IS NULL",
-                [],
-                |r| r.get(0),
-            )?;
+            let stop_sql = if scope.is_some() {
+                "SELECT COUNT(*) FROM risk_stops WHERE resolution IS NULL
+                 AND installation_id=?1 AND account_key=?2"
+            } else {
+                "SELECT COUNT(*) FROM risk_stops WHERE resolution IS NULL"
+            };
+            let stops: i64 =
+                tx.query_row(stop_sql, params_from_iter(scope_bind.iter()), |r| r.get(0))?;
             if paused || stops > 0 {
                 return Err(StoreError::Invalid("RISK_INCREASE_STOPPED"));
             }
-        }
-        if increase {
+            let recovery_sql = if scope.is_some() {
+                "SELECT requires_reconcile FROM storage_recovery WHERE singleton=1
+                 AND installation_id=?1 AND account_key=?2"
+            } else {
+                "SELECT requires_reconcile FROM storage_recovery"
+            };
             let recovery: bool =
-                tx.query_row("SELECT requires_reconcile FROM storage_recovery", [], |r| {
+                tx.query_row(recovery_sql, params_from_iter(scope_bind.iter()), |r| {
                     r.get(0)
                 })?;
             if recovery {
                 return Err(StoreError::Invalid("STORAGE_RECOVERY_INCOMPLETE"));
             }
-        }
-        if increase {
-            let unknown: i64 = tx.query_row(
-                "SELECT count(*) FROM intents WHERE state IN('POSTING','UNKNOWN')",
-                [],
-                |r| r.get(0),
-            )?;
+            let unknown_sql = if scope.is_some() {
+                "SELECT COUNT(*) FROM intents WHERE state IN('POSTING','UNKNOWN')
+                 AND installation_id=?1 AND account_key=?2"
+            } else {
+                "SELECT COUNT(*) FROM intents WHERE state IN('POSTING','UNKNOWN')"
+            };
+            let unknown: i64 =
+                tx.query_row(unknown_sql, params_from_iter(scope_bind.iter()), |r| {
+                    r.get(0)
+                })?;
             if unknown > 0 {
                 return Err(StoreError::Invalid("ACCOUNT_UNKNOWN_EXPOSURE"));
             }
         }
-        tx.execute("UPDATE intents SET state='POSTING',begin_post_at=?2,updated_at=?2,revision=revision+1 WHERE intent_id=?1 AND state='RESERVED' AND begin_post_at IS NULL",params![id,now])?;
-        tx.execute(
-            "UPDATE risk_receipts SET state='POSTED' WHERE intent_id=?1",
-            [id],
-        )?;
-        tx.commit()?;
+        if let Some(reservation) = required_reservation {
+            // Scoped finance requires the ORIGINAL AccountStore receipt,
+            // never an unattested RiskBook-only HELD row.
+            let sql = "SELECT COUNT(*) FROM risk_receipts
+                       WHERE installation_id=?1 AND account_key=?2
+                         AND intent_id=?3 AND reservation_key=?4 AND state='HELD'
+                         AND plan_hash=(SELECT plan_hash FROM intents
+                           WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3)";
+            let (installation, account) =
+                scope.ok_or(StoreError::Invalid("ACCOUNT_POST_SCOPE_REQUIRED"))?;
+            let count: i64 = tx.query_row(
+                sql,
+                rusqlite::params![installation, account, id, reservation],
+                |r| r.get(0),
+            )?;
+            if count != 1 {
+                return Err(StoreError::Invalid("ACCOUNT_POST_ORIGINAL_RECEIPT_MISSING"));
+            }
+        }
+        let update_sql = if scope.is_some() {
+            "UPDATE intents SET state='POSTING',begin_post_at=?2,updated_at=?2,
+             revision=revision+1 WHERE intent_id=?1 AND state='RESERVED'
+             AND begin_post_at IS NULL AND installation_id=?3 AND account_key=?4"
+        } else {
+            "UPDATE intents SET state='POSTING',begin_post_at=?2,updated_at=?2,
+             revision=revision+1 WHERE intent_id=?1 AND state='RESERVED'
+             AND begin_post_at IS NULL"
+        };
+        let update_bind = bind(vec![Value::Text(id.to_owned()), Value::Integer(now)], scope);
+        if tx.execute(update_sql, params_from_iter(update_bind.iter()))? != 1 {
+            return Err(StoreError::Invalid("ACCOUNT_POST_INTENT_CAS_FAILED"));
+        }
+        let receipt_sql = if scope.is_some() {
+            "UPDATE risk_receipts SET state='POSTED'
+             WHERE intent_id=?1 AND installation_id=?2 AND account_key=?3
+               AND state='HELD'"
+        } else {
+            "UPDATE risk_receipts SET state='POSTED' WHERE intent_id=?1 AND state='HELD'"
+        };
+        if tx.execute(receipt_sql, params_from_iter(intent_bind.iter()))? != 1 {
+            return Err(StoreError::Invalid("ACCOUNT_POST_RECEIPT_CAS_FAILED"));
+        }
         Ok(true)
     }
     // Exchange readback is authoritative; a timeout or negative lookup is UNKNOWN.
@@ -2238,10 +1942,37 @@ impl AccountStore {
         evidence: &str,
         now: i64,
     ) -> StoreResult<()> {
-        let i = self
-            .intent(id)?
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::record_outcome_sql_transaction(
+            &tx,
+            None,
+            id,
+            state,
+            exchange_order_id,
+            evidence,
+            now,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Original state transition + venue readback + terminal receipt, using
+    /// the same typed source decoder and ONE caller-owned SQL COMMIT.
+    /// Scope every SQL row on installation-v6; no venue call occurs here.
+    pub(crate) fn record_outcome_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        scope: Option<(&str, &str)>,
+        id: &str,
+        state: IntentState,
+        exchange_order_id: Option<&str>,
+        evidence: &str,
+        now: i64,
+    ) -> StoreResult<()> {
+        let original = Self::find_intent_sql(tx, scope, "intent_id", id)?
             .ok_or(StoreError::Invalid("INTENT_MISSING"))?;
-        let allowed = match i.state {
+        let allowed = match original.state {
             IntentState::Posting | IntentState::Unknown => matches!(
                 state,
                 IntentState::Unknown
@@ -2262,93 +1993,272 @@ impl AccountStore {
                 state,
                 IntentState::PartiallyFilled | IntentState::Filled | IntentState::Cancelled
             ),
-            _ => i.state == state,
+            _ => original.state == state,
         };
         if !allowed || evidence.is_empty() {
             return Err(StoreError::Invalid("INVALID_INTENT_TRANSITION"));
         }
-        if i.exchange_order_id
+        if original
+            .exchange_order_id
             .as_deref()
             .is_some_and(|old| Some(old) != exchange_order_id)
         {
             return Err(StoreError::Invalid("EXCHANGE_ID_CONFLICT"));
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("UPDATE intents SET state=?2,exchange_order_id=COALESCE(exchange_order_id,?3),updated_at=?4,revision=revision+1 WHERE intent_id=?1",params![id,state.as_str(),exchange_order_id,now])?;
-        tx.execute(
-            "UPDATE risk_receipts SET state=?2 WHERE intent_id=?1",
-            params![
-                id,
-                if state == IntentState::Unknown {
-                    "UNKNOWN"
-                } else if i.risk_increase
-                    && matches!(state, IntentState::Filled | IntentState::PartiallyFilled)
-                {
-                    "OPEN"
-                } else if state.terminal() {
-                    "TERMINAL_PENDING_CENTRAL"
-                } else {
-                    "OPEN"
-                }
-            ],
-        )?;
-        if state.terminal() {
-            tx.execute("INSERT INTO operation_receipts VALUES(?1,'TERMINAL',?2,?3,?4) ON CONFLICT(operation_id) DO NOTHING",params![format!("terminal:{id}"),i.request_hash,evidence,now])?;
+        let changed = match scope {
+            Some((installation, account)) => tx.execute(
+                "UPDATE intents SET state=?2,exchange_order_id=COALESCE(exchange_order_id,?3),
+                 updated_at=?4,revision=revision+1
+                 WHERE intent_id=?1 AND installation_id=?5 AND account_key=?6",
+                params![
+                    id,
+                    state.as_str(),
+                    exchange_order_id,
+                    now,
+                    installation,
+                    account
+                ],
+            )?,
+            None => tx.execute(
+                "UPDATE intents SET state=?2,exchange_order_id=COALESCE(exchange_order_id,?3),
+                 updated_at=?4,revision=revision+1 WHERE intent_id=?1",
+                params![id, state.as_str(), exchange_order_id, now],
+            )?,
+        };
+        if changed != 1 {
+            return Err(StoreError::Invalid("ACCOUNT_OUTCOME_INTENT_CAS_FAILED"));
         }
-        tx.commit()?;
+        let risk_state = if state == IntentState::Unknown {
+            "UNKNOWN"
+        } else if original.risk_increase
+            && matches!(state, IntentState::Filled | IntentState::PartiallyFilled)
+        {
+            "OPEN"
+        } else if state.terminal() {
+            "TERMINAL_PENDING_CENTRAL"
+        } else {
+            "OPEN"
+        };
+        let risk_rows = match scope {
+            Some((installation, account)) => tx.execute(
+                "UPDATE risk_receipts SET state=?2
+                 WHERE intent_id=?1 AND installation_id=?3 AND account_key=?4",
+                params![id, risk_state, installation, account],
+            )?,
+            None => tx.execute(
+                "UPDATE risk_receipts SET state=?2 WHERE intent_id=?1",
+                params![id, risk_state],
+            )?,
+        };
+        // A v6 increase with no ORIGINAL AccountStore risk receipt must never
+        // acknowledge an order while the campaign budget is unproven.
+        if scope.is_some() && original.risk_increase && risk_rows != 1 {
+            return Err(StoreError::Invalid("UNIFIED_OUTCOME_RISK_RECEIPT_MISSING"));
+        }
+        if state.terminal() {
+            let operation = format!("terminal:{id}");
+            match scope {
+                Some((installation, account)) => {
+                    let previous: Option<(String, String, String)> = tx
+                        .query_row(
+                            "SELECT kind,request_hash,result_ref FROM operation_receipts
+                         WHERE installation_id=?1 AND account_key=?2 AND operation_id=?3",
+                            params![installation, account, operation],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                        )
+                        .optional()?;
+                    if let Some((kind, hash, result)) = previous {
+                        if kind != "TERMINAL" || hash != original.request_hash || result != evidence
+                        {
+                            return Err(StoreError::Invalid("UNIFIED_TERMINAL_RECEIPT_CONFLICT"));
+                        }
+                    } else {
+                        tx.execute(
+                            "INSERT INTO operation_receipts(
+                             installation_id,account_key,operation_id,kind,request_hash,result_ref,committed_at)
+                             VALUES(?1,?2,?3,'TERMINAL',?4,?5,?6)",
+                            params![
+                                installation, account, operation,
+                                original.request_hash, evidence, now
+                            ],
+                        )?;
+                    }
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO operation_receipts VALUES(?1,'TERMINAL',?2,?3,?4)
+                         ON CONFLICT(operation_id) DO NOTHING",
+                        params![operation, original.request_hash, evidence, now],
+                    )?;
+                }
+            }
+        }
         Ok(())
     }
+
     pub fn recover_posting(&mut self, now: i64) -> StoreResult<usize> {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let n=tx.execute("UPDATE intents SET state='UNKNOWN',updated_at=?1,revision=revision+1 WHERE state='POSTING'",[now])?;
-        tx.execute("UPDATE risk_receipts SET state='UNKNOWN' WHERE intent_id IN(SELECT intent_id FROM intents WHERE state='UNKNOWN')",[])?;
+        let recovered = Self::recover_posting_sql_transaction(&tx, None, now)?;
         tx.commit()?;
-        Ok(n)
+        Ok(recovered)
     }
+
+    /// Native recovery: only POSTING rows under the requested account become
+    /// UNKNOWN. Verify the ORIGINAL durable POST fence and matching source
+    /// receipt BEFORE any change. Never treat a missing/corrupt receipt as
+    /// empty budget or silently overwrite an older UNKNOWN/terminal receipt.
+    /// The ledger intent and original receipt transition in ONE SQL COMMIT.
+    pub(crate) fn recover_posting_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        scope: Option<(&str, &str)>,
+        now: i64,
+    ) -> StoreResult<usize> {
+        let changed = match scope {
+            Some((installation, account)) => {
+                if installation.is_empty() || account.is_empty() {
+                    return Err(StoreError::Invalid("UNIFIED_RECOVERY_SCOPE_INVALID"));
+                }
+                // A POSTING intent means there was exactly one potential
+                // exchange POST. A missing SQL fence or original receipt is
+                // an incident, not permission to recover/release the budget.
+                let broken: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM intents i
+                     LEFT JOIN risk_receipts r
+                       ON r.installation_id=i.installation_id
+                      AND r.account_key=i.account_key
+                      AND r.intent_id=i.intent_id
+                     WHERE i.installation_id=?1 AND i.account_key=?2
+                       AND i.state='POSTING'
+                       AND (i.begin_post_at IS NULL OR i.begin_post_at<=0
+                         OR (i.risk_increase=1 AND (
+                              r.intent_id IS NULL OR r.state!='POSTED'
+                              OR r.plan_hash!=i.plan_hash
+                              OR r.policy_revision!=i.policy_revision)))",
+                    params![installation, account],
+                    |r| r.get(0),
+                )?;
+                if broken != 0 {
+                    return Err(StoreError::Invalid(
+                        "UNIFIED_RECOVERY_ORIGINAL_POST_UNPROVEN",
+                    ));
+                }
+                let originals: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM intents WHERE installation_id=?1
+                     AND account_key=?2 AND state='POSTING' AND risk_increase=1",
+                    params![installation, account],
+                    |r| r.get(0),
+                )?;
+                // Only receipts for intents that are CURRENTLY POSTING may
+                // transition. Previously UNKNOWN/terminal entries retain
+                // their exact durable evidence; repeated recovery is no-op.
+                let updated_receipts = tx.execute(
+                    "UPDATE risk_receipts SET state='UNKNOWN'
+                     WHERE installation_id=?1 AND account_key=?2 AND state='POSTED'
+                       AND intent_id IN (
+                         SELECT intent_id FROM intents
+                         WHERE installation_id=?1 AND account_key=?2
+                           AND state='POSTING' AND risk_increase=1
+                       )",
+                    params![installation, account],
+                )?;
+                if i64::try_from(updated_receipts).ok() != Some(originals) {
+                    return Err(StoreError::Invalid("UNIFIED_RECOVERY_RECEIPT_CAS_FAILED"));
+                }
+                tx.execute(
+                    "UPDATE intents SET state='UNKNOWN',updated_at=?1,revision=revision+1
+                     WHERE state='POSTING' AND installation_id=?2 AND account_key=?3",
+                    params![now, installation, account],
+                )?
+            }
+            None => {
+                // Keep the exact existing account-v2 algorithm until cutover.
+                // Its SQL owner contains only one account and uses local IDs.
+                let n = tx.execute(
+                    "UPDATE intents SET state='UNKNOWN',updated_at=?1,revision=revision+1
+                     WHERE state='POSTING'",
+                    [now],
+                )?;
+                tx.execute(
+                    "UPDATE risk_receipts SET state='UNKNOWN'
+                     WHERE intent_id IN(SELECT intent_id FROM intents WHERE state='UNKNOWN')",
+                    [],
+                )?;
+                n
+            }
+        };
+        Ok(changed)
+    }
+
+    /// Recover every installed account in ONE financial SQLite transaction.
+    /// Installation scope comes from the ORIGINAL account_meta inventory in
+    /// the same DB, never from caller-provided account lists or Cloudflare.
+    /// Any invalid original POST fence fails the entire installation batch:
+    /// the caller's one transaction rollback preserves every other account.
+    pub(crate) fn recover_installation_posting_sql_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        installation: &str,
+        now: i64,
+    ) -> StoreResult<usize> {
+        if installation.is_empty() {
+            return Err(StoreError::Invalid("UNIFIED_RECOVERY_SCOPE_INVALID"));
+        }
+        // Savepoint is within the ONE existing BEGIN IMMEDIATE, not another
+        // database or commit. On account B's failure, even a caller that
+        // mistakenly commits its outer transaction cannot persist A's
+        // recovery or partially clear the original budget receipt.
+        tx.execute_batch("SAVEPOINT okx_installation_post_recovery")?;
+        let attempted = (|| -> StoreResult<usize> {
+            let mut query = tx.prepare(
+                "SELECT account_key FROM account_meta
+                 WHERE installation_id=?1 ORDER BY account_key",
+            )?;
+            let accounts = query
+                .query_map([installation], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(query);
+            if accounts.is_empty() {
+                return Err(StoreError::Invalid("UNIFIED_RECOVERY_ACCOUNT_ROSTER_EMPTY"));
+            }
+            let mut total = 0_usize;
+            for account in accounts {
+                total = total
+                    .checked_add(Self::recover_posting_sql_transaction(
+                        tx,
+                        Some((installation, &account)),
+                        now,
+                    )?)
+                    .ok_or(StoreError::Invalid("UNIFIED_RECOVERY_COUNT_OVERFLOW"))?;
+            }
+            Ok(total)
+        })();
+        match attempted {
+            Ok(total) => {
+                tx.execute_batch("RELEASE SAVEPOINT okx_installation_post_recovery")?;
+                Ok(total)
+            }
+            Err(error) => {
+                tx.execute_batch(
+                    "ROLLBACK TO SAVEPOINT okx_installation_post_recovery;
+                     RELEASE SAVEPOINT okx_installation_post_recovery",
+                )?;
+                Err(error)
+            }
+        }
+    }
+
     /// Bounded combined local account obligations, including terminal
     /// intents whose RiskBook reservations have NOT yet been released.
     pub fn risk_census_intents(
         &self,
         limit: usize,
     ) -> StoreResult<(Vec<StoredIntent>, Vec<String>)> {
-        if limit == 0 || limit > 100 {
-            return Err(StoreError::Invalid("COHORT_CENSUS_LIMIT_INVALID"));
-        }
-        let live = self.active_intents(limit)?;
-        let pending = self.reconcilable_intents_page(limit, 0)?;
-        let mut all = std::collections::BTreeMap::new();
-        for intent in &live {
-            all.insert(intent.intent_id.clone(), intent.clone());
-        }
-        let mut unresolved = std::collections::BTreeSet::new();
-        for intent in pending {
-            unresolved.insert(intent.intent_id.clone());
-            all.insert(intent.intent_id.clone(), intent);
-        }
-        if live.len() >= limit || unresolved.len() >= limit || all.len() >= limit {
-            return Err(StoreError::Invalid("COHORT_LOCAL_INTENTS_TRUNCATED"));
-        }
-        Ok((
-            all.into_values().collect(),
-            unresolved.into_iter().collect(),
-        ))
+        Self::risk_census_intents_sql(&self.connection, None, limit, wall_time_ms())
     }
 
     pub fn active_intents(&self, limit: usize) -> StoreResult<Vec<StoredIntent>> {
-        let mut s=self.connection.prepare("SELECT intent_id FROM intents WHERE state IN('PREPARED','RESERVED','POSTING','UNKNOWN','ACKNOWLEDGED','PARTIALLY_FILLED') ORDER BY state,updated_at,intent_id LIMIT ?1")?;
-        let ids = s
-            .query_map([limit.min(1000) as i64], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        ids.iter()
-            .map(|id| {
-                self.intent(id)?
-                    .ok_or(StoreError::Invalid("INTENT_MISSING"))
-            })
-            .collect()
+        Self::active_intents_sql(&self.connection, None, limit)
     }
     // Cache an already-authorized revision. This grants no new financial authority.
 }
@@ -2372,11 +2282,9 @@ fn verified_durable_post_fence(
 }
 
 /// SQL risk receipt state is read under the existing single AccountStore owner.
+#[cfg(test)]
 fn risk_receipt_covers_exposure(state: &str) -> bool {
-    matches!(
-        state,
-        "HELD" | "POSTED" | "UNKNOWN" | "OPEN" | "TERMINAL_PENDING_CENTRAL"
-    )
+    AccountStore::receipt_covers_exposure(state)
 }
 
 #[cfg(test)]

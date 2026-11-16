@@ -1,5 +1,5 @@
 import {isObject,type Json} from './shared.js';
-import {normalizeDecimal} from './risk_book.js';
+import {normalizeDecimal} from './decimal.js';
 type Schema=Record<string,any>;
 const text=(max=128):Schema=>({type:'string',minLength:1,maxLength:max});
 const artifactId={type:'string',pattern:'^sha256:[0-9a-f]{64}$'};

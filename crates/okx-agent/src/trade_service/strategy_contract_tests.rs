@@ -18,10 +18,13 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        // Windows clock resolution cannot identify concurrent fixtures.
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).unwrap();
         let root = std::env::temp_dir().join(format!(
-            "okx-strategy-public-{}-{}",
+            "okx-strategy-public-{}-{:x}",
             std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+            u128::from_le_bytes(nonce)
         ));
         initialize_installation(&root, INSTALLATION).unwrap();
         let budget = okx_api::RateBudget::new();
@@ -175,7 +178,7 @@ fn rejected(response: AgentResponse, code: &str) {
     assert!(response.result.is_none());
     assert_eq!(response.failure.unwrap().code, code);
 }
-async fn money(store: &AccountStoreHandle) -> Value {
+async fn money(store: &crate::execution_store::ExecutionStore) -> Value {
     store
         .call(deadline(), |s| {
             Ok(json!({

@@ -1,4 +1,5 @@
 use super::*;
+use crate::execution_store::ExecutionStore;
 
 // Conservative bound for OKX's short-lived canceled/unfilled order
 // history. An expired archive cannot establish absence of lost POSTs.
@@ -154,12 +155,7 @@ impl TradeService {
             .map_err(|_| "STORAGE_RECOVERY_AUDIT_TIMEOUT".to_owned())?
     }
     async fn reconcile_restored_bounded(&self, r: &Arc<AccountResources>) -> Result<(), String> {
-        let local = r
-            .execution
-            .store
-            .call(deadline(), |s| s.recovery_snapshot(now()))
-            .await
-            .map_err(err)?;
+        let local = recovery_snapshot(&r.execution.store).await?;
         if !local.required {
             return Ok(());
         }
@@ -200,7 +196,10 @@ impl TradeService {
             let known = r
                 .execution
                 .store
-                .call(deadline(), move |s| s.by_client_order_id(&client))
+                .lookup_intent(
+                    deadline(),
+                    okx_execution::TradeIntentLookup::ClientOrderId(client),
+                )
                 .await
                 .map_err(err)?
                 .ok_or("STORAGE_RECOVERY_LOST_ORDER_FACT")?;
@@ -241,7 +240,7 @@ impl TradeService {
             let lots = r
                 .execution
                 .store
-                .call(deadline(), move |s| s.active_lots(&instrument))
+                .active_lots(deadline(), instrument)
                 .await
                 .map_err(err)?;
             let owned = lots
@@ -279,14 +278,7 @@ impl TradeService {
                             .checked_add(entry.remaining_qty)
                             .ok_or("STORAGE_RECOVERY_LOT_QUANTITY_OVERFLOW".to_owned())
                     })?;
-                let (protection, intent) = r
-                    .execution
-                    .store
-                    .call(deadline(), move |s| {
-                        Ok((s.protection(&id)?, s.intent(&id)?))
-                    })
-                    .await
-                    .map_err(err)?;
+                let (protection, intent) = recovery_position_owner(&r.execution.store, id).await?;
                 let protection = protection.ok_or("STORAGE_RECOVERY_PROTECTION_MISSING")?;
                 let intent = intent.ok_or("STORAGE_RECOVERY_PROTECTION_INTENT_MISSING")?;
                 if protection.quantity < owned_intent_qty || intent.plan.position_side != lot.side {
@@ -330,7 +322,10 @@ impl TradeService {
                 .ok_or("STORAGE_RECOVERY_UNATTRIBUTED_ORDER")?;
             if r.execution
                 .store
-                .call(deadline(), move |s| s.by_client_order_id(&client))
+                .lookup_intent(
+                    deadline(),
+                    okx_execution::TradeIntentLookup::ClientOrderId(client),
+                )
                 .await
                 .map_err(err)?
                 .is_none()
@@ -343,29 +338,23 @@ impl TradeService {
             r.private_ws.status().await.connection_generation,
             r.source_identity_ready().await,
         )?;
-        r.execution
-            .store
-            .call(deadline(), move |s| {
-                s.ingest_page(&okx_execution::IngestPage {
-                    cursor: Some(okx_execution::SourceCursor {
-                        source: "recovery_audit".into(),
-                        stream_partition: "account".into(),
-                        cursor: String::new(),
-                        watermark: started,
-                        generation: generation as i64,
-                        coverage_gaps: String::new(),
-                    }),
-                    ..Default::default()
-                })
-            })
-            .await
-            .map_err(err)?;
-        let local = r
-            .execution
-            .store
-            .call(deadline(), |s| s.recovery_snapshot(now()))
-            .await
-            .map_err(err)?;
+        recovery_ingest(
+            &r.execution.store,
+            okx_execution::IngestPage {
+                cursor: Some(okx_execution::SourceCursor {
+                    source: "recovery_audit".into(),
+                    stream_partition: "account".into(),
+                    cursor: String::new(),
+                    watermark: started,
+                    generation: i64::try_from(generation)
+                        .map_err(|_| "STORAGE_RECOVERY_GENERATION_CHANGED")?,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let local = recovery_snapshot(&r.execution.store).await?;
         let central = self
             .recovery_central(&state, &r.configuration.account_key.wire())
             .await?;
@@ -375,7 +364,7 @@ impl TradeService {
             let intent = r
                 .execution
                 .store
-                .call(deadline(), move |s| s.intent(&id))
+                .lookup_intent(deadline(), okx_execution::TradeIntentLookup::IntentId(id))
                 .await
                 .map_err(err)?
                 .ok_or("STORAGE_RECOVERY_INTENT_MISSING")?;
@@ -383,7 +372,7 @@ impl TradeService {
             let lots = r
                 .execution
                 .store
-                .call(deadline(), move |s| s.active_lots(&instrument))
+                .active_lots(deadline(), instrument)
                 .await
                 .map_err(err)?;
             let owned = lots
@@ -488,26 +477,24 @@ impl TradeService {
         {
             return Err("STORAGE_RECOVERY_PROOF_CHANGED".into());
         }
-        r.execution
-            .store
-            .call(deadline(), move |s| {
-                for source in ["account_snapshot", "orders"] {
-                    s.ingest_page(&okx_execution::IngestPage {
-                        cursor: Some(okx_execution::SourceCursor {
-                            source: source.into(),
-                            stream_partition: "account".into(),
-                            cursor: String::new(),
-                            watermark: account_received,
-                            generation: generation as i64,
-                            coverage_gaps: String::new(),
-                        }),
-                        ..Default::default()
-                    })?;
-                }
-                Ok(())
-            })
-            .await
-            .map_err(err)?;
+        for source in ["account_snapshot", "orders"] {
+            recovery_ingest(
+                &r.execution.store,
+                okx_execution::IngestPage {
+                    cursor: Some(okx_execution::SourceCursor {
+                        source: source.into(),
+                        stream_partition: "account".into(),
+                        cursor: String::new(),
+                        watermark: account_received,
+                        generation: i64::try_from(generation)
+                            .map_err(|_| "STORAGE_RECOVERY_GENERATION_CHANGED")?,
+                        coverage_gaps: String::new(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
         let proof_floor = protections
             .iter()
             .map(|(_, received)| *received)
@@ -518,12 +505,7 @@ impl TradeService {
             ])
             .min()
             .ok_or("STORAGE_RECOVERY_SOURCE_MISSING")?;
-        let local = r
-            .execution
-            .store
-            .call(deadline(), |s| s.recovery_snapshot(now()))
-            .await
-            .map_err(err)?;
+        let local = recovery_snapshot(&r.execution.store).await?;
         recovery_matches(&local, &central)?;
         let exchange = digest(&(
             fresh_snapshot,
@@ -535,6 +517,26 @@ impl TradeService {
         let evidence = digest(
             &json!({"central":central,"storage_gate_only":true,"post_requires_fresh_all_account_reserve":true,"local_cumulative_loss_usd":exact(local.cumulative_loss_usd)}),
         )?;
+        if let Some((owner, account)) = r.execution.store.native_scope() {
+            return owner
+                .commit_storage_recovery(
+                    deadline(),
+                    account.to_owned(),
+                    okx_execution::account_worker::NativeRecoveryProof {
+                        generation: i64::try_from(generation)
+                            .map_err(|_| "STORAGE_RECOVERY_GENERATION_CHANGED")?,
+                        observed_at_ms: proof_floor,
+                        expected_receipts_digest: digest(&local.active_receipts)?,
+                        active_reservations: central.active_reservations,
+                        occupied_loss_usd: central.occupied_usd.clone(),
+                        cumulative_loss_usd: central.cumulative_loss_usd.clone(),
+                        exchange_evidence: exchange,
+                        financial_evidence: evidence,
+                    },
+                )
+                .await
+                .map_err(err);
+        }
         r.execution
             .store
             .call(deadline(), move |s| {
@@ -546,6 +548,62 @@ impl TradeService {
                     ));
                 }
                 commit_recovery(s, &local, &central, proof_floor, &exchange, &evidence)
+            })
+            .await
+            .map_err(err)
+    }
+}
+
+async fn recovery_snapshot(
+    store: &ExecutionStore,
+) -> Result<okx_execution::RecoverySnapshot, String> {
+    if let Some((owner, account)) = store.native_scope() {
+        owner
+            .recovery_snapshot(deadline(), account.to_owned())
+            .await
+            .map_err(err)
+    } else {
+        store
+            .call(deadline(), |s| s.recovery_snapshot(now()))
+            .await
+            .map_err(err)
+    }
+}
+async fn recovery_ingest(
+    store: &ExecutionStore,
+    page: okx_execution::IngestPage,
+) -> Result<(), String> {
+    if let Some((owner, account)) = store.native_scope() {
+        owner
+            .ingest_source_page(account.to_owned(), page)
+            .await
+            .map_err(err)
+    } else {
+        store
+            .call(deadline(), move |s| s.ingest_page(&page))
+            .await
+            .map_err(err)
+    }
+}
+async fn recovery_position_owner(
+    store: &ExecutionStore,
+    id: String,
+) -> Result<
+    (
+        Option<okx_execution::ProtectionReceipt>,
+        Option<okx_execution::StoredIntent>,
+    ),
+    String,
+> {
+    if let Some((owner, account)) = store.native_scope() {
+        owner
+            .recovery_position_owner(deadline(), account.to_owned(), id)
+            .await
+            .map_err(err)
+    } else {
+        store
+            .call(deadline(), move |s| {
+                Ok((s.protection(&id)?, s.intent(&id)?))
             })
             .await
             .map_err(err)

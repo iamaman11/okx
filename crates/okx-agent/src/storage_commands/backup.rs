@@ -11,6 +11,7 @@ pub async fn backup_account(root: &Path, key: &str) -> AgentResult<Value> {
 
 fn backup_stopped(root: &Path, key: &AccountKey) -> AgentResult<Value> {
     let _engine = engine_lease(root)?;
+    let _finance_mode = legacy_account_maintenance_lease(root, key)?;
     let installation_id = installation(root)?;
     catalog(root, key)?;
     let directory = account_root(root, key);
@@ -75,6 +76,7 @@ fn restore_stopped(
     operation_id: &str,
 ) -> AgentResult<Value> {
     let _engine = engine_lease(root)?;
+    let _finance_mode = legacy_account_maintenance_lease(root, key)?;
     let installation_id = installation(root)?;
     catalog(root, key)?;
     let directory = account_root(root, key);

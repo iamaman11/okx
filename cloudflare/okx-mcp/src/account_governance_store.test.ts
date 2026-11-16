@@ -1,6 +1,5 @@
 import {governanceRequest,lowerCampaignLimit,enrollObservedAccount,setAccountPause,stopNewRealRisk,initializeGovernance,GOVERNANCE_STORAGE_KEY} from "./account_governance_store.js";
 import {FRAME_SCHEMA} from "./shared.js";
-import {installCampaignEntryProof,openingDigest,readRiskBook,type CampaignEntryOpeningSource} from "./risk_book.js";
 import {initial,limits} from "./account_governance.test.js";
 function ok(v:boolean,label:string){if(!v)throw Error(label);}
 class Storage{
@@ -39,67 +38,22 @@ const lowered=await lowerCampaignLimit(s,{expected_revision:revision,campaign_lo
 ok(lowered.status===200&&lowered.body.campaign_loss_limit_usd==="8","owner may only lower campaign ceiling");
 ok((await lowerCampaignLimit(s,{expected_revision:revision+1,campaign_loss_limit_usd:"10",idempotency_key:"raise_campaign_01"})).status===409,"campaign ceiling cannot increase");
 ok(JSON.stringify(await lowerCampaignLimit(s,{expected_revision:revision,campaign_loss_limit_usd:"8",idempotency_key:"lower_campaign_01"}))===JSON.stringify(lowered),"campaign lowering is body-bound idempotent");
-// Once the native finance owner has verified opening consumption, lowering
-// the centrally configured cap must update the same RiskBook transaction.
+// Configuration CAS is independent of historical financial balances. Native
+// finance enforces consumed/reserved constraints when it receives policy.
 {
- const budgetStore=new Storage();
- ok((await initializeGovernance(budgetStore,initial)).status===200,
-   "campaign cap transaction starts with legitimate installation");
- ok((await enrollObservedAccount(budgetStore,{
-   ...observation,idempotency_key:"budget_real_enrollment"
- })).status===200,"opening requires registered real cohort");
- const budgetPolicy=(await governanceRequest(budgetStore,"GET")).body;
- const origin=(await readRiskBook(budgetStore))!.campaign_origin!;
- ok(origin.campaign_id===initial.campaign_id&&origin.started_at_ms>0,
-   "governance creates immutable campaign inception in same transaction");
- const openingFrom=origin.started_at_ms,openingAt=openingFrom+100000;
- const manifest:CampaignEntryOpeningSource={
-   campaign_id:initial.campaign_id,limit_usd:"10",consumed_usd:"7",
-   source_digest:"f".repeat(64),as_of_ms:openingAt,
-   campaign_started_at_ms:openingFrom,
-   accounts:(budgetPolicy.accounts as any[])
-    .filter(a=>a.environment==="real")
-    .map(a=>({account_key:a.account_key,history_from_ms:openingFrom,
-      history_through_ms:openingAt,consumed_entry_usd:"7",
-      order_history_complete:true as const,fill_history_complete:true as const,
-      bill_history_complete:true as const,finance_provenance_sealed:true as const,
-      source_digest:"e".repeat(64)}))
-    .sort((a,b)=>a.account_key.localeCompare(b.account_key))
- };
- manifest.source_digest=await openingDigest(manifest);
- ok(await installCampaignEntryProof(budgetStore,manifest),
-   "synthetic full-cohort finance opening exists before budget mutation");
- const change={expected_revision:budgetPolicy.revision,max_total_modelled_loss_usdt:budgetPolicy.max_total_modelled_loss_usdt,
-   accounts:budgetPolicy.accounts};
- const beforeBook=await readRiskBook(budgetStore);
- const denied=await governanceRequest(budgetStore,"POST",{
-   ...change,campaign_entry_limit_usd:"6",idempotency_key:"lower_entry_below_booked"
- });
- ok(denied.status===409&&denied.body.reason==="ENTRY_LIMIT_BELOW_CONSUMED_OR_RESERVED",
-   "cannot lower entry cap beneath already consumed source-proven money");
- ok((await readRiskBook(budgetStore))?.sequence===beforeBook?.sequence&&
-   (await governanceRequest(budgetStore,"GET")).body.revision===budgetPolicy.revision,
-   "denied cap change leaves policy and RiskBook untouched");
- const accepted=await governanceRequest(budgetStore,"POST",{
-   ...change,campaign_entry_limit_usd:"8",idempotency_key:"lower_entry_atomic_001"
- });
- const afterBook=await readRiskBook(budgetStore);
- ok(accepted.status===200&&accepted.body.campaign_entry_limit_usd==="8"&&
-   afterBook?.entry_budget?.limit_usd==="8"&&
-   afterBook?.entry_budget?.consumed_usd==="7"&&
-   afterBook?.sequence===beforeBook!.sequence+1,
-   "cap and booked amount updated atomically without reset");
- ok((await governanceRequest(budgetStore,"POST",{
-   ...change,campaign_entry_limit_usd:"8",idempotency_key:"lower_entry_atomic_001"
- })).status===200,"replayed cap CAS cannot charge or change twice");
- ok((await readRiskBook(budgetStore))?.sequence===afterBook?.sequence,
-   "idempotent replay does not increment RiskBook sequence");
- const reboot=new Storage();reboot.map=structuredClone(budgetStore.map);
- ok((await readRiskBook(reboot))?.entry_budget?.consumed_usd==="7"&&
-   (await governanceRequest(reboot,"GET")).body.campaign_entry_limit_usd==="8",
-   "entry budget survives restart with exact consumed money");
+ const configStore=new Storage();
+ const oldBook={sequence:19,entry_budget:{consumed_usd:"7",reserved_usd:"2",limit_usd:"10"}};
+ await configStore.put("risk_meta_v2",oldBook);
+ await configStore.put("legacy_finance_disabled_v1",{disabled:true});
+ ok((await initializeGovernance(configStore,initial)).status===200,"configuration initializes without a financial book");
+ const update={expected_revision:0,max_total_modelled_loss_usdt:"5",accounts:[],campaign_entry_limit_usd:"6",idempotency_key:"config_entry_change_001"};
+ const changed=await governanceRequest(configStore,"POST",update);
+ ok(changed.status===200&&changed.body.campaign_entry_limit_usd==="6","configuration accepts validated monotonic cap independent of old consumption");
+ ok(JSON.stringify(await governanceRequest(configStore,"POST",update))===JSON.stringify(changed),"config cap remains body-bound idempotent");
+ ok(JSON.stringify(configStore.map.get("risk_meta_v2"))===JSON.stringify(oldBook),"configuration never changes persisted historical financial data");
+ ok(!configStore.reads.some(k=>k.startsWith("risk_")||k.startsWith("legacy_finance")),"configuration never consults historical financial authority");
 }
-console.log("entry_cap_governance_and_riskbook_atomic PASS");
+console.log("governance_configuration_independent_of_financial_storage PASS");
 console.log("account_governance_lower_campaign_limit_monotonic PASS");
 const restarted=new Storage();restarted.map=structuredClone(s.map);
 ok(((await governanceRequest(restarted,"GET")).body.accounts as any[])[0].enabled,"access_survives_restart");
@@ -153,34 +107,23 @@ ok(failed&&(await governanceRequest(atomic,"GET")).body.revision===0,"access and
 atomic.failReceipt=false;
 ok((await enrollObservedAccount(atomic,observation)).status===200,"failed commit is safely retried once");
 
-const oldFinancialKeys=["risk_book_v1","account_governance_v2","account_policy_v1"];
+const oldFinancialKeys=["risk_book_v1","account_governance_v2","account_policy_v1","risk_meta_v2","risk_entry_v2:fixture","legacy_finance_disabled_v1"];
 const lifecycle={operation_id:"clean_initialize_0001",release_sha256:"a".repeat(64),contract:FRAME_SCHEMA};
-function seedOld(storage:Storage){for(const key of oldFinancialKeys)storage.map.set(key,{fixture:"never read or import"});storage.map.set("oauth_fixture",{preserved:"oauth"});storage.map.set("session_fixture",{preserved:"session"});storage.map.set("generation",77);}
-function oldPresent(storage:Storage){return oldFinancialKeys.every(key=>storage.map.has(key));}
-function noOldReads(storage:Storage){return storage.reads.every(key=>!oldFinancialKeys.includes(key));}
-const implicit=new Storage();seedOld(implicit);
-ok((await initializeGovernance(implicit,initial)).status===200&&oldPresent(implicit)&&implicit.deletes.length===0,"no lifecycle never retires old keys");
-const clean=new Storage();seedOld(clean);
+const clean=new Storage();
+for(const key of oldFinancialKeys)clean.map.set(key,{fixture:"preserved historical data"});
+clean.map.set("oauth_fixture",{preserved:"oauth"});clean.map.set("generation",77);
+const oldData=oldFinancialKeys.map(key=>JSON.stringify(clean.map.get(key)));
 const initialized=await initializeGovernance(clean,initial,lifecycle);
-ok(initialized.status===200&&initialized.body.retired_financial_keys_removed===3,"confirmed exact retirement count");
-ok(oldFinancialKeys.every(key=>!clean.map.has(key))&&JSON.stringify(clean.deletes)==JSON.stringify([oldFinancialKeys]),"only exact financial keys deleted");
-ok(clean.map.get("oauth_fixture").preserved==="oauth"&&clean.map.get("session_fixture").preserved==="session"&&clean.map.get("generation")===77,"unrelated OAuth and session data preserved");
-ok(clean.map.has("risk_meta_v2")&&clean.map.has(GOVERNANCE_STORAGE_KEY)&&clean.map.has("installation_release_v1"),"retirement and new state commit together");
-for(const key of oldFinancialKeys)clean.map.set(key,{fixture:"reintroduced after init"});
-const replay=await initializeGovernance(clean,initial,lifecycle);
-ok(JSON.stringify(replay)===JSON.stringify(initialized)&&clean.deletes.length===1&&oldPresent(clean),"exact replay returns original outcome without deleting again");
-ok((await initializeGovernance(clean,initial,{...lifecycle,release_sha256:"b".repeat(64)})).status===409&&clean.deletes.length===1&&oldPresent(clean),"conflicting replay never erases");
-ok((await initializeGovernance(clean,initial,{...lifecycle,operation_id:"different_initialize_0001"})).status===409&&clean.deletes.length===1,"already initialized state never retires again");
-const invalid=new Storage();seedOld(invalid);
-ok((await initializeGovernance(invalid,{...initial,revision:1},lifecycle)).status===400&&oldPresent(invalid)&&invalid.deletes.length===0,"invalid init never erases");
-for(const stateKey of ["risk_meta_v2","installation_release_v1"]){const existing=new Storage();seedOld(existing);existing.map.set(stateKey,{fixture:"existing new state"});ok((await initializeGovernance(existing,initial,lifecycle)).status===409&&oldPresent(existing)&&existing.deletes.length===0,"orphan new state cannot be reset");ok(noOldReads(existing),"orphan check reads no old values");}
-class DeleteFailure extends Storage{override async delete(keys:string[]):Promise<number>{this.deletes.push([...keys]);this.map.delete(keys[0]);throw Error("fixture delete failure");}}
-const deleteFailure=new DeleteFailure();seedOld(deleteFailure);let deleteFailed=false;
-try{await initializeGovernance(deleteFailure,initial,lifecycle);}catch{deleteFailed=true;}
-ok(deleteFailed&&oldPresent(deleteFailure)&&!deleteFailure.map.has("risk_meta_v2")&&!deleteFailure.map.has(GOVERNANCE_STORAGE_KEY),"partial delete failure rolls back atomically");
-class NewStateFailure extends Storage{override async put(key:string,value:unknown){if(key==="risk_meta_v2")throw Error("fixture write failure");return super.put(key,value);}}
-const writeFailure=new NewStateFailure();seedOld(writeFailure);let writeFailed=false;
+ok(initialized.status===200&&!("retired_financial_keys_removed" in initialized.body),"config lifecycle has no financial migration receipt");
+ok(oldFinancialKeys.every((key,i)=>JSON.stringify(clean.map.get(key))===oldData[i])&&clean.deletes.length===0,"initialization preserves every old financial key");
+ok(clean.map.get("oauth_fixture").preserved==="oauth"&&clean.map.get("generation")===77,"unrelated OAuth and session data preserved");
+ok(clean.map.has(GOVERNANCE_STORAGE_KEY)&&clean.map.has("installation_release_v1"),"configuration and release receipt commit together");
+ok(JSON.stringify(await initializeGovernance(clean,initial,lifecycle))===JSON.stringify(initialized),"exact lifecycle replay returns original outcome");
+ok((await initializeGovernance(clean,initial,{...lifecycle,release_sha256:"b".repeat(64)})).status===409,"conflicting lifecycle replay rejected");
+ok((await initializeGovernance(clean,initial,{...lifecycle,operation_id:"different_initialize_0001"})).status===409,"initialized config cannot reset");
+ok(clean.reads.every(key=>!oldFinancialKeys.includes(key)),"lifecycle never reads historical financial values");
+class NewStateFailure extends Storage{override async put(key:string,value:unknown){if(key===GOVERNANCE_STORAGE_KEY)throw Error("fixture write failure");return super.put(key,value);}}
+const writeFailure=new NewStateFailure();let writeFailed=false;
 try{await initializeGovernance(writeFailure,initial,lifecycle);}catch{writeFailed=true;}
-ok(writeFailed&&oldPresent(writeFailure)&&!writeFailure.map.has("installation_operation:"+lifecycle.operation_id),"new state write failure restores retired keys and leaves no receipt");
-ok([implicit,clean,invalid,deleteFailure,writeFailure].every(noOldReads),"retirement never reads old values");
-console.log("clean_initialization_deletes_only_old_financial_keys PASS");
+ok(writeFailed&&!writeFailure.map.has("installation_operation:"+lifecycle.operation_id),"configuration failure leaves no receipt");
+console.log("configuration_initialization_preserves_financial_storage PASS");

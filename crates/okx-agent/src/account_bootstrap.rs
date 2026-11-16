@@ -1044,6 +1044,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_census_fresh_config_follows_settlement_frontier_without_relabeling_cache() {
+        let cache = ObserverConfigCache::default();
+        let config: AccountConfig = serde_json::from_value(
+            serde_json::json!({"uid":"terminal-observer","perm":"read_only"}),
+        )
+        .unwrap();
+        let settlement_frontier = Utc::now();
+        // Explicit cache-component input: the config is still within its 2s
+        // reuse age but its authentic observation precedes settlement. No
+        // persisted finance source or wall-clock value is rewritten.
+        let original_time = settlement_frontier - chrono::Duration::milliseconds(100);
+        *cache.current.lock().await = Some(ObservedConfig {
+            config: config.clone(),
+            received_at: original_time,
+            sampled_at: Instant::now(),
+        });
+        let (_, cached_time) = cache
+            .read(|| async { panic!("ordinary snapshot uses this still-valid cache") })
+            .await
+            .unwrap();
+        assert_eq!(cached_time, original_time);
+        assert!(cached_time < settlement_frontier);
+        let (_, fresh_time) = cache
+            .read_fresh(|| async { Ok::<_, OkxError>(config) })
+            .await
+            .unwrap();
+        assert!(
+            fresh_time >= settlement_frontier,
+            "terminal evidence must follow a new authenticated read"
+        );
+    }
+
+    #[tokio::test]
     async fn observer_config_expiry_refreshes_and_denies_stale_fallback() {
         let cache = ObserverConfigCache::default();
         cache

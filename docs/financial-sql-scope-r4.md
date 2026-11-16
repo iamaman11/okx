@@ -1,0 +1,366 @@
+# #510 r4.1 — one Rust financial SQLite; one-time stopped legacy cutover
+
+## One shared original finance command implementation (candidate, awaiting exact CI)
+
+The Rust account SQL worker now provides one typed
+`UnifiedFinanceWrite` transaction implementation, backed by the ORIGINAL
+AccountStore and RiskBook domain functions, not copies of budgeting rules.
+The domain entrypoints for `Reserve`, `BeginPost`, source-backed
+`SettlePartial` and `ReleaseUnsent` invoke the original
+`reserve_unified_account_transaction`,
+`begin_unified_post_and_account_transaction`,
+`settle_unified_partial_from_account_sql_transaction` and
+`release_unified_unsent_from_account_sql_transaction`.
+`RecoverPosting`, `RecoverInstallation` and `RecordOutcome`
+also use the original AccountStore implementation. These seven
+account/risk write forms have **one** bounded installation FIFO,
+one `BEGIN IMMEDIATE`, one `COMMIT`, and typed replies; the source
+checks and scope/sequence policy are not reimplemented in the agent.
+
+The previous dedicated test-only Reserve/Partial/Unsent wrappers were
+removed. Offline integration witnesses now run through the SAME normal
+Rust domain dispatch in `trial_financial_write`, then always ROLLBACK.
+`apply_financial_write` is the only intended shared production SQL
+commit ingress but **cannot presently authorize any mutation**:
+`finance_import_manifest.state` is immutable
+`OFFLINE_NOT_AUTHORIZED`, and the guard refuses
+`FINANCE_CUTOVER_NOT_ACCEPTED` before the domain action. The code
+does not synthesize a Cloudflare-disabled proof, activate a staged import,
+or allow a test grant to reach the exchange.
+
+The legacy AccountRuntimeRegistry also refuses startup when
+`runtime_root/finance/finance.sqlite` exists, including a symlink or
+partially created target, preventing the old Cloudflare finance route
+from running over a staged new DB even with an empty account catalog.
+Legacy production remains otherwise unchanged pending RB09.
+
+**Not complete:** authenticated live source producer, terminal and
+late fee `SettleEntry`, original RiskBook `Resolve`, opening/limit
+installation, active finance authorization after an actual one-time
+Cloudflare legacy disable + readback, all nine production TradeService
+actions and actual native Windows/26×T09/T10 acceptance. This is a
+single consolidated code candidate, **not** a release or RB01 PASS.
+
+---
+
+
+## Canonical Cloudflare responsibility boundary — accepted 15 Nov 2026
+
+See [Issue #510 r4.1](https://github.com/iamaman11/okx/issues/510). **This section supersedes any older references below to a permanent Cloudflare owner epoch/fencing protocol.** Those older paragraphs are chronological evidence of former Draft expectations, not current requirements.
+
+**During normal Rust execution:** the existing native `okx-execution` SQL owner owns all account ledger facts, RiskBook budgets, grants, settlements, releases and durable receipts in **one** `runtime_root/finance/finance.sqlite`. `okx-agent::TradeService` supplies authenticated source/policy information and dispatches typed operations. Local SQL policy/source revisions, monotone sequences, scoped CAS, file lock, durable BEGIN_POST/UNKNOWN and venue readback remain essential **native** checks. No Cloudflare financial authority, recurring `owner_epoch`/fencing RPC, backup ledger, second budget writer or WSS financial fallback may be introduced.
+
+**Cloudflare stays:** `cloudflare/okx-mcp/src/mcp.ts` and the supported authentication/transport/routing/permission responsibilities remain. Existing legacy financial execution is concentrated in `cloudflare/okx-mcp/src/risk_authority.ts` and `risk_book.ts`, invoked from `runtime_session.ts`; these old financial grant, Reserve, BeginPost, SettleEntry, ReleaseUnsent, Resolve and budget-write routes must be **disabled and removed from the new active financial path after cutover**, without deleting MCP/auth/routing. Keep the old finance endpoint server-disabled across authorized restart/rollback; a client-side flag or old SQLite marker is not sufficient.
+
+**RB09 is one bounded stopped-transition witness, not an online synchronization protocol:**
+1. Stop old executors; on the legacy Cloudflare side block all old financial mutations/POST grants while leaving the MCP/auth/transport path available. Send negative mutation probes before/after restart and supported rollback and independently read the old budget to verify no mutations occurred.
+2. Snapshot and verify the *complete* account/campaign/legacy budget inventory after writes are stopped. Prove absent obligations (zero reserve/consumed/late/terminal/UNKNOWN and no hidden account/campaign) before EMPTY bootstrap; otherwise preserve original IDs, source/policy revisions, ledger, reservations, spent budgets, UNKNOWN and immutable receipts.
+3. Import nonempty source state in one atomic scoped SQLite transaction with lossless parity, manifest and readback. Crash before commit leaves no live partial allocation; crash after commit but before reply retains every original obligation. No Rust write grants until the verified stop + readback + import/empty proof have succeeded.
+4. Test this on **isolated real-format account/campaign source files and a controlled legacy Cloudflare endpoint**, with positive/negative/restart/replay evidence and final exact SHA. Actual migration and shutdown of the *installed user's* environment is a **separate post-development deployment operation**, not part of the #510 Draft code cut. Do **not** rerun the whole historical Native/Worker campaign or require permanent Cloudflare checks on every Rust financial operation.
+
+**Current state:** PR #511 is Draft/NO-GO. The legacy TS financial code and WSS route still exist and must not be removed before a functioning Rust replacement plus RB09 gate. The existing `UnifiedFinanceHandle` currently opens `OFFLINE_NOT_AUTHORIZED` imports and exposes test-only rollback trials; no trade authority is activated by this documentation change.
+
+---
+
+## Production owner-mode exclusion across old account/campaign and new finance SQLite (15 Nov 2026)
+
+A single **local** Rust OS file lock, `runtime_root/finance/authority-mode.lock`, now implements mode exclusivity for this code version without Cloudflare coordination: original account and campaign SQL writers in the canonical installation directory each hold a **shared** mode lease for their whole lifetime; `UnifiedFinanceHandle` holds an **exclusive** mode lease in addition to its existing `finance.sqlite.writer.lock`. Legacy mode may have many account/campaign writers, but no unified writer simultaneously. Both legacy and unified fail immediately (no polling/retry) on incompatible mode.
+
+Canonical source layouts are `runtime_root/accounts/<key-hash>/account.sqlite` and `runtime_root/risk/campaigns/<campaign-hash>/risk-book.sqlite`. A legacy opener also refuses if `runtime_root/finance/finance.sqlite` exists, **even when it is OFFLINE_NOT_AUTHORIZED**: a staged target cannot coexist with a newly reopened old financial writer. An old worker's completion witness comes only AFTER native SQL and the mode lease have been released. The shared/exclusive OS locks use one canonical installation directory; standalone independent test-source fixtures outside these production layouts are not treated as installed financial authorities.
+
+Native regression includes multiple simultaneous old owners, both exclusive/old conflict directions, blocked restart after staged SQLite, real source AccountStore/RiskBook open, one child OS kill and immediate mode recover, and bounded queue lifecycle. This is a **local exclusivity gate for newly built Rust binaries**, not a substitute for **one-time RB09** stop and server-disable of an already deployed legacy Cloudflare Worker or older native binaries that do not acquire this new lock. No recurring Cloudflare owner epoch, lease renewal, network handshake or second financial engine is implemented. The single SQL-owner remains OFFLINE_NOT_AUTHORIZED until authenticated sources, migration and all nine production finance operations are accepted.
+
+## One installation-wide recovery COMMIT across all accounts (15 Nov 2026)
+
+`AccountStore::recover_installation_posting_sql_transaction` derives the
+account roster from ORIGINAL `account_meta` in the same one physical
+SQLite (not a separate Cloudflare census). It runs the original scoped
+`recover_posting_sql_transaction` per account in deterministic order
+under the caller's **one BEGIN IMMEDIATE/COMMIT**, returning the exact
+number of changed POSTING intents. One nested SQLite SAVEPOINT guarantees
+that even if the caller mistakenly commits after an account-B source
+failure, earlier account-A mutations are already rolled back; it does
+not add a second writer or COMMIT. No expired/missing risk receipt
+releases budget. The existing installation FIFO exposes this operation
+only as an offline/test rollback trial until RB09 and genuine producers
+are verified. Current account-v2 legacy worker is not changed.
+
+## Fail-closed scoped POST recovery under ONE original Rust owner (15 Nov 2026)
+
+`AccountStore::recover_posting_sql_transaction` on unified v6 now requires
+every original `POSTING` risk-increasing intent to have a positive durable
+`begin_post_at`, and a matching account-scoped native `risk_receipts`
+row in `POSTED` with the exact plan hash and policy revision.
+The same caller-owned transaction changes only those receipts and
+intents to `UNKNOWN` with exact scoped CAS. Missing or altered proof,
+missing receipt and mismatch of updated receipt count abort the entire
+transaction; no new available headroom or silent release.
+Old v2 account-local recovery behavior remains unchanged until cutover.
+
+`UnifiedFinanceHandle` now serves typed `account_intent` through the same
+bounded FIFO, using the original AccountStore full intent/plan decoder.
+Test-only `trial_original_recover_posting` and
+`trial_original_record_outcome` use the original scoped methods under
+the same physical FIFO but ALWAYS roll back against
+`OFFLINE_NOT_AUTHORIZED`. Repeated marker validation is centralized in
+one test-only helper. Direct SQLite tests stage same-ID two-account
+POSTING rows and verify fail-closed mismatched/missing ORIGINAL receipts
+plus unchanged foreign/terminal states. There is still no production
+source attestation, permission to POST or live activation; RB09 is the
+ONE stopped Cloudflare financial-disable/transfer proof, **not a
+continuous Cloudflare fencing/epoch requirement**.
+
+## Next account lifecycle slice — original OUTCOME and UNKNOWN recovery on one scoped SQL (15 Nov 2026)
+
+The original native `AccountStore::record_outcome` and
+`recover_posting` now reuse transaction-scoped counterparts. Shared
+`find_intent_sql` decodes the complete ORIGINAL stored intent+plan for v2
+and v6 rather than accepting a partial client status. The v6 write path
+scope-checks the AccountStore intent and risk receipt, treats missing
+original risk evidence as FAIL, and writes account terminal receipts with
+the full installation/account identity under the same transaction.
+Terminal replay with altered original evidence refuses the mutation.
+
+`recover_posting_sql_transaction` changes only POSTING from the requested
+installation+account to UNKNOWN; no venue resend, no foreign-account
+receipt updates and no implicit release. The physical v6 schema direct
+test stages test-only POSTING rows for A/B with identical raw IDs, checks
+selective recovery, readback, ACK, per-account immutable terminal receipt,
+rollback/conflict and FK integrity. These synthetic fixtures are scoped
+SQL contracts, **NOT authenticated venue/source evidence**. This slice
+has not switched the installed TradeService; before actual activation the
+one-time RB09 stopped legacy-finance disable and state proof must pass. No
+recurring Cloudflare fencing/epoch is required in Rust's financial hot path.
+
+## Current #510 next code slice — original PREPARE on the one scoped financial transaction (15 Nov 2026)
+
+The original `AccountStore::prepare` now delegates to the SAME
+`prepare_sql_transaction(&Transaction, scope, decision, intent)` used on the
+installation's v6 SQLite. This keeps original business validation (mechanics,
+idempotency, deadline/policy, strategy version, strategy decision claim and plan
+ownership) in ONE existing source owner, while scoped SQL uniquely binds
+`installation_id + account_key` for every decision, intent, strategy read,
+plan and last-decision update. The single caller owns COMMIT; no nested SQL
+owner or new financial calculations. The legacy v2 API retains its original
+readback shape.
+
+The `UnifiedFinanceHandle::trial_original_prepare` routes the exact new
+account mutation through the existing installation-wide bounded FIFO but
+**always rolls back**, because the import manifest remains
+`OFFLINE_NOT_AUTHORIZED`. This is NOT a production PREPARE/TradeService
+cutover, verified RB09 stopped-transition receipt, permission to post or a
+source producer switch. Added scoped A/B same-request collision, policy/version,
+rollback, idempotency and foreign-scope witnesses. Do not turn this trial
+into a live mutation until the one-time legacy financial-disable and verified
+source-state gate pass and all account producers run on the same file.
+
+## Next code slice: EXACT original AccountStore source + RiskBook receipt in one local transaction (15 Nov 2026)
+
+The new installation transaction methods:
+- `AccountStore::partial_entry_settlement_receipt_sql` checks ORIGINAL
+  immutable head/revision, intent order+plan, reserve receipt, source digest
+  and any existing ACK; each SQL read scopes installation+account in v6.
+  `acknowledge_unified_partial_entry_sql` records exactly the ORIGINAL
+  account ACK **in the same local commit** as original RiskBook partial-budget
+  debit and refuses bad original source/ACK. Old v2 methods delegate to the
+  same readback semantics; no duplicate financial arithmetic.
+- `AccountStore::unsent_release_receipt_sql` reads only original durable
+  `REJECTED_UNSENT` and native reserve-attempt proofs, joined on the
+  installation/account. `RiskBookStore::release_unified_unsent_from_account_sql_transaction`
+  proves campaign assignment and derives the original negative-tombstone
+  digest from the SQL source in that SAME transaction.
+- Original RiskBook no-send replay checks matching committed tombstone or
+  matching RELEASED source *before* applying the current book-sequence CAS.
+  A lost reply is read-only/idempotent even when the client repeats the
+  previous expected sequence. Any **new** release/negative fence must still
+  pass generation+sequence and original RiskBook integrity checks.
+- `UnifiedFinanceHandle` exposes these only via `#[cfg(test)]`,
+  from the one bounded FIFO with mandatory `ROLLBACK` while the import is
+  `OFFLINE_NOT_AUTHORIZED`. Existing source v2 import is tested to reject
+  absent financial evidence; a separate v6 scoped test exercises exact
+  signed-shape record relationships and an atomic ACK, but its source bytes
+  are staged only as **test fixture SQL**, not a live venue producer.
+
+This is still **not** a production trade authority, authenticated external
+source, one-time stopped legacy transition RB09, full terminal/late fee support,
+or a TradeService cutover. No initial import is silently activated; no venue POST.
+CI results must be attached for an exact SHA, not presumed from an earlier
+green result.
+
+## Current code slice: original RiskBook SettleEntry + ReleaseUnsent reuse one caller-owned scoped SQL transaction
+
+The existing **original Rust** `RiskBookStore::settle_partial_entry` and
+`RiskBookStore::release_unsent` now delegate to their exact original
+financial rules in `*_sql_transaction(&Transaction, scope, ...)`. Legacy v5
+continues to own its own COMMIT; scoped v6 accepts the SAME installation /
+campaign composite identity for reads, row updates and meta CAS. No duplicate
+amount arithmetic, SQL owner, or second risk balance is introduced. A scoped
+no-send replay cannot read or mutate a different campaign's identical key.
+Scoped mutation requires one affected campaign meta CAS and both occupancy
+rows on RELEASED. These methods remain **private to risk::book**, not a
+production `RiskCommandAction`/venue capability.
+
+The extended original v6 two-account Reserve fixture stages a POSTED source
+state and a no-send proof **inside explicitly rolled-back test transactions**
+to check settlement, exact replay, foreign campaign rejection, budget math,
+and rollback of both changes. This test-only source is **not** trusted live
+AccountStore evidence. Production must still bind authenticated original
+partial-entry SQL receipts and original durable `REJECTED_UNSENT` evidence in
+the SAME installation-owned SQL before allowing commits, plus verify the
+one-time RB09 stop/legacy finance disable. The existing immutable offline import
+remains `OFFLINE_NOT_AUTHORIZED`; **no code in this slice activates it**.
+
+The final Draft CI result for this exact candidate must be recorded from
+GitHub before claiming a PASS; Windows RB01–16 / T09/T10 26/26 still require
+physical acceptance.
+
+### Scope/authority correction after the first joint proof
+
+**Code SHA `47b53099a442b10002a2e6a7eef76769ef0e7771`**, [CI #43632385416](https://github.com/iamaman11/okx/actions/runs/43632385416) **SUCCESS** (69 execution, 6 kernel, 1 original source; 239 full execution PASS, 3 ignored). The private joint Reserve now additionally verifies original account intent `risk_increase=1`, original `account_policy.campaign_id` exactly matches the requested RiskBook campaign, source revision matches the receipt, and account is not paused, **inside the same transaction before staging RiskBook**. Negative tests fail closed on foreign campaign/stale revision/paused/neutral intent; old v2/v5 public semantics and live owners remain unchanged. Not a production authority or a Windows proof.
+
+## Original Reserve now has one scoped AccountStore + RiskBook SQL transaction — Draft PASS (14 Nov 2026)
+
+**Code SHA `2395bb7aa8600234890d9e3354b83ac303edb004`**, [CI #43631998537](https://github.com/iamaman11/okx/actions/runs/43631998537) **SUCCESS**: 69 original execution RiskBook direct tests, 6 kernel, 1 original AccountStore producer, full execution library **239 passed / 0 failed / 3 ignored**, guard and rustfmt PASS. This is **Draft Linux Rust only**, not production RB07/RB08, Windows or T09/T10 26/26.
+
+In the existing `ledger/sql/intents.rs` the original `AccountStore::reserve` now shares `reserve_sql_transaction(&Transaction, account scope)`; the pre-existing original plan/owner/idempotency checks execute inside the same transaction as the receipt/intent transition. In existing `risk/book/store.rs` the original `RiskBookStore::reserve` uses `reserve_sql_transaction(&Transaction, campaign scope)` and retains exactly its existing money/capacity/high-water rules. The PRIVATE `reserve_unified_account_transaction` composes both under **one caller-owned COMMIT**; ordinary risk denial persists independently observed source loss but never creates the account HELD receipt, while an original AccountStore owner rejection requires a rollback of the staged risk reserve. A source-level proof uses authentic stopped v2 account sources; the combined capacity proof uses explicit **test-only** SQL source fixtures, not trusted live census. See [testing.md](testing.md) for exact symbols, test names and negative witnesses.
+
+**Unfinished**: no installation-wide bounded production `AccountStoreHandle` owner, trusted TradeService source/census/epoch, legacy Cloudflare server-side old-owner fencing, all production nine RiskCommandActions, terminal/late/UNKNOWN, physical joint Reserve OS kill, Windows RB01–RB16 or 26/26. The schema and import remain `OFFLINE_NOT_AUTHORIZED`. Keep PR #511 Draft, no merge or deployment.
+
+## Full original execution regression after shared BEGIN_POST — 237/237 PASS (14 Nov 2026)
+
+**Code + draft CI SHA `70039cb06cd0f6581ebfe3d2f69cb05f211a7b94`**, [GitHub CI #43626550682](https://github.com/iamaman11/okx/actions/runs/43626550682) **SUCCESS**. Same EXISTING Draft RiskBook job now runs fast original/source/architecture/format guards **first**, then `cargo test --locked -p okx-execution --lib` using the same cached compilation; complete existing `okx-execution` library regression **237 passed, 0 failed, 3 ignored** (~15.06s after compile). RiskBook filtered cases 67/67 execution + 6/6 kernel + original source 1/1 still PASS. NOT Windows installed 26/26 or physical Cloudflare fencing; ignored tests are NOT claimed as passed. No second workflow/CI or new application engine. The single normal `riskbook-draft-rust` job remains a Draft code gate, not final acceptance.
+
+
+## Latest #510 r4 — original AccountStore full BEGIN_POST checks + RiskBook single-commit and durable readback (14 Nov 2026)
+
+**Verified CODE SHA `6a1db60a17ba7f3a62561557a58dcb9c32a3d8c8`** in [GitHub CI #43626228175](https://github.com/iamaman11/okx/actions/runs/43626228175) **SUCCESS**: 67/67 filtered `okx-execution` risk contracts + 6/6 `okx-kernel` + 1/1 original AccountStore source = **74 direct cases**; architecture guard/negative self-checks and rustfmt PASS. Filtered execution times post-build 1.15 + 0 + 0.11s Linux. **NOT** full native Windows RB01–RB16 or T09/T10 26/26.
+
+**Source ownership (one function, not duplicated):** Original production `AccountStore::begin_post` now calls `AccountStore::begin_post_sql_transaction(&Transaction, scope, intent_id, policy_revision, now, required_reservation)`, the **same** validation and original receipt writer used for old v2 unscoped and new v6 `(installation_id,account_id)` SQL. Preserves original expiration, policy revision, paused/stops, strategy identity, storage-reconcile and unknown-exposure guards; now checks exactly one CAS for intent `RESERVED→POSTING` with `begin_post_at` and the *original* `risk_receipts HELD→POSTED`. Scoped v6 additionally demands same original reservation identity and plan hash in the primary AccountStore receipt. This does **not** invent a new account owner or fee/ledger writer.
+
+**RiskBook composition:** Private `risk::book::store::post::begin_unified_post_and_account_transaction` stages the ORIGINAL native RiskBook `HELD→POSTED` risk/campaign checks, then invokes that original AccountStore method under **the same caller-owned SQLite Transaction**. Any failure is an error and the caller must roll back. Ordinary risk budget denial remains a distinct `PostDecision::Denied` (may persist a properly verified high-water source observation). Native `PostDecision::Authorized` remains *uncommitted internal state*, NOT venue-send permission and **not wired into production TradeService**.
+
+**Original source, not handwritten test status:** The same two-account/two-campaign test now prepares and reserves through genuine original v2 `AccountStore::prepare` + `AccountStore::reserve` before importing 39+8 primary tables; it never manually writes `POSTING`. Negative scenarios: removed original `risk_receipts`, paused source, stale policy revision, expired deadline, incomplete storage recovery all reject. Real Rust child OS-kill before/after combined risk+original-account commit proves all-or-nothing native SQLite/WAL; cold reopen invokes ORIGINAL `AccountStore::post_fence_evidence_sql` to verify exact `begin_post_at=10002` and original POSTED receipt; wrong account/reservation rejects; RiskBook X vs Y isolation and no duplicate grant on replay preserved. Test causal `PostCausalProof` stays explicitly `#[cfg(test)]` synthetic.
+
+**Still blocked:** Actual installed single bounded finance worker, trusted authenticated complete source census and Cloudflare server-side old-owner revoke/owner epoch, all nine production `TradeService` RPC/actions, real venue/replay recovery, partial/terminal/late fees, UNKNOWN and installed Windows RB01–16 / T09/T10 26/26. `finance_import_manifest` still `OFFLINE_NOT_AUTHORIZED`; old live writers untouched. PR Draft/NO-GO; no merge/deploy/live or Demo trading.
+
+
+## Previous #510 r4: staged RiskBook BEGIN_POST with basic original AccountStore SQL — 74 direct tests (historical)
+
+**Verified CODE SHA `ac3cf6ef9b8f09831e9504e8ab142562785c69b6`**, [GitHub CI #43623705885](https://github.com/iamaman11/okx/actions/runs/43623705885) **SUCCESS**: 67/67 `okx-execution` filtered risk contracts, 6/6 kernel, 1/1 original AccountStore fill/bill producer = **74 direct tests**; existing architecture guard/negative guard self-tests and rustfmt PASS. Linux filtered test execution ~0.99+0.00+0.07s after compilation, NOT installed Windows/RB01–16/T09/T10 26/26.
+
+**One ORIGINAL native RiskBook `BEGIN_POST` algorithm now has two SQL transaction backends, without duplicating Rust money rules.** Legacy v5 `RiskBookStore::begin_post` still commits on its owner; the same `begin_post_transaction(&Transaction, request, scope)` can operate in the caller's scoped v6 `(installation_id,campaign_id)` finance transaction. Original `apply_census_loss` high-water implementation is reused with explicit campaign scope. V6 entry CAS, cohort account policy/occupied JOIN, campaign sequence CAS and loss source writes are ALL scoped. The v6 path also checks the **original AccountStore `intents` plan hash, `RESERVED` state, `risk_increase=1` and `account_policy.campaign_id`** inside the same transaction before any POST transition. Legacy PostCausalProof/CAS/freshness checks are not weakened. The staged native `PostDecision::Authorized` is NOT an external venue POST permit; no production adapter exists and test-synthetic causal input is compiled only with `#[cfg(test)]`.
+
+**Real integration and OS-kill witness:** two genuine v2 AccountStore sources + two original v5 campaign RiskBooks import into one v6 SQLite. An original account without RESERVED/campaign policy is refused; one staged `HELD → POSTED` and account `RESERVED → POSTING` can rollback together or commit together. Child Rust test process is stopped by the parent's **REAL OS kill** before and after the same SQLite `BEGIN IMMEDIATE/COMMIT` boundary; cold readback verifies neither change survived pre-commit and BOTH changes survived post-commit. Identical original reservation IDs across X/Y remain isolated. A post-commit response-loss retry returns `AlreadyResolved`, not another send grant; original reserve/financial obligations remain exact. All original legacy v5 Rust tests still PASS.
+
+**Still Draft / NO-GO:** This is a **private staged mutation**, not the production TradeService route or connected trusted original AccountStore source/census producer. The installed old AccountStore per-account worker and v5 RiskBook per-campaign worker have not been replaced with one production finance worker; offline source manifest remains `OFFLINE_NOT_AUTHORIZED`. Cloudflare old-owner server-side fence/epoch, complete authenticated source census, full original scoped account write paths, other RiskCommandActions, terminal/late/UNKNOWN, and physical installed Windows RB01–16/T09/T10 acceptance remain outstanding. **No merge, deploy, account use or Windows changes.**
+
+
+## Previous #510 r4: original scoped RiskBook Summary and invariant — 72 direct tests (historical)
+
+**Verified code SHA `05ac22a9a346536be244aed48e28fdb5c5040f0e`**, [GitHub CI #43621761540](https://github.com/iamaman11/okx/actions/runs/43621761540) **SUCCESS**: 65/65 filtered `okx-execution` RiskBook contracts, 6/6 kernel, 1/1 original AccountStore source, architecture guard/negative tests, rustfmt PASS. Filtered Rust tests ~1.08+0.00+0.11 seconds after build on Linux; **NOT** Windows/RB01–16/T09/T10 acceptance.
+
+The ORIGINAL native `risk::book::store::integrity::verify_reservation_aggregates` now delegates to **one shared money-invariant implementation** that accepts either legacy v5 single-campaign SQL or fully scoped `installation_id`/`campaign_id` finance v6 SQL. Its risk entries, occupancy, strategy occupancy, loss sources, immutable no-reserve contradiction check, consumed amount and debt high-water queries all restrict the complete campaign identity; same historical reservation key can exist in two campaigns. The ORIGINAL RiskBook `BookMeta` decoder and `BookReadback` budget projection are also reused. A new private `read_unified_campaign_summary(&Transaction,...)` computes exact per-campaign read-only Summary without opening a connection or writer and refuses corrupted native reserves. The **existing finance importer calls this exact original invariant** inside the SAME account+campaign SQLite COMMIT, and cold readback calls it again. Two-campaign tests prove independent unchanged X summary, correct remaining budget and refusal of corrupted Y. All older native v5 tests still pass.
+
+**Still NO-GO / Draft:** This is a **private scoped invariant and read-only Summary**, NOT a production `TradeService::Summary` route or grant; eight other RiskCommandAction operations have NOT been cut over, and none of the nine production callers currently owns unified SQL. The original AccountStore worker still opens account-local v2 SQL, and RiskBook owner still opens a separate campaign v5 SQL in production. Cloudflare server-side fence/owner epoch, authenticated full census, scoped original account write paths, all nine live actions, terminal/late/UNKNOWN, Windows RB01–16/T09/T10 26/26 are outstanding. The offline import marker remains `OFFLINE_NOT_AUTHORIZED`. **No merge/deploy/trade/Windows changes.**
+
+
+## Previous #510 r4.0 offline manifest and OS-kill witness — 71 direct tests (historical)
+
+**Verified code SHA `31b0438ee7a4c0febb39a66f544b61122603f12f`**, [GitHub CI #43620387365](https://github.com/iamaman11/okx/actions/runs/43620387365) **SUCCESS**: 64/64 filtered `okx-execution` + 6/6 `okx-kernel` + 1/1 original AccountStore fill/bill = **71 direct Rust cases**; architecture guard/negative self-tests and rustfmt PASS. Linux test execution after build ~0.90+0.00+0.07s, not full native Windows acceptance.
+
+**One actual 39+8 offline import transaction now carries its own durable recovery witness.** The private importer requires `ExpectedFinanceInventory` containing the exact installation, account IDs and campaign IDs; missing/duplicate/foreign identities reject *before initializing target tables*. It copies the 47 original financial tables into the candidate finance SQLite under one `BEGIN IMMEDIATE/COMMIT`, calculates a deterministic scope+all-row SHA-256 across original values and writes a single `finance_import_manifest` receipt in that **same COMMIT**. Target schema now has **47 original finance tables + 1 migration metadata table (48 total)** and **48 original triggers + 2 immutable marker triggers (50 total)**. The extra table is *not* a second financial ledger.
+
+`inspect_stopped_finance_import` verifies the exact expected roster, version, table census, original row totals, marker, full persisted content digest, SQLite integrity and FK in a read-only snapshot after reopen. A missing ACK is recovered by **readback**, not a second import; replay on nonempty target is rejected. Negative tests deny incomplete/duplicate manifest, altered financial facts despite valid SQLite integrity, and marker mutation. A real native child process physically imports all 47 original finance tables while parent **OS-kills before and after one SQLite COMMIT**. Before: no tables/debts survive; after: original account history, held debt, risk reserves and offline marker survive exact reopen/readback. Parent verifies actual child exit and boundary markers; no simulated failure is counted as a physical witness.
+
+**Boundary:** This roster is supplied to the private importer and is **not an authenticated complete census from the production owner**. Its SHA-256 is a snapshot consistency proof, **not** Cloudflare server-side mutation revocation, a trusted source signature or an owner epoch. The stored marker's state is `OFFLINE_NOT_AUTHORIZED` and cannot grant a trading capability. No production AccountStore or RiskBook writer has been switched; all nine live RiskCommandAction callers, terminal/late/UNKNOWN, Cloudflare legacy server-side fencing/epoch, actual Windows RB01–16 and T09/T10 26/26 remain **NOT_PROVEN**. PR #511 stays **Draft / NO-GO**; no installed app, account or Cloudflare runtime changed.
+
+
+**Date:** 14 November 2026. **Canonical architecture:** [Issue #510 r4.0](https://github.com/iamaman11/okx/issues/510). **Code:** [Draft PR #511](https://github.com/iamaman11/okx/pull/511). No production authorization, migration, Cloudflare cutover, Windows installation or trading follows from this first slice.
+
+## Previous #510 r4.0: 39+8 offline source rows before manifest and OS-kill (historical)
+
+**Verified CODE HEAD `7519caa78c343d496d677d6dbcd24848b69eaed9`**, [GitHub CI #43615452874](https://github.com/iamaman11/okx/actions/runs/43615452874) **SUCCESS**: 60/60 direct execution-crate risk contracts, 6/6 kernel, and 1/1 original AccountStore fill/bill source (67 cases); architecture guard, negative self-tests and rustfmt PASS. Linux execution after build ~0.75 + 0.00 + 0.11 seconds. Not the full Windows/RB/T09/T10 acceptance.
+
+`account_store::sql::unified_financial::importer::import_stopped_finance_into_empty` now copies all **39 source AccountStore and 8 source RiskBook v5 campaign tables** from an explicitly supplied set of stopped SQLite/WAL files into the ONE candidate v6 finance.sqlite under **one BEGIN IMMEDIATE/COMMIT**. All source OS writer leases are held in canonical path order; account/campaign identity, source SQLite version/table census/integrity/FK, original RiskBook **primary reserve vs cached aggregate** invariant checks, target scoped row parity/47 tables/FKs/triggers and original values are preserved. The existing RiskBook invariant validator is reused, not duplicated. Direct tests cover two original accounts, two old campaign SQL files carrying HELD debts and no-reserve fences, identical historical reservation keys across campaigns, full rollback on forged plan, active risk writer refusal and rejection of a corrupt source aggregate.
+
+**Still Draft / NO-GO:** this is a private offline source-set witness, not a proof that the supplied source inventory enumerates every real account/campaign. Complete authenticated census/manifest/digest, *actual Cloudflare server-side revocation* with epoch/readback, crash-and-retry migration marker, production one-writer cutover, authenticated source writer, all 9 actions, terminal/late/UNKNOWN and physical Windows RB01–16/T09/T10 26/26 remain outstanding. `legacy_fenced=1` inside an old SQLite is not an authority revocation proof. No real account, demo, staging worker or Windows installation was altered.
+
+## #510 r4 P0: SQL original-source and intent identity boundaries (direct PASS, production NO-GO)
+
+**Verified code SHA `9f62f2df354b58dccc9f2d2a6961a7fbad34bebc`**, [GitHub CI #43533925640](https://github.com/iamaman11/okx/actions/runs/43533925640) **SUCCESS**: **52/52** `okx-execution` filtered `risk_book_contract`, **6/6** `okx-kernel`, **1/1** original `AccountStore` fill/bill test = **59 filtered cases** including child-process entrypoints; cargo fmt and existing architecture guard/negative self-tests PASS. After compilation on Linux runner: 0.58 + 0.00 + 0.12 s. Neither Windows/26/26 nor RB01–16 production is proven.
+
+Three production-blocking **SQL invariants** are now enforced in the private scoped 10-table target fixture:
+
+1. `finance_entry_receipts` has a single composite FK `(installation_id,campaign_id,reservation_key,account_key,intent_id)` to the exact `finance_risk_entries` row. Another composite FK `(installation_id,account_key,intent_id,settlement_revision,source_digest)` links to the *same original* immutable source. Independent valid references to A-reservation/B-source, or a foreign source digest, fail at the actual SQLite engine even without Rust preflight. The new negative test confirms the constraint and that no budget changes.
+2. `finance_entry_sources.original_receipt_json` is **NOT NULL and nonempty** with no silent default. `unified_financial::settle_entry` **always deserializes and verifies** the original `EntrySettlementEvidence`, its account/intent, plan, reservation, order, exact revision/source digest and amount; the previous empty-JSON bypass is removed. Test-only synthetic entries now use structurally valid **mock receipts**; they are NOT authenticated exchange observations. The separate original native AccountStore producer test is still the only positive genuine provenance witness and remains private, offline.
+3. A given original `(installation_id,account_key,intent_id)` can occur in **only one** campaign risk entry in the entire installation DB. SQL also enforces that `risk_entries.plan_sha256` matches the original account intent. Tests attempt an actual second campaign entry for the same order and a forged plan hash, both denied. Distinct account IDs and distinct original intent IDs remain independent.
+
+**Remaining distinction:** these exact constraints hold on the *new unactivated target schema*. They **do not** retroactively change the original production account-v2 29+10 tables or separate RiskBook's eight tables; there is not yet a single native production writer for all accounts. A JSON document on its own is not a cryptographic producer signature; only the original authenticated SQL AccountStore ownership and verified migration can establish provenance. Until the real source producer writes into the same fully normalized DB under the same writer and the legacy Worker is fenced, #510 remains Draft/NO-GO.
+
+## One-file full original-schema implementation (47 tables) — private, not production cutover
+
+A new **STATIC target** `crates/okx-execution/schema/finance-unified-v1.sql` now preserves the **actual names, field types, source checks and identities** of **all 39 original AccountStore** (29 account-v2 + 10 derived) and **all eight original Rust RiskBook** tables, in **one physical SQLite file**, not a second set of shadow `finance_intents/fills/bills`. Primary/UNIQUE/FK scopes are `(installation_id,account_key,...)` for account evidence and `(installation_id,campaign_id,...)` for campaign facts. Cross-domain RiskBook entry has a native account+intent+plan FK, and each original account intent has only one campaign attribution. All 21 source indexes and 48 immutable/source-invalidating trigger definitions were carried into the new SQL with correctly scoped account source epochs. The original account-local `campaign_receipt_events.event_seq` is now a composite `(installation_id,account_key,event_seq)` primary key; its trigger allocates the next **account-local** event sequence under the one intended SQL writer. `PRAGMA user_version=6` identifies the target file.
+
+**Important:** this is a *candidate* new schema, not yet the active AccountStore connection or legacy import. Its original finance *values* are not recomputed. Original SQL selection and writes across the rest of AccountStore/TradeService must still become account/campaign-scoped; immutable source, FKs, triggers and owner epoch must pass the final tests. Old source triggers and the new SQL schema must not both run as independent live budget authorities.
+
+**Earlier account-only offline migration witness (now extended to RiskBook):** `account_store::sql::unified_financial::importer::import_stopped_accounts_into_empty_finance` copies **all 39 exact original account/derived tables** from multiple independently closed original account-v2 source DBs into a new one-file target under **one `BEGIN IMMEDIATE/COMMIT`**. Source SQLite schema version, table census, integrity, FKs, original installation/account identity, exact original columns and per-table row counts are checked. Original account writer **OS file leases are acquired and held** through the whole migration; active source owner, duplicate source, unapproved table, missing column, mismatched row identity or nonempty destination fail closed. Copy is streamed (one row at a time) with native SQLite values, not a financial reimplementation. All destination tables are created and populated before installing the original financial triggers; original `operation_receipts` must not regenerate archived receipt events. Successful native two-source tests validate duplicate original intent/decision/venue identities in one DB, native opening source and foreign-key integrity, exact row parity and reopen. The source files stay intact and are never attached/mutated.
+
+**Updated 14 Nov, offline only / NOT an acceptance:** all eight original RiskBook campaign tables' rows now have a private importer *in the same transaction as the 39 AccountStore tables*. The source inventory and Cloudflare authority must still be authenticated and fenced; the import API is never called by installed code. Actual source production and nine RiskBook actions have not been moved into one production SQL owner; original `AccountStoreHandle` and `RiskBookHandle` remain separate WIP in the Draft. A file lease is local and does not prove Cloudflare server-side authority revocation/epoch. Final migration must import ALL 47 source tables, RiskBook cash/entry obligations and future receipts, preserve original monetary facts across migration, fence the legacy authority, eliminate old parallel writers and pass Windows/RB01–16/T09/T10. The earlier 10-table `finance-v1.sql` pilot is superseded by this full original-schema target but has not yet been deleted while independent old tests still refer to it.
+
+## Original SQL table inventory (47 tables; verified against GitHub)
+
+All 47 original tables below must be inspected for their **existing SQL PK/UNIQUE/FK, source joins, immutable triggers, account/campaign lifecycle and every caller**. Listing them is not a migration.
+
+| Owner / existing source file | Tables | Count |
+|---|---|---:|
+| `crates/okx-execution/schema/account-v2.sql` | `account_meta`, `strategy_definition_versions`, `strategy_instances`, `decisions`, `intents`, `intent_plans`, `protection_receipts`, `orders`, `fills`, `fill_projection_pending`, `funding_projection_pending`, `bills`, `cash_flows`, `allocations`, `position_lots`, `finance_entries`, `finance_totals`, `instance_finance_totals`, `finance_source_links`, `nav_points`, `nav_watermarks`, `nav_scopes`, `daily_losses`, `risk_stops`, `source_cursors`, `risk_receipts`, `operation_receipts`, `account_policy`, `storage_recovery` | 29 |
+| `crates/okx-execution/src/ledger/sql/schema.rs::ACCOUNT_DERIVED_SCHEMA` | `campaign_source_epoch`, `campaign_entry_readiness`, `campaign_late_head_epoch`, `campaign_receipt_events`, `campaign_receipt_cursors`, `campaign_entry_applied`, `campaign_entry_totals`, `campaign_entry_window_proofs`, `bill_order_sources`, `swap_fill_sources` | 10 |
+| `crates/okx-execution/src/risk/book/schema.sql` | `risk_meta`, `risk_policy_account`, `risk_account_occupied`, `risk_loss_source`, `risk_policy_strategy`, `risk_strategy_occupied`, `risk_entries`, `risk_no_reserve` | 8 |
+
+### The specific original assumptions that must change
+
+| Original construct | Actual current constraint/problem | Required r4 property |
+|---|---|---|
+| `account_meta`, `account_policy`, `storage_recovery` | One `singleton=1` per *separate account file*; initial schema `user_version=2` | Account-scoped identity/policy/recovery rows in the **one** installation SQLite; all reads/writes constrained by `installation_id + account_key` |
+| `campaign_source_epoch`, `campaign_late_head_epoch` | Original account-local singleton invalidation | Scope invalidation by the account whose original source changed; campaign reads still validate the correct cohort |
+| `intents`, `orders`, `fills`, `bills`, `finance_entries`, `operation_receipts` | Original account-local `intent_id/order_id/fill_id/bill_id/entry_id/operation_id` PK/UNIQUE with no `account_key` column | Identical raw venue and original request IDs on A/B coexist, with scoped PK/UNIQUE, all related FK and queries; original bytes never silently rewritten |
+| `strategy_instances` and definition/decision/plan/stop/position/NAV tables | Account-local FK and/or scope string | Composite account-scoped FKs, indexes and source queries; strategy IDs do not accidentally share budgets |
+| `campaign_entry_applied` / totals / receipts / windows | Account-local campaign IDs plus intent IDs | Original-source account identity remains part of each receipt and finance FK; campaign totals aggregate the right cohort once |
+| `risk_meta` | One campaign per separate `risk-book.sqlite` with singleton row and independently incremented sequence | `(installation_id,campaign_id)` keyed campaign policy, epoch, sequence and consumed/reserved/late obligations in the same installation DB |
+| `risk_policy_account`, `risk_loss_source`, `risk_entries`, `risk_no_reserve` | Account/reservation keys unique **within the campaign file** | Campaign+account membership and canonical reservation PK/FK; a different campaign cannot spend or read another budget |
+| Account SQL and campaign SQL owners | Existing original `AccountStoreHandle` and independent `RiskBookHandle` each execute `BEGIN IMMEDIATE` on different files | One actual writer, one `Transaction` for linked source revision, risk budget and immutable receipt; no second account ACK |
+| Reopen/backup/migration | `AccountStore::open_existing` requires account schema v2, RiskBook requires fixture schema v5 | New one-file schema version, one manifest/import marker and scope-total verification. No implicit upgrade of existing files before legacy transfer and account history are proven |
+
+**Extra code audit required before production:** all SQL statements that currently filter only by `intent_id`, `fill_id`, `bill_id`, `reservation_key`, `operation_id`, `scope_id`, `campaign_id`; all on-insert invalidation triggers; source provenance, cross-account JOINs, per-account currency and NAV aggregation; exact owner lease, backup/restore and startup. A row-level account filter only on the API is insufficient if the SQL UNIQUE/FK remains global. No detached DB `ATTACH` workaround.
+
+## First executable code slice — WHAT IT DOES
+
+Files under the **existing** `okx-execution::account_store::sql` tree:
+
+- `ledger/sql/finance-v1.sql`: an explicit private *10-table scoped subset* for installation, accounts, campaigns, memberships, original account intent/fill/bill/source revision, original campaign reserve and immutable entry receipts. Account+campaign composite PK/FK, immutable source and receipts. **Not the complete unified account-v2 schema.**
+- `ledger/sql/unified_financial.rs`: `settle_entry(&rusqlite::Transaction, EntryRef)` neither owns a Connection nor opens a DB, runs a second writer, calls venue, accepts caller-supplied dollar amounts or commits. It reads the original source revision and native scoped fill/bill links, validates exact persisted campaign balance and entry identity, applies checked `okx-kernel::risk::money::RiskAmount` updates and writes the immutable receipt **inside the caller's ONE SQL transaction**. The existing SQL worker must ultimately own the Connection/BEGIN/COMMIT; **production integration of the existing authenticated source producer remains NOT_PROVEN**.
+- `ledger/sql/unified_financial_tests.rs`: real disk SQLite/WAL with account A and B sharing the same raw `intent_id`, `fill_id`, `bill_id`, `trade_id`, `exchange_order_id` but distinct source/account scopes; campaign X aggregates both, campaign Y stays unchanged. Checks source/plan mismatch, read-only replay, stale revision, corrupt cache, SQLite concurrent-writer refusal, transaction rollback and real child OS kill **both before and after the single COMMIT**. All test sources are isolated fixtures; they are **NOT** authenticated venue producers.
+
+**Code tested:** SHA `941b24129697cd1399687c0736019f8a247721f7`, [GitHub CI #43529137651](https://github.com/iamaman11/okx/actions/runs/43529137651) **SUCCESS**: `risk_book_contract` **49/49 okx-execution + 6/6 okx-kernel** and native original AccountStore source-proof **1/1** = **56 filtered cases**, including subprocess entrypoints checked by physical parent tests; architecture guard/negative self-tests and `cargo fmt` PASS. Execution after compilation on Linux runner: **0.44s + 0.00s + 0.11s**. Negative integrity test `risk_book_contract_single_finance_sqlite_rejects_forged_primary_receipt_projection` demonstrates that tampering a mutable reservation while its original immutable SQL receipt remains is rejected; released rows with a nonzero reserved amount fail SQL CHECK. This is not full RB01–16, Windows 26/26, Windows P95, complete schema migration or production acceptance.
+
+## Second executable slice — import the **real** original AccountStore source (native source, isolated migration)
+
+**Tested code SHA `a1660565771a5e805f2c03d347840284b5a8d60f`**; [GitHub CI #43531489964](https://github.com/iamaman11/okx/actions/runs/43531489964) **SUCCESS**: the existing `risk_book_contract` direct Rust target **49/49 okx-execution + 6/6 okx-kernel**, and the **1/1 original `e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted`** test with new source migration assertions, rustfmt and architecture/negative guards PASS. This is **56 filtered cases**, not 56 complete r4 acceptance points. Exact performance and final counts belong to the CI run; no real Windows acceptance.
+
+- `unified_financial::inspect_legacy_partial_source(&mut AccountStore, intent_id)` **reuses the original** `AccountStore::partial_entry_settlement_receipt` and **rechecks** the existing immutable `bind_partial_entry_settlement` producer, its original fill→FEE finance_source_links→bill link, order identity and source cutoff. No new calculation of fills, fee, cumulative USD or FX is introduced. Missing/multiple linked legacy source pairs **fail closed** instead of choosing a random row; a multi-fill/terminal/late fee migration needs the full normalized importer.
+- `unified_financial::import_legacy_partial_source(&rusqlite::Transaction, verified)` writes the original intent, original fill/trade/order identity, original bill and **byte-exact original `EntrySettlementEvidence` JSON** into the **new single-file scoped schema**. It accepts only an admitted installation/account and first partial source revision. Re-import succeeds **only for identical complete source content**; conflicting prior content returns error (no `ON CONFLICT DO NOTHING` shortcut to trust). The imported immutable digest, bill digest, venue order ID, plan, account, revision and USD are verified by `settle_entry`.
+- The same original native AccountStore test now creates one isolated `finance.sqlite` target, imports its own **actual** partial source (50.01 USD), seeds a **test-only** posted reservation at 100.05 USD, executes **import + reservation + RiskBook consumed/reserved + immutable receipt** inside **one `BEGIN IMMEDIATE/COMMIT`** in the target DB. It verifies consumed **50.01**, remaining reserved **50.04**, exact repeat/import, preserved original receipt JSON and reopen without a second charge. This test uses the genuine native source/financial owner and **does not** copy financial arithmetic.
+- The *old* account file and *new* destination file coexist **only for offline migration in the isolated test**. **This is not a proof of production one-writer cutover or an allowed dual live authority**. Legacy owner fencing, manifest/complete-table import, global account scope and sole SQL writer must be implemented and tested before any real account transfer. The producer is not yet operating directly on the destination normalized schema; no automatic migration is enabled.
+
+The original first-slice `finance-v1.sql` **10-table subset** is intentionally a target proof, not a replacement for all old account-v2 tables. The new `original_receipt_json` field preserves original proof bytes for migrated source rows; synthetic A/B and OS-kill scope fixtures have no native receipt and cannot authorize trading.
+
+## Exact next engineering slice — not optional
+
+1. Normalize **all 29+10 original account SQL tables** in one verified versioned schema; preserve original `AccountStore` immutable rows/financial calculations and foreign keys, no shadow duplicate ledger. The 10-table subset is NOT an alternative production ledger. Prove same-venue IDs and negative cross-account joins on the full normalized schema.
+2. Move the original account source producer, `RiskBook` reserve/settle/resolve and legacy account ACK into **one existing account SQL writer / one connection**; transaction spans source and campaign facts. No second runtime `RiskBookStore::open_existing`; delete previous two-DB ACK only after same tests pass the new real production path.
+3. Implement safe snapshot/import all historical account and campaign rows+identity and Cloudflare legacy physical server-side fence, owner epoch, UNKNOWN/late fees; fail closed for incomplete/corrupted transfer. Do not initialize a blank budget over unknown legacy state.
+4. Finish all 9 action callers, RB01–RB16 + T09/T10 and physical Windows P95/CI; no mixed READY/NO-GO claims.
+
+**Remaining original-source limitation:** the test core’s sealed source/fill/bill rows are seeded as isolated fixtures, not yet written by the full original authenticated `AccountStore::bind_partial_entry_settlement` producer running on a normalized shared ledger. The source-linked SQL transaction does not accept caller dollars, but that alone does **not** establish authentic exchange provenance. Actual full ledger scope/import/producer cutover remains mandatory and unimplemented. No PR READY claim from this subset.
+
+**One file does not make OKX API calls atomic.** Venue POST is outside SQL COMMIT; unresolved response preserves `UNKNOWN`, original order identity and no blind retry. Multiple hosts cannot independently write their own replica of the same campaign authority.

@@ -1,4 +1,5 @@
 //! Read-only diagnostics project actual owners; they never change access or replay an intent.
+pub(crate) mod native_intent;
 mod protection_trace;
 pub(crate) use protection_trace::{
     ProtectionCleanupInvocation, ProtectionOperationTrace, ProtectionTraceEvent,
@@ -49,6 +50,9 @@ async fn operation_diagnostics(
         if selected.configuration.account_key != account.configuration.account_key {
             return Err("ACCOUNT_ROUTE_MISMATCH".into());
         }
+    }
+    if reference.starts_with("intent:") {
+        return Ok(native_intent::read(&account, ctx.accounts.installation_id(), reference).await);
     }
     if let Some(intent) = reference.strip_prefix("terminal_release:") {
         let state = account.terminal_release_trace.read(intent);

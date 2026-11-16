@@ -101,6 +101,18 @@ fn catalog(root: &Path, key: &AccountKey) -> AgentResult<VerifiedAccountConfig> 
         .find(|a| a.account_key == *key)
         .ok_or_else(|| error("ACCOUNT_CATALOG_INVALID"))
 }
+/// The original stopped AccountStore maintenance path uses the very same
+/// cross-process installation shared mode lock as regular legacy SQL workers.
+/// The guard must live until the command completes; after finance.sqlite
+/// exists, no account-local backup/restore or reinitialization is valid.
+fn legacy_account_maintenance_lease(
+    root: &Path,
+    key: &AccountKey,
+) -> AgentResult<okx_execution::LegacyAccountMaintenanceLease> {
+    let account_sql = account_root(root, key).join("account.sqlite");
+    okx_execution::hold_legacy_account_maintenance(root, &account_sql).map_err(AgentError::from)
+}
+
 fn parse_key(wire: &str) -> AgentResult<AccountKey> {
     let p = wire.split(':').collect::<Vec<_>>();
     if p.len() != 3 {
@@ -136,6 +148,45 @@ fn reply(installation: &str, operation: &str, key: Option<&AccountKey>, extra: V
     }
     v
 }
+/// Explicit initialization shares the SAME writer used by Native runtime.
+/// Exact retry reads the original receipt; it never imports/reset old state.
+async fn initialize_finance(
+    root: &Path,
+    installation_id: &str,
+    request_id: &str,
+    source_tree: &str,
+) -> AgentResult<Value> {
+    if root.join(account_catalog_proto::CATALOG_FILE).exists() {
+        let existing = account_catalog_proto::load(root)?;
+        if existing.installation_id != installation_id {
+            return Err(error("FINANCE_INSTALLATION_IDENTITY_MISMATCH"));
+        }
+        if !existing.accounts.is_empty() && !root.join("finance/finance.sqlite").exists() {
+            return Err(error("FINANCE_DATABASE_MISSING_WITH_ACCOUNTS"));
+        }
+    }
+    let owner = okx_execution::account_worker::UnifiedFinanceHandle::initialize_new(
+        root.canonicalize()?,
+        okx_execution::NewFinanceInstallation {
+            installation_id: installation_id.to_owned(),
+            initialize_request_id: request_id.to_owned(),
+            source_tree: source_tree.to_owned(),
+        },
+    )
+    .await?;
+    let mut stopped = owner.termination_signal();
+    let result = owner
+        .installation_receipt(Instant::now() + Duration::from_secs(2))
+        .await;
+    drop(owner);
+    if !*stopped.borrow() {
+        stopped
+            .changed()
+            .await
+            .map_err(|_| error("FINANCE_WORKER_SHUTDOWN_UNCONFIRMED"))?;
+    }
+    Ok(serde_json::to_value(result?)?)
+}
 pub async fn initialize_installation(
     root: &Path,
     installation_id: &str,
@@ -164,7 +215,14 @@ pub async fn initialize_installation(
             require_clean_installation_root(root, true)?;
             crate::accounts::initialize_installation(root, installation_id)?;
         }
-        return Ok(reply(installation_id, operation_id, None, json!({})));
+        let finance =
+            initialize_finance(root, installation_id, operation_id, expected_release).await?;
+        return Ok(reply(
+            installation_id,
+            operation_id,
+            None,
+            json!({"finance":finance}),
+        ));
     }
     if root.join(account_catalog_proto::CATALOG_FILE).exists() {
         return Err(error("INSTALLATION_ALREADY_EXISTS"));
@@ -174,7 +232,13 @@ pub async fn initialize_installation(
     require_clean_installation_root(root, false)?;
     write_new(&op_path, &serde_json::to_vec(&expected)?)?;
     crate::accounts::initialize_installation(root, installation_id)?;
-    Ok(reply(installation_id, operation_id, None, json!({})))
+    let finance = initialize_finance(root, installation_id, operation_id, expected_release).await?;
+    Ok(reply(
+        installation_id,
+        operation_id,
+        None,
+        json!({"finance":finance}),
+    ))
 }
 pub async fn initialize_account(
     root: &Path,
@@ -190,6 +254,7 @@ pub async fn initialize_account(
         return Err(error("INITIALIZE_ID_INVALID"));
     }
     let _lease = engine_lease(root)?;
+    let _finance_mode = legacy_account_maintenance_lease(root, key)?;
     if installation(root)? != installation_id {
         return Err(error("INSTALLATION_MISMATCH"));
     }
@@ -424,6 +489,48 @@ mod tests {
         assert!(parse_key(&format!("okx:demo:{}", "g".repeat(64))).is_err());
         assert!(release("UNVERIFIED_LOCAL_BUILD").is_err());
     }
+    #[tokio::test]
+    async fn new_finance_command_adapter_replays_receipt_and_releases_the_same_writer() {
+        let root = root();
+        let tree = "a".repeat(40);
+        let first = initialize_finance(&root, "installation_test", "initialize_test_001", &tree)
+            .await
+            .unwrap();
+        assert_eq!(first["schema_version"], 8);
+        let replay = initialize_finance(&root, "installation_test", "initialize_test_001", &tree)
+            .await
+            .unwrap();
+        assert_eq!(replay, first);
+        assert!(
+            initialize_finance(&root, "installation_test", "different_request_002", &tree)
+                .await
+                .is_err()
+        );
+        let owner = okx_execution::account_worker::UnifiedFinanceHandle::open_native(
+            root.clone(),
+            "installation_test".into(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            owner
+                .verify_live_authority(Instant::now() + Duration::from_secs(2))
+                .await,
+            Err(okx_execution::StoreError::Invalid(
+                "FINANCE_ACCOUNT_BOOTSTRAP_REQUIRED"
+            ))
+        ));
+        let mut stopped = owner.termination_signal();
+        drop(owner);
+        if !*stopped.borrow() {
+            stopped.changed().await.unwrap();
+        }
+        // No account identity, credentials or exchange client was invented.
+        assert!(!root.join(account_catalog_proto::CATALOG_FILE).exists());
+        assert!(!root.join("accounts").exists());
+    }
 }
 mod backup;
 pub use backup::{backup_account, restore_account};
+mod native_backup;
+pub use native_backup::{backup_finance, restore_finance};

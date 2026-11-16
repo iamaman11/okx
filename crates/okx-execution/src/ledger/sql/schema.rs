@@ -204,19 +204,7 @@ impl AccountStore {
         meta: AccountMeta,
         snapshot: &OpeningSnapshot,
     ) -> StoreResult<Self> {
-        if snapshot.positions != 0
-            || snapshot.orders != 0
-            || snapshot.conditional_orders != 0
-            || snapshot.liabilities != Decimal::ZERO
-        {
-            return Err(StoreError::Invalid("ACCOUNT_NOT_FLAT"));
-        }
-        if snapshot.source_ref != meta.opening_source
-            || snapshot.observed_at != meta.initialized_at
-            || snapshot.balances.is_empty()
-        {
-            return Err(StoreError::Invalid("OPENING_EVIDENCE_MISMATCH"));
-        }
+        Self::validate_account_opening(&meta, snapshot)?;
         Self::initialize_inner(path, meta, snapshot)
     }
     fn initialize_inner(
@@ -226,15 +214,6 @@ impl AccountStore {
     ) -> StoreResult<Self> {
         if path.as_ref().exists() {
             return Err(StoreError::Invalid("ACCOUNT_ALREADY_INITIALIZED"));
-        }
-        if meta.account_key.is_empty()
-            || meta.installation_id.is_empty()
-            || meta.opening_source.is_empty()
-            || meta.initialized_at <= 0
-            || meta.initialize_operation_id.is_empty()
-            || meta.release_id.is_empty()
-        {
-            return Err(StoreError::Invalid("INVALID_ACCOUNT_META"));
         }
         let lease = Self::writer_lease(path.as_ref())?;
         let _new_file = std::fs::OpenOptions::new()
@@ -247,83 +226,7 @@ impl AccountStore {
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(include_str!("../../../schema/account-v2.sql"))?;
         tx.execute_batch(ACCOUNT_DERIVED_SCHEMA)?;
-        tx.execute(
-            "INSERT INTO account_meta VALUES(1,?1,?2,2,?3,?4,?5,?6)",
-            params![
-                meta.account_key,
-                meta.installation_id,
-                meta.initialized_at,
-                meta.opening_source,
-                meta.initialize_operation_id,
-                meta.release_id
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO account_policy VALUES(1,0,0,'unconfigured','0','0')",
-            [],
-        )?;
-        for (currency, amount) in &snapshot.balances {
-            if currency.is_empty() || *amount < Decimal::ZERO {
-                return Err(StoreError::Invalid("INVALID_OPENING_BALANCE"));
-            }
-            tx.execute(
-                "INSERT INTO cash_flows VALUES(?1,'OPENING',?2,?3,?4,?5)",
-                params![
-                    format!("opening:{currency}"),
-                    currency,
-                    exact(*amount),
-                    snapshot.observed_at,
-                    snapshot.source_ref
-                ],
-            )?;
-        }
-        tx.execute(
-            "INSERT INTO source_cursors VALUES('opening','account',?1,?2,0,'')",
-            params![snapshot.source_ref, snapshot.observed_at],
-        )?;
-        tx.execute(
-            "INSERT INTO operation_receipts VALUES(?1,'INITIALIZE',?2,?3,?4)",
-            params![
-                meta.initialize_operation_id,
-                format!(
-                    "{}|{}|{}",
-                    meta.account_key, meta.installation_id, meta.release_id
-                ),
-                meta.opening_source,
-                meta.initialized_at
-            ],
-        )?;
-        tx.execute("INSERT INTO storage_recovery VALUES(1,0,NULL,NULL)", [])?;
-        tx.execute(
-            "INSERT INTO nav_points VALUES('account',?1,'opening',?2,'0','0','USD','COMPLETE',?3)",
-            params![
-                meta.initialized_at,
-                exact(snapshot.opening_equity_usd),
-                snapshot.source_ref
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO nav_watermarks VALUES('account',?1,?1,?2,'COMPLETE')",
-            params![exact(snapshot.opening_equity_usd), meta.initialized_at],
-        )?;
-        tx.execute("INSERT INTO nav_scopes VALUES('account','USD')", [])?;
-        for (currency, amount) in &snapshot.balances {
-            let scope = format!("account:{currency}");
-            tx.execute(
-                "INSERT INTO nav_points VALUES(?1,?2,'opening',?3,'0','0',?4,'COMPLETE',?5)",
-                params![
-                    scope,
-                    meta.initialized_at,
-                    exact(*amount),
-                    currency,
-                    snapshot.source_ref
-                ],
-            )?;
-            tx.execute(
-                "INSERT INTO nav_scopes VALUES(?1,?2)",
-                params![scope, currency],
-            )?;
-        }
+        Self::initialize_account_rows_sql(&tx, None, &meta, snapshot)?;
         tx.commit()?;
         Ok(Self {
             connection: c,

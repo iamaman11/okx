@@ -161,6 +161,81 @@ jobs:
           echo "BUILD_REQUIRED=${{ steps.classify.outputs.build_required }}"
           echo "REASON=${{ steps.classify.outputs.reason }}"
 
+  riskbook-draft-rust:
+    # Fast, real-source feedback for the active Rust RiskBook draft. Final
+    # acceptance remains the existing full required CI after Ready for review.
+    name: riskbook-draft-rust
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.pull_request.head.ref == 'work/510-riskbook-rust-20261113' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Verify existing architecture guard and its negative self-tests
+        run: |
+          python3 scripts/check_architecture.py --self-test
+          python3 scripts/check_architecture.py
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Direct RiskBook Rust/SQLite regression target
+        run: cargo test --locked -p okx-kernel -p okx-execution --lib risk_book_contract -- --nocapture
+      - name: Verify original AccountStore fill/bill source partial receipt
+        run: cargo test --locked -p okx-execution --lib e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted -- --nocapture
+      # The full original AccountStore API (including begin_post) is touched
+      # by #510. One reusable compilation, same job and same draft gate;
+      # 74 filtered risk contracts alone cannot prove zero regressions.
+      - name: Regression of complete original execution Rust library
+        run: cargo test --locked -p okx-execution --lib
+      - name: Native startup and stopped unified finance readback (no trading)
+        run: |
+          cargo test --locked -p okx-agent --lib finance_staged_import_never_falls_back_to_old_trade_or_cloudflare_finance -- --nocapture
+          cargo test --locked -p okx-agent --lib finance_inspection::tests -- --nocapture
+          cargo test --locked -p okx-agent --lib native_finance_risk::tests -- --nocapture
+          cargo test --locked -p okx-agent --lib risk_bridge::tests -- --nocapture
+          cargo test --locked -p okx-agent --bin okx-agent --no-run
+          cargo test --locked -p okx-agent --bin okx-agent native_finance_startup_tests -- --nocapture
+      - name: Strict price and bounded derivative context regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p okx-observation --lib risk_market_uses_strict_price_and_bounded_derivative_context -- --nocapture | tee "$RUNNER_TEMP/native-market-contract.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-market-contract.log"
+      - name: Native admission and existing trading boundary regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for contract in native_connect_contracts native_trade_contracts native_acceptance_coverage account_opening_capture storage_commands::tests storage_commands::native_backup::tests admission_source::tests native_finance_admission::tests source_capture::tests trade_service::plan::tests entry_settlement::direct_tests strategy_contract_tests protection_cleanup_direct_tests terminal_release::tests unsent_release::tests; do
+            log="$RUNNER_TEMP/native-boundary-${contract//:/_}.log"
+            cargo test --locked -p okx-agent --lib "$contract" -- --nocapture | tee "$log"
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$log"
+          done
+      - name: Worker transport and retired financial RPC boundary
+        working-directory: cloudflare/okx-mcp
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          node scripts/test-native-finance-retirement-do.mjs
+      - name: Fresh Rust property collector self-tests and known witnesses
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p okx-agent --example native_finance_acceptance
+          cargo run --locked -p okx-agent --example native_finance_acceptance -- --known > "$RUNNER_TEMP/native-finance-known.json"
+          python3 -c 'import json,os; r=json.load(open(os.path.join(os.environ["RUNNER_TEMP"],"native-finance-known.json"))); assert r["overall"] == "PARTIAL"; assert r["observed_witnesses"]; print("FRESH_NATIVE_PROPERTIES=PARTIAL_NOT_FULL")'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: native-finance-properties-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/native-finance-known.json
+          if-no-files-found: error
+          retention-days: 14
+
+
   architecture:
     name: architecture
     needs: classify
@@ -233,45 +308,22 @@ jobs:
       - name: Measure two-account 100-parallel native SQL (not WSS)
         run: cargo test --locked -p okx-execution --lib two_account_100_parallel_sql_readonly_isolation -- --nocapture
 
-      - name: Verify actual Worker governance CAS history against native SQL owner
+      # #510: finances now commit inside the Native SQLite owner. Old Worker
+      # monetary CAS traces are retired; they cannot witness the current owner.
+      - name: Native policy and original financial invariants
         shell: bash
         run: |
           set -euo pipefail
-          # Run in the same job/toolchain that already compiled native SQL.
-          # No new runner or production transport, no additional Rust rebuild.
-          # Native SQL creates actual immutable terminal fill/bill admission
-          # and campaign source *before* the Worker financial CAS fixture.
-          # This is a single offline CI composition, no real exchange POST.
-          OKX_E1_BRIDGE_SOURCE_PATH="$RUNNER_TEMP/e1-native-sql-source.json" \
-            cargo test --locked -p okx-execution --lib \
-              e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten -- --nocapture
-          test -s "$RUNNER_TEMP/e1-native-sql-source.json"
-          pushd cloudflare/okx-mcp
-          npm ci --ignore-scripts --no-audit --no-fund
-          OKX_E1_BRIDGE_SOURCE_JSON="$(cat "$RUNNER_TEMP/e1-native-sql-source.json")" \
-            OKX_A2_TRACE=1 npm run check | tee "$RUNNER_TEMP/a2-worker-cas.log"
-          popd
-          test "$(grep -c '^E1_SQL_WORKER_BRIDGE_TRACE_V1:' "$RUNNER_TEMP/a2-worker-cas.log")" -eq 1
-          sed -n 's/^E1_SQL_WORKER_BRIDGE_TRACE_V1://p' "$RUNNER_TEMP/a2-worker-cas.log" \
-            > "$RUNNER_TEMP/e1-worker-riskbook.json"
-          test -s "$RUNNER_TEMP/e1-worker-riskbook.json"
-          OKX_E1_BRIDGE_SOURCE_PATH="$RUNNER_TEMP/e1-native-sql-source.json" \
-            OKX_E1_BRIDGE_RESULT_PATH="$RUNNER_TEMP/e1-worker-riskbook.json" \
-            cargo test --locked -p okx-execution --lib \
-              e1_worker_finance_receipt_roundtrip_matches_native_sql_after_restart -- --ignored --nocapture
-          test "$(grep -c '^A2_SQL_BRIDGE_TRACE_V1:' "$RUNNER_TEMP/a2-worker-cas.log")" -eq 1
-          sed -n 's/^A2_SQL_BRIDGE_TRACE_V1://p' "$RUNNER_TEMP/a2-worker-cas.log" > "$RUNNER_TEMP/a2-worker-governance.json"
-          test -s "$RUNNER_TEMP/a2-worker-governance.json"
-          OKX_A2_TRACE_PATH="$RUNNER_TEMP/a2-worker-governance.json" \
-            cargo test --locked -p okx-protocol --lib worker_do_policy_frames_decode_and_fail_closed_in_native_protocol -- --ignored --nocapture
-          OKX_A2_TRACE_PATH="$RUNNER_TEMP/a2-worker-governance.json" \
-            cargo test --locked -p okx-execution --lib central_worker_cas_trace_native_sql_readback_and_restart -- --ignored --nocapture
-
-      - name: Real Rust Native WSS to persisted Worker SQLite DO (no exchange POST)
+          cargo test --locked -p okx-execution --lib risk_book_contract_native_campaign_policy_ -- --nocapture | tee "$RUNNER_TEMP/native-policy.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-policy.log"
+          cargo test --locked -p okx-execution --lib e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten -- --nocapture
+      - name: Actual Worker authenticated transport without financial authority
         timeout-minutes: 8
         working-directory: cloudflare/okx-mcp
-        run: OKX_NATIVE_WORKER_INTEGRATION=1 node scripts/test-runtime-do.mjs
-
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          node scripts/test-native-finance-retirement-do.mjs
 
   cloudflare-mcp:
     name: cloudflare-mcp
@@ -296,24 +348,12 @@ jobs:
 
       - name: Typecheck
         run: npm run check
-      - name: Accept production RuntimeSession backed by persisted workerd SQLite
-        run: node scripts/test-runtime-do.mjs
+      - name: Accept authenticated RuntimeSession transport without financial authority
+        run: node scripts/test-native-finance-retirement-do.mjs
 
-      # B1/#449 T10-07: real SQLite-backed Worker shared-cap prerequisite.
-      # This is NOT Native/SQL T10-07 acceptance; mandatory 26-case gate stays blocked.
-      - name: B1 Worker two-account shared-cap regression (component only)
-        working-directory: .
-        run: |
-          node scripts/trade-integration/worker-shared-cap.mjs --self-test
-          node scripts/trade-integration/worker-shared-cap.mjs --artifacts "${{ runner.temp }}/b1-worker-cap"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: b1-worker-only-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}/b1-worker-cap
-          retention-days: 7
-          if-no-files-found: warn
-
+      # The previous Worker shared-cap owner no longer exists. The original
+      # scoped Rust shared-budget invariants run in the execution job. Full
+      # Native T10-07 acceptance remains part of the mandatory matrix (#512).
       - name: Reject drift in generated MCP public contracts
         working-directory: cloudflare/okx-mcp
         run: git diff --exit-code -- contracts/tools.schema.json contracts/action-fixtures.json
@@ -364,54 +404,8 @@ jobs:
         shell: pwsh
         run: ./scripts/test-windows-unify-root.ps1
 
-      - name: Fast entry settlement production-boundary tests (#495)
-        shell: pwsh
-        run: |
-          $output = & cargo test --locked -p okx-agent --lib trade_service::entry_settlement:: -- --nocapture 2>&1
-          $code = $LASTEXITCODE
-          $output | Out-Host
-          if ($code -ne 0) { exit $code }
-          $proof = [regex]::Match(($output -join "`n"), 'test result: ok\.\s+(\d+) passed;')
-          if (-not $proof.Success -or [int]$proof.Groups[1].Value -lt 8) {
-            throw 'ENTRY_SETTLEMENT_DIRECT_TEST_COUNT_INVALID'
-          }
-
-      - name: Fast protection cleanup SQL tests (#500)
-        shell: pwsh
-        run: |
-          $output = & cargo test --locked -p okx-agent --lib trade_service::protection_cleanup::protection_cleanup_direct_tests:: -- --nocapture 2>&1
-          $code = $LASTEXITCODE
-          $output | Out-Host
-          if ($code -ne 0) { exit $code }
-          $proof = [regex]::Match(($output -join "`n"), 'test result: ok\.\s+(\d+) passed;')
-          if (-not $proof.Success -or [int]$proof.Groups[1].Value -lt 6) {
-            throw 'PROTECTION_CLEANUP_DIRECT_TEST_COUNT_INVALID'
-          }
-
       - name: Clippy native Windows crates
         run: cargo clippy --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --all-targets -- -D warnings
-
-      - name: Direct unsent release contract (#501)
-        shell: pwsh
-        run: |
-          $output = & cargo test --locked -p okx-agent --lib trade_service::unsent_release::tests:: -- --nocapture 2>&1
-          $code = $LASTEXITCODE
-          $output | Out-Host
-          if ($code -ne 0) { exit $code }
-          $proof = [regex]::Match(($output -join "`n"), 'test result: ok\.\s+(\d+) passed;')
-          if (-not $proof.Success -or [int]$proof.Groups[1].Value -ne 10) { throw 'UNSENT_RELEASE_TEST_COUNT_INVALID' }
-
-      - name: Direct scenario lifecycle contract (#501 / S1-05 boundary)
-        shell: pwsh
-        run: |
-          $output = & node --test --test-reporter=tap scripts/trade-integration/scenario-lifecycle.test.mjs 2>&1
-          $code = $LASTEXITCODE
-          $output | Out-Host
-          if ($code -ne 0) { exit $code }
-          if (($output -join "`n") -notmatch '# pass 8\b') { throw 'SCENARIO_LIFECYCLE_TEST_COUNT_INVALID' }
-
-      - name: Test native Windows crates
-        run: cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution
 
       - name: Install locked production workerd test dependencies on Windows
         if: github.event_name == 'pull_request'
@@ -420,52 +414,55 @@ jobs:
           npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Real Native/Worker lifecycle owner boundary (#501 / S1-05)
+      # The JavaScript Native/Worker finance scenario driver is retired with
+      # its separate financial owner. Its driver-only PID/cleanup tests do not
+      # establish the shipped Engine lifecycle. Current Rust process, SQLite,
+      # Engine drain and real workerd transport witnesses run in the gate below;
+      # CONTROL/Launcher tests above and #449 physical acceptance remain.
+      - name: Current Rust collector negative controls
+        shell: pwsh
+        run: |
+          cargo test --locked -p okx-agent --example native_finance_acceptance
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Mandatory current Rust financial property acceptance
+        id: native-properties
         if: github.event_name == 'pull_request'
         shell: pwsh
         run: |
-          # Complete the exact child target build before its ownership deadlines.
-          cargo test --locked -p okx-agent --lib --no-run
+          # The old Native/Worker finance driver is retired. Its properties
+          # remain in the reviewed current Rust map; missing evidence BLOCKS
+          # this full gate rather than falling back to historical26 results.
+          cargo run --locked -p okx-agent --example native_finance_acceptance > "$env:RUNNER_TEMP\native-finance-full.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:OKX_LIFECYCLE_ARTIFACTS = Join-Path $env:RUNNER_TEMP "native-worker-lifecycle"
-          $output = & node --test --test-reporter=tap scripts/trade-integration/native-workerd-lifecycle.test.mjs 2>&1
-          $code = $LASTEXITCODE
-          $output | Out-Host
-          if ($code -ne 0) { exit $code }
-          if (($output -join "`n") -notmatch '# pass 5\b') {
-            throw 'NATIVE_WORKER_LIFECYCLE_TEST_COUNT_INVALID'
-          }
+          $report = Get-Content -Raw "$env:RUNNER_TEMP\native-finance-full.json" | ConvertFrom-Json
+          if ($report.overall -ne 'FULL_PASS') { throw 'FULL_NATIVE_PROPERTIES_NOT_PROVEN' }
 
-      - name: Upload Native/Worker lifecycle stage evidence
-        if: always() && github.event_name == 'pull_request'
+      - name: Upload current Rust property evidence even on failure
+        if: always() && github.event_name == 'pull_request' && steps.native-properties.outcome != 'skipped'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: native-worker-lifecycle-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}\native-worker-lifecycle
+          name: native-finance-full-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}\native-finance-full.json
           if-no-files-found: error
           retention-days: 14
 
-      - name: Mandatory native Windows T09/T10 recorded acceptance
-        if: github.event_name == 'pull_request'
-        shell: pwsh
+      # These remain complete regressions, not substitutes for the exact current
+      # property map above. Independent CPU-heavy research fixtures must not age
+      # a separate financial fixture's real-time sources. Concurrency INSIDE
+      # the 100-caller, fairness and two-heavy-job tests is not reduced.
+      - name: Native trading, SQL, CONTROL and Launcher regression
         run: |
-          $artifacts = Join-Path $env:RUNNER_TEMP "trade-integration"
-          node scripts/run-trade-integration.mjs --suite t09,t10 --artifacts "$artifacts"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution -- --skip analytics:: --test-threads 2
 
-      - name: Upload T09/T10 acceptance evidence even on failure
-        if: always() && github.event_name == 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: t09-t10-native-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}\trade-integration
-          if-no-files-found: warn
-          retention-days: 14
+      - name: Independent research regression
+        run: |
+          cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --lib analytics:: -- --test-threads 2 --skip two_heavy_research_jobs_ingestion_stop_and_cancel_latency
 
       - name: K9 native two-heavy cancellation latency evidence
         shell: pwsh
         run: |
-          cargo test --locked -p okx-agent --lib two_heavy_research_jobs_ingestion_stop_and_cancel_latency -- --nocapture | Tee-Object -FilePath "$env:RUNNER_TEMP\k9-two-heavy.txt"
+          cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --lib two_heavy_research_jobs_ingestion_stop_and_cancel_latency -- --nocapture | Tee-Object -FilePath "$env:RUNNER_TEMP\k9-two-heavy.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $log = Get-Content -Raw -LiteralPath "$env:RUNNER_TEMP\k9-two-heavy.txt"
           $line = [regex]::Match($log, 'ANALYTICS_PERF_JSON:(\{[^\r\n]+\})')
@@ -880,14 +877,13 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-# B1 uses its own Windows OS process/runner. Its source/SQL/workerd test
-  # must not alter the workload or maintenance cadence of mandatory ALL26.
-  # This is a PARTIAL Native prerequisite, not T09-MA/T10-07 acceptance.
+  # Current Native A/B and semantic/CAS prerequisite on an isolated runner.
+  # Full property/physical/resource acceptance remains windows-native-full.
   b1-native:
+    # Preserve the existing check name; its obsolete remote-finance driver is
+    # replaced by the actual current Native public contracts, not an exemption.
     name: windows-b1-native-prerequisite
     needs: classify
-    # The same exact native-source proof applies to this partial prerequisite.
-    # Any source change or unproven Cloudflare change still runs the real B1.
     if: github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true' && needs.classify.outputs.native_required != 'false'
     runs-on: windows-latest
     timeout-minutes: 18
@@ -901,56 +897,45 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-      - name: Install locked production workerd test dependencies
-        run: npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
-      - name: Precompile actual Native/Worker child
-        run: cargo test --locked -p okx-agent --lib native_to_workerd_risk_summary_over_actual_websocket --no-run
-      - name: T10-14 isolated Native SQL owners prerequisite (not a required case PASS)
+      - name: Precompile current Rust property targets
+        run: cargo test --locked -p okx-agent -p okx-execution -p okx-kernel -p okx-protocol -p okx-runtime --lib --no-run
+      - name: Public Native A/B cap, independent progress, replay and policy CAS
         shell: pwsh
         run: |
-          cargo test --locked -p okx-execution --lib blocked_a_sql_owner_does_not_delay_b_cancel_receipt -- --nocapture |
-            Tee-Object -FilePath "$env:RUNNER_TEMP\t10-14-native-sql.log"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $evidence = Get-Content -Raw -LiteralPath "$env:RUNNER_TEMP\t10-14-native-sql.log"
-          if ($evidence -notmatch 'T10_14_NATIVE_SQL_PREREQUISITE_V1:') {
-            throw "T10_14_NATIVE_SQL_RECEIPT_MISSING"
+          $names = @(
+            'accounts::native_trade_contracts::native_public_cohort::risk_book_contract_native_public_cohort_denied_b_does_not_block_held_a_post'
+            'accounts::native_trade_contracts::native_public_fairness::risk_book_contract_native_public_b_executes_and_keeps_reserve_while_a_source_blocked'
+            'accounts::native_trade_contracts::native_public_fairness::risk_book_contract_native_public_b_status_and_cancel_leave_blocked_a_held'
+            'accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict'
+            'accounts::native_trade_contracts::native_strategies::risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner'
+          )
+          $packages = @('-p','okx-agent','-p','okx-execution','-p','okx-kernel','-p','okx-protocol','-p','okx-runtime')
+          $output = & cargo test --locked @packages --lib -- --exact --test-threads 4 --nocapture @names 2>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object -FilePath "$env:RUNNER_TEMP\native-b1-current.log" | Out-Host
+          if ($code -ne 0) { exit $code }
+          $proof = [regex]::Matches(($output -join "`n"), 'test result: ok\.\s+([1-9]\d*) passed;')
+          if ($proof.Count -ne 1 -or [int]$proof[0].Groups[1].Value -ne $names.Count) {
+            throw 'CURRENT_NATIVE_B1_PUBLIC_WITNESSES_MISSING'
+          }
+      - name: Current single-writer queue deadlines and FIFO drain
+        shell: pwsh
+        run: |
+          $packages = @('-p','okx-agent','-p','okx-execution','-p','okx-kernel','-p','okx-protocol','-p','okx-runtime')
+          $output = & cargo test --locked @packages --lib owner_queue_tests:: -- --nocapture 2>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object -FilePath "$env:RUNNER_TEMP\native-queue-current.log" | Out-Host
+          if ($code -ne 0) { exit $code }
+          $proof = [regex]::Matches(($output -join "`n"), 'test result: ok\.\s+([1-9]\d*) passed;')
+          if ($proof.Count -ne 1 -or [int]$proof[0].Groups[1].Value -ne 2) {
+            throw 'CURRENT_SINGLE_WRITER_QUEUE_WITNESSES_MISSING'
           }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: t10-14-sql-prerequisite-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}\t10-14-native-sql.log
-          if-no-files-found: warn
-          retention-days: 7
-      - name: B1 Native A/B independent order ACK and central shared-cap denial (partial only)
-        env:
-          OKX_B1_SECOND_POSITIVE_PROBE: "1"
-        shell: pwsh
-        run: |
-          $artifacts = Join-Path $env:RUNNER_TEMP "b1-native"
-          node scripts/trade-integration/b1-native-cap.mjs --artifacts "$artifacts"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: b1-native-partial-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}\b1-native
-          if-no-files-found: warn
-          retention-days: 7
-      # Actual Worker governance CAS after a signed Native ACK; T09.5
-      # verifies preserved original identity/hash/deadline and zero extra POST.
-      - name: S2-05 live Native/Worker policy CAS and semantic replay
-        shell: pwsh
-        env:
-          OKX_S2_05_POLICY_CAS_PROBE: "1"
-        run: |
-          $artifacts = Join-Path $env:RUNNER_TEMP "s2-05-policy-cas"
-          node scripts/run-trade-integration.mjs --case T09.5 --artifacts "$artifacts"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        with:
-          name: s2-05-native-worker-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}\s2-05-policy-cas
-          if-no-files-found: warn
+          name: native-b1-current-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}\native-b1-current.log
+            ${{ runner.temp }}\native-queue-current.log
+          if-no-files-found: error
           retention-days: 14

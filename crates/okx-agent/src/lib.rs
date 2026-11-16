@@ -1,4 +1,5 @@
 pub mod account_bootstrap;
+pub(crate) mod account_opening;
 pub mod accounts;
 pub mod analytics;
 pub mod cloudflare_auth;
@@ -7,12 +8,15 @@ pub mod config;
 pub mod diagnostics;
 pub mod execution_preflight;
 pub mod execution_runtime;
+pub mod execution_store;
+pub mod finance_inspection;
 pub(crate) mod finance_trace;
 pub(crate) mod finance_window;
 pub mod github_auth;
 pub mod github_mailbox;
 pub mod identity;
 pub mod market_bootstrap;
+pub(crate) mod native_account_connection;
 pub mod okx_credentials;
 pub mod once;
 mod portfolio;
@@ -22,9 +26,16 @@ pub mod source_capture;
 pub mod storage_commands;
 pub mod trade_service;
 
+mod native_finance_admission;
+mod native_finance_opening;
+pub mod native_finance_risk;
 pub mod risk_bridge;
 
 pub mod runtime;
+
+#[cfg(test)]
+#[path = "native_acceptance_coverage_tests.rs"]
+mod native_acceptance_coverage;
 
 use thiserror::Error;
 
@@ -59,6 +70,12 @@ pub enum AgentError {
 
     #[error("native financial evidence capture task failed: {0}")]
     FinancialCaptureTask(String),
+
+    #[error("ACCOUNT_CONNECTION_CATALOG_PUBLICATION_PENDING_RETRY_SAME_OPERATION: {source}")]
+    AccountCatalogPublicationPending {
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

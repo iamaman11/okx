@@ -1,10 +1,10 @@
 //! Cumulative entry settlement: one coordinator over existing SQL and Worker owners.
 //! Terminal release remains independent in terminal_release::release_terminal.
 use super::{
-    AccountStoreHandle, CentralGovernanceSnapshot, NativeRiskClient, StoredIntent,
-    build_risk_command, err, exact,
+    CentralGovernanceSnapshot, NativeRiskClient, StoredIntent, build_risk_command, err, exact,
     reconcile::{terminal_order_update_time, verified_order_readback},
 };
+use crate::execution_store::ExecutionStore;
 use okx_api::TradeOrderDetails;
 use okx_protocol::{
     accounts::AccountKey,
@@ -100,7 +100,7 @@ pub(super) async fn settle_incremental_entry(
     account: &AccountKey,
     i: &StoredIntent,
     order: Option<&TradeOrderDetails>,
-    store: &AccountStoreHandle,
+    store: &ExecutionStore,
     risk: &NativeRiskClient,
     governance: &RwLock<Option<CentralGovernanceSnapshot>>,
     sql_deadline: fn() -> Instant,
@@ -114,7 +114,7 @@ async fn settle_inner(
     account: &AccountKey,
     i: &StoredIntent,
     order: Option<&TradeOrderDetails>,
-    store: &AccountStoreHandle,
+    store: &ExecutionStore,
     risk: &NativeRiskClient,
     governance: &RwLock<Option<CentralGovernanceSnapshot>>,
     sql_deadline: fn() -> Instant,
@@ -139,14 +139,16 @@ async fn settle_inner(
         .clone()
         .ok_or("AUTHORITY_UNAVAILABLE")?;
     let id = i.intent_id.clone();
-    let (receipt, fill_cursor, bill_cursor) = store
-        .call(sql_deadline(), move |s| {
-            Ok((
-                s.central_receipt(&id)?,
-                s.cursor("fills", "SWAP")?,
-                s.cursor("bills", "account")?,
-            ))
-        })
+    let receipt = store
+        .central_receipt(sql_deadline(), id)
+        .await
+        .map_err(err)?;
+    let fill_cursor = store
+        .cursor(sql_deadline(), "fills".into(), "SWAP".into())
+        .await
+        .map_err(err)?;
+    let bill_cursor = store
+        .cursor(sql_deadline(), "bills".into(), "account".into())
         .await
         .map_err(err)?;
     let receipt = receipt.ok_or("PARTIAL_ENTRY_RESERVATION_UNVERIFIED")?;
@@ -189,13 +191,13 @@ async fn settle_inner(
     if inspection.reservation_state == Some(RiskReservationState::Released) {
         let id = i.intent_id.clone();
         let late = store
-            .call(sql_deadline(), move |s| s.entry_late_pending(&id))
+            .entry_late_pending(sql_deadline(), id)
             .await
             .map_err(err)?;
         if !late {
             let existing_id = format!("entry-settlement:{}", i.intent_id);
             let recorded = store
-                .call(sql_deadline(), move |s| s.operation(&existing_id))
+                .operation(sql_deadline(), existing_id)
                 .await
                 .map_err(err)?;
             return if recorded.is_some_and(|w| w.kind == "ENTRY_SETTLEMENT_PROVEN") {
@@ -209,9 +211,7 @@ async fn settle_inner(
         }
         let id = i.intent_id.clone();
         let late_proof = store
-            .call(sql_deadline(), move |s| {
-                s.bind_late_entry_settlement(&id, venue_at, filled, through)
-            })
+            .bind_late_entry_settlement(sql_deadline(), id, venue_at, filled, through)
             .await
             .map_err(err)?;
         if late_proof.schema != "okx.entry-late-settlement/v1"
@@ -258,9 +258,7 @@ async fn settle_inner(
                 .map_err(str::to_owned)?;
             if done.status == RiskDecisionStatus::Updated {
                 store
-                    .call(sql_deadline(), move |s| {
-                        s.acknowledge_late_entry_settlement(&late_proof)
-                    })
+                    .acknowledge_late_entry_settlement(sql_deadline(), late_proof)
                     .await
                     .map_err(err)?;
                 return Ok(EntrySettlementOutcome::LateRevisionAcknowledged);
@@ -285,21 +283,28 @@ async fn settle_inner(
     // and central RELEASE; this read-only replay grants no new capacity.
     if i.state.terminal() {
         let id = i.intent_id.clone();
-        let existing = store
-            .call(sql_deadline(), move |s| {
-                if s.operation(&format!("entry-settlement:{id}"))?.is_none() {
-                    return Ok(None);
-                }
-                if s.entry_late_pending(&id)? {
-                    return Err(okx_execution::StoreError::Invalid(
-                        "TERMINAL_ENTRY_LATE_BILL_PENDING",
-                    ));
-                }
-                s.bind_terminal_entry_settlement(&id, venue_at, filled, through)
-                    .map(Some)
-            })
+        let existing = if store
+            .operation(sql_deadline(), format!("entry-settlement:{id}"))
             .await
-            .map_err(err)?;
+            .map_err(err)?
+            .is_some()
+        {
+            if store
+                .entry_late_pending(sql_deadline(), id.clone())
+                .await
+                .map_err(err)?
+            {
+                return Err("TERMINAL_ENTRY_LATE_BILL_PENDING".into());
+            }
+            Some(
+                store
+                    .bind_terminal_entry_settlement(sql_deadline(), id, venue_at, filled, through)
+                    .await
+                    .map_err(err)?,
+            )
+        } else {
+            None
+        };
         if let Some(proof) = existing {
             if proof.plan_hash != i.plan_hash
                 || proof.venue_order_id != venue.order_id
@@ -312,9 +317,7 @@ async fn settle_inner(
     }
     let partial_id = i.intent_id.clone();
     let proof = store
-        .call(sql_deadline(), move |s| {
-            s.bind_partial_entry_settlement(&partial_id, venue_at, filled, through)
-        })
+        .bind_partial_entry_settlement(sql_deadline(), partial_id, venue_at, filled, through)
         .await
         .map_err(err)?;
     if proof.reservation_key != receipt.reservation_key
@@ -362,9 +365,7 @@ async fn settle_inner(
         if result.status == RiskDecisionStatus::Updated {
             let committed = proof.clone();
             store
-                .call(sql_deadline(), move |s| {
-                    s.acknowledge_partial_entry_settlement(&committed)
-                })
+                .acknowledge_partial_entry_settlement(sql_deadline(), committed)
                 .await
                 .map_err(err)?;
             return Ok(EntrySettlementOutcome::RevisionAcknowledged);

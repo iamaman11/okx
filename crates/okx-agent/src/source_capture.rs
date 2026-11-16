@@ -6,10 +6,9 @@ use crate::{
 };
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
-    AccountSqlStatementStat, Bill, BillOrderSource, CashFlow, EntryOrderFeeLink, Fill,
-    FinanceEntry, FundingEvent, IngestPage, NavPoint, SourceCursor, StoreError, StoreResult,
-    StrategyValuationEvidence, SwapFillSource, UsdConversionEvidence, ValuationPosition, VenueMark,
-    swap_fill_direction,
+    AccountNavSnapshot, AccountSqlStatementStat, Fill, IngestPage, SourceCursor, StoreError,
+    StoreResult, StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition, VenueMark,
+    build_account_nav_page,
 };
 use okx_runtime::PrivateWsHandle;
 use rust_decimal::Decimal;
@@ -19,6 +18,8 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+#[path = "source_capture_native_nav.rs"]
+mod native_nav;
 
 // A test can stop its own capture after durable raw facts, before projection.
 // Task-local scope cannot pause another account or a background capture.
@@ -42,11 +43,11 @@ pub(crate) fn snapshot_failure_code(error: &AccountBootstrapError) -> &'static s
 fn d(s: &str) -> StoreResult<Decimal> {
     Decimal::from_str(s).map_err(|_| StoreError::Invalid("SOURCE_DECIMAL_INVALID"))
 }
-fn optional_d(s: &str) -> StoreResult<Decimal> {
-    if s.is_empty() {
-        Ok(Decimal::ZERO)
+fn source_optional_decimal(value: &str) -> StoreResult<Option<Decimal>> {
+    if value.is_empty() {
+        Ok(None)
     } else {
-        d(s)
+        d(value).map(Some)
     }
 }
 // An absent amount on a real fill or a funding bill is UNKNOWN, not a zero
@@ -58,32 +59,21 @@ fn required_d(s: &str, reason: &'static str) -> StoreResult<Decimal> {
         d(s)
     }
 }
+#[cfg(test)]
 fn bill_pnl(sub_type: &str, value: &str) -> StoreResult<Decimal> {
-    if matches!(sub_type, "173" | "174") {
-        required_d(value, "FUNDING_AMOUNT_SOURCE_UNAVAILABLE")
-    } else {
-        optional_d(value)
-    }
+    okx_execution::captured_bill_pnl(sub_type, source_optional_decimal(value)?)
 }
-// OKX bill type 7 is interest. Never infer it from an unrelated cash
-// movement or silently classify an ambiguous interest bill as a fee/PnL.
+#[cfg(test)]
 fn residual_bill_component(
     bill_type: &str,
     pnl: &str,
     fee: &str,
 ) -> StoreResult<Option<&'static str>> {
-    if bill_type == "7" {
-        // Venue absent fields may be encoded as either "" or "0".
-        // Only a *nonzero* separate fee/PnL would double-count interest.
-        if optional_d(pnl)? != Decimal::ZERO || optional_d(fee)? != Decimal::ZERO {
-            return Err(StoreError::Invalid("INTEREST_BILL_AMBIGUOUS"));
-        }
-        Ok(Some("INTEREST"))
-    } else if pnl.is_empty() && fee.is_empty() {
-        Ok(Some("UNATTRIBUTED"))
-    } else {
-        Ok(None)
-    }
+    okx_execution::captured_bill_residual_component(
+        bill_type,
+        source_optional_decimal(pnl)?,
+        source_optional_decimal(fee)?,
+    )
 }
 fn ts(s: &str) -> StoreResult<i64> {
     s.parse()
@@ -99,9 +89,9 @@ pub struct CapturePhaseTimings {
     pub history_and_ingest_ms: u64,
     pub nav_reconciliation_ms: u64,
     /// Time this NAV job waited in the existing FIFO SQL queue.
-    pub nav_sql_queue_wait_ms: u64,
+    pub nav_sql_queue_wait_ms: Option<u64>,
     /// Actual on-owner execution of this NAV job, excluding queue wait.
-    pub nav_sql_owner_ms: u64,
+    pub nav_sql_owner_ms: Option<u64>,
 }
 
 /// Returned only after the full financial capture succeeds.
@@ -110,14 +100,8 @@ pub struct CaptureCompleted {
     pub phases: CapturePhaseTimings,
 }
 
-struct CaptureCursors {
-    spot: Option<SourceCursor>,
-    margin: Option<SourceCursor>,
-    swap: Option<SourceCursor>,
-    futures: Option<SourceCursor>,
-    options: Option<SourceCursor>,
-    bills: Option<SourceCursor>,
-}
+#[cfg(test)]
+use okx_execution::AccountSourceCursors as CaptureCursors;
 
 /// Preserve the source partition and its own durable cursor as one argument.
 struct FillHistorySource {
@@ -384,20 +368,9 @@ pub(crate) async fn capture_account_sources_traced(
         async {
             execution
                 .store
-                .call(deadline(), |s| {
-                    Ok((
-                        s.meta().initialized_at,
-                        CaptureCursors {
-                            spot: s.cursor("fills", "SPOT")?,
-                            margin: s.cursor("fills", "MARGIN")?,
-                            swap: s.cursor("fills", "SWAP")?,
-                            futures: s.cursor("fills", "FUTURES")?,
-                            options: s.cursor("fills", "OPTION")?,
-                            bills: s.cursor("bills", "account")?,
-                        },
-                    ))
-                })
+                .source_capture_state(deadline())
                 .await
+                .map(|state| (state.initialized_at, state.cursors))
                 .map_err(AgentError::from)
         },
     );
@@ -590,183 +563,172 @@ pub(crate) async fn capture_account_sources_traced(
     let nav_started = Instant::now();
     let nav_trace = trace.clone();
     let owner_trace = trace;
-    let ((), nav_sql_timing) = execution
-        .store
-        .call_with_timing_observed(
-            deadline(),
-            move |s| {
-                if complete {
-                    measured_nav_phase(&nav_trace, NavPhase::FillProjection, || {
-                        s.project_pending_fills_observed(1000, |stat| {
-                            record_statement(&nav_trace, stat);
+    let nav_sql_timing = if let Some((owner, account)) = execution.store.native_scope() {
+        native_nav::reconcile(
+            owner,
+            account,
+            AccountNavSnapshot {
+                as_of: now,
+                generation,
+                source_version: version,
+                source_ref: source,
+                equity_usd: usd_equity,
+                balances: balances
+                    .into_iter()
+                    .map(|balance| Ok((balance.currency, d(&balance.equity)?)))
+                    .collect::<StoreResult<Vec<_>>>()?,
+                complete,
+            },
+            valuation_positions,
+            fx,
+            &nav_trace,
+        )
+        .await?;
+        None
+    } else {
+        let ((), timing) = execution
+            .store
+            .call_with_timing_observed(
+                deadline(),
+                move |s| {
+                    if complete {
+                        measured_nav_phase(&nav_trace, NavPhase::FillProjection, || {
+                            s.project_pending_fills_observed(1000, |stat| {
+                                record_statement(&nav_trace, stat);
+                            })
+                        })?;
+                        measured_nav_phase(&nav_trace, NavPhase::FundingAttribution, || {
+                            s.attribute_pending_funding(&fx, 100)
+                        })?;
+                        measured_nav_phase(&nav_trace, NavPhase::StopResolution, || {
+                            s.resolve_stop("usd-conversion-unavailable", &fx.source_digest)
+                        })?;
+                    }
+                    let flows = measured_nav_phase(&nav_trace, NavPhase::CashFlows, || {
+                        s.cash_flow_totals_observed(|stat| record_statement(&nav_trace, stat))
+                    })?;
+                    let page = measured_nav_phase(&nav_trace, NavPhase::AccountNavBuild, || {
+                        let input = AccountNavSnapshot {
+                            as_of: now,
+                            generation,
+                            source_version: version.clone(),
+                            source_ref: source.clone(),
+                            equity_usd: usd_equity,
+                            balances: balances
+                                .into_iter()
+                                .map(|balance| Ok((balance.currency, d(&balance.equity)?)))
+                                .collect::<StoreResult<Vec<_>>>()?,
+                            complete,
+                        };
+                        build_account_nav_page(
+                            &input,
+                            &flows,
+                            s.opening_equity_usd()?,
+                            s.usd_component_total("EXTERNAL_FLOW_USD")?,
+                        )
+                    })?;
+                    measured_nav_phase(&nav_trace, NavPhase::AccountNavCommit, || {
+                        s.ingest_page_observed(&page, |timing| {
+                            if let Some((store, id)) = nav_trace.as_ref() {
+                                store.transaction_finished(
+                                    *id,
+                                    timing.begin_us,
+                                    timing.body_us,
+                                    timing.commit_us,
+                                    timing.commit_succeeded,
+                                );
+                            }
                         })
                     })?;
-                    measured_nav_phase(&nav_trace, NavPhase::FundingAttribution, || {
-                        s.attribute_pending_funding(&fx, 100)
-                    })?;
-                    measured_nav_phase(&nav_trace, NavPhase::StopResolution, || {
-                        s.resolve_stop("usd-conversion-unavailable", &fx.source_digest)
-                    })?;
-                }
-                let flows = measured_nav_phase(&nav_trace, NavPhase::CashFlows, || {
-                    s.cash_flow_totals_observed(|stat| record_statement(&nav_trace, stat))
-                })?;
-                let page = measured_nav_phase(&nav_trace, NavPhase::AccountNavBuild, || {
-                    let mut page = IngestPage::default();
-                    let external_usd = s.usd_component_total("EXTERNAL_FLOW_USD")?;
-                    let account_pnl = usd_equity
-                        .checked_sub(s.opening_equity_usd()?)
-                        .and_then(|v| v.checked_sub(external_usd))
-                        .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-                    page.nav.push(NavPoint {
-                        scope_id: "account".into(),
-                        time: now,
-                        source_version: version.clone(),
-                        equity: usd_equity,
-                        pnl: account_pnl,
-                        flows: external_usd,
-                        currency: "USD".into(),
-                        coverage: if complete { "COMPLETE" } else { "PARTIAL" }.into(),
-                        mark_source: source.clone(),
-                    });
-                    for balance in balances {
-                        let currency = balance.currency;
-                        let equity = d(&balance.equity)?;
-                        let opening = *flows
-                            .get(&(currency.clone(), "OPENING".into()))
-                            .unwrap_or(&Decimal::ZERO);
-                        let external = flows
-                            .iter()
-                            .filter(|((c, k), _)| c == &currency && k != "OPENING")
-                            .try_fold(Decimal::ZERO, |a, (_, v)| {
-                                a.checked_add(*v)
-                                    .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))
-                            })?;
-                        let pnl = equity
-                            .checked_sub(opening)
-                            .and_then(|v| v.checked_sub(external))
-                            .ok_or(StoreError::Invalid("MONEY_OVERFLOW"))?;
-                        page.nav.push(NavPoint {
-                            scope_id: format!("account:{currency}"),
-                            time: now,
-                            source_version: version.clone(),
-                            equity,
-                            pnl,
-                            flows: external,
-                            currency,
-                            coverage: if complete { "COMPLETE" } else { "PARTIAL" }.into(),
-                            mark_source: source.clone(),
-                        });
-                    }
-                    page.cursor = Some(SourceCursor {
-                        source: "account_snapshot".into(),
+                    // One AccountStore, one canonical NAV owner. Strategy failures
+                    // are recorded in the existing coverage cursor; manual trading
+                    // does not inherit a missing standalone strategy NAV.
+                    let strategy_cursor = SourceCursor {
+                        source: "strategy_valuation".into(),
                         stream_partition: "account".into(),
                         cursor: String::new(),
                         watermark: now,
                         generation,
-                        coverage_gaps: if complete {
-                            String::new()
-                        } else {
-                            "FINANCIAL_BACKFILL_PENDING".into()
-                        },
-                    });
-                    Ok(page)
-                })?;
-                measured_nav_phase(&nav_trace, NavPhase::AccountNavCommit, || {
-                    s.ingest_page_observed(&page, |timing| {
-                        if let Some((store, id)) = nav_trace.as_ref() {
-                            store.transaction_finished(
-                                *id,
-                                timing.begin_us,
-                                timing.body_us,
-                                timing.commit_us,
-                                timing.commit_succeeded,
-                            );
-                        }
-                    })
-                })?;
-                // One AccountStore, one canonical NAV owner. Strategy failures
-                // are recorded in the existing coverage cursor; manual trading
-                // does not inherit a missing standalone strategy NAV.
-                let strategy_cursor = SourceCursor {
-                    source: "strategy_valuation".into(),
-                    stream_partition: "account".into(),
-                    cursor: String::new(),
-                    watermark: now,
-                    generation,
-                    coverage_gaps: String::new(),
-                };
-                let mut strategy_cursor_committed = false;
-                let mut no_strategy_capital = false;
-                let strategy_result = if !complete {
-                    Err(StoreError::Invalid("FINANCIAL_BACKFILL_PENDING"))
-                } else {
-                    match measured_nav_phase(&nav_trace, NavPhase::Capital, || s.capital_state(now))
-                    {
-                        Ok(capital) if capital.strategy_principal_usd.is_empty() => {
-                            no_strategy_capital = true;
-                            Ok(())
-                        }
-                        Ok(_) => valuation_positions.and_then(|venue_positions| {
-                            measured_nav_phase(&nav_trace, NavPhase::StrategyValuation, || {
-                                s.commit_reconciled_strategy_nav_with_cursor(
-                                    &StrategyValuationEvidence {
-                                        account_key: s.meta().account_key.clone(),
-                                        account_nav_source: source.clone(),
-                                        as_of: now,
-                                        conversion: fx.clone(),
-                                        venue_positions,
-                                    },
-                                    &strategy_cursor,
-                                )
-                            })?;
-                            strategy_cursor_committed = true;
-                            Ok(())
-                        }),
-                        Err(e) => Err(e),
-                    }
-                };
-                let gap = match strategy_result {
-                    Ok(()) => String::new(),
-                    Err(StoreError::Invalid(reason)) => reason.into(),
-                    Err(e) => return Err(e),
-                };
-                // On success strategy NAV and its cursor are already atomic.
-                // On incomplete evidence record only the actual coverage gap.
-                if !strategy_cursor_committed {
-                    let previous = if no_strategy_capital && gap.is_empty() {
-                        measured_nav_phase(&nav_trace, NavPhase::CursorRead, || {
-                            s.cursor("strategy_valuation", "account")
-                        })?
-                    } else {
-                        None
+                        coverage_gaps: String::new(),
                     };
-                    if strategy_cursor_refresh_needed(
-                        no_strategy_capital,
-                        &gap,
-                        previous.as_ref(),
-                        generation,
-                    ) {
-                        measured_nav_phase(&nav_trace, NavPhase::CursorCommit, || {
-                            s.ingest_page(&IngestPage {
-                                cursor: Some(SourceCursor {
-                                    coverage_gaps: gap,
-                                    ..strategy_cursor
-                                }),
-                                ..Default::default()
-                            })
-                        })?;
+                    let mut strategy_cursor_committed = false;
+                    let mut no_strategy_capital = false;
+                    let strategy_result = if !complete {
+                        Err(StoreError::Invalid("FINANCIAL_BACKFILL_PENDING"))
+                    } else {
+                        match measured_nav_phase(&nav_trace, NavPhase::Capital, || {
+                            s.capital_state(now)
+                        }) {
+                            Ok(capital) if capital.strategy_principal_usd.is_empty() => {
+                                no_strategy_capital = true;
+                                Ok(())
+                            }
+                            Ok(_) => valuation_positions.and_then(|venue_positions| {
+                                measured_nav_phase(
+                                    &nav_trace,
+                                    NavPhase::StrategyValuation,
+                                    || {
+                                        s.commit_reconciled_strategy_nav_with_cursor(
+                                            &StrategyValuationEvidence {
+                                                account_key: s.meta().account_key.clone(),
+                                                account_nav_source: source.clone(),
+                                                as_of: now,
+                                                conversion: fx.clone(),
+                                                venue_positions,
+                                            },
+                                            &strategy_cursor,
+                                        )
+                                    },
+                                )?;
+                                strategy_cursor_committed = true;
+                                Ok(())
+                            }),
+                            Err(e) => Err(e),
+                        }
+                    };
+                    let gap = match strategy_result {
+                        Ok(()) => String::new(),
+                        Err(StoreError::Invalid(reason)) => reason.into(),
+                        Err(e) => return Err(e),
+                    };
+                    // On success strategy NAV and its cursor are already atomic.
+                    // On incomplete evidence record only the actual coverage gap.
+                    if !strategy_cursor_committed {
+                        let previous = if no_strategy_capital && gap.is_empty() {
+                            measured_nav_phase(&nav_trace, NavPhase::CursorRead, || {
+                                s.cursor("strategy_valuation", "account")
+                            })?
+                        } else {
+                            None
+                        };
+                        if strategy_cursor_refresh_needed(
+                            no_strategy_capital,
+                            &gap,
+                            previous.as_ref(),
+                            generation,
+                        ) {
+                            measured_nav_phase(&nav_trace, NavPhase::CursorCommit, || {
+                                s.ingest_page(&IngestPage {
+                                    cursor: Some(SourceCursor {
+                                        coverage_gaps: gap,
+                                        ..strategy_cursor
+                                    }),
+                                    ..Default::default()
+                                })
+                            })?;
+                        }
                     }
-                }
-                Ok(())
-            },
-            move |timing, _ok| {
-                if let Some((store, id)) = owner_trace.as_ref() {
-                    store.owner_finished(*id, timing.queue_wait_ms, timing.sql_owner_ms);
-                }
-            },
-        )
-        .await?;
+                    Ok(())
+                },
+                move |timing, _ok| {
+                    if let Some((store, id)) = owner_trace.as_ref() {
+                        store.owner_finished(*id, timing.queue_wait_ms, timing.sql_owner_ms);
+                    }
+                },
+            )
+            .await?;
+        Some(timing)
+    };
     let nav_reconciliation_ms = phase_elapsed_ms(nav_started);
     if !complete {
         return Err(invalid("FINANCIAL_BACKFILL_PENDING"));
@@ -777,8 +739,8 @@ pub(crate) async fn capture_account_sources_traced(
             observer_and_cursors_ms,
             history_and_ingest_ms,
             nav_reconciliation_ms,
-            nav_sql_queue_wait_ms: nav_sql_timing.queue_wait_ms,
-            nav_sql_owner_ms: nav_sql_timing.sql_owner_ms,
+            nav_sql_queue_wait_ms: nav_sql_timing.as_ref().map(|timing| timing.queue_wait_ms),
+            nav_sql_owner_ms: nav_sql_timing.as_ref().map(|timing| timing.sql_owner_ms),
         },
     })
 }
@@ -834,80 +796,52 @@ async fn capture_fills(
         rows.last().map(|r| r.bill_id.as_str()),
         complete,
     )?;
+    let mut parsed = Vec::with_capacity(rows.len());
+    for r in rows {
+        let time = ts(if r.fill_time_ms.is_empty() {
+            &r.timestamp_ms
+        } else {
+            &r.fill_time_ms
+        })?;
+        if time < t0 {
+            continue;
+        }
+        let fee = required_d(&r.fee, "FILL_FEE_SOURCE_UNAVAILABLE")?;
+        if r.fee_currency.is_empty() {
+            return Err(StoreError::Invalid("FILL_FEE_CURRENCY_UNAVAILABLE").into());
+        }
+        parsed.push(okx_execution::CapturedFill {
+            client_order_id: r.client_order_id,
+            bill_id: r.bill_id,
+            instrument_type: r.instrument_type,
+            sub_type: r.sub_type,
+            position_side: r.position_side,
+            fill: Fill {
+                fill_id: format!("{}:{}:{}", r.instrument_id, r.trade_id, r.order_id),
+                instrument_id: r.instrument_id,
+                trade_id: r.trade_id,
+                exchange_order_id: r.order_id,
+                intent_id: None,
+                time,
+                qty: d(&r.fill_size)?,
+                price: d(&r.fill_price)?,
+                fee,
+                currency: r.fee_currency,
+                side: r.side,
+            },
+        });
+    }
     execution
         .store
-        .call(deadline(), move |s| {
-            let mut page = IngestPage {
-                cursor: Some(next),
-                ..Default::default()
-            };
-            for r in rows {
-                let time = ts(if r.fill_time_ms.is_empty() {
-                    &r.timestamp_ms
-                } else {
-                    &r.fill_time_ms
-                })?;
-                if time < t0 {
-                    continue;
-                }
-                let owner = s.by_client_order_id(&r.client_order_id)?;
-                let instance = owner.as_ref().map(|i| i.plan.strategy_instance.clone());
-                let fee = required_d(&r.fee, "FILL_FEE_SOURCE_UNAVAILABLE")?;
-                let key = if r.bill_id.is_empty() {
-                    format!("fill:{}:{}:{}", r.instrument_id, r.trade_id, r.order_id)
-                } else {
-                    format!("bill:{}", r.bill_id)
-                };
-                let id = format!("{}:{}:{}", r.instrument_id, r.trade_id, r.order_id);
-                // The raw fill retains the fee, but without billId there
-                // is no final canonical fee event for a SWAP yet.
-                if fee != Decimal::ZERO && !(partition == "SWAP" && r.bill_id.is_empty()) {
-                    page.finance.push(FinanceEntry {
-                        entry_id: format!("{key}:fee"),
-                        economic_event_key: key,
-                        component: "FEE".into(),
-                        allocation_leg: "account".into(),
-                        amount: fee,
-                        currency: r.fee_currency.clone(),
-                        instance_id: instance,
-                        source_ref: format!("fill:{id}"),
-                        time,
-                        reverses_entry_id: None,
-                    });
-                }
-                if partition == "SWAP" {
-                    if r.instrument_type != "SWAP" {
-                        return Err(StoreError::Invalid("SWAP_FILL_SOURCE_TYPE_MISMATCH"));
-                    }
-                    let direction = swap_fill_direction(&r.sub_type, &r.side, &r.position_side)?;
-                    page.swap_fill_sources.push(SwapFillSource {
-                        fill_id: id.clone(),
-                        bill_id: r.bill_id.clone(),
-                        sub_type: r.sub_type.clone(),
-                        position_side: r.position_side.clone(),
-                        direction: direction.into(),
-                    });
-                }
-                page.fills.push(Fill {
-                    fill_id: id,
-                    instrument_id: r.instrument_id,
-                    trade_id: r.trade_id,
-                    exchange_order_id: r.order_id,
-                    intent_id: owner.map(|i| i.intent_id),
-                    time,
-                    qty: d(&r.fill_size)?,
-                    price: d(&r.fill_price)?,
-                    fee,
-                    currency: if r.fee_currency.is_empty() {
-                        return Err(StoreError::Invalid("FILL_FEE_CURRENCY_UNAVAILABLE"));
-                    } else {
-                        r.fee_currency
-                    },
-                    side: r.side,
-                });
-            }
-            s.ingest_page_with_usd(&page, &fx)
-        })
+        .ingest_captured_fills(
+            deadline(),
+            okx_execution::CapturedFillPage {
+                partition: partition.into(),
+                cursor: next,
+                rows: parsed,
+            },
+            fx,
+        )
         .await?;
     Ok(complete)
 }
@@ -952,136 +886,37 @@ async fn capture_bills(
         rows.last().map(|r| r.bill_id.as_str()),
         complete,
     )?;
+    let mut parsed = Vec::with_capacity(rows.len());
+    for row in rows {
+        let time = ts(&row.timestamp_ms)?;
+        if time < t0 {
+            continue;
+        }
+        parsed.push(okx_execution::CapturedBill {
+            bill_id: row.bill_id,
+            client_order_id: row.client_order_id,
+            order_id: row.order_id,
+            instrument_id: row.instrument_id,
+            trade_id: row.trade_id,
+            bill_type: row.bill_type,
+            bill_sub_type: row.bill_sub_type,
+            currency: row.ccy,
+            time,
+            fee: source_optional_decimal(&row.fee)?,
+            pnl: source_optional_decimal(&row.pnl)?,
+            balance_change: source_optional_decimal(&row.balance_change)?,
+        });
+    }
     execution
         .store
-        .call(deadline(), move |s| {
-            let mut page = IngestPage {
-                cursor: Some(next),
-                ..Default::default()
-            };
-            for b in rows {
-                let time = ts(&b.timestamp_ms)?;
-                if time < t0 {
-                    continue;
-                }
-                let key = format!("bill:{}", b.bill_id);
-                if !b.order_id.is_empty() && b.order_id != "0" && !b.instrument_id.is_empty() {
-                    page.bill_order_sources.push(BillOrderSource {
-                        bill_id: b.bill_id.clone(),
-                        instrument_id: b.instrument_id.clone(),
-                        exchange_order_id: b.order_id.clone(),
-                        trade_id: b.trade_id.clone(),
-                    });
-                }
-                let owner = s
-                    .by_client_order_id(&b.client_order_id)?
-                    .or(s.by_exchange_order_id(&b.order_id)?);
-                let fee = optional_d(&b.fee)?;
-                if fee < Decimal::ZERO
-                    && let Some(i) = owner.as_ref().filter(|i| i.risk_increase)
-                    && i.exchange_order_id.as_deref() == Some(b.order_id.as_str())
-                    && i.instrument_id == b.instrument_id
-                {
-                    if b.ccy != "USDT" {
-                        return Err(StoreError::Invalid("ENTRY_FEE_CURRENCY_UNPROVEN"));
-                    }
-                    page.entry_order_fee_links.push(EntryOrderFeeLink {
-                        bill_id: b.bill_id.clone(),
-                        intent_id: i.intent_id.clone(),
-                        exchange_order_id: b.order_id.clone(),
-                        instrument_id: b.instrument_id.clone(),
-                        bill_at: time,
-                        fee_usdt: fee,
-                    });
-                }
-                let instance = owner.map(|i| i.plan.strategy_instance);
-                let amount = optional_d(&b.balance_change)?;
-                let residual_component = residual_bill_component(&b.bill_type, &b.pnl, &b.fee)?;
-                page.bills.push(Bill {
-                    bill_id: b.bill_id.clone(),
-                    kind: format!("{}:{}", b.bill_type, b.bill_sub_type),
-                    time,
-                    amount,
-                    currency: b.ccy.clone(),
-                    economic_event_key: key.clone(),
-                });
-                let transfer =
-                    b.bill_type == "1" && matches!(b.bill_sub_type.as_str(), "11" | "12");
-                if transfer {
-                    if !b.instrument_id.is_empty() || !b.order_id.is_empty() && b.order_id != "0" {
-                        return Err(StoreError::Invalid("CASH_FLOW_LINKAGE_INVALID"));
-                    }
-                    page.cash_flows.push(CashFlow {
-                        event_id: key.clone(),
-                        kind: if amount >= Decimal::ZERO {
-                            "TRANSFER_IN"
-                        } else {
-                            "TRANSFER_OUT"
-                        }
-                        .into(),
-                        currency: b.ccy.clone(),
-                        amount,
-                        time,
-                        source_ref: key.clone(),
-                    });
-                }
-                for (component, value) in [
-                    ("FEE", optional_d(&b.fee)?),
-                    (
-                        if matches!(b.bill_sub_type.as_str(), "173" | "174") {
-                            "FUNDING"
-                        } else {
-                            "REALIZED_PNL"
-                        },
-                        bill_pnl(&b.bill_sub_type, &b.pnl)?,
-                    ),
-                ] {
-                    if value == Decimal::ZERO {
-                        continue;
-                    }
-                    if component == "FUNDING" {
-                        page.funding_events.push(FundingEvent {
-                            event_id: b.bill_id.clone(),
-                            instrument_id: b.instrument_id.clone(),
-                            time,
-                            amount: value,
-                            currency: b.ccy.clone(),
-                        });
-                        continue;
-                    }
-                    page.finance.push(FinanceEntry {
-                        entry_id: format!("{key}:{component}"),
-                        economic_event_key: key.clone(),
-                        component: component.into(),
-                        allocation_leg: "account".into(),
-                        amount: value,
-                        currency: b.ccy.clone(),
-                        instance_id: instance.clone(),
-                        source_ref: key.clone(),
-                        time,
-                        reverses_entry_id: None,
-                    });
-                }
-                if !transfer
-                    && amount != Decimal::ZERO
-                    && let Some(component) = residual_component
-                {
-                    page.finance.push(FinanceEntry {
-                        entry_id: format!("{key}:unattributed"),
-                        economic_event_key: key.clone(),
-                        component: component.into(),
-                        allocation_leg: "account".into(),
-                        amount,
-                        currency: b.ccy,
-                        instance_id: None,
-                        source_ref: key,
-                        time,
-                        reverses_entry_id: None,
-                    });
-                }
-            }
-            s.ingest_page_with_usd(&page, &fx)
-        })
+        .ingest_captured_bills(
+            deadline(),
+            okx_execution::CapturedBillPage {
+                cursor: next,
+                rows: parsed,
+            },
+            fx,
+        )
         .await?;
     Ok(complete)
 }

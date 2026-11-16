@@ -3,6 +3,8 @@
 
 import argparse
 import json
+from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -14,7 +16,7 @@ ALLOWED = {
     "okx-kernel": set(),
     "okx-analysis": {"okx-kernel"},
     "okx-research": {"okx-analysis"},
-    "okx-execution": {"okx-api", "okx-analysis", "okx-observation"},
+    "okx-execution": {"okx-api", "okx-analysis", "okx-kernel", "okx-observation"},
     "okx-protocol": set(),
     "okx-github": set(),
     "okx-cli": {"okx-api"},
@@ -33,6 +35,33 @@ ALLOWED = {
     },
 }
 
+
+# Scoped supplemental source guard: the Cargo DAG cannot see std::fs/network/
+# wall-clock use. This does not replace Rust visibility/compile-fail checks.
+RISK_PURE_FORBIDDEN = re.compile(
+    r"\b(?:tokio|rusqlite|std::(?:fs|net|env|thread|time)|SystemTime|Instant|unsafe)\b"
+)
+
+
+def pure_risk_source_violations(sources: dict[str, str]) -> list[str]:
+    errors = []
+    for path, source in sorted(sources.items()):
+        for lineno, line in enumerate(source.splitlines(), 1):
+            # Comments alone do not create a runtime dependency.
+            code = line.split("//", 1)[0].strip()
+            if code and RISK_PURE_FORBIDDEN.search(code):
+                errors.append(f"pure RiskBook forbidden symbol: {path}:{lineno}")
+    return errors
+
+
+def load_risk_sources() -> dict[str, str]:
+    folder = Path(__file__).resolve().parents[1] / "crates/okx-kernel/src/risk"
+    if not folder.is_dir():
+        return {"missing": "use std::fs;"}
+    return {
+        str(path.relative_to(folder)): path.read_text(encoding="utf-8")
+        for path in folder.glob("*.rs")
+    }
 
 def validate(graph: dict[str, set[str]]) -> list[str]:
     errors: list[str] = []
@@ -149,6 +178,24 @@ def self_test() -> int:
         print("self-test failed: a removed dependency was rejected", file=sys.stderr)
         return 1
 
+    reverse = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
+    reverse["okx-kernel"].add("okx-execution")
+    if "forbidden local dependency: okx-kernel -> okx-execution" not in validate(reverse):
+        print("self-test failed: reverse risk domain dependency passed", file=sys.stderr)
+        return 1
+
+    research_escape = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
+    research_escape["okx-research"].add("okx-execution")
+    if "forbidden local dependency: okx-research -> okx-execution" not in validate(research_escape):
+        print("self-test failed: research gained write capability", file=sys.stderr)
+        return 1
+
+    pure_source = {"money.rs": "use std::fmt;\nfn one() {}"}
+    dirty_source = {"money.rs": "use std::fs;\nfn bad(){std::fs::write(\"x\", b\"x\");}"}
+    if pure_risk_source_violations(pure_source) or not pure_risk_source_violations(dirty_source):
+        print("self-test failed: pure RiskBook source guard", file=sys.stderr)
+        return 1
+
     forbidden = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
     forbidden["okx-observation"].add("okx-analysis")
     errors = validate(forbidden)
@@ -202,6 +249,7 @@ def main() -> int:
     if args.k10_purity:
         graph, names = load_complete_workspace_graph()
         errors = pure_dependency_violations(graph, package_names=names)
+        errors.extend(pure_risk_source_violations(load_risk_sources()))
         if errors:
             for error in errors:
                 print(error, file=sys.stderr)
@@ -210,6 +258,7 @@ def main() -> int:
         return 0
 
     errors = validate(load_graph())
+    errors.extend(pure_risk_source_violations(load_risk_sources()))
     graph, names = load_complete_workspace_graph()
     errors.extend(pure_dependency_violations(graph, K10_ENFORCED_PURE, names))
     if errors:

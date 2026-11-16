@@ -1,6 +1,7 @@
 //! One bounded blocking worker per account. No SQLite calls on the async reactor.
 use crate::{
     AccountMeta, AccountStore, OpeningSnapshot, StoreError, StoreResult, WalMaintenanceObservation,
+    finance_owner_gate::{self, AuthorityModeError, AuthorityModeLease},
 };
 use std::{
     collections::VecDeque,
@@ -163,6 +164,7 @@ struct PendingBackup {
 fn finish_owner(
     store: AccountStore,
     pending_backup: Option<PendingBackup>,
+    mode_lease: Option<AuthorityModeLease>,
     terminated: watch::Sender<bool>,
 ) {
     if let Some(backup) = pending_backup {
@@ -179,6 +181,9 @@ fn finish_owner(
     // Completion means owned resources closed, not a successful backup. A caller
     // may time out waiting, but must then keep shutdown explicitly unproven.
     drop(store);
+    // Completion witnesses close the old SQL writer AND mode lease before
+    // allowing the new installation-wide owner to acquire exclusive access.
+    drop(mode_lease);
     let _ = terminated.send(true);
 }
 #[derive(Clone)]
@@ -191,22 +196,84 @@ impl std::fmt::Debug for AccountStoreHandle {
     }
 }
 impl AccountStoreHandle {
+    pub async fn assign_capital(
+        &self,
+        deadline: Instant,
+        command: crate::CapitalAssignmentCommand,
+    ) -> StoreResult<crate::CapitalAssignmentResult> {
+        self.call(deadline, move |s| s.assign_capital(&command))
+            .await
+    }
+    pub async fn finance_report(
+        &self,
+        deadline: Instant,
+        query: crate::FinanceReportQuery,
+    ) -> StoreResult<crate::FinanceReportSnapshot> {
+        self.call(deadline, move |store| store.finance_report(&query))
+            .await
+    }
+
+    pub async fn ingest_captured_bills(
+        &self,
+        deadline: Instant,
+        input: crate::CapturedBillPage,
+        conversion: crate::UsdConversionEvidence,
+    ) -> StoreResult<()> {
+        self.call(deadline, move |store| {
+            store.ingest_captured_bills(&input, &conversion)
+        })
+        .await
+    }
+
+    /// Parsed source facts are bound and written by this same SQL owner.
+    pub async fn ingest_captured_fills(
+        &self,
+        deadline: Instant,
+        input: crate::CapturedFillPage,
+        conversion: crate::UsdConversionEvidence,
+    ) -> StoreResult<()> {
+        self.call(deadline, move |store| {
+            store.ingest_captured_fills(&input, &conversion)
+        })
+        .await
+    }
+
+    /// Typed coherent source frontier. Raw SQL stays with the account owner.
+    pub async fn source_capture_state(
+        &self,
+        deadline: Instant,
+    ) -> StoreResult<crate::AccountSourceState> {
+        self.call(deadline, |store| store.source_capture_state())
+            .await
+    }
+
     pub async fn open_existing(
         path: PathBuf,
         account_key: String,
         installation_id: String,
     ) -> StoreResult<Self> {
-        Self::start(move || AccountStore::open_existing(path, &account_key, &installation_id)).await
+        let legacy_path = path.clone();
+        Self::start(
+            move || AccountStore::open_existing(path, &account_key, &installation_id),
+            legacy_path,
+        )
+        .await
     }
     pub async fn initialize_flat(
         path: PathBuf,
         meta: AccountMeta,
         snapshot: OpeningSnapshot,
     ) -> StoreResult<Self> {
-        Self::start(move || AccountStore::initialize_or_inspect_exact(path, meta, &snapshot)).await
+        let legacy_path = path.clone();
+        Self::start(
+            move || AccountStore::initialize_or_inspect_exact(path, meta, &snapshot),
+            legacy_path,
+        )
+        .await
     }
     async fn start(
         factory: impl FnOnce() -> StoreResult<AccountStore> + Send + 'static,
+        legacy_path: PathBuf,
     ) -> StoreResult<Self> {
         let (sender, receiver) = sync_channel::<Job>(128);
         let timings = Arc::new(SqlTimingCounters::default());
@@ -219,6 +286,25 @@ impl AccountStoreHandle {
         std::thread::Builder::new()
             .name("okx-account-sql".into())
             .spawn(move || {
+                // Old account/campaign owners may share a mode lease; the
+                // installation's unified finance owner requires EXCLUSIVE.
+                // A staged/active finance.sqlite prohibits any old opener.
+                let mode_lease = match finance_owner_gate::legacy_mode_for(&legacy_path) {
+                    Ok(lease) => lease,
+                    Err(error) => {
+                        let reason = match error {
+                            AuthorityModeError::Io(error) => StoreError::Io(error),
+                            AuthorityModeError::Busy => {
+                                StoreError::Invalid("FINANCE_INSTALLATION_WRITER_BUSY")
+                            }
+                            AuthorityModeError::FinancePresent => {
+                                StoreError::Invalid("LEGACY_FINANCE_OWNER_DISABLED")
+                            }
+                        };
+                        let _ = ready_tx.send(Err(reason));
+                        return;
+                    }
+                };
                 let mut store = match factory() {
                     Ok(s) => {
                         let _ = ready_tx.send(Ok(()));
@@ -332,7 +418,7 @@ impl AccountStoreHandle {
                         }
                     }
                 }
-                finish_owner(store, pending_backup, terminated_tx);
+                finish_owner(store, pending_backup, mode_lease, terminated_tx);
             })?;
         ready_rx
             .await
@@ -499,9 +585,103 @@ impl AccountStoreHandle {
     }
 }
 
+mod unified;
+pub use crate::risk::{NativeOpeningAccount, NativeOpeningSource};
+pub use unified::{
+    NativeCampaignAccountPolicy, NativeCampaignPolicy, NativeCampaignPolicyReceipt,
+    NativeCampaignStrategyPolicy, NativeIntentDiagnosticSnapshot, NativePostDecision,
+    NativePostRequest, NativeRecoveryProof, NativeReserveDecision, NativeReserveRequest,
+    ReportedOpeningCensus, ReportedOpeningReceipt, ReportedRiskCensus,
+    StrategyDecisionClaimCommand, StrategyMutationCommand, UnifiedFinanceAccountPolicyReadback,
+    UnifiedFinanceAccountReadback, UnifiedFinanceBoundSettlement,
+    UnifiedFinanceBoundSettlementReceipt, UnifiedFinanceBoundUnsent,
+    UnifiedFinanceBoundUnsentReceipt, UnifiedFinanceCampaignSummary, UnifiedFinanceHandle,
+    UnifiedFinanceInventory, UnifiedFinancePolicy, UnifiedFinancePolicyAccount,
+    UnifiedFinanceReservationReadback,
+};
+#[cfg(test)]
+pub(crate) use unified::{
+    UnifiedFinanceWrite, UnifiedFinanceWriteReceipt, apply_original_unified_finance_transaction,
+    install_reported_opening_sql, native_reservation_receipt_sql, original_bound_entry_source_sql,
+    original_bound_unsent_source_sql,
+};
+#[cfg(test)]
+pub(crate) use unified::{test_bind_native_census, test_reserve_reported_sql};
+
 #[cfg(test)]
 mod diagnostic_fault_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn real_account_worker_holds_shared_installation_mode_until_close() {
+        use rust_decimal::Decimal;
+        static NEXT_MODE: AtomicU64 = AtomicU64::new(1);
+        let nonce = NEXT_MODE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "okx-510-account-mode-{}-{}",
+            std::process::id(),
+            nonce,
+        ));
+        let path = root
+            .join("accounts")
+            .join("a".repeat(64))
+            .join("account.sqlite");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let meta = AccountMeta {
+            initialize_operation_id: "mode-test-connect".into(),
+            release_id: "test".into(),
+            account_key: format!("okx:real:{}", "a".repeat(64)),
+            installation_id: "installation-test".into(),
+            initialized_at: 1,
+            opening_source: "verified-test-snapshot".into(),
+        };
+        let opening = OpeningSnapshot {
+            opening_equity_usd: Decimal::from(100),
+            source_ref: meta.opening_source.clone(),
+            observed_at: 1,
+            positions: 0,
+            orders: 0,
+            conditional_orders: 0,
+            liabilities: Decimal::ZERO,
+            balances: vec![("USDT".into(), Decimal::from(100))],
+        };
+        let owner = AccountStoreHandle::initialize_flat(path.clone(), meta.clone(), opening)
+            .await
+            .unwrap();
+        assert!(matches!(
+            finance_owner_gate::unified_mode_for(&root),
+            Err(AuthorityModeError::Busy)
+        ));
+        let mut terminated = owner.termination_signal();
+        drop(owner);
+        // Completion is a native observable worker close, not a sleep.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !*terminated.borrow() {
+                terminated.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let unified = finance_owner_gate::unified_mode_for(&root).unwrap();
+        assert!(matches!(
+            AccountStoreHandle::open_existing(
+                path.clone(),
+                meta.account_key.clone(),
+                meta.installation_id.clone(),
+            )
+            .await,
+            Err(StoreError::Invalid("FINANCE_INSTALLATION_WRITER_BUSY"))
+        ));
+        drop(unified);
+        // The full finance file may still be OFFLINE_NOT_AUTHORIZED: the
+        // legacy worker must NOT reopen over a staged financial import.
+        std::fs::write(root.join("finance").join("finance.sqlite"), b"offline").unwrap();
+        assert!(matches!(
+            AccountStoreHandle::open_existing(path, meta.account_key, meta.installation_id,).await,
+            Err(StoreError::Invalid("LEGACY_FINANCE_OWNER_DISABLED"))
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn failed_accepted_sql_job_still_invokes_timing_observer() {
@@ -681,6 +861,7 @@ mod shutdown_tests {
                     handle: backup,
                     started: Instant::now(),
                 }),
+                None,
                 terminated_tx,
             );
             done_tx.send(()).unwrap();

@@ -18,18 +18,19 @@ impl TradeService {
             request,
             StrategyRequest::List {} | StrategyRequest::Status { .. }
         ) {
-            let body = request.clone();
-            let result = r
-                .execution
-                .store
-                .call(deadline(), move |s| match body {
-                    StrategyRequest::Status { instance_id } => {
-                        s.strategy_status(&instance_id, now())
-                    }
-                    _ => Ok(json!({"instances":s.instances()?})),
-                })
-                .await
-                .map_err(err)?;
+            let result = match request {
+                StrategyRequest::Status { instance_id } => {
+                    let instance_id = instance_id.clone();
+                    r.execution
+                        .store
+                        .strategy_status(deadline(), instance_id, now())
+                        .await
+                        .map_err(err)?
+                }
+                _ => {
+                    json!({"instances":r.execution.store.strategy_instances(deadline()).await.map_err(err)?})
+                }
+            };
             return Ok(completed(result));
         }
 
@@ -73,25 +74,10 @@ impl TradeService {
             let result = r
                 .execution
                 .store
-                .call(deadline(), move |s| {
-                    // Immutable receipt survives snapshot outages and reruns.
-                    if let Some(prior) = s.operation(&idempotency_key)? {
-                        if prior.kind != "CAPITAL_ASSIGNMENT"
-                            || prior.request_hash != operation_hash
-                        {
-                            return Err(okx_execution::StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
-                        }
-                        let capital = s.capital_state(observed_at).ok();
-                        let coverage = capital.as_ref().map_or("PARTIAL", |v| v.coverage.as_str());
-                        return Ok(
-                            json!({"receipt":prior,"capital":capital,"capital_coverage":coverage}),
-                        );
-                    }
-                    let source = s.capital_state(observed_at)?.nav_source_ref;
-                    let authorized = okx_execution::AuthorizedCapitalAssignment {
+                .assign_capital(
+                    deadline(),
+                    okx_execution::CapitalAssignmentCommand {
                         account_key,
-                        installation_id: s.meta().installation_id.clone(),
-                        nav_source_ref: source,
                         operation_id: idempotency_key,
                         request_hash: operation_hash,
                         instance_id,
@@ -99,191 +85,202 @@ impl TradeService {
                         authority_revision: revision,
                         authority_receipt: verified_authority_receipt,
                         time: observed_at,
-                    };
-                    let receipt = s.commit_authorized_capital_assignment(&authorized)?;
-                    let capital = s.capital_state(observed_at)?;
-                    let coverage = capital.coverage.clone();
-                    Ok(json!({"receipt":receipt,"capital":capital,"capital_coverage":coverage}))
-                })
+                    },
+                )
                 .await
                 .map_err(err)?;
-            return Ok(completed(result));
+            return Ok(completed(serde_json::to_value(result).map_err(err)?));
         }
         let body = request.clone();
-        let result = r
-            .execution
-            .store
-            .call(deadline(), move |s| {
-                let operation = match &body {
-                    StrategyRequest::Create {
-                        idempotency_key, ..
-                    }
-                    | StrategyRequest::Update {
-                        idempotency_key, ..
-                    }
-                    | StrategyRequest::Start {
-                        idempotency_key, ..
-                    }
-                    | StrategyRequest::Stop {
-                        idempotency_key, ..
-                    } => idempotency_key,
-                    _ => {
-                        return Err(okx_execution::StoreError::Invalid(
-                            "STRATEGY_MUTATION_REQUIRED",
-                        ));
-                    }
-                };
-                if let Some(old) = s.operation(operation)? {
-                    if old.request_hash != request_hash {
-                        return Err(okx_execution::StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
-                    }
-                    return serde_json::from_str::<StrategyInstance>(&old.result_ref).map_err(
-                        |_| okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"),
-                    );
+        let result: okx_execution::StoreResult<StrategyInstance> = async {
+            let operation = match &body {
+                StrategyRequest::Create {
+                    idempotency_key, ..
                 }
-                let instances = s.instances()?;
-                let (operation, action, instance, expected) = match &body {
-                    StrategyRequest::Create {
-                        idempotency_key,
-                        instance_id,
-                        definition_id,
-                        version,
-                        parameters,
-                        instruments,
-                        timeframe_ms,
-                        budget_usd,
-                    } => {
-                        if !matches!(
-                            definition_id.as_str(),
-                            "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
-                        ) {
-                            return Err(okx_execution::StoreError::Invalid(
-                                "STRATEGY_DEFINITION_UNSUPPORTED",
-                            ));
-                        }
-                        let config = StrategyConfigurationV1 {
-                            parameters: StrategyParametersV1::parse(parameters).ok_or(
-                                okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
-                            )?,
-                            instruments: instruments.clone(),
-                            timeframe_ms: *timeframe_ms,
-                        };
-                        if !config.valid() || *version != 1 {
-                            return Err(okx_execution::StoreError::Invalid(
-                                "STRATEGY_CONFIGURATION_INVALID",
-                            ));
-                        }
-                        let parameters = serde_json::to_string(&config).map_err(|_| {
-                            okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
-                        })?;
-                        let instance = StrategyInstance {
-                            instance_id: instance_id.clone(),
-                            definition_id: definition_id.clone(),
-                            definition_version: version.to_string(),
-                            parameters,
-                            enabled: false,
-                            policy_revision: 1,
-                            budget: Decimal::from_str(budget_usd).map_err(|_| {
-                                okx_execution::StoreError::Invalid("INVALID_BUDGET")
-                            })?,
-                            last_decision_key: None,
-                        };
-                        (idempotency_key.clone(), "create", instance, None)
-                    }
-                    StrategyRequest::Update {
-                        idempotency_key,
-                        instance_id,
-                        expected_revision,
-                        parameters,
-                        budget_usd,
-                    } => {
-                        let mut i = instances
-                            .iter()
-                            .find(|i| &i.instance_id == instance_id)
-                            .cloned()
-                            .ok_or(okx_execution::StoreError::Invalid(
-                                "STRATEGY_INSTANCE_NOT_FOUND",
-                            ))?;
-                        let mut config: StrategyConfigurationV1 =
-                            serde_json::from_str(&i.parameters).map_err(|_| {
-                                okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT")
-                            })?;
-                        config.parameters = StrategyParametersV1::parse(parameters).ok_or(
-                            okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
-                        )?;
-                        if !config.valid() {
-                            return Err(okx_execution::StoreError::Invalid(
-                                "STRATEGY_CONFIGURATION_INVALID",
-                            ));
-                        }
-                        i.parameters = serde_json::to_string(&config).map_err(|_| {
-                            okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
-                        })?;
-                        i.budget = Decimal::from_str(budget_usd)
-                            .map_err(|_| okx_execution::StoreError::Invalid("INVALID_BUDGET"))?;
-                        i.policy_revision = (*expected_revision as i64) + 1;
-                        (
-                            idempotency_key.clone(),
-                            "update",
-                            i,
-                            Some(*expected_revision as i64),
-                        )
-                    }
-                    StrategyRequest::Start {
-                        idempotency_key,
-                        instance_id,
-                    }
-                    | StrategyRequest::Stop {
-                        idempotency_key,
-                        instance_id,
-                    } => {
-                        let mut i = instances
-                            .iter()
-                            .find(|i| &i.instance_id == instance_id)
-                            .cloned()
-                            .ok_or(okx_execution::StoreError::Invalid(
-                                "STRATEGY_INSTANCE_NOT_FOUND",
-                            ))?;
-                        let expected = i.policy_revision;
-                        i.policy_revision += 1;
-                        i.enabled = matches!(&body, StrategyRequest::Start { .. });
-                        (
-                            idempotency_key.clone(),
-                            if i.enabled { "start" } else { "stop" },
-                            i,
-                            Some(expected),
-                        )
-                    }
-                    _ => {
-                        return Err(okx_execution::StoreError::Invalid(
-                            "STRATEGY_MUTATION_REQUIRED",
-                        ));
-                    }
-                };
-                if action == "start" && !control.access_enabled() {
+                | StrategyRequest::Update {
+                    idempotency_key, ..
+                }
+                | StrategyRequest::Start {
+                    idempotency_key, ..
+                }
+                | StrategyRequest::Stop {
+                    idempotency_key, ..
+                } => idempotency_key,
+                _ => {
                     return Err(okx_execution::StoreError::Invalid(
-                        "ACCOUNT_NEW_RISK_PAUSED",
+                        "STRATEGY_MUTATION_REQUIRED",
                     ));
                 }
-                // Strategy budget is a per-decision maximum modeled loss in USD, NOT a
-                // notional allocation and NOT a central reservation. Only actual plans
-                // reserve aggregate campaign capacity through RiskBook CAS.
-                let ceiling = Decimal::from_str(&campaign_limit_usd)
-                    .map_err(|_| okx_execution::StoreError::Invalid("INVALID_CAMPAIGN_BUDGET"))?;
-                validate_strategy_risk_budget_usd(instance.budget, ceiling)?;
-                let receipt = s.mutate_instance(
-                    &operation,
-                    &request_hash,
-                    action,
-                    &instance,
-                    expected,
-                    now(),
-                )?;
-                serde_json::from_str::<StrategyInstance>(&receipt.result_ref)
-                    .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"))
-            })
-            .await
-            .map_err(err)?;
+            };
+            if let Some(old) = r
+                .execution
+                .store
+                .operation(deadline(), operation.clone())
+                .await?
+            {
+                if old.request_hash != request_hash {
+                    return Err(okx_execution::StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
+                }
+                return serde_json::from_str::<StrategyInstance>(&old.result_ref)
+                    .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"));
+            }
+            let instances = r.execution.store.strategy_instances(deadline()).await?;
+            let (operation, action, instance, expected) = match &body {
+                StrategyRequest::Create {
+                    idempotency_key,
+                    instance_id,
+                    definition_id,
+                    version,
+                    parameters,
+                    instruments,
+                    timeframe_ms,
+                    budget_usd,
+                } => {
+                    if !matches!(
+                        definition_id.as_str(),
+                        "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
+                    ) {
+                        return Err(okx_execution::StoreError::Invalid(
+                            "STRATEGY_DEFINITION_UNSUPPORTED",
+                        ));
+                    }
+                    let config = StrategyConfigurationV1 {
+                        parameters: StrategyParametersV1::parse(parameters).ok_or(
+                            okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
+                        )?,
+                        instruments: instruments.clone(),
+                        timeframe_ms: *timeframe_ms,
+                    };
+                    if !config.valid() || *version != 1 {
+                        return Err(okx_execution::StoreError::Invalid(
+                            "STRATEGY_CONFIGURATION_INVALID",
+                        ));
+                    }
+                    let parameters = serde_json::to_string(&config).map_err(|_| {
+                        okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
+                    })?;
+                    let instance = StrategyInstance {
+                        instance_id: instance_id.clone(),
+                        definition_id: definition_id.clone(),
+                        definition_version: version.to_string(),
+                        parameters,
+                        enabled: false,
+                        policy_revision: 1,
+                        budget: Decimal::from_str(budget_usd)
+                            .map_err(|_| okx_execution::StoreError::Invalid("INVALID_BUDGET"))?,
+                        last_decision_key: None,
+                    };
+                    (idempotency_key.clone(), "create", instance, None)
+                }
+                StrategyRequest::Update {
+                    idempotency_key,
+                    instance_id,
+                    expected_revision,
+                    parameters,
+                    budget_usd,
+                } => {
+                    let mut i = instances
+                        .iter()
+                        .find(|i| &i.instance_id == instance_id)
+                        .cloned()
+                        .ok_or(okx_execution::StoreError::Invalid(
+                            "STRATEGY_INSTANCE_NOT_FOUND",
+                        ))?;
+                    let mut config: StrategyConfigurationV1 = serde_json::from_str(&i.parameters)
+                        .map_err(|_| {
+                        okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT")
+                    })?;
+                    config.parameters = StrategyParametersV1::parse(parameters).ok_or(
+                        okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
+                    )?;
+                    if !config.valid() {
+                        return Err(okx_execution::StoreError::Invalid(
+                            "STRATEGY_CONFIGURATION_INVALID",
+                        ));
+                    }
+                    i.parameters = serde_json::to_string(&config).map_err(|_| {
+                        okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
+                    })?;
+                    i.budget = Decimal::from_str(budget_usd)
+                        .map_err(|_| okx_execution::StoreError::Invalid("INVALID_BUDGET"))?;
+                    let expected = i64::try_from(*expected_revision).map_err(|_| {
+                        okx_execution::StoreError::Invalid("INSTANCE_REVISION_CONFLICT")
+                    })?;
+                    i.policy_revision =
+                        expected
+                            .checked_add(1)
+                            .ok_or(okx_execution::StoreError::Invalid(
+                                "INSTANCE_REVISION_OVERFLOW",
+                            ))?;
+                    (idempotency_key.clone(), "update", i, Some(expected))
+                }
+                StrategyRequest::Start {
+                    idempotency_key,
+                    instance_id,
+                }
+                | StrategyRequest::Stop {
+                    idempotency_key,
+                    instance_id,
+                } => {
+                    let mut i = instances
+                        .iter()
+                        .find(|i| &i.instance_id == instance_id)
+                        .cloned()
+                        .ok_or(okx_execution::StoreError::Invalid(
+                            "STRATEGY_INSTANCE_NOT_FOUND",
+                        ))?;
+                    let expected = i.policy_revision;
+                    i.policy_revision =
+                        expected
+                            .checked_add(1)
+                            .ok_or(okx_execution::StoreError::Invalid(
+                                "INSTANCE_REVISION_OVERFLOW",
+                            ))?;
+                    i.enabled = matches!(&body, StrategyRequest::Start { .. });
+                    (
+                        idempotency_key.clone(),
+                        if i.enabled { "start" } else { "stop" },
+                        i,
+                        Some(expected),
+                    )
+                }
+                _ => {
+                    return Err(okx_execution::StoreError::Invalid(
+                        "STRATEGY_MUTATION_REQUIRED",
+                    ));
+                }
+            };
+            if action == "start" && !control.access_enabled() {
+                return Err(okx_execution::StoreError::Invalid(
+                    "ACCOUNT_NEW_RISK_PAUSED",
+                ));
+            }
+            // Strategy budget is a per-decision maximum modeled loss in USD, NOT a
+            // notional allocation and NOT a central reservation. Only actual plans
+            // reserve aggregate campaign capacity through RiskBook CAS.
+            let ceiling = Decimal::from_str(&campaign_limit_usd)
+                .map_err(|_| okx_execution::StoreError::Invalid("INVALID_CAMPAIGN_BUDGET"))?;
+            validate_strategy_risk_budget_usd(instance.budget, ceiling)?;
+            let receipt = r
+                .execution
+                .store
+                .mutate_strategy_instance(
+                    deadline(),
+                    okx_execution::account_worker::StrategyMutationCommand {
+                        operation_id: operation,
+                        request_hash: request_hash.clone(),
+                        action: action.into(),
+                        instance,
+                        expected_revision: expected,
+                        time: now(),
+                    },
+                )
+                .await?;
+            serde_json::from_str::<StrategyInstance>(&receipt.result_ref)
+                .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"))
+        }
+        .await;
+        let result = result.map_err(err)?;
         Ok(completed(json!({"instance":result})))
     }
     pub async fn run(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
@@ -344,10 +341,15 @@ impl TradeService {
             );
             if due {
                 let until = Instant::now() + Duration::from_secs(4);
-                let result = tokio::time::timeout(
-                    Duration::from_secs(4),
-                    self.install_captured_empty_campaign_opening(&authority, until),
-                )
+                let result = tokio::time::timeout(Duration::from_secs(4), async {
+                    // After authenticated account connection, the original
+                    // retained policy may now have a complete SQL roster.
+                    if self.risk.is_native_finance() {
+                        self.risk.apply_native_governance(&authority).await?;
+                    }
+                    self.install_captured_empty_campaign_opening(&authority, until)
+                        .await
+                })
                 .await;
                 match result {
                     Ok(Ok(())) => {
@@ -389,9 +391,7 @@ impl TradeService {
                     let mut result = r
                         .execution
                         .store
-                        .call(deadline(), move |s| {
-                            s.reconcilable_intents_page(RECOVERY_BATCH, offset)
-                        })
+                        .reconcilable_intents_page(deadline(), RECOVERY_BATCH, offset)
                         .await;
                     if result.as_ref().is_ok_and(Vec::is_empty) && offset != 0 {
                         // The candidate set shrank after successful recovery.
@@ -400,9 +400,7 @@ impl TradeService {
                         result = r
                             .execution
                             .store
-                            .call(deadline(), move |s| {
-                                s.reconcilable_intents_page(RECOVERY_BATCH, 0)
-                            })
+                            .reconcilable_intents_page(deadline(), RECOVERY_BATCH, 0)
                             .await;
                     }
                     match result {
@@ -483,7 +481,7 @@ impl TradeService {
                 };
                 let decisions = async {
                     if let Ok(instances) =
-                        r.execution.store.call(deadline(), |s| s.instances()).await
+                        r.execution.store.strategy_instances(deadline()).await
                     {
                         for instance in instances.into_iter().filter(|i| i.enabled) {
                             let _ = self.strategy_turn(&r, &instance).await;
@@ -547,22 +545,23 @@ impl TradeService {
             if !control.access_enabled() {
                 return Err("ACCOUNT_NEW_RISK_PAUSED".into());
             }
-            let id = instance.instance_id.clone();
-            let dk = decision_key.clone();
             let input_for_execute = decision_digest.clone();
-            let revision = state.state.revision as i64;
-            let expected_version = instance.definition_version.clone();
+            let revision = i64::try_from(state.state.revision)
+                .map_err(|_| "STRATEGY_POLICY_REVISION_INVALID")?;
             let claimed = r
                 .execution
                 .store
-                .call(deadline(), move |s| {
-                    if s.strategy_definition(&id)?.version != expected_version {
-                        return Err(okx_execution::StoreError::Invalid(
-                            "STRATEGY_VERSION_CHANGED",
-                        ));
-                    }
-                    s.claim_strategy_decision_with_id(&id, &dk, &decision_digest, revision, now())
-                })
+                .claim_strategy_decision(
+                    deadline(),
+                    okx_execution::account_worker::StrategyDecisionClaimCommand {
+                        instance_id: instance.instance_id.clone(),
+                        decision_key: decision_key.clone(),
+                        input_digest: decision_digest,
+                        policy_revision: revision,
+                        expected_version: instance.definition_version.clone(),
+                        time: now(),
+                    },
+                )
                 .await
                 .map_err(err)?;
             let Some(claimed_decision_id) = claimed else {
@@ -574,9 +573,13 @@ impl TradeService {
                 let key = decision_key.clone();
                 r.execution
                     .store
-                    .call(deadline(), move |s| {
-                        s.finish_strategy_no_trade(&id, &key, now())
-                    })
+                    .finish_strategy_no_trade(
+                        deadline(),
+                        id,
+                        key,
+                        instance.definition_version.clone(),
+                        now(),
+                    )
                     .await
                     .map_err(err)?;
                 continue;
@@ -586,14 +589,12 @@ impl TradeService {
             let lots = r
                 .execution
                 .store
-                .call(deadline(), move |s| {
-                    Ok(s.active_lots(&inst)?
-                        .into_iter()
-                        .filter(|l| l.instance_id.as_deref() == Some(&instance_id))
-                        .collect::<Vec<_>>())
-                })
+                .active_lots(deadline(), inst)
                 .await
-                .map_err(err)?;
+                .map_err(err)?
+                .into_iter()
+                .filter(|lot| lot.instance_id.as_deref() == Some(&instance_id))
+                .collect::<Vec<_>>();
             let desired_side = if desired > 0 { "long" } else { "short" };
             if lots.iter().any(|l| l.side != desired_side) {
                 for lot in lots.iter().filter(|l| l.side != desired_side) {
@@ -614,9 +615,13 @@ impl TradeService {
                 let key = decision_key.clone();
                 r.execution
                     .store
-                    .call(deadline(), move |s| {
-                        s.finish_strategy_no_trade(&id, &key, now())
-                    })
+                    .finish_strategy_no_trade(
+                        deadline(),
+                        id,
+                        key,
+                        instance.definition_version.clone(),
+                        now(),
+                    )
                     .await
                     .map_err(err)?;
                 continue;

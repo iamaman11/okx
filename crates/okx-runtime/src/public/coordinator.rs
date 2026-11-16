@@ -1,13 +1,16 @@
 use std::{
     collections::{BTreeSet, VecDeque},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
 use chrono::{SecondsFormat, Utc};
 use okx_api::{
-    OkxEnvironment, PublicFundingRate, PublicIndexTicker, PublicInstrument, PublicMarkPrice,
-    PublicOpenInterest, PublicTicker, RateBudget,
+    OkxEnvironment, OkxPublicClient, PublicFundingRate, PublicIndexTicker, PublicInstrument,
+    PublicMarkPrice, PublicOpenInterest, PublicTicker, RateBudget,
 };
 use okx_observation::{
     FundingRequirement, InstrumentRulesSnapshot, LiveMarketSnapshot, MarketStreamState,
@@ -18,7 +21,7 @@ use okx_ws::{
     Subscription, WsArg, WsConnector,
 };
 use tokio::{
-    sync::{RwLock, mpsc, watch},
+    sync::{RwLock, mpsc, oneshot, watch},
     time::{Instant, interval, sleep_until},
 };
 
@@ -46,15 +49,17 @@ pub struct PublicMarketWakeup {
 
 #[derive(Clone)]
 pub struct PublicWsHandle {
-    commands: mpsc::Sender<CoordinatorCommand>,
-    state: Arc<RwLock<PublicRuntimeState>>,
+    pub(super) commands: mpsc::Sender<CoordinatorCommand>,
+    pub(super) state: Arc<RwLock<PublicRuntimeState>>,
     market_updates: watch::Sender<PublicMarketWakeup>,
+    pub(super) reference_client: Result<OkxPublicClient, String>,
+    pub(super) reference_revision: Arc<AtomicU64>,
 }
 
 pub struct PublicWsCoordinator {
     environment: OkxEnvironment,
     state: Arc<RwLock<PublicRuntimeState>>,
-    commands: mpsc::Receiver<CoordinatorCommand>,
+    pub(super) commands: mpsc::Receiver<CoordinatorCommand>,
     market_updates: watch::Sender<PublicMarketWakeup>,
     market_update_sequence: u64,
     demands: BTreeSet<String>,
@@ -62,11 +67,19 @@ pub struct PublicWsCoordinator {
     generation: u64,
     rate_budget: RateBudget,
     connector: Arc<dyn WsConnector>,
+    reference_revision: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
-enum CoordinatorCommand {
+pub(super) enum CoordinatorCommand {
     DemandInstrument(String),
+    RefreshReference {
+        expected_generation: String,
+        expected_revision: u64,
+        reference: ReferenceRegistry,
+        deadline: std::time::Instant,
+        reply: oneshot::Sender<Result<(), &'static str>>,
+    },
 }
 
 #[derive(Debug)]
@@ -222,7 +235,39 @@ impl PublicWsCoordinator {
         rate_budget: RateBudget,
         connector: Arc<dyn WsConnector>,
     ) -> (Self, PublicWsHandle) {
+        let client = OkxPublicClient::with_rate_budget(environment, rate_budget.clone())
+            .map_err(|error| error.to_string());
+        Self::compose(environment, reference, rate_budget, connector, client)
+    }
+
+    /// Inject only public HTTP delivery; parsing, source checks and the sole
+    /// coordinator reference mutation path remain the production ones.
+    pub fn new_with_connector_and_public_client(
+        environment: OkxEnvironment,
+        reference: ReferenceRegistry,
+        rate_budget: RateBudget,
+        connector: Arc<dyn WsConnector>,
+        client: OkxPublicClient,
+    ) -> (Self, PublicWsHandle) {
+        Self::compose(environment, reference, rate_budget, connector, Ok(client))
+    }
+
+    fn compose(
+        environment: OkxEnvironment,
+        reference: ReferenceRegistry,
+        rate_budget: RateBudget,
+        connector: Arc<dyn WsConnector>,
+        reference_client: Result<OkxPublicClient, String>,
+    ) -> (Self, PublicWsHandle) {
+        let reference_client = reference_client.and_then(|client| {
+            if client.environment() == environment {
+                Ok(client)
+            } else {
+                Err("REFERENCE_CLIENT_ENVIRONMENT_MISMATCH".into())
+            }
+        });
         let state = Arc::new(RwLock::new(PublicRuntimeState::new(reference)));
+        let reference_revision = Arc::new(AtomicU64::new(0));
         let (commands_tx, commands_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (market_updates, _market_updates_rx) = watch::channel(PublicMarketWakeup::default());
         (
@@ -237,11 +282,14 @@ impl PublicWsCoordinator {
                 generation: 0,
                 rate_budget,
                 connector,
+                reference_revision: reference_revision.clone(),
             },
             PublicWsHandle {
                 commands: commands_tx,
                 state,
                 market_updates,
+                reference_client,
+                reference_revision,
             },
         )
     }
@@ -360,7 +408,13 @@ impl PublicWsCoordinator {
                     return Ok(GenerationOutcome::Shutdown);
                 }
                 LoopAction::Command(Some(command)) => {
-                    self.apply_command(command).await;
+                    if self.apply_command(command).await {
+                        return Ok(GenerationOutcome::Reconnect {
+                            saw_data,
+                            reason: "REST reference changed; rebuilding one coherent generation"
+                                .into(),
+                        });
+                    }
                     self.reconcile_subscriptions(connection, &mut pending, &failed)
                         .await?;
                 }
@@ -513,7 +567,7 @@ impl PublicWsCoordinator {
         Ok(())
     }
 
-    async fn apply_command(&mut self, command: CoordinatorCommand) {
+    pub(super) async fn apply_command(&mut self, command: CoordinatorCommand) -> bool {
         match command {
             CoordinatorCommand::DemandInstrument(instrument_id) => {
                 let evicted = touch_demand(
@@ -543,11 +597,43 @@ impl PublicWsCoordinator {
                         );
                     }
                 }
+                false
+            }
+            CoordinatorCommand::RefreshReference {
+                expected_generation,
+                expected_revision,
+                reference,
+                deadline,
+                reply,
+            } => {
+                let mut state = self.state.write().await;
+                if deadline <= std::time::Instant::now() || reply.is_closed() {
+                    let _ = reply.send(Err("REFERENCE_REFRESH_DEADLINE"));
+                    return false;
+                }
+                if state.reference.generation().as_str() != expected_generation
+                    || self.reference_revision.load(Ordering::SeqCst) != expected_revision
+                {
+                    let _ = reply.send(Err("REFERENCE_REFRESH_SOURCE_CHANGED"));
+                    return false;
+                }
+                let changed = reference.generation() != state.reference.generation();
+                state.reference = reference;
+                self.reference_revision.fetch_add(1, Ordering::SeqCst);
+                if changed {
+                    state.set_disconnected(true, "REST reference content changed");
+                }
+                let _ = reply.send(if changed {
+                    Err("REFERENCE_REFRESH_CONTENT_CHANGED")
+                } else {
+                    Ok(())
+                });
+                changed
             }
         }
     }
 
-    async fn apply_data(
+    pub(super) async fn apply_data(
         &mut self,
         generation: u64,
         arg: WsArg,
@@ -565,7 +651,9 @@ impl PublicWsCoordinator {
                     .into_iter()
                     .map(serde_json::from_value)
                     .collect::<Result<_, _>>()?;
-                Ok(state.reference.apply_public_updates(received_at, updates)?)
+                let changed = state.reference.apply_public_updates(received_at, updates)?;
+                self.reference_revision.fetch_add(1, Ordering::SeqCst);
+                Ok(changed)
             }
             PublicChannel::Tickers => {
                 for value in data {
@@ -688,7 +776,7 @@ impl PublicWsCoordinator {
                 _ = sleep_until(deadline) => return Ok(false),
                 command = self.commands.recv(), if commands_open => {
                     match command {
-                        Some(command) => self.apply_command(command).await,
+                        Some(command) => { self.apply_command(command).await; },
                         None => commands_open = false,
                     }
                 }

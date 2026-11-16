@@ -1,10 +1,10 @@
 //! Account-local native adapters. AccountStoreHandle is the sole SQL owner;
 //! this object owns no parallel ledger, access grant or financial epoch.
 use crate::AgentResult;
+use crate::execution_store::ExecutionStore;
 use okx_api::{
     AccountApi, AccountHistoryApi, Credentials, OkxEnvironment, OkxRestClient, RateBudget, TradeApi,
 };
-use okx_execution::AccountStoreHandle;
 use std::time::{Duration, Instant};
 
 // This cache retains ONLY the authenticated executor UID proof, not a
@@ -36,7 +36,7 @@ fn identity_source_deadline() -> okx_api::OkxError {
 }
 
 pub struct ExecutionRuntime {
-    pub store: AccountStoreHandle,
+    pub store: ExecutionStore,
     pub trade: TradeApi,
     pub history: AccountHistoryApi,
     pub account: AccountApi,
@@ -54,7 +54,7 @@ pub struct ExecutionRuntime {
 }
 impl ExecutionRuntime {
     pub fn new(
-        store: AccountStoreHandle,
+        store: impl Into<ExecutionStore>,
         environment: OkxEnvironment,
         credentials: Credentials,
         uid: String,
@@ -66,13 +66,13 @@ impl ExecutionRuntime {
 
     /// One composition path; the SQL owner and execution code remain unchanged.
     pub fn from_client(
-        store: AccountStoreHandle,
+        store: impl Into<ExecutionStore>,
         rest: OkxRestClient,
         environment: OkxEnvironment,
         uid: String,
     ) -> Self {
         Self {
-            store,
+            store: store.into(),
             trade: TradeApi::new(rest.clone()),
             history: AccountHistoryApi::new(rest.clone()),
             account: AccountApi::new(rest.clone()),

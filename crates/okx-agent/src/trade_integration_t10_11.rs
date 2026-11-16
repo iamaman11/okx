@@ -505,7 +505,7 @@ async fn t10_11_f6_observe_and_capture(
         )
         .unwrap();
         let resend = crate::trade_service::post_once(
-            &owner.execution.store,
+            owner.execution.store.legacy().unwrap(),
             &intent,
             std::time::Instant::now() + Duration::from_secs(3),
             || async {
@@ -1201,7 +1201,7 @@ async fn native_crash_unsent_boundary() {
             .unwrap();
             if phase == T10_11UnsentPhase::F7 {
                 crate::trade_service::post_once(
-                    &owner.execution.store,
+                    owner.execution.store.legacy().unwrap(),
                     &saved,
                     std::time::Instant::now() + Duration::from_secs(3),
                     || async {
@@ -1229,7 +1229,7 @@ async fn native_crash_unsent_boundary() {
                 panic!("F7 must be killed before projection");
             }
             let result = crate::trade_service::post_once(
-                &owner.execution.store,
+                owner.execution.store.legacy().unwrap(),
                 &saved,
                 std::time::Instant::now() + Duration::from_secs(5),
                 || async {

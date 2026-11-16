@@ -24,9 +24,13 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, RwLock};
+mod admission_source;
 mod entry_budget;
+pub(crate) use admission_source::{ProducedPost, ProducedReserve};
 mod entry_settlement;
 mod execute;
+mod opening_source;
+pub(crate) use opening_source::ProducedOpening;
 mod plan;
 mod protection_cleanup;
 mod protection_resize;
@@ -254,16 +258,33 @@ impl TradeService {
         }) {
             return Err("POLICY_REVISION_CONFLICT".into());
         }
-        // Publish the new in-process authority only after all connected SQL
-        // account owners have durably applied it. On failure, retain the old
-        // authority; stale SQL revisions reject attempts to reuse it.
-        // Holding the write guard also prevents readers from observing a
-        // partially applied multi-account policy.
+        // Serialize policy delivery. An initial Native policy may be observed
+        // before accounts connect, but it cannot grant financial permission.
+        // Execution independently requires the strict SQL policy application;
+        // failures retain the prior snapshot. No partial SQL policy is visible.
 
         // A policy frame is the authoritative update.  Persist the campaign
         // ceiling for every currently connected account before returning the
         // frame acknowledgement, so a restart or read-only diagnostic cannot
         // retain an older ceiling until somebody submits a trade.
+        // #510: once TradeService is constructed with the new LOCAL finance
+        // route, the original account_policy and RiskBook revision have ONE
+        // SQL transaction owner. Native rejection is FINAL, never a fallback
+        // to the legacy per-account writer loop.
+        if let Some(observation) = self.risk.observe_native_governance(snapshot).await? {
+            // Pending configuration keeps the authenticated session usable for
+            // account connection. Execution's authority path independently
+            // requires strict SQL application; preview checks its SQL receipt.
+            if observation
+                == crate::native_finance_risk::NativePolicyObservation::WaitingForAccounts
+            {
+                eprintln!(
+                    "OKX_NATIVE_POLICY_V1 state=WAITING_FOR_ACCOUNTS reason=NATIVE_CAMPAIGN_ACCOUNTS_NOT_CONNECTED"
+                );
+            }
+            *latest = Some(snapshot.clone());
+            return Ok(());
+        }
         let limit = dec(&snapshot.state.campaign_loss_limit_usd)?;
         for account in &snapshot.state.accounts {
             let Some(resources) = self.accounts.resolve(&account.account_key).await else {
@@ -348,6 +369,7 @@ impl TradeService {
         r: &AccountResources,
         supplied: Option<&CentralGovernanceSnapshot>,
     ) -> Result<(CentralGovernanceSnapshot, AccountControl), String> {
+        self.verify_runtime_finance_route(r)?;
         if let Some(s) = supplied {
             self.update_governance(s).await?;
         }
@@ -368,14 +390,36 @@ impl TradeService {
         let paused = !account.access_enabled();
         let campaign = state.state.campaign_id.clone();
         let limit = dec(&state.state.campaign_loss_limit_usd)?;
-        r.execution
-            .store
-            .call(deadline(), move |s| {
-                s.apply_authority_policy(revision, paused, &campaign, limit)
-            })
-            .await
-            .map_err(err)?;
+        if r.execution.store.native_scope().is_some() {
+            if !self.risk.apply_native_governance(&state).await? {
+                return Err("NATIVE_GOVERNANCE_ROUTE_MISMATCH".into());
+            }
+        } else {
+            r.execution
+                .store
+                .call(deadline(), move |s| {
+                    s.apply_authority_policy(revision, paused, &campaign, limit)
+                })
+                .await
+                .map_err(err)?;
+        }
         Ok((state, account))
+    }
+    fn verify_runtime_finance_route(&self, resource: &AccountResources) -> Result<(), String> {
+        match (
+            resource.execution.store.native_scope(),
+            self.risk.native_finance_owner(),
+        ) {
+            (None, None) => Ok(()),
+            (Some((owner, account)), Some(risk_owner))
+                if owner.installation_id() == self.accounts.installation_id()
+                    && risk_owner.installation_id() == owner.installation_id()
+                    && account == resource.configuration.account_key.wire() =>
+            {
+                Ok(())
+            }
+            _ => Err("NATIVE_RUNTIME_FINANCE_ROUTE_MISMATCH".into()),
+        }
     }
     /// A preview observes an already-applied governance revision; only the
     /// policy delivery and execution owners may write policy to account SQL.
@@ -403,7 +447,7 @@ impl TradeService {
         let policy = r
             .execution
             .store
-            .call(deadline(), |store| store.policy())
+            .account_policy(deadline())
             .await
             .map_err(err)?;
         if Self::sql_policy_receipt(&policy, Some(&state), &r.configuration.account_key.wire())["matches_governance"]
@@ -414,7 +458,7 @@ impl TradeService {
         Ok((state, account))
     }
     fn sql_policy_receipt(
-        policy: &(i64, bool, String, Decimal, Decimal),
+        policy: &okx_execution::AccountPolicySnapshot,
         governance: Option<&CentralGovernanceSnapshot>,
         account_key: &str,
     ) -> Value {
@@ -428,18 +472,19 @@ impl TradeService {
                 return false;
             };
             snapshot.valid()
-                && i64::try_from(snapshot.state.revision).ok() == Some(policy.0)
-                && policy.1 != account.access_enabled()
-                && policy.2 == snapshot.state.campaign_id
-                && dec(&snapshot.state.campaign_loss_limit_usd).is_ok_and(|value| policy.3 == value)
+                && i64::try_from(snapshot.state.revision).ok() == Some(policy.revision)
+                && policy.paused != account.access_enabled()
+                && policy.campaign_id == snapshot.state.campaign_id
+                && dec(&snapshot.state.campaign_loss_limit_usd)
+                    .is_ok_and(|value| policy.campaign_limit == value)
         });
         json!({
             "schema":"okx.native-policy-sql-receipt/v1",
             "source":"account_sql",
-            "revision":policy.0,
-            "paused":policy.1,
-            "campaign_id":policy.2,
-            "campaign_limit_usd":exact(policy.3),
+            "revision":policy.revision,
+            "paused":policy.paused,
+            "campaign_id":policy.campaign_id,
+            "campaign_limit_usd":exact(policy.campaign_limit),
             "matches_governance":matched,
             "state":if matched {"applied"} else {"mismatch"},
         })
@@ -497,11 +542,7 @@ impl TradeService {
                     // the native account-local SQLite owner. It proves the current
                     // governance revision was physically applied; the cached Worker
                     // snapshot alone is insufficient evidence.
-                    let sql = r
-                        .execution
-                        .store
-                        .call(deadline(), |store| store.policy())
-                        .await;
+                    let sql = r.execution.store.account_policy(deadline()).await;
                     let governance = self.governance.read().await;
                     let sql_receipt = match sql {
                         Ok(policy) => Self::sql_policy_receipt(
@@ -590,9 +631,7 @@ impl TradeService {
                     let (financial, stops) = r
                         .execution
                         .store
-                        .call(deadline(), |s| {
-                            Ok((s.financial_risk(now(), None)?, s.stops()?.len()))
-                        })
+                        .financial_readiness(deadline(), None)
                         .await
                         .map_err(err)?;
                     let budget = self.risk_summary().await;
@@ -673,19 +712,25 @@ impl TradeService {
                         plan::requires_independent_strategy_nav(strategy_instance);
                     let binding = strategy_instance.clone();
                     let instance_nav_complete = if independent_capital {
-                        r.execution
+                        let instances = r
+                            .execution
                             .store
-                            .call(deadline(), move |store| {
-                                if store.instances()?.iter().any(|i| i.instance_id == binding) {
-                                    Ok(Some(
-                                        store.financial_risk(now(), Some(&binding))?.nav_complete,
-                                    ))
-                                } else {
-                                    Ok(None)
-                                }
-                            })
+                            .strategy_instances(deadline())
                             .await
-                            .map_err(err)?
+                            .map_err(err)?;
+                        if instances.iter().any(|i| i.instance_id == binding) {
+                            Some(
+                                r.execution
+                                    .store
+                                    .financial_readiness(deadline(), Some(binding))
+                                    .await
+                                    .map_err(err)?
+                                    .0
+                                    .nav_complete,
+                            )
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     };
@@ -949,7 +994,8 @@ mod governance_sql_proof_tests {
             Decimal::from(10),
             Decimal::ZERO,
         );
-        let receipt = TradeService::sql_policy_receipt(&original, Some(&governance), &key);
+        let receipt =
+            TradeService::sql_policy_receipt(&original.clone().into(), Some(&governance), &key);
         assert_eq!(receipt["state"], "applied");
         assert_eq!(receipt["revision"], 2);
         assert_eq!(receipt["matches_governance"], true);
@@ -984,16 +1030,17 @@ mod governance_sql_proof_tests {
             ),
         ] {
             assert_eq!(
-                TradeService::sql_policy_receipt(&failed, Some(&governance), &key)["matches_governance"],
+                TradeService::sql_policy_receipt(&failed.into(), Some(&governance), &key)["matches_governance"],
                 false
             );
         }
         assert_eq!(
-            TradeService::sql_policy_receipt(&original, Some(&governance), "wrong")["matches_governance"],
+            TradeService::sql_policy_receipt(&original.clone().into(), Some(&governance), "wrong")
+                ["matches_governance"],
             false
         );
         assert_eq!(
-            TradeService::sql_policy_receipt(&original, None, &key)["matches_governance"],
+            TradeService::sql_policy_receipt(&original.clone().into(), None, &key)["matches_governance"],
             false
         );
     }

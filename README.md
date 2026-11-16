@@ -9,10 +9,18 @@ Issue #398 records historical **read-only** acceptance; it is not a competing ro
 
 The product has one installed **`okx-agent` Engine** on `windows-primary` for accounts,
 trading, research and finance. Cloudflare Worker provides the authenticated MCP/WSS
-gateway and central account risk authority; native Windows CONTROL only owns
+gateway; the #510 Native runtime constructs its financial authority in Rust on
+one shared SQLite. Native Windows CONTROL only owns
 install/restart/diagnostics. GitHub CI builds signed, version-addressed release
 artifacts. No separate Demo Agent, research benchmark executable, second financial
 ledger, alternate transport or bypass for real orders.
+
+**#510 is Draft / NO-GO.** Fresh initialization, verified account sources,
+campaign policy and Native financial ports are under acceptance. Legacy
+Cloudflare financial handlers still require retirement; Native startup has no
+remote finance fallback. This branch is not an accepted trading release.
+Current evidence and remaining public lifecycle checks: [testing](docs/testing.md).
+The complete fast 26/26 runner is the subsequent [#512](https://github.com/iamaman11/okx/issues/512), not the current direct-test subset.
 
 ## Modules and responsibility
 
@@ -23,8 +31,8 @@ ledger, alternate transport or bypass for real orders.
 | `crates/okx-agent/src/analytics/result.rs` | Verified immutable result reads, page cursors and export integrity | Research CPU execution or SQL mutations |
 | `crates/okx-agent/src/analytics/{jobs,executor,budget,benchmark}.rs` | SQLite research jobs, shared CPU/memory admission, in-Agent K9 diagnostics | A separate benchmark service |
 | `crates/okx-research` / `crates/okx-analysis` | Replay, research artifacts and analytics formulas | Transport permissions or exchange orders |
-| `crates/okx-execution` | Account-owned order facts, fills and SQLite finance | Worker risk authority or display totals |
-| `cloudflare/okx-mcp` | Public MCP schema, routing and central risk authority | A second native trading engine |
+| `crates/okx-execution` | Scoped orders/fills/bills, NAV and RiskBook in one SQLite writer | Network requests or research jobs |
+| `cloudflare/okx-mcp` | Public MCP schema, authorization and routing | Native financial grants or a second trading engine |
 | `crates/okx-host-control` | Verified GitHub artifact install, lifecycle and Windows diagnostics | Research/strategy calculation or venue execution |
 
 **Market:** `market` MCP → Worker/WSS → Agent `AnalyticsService.market`

@@ -49,22 +49,10 @@ export class RuntimeSession {
     if(url.pathname==="/installation/inspect"&&request.method==="GET"){
       // Owner-authorized readback of the existing DO; never return account names, keys or amounts.
       const governance:unknown=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);
-      const storedRisk:unknown=await this.state.storage.get("risk_meta_v2");
       const storedRelease:unknown=await this.state.storage.get("installation_release_v1");
-      const entries:Map<string,unknown>=await this.state.storage.list({prefix:"risk_entry_v2:",limit:1000});
-      const risk=storedRisk!==null&&typeof storedRisk==="object"?storedRisk as Record<string,unknown>:null;
       const release=storedRelease!==null&&typeof storedRelease==="object"?storedRelease as Record<string,unknown>:null;
-      const budget=risk?.entry_budget!==null&&typeof risk?.entry_budget==="object"
-        ?risk.entry_budget as Record<string,unknown>:null;
-      const nonzero=(value:unknown):boolean=>typeof value!=="string"||!/^0(?:\.0+)?$/.test(value);
-      let unresolved=0;
-      for(const entry of entries.values()){
-        if(entry===null||typeof entry!=="object"||(entry as Record<string,unknown>).state!=="RELEASED")unresolved++;
-      }
       const valid=validGovernance(governance);
-      const bound=valid&&risk?.schema==="okx.risk-book/v2"&&
-        risk.installation_id===governance.installation_id&&
-        release?.installation_id===governance.installation_id;
+      const bound=valid&&release?.installation_id===governance.installation_id;
       return Response.json({
         schema:"okx.installation-inspection/v1",
         state:bound?"BOUND":valid?"INCONSISTENT":"MISSING_OR_INVALID",
@@ -83,20 +71,7 @@ export class RuntimeSession {
           a.environment!=="real"||!accessEnabled(a)):null,
         revision:valid?governance.revision:null,
         release_present:release!==null,
-        risk:{
-          metadata_present:risk!==null,
-          occupied_usd_nonzero:nonzero(risk?.occupied_usd),
-          occupied_usdt_nonzero:nonzero(risk?.occupied_usdt),
-          consumed_loss_nonzero:nonzero(risk?.consumed_loss_usd),
-          entry_budget_present:budget!==null,
-          entry_reserved_nonzero:budget?nonzero(budget.reserved_usd):null,
-          entry_consumed_nonzero:budget?nonzero(budget.consumed_usd):null,
-          reservation_entries:entries.size,
-          unresolved_entries:unresolved,
-          entries_truncated:entries.size===1000,
-          risk_accounts_total:risk?.accounts&&typeof risk.accounts==="object"
-            ?Object.keys(risk.accounts).length:null
-        }
+        finance_authority:"native"
       },{headers:{"cache-control":"no-store"}});
     }
     if(url.pathname==="/installation/initialize"&&request.method==="POST"){
@@ -457,8 +432,7 @@ export class RuntimeSession {
       const deliveryChallenge = await this.proveFresh(active);
 
       // Production writes and exact-intent terminal status both need the
-      // current native governance cohort. The latter is ONLY for a proven
-      // terminal RELEASE, not permission to introduce new exposure.
+      // current native governance configuration for its own finance decisions.
       const tradeMutation = isExecutionMutation(request.operation?.type,request.operation?.request?.action)&&request.operation?.type!=="connect_account";
       const terminalStatus = request.operation?.type === "trade";
       let operator_governance: Record<string, unknown> | undefined;
@@ -472,7 +446,7 @@ export class RuntimeSession {
              !current.accounts.some(a=>accessEnabled(a)&&(a.id===request.account||a.account_key===request.account)))
             return transportFailure("CENTRAL_NEW_RISK_STOPPED",false);
           // Typed fresh request-scoped delivery proof. This is NOT the POST
-          // permit; the native executor still needs an exact DO reservation.
+          // permit; the native executor enforces its own durable finance reservation.
           operator_governance={
             state:current,issued_at_ms:Date.now(),
             session_generation:active.attachment.generation,

@@ -116,17 +116,24 @@ pub fn load(root: &Path) -> io::Result<AccountCatalog> {
     decode(&fs::read(root.join(CATALOG_FILE))?)
 }
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-fn stage(root: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+fn stage(root: &Path, bytes: &[u8]) -> io::Result<(PathBuf, fs::File)> {
     fs::create_dir_all(root)?;
     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = root.join(format!(".catalog-{}-{counter}.tmp", std::process::id()));
-    let mut f = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&tmp)?;
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // GENERIC_WRITE | DELETE. Retain the publication right through the
+        // rename: a new reader that denies DELETE cannot open this staging
+        // file between sync_all and publication. No retries or weaker sync.
+        options.access_mode(0x4000_0000 | 0x0001_0000);
+    }
+    let mut f = options.open(&tmp)?;
     f.write_all(bytes)?;
     f.sync_all()?;
-    Ok(tmp)
+    Ok((tmp, f))
 }
 pub fn initialize(root: &Path, installation_id: &str) -> io::Result<()> {
     let c = AccountCatalog {
@@ -141,21 +148,39 @@ pub fn initialize(root: &Path, installation_id: &str) -> io::Result<()> {
             "INSTALLATION_ALREADY_EXISTS",
         ));
     }
-    let tmp = stage(root, &bytes)?;
+    let (tmp, _staged_file) = stage(root, &bytes)?;
     let result = fs::hard_link(&tmp, root.join(CATALOG_FILE));
     let _ = fs::remove_file(tmp);
     result
 }
 pub fn append(root: &Path, config: &VerifiedAccountConfig) -> io::Result<()> {
-    let mut c = load(root)?;
+    let context = |stage: &'static str, error: io::Error| {
+        io::Error::new(error.kind(), format!("{stage}: {error}"))
+    };
+    #[cfg(windows)]
+    let _replacement_guard = {
+        use std::os::windows::fs::OpenOptionsExt;
+        // GENERIC_READ | DELETE, sharing READ/WRITE/DELETE. Existing
+        // incompatible readers produce a precise no-publication failure;
+        // compatible readers keep their old snapshot through replacement.
+        fs::OpenOptions::new()
+            .read(true)
+            .access_mode(0x8000_0000 | 0x0001_0000)
+            .share_mode(0x1 | 0x2 | 0x4)
+            .open(root.join(CATALOG_FILE))
+            .map_err(|e| context("ACCOUNT_CATALOG_REPLACE_GUARD", e))?
+    };
+    let mut c = load(root).map_err(|e| context("ACCOUNT_CATALOG_READ", e))?;
     c.accounts.push(config.clone());
-    let tmp = stage(root, &encode(&c)?)?;
+    let bytes = encode(&c).map_err(|e| context("ACCOUNT_CATALOG_ENCODE", e))?;
+    let (tmp, _staged_file) =
+        stage(root, &bytes).map_err(|e| context("ACCOUNT_CATALOG_STAGE", e))?;
     // Engine serializes writers. Same-volume rename replaces one canonical snapshot.
     let result = fs::rename(&tmp, root.join(CATALOG_FILE));
     if result.is_err() {
         let _ = fs::remove_file(tmp);
     }
-    result
+    result.map_err(|e| context("ACCOUNT_CATALOG_PUBLISH_RENAME", e))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -216,7 +241,7 @@ pub fn promote_existing_once(
     // Validate each account's actual SQL identity before publishing one
     // canonical catalog; a matching filename alone is insufficient.
     verify_account_sql(&expected)?;
-    let tmp = stage(root, &encode(&expected)?)?;
+    let (tmp, _staged_file) = stage(root, &encode(&expected)?)?;
     let publish = fs::hard_link(&tmp, root.join(CATALOG_FILE));
     let _ = fs::remove_file(tmp);
     if let Err(e) = publish
@@ -239,6 +264,49 @@ pub fn promote_existing_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn staged_catalog_retains_delete_right_until_publication() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "okx-catalog-delete-right-{}-{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let (path, guard) = stage(&root, b"original staged bytes").unwrap();
+        let incompatible = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .open(&path);
+        assert!(
+            incompatible.is_err(),
+            "an unshared DELETE reader must not steal the publication right"
+        );
+        drop(guard);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn compatible_catalog_reader_keeps_old_snapshot_across_atomic_replacement() {
+        use std::io::Read;
+        let root = std::env::temp_dir().join(format!(
+            "okx-catalog-reader-{}-{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        initialize(&root, "installation-test").unwrap();
+        let before = fs::read(root.join(CATALOG_FILE)).unwrap();
+        let mut reader = fs::File::open(root.join(CATALOG_FILE)).unwrap();
+        let expected = sample();
+        append(&root, &expected.accounts[0]).unwrap();
+        assert_eq!(load(&root).unwrap(), expected);
+        let mut old = Vec::new();
+        reader.read_to_end(&mut old).unwrap();
+        assert_eq!(old, before);
+        drop(reader);
+        fs::remove_dir_all(root).unwrap();
+    }
     fn sample() -> AccountCatalog {
         AccountCatalog {
             schema: AccountCatalog::SCHEMA.into(),

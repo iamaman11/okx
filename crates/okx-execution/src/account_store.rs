@@ -11,6 +11,51 @@ use std::{
 #[path = "account_store_tests.rs"]
 mod tests;
 
+#[path = "account_source_state.rs"]
+mod source_state;
+#[path = "account_source_stops.rs"]
+mod source_stops;
+pub use source_state::{AccountSourceCursors, AccountSourceState};
+
+#[path = "account_nav_projection.rs"]
+mod nav_projection;
+pub use nav_projection::{AccountNavSnapshot, build_account_nav_page};
+
+#[path = "account_finance_report.rs"]
+mod finance_report;
+pub use finance_report::{FinanceReportQuery, FinanceReportSnapshot, FinanceReportView};
+#[path = "account_capital_command.rs"]
+mod capital_command;
+pub use capital_command::{CapitalAssignmentCommand, CapitalAssignmentResult};
+#[path = "account_reserve_source.rs"]
+mod reserve_source;
+pub use reserve_source::AccountReserveSource;
+#[path = "account_authority_reads.rs"]
+mod authority_reads;
+pub use authority_reads::{AccountPolicySnapshot, CentralReceiptView};
+#[path = "account_financial_admission.rs"]
+mod financial_admission;
+pub use self::sql::finance_installation::{FinanceInstallationReceipt, NewFinanceInstallation};
+pub use financial_admission::{FinancialAdmissionRequest, instance_nav_gate};
+#[path = "account_trade_reads.rs"]
+mod trade_reads;
+pub use trade_reads::TradeIntentLookup;
+#[path = "account_census_reads.rs"]
+mod census_reads;
+pub use census_reads::{
+    AccountCensusRequest, AccountCensusSnapshot, AccountPositionCensus, TerminalPeerSources,
+};
+
+#[path = "account_captured_fills.rs"]
+mod captured_fills;
+pub use captured_fills::{CapturedFill, CapturedFillPage};
+
+#[path = "account_captured_bills.rs"]
+mod captured_bills;
+pub use captured_bills::{
+    CapturedBill, CapturedBillPage, captured_bill_pnl, captured_bill_residual_component,
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("ACCOUNT_STORAGE_UNAVAILABLE: {0}")]
@@ -296,7 +341,7 @@ pub struct ProtectionReceipt {
     pub verified_at: i64,
     pub source_digest: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationReceipt {
     pub operation_id: String,
     pub kind: String,
@@ -697,6 +742,28 @@ mod storage_snapshot;
 pub use storage_snapshot::{
     AccountStorageCoverage, AccountStoragePolicy, AccountStorageSnapshot, AccountStorageStop,
 };
+
+impl AccountStore {
+    /// An existing, stopped r4 finance import must pass the SAME original
+    /// 47-table ledger/RiskBook verification before a shared SQL owner can
+    /// even open it. This never grants cutover or venue authority.
+    pub(crate) fn inspect_offline_finance_import(
+        db: &Connection,
+        installation: &str,
+        accounts: &[&str],
+        campaigns: &[&str],
+    ) -> StoreResult<()> {
+        sql::unified_financial::importer::inspect_stopped_finance_import(
+            db,
+            &sql::unified_financial::importer::ExpectedFinanceInventory {
+                installation,
+                accounts,
+                campaigns,
+            },
+        )?;
+        Ok(())
+    }
+}
 
 impl AccountStore {
     pub(crate) fn run_before_deadline<T>(

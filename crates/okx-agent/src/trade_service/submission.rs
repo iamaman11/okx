@@ -16,30 +16,95 @@ where
     }
     let id = intent.intent_id.clone();
     let revision = intent.policy_revision;
-    if !store
-        .call(until, move |s| s.begin_post(&id, revision, now()))
+    let Some(claim) = store
+        .claim_legacy_send(until, id, intent.plan_hash.clone(), revision)
         .await
         .map_err(err)?
-    {
+    else {
         return Ok(None);
+    };
+    send_committed(OutcomeOwner::Legacy(store), intent, claim, until, send).await
+}
+
+enum OutcomeOwner<'a> {
+    Legacy(&'a AccountStoreHandle),
+    Native {
+        owner: &'a okx_execution::account_worker::UnifiedFinanceHandle,
+        account: String,
+    },
+}
+impl OutcomeOwner<'_> {
+    async fn record(&self, outcome: okx_execution::IntentOutcome) -> Result<(), String> {
+        match self {
+            Self::Legacy(store) => store
+                .record_intent_outcome(deadline(), outcome)
+                .await
+                .map_err(err),
+            Self::Native { owner, account } => owner
+                .record_intent_outcome(account.clone(), outcome)
+                .await
+                .map_err(err),
+        }
     }
+}
+/// Native already owns the durable account claim. Consuming that first-COMMIT
+/// value avoids a second begin_post CAS; a read-only POSTING cannot call this.
+pub(crate) async fn post_committed_native<T, F, Fut>(
+    owner: &okx_execution::account_worker::UnifiedFinanceHandle,
+    installation: &str,
+    account: &str,
+    intent: &StoredIntent,
+    claim: okx_execution::CommittedVenueSend,
+    until: Instant,
+    send: F,
+) -> Result<Option<T>, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    if owner.installation_id() != installation
+        || !claim.matches(installation, account, &intent.intent_id, &intent.plan_hash)
+    {
+        return Err("POST_CLAIM_IDENTITY_MISMATCH".into());
+    }
+    send_committed(
+        OutcomeOwner::Native {
+            owner,
+            account: account.into(),
+        },
+        intent,
+        claim,
+        until,
+        send,
+    )
+    .await
+}
+async fn send_committed<T, F, Fut>(
+    owner: OutcomeOwner<'_>,
+    intent: &StoredIntent,
+    claim: okx_execution::CommittedVenueSend,
+    until: Instant,
+    send: F,
+) -> Result<Option<T>, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
     if Instant::now() >= until {
         let id = intent.intent_id.clone();
-        store
-            .call(deadline(), move |s| {
-                s.record_outcome(
-                    &id,
-                    IntentState::Rejected,
-                    None,
-                    "monotonic-deadline-expired-owner-confirmed-unsent",
-                    now(),
-                )
+        owner
+            .record(okx_execution::IntentOutcome {
+                intent_id: id,
+                state: IntentState::Rejected,
+                exchange_order_id: None,
+                evidence: "monotonic-deadline-expired-owner-confirmed-unsent".into(),
+                observed_at: now(),
             })
             .await
             .map_err(err)?;
         return Err("COMMAND_EXPIRED".into());
     }
-    match send().await {
+    match claim.send(send).await {
         Ok(v) => Ok(Some(v)),
         Err(reason)
             if reason == "COMMAND_EXPIRED_BEFORE_SEND"
@@ -47,15 +112,13 @@ where
         {
             let id = intent.intent_id.clone();
             let proof = reason.clone();
-            store
-                .call(deadline(), move |s| {
-                    s.record_outcome(
-                        &id,
-                        IntentState::Rejected,
-                        None,
-                        &format!("owner-confirmed-unsent:{proof}"),
-                        now(),
-                    )
+            owner
+                .record(okx_execution::IntentOutcome {
+                    intent_id: id,
+                    state: IntentState::Rejected,
+                    exchange_order_id: None,
+                    evidence: format!("owner-confirmed-unsent:{proof}"),
+                    observed_at: now(),
                 })
                 .await
                 .map_err(err)?;
@@ -63,15 +126,13 @@ where
         }
         Err(_) => {
             let id = intent.intent_id.clone();
-            store
-                .call(deadline(), move |s| {
-                    s.record_outcome(
-                        &id,
-                        IntentState::Unknown,
-                        None,
-                        "exchange-post-outcome-unknown",
-                        now(),
-                    )
+            owner
+                .record(okx_execution::IntentOutcome {
+                    intent_id: id,
+                    state: IntentState::Unknown,
+                    exchange_order_id: None,
+                    evidence: "exchange-post-outcome-unknown".into(),
+                    observed_at: now(),
                 })
                 .await
                 .map_err(err)?;

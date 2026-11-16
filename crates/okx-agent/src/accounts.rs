@@ -7,21 +7,24 @@ use crate::{
     okx_credentials::{NamedAccountCredentials, load_native_account_credentials},
 };
 use okx_api::{AccountApi, Credentials, OkxEnvironment, OkxRestClient, RateBudget};
-use okx_execution::{AccountMeta, AccountStoreHandle, OpeningSnapshot};
+use okx_execution::account_worker::UnifiedFinanceHandle;
+use okx_execution::{AccountMeta, AccountStoreHandle};
 use okx_protocol::{
     account_catalog_proto,
     accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
 };
 use okx_runtime::{LiveWsConnector, PrivateWsCoordinator, PrivateWsHandle, WsConnector};
+#[cfg(test)]
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::str::FromStr;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
-    str::FromStr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -177,6 +180,10 @@ pub struct AccountRuntimeRegistry {
     /// Only catalog publication is serialized. Verification/HTTP never hold it.
     catalog_write: tokio::sync::Mutex<()>,
     rate_budget: RateBudget,
+    /// An opened stopped finance import has ZERO account-local writers.
+    /// No connect/recovery source task or venue POST can start in this mode.
+    native_stopped_finance: bool,
+    native_finance_owner: Option<UnifiedFinanceHandle>,
 }
 
 fn invalid() -> AgentError {
@@ -198,6 +205,25 @@ pub fn initialize_installation(root: &Path, installation_id: &str) -> AgentResul
 
 impl AccountRuntimeRegistry {
     pub async fn open(root: &Path, rate_budget: RateBudget) -> AgentResult<Self> {
+        // #510: A stopped unified finance import is NOT trading authority.
+        // The old account registry must not start its per-account writers or
+        // the Cloudflare financial command route over a staged finance.sqlite,
+        // even when the catalog is empty (no legacy account worker to lock).
+        // Checking metadata, not is_file(), also fails closed for symlinks
+        // and partially created targets. There is no Cloudflare lease RPC.
+        match std::fs::symlink_metadata(root.join("finance").join("finance.sqlite")) {
+            Ok(_) => {
+                return Err(AgentError::FinancialCaptureTask(
+                    "FINANCE_CUTOVER_NOT_ACCEPTED".into(),
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(AgentError::FinancialCaptureTask(
+                    "FINANCE_AUTHORITY_STATUS_UNAVAILABLE".into(),
+                ));
+            }
+        }
         let catalog = account_catalog_proto::promote_existing_once(root, |catalog| {
             for account in &catalog.accounts {
                 let path = root
@@ -236,6 +262,8 @@ impl AccountRuntimeRegistry {
             failures: RwLock::new(BTreeMap::new()),
             catalog_write: tokio::sync::Mutex::new(()),
             rate_budget,
+            native_stopped_finance: false,
+            native_finance_owner: None,
         };
         // Build independently: one account's slow verification cannot block another.
         use futures_util::{StreamExt, stream};
@@ -273,6 +301,136 @@ impl AccountRuntimeRegistry {
         Ok(registry)
     }
 
+    /// Actual Engine startup path for the original unified finance import.
+    /// The ONE finance.sqlite writer is opened before any account resources,
+    /// and NO AccountStoreHandle/venue observer/executor is created. The
+    /// account-catalog roster is independent of the immutable SQL manifest;
+    /// both must match. One campaign only until native multi-campaign
+    /// routing is implemented; never infer other campaigns away.
+    pub async fn open_stopped_finance(
+        root: &Path,
+        rate_budget: RateBudget,
+        campaign: &str,
+    ) -> AgentResult<(Self, UnifiedFinanceHandle)> {
+        if campaign.is_empty() {
+            return Err(AgentError::FinancialCaptureTask(
+                "FINANCE_EXPECTED_CAMPAIGN_REQUIRED".into(),
+            ));
+        }
+        let catalog = account_catalog_proto::load(root)?;
+        if catalog.accounts.is_empty()
+            || catalog
+                .accounts
+                .iter()
+                .any(|c| c.account_key.environment != Environment::Real)
+        {
+            return Err(AgentError::FinancialCaptureTask(
+                "FINANCE_STOPPED_CATALOG_COHORT_INVALID".into(),
+            ));
+        }
+        let roster = catalog
+            .accounts
+            .iter()
+            .map(|c| c.account_key.wire())
+            .collect::<Vec<_>>();
+        let owner = UnifiedFinanceHandle::open_stopped_import(
+            root.canonicalize()?,
+            catalog.installation_id.clone(),
+            roster,
+            vec![campaign.to_owned()],
+        )
+        .await?;
+        if owner.inventory().await?.state != "OFFLINE_NOT_AUTHORIZED" {
+            return Err(AgentError::FinancialCaptureTask(
+                "FINANCE_STOPPED_MANIFEST_INVALID".into(),
+            ));
+        }
+        let registry = Self {
+            root: root.to_path_buf(),
+            installation_id: catalog.installation_id,
+            routes: RwLock::new(BTreeMap::new()),
+            configurations: RwLock::new(
+                catalog
+                    .accounts
+                    .into_iter()
+                    .map(|c| (c.account_key.wire(), c))
+                    .collect(),
+            ),
+            failures: RwLock::new(BTreeMap::new()),
+            catalog_write: tokio::sync::Mutex::new(()),
+            rate_budget,
+            native_stopped_finance: true,
+            native_finance_owner: None,
+        };
+        Ok((registry, owner))
+    }
+
+    /// One new Native Engine composition, without a legacy import/fallback.
+    /// Verified account bootstrap must pass before private clients are loaded.
+    pub async fn open_native_finance(
+        root: &Path,
+        rate_budget: RateBudget,
+        campaign: &str,
+    ) -> AgentResult<(Self, UnifiedFinanceHandle)> {
+        let (registry, owner) = Self::open_native_catalog(root, rate_budget, campaign).await?;
+        for config in registry.list().await {
+            let credentials = load_native_account_credentials(&config.credential_ref)?;
+            let resources = registry
+                .open_resources(config.clone(), credentials, false)
+                .await?;
+            registry
+                .routes
+                .write()
+                .await
+                .insert(config.account_key.wire(), resources);
+        }
+        Ok((registry, owner))
+    }
+
+    /// Same startup composition for production and recorded-client tests.
+    /// Loading a verified local installation permits observation/connection,
+    /// never Reserve/BeginPost; those retain their independent policy gate.
+    async fn open_native_catalog(
+        root: &Path,
+        rate_budget: RateBudget,
+        campaign: &str,
+    ) -> AgentResult<(Self, UnifiedFinanceHandle)> {
+        let catalog = account_catalog_proto::load(root)?;
+        let owner = UnifiedFinanceHandle::open_native(
+            root.canonicalize()?,
+            catalog.installation_id.clone(),
+        )
+        .await?;
+        if !campaign.is_empty()
+            && let Some(configured) = owner
+                .configured_campaign(Instant::now() + std::time::Duration::from_secs(2))
+                .await?
+            && configured != campaign
+        {
+            return Err(AgentError::FinancialCaptureTask(
+                "FINANCE_CAMPAIGN_IDENTITY_MISMATCH".into(),
+            ));
+        }
+        let registry = Self {
+            root: root.to_path_buf(),
+            installation_id: catalog.installation_id,
+            routes: RwLock::new(BTreeMap::new()),
+            configurations: RwLock::new(
+                catalog
+                    .accounts
+                    .into_iter()
+                    .map(|c| (c.account_key.wire(), c))
+                    .collect(),
+            ),
+            failures: RwLock::new(BTreeMap::new()),
+            catalog_write: tokio::sync::Mutex::new(()),
+            rate_budget,
+            native_stopped_finance: false,
+            native_finance_owner: Some(owner.clone()),
+        };
+        Ok((registry, owner))
+    }
+
     pub fn installation_id(&self) -> &str {
         &self.installation_id
     }
@@ -296,6 +454,11 @@ impl AccountRuntimeRegistry {
     /// Re-open unavailable contexts without changing configuration or storage.
     /// An unreachable account never holds another account's mutation owner.
     pub async fn recover_unavailable(&self) {
+        // No legacy resource can be re-opened while the new installation
+        // writer owns finance.sqlite; stopped mode never heals to two owners.
+        if self.native_stopped_finance || self.native_finance_owner.is_some() {
+            return;
+        }
         use futures_util::{StreamExt, stream};
         let unavailable = self
             .failures
@@ -343,6 +506,11 @@ impl AccountRuntimeRegistry {
         operation_id: &str,
         request_digest: &str,
     ) -> AgentResult<VerifiedAccountConfig> {
+        if self.native_stopped_finance {
+            return Err(AgentError::FinancialCaptureTask(
+                "FINANCE_STOPPED_ACCOUNT_CONNECTION_DISABLED".into(),
+            ));
+        }
         if !valid_reference(credential_ref)
             || request_digest.len() != 64
             || !request_digest
@@ -429,7 +597,19 @@ impl AccountRuntimeRegistry {
                 "ACCOUNT_ALREADY_CONNECTED".into(),
             ));
         }
-        account_catalog_proto::append(&self.root, configuration)?;
+        if let Err(source) = account_catalog_proto::append(&self.root, configuration) {
+            // SQL initialization is already durable. Release unpublished source
+            // tasks and the account lease before the caller retries its original
+            // connect identity; never reset SQL or auto-repeat publication.
+            drop(configs);
+            drop(_publication);
+            resources.stop_sources().await;
+            return Err(if self.native_finance_owner.is_some() {
+                AgentError::AccountCatalogPublicationPending { source }
+            } else {
+                AgentError::Io(source)
+            });
+        }
         configs.insert(configuration.account_key.wire(), configuration.clone());
         self.routes
             .write()
@@ -460,6 +640,9 @@ impl AccountRuntimeRegistry {
         initialize: bool,
         lease_root: &Path,
     ) -> AgentResult<Arc<AccountResources>> {
+        if !configuration.valid() {
+            return Err(invalid());
+        }
         let uid =
             verify_client_pair(clients.environment, &clients.observer, &clients.executor).await?;
         if uid != configuration.account_key.verified_uid
@@ -476,125 +659,69 @@ impl AccountRuntimeRegistry {
             .join("accounts")
             .join(key_hash(&configuration.account_key));
         let identity_lease = acquire_identity_lease(lease_root, &configuration.account_key)?;
-        fs::create_dir_all(&root)?;
+        if self.native_finance_owner.is_none() {
+            fs::create_dir_all(&root)?;
+        }
         let database = root.join("account.sqlite");
-        let store = if initialize {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-            let opening = loop {
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(AgentError::FinancialCaptureTask(
-                        "INITIAL_SNAPSHOT_UNSTABLE".into(),
-                    ));
-                }
-                let first = observer.snapshot().await.map_err(|error| {
-                    AgentError::FinancialCaptureTask(
-                        crate::source_capture::snapshot_failure_code(&error).into(),
-                    )
-                })?;
-                let algos = observer
-                    .pending_derivative_risk_algos()
-                    .await
-                    .map_err(|_| {
-                        AgentError::FinancialCaptureTask("ACCOUNT_ALGO_SOURCE_UNAVAILABLE".into())
-                    })?;
-                let last = observer.snapshot().await.map_err(|error| {
-                    AgentError::FinancialCaptureTask(
-                        crate::source_capture::snapshot_failure_code(&error).into(),
-                    )
-                })?;
-                if first.account_uid_fingerprint != uid || last.account_uid_fingerprint != uid {
-                    return Err(AgentError::FinancialCaptureTask(
-                        "ACCOUNT_IDENTITY_MISMATCH".into(),
-                    ));
-                }
-                if !first
-                    .balance
-                    .same_values_ignoring_update_times(&last.balance)
-                    || first.positions != last.positions
-                    || first.pending_orders != last.pending_orders
-                {
-                    continue;
-                }
-                if !algos.complete_within_bound {
-                    return Err(AgentError::FinancialCaptureTask(
-                        "ACCOUNT_ALGO_COVERAGE_INCOMPLETE".into(),
-                    ));
-                }
-                let liabilities =
-                    last.balance
-                        .details
-                        .iter()
-                        .try_fold(Decimal::ZERO, |sum, d| {
-                            // OKX documents liab as not applicable to Futures mode (2).
-                            // Other account modes require an explicit observed debt field.
-                            let value = match d.liabilities.as_deref() {
-                                Some(v) => Decimal::from_str(v).map_err(|_| invalid())?,
-                                None if last.account_level == "2" => Decimal::ZERO,
-                                None => return Err(invalid()),
-                            };
-                            sum.checked_add(value).ok_or_else(invalid)
-                        })?;
-                let positions = last
-                    .positions
-                    .iter()
-                    .filter(|p| Decimal::from_str(&p.position) != Ok(Decimal::ZERO))
-                    .count();
-                let balances = last
-                    .balance
-                    .details
-                    .iter()
-                    .map(|d| {
-                        Ok((
-                            d.currency.clone(),
-                            Decimal::from_str(&d.equity).map_err(|_| invalid())?,
-                        ))
-                    })
-                    .collect::<AgentResult<Vec<_>>>()?;
-                let observed_at = chrono::DateTime::parse_from_rfc3339(&last.source_received_at)
-                    .map_err(|_| invalid())?
-                    .timestamp_millis();
-                let source_ref = format!("{:x}", Sha256::digest(serde_json::to_vec(&last)?));
-                break OpeningSnapshot {
-                    opening_equity_usd: Decimal::from_str(&last.balance.total_equity_usd)
-                        .map_err(|_| invalid())?,
-                    source_ref,
-                    observed_at,
-                    positions,
-                    orders: last.pending_orders.len(),
-                    conditional_orders: algos.rows,
-                    liabilities,
-                    balances,
-                };
-            };
-            let meta = AccountMeta {
-                account_key: configuration.account_key.wire(),
-                installation_id: self.installation_id.clone(),
-                initialized_at: opening.observed_at,
-                opening_source: opening.source_ref.clone(),
-                initialize_operation_id: configuration.connect_operation_id.clone(),
-                release_id: build_release().into(),
-            };
-            AccountStoreHandle::initialize_flat(database, meta, opening).await?
-        } else {
-            AccountStoreHandle::open_existing(
-                database,
+        let store = if let Some(owner) = &self.native_finance_owner {
+            crate::native_account_connection::ensure_account(
+                owner,
+                &configuration,
+                &observer,
+                &uid,
+                initialize,
+            )
+            .await?;
+            owner
+                .recover_posting(
+                    configuration.account_key.wire(),
+                    Instant::now() + std::time::Duration::from_secs(2),
+                )
+                .await?;
+            crate::execution_store::ExecutionStore::native(
+                owner.clone(),
                 configuration.account_key.wire(),
-                self.installation_id.clone(),
-            )
-            .await?
+            )?
+        } else {
+            let legacy = if initialize {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                let opening =
+                    crate::account_opening::capture_opening(&observer, &uid, deadline).await?;
+                let meta = AccountMeta {
+                    account_key: configuration.account_key.wire(),
+                    installation_id: self.installation_id.clone(),
+                    initialized_at: opening.observed_at,
+                    opening_source: opening.source_ref.clone(),
+                    initialize_operation_id: configuration.connect_operation_id.clone(),
+                    release_id: build_release().into(),
+                };
+                AccountStoreHandle::initialize_flat(database, meta, opening).await?
+            } else {
+                AccountStoreHandle::open_existing(
+                    database,
+                    configuration.account_key.wire(),
+                    self.installation_id.clone(),
+                )
+                .await?
+            };
+            legacy
+                .call(
+                    std::time::Instant::now() + std::time::Duration::from_secs(2),
+                    |s| s.recover_posting(chrono::Utc::now().timestamp_millis()),
+                )
+                .await?;
+            crate::execution_store::ExecutionStore::from(legacy)
         };
-        store
-            .call(
-                std::time::Instant::now() + std::time::Duration::from_secs(2),
-                |s| s.recover_posting(chrono::Utc::now().timestamp_millis()),
-            )
-            .await?;
-        let source_generation_seed = store
-            .call(
-                std::time::Instant::now() + std::time::Duration::from_secs(2),
-                |s| s.source_generation_base(),
-            )
-            .await?;
+        let source_generation_seed = if let Some((owner, account)) = store.native_scope() {
+            owner.source_generation_base(account.to_owned()).await?
+        } else {
+            store
+                .call(
+                    std::time::Instant::now() + std::time::Duration::from_secs(2),
+                    |s| s.source_generation_base(),
+                )
+                .await?
+        };
         let execution = Arc::new(ExecutionRuntime::from_client(
             store,
             clients.executor,
@@ -684,15 +811,7 @@ impl AccountRuntimeRegistry {
             let _ = account.source_shutdown.send(true);
         }
         for account in resources {
-            let tasks = std::mem::take(
-                &mut *account
-                    .source_tasks
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()),
-            );
-            for task in tasks {
-                stop_source_task(task, std::time::Duration::from_secs(10)).await;
-            }
+            account.stop_sources().await;
         }
     }
 }
@@ -806,6 +925,15 @@ pub(crate) fn acquire_identity_lease(root: &Path, key: &AccountKey) -> AgentResu
 }
 
 impl AccountResources {
+    async fn stop_sources(&self) {
+        let _ = self.source_shutdown.send(true);
+        let tasks =
+            std::mem::take(&mut *self.source_tasks.lock().unwrap_or_else(|e| e.into_inner()));
+        for task in tasks {
+            stop_source_task(task, std::time::Duration::from_secs(10)).await;
+        }
+    }
+
     /// A diagnostic observation only, never an admission or freshness proof.
     pub(crate) fn diagnostic_source_identity(&self) -> Option<bool> {
         let state = self.private_ws.state();
@@ -877,16 +1005,16 @@ impl AccountResources {
         health.last_observer_and_cursors_ms = Some(phases.observer_and_cursors_ms);
         health.last_history_and_ingest_ms = Some(phases.history_and_ingest_ms);
         health.last_nav_reconciliation_ms = Some(phases.nav_reconciliation_ms);
-        health.last_nav_sql_queue_wait_ms = Some(phases.nav_sql_queue_wait_ms);
-        health.last_nav_sql_owner_ms = Some(phases.nav_sql_owner_ms);
+        health.last_nav_sql_queue_wait_ms = phases.nav_sql_queue_wait_ms;
+        health.last_nav_sql_owner_ms = phases.nav_sql_owner_ms;
         health
             .finance_window
             .record(crate::finance_window::FinanceAttempt {
                 at_ms: now,
                 source_generation: generation,
                 elapsed_ms: duration_ms,
-                nav_sql_owner_ms: Some(phases.nav_sql_owner_ms),
-                nav_sql_queue_ms: Some(phases.nav_sql_queue_wait_ms),
+                nav_sql_owner_ms: phases.nav_sql_owner_ms,
+                nav_sql_queue_ms: phases.nav_sql_queue_wait_ms,
                 snapshot_age_ms,
                 failure_code: None,
             });
@@ -1037,6 +1165,14 @@ pub fn build_release() -> &'static str {
         None => "UNVERIFIED_LOCAL_BUILD",
     }
 }
+
+#[cfg(test)]
+#[path = "accounts_native_connect_tests.rs"]
+mod native_connect_contracts;
+
+#[cfg(test)]
+#[path = "accounts_native_trade_contract_tests.rs"]
+mod native_trade_contracts;
 
 #[cfg(test)]
 pub(crate) mod recorded_support {
@@ -5137,7 +5273,7 @@ pub(crate) mod recorded_support {
 
     pub(crate) fn prepared_with_socket(
         label: &str,
-        feed: Arc<RecordedAccountHttp>,
+        feed: Arc<dyn HttpTransport>,
         ws_connector: Arc<dyn WsConnector>,
         budget: RateBudget,
     ) -> (VerifiedAccountConfig, PreparedAccountClients) {
@@ -6073,6 +6209,74 @@ mod tests {
             verified_uid: "a".repeat(64),
         }
     }
+    /// Same production capture helper, real HTTP parser, no SQL owner or sender.
+    #[tokio::test]
+    async fn account_opening_capture_direct_readonly_and_identity_contract() {
+        use recorded_support::{RecordedAccountHttp, prepared};
+        for wrong_uid in [false, true] {
+            let feed = Arc::new(RecordedAccountHttp::default());
+            let (configuration, clients) = prepared("a", feed.clone(), RateBudget::new());
+            let observer = AccountBootstrapper::new(clients.observer);
+            let expected = if wrong_uid {
+                "f".repeat(64)
+            } else {
+                configuration.account_key.verified_uid
+            };
+            let result = crate::account_opening::capture_opening(
+                &observer,
+                &expected,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+            )
+            .await;
+            if wrong_uid {
+                assert!(
+                    matches!(result, Err(AgentError::FinancialCaptureTask(ref code)) if code=="ACCOUNT_IDENTITY_MISMATCH")
+                );
+            } else {
+                let opening = result.unwrap();
+                assert_eq!(opening.opening_equity_usd, Decimal::from(100));
+                assert_eq!(opening.balances, vec![("USDT".into(), Decimal::from(100))]);
+                assert_eq!(
+                    (
+                        opening.positions,
+                        opening.orders,
+                        opening.conditional_orders
+                    ),
+                    (0, 0, 0)
+                );
+                assert_eq!(opening.liabilities, Decimal::ZERO);
+                assert_eq!(opening.source_ref.len(), 64);
+                assert!(opening.observed_at > 0);
+            }
+            assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
+            assert!(
+                feed.requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.contains("orders-algo-pending"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn account_opening_capture_expired_deadline_reads_nothing() {
+        use recorded_support::{RecordedAccountHttp, prepared};
+        let feed = Arc::new(RecordedAccountHttp::default());
+        let (configuration, clients) = prepared("a", feed.clone(), RateBudget::new());
+        let result = crate::account_opening::capture_opening(
+            &AccountBootstrapper::new(clients.observer),
+            &configuration.account_key.verified_uid,
+            tokio::time::Instant::now(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AgentError::FinancialCaptureTask(ref code)) if code=="INITIAL_SNAPSHOT_UNSTABLE")
+        );
+        assert!(feed.requests.lock().unwrap().is_empty());
+        assert!(feed.outbound_posts.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn recovery_prepared_account_reopens_catalog_and_original_sql() {
         use recorded_support::{RecordedAccountHttp, prepared};
@@ -7026,6 +7230,26 @@ mod tests {
             .expect("SQL owner not closed");
         }
         std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn finance_staged_import_never_falls_back_to_old_trade_or_cloudflare_finance() {
+        let root = root();
+        initialize_installation(&root, "installation-test").unwrap();
+        std::fs::create_dir_all(root.join("finance")).unwrap();
+        std::fs::write(
+            root.join("finance").join("finance.sqlite"),
+            b"OFFLINE_NOT_AUTHORIZED",
+        )
+        .unwrap();
+        // Even zero registered accounts cannot produce a legacy sender.
+        assert!(matches!(
+            AccountRuntimeRegistry::open(&root, RateBudget::new()).await,
+            Err(AgentError::FinancialCaptureTask(reason))
+                if reason == "FINANCE_CUTOVER_NOT_ACCEPTED"
+        ));
+        assert!(!root.join("accounts").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
