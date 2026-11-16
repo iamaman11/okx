@@ -2344,19 +2344,23 @@ mod active_receipt_tests {
             .execute_batch(include_str!("../../../schema/finance-unified-v1.sql"))
             .unwrap();
         let mut statement = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {TERMINAL_RELEASE_DIAGNOSTIC_SCOPED_SQL}"))
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {TERMINAL_RELEASE_DIAGNOSTIC_SCOPED_SQL}"
+            ))
             .unwrap();
         let plan = statement
-            .query_map(params![128, "okx:real:account", "installation_native"], |row| {
-                row.get::<_, String>(3)
-            })
+            .query_map(
+                params![128, "okx:real:account", "installation_native"],
+                |row| row.get::<_, String>(3),
+            )
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
             .join(" ");
-        assert!(TERMINAL_RELEASE_DIAGNOSTIC_SCOPED_SQL.contains(
-            "WHERE account_key=?2 AND installation_id=?3"
-        ));
+        assert!(
+            TERMINAL_RELEASE_DIAGNOSTIC_SCOPED_SQL
+                .contains("WHERE account_key=?2 AND installation_id=?3")
+        );
         assert!(plan.contains("MATERIALIZE candidates"), "{plan}");
         assert!(plan.contains("idx_risk_receipts_active"), "{plan}");
         assert!(!plan.contains("SCAN intents"), "{plan}");
