@@ -2152,7 +2152,7 @@ impl TradeService {
                     .post_produced(packet)
                     .await
                     .map_err(str::to_owned)?;
-                (Ok(result), claim)
+                (Ok::<RiskResult, &'static str>(result), claim)
             } else {
                 #[cfg(test)]
                 {

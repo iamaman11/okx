@@ -5,9 +5,10 @@ use crate::{
 };
 use chrono::Utc;
 use okx_execution::{
-    AccountStoreHandle, CentralReceipt, Decision, IntentPlan, IntentState, NewIntent, StoredIntent,
-    StrategyInstance,
+    CentralReceipt, Decision, IntentPlan, IntentState, NewIntent, StoredIntent, StrategyInstance,
 };
+#[cfg(test)]
+use okx_execution::AccountStoreHandle;
 use okx_protocol::{
     account_governance::{AccountControl, CentralGovernanceSnapshot},
     risk_authority::*,
