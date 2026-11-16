@@ -15,7 +15,8 @@ fn strategy_owner_matches_plan(owner: Option<&str>, plan_owner: &str) -> bool {
 const TERMINAL_RELEASE_DIAGNOSTIC_SQL: &str = "
 WITH candidates AS MATERIALIZED (
     SELECT * FROM risk_receipts INDEXED BY idx_risk_receipts_active
-    WHERE state IN ('TERMINAL_PENDING_CENTRAL','RELEASED','LATE_SETTLEMENT_PENDING')
+    WHERE account_key=?2 AND installation_id=?3
+      AND state IN ('TERMINAL_PENDING_CENTRAL','RELEASED','LATE_SETTLEMENT_PENDING')
     ORDER BY state,intent_id
     LIMIT ?1
 )
@@ -2299,6 +2300,31 @@ fn risk_receipt_covers_exposure(state: &str) -> bool {
 #[cfg(test)]
 mod active_receipt_tests {
     use super::*;
+
+    #[test]
+    fn terminal_diagnostics_native_plan_scopes_before_candidate_limit() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../../../schema/finance-unified-v1.sql"))
+            .unwrap();
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {TERMINAL_RELEASE_DIAGNOSTIC_SQL}"))
+            .unwrap();
+        let plan = statement
+            .query_map(params![128, "okx:real:account", "installation_native"], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join(" ");
+        assert!(TERMINAL_RELEASE_DIAGNOSTIC_SQL.contains(
+            "WHERE account_key=?2 AND installation_id=?3"
+        ));
+        assert!(plan.contains("MATERIALIZE candidates"), "{plan}");
+        assert!(plan.contains("idx_risk_receipts_active"), "{plan}");
+        assert!(!plan.contains("SCAN intents"), "{plan}");
+    }
 
     #[test]
     fn terminal_diagnostics_query_plan_bounds_original_index_before_joins() {
