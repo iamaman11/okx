@@ -3,6 +3,7 @@
 use okx_protocol::risk_authority::{
     RiskCommand, RiskCommandAction, RiskDecisionStatus, RiskResult,
 };
+#[cfg(test)]
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
@@ -17,6 +18,7 @@ pub struct NativeRiskClient {
 
 #[derive(Clone)]
 enum RiskRoute {
+    #[cfg(test)]
     Cloudflare(mpsc::Sender<OutboundRiskCommand>),
     Local(crate::native_finance_risk::NativeFinanceRisk),
     /// Installed finance snapshot, real Engine route, ZERO private SQL/POST
@@ -25,13 +27,18 @@ enum RiskRoute {
 }
 impl NativeRiskClient {
     pub(crate) fn is_native_finance(&self) -> bool {
-        !matches!(&self.route, RiskRoute::Cloudflare(_))
+        match &self.route {
+            #[cfg(test)]
+            RiskRoute::Cloudflare(_) => false,
+            RiskRoute::Local(_) | RiskRoute::LocalStopped(_) => true,
+        }
     }
 
     pub(crate) fn native_finance_owner(
         &self,
     ) -> Option<okx_execution::account_worker::UnifiedFinanceHandle> {
         match &self.route {
+            #[cfg(test)]
             RiskRoute::Cloudflare(_) => None,
             RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
                 Some(backend.owner.clone())
@@ -44,6 +51,7 @@ impl NativeRiskClient {
         packet: crate::trade_service::ProducedReserve,
     ) -> Result<(RiskResult, Option<okx_execution::CentralReceipt>), &'static str> {
         match &self.route {
+            #[cfg(test)]
             RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED"),
             RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
                 backend.resolved().await?.reserve_produced(packet).await
@@ -56,6 +64,7 @@ impl NativeRiskClient {
         packet: crate::trade_service::ProducedPost,
     ) -> Result<(RiskResult, Option<okx_execution::CommittedVenueSend>), &'static str> {
         match &self.route {
+            #[cfg(test)]
             RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED"),
             RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
                 backend.resolved().await?.post_produced(packet).await
@@ -68,6 +77,7 @@ impl NativeRiskClient {
         packet: crate::trade_service::ProducedOpening,
     ) -> Result<RiskResult, &'static str> {
         match &self.route {
+            #[cfg(test)]
             RiskRoute::Cloudflare(_) => self.request(packet.into_parts().0).await,
             RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
                 backend
@@ -107,6 +117,7 @@ impl NativeRiskClient {
         snapshot: &okx_protocol::account_governance::CentralGovernanceSnapshot,
     ) -> Result<Option<crate::native_finance_risk::NativePolicyObservation>, String> {
         match &self.route {
+            #[cfg(test)]
             RiskRoute::Cloudflare(_) => Ok(None),
             RiskRoute::Local(backend) => backend.observe_governance(snapshot).await.map(Some),
             RiskRoute::LocalStopped(backend) => {
@@ -127,6 +138,7 @@ impl NativeRiskClient {
         snapshot: &okx_protocol::account_governance::CentralGovernanceSnapshot,
     ) -> Result<bool, String> {
         match &self.route {
+            #[cfg(test)]
             RiskRoute::Cloudflare(_) => Ok(false),
             RiskRoute::Local(backend) => {
                 backend.apply_governance(snapshot).await?;
@@ -145,27 +157,29 @@ impl NativeRiskClient {
         if !command.valid() {
             return Err("INVALID_RISK_COMMAND");
         }
-        let tx = match &self.route {
+        match &self.route {
             RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
-                return backend.resolved().await?.request(command).await;
+                backend.resolved().await?.request(command).await
             }
-            RiskRoute::Cloudflare(sender) => sender,
-        };
-        let id = command.command_id.clone();
-        let (reply, rx) = oneshot::channel();
-        tx.try_send(OutboundRiskCommand {
-            command,
-            return_to: reply,
-        })
-        .map_err(|_| "RISK_TRANSPORT_UNAVAILABLE")?;
-        let response = tokio::time::timeout(Duration::from_secs(5), rx)
-            .await
-            .map_err(|_| "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY")?
-            .map_err(|_| "RISK_TRANSPORT_LOST_DO_NOT_REPLAY")?;
-        if !response.valid() || response.command_id != id {
-            return Err("RISK_RESPONSE_IDENTITY_MISMATCH");
+            #[cfg(test)]
+            RiskRoute::Cloudflare(tx) => {
+                let id = command.command_id.clone();
+                let (reply, rx) = oneshot::channel();
+                tx.try_send(OutboundRiskCommand {
+                    command,
+                    return_to: reply,
+                })
+                .map_err(|_| "RISK_TRANSPORT_UNAVAILABLE")?;
+                let response = tokio::time::timeout(Duration::from_secs(5), rx)
+                    .await
+                    .map_err(|_| "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY")?
+                    .map_err(|_| "RISK_TRANSPORT_LOST_DO_NOT_REPLAY")?;
+                if !response.valid() || response.command_id != id {
+                    return Err("RISK_RESPONSE_IDENTITY_MISMATCH");
+                }
+                Ok(response)
+            }
         }
-        Ok(response)
     }
     /// Two-phase native admission using the same authenticated WS owner.
     /// The supplier MUST make a fresh source read after receiving HELD;
