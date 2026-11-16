@@ -176,6 +176,8 @@ jobs:
         with:
           toolchain: 1.95.0
           components: rustfmt
+      - name: Fast formatting gate before any Cargo build
+        run: cargo fmt --all -- --check
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
@@ -200,8 +202,6 @@ jobs:
           cargo test --locked -p okx-agent --lib risk_bridge::tests -- --nocapture
           cargo test --locked -p okx-agent --lib risk_book_contract_native_initialize_account -- --nocapture
           cargo test --locked -p okx-agent --lib actual_native_session_binds_risk_reply_to_generation_and_id -- --nocapture
-      - name: Formatting (not a substitute for compile/test)
-        run: cargo fmt --all -- --check
 
   riskbook-draft-rust:
     # Fast, real-source feedback for the active Rust RiskBook draft. Final
