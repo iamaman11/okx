@@ -265,11 +265,8 @@ pub async fn initialize_account(
     }
     // Fail closed if the finance file is absent, foreign, staged or from the
     // retired per-account layout. Never create an account-local SQL writer.
-    let owner = UnifiedFinanceHandle::open_native(
-        root.canonicalize()?,
-        installation_id.to_owned(),
-    )
-    .await?;
+    let owner =
+        UnifiedFinanceHandle::open_native(root.canonicalize()?, installation_id.to_owned()).await?;
     let mut stopped = owner.termination_signal();
     let result = initialize_account_on_owner(&owner, &config, expected_release).await;
     drop(owner);
@@ -292,10 +289,8 @@ async fn initialize_account_on_owner(
     expected_release: &str,
 ) -> AgentResult<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
-    if let Some(meta) = crate::native_account_connection::original_connection(
-        owner, config, deadline,
-    )
-    .await?
+    if let Some(meta) =
+        crate::native_account_connection::original_connection(owner, config, deadline).await?
     {
         if meta.release_id != expected_release {
             return Err(error("INITIALIZE_OPERATION_CONFLICT"));
@@ -306,8 +301,7 @@ async fn initialize_account_on_owner(
     let budget = RateBudget::new();
     let uid = verify_credentials(&credentials, budget.clone()).await?;
     if uid != config.account_key.verified_uid
-        || credentials.environment.demo
-            != (config.account_key.environment == Environment::Demo)
+        || credentials.environment.demo != (config.account_key.environment == Environment::Demo)
     {
         return Err(error("ACCOUNT_IDENTITY_MISMATCH"));
     }
@@ -316,14 +310,13 @@ async fn initialize_account_on_owner(
         credentials.observer,
         budget,
     )?);
-    crate::native_account_connection::ensure_account(
-        owner, config, &observer, &uid, true,
-    )
-    .await?;
+    crate::native_account_connection::ensure_account(owner, config, &observer, &uid, true).await?;
     // Even if the original commit reply was lost, require the durable bound
     // identity and original CONNECT receipt before reporting completion.
     let confirmed = crate::native_account_connection::original_connection(
-        owner, config, Instant::now() + Duration::from_secs(2),
+        owner,
+        config,
+        Instant::now() + Duration::from_secs(2),
     )
     .await?;
     if !matches!(confirmed, Some(ref meta) if meta.release_id == expected_release) {
@@ -509,7 +502,10 @@ mod tests {
         assert_eq!(counts(), (1, 1, 3), "replay cannot write a second opening");
         assert_eq!(
             owner
-                .account_metadata(Instant::now() + Duration::from_secs(2), meta.account_key.clone())
+                .account_metadata(
+                    Instant::now() + Duration::from_secs(2),
+                    meta.account_key.clone()
+                )
                 .await
                 .unwrap(),
             Some(meta)
@@ -537,7 +533,10 @@ mod tests {
         if !*stopped.borrow() {
             stopped.changed().await.unwrap();
         }
-        assert!(!root.join("accounts").exists(), "no legacy financial writer");
+        assert!(
+            !root.join("accounts").exists(),
+            "no legacy financial writer"
+        );
     }
 
     #[tokio::test]
@@ -564,7 +563,11 @@ mod tests {
             connect_operation_id: "connect_missing_512".into(),
             configuration_digest: "d".repeat(64),
         };
-        assert!(initialize_account_on_owner(&owner, &config, "e").await.is_err());
+        assert!(
+            initialize_account_on_owner(&owner, &config, "e")
+                .await
+                .is_err()
+        );
         assert!(
             owner
                 .account_metadata(
