@@ -410,6 +410,9 @@ impl TradeService {
             resource.execution.store.native_scope(),
             self.risk.native_finance_owner(),
         ) {
+            // Only old unit fixtures may represent a financial route with no
+            // unified owner. The supported runtime must never accept it.
+            #[cfg(test)]
             (None, None) => Ok(()),
             (Some((owner, account)), Some(risk_owner))
                 if owner.installation_id() == self.accounts.installation_id()
