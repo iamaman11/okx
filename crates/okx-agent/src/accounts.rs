@@ -8,6 +8,7 @@ use crate::{
 };
 use okx_api::{AccountApi, Credentials, OkxEnvironment, OkxRestClient, RateBudget};
 use okx_execution::account_worker::UnifiedFinanceHandle;
+#[cfg(test)]
 use okx_execution::{AccountMeta, AccountStoreHandle};
 use okx_protocol::{
     account_catalog_proto,
@@ -204,6 +205,9 @@ pub fn initialize_installation(root: &Path, installation_id: &str) -> AgentResul
 }
 
 impl AccountRuntimeRegistry {
+    // Retired per-account SQL composition is retained exclusively for recorded
+    // historical fixtures. Shipping Engine starts with open_native_finance().
+    #[cfg(test)]
     pub async fn open(root: &Path, rate_budget: RateBudget) -> AgentResult<Self> {
         // #510: A stopped unified finance import is NOT trading authority.
         // The old account registry must not start its per-account writers or
@@ -643,6 +647,14 @@ impl AccountRuntimeRegistry {
         if !configuration.valid() {
             return Err(invalid());
         }
+        // Fail before any private API request, identity lease or SQL creation.
+        // A stopped/no-owner installation must never fall back to account.sqlite.
+        #[cfg(not(test))]
+        if self.native_finance_owner.is_none() {
+            return Err(AgentError::FinancialCaptureTask(
+                "NATIVE_FINANCE_OWNER_REQUIRED".into(),
+            ));
+        }
         let uid =
             verify_client_pair(clients.environment, &clients.observer, &clients.executor).await?;
         if uid != configuration.account_key.verified_uid
@@ -659,9 +671,11 @@ impl AccountRuntimeRegistry {
             .join("accounts")
             .join(key_hash(&configuration.account_key));
         let identity_lease = acquire_identity_lease(lease_root, &configuration.account_key)?;
+        #[cfg(test)]
         if self.native_finance_owner.is_none() {
             fs::create_dir_all(&root)?;
         }
+        #[cfg(test)]
         let database = root.join("account.sqlite");
         let store = if let Some(owner) = &self.native_finance_owner {
             crate::native_account_connection::ensure_account(
@@ -683,6 +697,8 @@ impl AccountRuntimeRegistry {
                 configuration.account_key.wire(),
             )?
         } else {
+            #[cfg(test)]
+            {
             let legacy = if initialize {
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
                 let opening =
@@ -711,16 +727,32 @@ impl AccountRuntimeRegistry {
                 )
                 .await?;
             crate::execution_store::ExecutionStore::from(legacy)
+            }
+            #[cfg(not(test))]
+            {
+                return Err(AgentError::FinancialCaptureTask(
+                    "NATIVE_FINANCE_OWNER_REQUIRED".into(),
+                ));
+            }
         };
         let source_generation_seed = if let Some((owner, account)) = store.native_scope() {
             owner.source_generation_base(account.to_owned()).await?
         } else {
-            store
-                .call(
-                    std::time::Instant::now() + std::time::Duration::from_secs(2),
-                    |s| s.source_generation_base(),
-                )
-                .await?
+            #[cfg(test)]
+            {
+                store
+                    .call(
+                        std::time::Instant::now() + std::time::Duration::from_secs(2),
+                        |s| s.source_generation_base(),
+                    )
+                    .await?
+            }
+            #[cfg(not(test))]
+            {
+                return Err(AgentError::FinancialCaptureTask(
+                    "NATIVE_FINANCE_OWNER_REQUIRED".into(),
+                ));
+            }
         };
         let execution = Arc::new(ExecutionRuntime::from_client(
             store,
