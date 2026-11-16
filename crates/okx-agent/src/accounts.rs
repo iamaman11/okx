@@ -666,6 +666,7 @@ impl AccountRuntimeRegistry {
             ));
         }
         let observer = AccountBootstrapper::new(clients.observer);
+        #[cfg(test)]
         let root = self
             .root
             .join("accounts")
@@ -699,34 +700,34 @@ impl AccountRuntimeRegistry {
         } else {
             #[cfg(test)]
             {
-            let legacy = if initialize {
-                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-                let opening =
-                    crate::account_opening::capture_opening(&observer, &uid, deadline).await?;
-                let meta = AccountMeta {
-                    account_key: configuration.account_key.wire(),
-                    installation_id: self.installation_id.clone(),
-                    initialized_at: opening.observed_at,
-                    opening_source: opening.source_ref.clone(),
-                    initialize_operation_id: configuration.connect_operation_id.clone(),
-                    release_id: build_release().into(),
+                let legacy = if initialize {
+                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                    let opening =
+                        crate::account_opening::capture_opening(&observer, &uid, deadline).await?;
+                    let meta = AccountMeta {
+                        account_key: configuration.account_key.wire(),
+                        installation_id: self.installation_id.clone(),
+                        initialized_at: opening.observed_at,
+                        opening_source: opening.source_ref.clone(),
+                        initialize_operation_id: configuration.connect_operation_id.clone(),
+                        release_id: build_release().into(),
+                    };
+                    AccountStoreHandle::initialize_flat(database, meta, opening).await?
+                } else {
+                    AccountStoreHandle::open_existing(
+                        database,
+                        configuration.account_key.wire(),
+                        self.installation_id.clone(),
+                    )
+                    .await?
                 };
-                AccountStoreHandle::initialize_flat(database, meta, opening).await?
-            } else {
-                AccountStoreHandle::open_existing(
-                    database,
-                    configuration.account_key.wire(),
-                    self.installation_id.clone(),
-                )
-                .await?
-            };
-            legacy
-                .call(
-                    std::time::Instant::now() + std::time::Duration::from_secs(2),
-                    |s| s.recover_posting(chrono::Utc::now().timestamp_millis()),
-                )
-                .await?;
-            crate::execution_store::ExecutionStore::from(legacy)
+                legacy
+                    .call(
+                        std::time::Instant::now() + std::time::Duration::from_secs(2),
+                        |s| s.recover_posting(chrono::Utc::now().timestamp_millis()),
+                    )
+                    .await?;
+                crate::execution_store::ExecutionStore::from(legacy)
             }
             #[cfg(not(test))]
             {
