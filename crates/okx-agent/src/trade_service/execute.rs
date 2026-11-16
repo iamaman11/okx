@@ -499,27 +499,12 @@ impl TradeService {
                 return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
             }
             let campaign = campaign.clone();
-            if let Some((owner, account)) = resource.execution.store.native_scope() {
-                owner
-                    .verify_campaign_entry_readiness(
-                        until,
-                        account.to_owned(),
-                        campaign,
-                        from,
-                        through,
-                    )
-                    .await
-                    .map_err(err)?;
-            } else {
-                resource
-                    .execution
-                    .store
-                    .call(until, move |store| {
-                        store.verify_campaign_entry_readiness(&campaign, from, through)
-                    })
-                    .await
-                    .map_err(err)?;
-            }
+            resource
+                .execution
+                .store
+                .verify_campaign_entry_readiness(until, campaign, from, through)
+                .await
+                .map_err(err)?;
         }
         Ok(CampaignOpeningDecision::VerifyNativeReadiness)
     }
@@ -572,27 +557,12 @@ impl TradeService {
                     return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
                 }
                 let campaign = origin.campaign_id.clone();
-                if let Some((owner, account)) = resource.execution.store.native_scope() {
-                    owner
-                        .refresh_campaign_entry_readiness(
-                            until,
-                            account.to_owned(),
-                            campaign,
-                            from,
-                            through,
-                        )
-                        .await
-                        .map_err(err)?;
-                } else {
-                    resource
-                        .execution
-                        .store
-                        .call(until, move |store| {
-                            store.refresh_campaign_entry_readiness(&campaign, from, through)
-                        })
-                        .await
-                        .map_err(err)?;
-                }
+                resource
+                    .execution
+                    .store
+                    .refresh_campaign_entry_readiness(until, campaign, from, through)
+                    .await
+                    .map_err(err)?;
             }
             return Ok(());
         }
@@ -631,28 +601,12 @@ impl TradeService {
                 return Err("ENTRY_OPENING_IDENTITY_UNVERIFIED".into());
             }
             let campaign = origin.campaign_id.clone();
-            let (spent, source_digest) =
-                if let Some((owner, account)) = resource.execution.store.native_scope() {
-                    owner
-                        .seal_captured_campaign_baseline(
-                            until,
-                            account.to_owned(),
-                            campaign,
-                            from,
-                            through,
-                        )
-                        .await
-                        .map_err(err)?
-                } else {
-                    resource
-                        .execution
-                        .store
-                        .call(until, move |store| {
-                            store.seal_captured_campaign_baseline(&campaign, from, through)
-                        })
-                        .await
-                        .map_err(err)?
-                };
+            let (spent, source_digest) = resource
+                .execution
+                .store
+                .seal_captured_campaign_baseline(until, campaign, from, through)
+                .await
+                .map_err(err)?;
             rows.push(CampaignOpeningAccount {
                 account_key: account.account_key.clone(),
                 history_from_ms: origin.started_at_ms,
@@ -1814,26 +1768,18 @@ impl TradeService {
         resource: &AccountResources,
         outcome: okx_execution::IntentOutcome,
     ) -> Result<(), String> {
-        if self.risk.is_native_finance() {
-            let owner = self
-                .risk
-                .native_finance_owner()
-                .ok_or("NATIVE_OUTCOME_OWNER_MISSING")?;
+        if let Some(owner) = self.risk.native_finance_owner() {
             if owner.installation_id() != self.accounts.installation_id() {
                 return Err("NATIVE_OUTCOME_INSTALLATION_MISMATCH".into());
             }
-            owner
-                .record_intent_outcome(resource.configuration.account_key.wire(), outcome)
-                .await
-                .map_err(err)
-        } else {
-            resource
-                .execution
-                .store
-                .record_intent_outcome(deadline(), outcome)
-                .await
-                .map_err(err)
         }
+        self.verify_runtime_finance_route(resource)?;
+        resource
+            .execution
+            .store
+            .record_intent_outcome(deadline(), outcome)
+            .await
+            .map_err(err)
     }
     pub(super) fn risk_command(
         &self,

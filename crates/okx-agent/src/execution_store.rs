@@ -944,6 +944,98 @@ impl ExecutionStore {
         }
     }
 
+    /// Observe the original campaign source boundary through the existing
+    /// account scope; never expose the owner's SQL connection to Execute.
+    pub async fn verify_campaign_entry_readiness(
+        &self,
+        deadline: Instant,
+        campaign: String,
+        from: i64,
+        through: i64,
+    ) -> StoreResult<()> {
+        match self {
+            #[cfg(test)]
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.verify_campaign_entry_readiness(&campaign, from, through)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .verify_campaign_entry_readiness(
+                        deadline,
+                        account.clone(),
+                        campaign,
+                        from,
+                        through,
+                    )
+                    .await
+            }
+        }
+    }
+
+    /// Source refresh commits on the one finance writer before any opening.
+    pub async fn refresh_campaign_entry_readiness(
+        &self,
+        deadline: Instant,
+        campaign: String,
+        from: i64,
+        through: i64,
+    ) -> StoreResult<()> {
+        match self {
+            #[cfg(test)]
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.refresh_campaign_entry_readiness(&campaign, from, through)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .refresh_campaign_entry_readiness(
+                        deadline,
+                        account.clone(),
+                        campaign,
+                        from,
+                        through,
+                    )
+                    .await
+            }
+        }
+    }
+
+    /// The sealed historical spend and source digest are scoped facts,
+    /// never a trading grant or a second copy of the financial ledger.
+    pub async fn seal_captured_campaign_baseline(
+        &self,
+        deadline: Instant,
+        campaign: String,
+        from: i64,
+        through: i64,
+    ) -> StoreResult<(rust_decimal::Decimal, String)> {
+        match self {
+            #[cfg(test)]
+            Self::Legacy(s) => {
+                s.call(deadline, move |sql| {
+                    sql.seal_captured_campaign_baseline(&campaign, from, through)
+                })
+                .await
+            }
+            Self::Native { owner, account } => {
+                owner
+                    .seal_captured_campaign_baseline(
+                        deadline,
+                        account.clone(),
+                        campaign,
+                        from,
+                        through,
+                    )
+                    .await
+            }
+        }
+    }
+
     pub async fn reject_unsent(
         &self,
         deadline: Instant,

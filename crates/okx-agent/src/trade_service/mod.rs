@@ -285,25 +285,32 @@ impl TradeService {
             *latest = Some(snapshot.clone());
             return Ok(());
         }
-        let limit = dec(&snapshot.state.campaign_loss_limit_usd)?;
-        for account in &snapshot.state.accounts {
-            let Some(resources) = self.accounts.resolve(&account.account_key).await else {
-                continue;
-            };
-            let revision = snapshot.state.revision as i64;
-            let paused = !account.access_enabled();
-            let campaign = snapshot.state.campaign_id.clone();
-            resources
-                .execution
-                .store
-                .call(deadline(), move |store| {
-                    store.apply_authority_policy(revision, paused, &campaign, limit)
-                })
-                .await
-                .map_err(err)?;
+        // The retired remote finance route has no production fallback. Only
+        // original unit fixtures can reach the per-account SQL owner below.
+        #[cfg(test)]
+        {
+            let limit = dec(&snapshot.state.campaign_loss_limit_usd)?;
+            for account in &snapshot.state.accounts {
+                let Some(resources) = self.accounts.resolve(&account.account_key).await else {
+                    continue;
+                };
+                let revision = snapshot.state.revision as i64;
+                let paused = !account.access_enabled();
+                let campaign = snapshot.state.campaign_id.clone();
+                resources
+                    .execution
+                    .store
+                    .call(deadline(), move |store| {
+                        store.apply_authority_policy(revision, paused, &campaign, limit)
+                    })
+                    .await
+                    .map_err(err)?;
+            }
+            *latest = Some(snapshot.clone());
+            Ok(())
         }
-        *latest = Some(snapshot.clone());
-        Ok(())
+        #[cfg(not(test))]
+        Err("NATIVE_GOVERNANCE_ROUTE_MISMATCH".into())
     }
     pub async fn diagnostic_access(&self, key: &str) -> Value {
         let latest = self.governance.read().await;
@@ -386,22 +393,25 @@ impl TradeService {
             .find(|a| a.account_key == r.configuration.account_key.wire())
             .cloned()
             .ok_or("ACCOUNT_ACCESS_MISSING")?;
-        let revision = state.state.revision as i64;
-        let paused = !account.access_enabled();
-        let campaign = state.state.campaign_id.clone();
-        let limit = dec(&state.state.campaign_loss_limit_usd)?;
-        if r.execution.store.native_scope().is_some() {
-            if !self.risk.apply_native_governance(&state).await? {
-                return Err("NATIVE_GOVERNANCE_ROUTE_MISMATCH".into());
+        if !self.risk.apply_native_governance(&state).await? {
+            // Production never reopens per-account SQL after a Native refusal.
+            // Original remote-risk fixtures are the only legacy callers.
+            #[cfg(test)]
+            {
+                let revision = state.state.revision as i64;
+                let paused = !account.access_enabled();
+                let campaign = state.state.campaign_id.clone();
+                let limit = dec(&state.state.campaign_loss_limit_usd)?;
+                r.execution
+                    .store
+                    .call(deadline(), move |s| {
+                        s.apply_authority_policy(revision, paused, &campaign, limit)
+                    })
+                    .await
+                    .map_err(err)?;
             }
-        } else {
-            r.execution
-                .store
-                .call(deadline(), move |s| {
-                    s.apply_authority_policy(revision, paused, &campaign, limit)
-                })
-                .await
-                .map_err(err)?;
+            #[cfg(not(test))]
+            return Err("NATIVE_GOVERNANCE_ROUTE_MISMATCH".into());
         }
         Ok((state, account))
     }
