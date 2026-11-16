@@ -1,4 +1,6 @@
 //! Engine lifecycle: one process, one shutdown signal, account-local owners.
+#[cfg(test)]
+use crate::risk_bridge::OutboundRiskCommand;
 pub use crate::source_capture::capture_account_sources;
 use crate::{
     AgentResult,
@@ -16,8 +18,6 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, watch};
-#[cfg(test)]
-use crate::risk_bridge::OutboundRiskCommand;
 pub struct EngineContext {
     pub dispatch: DispatchContext,
     pub public: PublicWsCoordinator,

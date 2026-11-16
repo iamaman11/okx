@@ -1,4 +1,6 @@
 //! Authenticated product transport. Remote financial grants are retired.
+#[cfg(test)]
+use crate::risk_bridge::OutboundRiskCommand;
 use crate::{
     AgentError, AgentResult,
     query::{DispatchContext, dispatch_with_governance, response},
@@ -17,11 +19,9 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::{sync::watch, time::Instant};
 #[cfg(test)]
 use tokio::sync::{mpsc, oneshot};
-#[cfg(test)]
-use crate::risk_bridge::OutboundRiskCommand;
+use tokio::{sync::watch, time::Instant};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -166,8 +166,7 @@ where
 pub async fn run_cloudflare_transport(
     config: &CloudflareTransportConfig,
     ctx: DispatchContext,
-    #[cfg(test)]
-    mut risk: mpsc::Receiver<OutboundRiskCommand>,
+    #[cfg(test)] mut risk: mpsc::Receiver<OutboundRiskCommand>,
     mut shutdown: watch::Receiver<bool>,
 ) -> AgentResult<()> {
     let mut retry = 0usize;
@@ -195,8 +194,7 @@ pub async fn run_cloudflare_transport(
 async fn run_session(
     config: &CloudflareTransportConfig,
     ctx: DispatchContext,
-    #[cfg(test)]
-    risk: &mut mpsc::Receiver<OutboundRiskCommand>,
+    #[cfg(test)] risk: &mut mpsc::Receiver<OutboundRiskCommand>,
     shutdown: watch::Receiver<bool>,
 ) -> AgentResult<()> {
     let mut request = config
@@ -240,8 +238,7 @@ async fn run_connected_session<S>(
     socket: S,
     hello: F,
     ctx: DispatchContext,
-    #[cfg(test)]
-    risk: &mut mpsc::Receiver<OutboundRiskCommand>,
+    #[cfg(test)] risk: &mut mpsc::Receiver<OutboundRiskCommand>,
     mut shutdown: watch::Receiver<bool>,
 ) -> AgentResult<()>
 where
