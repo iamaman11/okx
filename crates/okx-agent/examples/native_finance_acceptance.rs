@@ -1,6 +1,8 @@
 //! Fresh contract-witness collector. Partial coverage never becomes full acceptance.
 //! Run with --known for existing witnesses, --list for the manifest, or no flags
 //! for full acceptance (blocked while any mandatory contract remains missing).
+#[path = "native_finance_acceptance/budgets.rs"]
+mod budgets;
 #[path = "native_finance_acceptance/manifest.rs"]
 mod manifest;
 #[path = "native_finance_acceptance/process.rs"]
@@ -105,6 +107,7 @@ async fn execute(
     baseline: &(String, String, bool),
     wanted: &Witnesses,
     report: &mut Value,
+    enforce_resources: bool,
 ) -> Result<Witnesses> {
     if !baseline.2 {
         return Err("GIT_TREE_DIRTY");
@@ -155,6 +158,7 @@ async fn execute(
     })?;
     let mut observed = Witnesses::new();
     let runtime_start = Instant::now();
+    let measurements = budgets::Measurements::new(report["run_id"].as_str().unwrap())?;
     let execution: Result<()> = async {
         for package in PACKAGES {
             let names: BTreeSet<String> = wanted
@@ -184,6 +188,7 @@ async fn execute(
                 "OKX_NATIVE_ACCEPTANCE_RUN_ID",
                 report["run_id"].as_str().unwrap(),
             );
+            cmd.env("OKX_NATIVE_ACCEPTANCE_WORKLOAD_DIR", measurements.path());
             let stage_started = Instant::now();
             let out = command(cmd, Duration::from_secs(180)).await;
             report["stages"].as_array_mut().unwrap().push(json!({
@@ -249,20 +254,36 @@ async fn execute(
                 repository_guards::TRANSPORT_WITNESS.into(),
             ));
         }
-        if observed != *wanted {
+        let core: Witnesses = wanted
+            .iter()
+            .filter(|(_, n)| n != budgets::WITNESS)
+            .cloned()
+            .collect();
+        if observed != core {
             return Err("SELECTED_WITNESS_MISSING");
         }
         Ok(())
     }
     .await;
+    let workload = if execution.is_ok() {
+        measurements.finish(report["run_id"].as_str().unwrap())
+    } else {
+        Err("FUNCTIONAL_WITNESS_FAILED")
+    };
     report["runtime_setup_to_teardown_ms"] = json!(runtime_start.elapsed().as_millis());
+    execution?;
+    report["owner_workload"] = workload?;
+    if budgets::verify(report, &observed)? {
+        observed.insert(("repository".into(), budgets::WITNESS.into()));
+    } else if enforce_resources {
+        return Err("FULL_RESOURCE_COUNTERS_UNAVAILABLE");
+    }
     report["observed_witnesses"] = json!(
         observed
             .iter()
             .map(|(p, n)| json!({"package":p,"test":n,"status":"ok"}))
             .collect::<Vec<_>>()
     );
-    execution?;
     Ok(observed)
 }
 
@@ -310,6 +331,15 @@ async fn main() {
         report["head"] = json!(baseline.0);
         report["tree"] = json!(baseline.1);
         report["git_clean"] = json!(baseline.2);
+        let mut compiler=Command::new("rustc");
+        compiler.arg("--version");
+        let compiler=command(compiler,Duration::from_secs(30)).await?;
+        if !compiler.success { return Err("TOOLCHAIN_IDENTITY_UNAVAILABLE"); }
+        report["environment"]=json!({"os":std::env::consts::OS,"arch":std::env::consts::ARCH,
+            "logical_processors":std::thread::available_parallelism().ok().map(|n|n.get()),
+            "processor_identifier":std::env::var("PROCESSOR_IDENTIFIER").ok(),
+            "toolchain":String::from_utf8_lossy(&compiler.stdout).trim(),
+            "profile":"Cargo test debug","test_threads":4});
         let wanted = selected()?;
         if mode == "full" && incomplete() {
             report["overall"] = json!("BLOCKED");
@@ -322,11 +352,14 @@ async fn main() {
             report["run_id"] = json!(format!("{root_run_id}_{sample}"));
             report["stages"] = json!([]);
             report["repository_guards"] = json!([]);
-            observed = execute(repo, &baseline, &wanted, &mut report).await?;
+            report["resource_budgets"] = Value::Null;
+            report["owner_workload"] = Value::Null;
+            observed = execute(repo, &baseline, &wanted, &mut report, mode=="full").await?;
             measurements.push(json!({"sample":sample,"run_id":report["run_id"],
                 "head":baseline.0,"tree":baseline.1,"build_ms":report["build_ms"],
                 "runtime_setup_to_teardown_ms":report["runtime_setup_to_teardown_ms"],
-                "stages":report["stages"],"executed_witnesses":observed.len()}));
+                "stages":report["stages"],"owner_workload":report["owner_workload"],
+                "resource_budgets":report["resource_budgets"],"executed_witnesses":observed.len()}));
             report["samples"] = json!(measurements);
         }
         let times: Vec<u64> = measurements
@@ -345,7 +378,11 @@ async fn main() {
     let observed = result.as_ref().ok();
     let blocked = report["overall"] == "BLOCKED";
     let mut contracts: Vec<Value> = CONTRACTS.iter().map(|c| {
-        let missing = c.missing.or(if c.witnesses.is_empty() { Some("NO_WITNESS") } else { None });
+        let missing = c.missing.or(if c.witnesses.is_empty() { Some("NO_WITNESS") }
+            else if c.witnesses.iter().any(|w|w.test==budgets::WITNESS)
+                && report["resource_budgets"]["status"]!="VERIFIED" {
+                Some("RESOURCE_MEASUREMENTS_NOT_VERIFIED")
+            } else { None });
         let passed = c.witnesses.iter().all(|w| observed.is_some_and(|o| o.contains(&(w.package.to_owned(), w.test.to_owned()))));
         json!({"id":c.id,"status":if missing.is_some(){"MISSING"}else if blocked{"NOT_RUN"}else if passed{"PASS"}else{"FAIL"},"missing":missing,
             "reason":if blocked && missing.is_none(){Some("FULL_MODE_BLOCKED_BY_MISSING_CONTRACTS")}else{missing}})

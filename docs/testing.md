@@ -1,3 +1,49 @@
+## RB16 final acceptance envelope (declared before final run)
+
+The current acceptance workload is the exact reviewed Rust witness set (84
+core witnesses at the d35565e0 baseline), including public A/B trading, Add,
+partial/late fills, closes, UNKNOWN, source/refusal/diagnostic/recovery paths,
+real child kill/reopen/exclusion and retained workerd transport. The64-transfer
+workload adds16-concurrent SQL pressure,64 exact replays,65 original owner jobs
+and128 conserved ledger legs. This is a finite CODE workload, not proof that
+all32 possible accounts or unlimited markets sustain a throughput rate.
+
+budgets.rs enforces, without modifying production limits:
+- Whole setup/physical/teardown:180s; build and metadata collection separate.
+- Sum of direct measured process CPU:90s; observed peak of each direct process:
+  512MiB; sum of direct Windows process read bytes and write bytes:512MiB each.
+  These include pipe I/O. Descendants are excluded; this is explicitly NOT an
+  aggregate OS-process-tree resource or power-loss guarantee.
+- Workload:5s for each command and observed queue/SQL maximum;30s complete
+  setup/reopen/replay/teardown;32MiB isolated financial storage.
+- A missing counter, missing/duplicate/foreign stage, wrong run, wrong operation
+  count, malformed latency vector, false percentile or exceeded budget cannot
+  satisfy the measurement witness. Full mode refuses unsupported counters.
+
+The Windows x86_64 debug/threads4 baseline at d35565e0 is89.091/81.798/82.765s,
+8 logical processors, Intel64 Family6 Model60 Stepping3. Selected core witness
+hash is076f617c6aaf220a3b4a2506a28a05ce1d17d020363b68f46541d09610af6467.
+On that hardware class and identical witness set, the ceiling is111.364s
+(25% above observed maximum); a changed machine/workload is explicitly not a
+comparable speedup/regression claim. Portable180s gives about2x baseline max;
+CPU90s gives over2x observed direct CPU;512MiB gives over3x observed direct
+peak and about3x aggregate reads/writes. This is an initial regression envelope,
+not an optimization result. #512 owns subsequent measured reductions.
+
+p50/p95/max are empirical nearest-rank values over the64 real command latencies,
+including queueing. Samples are correlated within16-way batches, so no population
+tail or independence is claimed. One full-run duration is reported separately,
+never as whole-run p95. An optional repeated collection still requires20samples
+to emit whole-run p95; repeating the entire suite20times is NOT required for
+initial CODE acceptance. #510 explicitly records this clarification. Financial
+witnesses still run fresh once per full invocation; no prior PASS is reused.
+
+Both RB16 manifest rows now require an EXECUTED measurement witness, not just
+the presence of constants. Windows full mode can emit FULL_PASS only after all
+current properties, workload export/readback/cleanup, counters and budgets pass.
+Linux known mode retains explicit MISSING measurement rows when counters are
+unavailable; unavailable counters are null, never synthetic zero measurements.
+Final local/GitHub outcomes must be recorded against the committed candidate.
 ## Bounded workload and measured acceptance stages - 16 November 2026
 
 The fresh installation writer now has a declared financial workload: four

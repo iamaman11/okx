@@ -41,6 +41,10 @@ pub(super) fn collector_sources_match(repo: &Path) -> Result<()> {
             "native_finance_acceptance/resources.rs",
             include_bytes!("resources.rs").as_slice(),
         ),
+        (
+            "native_finance_acceptance/budgets.rs",
+            include_bytes!("budgets.rs").as_slice(),
+        ),
     ] {
         let path = repo.join("crates/okx-agent/examples").join(relative);
         let actual = std::fs::read(path).map_err(|_| "COLLECTOR_SOURCE_UNAVAILABLE")?;
@@ -246,6 +250,7 @@ pub(super) fn selected() -> Result<Witnesses> {
                     && [
                         super::repository_guards::WITNESS,
                         super::repository_guards::TRANSPORT_WITNESS,
+                        super::budgets::WITNESS,
                     ]
                     .contains(&w.test));
             if !supported

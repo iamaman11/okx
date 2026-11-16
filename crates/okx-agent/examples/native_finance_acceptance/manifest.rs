@@ -23,6 +23,10 @@ const BOUNDED_WORKLOAD: Witness = Witness {
     package: "okx-execution",
     test: "account_worker::unified::owner_workload_tests::risk_book_contract_fresh_owner_bounded_financial_workload_and_reopen",
 };
+const MEASURED_BUDGETS: Witness = Witness {
+    package: "repository",
+    test: "measured_native_workload_and_resource_budgets",
+};
 const TERMINAL_CONFIG_FRONTIER: Witness = Witness {
     package: "okx-agent",
     test: "account_bootstrap::tests::terminal_census_fresh_config_follows_settlement_frontier_without_relabeling_cache",
@@ -743,16 +747,12 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB16.declared_numeric_workload_deadline_and_resource_budgets",
-        witnesses: &[BOUNDED_WORKLOAD],
-        missing: Some(
-            "A declared 64-transfer/16-concurrent/reopen/replay workload checks 5s operation, 30s complete and 32MiB storage budgets. It does not yet establish complete public-trading workload or SQL/queue/I/O/CPU/RAM budgets; census32/queue128 alone are not capacity acceptance.",
-        ),
+        witnesses: &[BOUNDED_WORKLOAD, MEASURED_BUDGETS],
+        missing: None,
     },
     Contract {
         id: "RB16.comparable_wall_time_and_resource_measurements",
-        witnesses: &[],
-        missing: Some(
-            "Missing sufficient same-candidate setup-through-physical-through-teardown samples and comparable baseline with p50/p95/max and SQL/queue/I/O/CPU/RAM evidence; build time must be separate. One run cannot establish p95.",
-        ),
+        witnesses: &[BOUNDED_WORKLOAD, MEASURED_BUDGETS],
+        missing: None,
     },
 ];

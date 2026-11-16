@@ -30,6 +30,7 @@ async fn risk_book_contract_fresh_owner_bounded_financial_workload_and_reopen() 
     let (root, owner) = fixture::fresh().await;
     let before = owner.sql_timing();
     let mut original = Vec::new();
+    let mut latency_us = Vec::new();
     for batch in 0..BATCHES {
         let mut tasks = tokio::task::JoinSet::new();
         for lane in 0..CONCURRENCY {
@@ -47,11 +48,13 @@ async fn risk_book_contract_fresh_owner_bounded_financial_workload_and_reopen() 
                 .unwrap()
                 .unwrap();
                 assert!(started.elapsed() < OPERATION_BUDGET);
-                (cmd, result.receipt)
+                (cmd, result.receipt, started.elapsed().as_micros() as u64)
             });
         }
         while let Some(done) = tasks.join_next().await {
-            original.push(done.unwrap());
+            let (cmd, receipt, elapsed) = done.unwrap();
+            original.push((cmd, receipt));
+            latency_us.push(elapsed);
         }
     }
     assert_eq!(original.len(), BATCHES * CONCURRENCY);
@@ -128,4 +131,42 @@ async fn risk_book_contract_fresh_owner_bounded_financial_workload_and_reopen() 
         setup.elapsed() < TOTAL_BUDGET,
         "includes setup/reopen/replay/teardown"
     );
+    if let Some(directory) = std::env::var_os("OKX_NATIVE_ACCEPTANCE_WORKLOAD_DIR") {
+        use std::io::Write;
+        let directory = std::path::PathBuf::from(directory);
+        assert_eq!(
+            directory.parent().unwrap().canonicalize().unwrap(),
+            std::env::temp_dir().canonicalize().unwrap()
+        );
+        assert!(
+            directory
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("okx-acceptance-measurements-")
+        );
+        assert!(
+            !std::fs::symlink_metadata(&directory)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        latency_us.sort_unstable();
+        let report = serde_json::json!({
+            "schema":"okx.native-owner-workload/v1",
+            "run_id":std::env::var("OKX_NATIVE_ACCEPTANCE_RUN_ID").unwrap(),
+            "operations":64,"concurrency":16,"replays":64,"ledger_legs":legs,
+            "latency_us":latency_us,"p50_us":latency_us[31],"p95_us":latency_us[60],
+            "max_us":latency_us[63],"sql_jobs":timing.observed_jobs-before.observed_jobs,
+            "max_queue_wait_ms":timing.max_queue_wait_ms,"max_sql_owner_ms":timing.max_sql_owner_ms,
+            "storage_bytes":bytes,"setup_through_teardown_us":setup.elapsed().as_micros()
+        });
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(directory.join("owner-workload.json"))
+            .unwrap();
+        file.write_all(report.to_string().as_bytes()).unwrap();
+    }
 }
