@@ -1,3 +1,45 @@
+# Current #510 integrated Native checkpoint — 2026-11-16
+
+This checkpoint is NO-GO for complete RB01–RB16 / historical26 acceptance.
+All results below are fresh LOCAL executions on this code; build is excluded.
+
+- Native public composition:25 PASS,0 FAIL,0 ignored,28.16s.
+- Execution:340 PASS,0 FAIL,2 historical ignored,12.23s; kernel25 PASS,0.01s.
+- Storage commands:10 PASS,0.91s (including whole-finance wrapper).
+- Existing adjacent contracts PASS: connect5,coverage verifier4,diagnostics29,
+  plan13,terminal release8,unsent release10,protection cleanup7,entry settlement8.
+- All-target Agent type check, format, architecture/self-test and SQL guard PASS.
+- These are separately measured targets, not one full run, p95 or a latency SLA.
+
+Completed boundaries: public partial Close0.04 then Close0.06 with independent
+fees; explicit shared-budget Reserve denial B cannot strand A; caller canceled
+after HELD retains original reservation on same-key replay and cold reopen;
+changed post-HELD fee refuses send without fabricating unsent proof; whole-DB
+WAL-aware backup and missing-target restore preserve identity and budgets and
+require the original storage audit. Native operation diagnostics now read the
+original receipt and account source generation/watermark in one scoped SQL
+snapshot, without network, renewed freshness or a send capability.
+
+Causal REDs: partial terminal Close incorrectly required filled==planned;
+explicit Native Reserve Denied left an unresolved attempt that blocked A.
+Snapshot contract setup originally failed CAMPAIGN_READINESS_STALE after
+reconnect; it now uses the existing production maintenance refresh over actual
+captured rows before testing the separate STORAGE_RECOVERY_INCOMPLETE fence.
+No production freshness, source coverage or risk-release rule was relaxed.
+
+Detailed production symbols and negative boundaries are in
+cloudflare/okx-mcp/FINANCIAL_WITNESS_RETIREMENT.md. CI includes the new Native
+backup wrapper. A Draft job success with other jobs skipped is not full GO.
+
+Still missing: complete executable atomic-property map/collector and measured
+workload budgets; public Add/second spec/fresh replan; positive B trading
+fairness and independent obligations; Reserve/BeginPost-specific committed
+reply-loss/remaining transport witnesses; all diagnostic drills and emergency
+variants. The earlier intermittent Windows account-catalog publication error
+is not declared fixed by later PASS. CODE does not imply installed/real trading.
+
+The material below records earlier checkpoints and historical requirements.
+
 ## #510 r7 - Parallel financial safety checkpoint (Draft / NO-GO)
 
 Issue #510 r7 is the single current plan; prior sections below are historical.

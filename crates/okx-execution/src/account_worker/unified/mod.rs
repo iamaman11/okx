@@ -6,6 +6,8 @@ use std::sync::Arc;
 mod opening_ingress;
 mod owner;
 #[cfg(test)]
+mod owner_finance_snapshot_tests;
+#[cfg(test)]
 mod owner_financial_crash_tests;
 #[cfg(test)]
 mod owner_financial_reply_tests;
@@ -29,11 +31,13 @@ mod census_reads;
 mod finance_authority;
 mod financial_admission;
 mod native_admission;
+mod operation_diagnostics;
 mod order_observation;
 #[cfg(test)]
 pub(crate) use native_admission::{
     bind_census as test_bind_native_census, reserve_reported_sql as test_reserve_reported_sql,
 };
+pub use operation_diagnostics::NativeIntentDiagnosticSnapshot;
 mod entry_settlement;
 mod posting_recovery;
 mod storage_recovery;

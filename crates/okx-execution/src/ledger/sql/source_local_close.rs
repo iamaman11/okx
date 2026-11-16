@@ -56,7 +56,7 @@ impl AccountStore {
         if intent.risk_increase
             || !intent.state.terminal()
             || intent.exchange_order_id.as_deref() != Some(order_id)
-            || intent.plan.quantity != venue_filled
+            || venue_filled > intent.plan.quantity
             || venue_filled <= Decimal::ZERO
             || venue_updated_at <= 0
             || !intent.instrument_id.ends_with("-USDT-SWAP")

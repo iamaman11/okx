@@ -126,3 +126,28 @@ for unknown or inconsistent host state.
 - MCP acceptance: OAuth initialize/tools/list, connected runtime diagnostics,
   account read-only state, research run/result/export/reopen. No exchange POST
   belongs to this migration or initial acceptance.
+
+## Native whole-finance maintenance (#510 candidate)
+
+The new Native format has one `runtime/finance/finance.sqlite` for all accounts
+and campaigns. A verified release provides `okx-agent --root <runtime-root>
+backup-finance` and `restore-finance --snapshot-id finance-<32-lowercase-hex>
+--expected-release <accepted-release> --operation-id <unique-operation>`.
+These are stopped-Engine maintenance operations, not install/update commands.
+The Draft #510 candidate is not permission to run them on an existing host.
+
+Backup requires the existing verified catalog/initialization metadata, no Engine
+or financial writer, and a recognized root. It writes one whole-finance snapshot
+under `finance-backups`; SQLite backup includes committed WAL. It never copies
+credentials or creates account/installation identity. The original DB/WAL bytes
+remain unchanged. The archived DB carries a checksummed recovery-history cutoff.
+
+Restore requires the same existing identity/catalog and an ABSENT financial DB;
+existing DB, orphan WAL/SHM, unknown files, active writers, invalid manifest,
+schema or cohort refuse. It reads the published archive without modifying it,
+validates a private staging copy, and never replaces an existing target. An
+interrupted staging file remains an explicit blocker. This is not automatic
+repair or rollback of a corrupt/current financial database. Restored accounts
+remain fenced until the original exchange/storage audit proves the missing
+history; ordinary NAV capture alone cannot clear that audit. An archive older
+than the supported exchange order-history window can remain unproven.

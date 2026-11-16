@@ -10,6 +10,10 @@ pub(super) struct ExecuteMarketBoundary {
     // Hold one real planner before intent preparation. Other public callers
     // must return their actual no-send result, not consume spare HTTP pages.
     pub(super) planning_fee_gate: Mutex<Option<Arc<PlanningFeeGate>>>,
+    pub(super) planning_fee_gate_actor: Mutex<Option<String>>,
+    pub(super) planning_fee_skip: AtomicUsize,
+    pub(super) market_updates_expected: AtomicUsize,
+    market_delivery: tokio::sync::Mutex<()>,
     // A single corrupt raw ACK must reach the production identity verifier,
     // rather than becoming a transcript-guard transport error first.
     pub(super) foreign_create_ack: std::sync::atomic::AtomicBool,
@@ -23,11 +27,31 @@ pub(super) struct PlanningFeeGate {
 impl HttpTransport for ExecuteMarketBoundary {
     fn send(&self, request: HttpRequest, deadline: Instant) -> HttpSend<'_> {
         Box::pin(async move {
-            let planning_gate = if request.url().path() == "/api/v5/account/trade-fee" {
-                self.planning_fee_gate.lock().unwrap().take()
+            let actor_matches = self
+                .planning_fee_gate_actor
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_none_or(|actor| {
+                    request
+                        .headers()
+                        .get("OK-ACCESS-KEY")
+                        .and_then(|v| v.to_str().ok())
+                        == Some(actor.as_str())
+                });
+            let skip = if actor_matches && request.url().path() == "/api/v5/account/trade-fee" {
+                self.planning_fee_skip
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
+                    .is_ok()
             } else {
-                None
+                false
             };
+            let planning_gate =
+                if actor_matches && !skip && request.url().path() == "/api/v5/account/trade-fee" {
+                    self.planning_fee_gate.lock().unwrap().take()
+                } else {
+                    None
+                };
             if let Some(gate) = planning_gate {
                 gate.entered.notify_one();
                 gate.release.notified().await;
@@ -43,6 +67,13 @@ impl HttpTransport for ExecuteMarketBoundary {
                     .any(|(k, v)| k == "ordType" && v == "smart_iceberg");
             let create =
                 request.method() == "POST" && request.url().path() == "/api/v5/trade/order";
+            // Different accounts may complete inventory concurrently; raw
+            // sequence frames still have one ordered physical delivery lane.
+            let _delivery = if last_inventory {
+                Some(self.market_delivery.lock().await)
+            } else {
+                None
+            };
             let result = self.feed.send(request, deadline).await;
             // A real child process stops after the venue consumed Create,
             // before Execute can persist the transport outcome. Only this
@@ -75,7 +106,7 @@ impl HttpTransport for ExecuteMarketBoundary {
             if let Some((socket, public)) = market {
                 let index = self.updates.fetch_add(1, Ordering::SeqCst);
                 assert!(
-                    index < 2,
+                    index < self.market_updates_expected.load(Ordering::SeqCst),
                     "only pre-reserve and post-held inventory observations are scripted"
                 );
                 let timestamp = chrono::Utc::now().timestamp_millis();
@@ -332,6 +363,10 @@ pub(super) async fn fixture_for_accounts(labels: &[&str]) -> NativeFixture {
         market: Mutex::new(None),
         updates: AtomicUsize::new(0),
         planning_fee_gate: Mutex::new(None),
+        planning_fee_gate_actor: Mutex::new(None),
+        planning_fee_skip: AtomicUsize::new(0),
+        market_updates_expected: AtomicUsize::new(2),
+        market_delivery: tokio::sync::Mutex::new(()),
         foreign_create_ack: std::sync::atomic::AtomicBool::new(false),
     });
     let prepared = labels

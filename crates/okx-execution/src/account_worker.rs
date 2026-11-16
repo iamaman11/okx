@@ -589,11 +589,12 @@ mod unified;
 pub use crate::risk::{NativeOpeningAccount, NativeOpeningSource};
 pub use unified::{
     NativeCampaignAccountPolicy, NativeCampaignPolicy, NativeCampaignPolicyReceipt,
-    NativeCampaignStrategyPolicy, NativePostDecision, NativePostRequest, NativeRecoveryProof,
-    NativeReserveDecision, NativeReserveRequest, ReportedOpeningCensus, ReportedOpeningReceipt,
-    ReportedRiskCensus, StrategyDecisionClaimCommand, StrategyMutationCommand,
-    UnifiedFinanceAccountPolicyReadback, UnifiedFinanceAccountReadback,
-    UnifiedFinanceBoundSettlement, UnifiedFinanceBoundSettlementReceipt, UnifiedFinanceBoundUnsent,
+    NativeCampaignStrategyPolicy, NativeIntentDiagnosticSnapshot, NativePostDecision,
+    NativePostRequest, NativeRecoveryProof, NativeReserveDecision, NativeReserveRequest,
+    ReportedOpeningCensus, ReportedOpeningReceipt, ReportedRiskCensus,
+    StrategyDecisionClaimCommand, StrategyMutationCommand, UnifiedFinanceAccountPolicyReadback,
+    UnifiedFinanceAccountReadback, UnifiedFinanceBoundSettlement,
+    UnifiedFinanceBoundSettlementReceipt, UnifiedFinanceBoundUnsent,
     UnifiedFinanceBoundUnsentReceipt, UnifiedFinanceCampaignSummary, UnifiedFinanceHandle,
     UnifiedFinanceInventory, UnifiedFinancePolicy, UnifiedFinancePolicyAccount,
     UnifiedFinanceReservationReadback,

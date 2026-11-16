@@ -428,3 +428,18 @@ mod native_fee_correction;
 
 #[path = "accounts_native_diagnostic_contract_tests.rs"]
 mod native_diagnostics;
+
+#[path = "accounts_native_multi_close_contract_tests.rs"]
+mod native_multi_close;
+
+#[path = "accounts_native_public_cohort_contract_tests.rs"]
+mod native_public_cohort;
+
+#[path = "accounts_native_snapshot_contract_tests.rs"]
+mod native_snapshot;
+
+#[path = "accounts_native_changed_source_contract_tests.rs"]
+mod native_changed_source;
+
+#[path = "accounts_native_reserve_recovery_contract_tests.rs"]
+mod native_reserve_recovery;

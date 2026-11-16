@@ -1295,17 +1295,20 @@ impl TradeService {
                 self.risk
                     .reserve_produced(packet)
                     .await
-                    .map_err(str::to_owned)
+                    .map_err(|reason| (reason.to_owned(), false))
                     .and_then(|(result, receipt)| {
                         if result.status == RiskDecisionStatus::Held {
                             Ok((result, receipt))
                         } else {
-                            Err(result.reason.unwrap_or_else(|| {
-                                "NATIVE_RESERVE_DENIED_OUTCOME_REQUIRES_READBACK".into()
-                            }))
+                            let denied = result.status == RiskDecisionStatus::Denied;
+                            Err((
+                                result.reason.unwrap_or_else(|| {
+                                    "NATIVE_RESERVE_DENIED_OUTCOME_REQUIRES_READBACK".into()
+                                }),
+                                denied,
+                            ))
                         }
                     })
-                    .map_err(|e| (e, false))
             } else {
                 self.reserve_inspect_retry(&state, reserve, &prepared, r)
                     .await
@@ -1313,6 +1316,34 @@ impl TradeService {
             };
             let (held, native_receipt) = match reserved {
                 Ok(held) => held,
+                Err((reason, true)) if native_reserve => {
+                    // This is the actual local owner's explicit Denied reply,
+                    // not a timeout or lost reply. Its scoped transaction also
+                    // refuses rejection if any original reservation exists.
+                    let Some((owner, account)) = r.execution.store.native_scope() else {
+                        return Err("NATIVE_RESERVE_OWNER_MISSING".into());
+                    };
+                    if owner
+                        .reject_denied_reserve(
+                            deadline(),
+                            account.to_owned(),
+                            prepared.intent_id.clone(),
+                            reason.clone(),
+                        )
+                        .await
+                        .is_err()
+                    {
+                        return Ok(uncertain(
+                            &prepared.intent_id,
+                            "NATIVE_RESERVE_DENIAL_COMMIT_UNCONFIRMED_NO_RESUBMIT",
+                        ));
+                    }
+                    return Ok(completed(json!({
+                        "intent_id":prepared.intent_id,"state":"REJECTED",
+                        "rejection_origin":"LOCAL","send_state":"NOT_STARTED",
+                        "primary_reason":reason,"risk_release_state":"NOT_RESERVED"
+                    })));
+                }
                 Err((reason, _)) if native_reserve => {
                     // An enqueued native transaction may have committed before
                     // its reply was lost. Never reject/release it through the

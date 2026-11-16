@@ -82,6 +82,17 @@ enum Command {
         #[arg(long)]
         account_key: String,
     },
+    /// Back up the stopped installation's complete financial SQLite.
+    BackupFinance {},
+    /// Restore a missing financial SQLite, preserving identity and requiring reconciliation.
+    RestoreFinance {
+        #[arg(long)]
+        snapshot_id: String,
+        #[arg(long)]
+        expected_release: String,
+        #[arg(long)]
+        operation_id: String,
+    },
     /// Inspect a verified stopped 47-table finance import. No trading,
     /// account writers, Cloudflare session or financial mutation is started.
     InspectFinance {
@@ -229,6 +240,28 @@ async fn run(cli: Cli) -> AgentResult<()> {
             };
             let result = okx_agent::finance_inspection::inspect(&config.root, request).await?;
             println!("{}", serde_json::to_string(&result)?);
+        }
+        Command::BackupFinance {} => {
+            println!(
+                "{}",
+                okx_agent::storage_commands::backup_finance(&config.root).await?
+            );
+        }
+        Command::RestoreFinance {
+            snapshot_id,
+            expected_release,
+            operation_id,
+        } => {
+            println!(
+                "{}",
+                okx_agent::storage_commands::restore_finance(
+                    &config.root,
+                    &snapshot_id,
+                    &expected_release,
+                    &operation_id,
+                )
+                .await?
+            );
         }
         Command::BackupAccount { account_key } => {
             println!(

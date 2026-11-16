@@ -188,7 +188,11 @@ impl TradeService {
                     return Err("LOCAL_CLOSE_VENUE_NOT_TERMINAL".into());
                 }
                 let filled = verified_order_readback(i, venue)?;
-                if filled <= Decimal::ZERO || filled != i.plan.quantity {
+                // An IOC Close may terminate after executing only part of
+                // its request. Flatness is independently verified above;
+                // SQL below must prove exactly this actual filled quantity
+                // with the original fills and their separate fee bills.
+                if filled <= Decimal::ZERO || filled > i.plan.quantity {
                     return Err("LOCAL_CLOSE_FILL_QUANTITY_UNPROVEN".into());
                 }
                 stage = TerminalReleaseStage::LocalAcknowledgement;

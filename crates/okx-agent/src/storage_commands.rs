@@ -532,3 +532,5 @@ mod tests {
 }
 mod backup;
 pub use backup::{backup_account, restore_account};
+mod native_backup;
+pub use native_backup::{backup_finance, restore_finance};

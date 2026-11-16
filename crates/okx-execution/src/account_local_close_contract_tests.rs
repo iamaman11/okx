@@ -1,7 +1,7 @@
 //! Offline primary-source namespace contract; never an activation or venue grant.
 use super::*;
 
-fn prepared_close(account: &str) -> AccountStore {
+fn prepared_close_source(account: &str, planned: Decimal, state: IntentState) -> AccountStore {
     let mut s = store_with_account(account);
     let definition = s.ensure_manual_instance(1).unwrap();
     let intent = NewIntent {
@@ -11,7 +11,7 @@ fn prepared_close(account: &str) -> AccountStore {
             strategy_parameters_digest: definition.parameters_digest,
             operation: "close".into(),
             side: "sell".into(),
-            quantity: Decimal::ONE,
+            quantity: planned,
             limit_price: Decimal::from(100),
             stop_price: None,
             strategy_instance: "manual".into(),
@@ -64,7 +64,7 @@ fn prepared_close(account: &str) -> AccountStore {
     assert!(s.begin_post(&intent.intent_id, 1, 4).unwrap());
     s.record_outcome(
         &intent.intent_id,
-        IntentState::Filled,
+        state,
         Some("same-order"),
         "fixture-terminal",
         5,
@@ -97,8 +97,12 @@ fn prepared_close(account: &str) -> AccountStore {
     s
 }
 fn imported() -> Connection {
-    let a = prepared_close("close-A");
-    let b = prepared_close("close-B");
+    imported_close_source(Decimal::ONE, IntentState::Filled)
+}
+
+fn imported_close_source(planned: Decimal, state: IntentState) -> Connection {
+    let a = prepared_close_source("close-A", planned, state);
+    let b = prepared_close_source("close-B", planned, state);
     let (ap, bp) = (a.path.clone(), b.path.clone());
     drop(a);
     drop(b);
@@ -218,4 +222,104 @@ fn risk_book_contract_local_terminal_close_requires_own_bill_and_atomic_ack() {
         1
     );
     tx.commit().unwrap();
+}
+
+#[test]
+fn risk_book_contract_local_partial_close_requires_terminal_positive_exact_fill_and_own_bill() {
+    let mut db = imported_close_source(Decimal::from(2), IntentState::Cancelled);
+    let scope = Some(("installation", "close-B"));
+    let tx = db.transaction().unwrap();
+    let before = tx.total_changes();
+    for invalid in [Decimal::ZERO, Decimal::from(3)] {
+        assert!(matches!(
+            AccountStore::acknowledge_local_terminal_close_sql(
+                &tx,
+                scope,
+                "close-intent",
+                "same-order",
+                invalid,
+                5,
+                11,
+            ),
+            Err(StoreError::Invalid("LOCAL_CLOSE_TERMINAL_PROOF_INVALID"))
+        ));
+    }
+    assert!(matches!(
+        AccountStore::acknowledge_local_terminal_close_sql(
+            &tx,
+            scope,
+            "close-intent",
+            "same-order",
+            Decimal::new(5, 1),
+            5,
+            11,
+        ),
+        Err(StoreError::Invalid("LOCAL_CLOSE_FILL_SUM_MISMATCH"))
+    ));
+    assert!(matches!(
+        AccountStore::acknowledge_local_terminal_close_sql(
+            &tx,
+            Some(("installation", "close-A")),
+            "close-intent",
+            "same-order",
+            Decimal::ONE,
+            5,
+            11,
+        ),
+        Err(StoreError::Invalid("LOCAL_CLOSE_FEE_BILL_UNVERIFIED"))
+    ));
+    assert_eq!(
+        tx.total_changes(),
+        before,
+        "negative proofs must not acknowledge local money"
+    );
+    for _ in 0..2 {
+        AccountStore::acknowledge_local_terminal_close_sql(
+            &tx,
+            scope,
+            "close-intent",
+            "same-order",
+            Decimal::ONE,
+            5,
+            11,
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        tx.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM operation_receipts WHERE kind='LOCAL_TERMINAL_RELEASE'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        tx.query_row::<String, _, _>(
+            "SELECT state FROM risk_receipts WHERE account_key='close-A'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        "TERMINAL_PENDING_CENTRAL"
+    );
+    tx.commit().unwrap();
+
+    let mut live = imported_close_source(Decimal::from(2), IntentState::Acknowledged);
+    let tx = live.transaction().unwrap();
+    let before = tx.total_changes();
+    assert!(matches!(
+        AccountStore::acknowledge_local_terminal_close_sql(
+            &tx,
+            scope,
+            "close-intent",
+            "same-order",
+            Decimal::ONE,
+            5,
+            11,
+        ),
+        Err(StoreError::Invalid("LOCAL_CLOSE_TERMINAL_PROOF_INVALID"))
+    ));
+    assert_eq!(tx.total_changes(), before);
+    tx.rollback().unwrap();
 }

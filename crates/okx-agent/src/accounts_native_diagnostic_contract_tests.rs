@@ -67,7 +67,14 @@ async fn risk_book_contract_native_unknown_intent_diagnostic_reads_sql_without_n
         result["intent"]["plan_hash"],
         before.1.as_ref().unwrap().plan_hash
     );
-    assert_eq!(result["durable_receipt"]["state"], "NOT_INFERRED");
+    assert_eq!(result["durable_receipt"]["state"], "STORED_SQL_RECEIPT");
+    assert_eq!(result["durable_receipt"]["intent_id"], id);
+    assert_eq!(result["durable_receipt"]["account_key"], key);
+    assert_eq!(result["durable_receipt"]["send_permission"], "NOT_GRANTED");
+    assert_eq!(result["source_as_of"]["state"], "STORED_SQL_SOURCE");
+    assert!(result["source_as_of"]["watermark_ms"].as_i64().unwrap() > 0);
+    assert!(result["source_as_of"]["generation"].as_i64().unwrap() > 0);
+    assert_eq!(result["source_as_of"]["current_validity"], "NOT_EVALUATED");
     assert_eq!(
         result["missing_evidence"],
         json!(["AUTHORITATIVE_VENUE_ORDER_READBACK"])

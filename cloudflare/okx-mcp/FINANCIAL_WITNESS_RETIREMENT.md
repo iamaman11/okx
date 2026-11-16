@@ -1,5 +1,51 @@
 # Cloudflare financial witness retirement - #510
 
+## Current integrated Native delta (16 November 2026, not full RB acceptance)
+
+- `accounts_native_multi_close_contract_tests`: public Close 0.1 actually fills
+  0.04 and cancels; a second Close uses the remaining 0.06. Independent bills
+  prove exit fees 0.0002 + 0.0003 exactly once. Original terminal canceled Close
+  can retire its local receipt only with its actual positive fill, scoped bill
+  and flat proof. The former `filled == planned` condition was reproduced RED;
+  production now requires `0 < filled <= planned`, retaining exact source sums.
+  `risk_book_contract_local_partial_close_requires_terminal_positive_exact_fill_and_own_bill`
+  denies zero, overfill, mismatched sum, foreign bill and nonterminal evidence.
+- `accounts_native_public_cohort_contract_tests`: public A reaches original
+  HELD while B performs the whole A/B census and is denied by shared cap1.5.
+  A continues its original single send; exact remaining capacity is0.4995.
+  The reproduced `COHORT_UNRESOLVED_RESERVE_ATTEMPT` was fixed by recording the
+  actual Native owner's explicit Denied as a scoped no-send rejection. Lost
+  replies remain UNKNOWN. This is not positive B execution during an A outage.
+- `accounts_native_reserve_recovery_contract_tests`: cancel the public caller
+  after actual HELD, before BeginPost; same-key replay and real cold reopen
+  retain original identity/receipt/1.0005 entry reserve/0.102 loss without POST.
+  Task cancellation is not SQL reply loss or an OS-crash witness.
+- `accounts_native_changed_source_contract_tests`: independent changed fee
+  after HELD refuses POST and retains the original obligation. No fake unsent
+  proof is accepted. Successful unsent convergence/fresh replan remains missing.
+- `finance_snapshot` and `storage_commands::native_backup`: stopped whole-DB
+  snapshot includes committed WAL without modifying source main/WAL. Checksummed
+  SQLite retains the earliest recovery cutoff; editing manifest time or taking
+  another unresolved snapshot cannot advance it. Restore reads an immutable,
+  possibly read-only archive into private no-clobber staging, verifies original
+  schema/identity/cohort, and publishes only to an absent DB. Existing DB,
+  orphan WAL/SHM, unknown entries and active owner refuse; no credentials/catalog
+  are manufactured. A restored public Execute remains fenced until the separate
+  original storage audit. Existing/corrupt DB replacement is not supported.
+- `diagnostics::native_intent` now reads intent, protection, original reservation
+  receipt and account-source generation/watermark in ONE scoped SQL snapshot.
+  Stored source is not current venue truth or renewed freshness. Diagnostics
+  never send, reconcile or grant authority. Full causal history and all RB14
+  drills are still not established.
+
+Local integrated Native run:25 passed/0 failed/0 ignored,28.16s after build;
+storage:10 passed,0.91s. The earlier snapshot test failed on stale campaign
+readiness after reconnect; its corrected setup uses the SAME production
+maintenance refresh over captured rows, not a readiness marker. These targeted
+results are not the complete RB01-RB16/26-property gate or p95. An earlier
+Windows catalog publication sharing failure remains an unresolved environmental
+or lifecycle boundary; later PASS does not establish its root cause.
+
 ## Current r7 delta (isolated Native tests, not full gate)
 
 - `accounts_native_partial_protection_contract_tests`: actual 0.04 partial stop,

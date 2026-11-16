@@ -34,13 +34,13 @@ pub(crate) async fn read(account: &AccountResources, installation: &str, referen
         return result;
     }
     let snapshot = owner
-        .recovery_position_owner(
+        .inspect_intent_operation(
             Instant::now() + Duration::from_secs(2),
             scope.into(),
             id.into(),
         )
         .await;
-    let (protection, intent) = match snapshot {
+    let snapshot = match snapshot {
         Ok(snapshot) => snapshot,
         Err(error) => {
             result["reason_code"] = super::storage_failure_code(&error).into();
@@ -48,7 +48,8 @@ pub(crate) async fn read(account: &AccountResources, installation: &str, referen
             return result;
         }
     };
-    let Some(intent) = intent else {
+    result["observed_at_ms"] = snapshot.observed_at_ms.into();
+    let Some(intent) = snapshot.intent else {
         result["state"] = "NOT_FOUND".into();
         result["reason_code"] = "INTENT_NOT_FOUND_IN_ACCOUNT_SQL".into();
         result["missing_evidence"] = json!(["ORIGINAL_ACCOUNT_SCOPED_INTENT"]);
@@ -73,8 +74,26 @@ pub(crate) async fn read(account: &AccountResources, installation: &str, referen
         "source_generation":intent.plan.source_generation,
         "private_source_generation":intent.plan.private_source_generation
     });
-    result["source_as_of"] = json!({"state":"NOT_READ_IN_THIS_SNAPSHOT"});
-    result["protection"] = protection.map_or_else(
+    result["durable_receipt"] = snapshot.reservation.map_or_else(
+        || json!({"state":"NOT_FOUND_IN_ACCOUNT_SQL","send_permission":"NOT_GRANTED"}),
+        |receipt| {
+            json!({"state":"STORED_SQL_RECEIPT","send_permission":"NOT_GRANTED",
+            "reservation_key":receipt.reservation_key,"account_key":receipt.account_key,
+            "installation_id":receipt.installation_id,"intent_id":receipt.intent_id,
+            "plan_hash":receipt.plan_hash,"policy_revision":receipt.policy_revision,
+            "receipt_hash":receipt.receipt_hash,"requested_loss_usd":receipt.requested_loss_usd})
+        },
+    );
+    result["source_as_of"] = snapshot.account_source.map_or_else(
+        || json!({"state":"NOT_FOUND_IN_ACCOUNT_SQL","venue_state":"NOT_INFERRED"}),
+        |source| {
+            json!({"state":"STORED_SQL_SOURCE","source":source.source,
+            "partition":source.stream_partition,"generation":source.generation,
+            "watermark_ms":source.watermark,"cursor":source.cursor,
+            "coverage_gaps":source.coverage_gaps,"current_validity":"NOT_EVALUATED"})
+        },
+    );
+    result["protection"] = snapshot.protection.map_or_else(
         || json!({"state":"NOT_FOUND_IN_ACCOUNT_SQL","venue_state":"NOT_INFERRED"}),
         |proof| {
             json!({"state":"STORED_SQL_PROOF","venue_state":"NOT_INFERRED",
