@@ -194,6 +194,7 @@ jobs:
       - name: Existing risk client and bound raw-frame regressions
         run: |
           cargo test --locked -p okx-agent --lib risk_bridge::tests -- --nocapture
+          cargo test --locked -p okx-agent --lib risk_book_contract_native_initialize_account -- --nocapture
           cargo test --locked -p okx-agent --lib actual_native_session_binds_risk_reply_to_generation_and_id -- --nocapture
       - name: Formatting (not a substitute for compile/test)
         run: cargo fmt --all -- --check

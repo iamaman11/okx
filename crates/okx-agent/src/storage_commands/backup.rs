@@ -199,6 +199,8 @@ fn restore_stopped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use okx_execution::{AccountMeta, OpeningSnapshot};
+    use rust_decimal::Decimal;
     fn fixture() -> (PathBuf, AccountKey) {
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce).unwrap();
