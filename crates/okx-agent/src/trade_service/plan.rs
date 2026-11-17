@@ -514,47 +514,50 @@ impl TradeService {
         }
         let binding_id = instance_id.clone();
         let definition = {
-    #[cfg(test)]
-    if let Some((owner, account)) = r.execution.store.native_scope() {
-            owner
-                .plan_definition(until, account.to_owned(), binding_id, record_risk_state)
-                .await
-                .map_err(err)?
-        } else {
             #[cfg(test)]
-            {
-                r.execution
-                    .store
-                    .call(until, move |s| {
-                        if binding_id == "manual" {
-                            if record_risk_state {
-                                s.ensure_manual_instance(now())
-                            } else {
-                                s.manual_definition_preview()
-                            }
-                        } else {
-                            s.strategy_definition(&binding_id)
-                        }
-                    })
+            if let Some((owner, account)) = r.execution.store.native_scope() {
+                owner
+                    .plan_definition(until, account.to_owned(), binding_id, record_risk_state)
                     .await
                     .map_err(err)?
+            } else {
+                #[cfg(test)]
+                {
+                    r.execution
+                        .store
+                        .call(until, move |s| {
+                            if binding_id == "manual" {
+                                if record_risk_state {
+                                    s.ensure_manual_instance(now())
+                                } else {
+                                    s.manual_definition_preview()
+                                }
+                            } else {
+                                s.strategy_definition(&binding_id)
+                            }
+                        })
+                        .await
+                        .map_err(err)?
+                }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                }
             }
             #[cfg(not(test))]
             {
-                return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                let (owner, account) = r
+                    .execution
+                    .store
+                    .native_owner()
+                    .map_err(|e| e.to_string())?;
+
+                owner
+                    .plan_definition(until, account.to_owned(), binding_id, record_risk_state)
+                    .await
+                    .map_err(err)?
             }
-        }
-    #[cfg(not(test))]
-    {
-        let (owner, account) = r.execution.store.native_owner().map_err(|e| e.to_string())?;
-        
-            owner
-                .plan_definition(until, account.to_owned(), binding_id, record_risk_state)
-                .await
-                .map_err(err)?
-        
-    }
-};
+        };
         Ok(IntentPlan {
             strategy_definition_id: definition.definition_id,
             strategy_definition_version: definition.version,
@@ -603,39 +606,42 @@ impl TradeService {
             record_risk_state,
         };
         let decision = {
-    #[cfg(test)]
-    if let Some((owner, account)) = r.execution.store.native_scope() {
-            owner
-                .check_financial_admission(deadline(), account.to_owned(), request)
-                .await
-                .map_err(err)?
-        } else {
             #[cfg(test)]
-            {
-                r.execution
-                    .store
-                    .call(deadline(), move |s| {
-                        s.check_financial_admission(&request, now())
-                    })
+            if let Some((owner, account)) = r.execution.store.native_scope() {
+                owner
+                    .check_financial_admission(deadline(), account.to_owned(), request)
                     .await
                     .map_err(err)?
+            } else {
+                #[cfg(test)]
+                {
+                    r.execution
+                        .store
+                        .call(deadline(), move |s| {
+                            s.check_financial_admission(&request, now())
+                        })
+                        .await
+                        .map_err(err)?
+                }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                }
             }
             #[cfg(not(test))]
             {
-                return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                let (owner, account) = r
+                    .execution
+                    .store
+                    .native_owner()
+                    .map_err(|e| e.to_string())?;
+
+                owner
+                    .check_financial_admission(deadline(), account.to_owned(), request)
+                    .await
+                    .map_err(err)?
             }
-        }
-    #[cfg(not(test))]
-    {
-        let (owner, account) = r.execution.store.native_owner().map_err(|e| e.to_string())?;
-        
-            owner
-                .check_financial_admission(deadline(), account.to_owned(), request)
-                .await
-                .map_err(err)?
-        
-    }
-};
+        };
         if let Some(reason) = decision {
             return Err(reason);
         }

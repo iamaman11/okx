@@ -563,10 +563,9 @@ pub(crate) async fn capture_account_sources_traced(
     let nav_started = Instant::now();
     let nav_trace = trace.clone();
     let owner_trace = trace;
-    let nav_sql_timing: Option<okx_execution::account_worker::AccountSqlJobTiming> =
-        {
-    #[cfg(test)]
-    if let Some((owner, account)) = execution.store.native_scope() {
+    let nav_sql_timing: Option<okx_execution::account_worker::AccountSqlJobTiming> = {
+        #[cfg(test)]
+        if let Some((owner, account)) = execution.store.native_scope() {
             native_nav::reconcile(
                 owner,
                 account,
@@ -751,10 +750,13 @@ pub(crate) async fn capture_account_sources_traced(
                 return Err(invalid("NATIVE_FINANCE_OWNER_REQUIRED"));
             }
         }
-    #[cfg(not(test))]
-    {
-        let (owner, account) = execution.store.native_owner().map_err(|e| AgentError::from(e))?;
-        
+        #[cfg(not(test))]
+        {
+            let (owner, account) = execution
+                .store
+                .native_owner()
+                .map_err(|e| AgentError::from(e))?;
+
             native_nav::reconcile(
                 owner,
                 account,
@@ -776,9 +778,8 @@ pub(crate) async fn capture_account_sources_traced(
             )
             .await?;
             None
-        
-    }
-};
+        }
+    };
     let nav_reconciliation_ms = phase_elapsed_ms(nav_started);
     if !complete {
         return Err(invalid("FINANCIAL_BACKFILL_PENDING"));

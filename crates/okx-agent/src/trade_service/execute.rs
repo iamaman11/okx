@@ -941,71 +941,74 @@ impl TradeService {
         #[cfg(test)]
         let owner_uid = r.execution.uid().to_owned();
         let prepared = {
-    #[cfg(test)]
-    if let Some((owner, account)) = r.execution.store.native_scope() {
-            owner
-                .prepare_admission(until, account.to_owned(), decision, intent)
-                .await
-                .map_err(err)?
-        } else {
-            // Original per-account owner survives only in historical test fixtures.
             #[cfg(test)]
-            {
-                prepare_on_owner(
-                    r.execution.store.legacy().map_err(err)?,
-                    until,
-                    &owner_account,
-                    &owner_uid,
-                    move |s| {
-                        if intent.plan.strategy_instance == "manual"
-                            && !s.instances()?.iter().any(|i| i.instance_id == "manual")
-                        {
-                            let manual = StrategyInstance {
-                                instance_id: "manual".into(),
-                                definition_id: "manual".into(),
-                                definition_version: "1".into(),
-                                parameters: "{}".into(),
-                                enabled: false,
-                                policy_revision: 1,
-                                budget: manual_budget,
-                                last_decision_key: None,
-                            };
-                            let h = format!(
-                                "{:x}",
-                                Sha256::digest(
-                                    format!("{}:manual", s.meta().account_key).as_bytes()
-                                )
-                            );
-                            s.mutate_instance(
-                                "internal_create_manual",
-                                &h,
-                                "create",
-                                &manual,
-                                None,
-                                now(),
-                            )?;
-                        }
-                        s.prepare(&decision, &intent)
-                    },
-                )
-                .await?
+            if let Some((owner, account)) = r.execution.store.native_scope() {
+                owner
+                    .prepare_admission(until, account.to_owned(), decision, intent)
+                    .await
+                    .map_err(err)?
+            } else {
+                // Original per-account owner survives only in historical test fixtures.
+                #[cfg(test)]
+                {
+                    prepare_on_owner(
+                        r.execution.store.legacy().map_err(err)?,
+                        until,
+                        &owner_account,
+                        &owner_uid,
+                        move |s| {
+                            if intent.plan.strategy_instance == "manual"
+                                && !s.instances()?.iter().any(|i| i.instance_id == "manual")
+                            {
+                                let manual = StrategyInstance {
+                                    instance_id: "manual".into(),
+                                    definition_id: "manual".into(),
+                                    definition_version: "1".into(),
+                                    parameters: "{}".into(),
+                                    enabled: false,
+                                    policy_revision: 1,
+                                    budget: manual_budget,
+                                    last_decision_key: None,
+                                };
+                                let h = format!(
+                                    "{:x}",
+                                    Sha256::digest(
+                                        format!("{}:manual", s.meta().account_key).as_bytes()
+                                    )
+                                );
+                                s.mutate_instance(
+                                    "internal_create_manual",
+                                    &h,
+                                    "create",
+                                    &manual,
+                                    None,
+                                    now(),
+                                )?;
+                            }
+                            s.prepare(&decision, &intent)
+                        },
+                    )
+                    .await?
+                }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_ADMISSION_OWNER_MISSING".into());
+                }
             }
             #[cfg(not(test))]
             {
-                return Err("NATIVE_ADMISSION_OWNER_MISSING".into());
+                let (owner, account) = r
+                    .execution
+                    .store
+                    .native_owner()
+                    .map_err(|e| e.to_string())?;
+
+                owner
+                    .prepare_admission(until, account.to_owned(), decision, intent)
+                    .await
+                    .map_err(err)?
             }
-        }
-    #[cfg(not(test))]
-    {
-        let (owner, account) = r.execution.store.native_owner().map_err(|e| e.to_string())?;
-        
-            owner
-                .prepare_admission(until, account.to_owned(), decision, intent)
-                .await
-                .map_err(err)?
-        
-    }
-};
+        };
         if Instant::now() >= until {
             return Err("COMMAND_EXPIRED".into());
         }
@@ -1462,62 +1465,65 @@ impl TradeService {
                     // BeginPost wins the same writer order and makes rejection
                     // fail; lost replies must then remain UNKNOWN, never resend.
                     {
-    #[cfg(test)]
-    if let Some((owner, account)) = r.execution.store.native_scope() {
-                        let resolution = owner
-                            .reject_and_release_unsent(
-                                deadline(),
-                                account.into(),
-                                prepared.intent_id.clone(),
-                                prepared.plan_hash.clone(),
-                                reason.clone(),
-                            )
-                            .await;
-                        if resolution.is_ok() {
-                            return Ok(completed(json!({
-                                "intent_id":prepared.intent_id,"state":"REJECTED",
-                                "rejection_origin":"LOCAL","send_state":"NOT_STARTED",
-                                "primary_reason":reason,"risk_release_state":"RELEASED"
-                            })));
+                        #[cfg(test)]
+                        if let Some((owner, account)) = r.execution.store.native_scope() {
+                            let resolution = owner
+                                .reject_and_release_unsent(
+                                    deadline(),
+                                    account.into(),
+                                    prepared.intent_id.clone(),
+                                    prepared.plan_hash.clone(),
+                                    reason.clone(),
+                                )
+                                .await;
+                            if resolution.is_ok() {
+                                return Ok(completed(json!({
+                                    "intent_id":prepared.intent_id,"state":"REJECTED",
+                                    "rejection_origin":"LOCAL","send_state":"NOT_STARTED",
+                                    "primary_reason":reason,"risk_release_state":"RELEASED"
+                                })));
+                            }
+                            let mut result = uncertain(&prepared.intent_id, &reason);
+                            result["unsent_resolution"] = json!({
+                                "state":"NOT_PROVEN",
+                                "reason_code":err(resolution.unwrap_err()),
+                                "send_permission":"NOT_GRANTED"
+                            });
+                            return Ok(result);
                         }
-                        let mut result = uncertain(&prepared.intent_id, &reason);
-                        result["unsent_resolution"] = json!({
-                            "state":"NOT_PROVEN",
-                            "reason_code":err(resolution.unwrap_err()),
-                            "send_permission":"NOT_GRANTED"
-                        });
-                        return Ok(result);
+                        #[cfg(not(test))]
+                        {
+                            let (owner, account) = r
+                                .execution
+                                .store
+                                .native_owner()
+                                .map_err(|e| e.to_string())?;
+
+                            let resolution = owner
+                                .reject_and_release_unsent(
+                                    deadline(),
+                                    account.into(),
+                                    prepared.intent_id.clone(),
+                                    prepared.plan_hash.clone(),
+                                    reason.clone(),
+                                )
+                                .await;
+                            if resolution.is_ok() {
+                                return Ok(completed(json!({
+                                    "intent_id":prepared.intent_id,"state":"REJECTED",
+                                    "rejection_origin":"LOCAL","send_state":"NOT_STARTED",
+                                    "primary_reason":reason,"risk_release_state":"RELEASED"
+                                })));
+                            }
+                            let mut result = uncertain(&prepared.intent_id, &reason);
+                            result["unsent_resolution"] = json!({
+                                "state":"NOT_PROVEN",
+                                "reason_code":err(resolution.unwrap_err()),
+                                "send_permission":"NOT_GRANTED"
+                            });
+                            return Ok(result);
+                        }
                     }
-    #[cfg(not(test))]
-    {
-        let (owner, account) = r.execution.store.native_owner().map_err(|e| e.to_string())?;
-        
-                        let resolution = owner
-                            .reject_and_release_unsent(
-                                deadline(),
-                                account.into(),
-                                prepared.intent_id.clone(),
-                                prepared.plan_hash.clone(),
-                                reason.clone(),
-                            )
-                            .await;
-                        if resolution.is_ok() {
-                            return Ok(completed(json!({
-                                "intent_id":prepared.intent_id,"state":"REJECTED",
-                                "rejection_origin":"LOCAL","send_state":"NOT_STARTED",
-                                "primary_reason":reason,"risk_release_state":"RELEASED"
-                            })));
-                        }
-                        let mut result = uncertain(&prepared.intent_id, &reason);
-                        result["unsent_resolution"] = json!({
-                            "state":"NOT_PROVEN",
-                            "reason_code":err(resolution.unwrap_err()),
-                            "send_permission":"NOT_GRANTED"
-                        });
-                        return Ok(result);
-                    
-    }
-}
                     return Ok(uncertain(&prepared.intent_id, &reason));
                 }
                 Err(reason)
@@ -1587,67 +1593,70 @@ impl TradeService {
                 conversion_digest: digest(&plan)?,
             };
             {
-    #[cfg(test)]
-    if let Some((owner, account)) = r.execution.store.native_scope() {
-                owner
-                    .reserve_local_reduction(until, account.to_owned(), receipt)
-                    .await
-                    .map_err(err)?;
-                native_send_claim = owner
-                    .claim_local_reduction_send(
-                        until,
-                        account.to_owned(),
-                        prepared.intent_id.clone(),
-                        prepared.plan_hash.clone(),
-                        prepared.policy_revision,
-                    )
-                    .await
-                    .map_err(err)?;
-                if native_send_claim.is_none() {
-                    return Ok(uncertain(
-                        &prepared.intent_id,
-                        "NATIVE_REDUCTION_POST_ALREADY_CLAIMED_NO_RESEND",
-                    ));
-                }
-            } else {
                 #[cfg(test)]
-                {
-                    r.execution
-                        .store
-                        .call(until, move |s| s.reserve(&receipt, now()))
+                if let Some((owner, account)) = r.execution.store.native_scope() {
+                    owner
+                        .reserve_local_reduction(until, account.to_owned(), receipt)
                         .await
                         .map_err(err)?;
+                    native_send_claim = owner
+                        .claim_local_reduction_send(
+                            until,
+                            account.to_owned(),
+                            prepared.intent_id.clone(),
+                            prepared.plan_hash.clone(),
+                            prepared.policy_revision,
+                        )
+                        .await
+                        .map_err(err)?;
+                    if native_send_claim.is_none() {
+                        return Ok(uncertain(
+                            &prepared.intent_id,
+                            "NATIVE_REDUCTION_POST_ALREADY_CLAIMED_NO_RESEND",
+                        ));
+                    }
+                } else {
+                    #[cfg(test)]
+                    {
+                        r.execution
+                            .store
+                            .call(until, move |s| s.reserve(&receipt, now()))
+                            .await
+                            .map_err(err)?;
+                    }
+                    #[cfg(not(test))]
+                    return Err("NATIVE_REDUCTION_OWNER_REQUIRED_NO_POST".into());
                 }
                 #[cfg(not(test))]
-                return Err("NATIVE_REDUCTION_OWNER_REQUIRED_NO_POST".into());
-            }
-    #[cfg(not(test))]
-    {
-        let (owner, account) = r.execution.store.native_owner().map_err(|e| e.to_string())?;
-        
-                owner
-                    .reserve_local_reduction(until, account.to_owned(), receipt)
-                    .await
-                    .map_err(err)?;
-                native_send_claim = owner
-                    .claim_local_reduction_send(
-                        until,
-                        account.to_owned(),
-                        prepared.intent_id.clone(),
-                        prepared.plan_hash.clone(),
-                        prepared.policy_revision,
-                    )
-                    .await
-                    .map_err(err)?;
-                if native_send_claim.is_none() {
-                    return Ok(uncertain(
-                        &prepared.intent_id,
-                        "NATIVE_REDUCTION_POST_ALREADY_CLAIMED_NO_RESEND",
-                    ));
+                {
+                    let (owner, account) = r
+                        .execution
+                        .store
+                        .native_owner()
+                        .map_err(|e| e.to_string())?;
+
+                    owner
+                        .reserve_local_reduction(until, account.to_owned(), receipt)
+                        .await
+                        .map_err(err)?;
+                    native_send_claim = owner
+                        .claim_local_reduction_send(
+                            until,
+                            account.to_owned(),
+                            prepared.intent_id.clone(),
+                            prepared.plan_hash.clone(),
+                            prepared.policy_revision,
+                        )
+                        .await
+                        .map_err(err)?;
+                    if native_send_claim.is_none() {
+                        return Ok(uncertain(
+                            &prepared.intent_id,
+                            "NATIVE_REDUCTION_POST_ALREADY_CLAIMED_NO_RESEND",
+                        ));
+                    }
                 }
-            
-    }
-}
+            }
         }
         let revision = self
             .governance
