@@ -25,6 +25,16 @@ Source of truth: issue #512 r11, code of accepted main commit 9c36f50fc9a02d59d6
 
 **Performance measurement status:** #510 accepted CI reported 95.996s post-build runtime and 126.048s test build for its declared workload (not a new #512 baseline). S0's direct-test 5/10/30s and diagnostic p95/250ms targets remain *UNMEASURED / NOT YET FIXED* until three equivalent Windows runner runs with exact test IDs, seeds, fixture sizes, cache state and separate build/setup/execution times. No baseline or budget is invented from source inspection; S0 cannot be accepted on this note alone.
 
+### #512 S1 — migrated old-worker property (same current-owner code path)
+
+| Previous fixture property | Actual current-owner witness | Disposition |
+|---|---|---|
+| `account_worker::diagnostic_fault_tests::failed_accepted_sql_job_still_invokes_timing_observer` | `unified::owner_queue_tests::risk_book_contract_fresh_owner_failed_job_counts_and_preserves_installation`: failed accepted SQL job increments the ONE finance owner job counter exactly once, preserves the committed installation receipt and allows safe reopen | Replaced; the retired per-account timing callback is not an acceptance interface |
+| `account_worker::diagnostic_fault_tests::real_account_worker_holds_shared_installation_mode_until_close` | `unified::owner_startup_tests::risk_book_contract_new_owner_exact_replay_reopen_and_no_trade_permission` + `finance_owner_gate::tests::legacy_stopped_maintenance_uses_same_cross_process_mode_and_rejects_import` | Existing current-owner and maintenance witnesses; retire only after final mapping |
+| Old worker backup cadence, maintenance projection and shutdown-reader tests | Unified owner FIFO/shutdown/reopen, native SQL diagnostics, stopped whole-finance snapshot and real crash tests | Old worker mechanisms are not a required live owner contract; verify current witnesses before deleting fixture |
+
+Do **not** count any `legacy-account-worker-fixtures` test as proof of shipping finance behavior. The fixture feature is temporary, its deletion and full current-owner replacement are required to accept S1. Production build uses no such feature. The S1 current-owner direct properties above still require exact-SHA CI verification.
+
 ## Current-architecture CI layout and asynchronous research contract
 
 CI43887700047 at c8999955 passed architecture, Linux Rust/core, actual workerd
