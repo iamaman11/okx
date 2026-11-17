@@ -384,10 +384,12 @@ async fn risk_book_contract_native_account_diagnostics_one_scoped_read_no_mutati
     assert!(first.sqlite_version.starts_with("3."));
     assert!(!first.sqlite_source_id.is_empty());
     assert!(second.intent.is_none());
-    assert!(owner
-        .account_diagnostic_snapshot(deadline(), key('c'), None)
-        .await
-        .is_err());
+    assert!(
+        owner
+            .account_diagnostic_snapshot(deadline(), key('c'), None)
+            .await
+            .is_err()
+    );
     assert_eq!(ledger(&owner).await, before);
     close(owner).await;
     std::fs::remove_dir_all(root).unwrap();
