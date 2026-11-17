@@ -20,8 +20,6 @@ jobs:
   dependency-policy:
     name: dependency-policy
     runs-on: ubuntu-latest
-    env:
-      CARGO_HOME: ${{ runner.temp }}/cargo-deny-home
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -31,6 +29,8 @@ jobs:
           toolchain: 1.95.0
       - name: Verify pinned cargo-deny release and audit locked graph
         shell: bash
+        env:
+          CARGO_HOME: ${{ runner.temp }}/cargo-deny-home
         run: |
           set -euo pipefail
           asset=cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
@@ -797,7 +797,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build deployable Windows binaries
-        if: true
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
