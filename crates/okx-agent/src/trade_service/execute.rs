@@ -1810,8 +1810,8 @@ impl TradeService {
         let result = if let Some(claim) = native_send_claim {
             let owner = self
                 .risk
-                .native_finance_owner()
-                .ok_or("NATIVE_SEND_OWNER_MISSING")?;
+                .required_finance_owner()
+                .map_err(str::to_owned)?;
             submission::post_committed_native(
                 &owner,
                 self.accounts.installation_id(),
@@ -1902,11 +1902,8 @@ impl TradeService {
         resource: &AccountResources,
         outcome: okx_execution::IntentOutcome,
     ) -> Result<(), String> {
-        if let Some(owner) = self.risk.native_finance_owner() {
-            if owner.installation_id() != self.accounts.installation_id() {
-                return Err("NATIVE_OUTCOME_INSTALLATION_MISMATCH".into());
-            }
-        }
+        // The required route check already binds account and RiskBook owner
+        // to the same installation, without a second optional owner probe.
         self.verify_runtime_finance_route(resource)?;
         resource
             .execution

@@ -39,16 +39,25 @@ impl NativeRiskClient {
         }
     }
 
+    /// A shipping risk client owns exactly one installation finance route;
+    /// historical remote-risk fixtures cannot borrow a native SQL owner.
+    pub(crate) fn required_finance_owner(
+        &self,
+    ) -> Result<okx_execution::account_worker::UnifiedFinanceHandle, &'static str> {
+        match &self.route {
+            #[cfg(test)]
+            RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED"),
+            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
+                Ok(backend.owner.clone())
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn native_finance_owner(
         &self,
     ) -> Option<okx_execution::account_worker::UnifiedFinanceHandle> {
-        match &self.route {
-            #[cfg(test)]
-            RiskRoute::Cloudflare(_) => None,
-            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
-                Some(backend.owner.clone())
-            }
-        }
+        self.required_finance_owner().ok()
     }
 
     pub(crate) async fn reserve_produced(
@@ -117,46 +126,64 @@ impl NativeRiskClient {
 
     /// Transport policy observation precedes account connection on a new
     /// installation; it is distinct from strict financial policy application.
+    /// Policy observation is local, scoped and never a separate financial
+    /// transport. Stopped inspection verifies only; it grants no write.
+    pub async fn observe_required_governance(
+        &self,
+        snapshot: &okx_protocol::account_governance::CentralGovernanceSnapshot,
+    ) -> Result<crate::native_finance_risk::NativePolicyObservation, String> {
+        match &self.route {
+            #[cfg(test)]
+            RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED".into()),
+            RiskRoute::Local(backend) => backend.observe_governance(snapshot).await,
+            RiskRoute::LocalStopped(backend) => {
+                backend.verify_stopped_observation(snapshot).await?;
+                Ok(crate::native_finance_risk::NativePolicyObservation::Applied)
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub async fn observe_native_governance(
         &self,
         snapshot: &okx_protocol::account_governance::CentralGovernanceSnapshot,
     ) -> Result<Option<crate::native_finance_risk::NativePolicyObservation>, String> {
         match &self.route {
-            #[cfg(test)]
             RiskRoute::Cloudflare(_) => Ok(None),
-            RiskRoute::Local(backend) => backend.observe_governance(snapshot).await.map(Some),
+            _ => self.observe_required_governance(snapshot).await.map(Some),
+        }
+    }
+
+
+    /// The authoritative policy commit is one finance owner operation.
+    pub async fn apply_required_governance(
+        &self,
+        snapshot: &okx_protocol::account_governance::CentralGovernanceSnapshot,
+    ) -> Result<(), String> {
+        match &self.route {
+            #[cfg(test)]
+            RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED".into()),
+            RiskRoute::Local(backend) => backend.apply_governance(snapshot).await,
             RiskRoute::LocalStopped(backend) => {
-                backend.verify_stopped_observation(snapshot).await?;
-                Ok(Some(
-                    crate::native_finance_risk::NativePolicyObservation::Applied,
-                ))
+                backend.verify_stopped_observation(snapshot).await
             }
         }
     }
 
-    /// The native route applies the FULL signed governance roster in its
-    /// single SQL COMMIT; it must never fall back to legacy per-account SQL
-    /// if the native gate rejects. False selects the still-unswitched
-    /// legacy installation only.
+    #[cfg(test)]
     pub async fn apply_native_governance(
         &self,
         snapshot: &okx_protocol::account_governance::CentralGovernanceSnapshot,
     ) -> Result<bool, String> {
         match &self.route {
-            #[cfg(test)]
             RiskRoute::Cloudflare(_) => Ok(false),
-            RiskRoute::Local(backend) => {
-                backend.apply_governance(snapshot).await?;
-                Ok(true)
-            }
-            RiskRoute::LocalStopped(backend) => {
-                // Only compare an authenticated policy to original imported
-                // SQL; do NOT write it or promote the sealed import to LIVE.
-                backend.verify_stopped_observation(snapshot).await?;
+            _ => {
+                self.apply_required_governance(snapshot).await?;
                 Ok(true)
             }
         }
     }
+
 
     pub async fn request(&self, command: RiskCommand) -> Result<RiskResult, &'static str> {
         if !command.valid() {

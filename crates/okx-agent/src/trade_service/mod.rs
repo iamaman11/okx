@@ -274,24 +274,9 @@ impl TradeService {
         // route, the original account_policy and RiskBook revision have ONE
         // SQL transaction owner. Native rejection is FINAL, never a fallback
         // to the legacy per-account writer loop.
-        if let Some(observation) = self.risk.observe_native_governance(snapshot).await? {
-            // Pending configuration keeps the authenticated session usable for
-            // account connection. Execution's authority path independently
-            // requires strict SQL application; preview checks its SQL receipt.
-            if observation
-                == crate::native_finance_risk::NativePolicyObservation::WaitingForAccounts
-            {
-                eprintln!(
-                    "OKX_NATIVE_POLICY_V1 state=WAITING_FOR_ACCOUNTS reason=NATIVE_CAMPAIGN_ACCOUNTS_NOT_CONNECTED"
-                );
-            }
-            *latest = Some(snapshot.clone());
-            return Ok(());
-        }
-        // The retired remote finance route has no production fallback. Only
-        // original unit fixtures can reach the per-account SQL owner below.
         #[cfg(test)]
-        {
+        if self.risk.native_finance_owner().is_none() {
+            // The historical remote-finance fixture has no production writer.
             let limit = dec(&snapshot.state.campaign_loss_limit_usd)?;
             for account in &snapshot.state.accounts {
                 let Some(resources) = self.accounts.resolve(&account.account_key).await else {
@@ -310,10 +295,20 @@ impl TradeService {
                     .map_err(err)?;
             }
             *latest = Some(snapshot.clone());
-            Ok(())
+            return Ok(());
         }
-        #[cfg(not(test))]
-        Err("NATIVE_GOVERNANCE_ROUTE_MISMATCH".into())
+        let observation = self.risk.observe_required_governance(snapshot).await?;
+        // Transport observation never grants execution. The strict financial
+        // policy application still occurs at the account's authority gate.
+        if observation
+            == crate::native_finance_risk::NativePolicyObservation::WaitingForAccounts
+        {
+            eprintln!(
+                "OKX_NATIVE_POLICY_V1 state=WAITING_FOR_ACCOUNTS reason=NATIVE_CAMPAIGN_ACCOUNTS_NOT_CONNECTED"
+            );
+        }
+        *latest = Some(snapshot.clone());
+        Ok(())
     }
     pub async fn diagnostic_access(&self, key: &str) -> Value {
         let latest = self.governance.read().await;
@@ -396,26 +391,24 @@ impl TradeService {
             .find(|a| a.account_key == r.configuration.account_key.wire())
             .cloned()
             .ok_or("ACCOUNT_ACCESS_MISSING")?;
-        if !self.risk.apply_native_governance(&state).await? {
-            // Production never reopens per-account SQL after a Native refusal.
-            // Original remote-risk fixtures are the only legacy callers.
-            #[cfg(test)]
-            {
-                let revision = state.state.revision as i64;
-                let paused = !account.access_enabled();
-                let campaign = state.state.campaign_id.clone();
-                let limit = dec(&state.state.campaign_loss_limit_usd)?;
-                r.execution
-                    .store
-                    .call(deadline(), move |s| {
-                        s.apply_authority_policy(revision, paused, &campaign, limit)
-                    })
-                    .await
-                    .map_err(err)?;
-            }
-            #[cfg(not(test))]
-            return Err("NATIVE_GOVERNANCE_ROUTE_MISMATCH".into());
+        #[cfg(test)]
+        if self.risk.native_finance_owner().is_none() {
+            // Historical remote-risk fixture only; its SQL writer is not a
+            // supported finance runtime and is never built into the Agent.
+            let revision = state.state.revision as i64;
+            let paused = !account.access_enabled();
+            let campaign = state.state.campaign_id.clone();
+            let limit = dec(&state.state.campaign_loss_limit_usd)?;
+            r.execution
+                .store
+                .call(deadline(), move |s| {
+                    s.apply_authority_policy(revision, paused, &campaign, limit)
+                })
+                .await
+                .map_err(err)?;
+            return Ok((state, account));
         }
+        self.risk.apply_required_governance(&state).await?;
         Ok((state, account))
     }
     fn verify_runtime_finance_route(&self, resource: &AccountResources) -> Result<(), String> {
@@ -443,8 +436,8 @@ impl TradeService {
             let (owner, account) = resource.execution.store.native_owner().map_err(err)?;
             let risk_owner = self
                 .risk
-                .native_finance_owner()
-                .ok_or("NATIVE_RUNTIME_FINANCE_ROUTE_MISMATCH")?;
+                .required_finance_owner()
+                .map_err(str::to_owned)?;
             if owner.installation_id() == self.accounts.installation_id()
                 && risk_owner.installation_id() == owner.installation_id()
                 && account == resource.configuration.account_key.wire()
