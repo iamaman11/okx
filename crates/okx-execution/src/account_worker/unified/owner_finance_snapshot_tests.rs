@@ -363,3 +363,32 @@ async fn risk_book_contract_native_snapshot_refuses_tampered_foreign_or_existing
     );
     assert!(!orphan.join("finance/finance.sqlite").exists());
 }
+
+#[tokio::test]
+async fn risk_book_contract_native_account_diagnostics_one_scoped_read_no_mutation() {
+    let root = root();
+    let owner = fresh(&root).await;
+    let before = ledger(&owner).await;
+    let first = owner
+        .account_diagnostic_snapshot(deadline(), key('a'), None)
+        .await
+        .unwrap();
+    let second = owner
+        .account_diagnostic_snapshot(deadline(), key('b'), Some("missing-intent".into()))
+        .await
+        .unwrap();
+    assert_eq!(first.policy.revision, second.policy.revision);
+    assert_eq!(first.policy.campaign_id, second.policy.campaign_id);
+    assert_eq!(first.source_coverage.len(), 5);
+    assert_eq!(second.source_coverage.len(), 5);
+    assert!(first.sqlite_version.starts_with("3."));
+    assert!(!first.sqlite_source_id.is_empty());
+    assert!(second.intent.is_none());
+    assert!(owner
+        .account_diagnostic_snapshot(deadline(), key('c'), None)
+        .await
+        .is_err());
+    assert_eq!(ledger(&owner).await, before);
+    close(owner).await;
+    std::fs::remove_dir_all(root).unwrap();
+}

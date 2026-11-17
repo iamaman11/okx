@@ -218,6 +218,10 @@ jobs:
           cargo test --locked -p okx-agent --lib trade_service::execute::tests::e1_ -- --nocapture
           cargo test --locked -p okx-agent --lib trade_service::execute::tests::t10_native_ -- --nocapture
           cargo test --locked -p okx-agent --lib trade_service::execute::tests::k4_ -- --nocapture
+      - name: Native diagnostic snapshot and stopped finance-mode exclusion
+        run: |
+          cargo test --locked -p okx-execution --lib risk_book_contract_native_account_diagnostics_one_scoped_read_no_mutation -- --nocapture
+          cargo test --locked -p okx-execution --lib legacy_stopped_maintenance_uses_same_cross_process_mode_and_rejects_import -- --nocapture
 
   riskbook-draft-rust:
     # Fast, real-source feedback for the active Rust RiskBook draft. Final
