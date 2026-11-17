@@ -13,8 +13,8 @@ use std::time::Instant;
 ///
 /// ```compile_fail,E0599
 /// use okx_agent::execution_store::ExecutionStore;
-/// fn forbidden(legacy: okx_execution::AccountStoreHandle) -> ExecutionStore {
-///     ExecutionStore::Legacy(legacy)
+/// fn forbidden(owner: okx_execution::account_worker::UnifiedFinanceHandle) -> ExecutionStore {
+///     ExecutionStore::Legacy(owner)
 /// }
 /// ```
 #[derive(Clone)]

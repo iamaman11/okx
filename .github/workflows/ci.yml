@@ -186,7 +186,9 @@ jobs:
           python3 scripts/check_architecture.py --self-test
           python3 scripts/check_architecture.py
       - name: Compile shipping Engine without retired finance path
-        run: cargo check --locked -p okx-agent --bin okx-agent
+        run: |
+          cargo check --locked -p okx-execution --lib
+          cargo check --locked -p okx-agent --bin okx-agent
       - name: Compile exact Agent Rust unit-test source
         run: cargo test --locked -p okx-agent --lib --no-run
       - name: Compile all Agent targets including examples and integration targets

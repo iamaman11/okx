@@ -23,19 +23,6 @@ pub(super) struct StorageProjection {
     refresh_pending: AtomicBool,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct AccountStorageReadback {
-    pub schema: &'static str,
-    pub state: &'static str,
-    pub snapshot: Option<AccountStorageSnapshot>,
-    pub last_attempt_ms: Option<i64>,
-    pub reason_code: Option<String>,
-    pub refresh_pending: bool,
-    pub refresh_attempts: u64,
-    pub publication_skipped: u64,
-    pub owner_terminated: bool,
-}
-
 impl StorageProjection {
     pub(super) fn readback(&self) -> AccountStorageReadback {
         let mut out = AccountStorageReadback {

@@ -36,6 +36,8 @@ zeroize = { version = "1", features = ["derive"] }
 # The T09.7 acceptance child is a real OS process launched by a Rust test.
 # Keep Tokio process support test-only; production Agent features are unchanged.
 [dev-dependencies]
+# Historical tests only; production dependency has no per-account SQL worker.
+okx-execution = { path = "../okx-execution", features = ["legacy-account-worker-fixtures"] }
 reqwest = { version = "0.12", default-features = false }
 tokio = { version = "1", features = ["process", "io-util"] }
 
