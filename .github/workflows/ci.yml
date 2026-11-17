@@ -185,6 +185,7 @@ jobs:
         run: |
           python3 scripts/check_architecture.py --self-test
           python3 scripts/check_architecture.py
+          python3 scripts/acceptance_product.py --self-test
       - name: Compile shipping Engine without retired finance path
         run: |
           cargo check --locked -p okx-execution --lib

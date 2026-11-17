@@ -5,10 +5,10 @@ ROOT=pathlib.Path(__file__).resolve().parents[1]
 REQUIRED={
     "CLEAN-01":{"clean_initialization_deletes_only_old_financial_keys","accounts::tests::initialize_without_any_legacy_files","accounts::tests::legacy_stop_claims_and_epochs_are_never_read","account_store::tests::corrupt_or_missing_db_never_reinitialized"},
     "ACCESS-01":{"accounts::tests::access_survives_restart","access_restart_and_account_registration"},
-    "EXEC-01":{"trade_service::execute::tests::duplicate_execute_one_post","trade_service::execute::tests::lost_response_after_post_returns_unknown","trade_service::execute::tests::restart_posting_reconciles_without_resubmit"},
+    "EXEC-01":{"accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict","accounts::native_trade_contracts::risk_book_contract_native_public_execute_lost_ack_and_replay_send_once","accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_after_create_recovers_original_unknown"},
     "RISK-01":{"risk_concurrent_accounts_campaign_limit"},
     "FIN-01":{"account_store::tests::fee_fill_bill_counted_once","account_store::tests::sql_ingest_retry_exactly_once","finance::attribution::tests::funding_allocation_sums_to_account","finance::nav::tests::deposit_is_not_profit"},
-    "MULTI-01":{"trade_service::execute::tests::two_accounts_two_instances","finance::attribution::tests::two_instances_same_instrument_lot_attribution"},
+    "MULTI-01":{"accounts::native_connect_tests::risk_book_contract_native_connect_two_accounts_and_reopen_one_original_sqlite","accounts::native_trade_contracts::native_multiaccount::risk_book_contract_native_two_accounts_share_budget_and_isolate_public_capital_receipts","finance::attribution::tests::two_instances_same_instrument_lot_attribution"},
     "ANALYTICS-01":{"strategy_registry::tests::ema_cross_next_bar_no_lookahead","operators::tests::correlation_timestamp_alignment","strategy_registry::tests::test_partition_not_used_for_selection"},
     "OPS-01":{"analytics::jobs::tests::restart_marks_job_interrupted","analytics::executor::tests::cancel_releases_queue_capacity","account_store::tests::disk_full_before_post"},
     "F01":{"account_governance_lower_campaign_limit_monotonic"},
@@ -57,8 +57,8 @@ FAKE_NATIVE_OWNERS={
     "strategies.update":frozenset({"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop"}),
     "strategies.start":frozenset({"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop"}),
     "strategies.stop":frozenset({"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop"}),
-    "trade.execute":frozenset({"trade_service::execute::tests::duplicate_execute_one_post",
-                                  "trade_service::execute::tests::lost_response_after_post_returns_unknown"}),
+    "trade.execute":frozenset({"accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict",
+                                  "accounts::native_trade_contracts::risk_book_contract_native_public_execute_lost_ack_and_replay_send_once"}),
     "trade.cancel":frozenset({"account_store::tests::duplicate_cancel_never_posts_twice"}),
     "trade.close":frozenset({"trade_service::execute::tests::close_under_stop"}),
 }
@@ -483,7 +483,7 @@ def self_test():
         def test_fake_venue_fixture_requires_native_and_worker_proof(self):
             case={"transport":"fake_venue_fixture","venue":"fake",
                   "real_exchange_post_count":0,
-                  "native_test_name":"trade_service::execute::tests::duplicate_execute_one_post",
+                  "native_test_name":"accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict",
                   "worker_test_name":FAKE_WORKER_ROUTE_TEST}
             native,worker=case["native_test_name"],case["worker_test_name"]
             self.assertFalse(admissible_transport("trade.execute",case,set()))

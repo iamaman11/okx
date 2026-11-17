@@ -44,6 +44,14 @@ is still invoked by the larger `#[cfg(test)]` legacy Execute preparation
 branch. That branch and its original tests must be migrated together, not
 silently removed; it is **not** a production financial write path.
 
+The acceptance evidence consumer `scripts/acceptance_product.py` has
+been updated too: `EXEC-01` and `MULTI-01` now require executed, fully
+qualified **real Native owner test names**, never removed legacy tests.
+The fake-venue action guard accepts only current Native business tests plus
+its existing exact Worker route witness; it still rejects any supposed
+physical Real exchange mutation proof. The script's own `--self-test` is
+required in Draft CI. Missing Native tests remain missing evidence, not PASS.
+
 ### #512 — Native account bootstrap supersedes per-account worker fixtures
 
 Two old tests were retired from `accounts.rs` because they opened
