@@ -71,7 +71,12 @@ impl TradeService {
     }
 
     #[cfg(test)]
-    pub(super) fn b_census_probe_failure(phase: &str, account: &str, reason: &str, until: Option<Instant>) {
+    pub(super) fn b_census_probe_failure(
+        phase: &str,
+        account: &str,
+        reason: &str,
+        until: Option<Instant>,
+    ) {
         if std::env::var("OKX_B_CENSUS_CAUSE_PROBE").as_deref() != Ok("1") {
             return;
         }
