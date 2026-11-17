@@ -25,6 +25,25 @@ Source of truth: issue #512 r11, code of accepted main commit 9c36f50fc9a02d59d6
 
 **Performance measurement status:** #510 accepted CI reported 95.996s post-build runtime and 126.048s test build for its declared workload (not a new #512 baseline). S0's direct-test 5/10/30s and diagnostic p95/250ms targets remain *UNMEASURED / NOT YET FIXED* until three equivalent Windows runner runs with exact test IDs, seeds, fixture sizes, cache state and separate build/setup/execution times. No baseline or budget is invented from source inspection; S0 cannot be accepted on this note alone.
 
+### #512 — Scope and stale-generation properties on current owner
+
+The old `wrong_uid_rejected_before_post` and `view_selection_does_not_reroute_intent`
+test functions were retired. They used a legacy per-account SQL handle
+and are replaced by the actual Native wrong-UID bootstrap, account-scoped
+diagnostic and two-account isolation contracts:
+`risk_book_contract_native_connect_wrong_uid_does_not_create_account_or_publish_catalog`,
+`risk_book_contract_native_intent_diagnostic_is_account_scoped_and_refuses_foreign_installation`,
+`risk_book_contract_native_two_accounts_share_budget_and_isolate_public_capital_receipts`.
+The old `stale_generation_response_ignored` simulation was replaced by a
+direct pure test of the same production `validate_generation` guard, paired
+with `risk_book_contract_native_changed_post_held_fee_releases_unsent_and_replans`
+for the real source-change/unsent behavior.
+
+The `prepare_on_owner` test helper **must remain temporarily** because it
+is still invoked by the larger `#[cfg(test)]` legacy Execute preparation
+branch. That branch and its original tests must be migrated together, not
+silently removed; it is **not** a production financial write path.
+
 ### #512 — Native account bootstrap supersedes per-account worker fixtures
 
 Two old tests were retired from `accounts.rs` because they opened

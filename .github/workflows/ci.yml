@@ -233,6 +233,11 @@ jobs:
         run: |
           cargo test --locked -p okx-agent --lib risk_book_contract_native_connect_two_accounts_and_reopen_one_original_sqlite -- --nocapture
           cargo test --locked -p okx-agent --lib risk_book_contract_native_connect_wrong_uid_does_not_create_account_or_publish_catalog -- --nocapture
+      - name: Current Native scope and source-generation witnesses
+        run: |
+          cargo test --locked -p okx-agent --lib risk_book_contract_native_intent_diagnostic_is_account_scoped_and_refuses_foreign_installation -- --nocapture
+          cargo test --locked -p okx-agent --lib risk_book_contract_native_changed_post_held_fee_releases_unsent_and_replans -- --nocapture
+          cargo test --locked -p okx-agent --lib stale_generation_rejects_before_financial_or_venue_action -- --nocapture
       - name: Census original source, scope, receipt and post-HELD regressions
         run: |
           cargo test --locked -p okx-agent --lib trade_service::execute::tests::e2_ -- --nocapture

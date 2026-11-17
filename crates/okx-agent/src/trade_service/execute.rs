@@ -4172,63 +4172,13 @@ mod tests {
         }
         assert_eq!(gateway.posts.load(Ordering::SeqCst), 0);
     }
-    #[tokio::test]
-    async fn wrong_uid_rejected_before_post() {
-        let (store, _intent, _root) = reserved("wrong_uid", true, false, false).await;
-        let account = format!("okx:real:{}", "a".repeat(64));
-        let gateway = FixtureGateway {
-            posts: AtomicUsize::new(0),
-            lose: false,
-        };
-        let validated = prepare_on_owner(&store, deadline(), &account, &"b".repeat(64), |s| {
-            s.intent("intent_fixture")
-        })
-        .await;
-        assert!(validated.is_err());
-        assert_eq!(gateway.posts.load(Ordering::SeqCst), 0);
+    #[test]
+    fn stale_generation_rejects_before_financial_or_venue_action() {
         assert_eq!(
-            store
-                .call(deadline(), |s| s.intent("intent_fixture"))
-                .await
-                .unwrap()
-                .unwrap()
-                .state,
-            IntentState::Reserved
+            validate_generation(2, 1),
+            Err("SOURCE_GENERATION_CHANGED".into())
         );
-    }
-    #[tokio::test]
-    async fn stale_generation_response_ignored() {
-        let (store, intent, _root) = reserved("generation", true, false, false).await;
-        let gateway = FixtureGateway {
-            posts: AtomicUsize::new(0),
-            lose: false,
-        };
-        if validate_generation(2, 1).is_ok() {
-            let _ = post_once(&store, &intent, deadline(), || gateway.send()).await;
-        }
-        assert_eq!(gateway.posts.load(Ordering::SeqCst), 0);
-        assert!(validate_generation(2, 2).is_ok());
-    }
-    #[tokio::test]
-    async fn view_selection_does_not_reroute_intent() {
-        let (store, intent, _root) = reserved("view_route", true, false, false).await;
-        let bound = format!("okx:real:{}", "a".repeat(64));
-        let selected = format!("okx:real:{}", "b".repeat(64));
-        assert_ne!(bound, selected);
-        let route = prepare_on_owner(&store, deadline(), &bound, &"a".repeat(64), |s| {
-            Ok(s.meta().account_key.clone())
-        })
-        .await
-        .unwrap();
-        let gateway = FixtureGateway {
-            posts: AtomicUsize::new(0),
-            lose: false,
-        };
-        post_once(&store, &intent, deadline(), || gateway.send())
-            .await
-            .unwrap();
-        assert_eq!(route, bound);
-        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
+        assert_eq!(validate_generation(2, 2), Ok(()));
     }
     /// Test the actual Rust single-POST boundary, not an extra mock engine.
     /// External source labels are synthetic and do not prove chat identity.
