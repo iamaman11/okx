@@ -459,7 +459,8 @@ jobs:
         run: cargo clippy --locked --workspace --exclude okx-agent --exclude okx-host-control --all-targets -- -D warnings
 
       - name: Test portable crates
-        run: cargo test --locked --workspace --exclude okx-agent --exclude okx-host-control
+        # Research has its own complete run below, including real IPC children.
+        run: cargo test --locked --workspace --exclude okx-agent --exclude okx-host-control --exclude okx-research-worker
 
       - name: Research worker process and Agent dispatch contracts
         shell: bash
@@ -467,10 +468,11 @@ jobs:
           set -euo pipefail
           cargo build --locked -p okx-research-worker --bin okx-research-worker
           export OKX_RESEARCH_WORKER_TEST_EXE="$PWD/target/debug/okx-research-worker"
-          cargo test --locked -p okx-research-worker --lib analytics:: -- --test-threads 2 | tee "$RUNNER_TEMP/research-worker-unit.log"
+          cargo test --locked -p okx-research-worker --lib -- --test-threads 2 | tee "$RUNNER_TEMP/research-worker-unit.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-worker-unit.log"
           cargo test --locked -p okx-research-worker --test ipc_process -- --nocapture | tee "$RUNNER_TEMP/research-worker-ipc.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-worker-ipc.log"
+          cargo test --locked -p okx-research-worker --doc
           cargo test --locked -p okx-agent --lib research_dispatch_tests:: -- --test-threads 2 | tee "$RUNNER_TEMP/research-dispatch.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-dispatch.log"
 
@@ -672,10 +674,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Worker analytics regression and actual IPC child
+      # K9 runs once in its dedicated step, where its measurement is collected.
+      - name: Worker library regression and actual IPC child
         shell: pwsh
         run: |
-          $output = & cargo test --locked -p okx-research-worker --lib analytics:: -- --test-threads 2 2>&1
+          $output = & cargo test --locked -p okx-research-worker --lib -- --skip analytics::executor::heavy_fixtures::two_heavy_research_jobs_ingestion_stop_and_cancel_latency --test-threads 2 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }

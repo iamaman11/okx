@@ -233,13 +233,67 @@ mod research_tree_tests {
     }
     #[test]
     #[cfg(windows)]
+    #[ignore = "executed by the process-tree parent contract"]
+    fn measured_cpu_child() {
+        #[repr(C)]
+        #[derive(Clone, Copy, Default)]
+        struct FileTime {
+            low: u32,
+            high: u32,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> *mut std::ffi::c_void;
+            fn GetProcessTimes(
+                process: *mut std::ffi::c_void,
+                creation: *mut FileTime,
+                exit: *mut FileTime,
+                kernel: *mut FileTime,
+                user: *mut FileTime,
+            ) -> i32;
+        }
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let [mut creation, mut exit, mut kernel, mut user] = [FileTime::default(); 4];
+            let ok = unsafe {
+                GetProcessTimes(
+                    GetCurrentProcess(),
+                    &mut creation,
+                    &mut exit,
+                    &mut kernel,
+                    &mut user,
+                )
+            };
+            assert_ne!(ok, 0);
+            let ticks = |t: FileTime| ((t.high as u64) << 32) | t.low as u64;
+            if ticks(kernel) + ticks(user) >= 200_000 {
+                break;
+            }
+            for value in 0..4096u64 {
+                std::hint::black_box(value.wrapping_mul(31));
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "child CPU accounting unavailable"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn windows_job_accounts_for_a_terminated_child_without_proving_a_budget() {
         let measurement = ResearchProcessTree::begin();
-        let status = std::process::Command::new("cmd.exe")
-            .args(["/C", "ver"])
-            .status()
+        // A trivial `cmd /C ver` may finish below the Windows accounting tick.
+        // Exercise a Rust child with independently observed nonzero CPU instead.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "accounts::native_trade_contracts::native_engine_research::process_tree::research_tree_tests::measured_cpu_child"])
+            .output()
             .unwrap();
-        assert!(status.success());
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+            "CPU helper must actually execute: {output:?}"
+        );
         let value = measurement.finish();
         if value["status"] == "NOT_PROVEN" {
             assert_eq!(value["descendants_included"], false);
