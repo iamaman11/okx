@@ -25,6 +25,27 @@ Source of truth: issue #512 r11, code of accepted main commit 9c36f50fc9a02d59d6
 
 **Performance measurement status:** #510 accepted CI reported 95.996s post-build runtime and 126.048s test build for its declared workload (not a new #512 baseline). S0's direct-test 5/10/30s and diagnostic p95/250ms targets remain *UNMEASURED / NOT YET FIXED* until three equivalent Windows runner runs with exact test IDs, seeds, fixture sizes, cache state and separate build/setup/execution times. No baseline or budget is invented from source inspection; S0 cannot be accepted on this note alone.
 
+### #512 — Native POST/replay/UNKNOWN witnesses replace retired worker tests
+
+Eight old per-account `AccountStoreHandle` send/recovery simulations were removed
+from `trade_service/execute.rs`, with their actual properties retained by
+tests using the real `UnifiedFinanceHandle` and public Agent entrypoints:
+
+| Removed legacy test | Current owner test(s) proving the retained property |
+|---|---|
+| `prepost_fence_denial_is_durable_no_send_not_unknown`, `stop_after_reserve_before_post` | `risk_book_contract_native_execute_bound_rejection_preserves_code_and_reserve`; `risk_book_contract_native_public_cancel_after_held_replays_and_cold_reopens_without_send` |
+| `lost_http_ack_reopens_original_sql_without_second_send`, `lost_response_after_post_returns_unknown` | `risk_book_contract_native_public_execute_lost_ack_and_replay_send_once`; `risk_book_contract_native_os_kill_after_create_recovers_original_unknown` |
+| `k5_f5_f6_reopen_sql_never_reposts_unknown_or_invents_no_send`, `restart_posting_reconciles_without_resubmit` | `risk_book_contract_native_os_kill_after_create_recovers_original_unknown`: genuine OS death, durable UNKNOWN, no second POST |
+| `duplicate_execute_one_post` | `risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict` |
+| `two_accounts_two_instances` | `risk_book_contract_native_two_accounts_share_budget_and_isolate_public_capital_receipts`; `risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_entry_cap` |
+
+The Native lost-ACK test also verifies the persisted semantic `request_hash`
+against the original canonical request on the actual financial owner before
+replay. The **old 60-kill Windows K5 fixture remains temporarily** because
+its repeated/all-phase coverage has not been replaced by an equivalent Native
+Windows matrix. It must be migrated before the legacy worker can be deleted;
+passing historical fixture tests is not acceptance of the current owner.
+
 ### #512 S1 — migrated old-worker property (same current-owner code path)
 
 | Previous fixture property | Actual current-owner witness | Disposition |

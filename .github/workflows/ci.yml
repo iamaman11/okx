@@ -223,6 +223,12 @@ jobs:
           cargo test --locked -p okx-agent --lib risk_book_contract_native_public_execute_lost_ack_and_replay_send_once -- --nocapture
           cargo test --locked -p okx-agent --lib risk_book_contract_native_execute_bound_rejection_preserves_code_and_reserve -- --nocapture
           cargo test --locked -p okx-agent --lib risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner -- --nocapture
+      - name: Current-owner POST replay UNKNOWN and two-account replacements
+        run: |
+          cargo test --locked -p okx-agent --lib risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict -- --nocapture
+          cargo test --locked -p okx-agent --lib risk_book_contract_native_public_cancel_after_held_replays_and_cold_reopens_without_send -- --nocapture
+          cargo test --locked -p okx-agent --lib risk_book_contract_native_os_kill_after_create_recovers_original_unknown -- --nocapture
+          cargo test --locked -p okx-agent --lib risk_book_contract_native_two_accounts_share_budget_and_isolate_public_capital_receipts -- --nocapture
       - name: Census original source, scope, receipt and post-HELD regressions
         run: |
           cargo test --locked -p okx-agent --lib trade_service::execute::tests::e2_ -- --nocapture

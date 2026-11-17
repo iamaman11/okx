@@ -336,6 +336,28 @@ async fn risk_book_contract_native_public_execute_lost_ack_and_replay_send_once(
                 execute_started.elapsed().as_millis(),
             )
         });
+    // Native financial evidence: one canonical semantic hash survives a lost
+    // exchange ACK on the original installation writer, not a retired fixture.
+    let account_key = fixture.config.account_key.wire();
+    let idempotency = match &request {
+        TradeRequest::Execute { idempotency_key, .. } => idempotency_key.clone(),
+        _ => unreachable!("Native public Create fixture must be Execute"),
+    };
+    use sha2::Digest as _;
+    let semantic = request.canonical_semantic_json(&account_key).unwrap();
+    let expected_hash = format!("{:x}", sha2::Sha256::digest(semantic.as_bytes()));
+    let stored = fixture
+        .owner
+        .lookup_intent(
+            account_key,
+            okx_execution::TradeIntentLookup::IdempotencyKey(idempotency),
+            Instant::now() + Duration::from_secs(3),
+        )
+        .await
+        .unwrap()
+        .expect("Native finance owner retains the original semantic request");
+    assert_eq!(stored.intent_id, first["intent_id"].as_str().unwrap());
+    assert_eq!(stored.request_hash, expected_hash);
     assert_eq!(first["status"], "unknown", "{first}");
     assert_eq!(
         first["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
