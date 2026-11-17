@@ -212,6 +212,12 @@ jobs:
           cargo test --locked -p okx-agent --lib risk_book_contract_native_public_execute_lost_ack_and_replay_send_once -- --nocapture
           cargo test --locked -p okx-agent --lib risk_book_contract_native_execute_bound_rejection_preserves_code_and_reserve -- --nocapture
           cargo test --locked -p okx-agent --lib risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner -- --nocapture
+      - name: Census original source, scope, receipt and post-HELD regressions
+        run: |
+          cargo test --locked -p okx-agent --lib trade_service::execute::tests::e2_ -- --nocapture
+          cargo test --locked -p okx-agent --lib trade_service::execute::tests::e1_ -- --nocapture
+          cargo test --locked -p okx-agent --lib trade_service::execute::tests::t10_native_ -- --nocapture
+          cargo test --locked -p okx-agent --lib trade_service::execute::tests::k4_ -- --nocapture
 
   riskbook-draft-rust:
     # Fast, real-source feedback for the active Rust RiskBook draft. Final
