@@ -993,7 +993,7 @@ jobs:
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\native-queue-current.log" | Out-Host
           if ($code -ne 0) { exit $code }
           $proof = [regex]::Matches(($output -join "`n"), 'test result: ok\.\s+([1-9]\d*) passed;')
-          if ($proof.Count -ne 1 -or [int]$proof[0].Groups[1].Value -ne 2) {
+          if ($proof.Count -ne 1 -or [int]$proof[0].Groups[1].Value -ne 3) {
             throw 'CURRENT_SINGLE_WRITER_QUEUE_WITNESSES_MISSING'
           }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -41,7 +41,9 @@ async fn send(
 async fn receive(
     r: &mut FramedRead<tokio::io::ReadHalf<tokio::io::DuplexStream>, LengthDelimitedCodec>,
 ) -> WorkerFrame {
-    let bytes = tokio::time::timeout(Duration::from_secs(5), r.next())
+    // Use the shipping IPC deadline, including initial executable hashing.
+    // A shorter fixture deadline falsely rejects a valid cold Hello under load.
+    let bytes = tokio::time::timeout(Duration::from_millis(REQUEST_TIMEOUT_MS), r.next())
         .await
         .unwrap()
         .unwrap()

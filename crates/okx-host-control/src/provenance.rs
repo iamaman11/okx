@@ -260,9 +260,7 @@ pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> HostControlRe
 
 #[cfg(not(windows))]
 pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> HostControlResult<()> {
-    if destination.exists() {
-        fs::remove_file(destination)?;
-    }
+    // POSIX rename replaces atomically; unlinking first creates a crash gap.
     fs::rename(source, destination)?;
     Ok(())
 }

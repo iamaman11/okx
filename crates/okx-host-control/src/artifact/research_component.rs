@@ -323,6 +323,28 @@ fn plain_directory(path: &Path) -> HostControlResult<()> {
     }
 }
 
+fn write_stage_file(directory: &Path, bytes: &[u8]) -> HostControlResult<std::path::PathBuf> {
+    let mut nonce = [0u8; 16];
+    getrandom::fill(&mut nonce).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let path = directory.join(format!(
+        ".research-stage-{:032x}.tmp",
+        u128::from_le_bytes(nonce)
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&path);
+        return Err(error.into());
+    }
+    Ok(path)
+}
+
 fn stage_research(root: &Path, record: &InstalledResearch, bytes: &[u8]) -> HostControlResult<()> {
     if !valid_hex(&record.worker_sha256, 64) || sha256_hex(bytes) != record.worker_sha256 {
         return Err(HostControlError::ArtifactHashMismatch);
@@ -350,12 +372,15 @@ fn stage_research(root: &Path, record: &InstalledResearch, bytes: &[u8]) -> Host
             ));
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&binary)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
+            // Interrupted writes leave only an unpublished unique staging file.
+            let temp = write_stage_file(&version, bytes)?;
+            if let Err(error) = fs::rename(&temp, &binary) {
+                let _ = fs::remove_file(&temp);
+                if !fs::read(&binary).is_ok_and(|value| sha256_hex(&value) == record.worker_sha256)
+                {
+                    return Err(error.into());
+                }
+            }
         }
         Err(e) => return Err(e.into()),
     }
@@ -370,15 +395,12 @@ fn stage_research(root: &Path, record: &InstalledResearch, bytes: &[u8]) -> Host
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    let temp = root.join(format!(".installed-research-{}.tmp", std::process::id()));
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
-    f.write_all(&serde_json::to_vec_pretty(record)?)?;
-    f.sync_all()?;
-    drop(f);
-    crate::provenance::atomic_replace(&temp, &pointer)
+    let temp = write_stage_file(root, &serde_json::to_vec_pretty(record)?)?;
+    let result = crate::provenance::atomic_replace(&temp, &pointer);
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
 }
 
 pub(super) fn parse_persisted_manifest(bytes: &[u8]) -> HostControlResult<BundleManifest> {
@@ -561,6 +583,15 @@ mod tests {
         };
         assert!(stage_research(&root, &record, b"tampered").is_err());
         assert!(!root.join("installed-research.json").exists());
+        let version = root.join("research/versions").join(&record.worker_sha256);
+        fs::create_dir_all(&version).unwrap();
+        // Simulated crash residue is unpublished and cannot block an exact retry.
+        fs::write(version.join(".research-stage-interrupted.tmp"), b"partial").unwrap();
+        fs::write(
+            root.join(format!(".installed-research-{}.tmp", std::process::id())),
+            b"partial",
+        )
+        .unwrap();
         stage_research(&root, &record, bytes).unwrap();
         stage_research(&root, &record, bytes).unwrap();
         assert_eq!(
