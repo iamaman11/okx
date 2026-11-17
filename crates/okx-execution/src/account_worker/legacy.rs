@@ -619,8 +619,6 @@ mod diagnostic_fault_tests {
         ));
         std::fs::remove_dir_all(root).unwrap();
     }
-
-
 }
 
 #[cfg(test)]

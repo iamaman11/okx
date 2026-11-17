@@ -80,12 +80,18 @@ async fn risk_book_contract_fresh_owner_failed_job_counts_and_preserves_installa
     let after = owner.sql_timing();
     assert_eq!(after.observed_jobs, before + 1);
     assert!(after.last_sql_owner_ms < 5_000);
-    assert_eq!(owner.installation_receipt(deadline()).await.unwrap(), receipt);
+    assert_eq!(
+        owner.installation_receipt(deadline()).await.unwrap(),
+        receipt
+    );
     close(owner).await;
     let reopened = UnifiedFinanceHandle::open_native(root, receipt.installation_id.clone())
         .await
         .unwrap();
-    assert_eq!(reopened.installation_receipt(deadline()).await.unwrap(), receipt);
+    assert_eq!(
+        reopened.installation_receipt(deadline()).await.unwrap(),
+        receipt
+    );
     close(reopened).await;
 }
 
