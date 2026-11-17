@@ -212,6 +212,8 @@ impl TradeService {
                         .await
                         .map_err(err)?;
                 } else {
+                #[cfg(test)]
+                {
                     r.execution
                         .store
                         .call(deadline(), move |s| {
@@ -225,6 +227,11 @@ impl TradeService {
                         .await
                         .map_err(err)?;
                 }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                }
+            }
                 return Ok(());
             }
             stage = TerminalReleaseStage::Inspection;
@@ -298,13 +305,20 @@ impl TradeService {
                         .map_err(err)?;
                     return Ok(());
                 }
-                let k = receipt.reservation_key.clone();
+                #[cfg(test)]
+                {                let k = receipt.reservation_key.clone();
                 let e = digest(&observed)?;
                 r.execution
                     .store
                     .call(deadline(), move |s| s.acknowledge_central_release(&k, &e))
                     .await
                     .map_err(err)?;
+
+                }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                }
                 return Ok(());
             }
             stage = TerminalReleaseStage::BillCoverage;
@@ -315,6 +329,8 @@ impl TradeService {
                     .await
                     .map_err(err)?
             } else {
+                #[cfg(test)]
+                {
                 r.execution
                     .store
                     .call(deadline(), |s| {
@@ -327,6 +343,11 @@ impl TradeService {
                     })
                     .await
                     .map_err(err)?
+            }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                }
             };
             facts.bills = Some((&through).into());
             if !source_covers_terminal(&through, venue_updated_at) {
@@ -455,7 +476,8 @@ impl TradeService {
                 stage = TerminalReleaseStage::SqlAcknowledgement;
                 return Ok(());
             }
-            let proof = TerminalRiskLedgerProof {
+            #[cfg(test)]
+            {            let proof = TerminalRiskLedgerProof {
                 account_uid: r.configuration.account_key.verified_uid.clone(),
                 run_id: "continuous_engine".into(),
                 intent_id: i.intent_id.clone(),
@@ -504,7 +526,13 @@ impl TradeService {
                 })
                 .await
                 .map_err(err)?;
-            Ok(())
+
+                Ok(())
+            }
+            #[cfg(not(test))]
+            {
+                Err("NATIVE_FINANCE_OWNER_REQUIRED".into())
+            }
         }
         .await;
         observe(

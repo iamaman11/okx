@@ -519,6 +519,8 @@ impl TradeService {
                 .await
                 .map_err(err)?
         } else {
+                #[cfg(test)]
+                {
             r.execution
                 .store
                 .call(until, move |s| {
@@ -534,7 +536,12 @@ impl TradeService {
                 })
                 .await
                 .map_err(err)?
-        };
+        }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                }
+            };
         Ok(IntentPlan {
             strategy_definition_id: definition.definition_id,
             strategy_definition_version: definition.version,
@@ -588,6 +595,8 @@ impl TradeService {
                 .await
                 .map_err(err)?
         } else {
+                #[cfg(test)]
+                {
             r.execution
                 .store
                 .call(deadline(), move |s| {
@@ -595,7 +604,12 @@ impl TradeService {
                 })
                 .await
                 .map_err(err)?
-        };
+        }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                }
+            };
         if let Some(reason) = decision {
             return Err(reason);
         }

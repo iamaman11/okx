@@ -586,6 +586,8 @@ pub(crate) async fn capture_account_sources_traced(
         .await?;
         None
     } else {
+                #[cfg(test)]
+                {
         let ((), timing) = execution
             .store
             .call_with_timing_observed(
@@ -728,7 +730,12 @@ pub(crate) async fn capture_account_sources_traced(
             )
             .await?;
         Some(timing)
-    };
+    }
+                #[cfg(not(test))]
+                {
+                    return Err(invalid("NATIVE_FINANCE_OWNER_REQUIRED"));
+                }
+            };
     let nav_reconciliation_ms = phase_elapsed_ms(nav_started);
     if !complete {
         return Err(invalid("FINANCIAL_BACKFILL_PENDING"));

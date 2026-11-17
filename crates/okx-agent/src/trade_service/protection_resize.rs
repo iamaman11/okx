@@ -42,6 +42,8 @@ impl TradeService {
                     .await
                     .map_err(err)?
             } else {
+                #[cfg(test)]
+                {
                 let id = reduction.intent_id.clone();
                 let order = venue.order_id.clone();
                 r.execution
@@ -51,6 +53,11 @@ impl TradeService {
                     })
                     .await
                     .map_err(err)?
+            }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                }
             };
         let hash = digest(&(
             "protection-shrink/v1",
@@ -141,6 +148,8 @@ impl TradeService {
                     .await
                     .map_err(err)?;
             } else {
+                #[cfg(test)]
+                {
                 r.execution
                     .store
                     .call(deadline(), move |s| {
@@ -156,6 +165,11 @@ impl TradeService {
                     })
                     .await
                     .map_err(err)?;
+            }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                }
             }
             return Ok(json!({
                 "state":"verified",

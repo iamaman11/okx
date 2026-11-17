@@ -48,7 +48,9 @@ mod order_observation;
 pub(crate) use native_admission::{
     bind_census as test_bind_native_census, reserve_reported_sql as test_reserve_reported_sql,
 };
-pub use operation_diagnostics::NativeIntentDiagnosticSnapshot;
+pub use operation_diagnostics::{
+    NativeAccountDiagnosticSnapshot, NativeIntentDiagnosticSnapshot, NativeRiskStopDiagnostic,
+};
 mod entry_settlement;
 mod posting_recovery;
 mod storage_recovery;

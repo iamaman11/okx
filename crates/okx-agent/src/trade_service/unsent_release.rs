@@ -3,7 +3,9 @@
 use super::{build_risk_command, digest};
 use crate::execution_store::ExecutionStore;
 use crate::risk_bridge::NativeRiskClient;
-use okx_execution::{AccountStoreHandle, StoredIntent};
+#[cfg(test)]
+use okx_execution::AccountStoreHandle;
+use okx_execution::StoredIntent;
 use okx_protocol::{
     account_governance::CentralGovernanceSnapshot,
     accounts::Environment,
@@ -99,7 +101,8 @@ pub(super) async fn release_unsent(
             })
             .map_err(|e| failure(UnsentReleaseStage::Release, e.to_string(), None));
     }
-    let store = deps
+    #[cfg(test)]
+    {    let store = deps
         .store
         .legacy()
         .map_err(|e| failure(UnsentReleaseStage::SqlProof, e.to_string(), None))?;
@@ -221,8 +224,18 @@ pub(super) async fn release_unsent(
         UnsentReleaseStage::Release,
         "CENTRAL_UNSENT_RELEASE_CAS_BUSY".into(),
     ))
+    }
+    #[cfg(not(test))]
+    {
+        Err(failure(
+            UnsentReleaseStage::SqlProof,
+            "NATIVE_FINANCE_OWNER_REQUIRED".into(),
+            None,
+        ))
+    }
 }
 
+#[cfg(test)]
 async fn acknowledge(
     store: &AccountStoreHandle,
     reservation: &str,

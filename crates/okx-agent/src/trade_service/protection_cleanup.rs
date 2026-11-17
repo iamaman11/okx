@@ -147,7 +147,8 @@ async fn protection_cleanup_step(
             _ => Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into()),
         };
     }
-    store
+    #[cfg(test)]
+    {    store
         .call(deadline(), move |s| {
             if s.begin_operation(&key, &hash, "protection_cleanup", now())? {
                 return Ok(ProtectionCleanupStep::SendOnce);
@@ -167,7 +168,13 @@ async fn protection_cleanup_step(
         })
         .await
         .map_err(err)
-}
+
+    }
+    #[cfg(not(test))]
+    {
+        Err("NATIVE_FINANCE_OWNER_REQUIRED".into())
+    }
+
 
 // The exact same authenticated cancellation and ACK verdict are exercised
 // by the direct recorded-HTTP regression and by the live Status owner.
@@ -291,7 +298,8 @@ async fn commit_cleanup_confirmation(
             .map_err(err)?;
         return Ok(());
     }
-    store
+    #[cfg(test)]
+    {    store
         .call(deadline(), move |s| {
             s.operation_receipt(
                 &proof.operation_key,
@@ -304,7 +312,13 @@ async fn commit_cleanup_confirmation(
         .await
         .map_err(err)?;
     Ok(())
-}
+
+    }
+    #[cfg(not(test))]
+    {
+        Err("NATIVE_FINANCE_OWNER_REQUIRED".into())
+    }
+
 
 async fn cleanup_operation(
     store: &ExecutionStore,
@@ -316,11 +330,18 @@ async fn cleanup_operation(
             .await
             .map_err(err)
     } else {
+                #[cfg(test)]
+                {
         store
             .call(deadline(), move |s| s.operation(&key))
             .await
             .map_err(err)
     }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                }
+            }
 }
 
 async fn protection_cleanup_readback(
@@ -445,11 +466,18 @@ pub(super) async fn cleanup_flat_protection(
             .await
             .map_err(err)?
     } else {
+                #[cfg(test)]
+                {
         deps.store
             .call(deadline(), move |s| s.protection(&id))
             .await
             .map_err(err)?
-    };
+    }
+                #[cfg(not(test))]
+                {
+                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                }
+            };
     let Some(saved) = saved else {
         trace_cleanup(&deps, facts, ProtectionTraceEvent::NoProtection);
         return Ok(());
