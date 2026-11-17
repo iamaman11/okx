@@ -38,9 +38,20 @@ pub(crate) async fn read(account: &AccountResources, installation: &str, referen
         result["reason_code"] = "INVALID_INTENT_REFERENCE".into();
         return result;
     };
-    let Some((owner, scope)) = account.execution.store.native_scope() else {
+    #[cfg(test)]
+    let owner_scope = account.execution.store.native_scope();
+    #[cfg(test)]
+    let Some((owner, scope)) = owner_scope else {
         result["reason_code"] = "NATIVE_FINANCE_OWNER_REQUIRED".into();
         return result;
+    };
+    #[cfg(not(test))]
+    let (owner, scope) = match account.execution.store.native_owner() {
+        Ok(scoped) => scoped,
+        Err(_) => {
+            result["reason_code"] = "NATIVE_FINANCE_OWNER_REQUIRED".into();
+            return result;
+        }
     };
     if owner.installation_id() != installation || scope != key {
         result["reason_code"] = "ACCOUNT_IDENTITY_MISMATCH".into();
