@@ -340,7 +340,9 @@ async fn risk_book_contract_native_public_execute_lost_ack_and_replay_send_once(
     // exchange ACK on the original installation writer, not a retired fixture.
     let account_key = fixture.config.account_key.wire();
     let idempotency = match &request {
-        TradeRequest::Execute { idempotency_key, .. } => idempotency_key.clone(),
+        TradeRequest::Execute {
+            idempotency_key, ..
+        } => idempotency_key.clone(),
         _ => unreachable!("Native public Create fixture must be Execute"),
     };
     use sha2::Digest as _;

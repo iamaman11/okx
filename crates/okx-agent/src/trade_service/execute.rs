@@ -3754,10 +3754,6 @@ mod tests {
         (store, saved, root)
     }
 
-
-
-
-
     // Genuine OS-level termination on the Windows CI runner. The child keeps
     // the original SQLite writer lease open until TerminateProcess kills it.
     // This is component evidence: Cloudflare is not connected, and the
@@ -4144,7 +4140,6 @@ mod tests {
             })
         );
     }
-
 
     #[tokio::test]
     async fn close_under_stop() {
