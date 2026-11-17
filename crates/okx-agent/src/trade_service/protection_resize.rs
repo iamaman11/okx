@@ -27,23 +27,24 @@ impl TradeService {
         }
         let plan_hash = reduction.plan_hash.clone();
         let account_key = r.configuration.account_key.wire();
-        let (opening, old_stop, key, prior, verified) =
-            if let Some((owner, account)) = r.execution.store.native_scope() {
-                owner
-                    .protection_resize_source(
-                        deadline(),
-                        account.into(),
-                        reduction.intent_id.clone(),
-                        venue.order_id.clone(),
-                        venue_filled,
-                        update,
-                        position_qty,
-                    )
-                    .await
-                    .map_err(err)?
-            } else {
-                #[cfg(test)]
-                {
+        let (opening, old_stop, key, prior, verified) = if let Some((owner, account)) =
+            r.execution.store.native_scope()
+        {
+            owner
+                .protection_resize_source(
+                    deadline(),
+                    account.into(),
+                    reduction.intent_id.clone(),
+                    venue.order_id.clone(),
+                    venue_filled,
+                    update,
+                    position_qty,
+                )
+                .await
+                .map_err(err)?
+        } else {
+            #[cfg(test)]
+            {
                 let id = reduction.intent_id.clone();
                 let order = venue.order_id.clone();
                 r.execution
@@ -54,11 +55,11 @@ impl TradeService {
                     .await
                     .map_err(err)?
             }
-                #[cfg(not(test))]
-                {
-                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
-                }
-            };
+            #[cfg(not(test))]
+            {
+                return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+            }
+        };
         let hash = digest(&(
             "protection-shrink/v1",
             &account_key,
@@ -150,22 +151,22 @@ impl TradeService {
             } else {
                 #[cfg(test)]
                 {
-                r.execution
-                    .store
-                    .call(deadline(), move |s| {
-                        s.verify_protection(&new_protection)?;
-                        s.operation_receipt(
-                            &verification,
-                            &hash,
-                            "protection_shrink_verified",
-                            "VERIFIED",
-                            now(),
-                        )?;
-                        Ok(())
-                    })
-                    .await
-                    .map_err(err)?;
-            }
+                    r.execution
+                        .store
+                        .call(deadline(), move |s| {
+                            s.verify_protection(&new_protection)?;
+                            s.operation_receipt(
+                                &verification,
+                                &hash,
+                                "protection_shrink_verified",
+                                "VERIFIED",
+                                now(),
+                            )?;
+                            Ok(())
+                        })
+                        .await
+                        .map_err(err)?;
+                }
                 #[cfg(not(test))]
                 {
                     return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());

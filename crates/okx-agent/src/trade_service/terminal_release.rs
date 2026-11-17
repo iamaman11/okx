@@ -212,26 +212,26 @@ impl TradeService {
                         .await
                         .map_err(err)?;
                 } else {
-                #[cfg(test)]
-                {
-                    r.execution
-                        .store
-                        .call(deadline(), move |s| {
-                            s.acknowledge_local_terminal_close(
-                                &id,
-                                &order_id,
-                                filled,
-                                venue_updated_at,
-                            )
-                        })
-                        .await
-                        .map_err(err)?;
+                    #[cfg(test)]
+                    {
+                        r.execution
+                            .store
+                            .call(deadline(), move |s| {
+                                s.acknowledge_local_terminal_close(
+                                    &id,
+                                    &order_id,
+                                    filled,
+                                    venue_updated_at,
+                                )
+                            })
+                            .await
+                            .map_err(err)?;
+                    }
+                    #[cfg(not(test))]
+                    {
+                        return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+                    }
                 }
-                #[cfg(not(test))]
-                {
-                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
-                }
-            }
                 return Ok(());
             }
             stage = TerminalReleaseStage::Inspection;
@@ -306,14 +306,14 @@ impl TradeService {
                     return Ok(());
                 }
                 #[cfg(test)]
-                {                let k = receipt.reservation_key.clone();
-                let e = digest(&observed)?;
-                r.execution
-                    .store
-                    .call(deadline(), move |s| s.acknowledge_central_release(&k, &e))
-                    .await
-                    .map_err(err)?;
-
+                {
+                    let k = receipt.reservation_key.clone();
+                    let e = digest(&observed)?;
+                    r.execution
+                        .store
+                        .call(deadline(), move |s| s.acknowledge_central_release(&k, &e))
+                        .await
+                        .map_err(err)?;
                 }
                 #[cfg(not(test))]
                 {
@@ -331,19 +331,19 @@ impl TradeService {
             } else {
                 #[cfg(test)]
                 {
-                r.execution
-                    .store
-                    .call(deadline(), |s| {
-                        Ok((
-                            s.cursor("bills", "account")?.ok_or(
-                                okx_execution::StoreError::Invalid("BILLS_COVERAGE_MISSING"),
-                            )?,
-                            s.policy()?.4,
-                        ))
-                    })
-                    .await
-                    .map_err(err)?
-            }
+                    r.execution
+                        .store
+                        .call(deadline(), |s| {
+                            Ok((
+                                s.cursor("bills", "account")?.ok_or(
+                                    okx_execution::StoreError::Invalid("BILLS_COVERAGE_MISSING"),
+                                )?,
+                                s.policy()?.4,
+                            ))
+                        })
+                        .await
+                        .map_err(err)?
+                }
                 #[cfg(not(test))]
                 {
                     return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
@@ -477,55 +477,56 @@ impl TradeService {
                 return Ok(());
             }
             #[cfg(test)]
-            {            let proof = TerminalRiskLedgerProof {
-                account_uid: r.configuration.account_key.verified_uid.clone(),
-                run_id: "continuous_engine".into(),
-                intent_id: i.intent_id.clone(),
-                state: match i.state {
-                    IntentState::Rejected => "REJECTED",
-                    IntentState::Cancelled => "CANCELED",
-                    _ => "FILLED",
+            {
+                let proof = TerminalRiskLedgerProof {
+                    account_uid: r.configuration.account_key.verified_uid.clone(),
+                    run_id: "continuous_engine".into(),
+                    intent_id: i.intent_id.clone(),
+                    state: match i.state {
+                        IntentState::Rejected => "REJECTED",
+                        IntentState::Cancelled => "CANCELED",
+                        _ => "FILLED",
+                    }
+                    .into(),
+                    record_digest: digest(&(i, order, loss, through))?,
+                    cumulative_loss_usd: exact(loss),
+                    remaining_exposure_usdt: "0".into(),
+                    // The previous SETTLE_ENTRY committed the entire observed
+                    // amount. Terminal RELEASE must not create another revision or
+                    // claim a new debit; Worker compares these exact immutable
+                    // SQL-backed fields to the existing settled RiskBook entry.
+                    cumulative_entry_usd: Some(exact(settlement.cumulative_entry_usd)),
+                    entry_settlement_revision: Some(settlement.settlement_revision),
+                    entry_settlement_digest: Some(settlement.source_digest.clone()),
+                };
+                let command = self.risk_command(
+                    &state,
+                    format!("release_{}", &i.client_order_id),
+                    RiskCommandAction::Resolve {
+                        reservation_key: receipt.reservation_key.clone(),
+                        plan_sha256: i.plan_hash.clone(),
+                        expected_risk_book_sequence: settlement_sequence,
+                        next_state: RiskResolution::Released,
+                        source_proof_sha256: digest(&proof)?,
+                        terminal_census: Some(census),
+                        terminal_ledger: Some(proof),
+                    },
+                );
+                let reservation = receipt.reservation_key.clone();
+                let result = self.risk.request(command).await.map_err(str::to_owned)?;
+                if result.status != RiskDecisionStatus::Updated {
+                    return Err(result.reason.unwrap_or("CENTRAL_RELEASE_DENIED".into()));
                 }
-                .into(),
-                record_digest: digest(&(i, order, loss, through))?,
-                cumulative_loss_usd: exact(loss),
-                remaining_exposure_usdt: "0".into(),
-                // The previous SETTLE_ENTRY committed the entire observed
-                // amount. Terminal RELEASE must not create another revision or
-                // claim a new debit; Worker compares these exact immutable
-                // SQL-backed fields to the existing settled RiskBook entry.
-                cumulative_entry_usd: Some(exact(settlement.cumulative_entry_usd)),
-                entry_settlement_revision: Some(settlement.settlement_revision),
-                entry_settlement_digest: Some(settlement.source_digest.clone()),
-            };
-            let command = self.risk_command(
-                &state,
-                format!("release_{}", &i.client_order_id),
-                RiskCommandAction::Resolve {
-                    reservation_key: receipt.reservation_key.clone(),
-                    plan_sha256: i.plan_hash.clone(),
-                    expected_risk_book_sequence: settlement_sequence,
-                    next_state: RiskResolution::Released,
-                    source_proof_sha256: digest(&proof)?,
-                    terminal_census: Some(census),
-                    terminal_ledger: Some(proof),
-                },
-            );
-            let reservation = receipt.reservation_key.clone();
-            let result = self.risk.request(command).await.map_err(str::to_owned)?;
-            if result.status != RiskDecisionStatus::Updated {
-                return Err(result.reason.unwrap_or("CENTRAL_RELEASE_DENIED".into()));
-            }
-            stage = TerminalReleaseStage::SqlAcknowledgement;
-            observe(stage, reservation_key.as_deref(), "running", None, &facts);
-            let e = digest(&result)?;
-            r.execution
-                .store
-                .call(deadline(), move |s| {
-                    s.acknowledge_central_release(&reservation, &e)
-                })
-                .await
-                .map_err(err)?;
+                stage = TerminalReleaseStage::SqlAcknowledgement;
+                observe(stage, reservation_key.as_deref(), "running", None, &facts);
+                let e = digest(&result)?;
+                r.execution
+                    .store
+                    .call(deadline(), move |s| {
+                        s.acknowledge_central_release(&reservation, &e)
+                    })
+                    .await
+                    .map_err(err)?;
 
                 Ok(())
             }

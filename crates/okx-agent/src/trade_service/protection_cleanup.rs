@@ -148,27 +148,27 @@ async fn protection_cleanup_step(
         };
     }
     #[cfg(test)]
-    {    store
-        .call(deadline(), move |s| {
-            if s.begin_operation(&key, &hash, "protection_cleanup", now())? {
-                return Ok(ProtectionCleanupStep::SendOnce);
-            }
-            let old = s
-                .operation(&key)?
-                .ok_or(okx_execution::StoreError::Invalid(
-                    "PROTECTION_CLEANUP_BEGIN_MISSING",
-                ))?;
-            match old.result_ref.as_str() {
-                "POSTING" => Ok(ProtectionCleanupStep::Inspect),
-                "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
-                _ => Err(okx_execution::StoreError::Invalid(
-                    "PROTECTION_CLEANUP_RECEIPT_CONFLICT",
-                )),
-            }
-        })
-        .await
-        .map_err(err)
-
+    {
+        store
+            .call(deadline(), move |s| {
+                if s.begin_operation(&key, &hash, "protection_cleanup", now())? {
+                    return Ok(ProtectionCleanupStep::SendOnce);
+                }
+                let old = s
+                    .operation(&key)?
+                    .ok_or(okx_execution::StoreError::Invalid(
+                        "PROTECTION_CLEANUP_BEGIN_MISSING",
+                    ))?;
+                match old.result_ref.as_str() {
+                    "POSTING" => Ok(ProtectionCleanupStep::Inspect),
+                    "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
+                    _ => Err(okx_execution::StoreError::Invalid(
+                        "PROTECTION_CLEANUP_RECEIPT_CONFLICT",
+                    )),
+                }
+            })
+            .await
+            .map_err(err)
     }
     #[cfg(not(test))]
     {
@@ -299,20 +299,20 @@ async fn commit_cleanup_confirmation(
         return Ok(());
     }
     #[cfg(test)]
-    {    store
-        .call(deadline(), move |s| {
-            s.operation_receipt(
-                &proof.operation_key,
-                &proof.request_hash,
-                "protection_cleanup",
-                "VERIFIED_CANCELED",
-                now(),
-            )
-        })
-        .await
-        .map_err(err)?;
-    Ok(())
-
+    {
+        store
+            .call(deadline(), move |s| {
+                s.operation_receipt(
+                    &proof.operation_key,
+                    &proof.request_hash,
+                    "protection_cleanup",
+                    "VERIFIED_CANCELED",
+                    now(),
+                )
+            })
+            .await
+            .map_err(err)?;
+        Ok(())
     }
     #[cfg(not(test))]
     {
@@ -330,18 +330,18 @@ async fn cleanup_operation(
             .await
             .map_err(err)
     } else {
-                #[cfg(test)]
-                {
-        store
-            .call(deadline(), move |s| s.operation(&key))
-            .await
-            .map_err(err)
+        #[cfg(test)]
+        {
+            store
+                .call(deadline(), move |s| s.operation(&key))
+                .await
+                .map_err(err)
+        }
+        #[cfg(not(test))]
+        {
+            return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+        }
     }
-                #[cfg(not(test))]
-                {
-                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
-                }
-            }
 }
 
 async fn protection_cleanup_readback(
@@ -466,18 +466,18 @@ pub(super) async fn cleanup_flat_protection(
             .await
             .map_err(err)?
     } else {
-                #[cfg(test)]
-                {
-        deps.store
-            .call(deadline(), move |s| s.protection(&id))
-            .await
-            .map_err(err)?
-    }
-                #[cfg(not(test))]
-                {
-                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
-                }
-            };
+        #[cfg(test)]
+        {
+            deps.store
+                .call(deadline(), move |s| s.protection(&id))
+                .await
+                .map_err(err)?
+        }
+        #[cfg(not(test))]
+        {
+            return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+        }
+    };
     let Some(saved) = saved else {
         trace_cleanup(&deps, facts, ProtectionTraceEvent::NoProtection);
         return Ok(());

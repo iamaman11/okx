@@ -519,29 +519,29 @@ impl TradeService {
                 .await
                 .map_err(err)?
         } else {
-                #[cfg(test)]
-                {
-            r.execution
-                .store
-                .call(until, move |s| {
-                    if binding_id == "manual" {
-                        if record_risk_state {
-                            s.ensure_manual_instance(now())
+            #[cfg(test)]
+            {
+                r.execution
+                    .store
+                    .call(until, move |s| {
+                        if binding_id == "manual" {
+                            if record_risk_state {
+                                s.ensure_manual_instance(now())
+                            } else {
+                                s.manual_definition_preview()
+                            }
                         } else {
-                            s.manual_definition_preview()
+                            s.strategy_definition(&binding_id)
                         }
-                    } else {
-                        s.strategy_definition(&binding_id)
-                    }
-                })
-                .await
-                .map_err(err)?
-        }
-                #[cfg(not(test))]
-                {
-                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
-                }
-            };
+                    })
+                    .await
+                    .map_err(err)?
+            }
+            #[cfg(not(test))]
+            {
+                return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+            }
+        };
         Ok(IntentPlan {
             strategy_definition_id: definition.definition_id,
             strategy_definition_version: definition.version,
@@ -595,21 +595,21 @@ impl TradeService {
                 .await
                 .map_err(err)?
         } else {
-                #[cfg(test)]
-                {
-            r.execution
-                .store
-                .call(deadline(), move |s| {
-                    s.check_financial_admission(&request, now())
-                })
-                .await
-                .map_err(err)?
-        }
-                #[cfg(not(test))]
-                {
-                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
-                }
-            };
+            #[cfg(test)]
+            {
+                r.execution
+                    .store
+                    .call(deadline(), move |s| {
+                        s.check_financial_admission(&request, now())
+                    })
+                    .await
+                    .map_err(err)?
+            }
+            #[cfg(not(test))]
+            {
+                return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
+            }
+        };
         if let Some(reason) = decision {
             return Err(reason);
         }
