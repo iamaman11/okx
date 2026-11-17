@@ -882,15 +882,7 @@ impl TradeService {
                 Ok(plan) => break plan,
                 Err(reason)
                     if Instant::now() + Duration::from_millis(100) < until
-                        && [
-                            "ACCOUNT_SOURCE_GENERATION_UNVERIFIED",
-                            "ACCOUNT_EVIDENCE_EXPIRED_DURING_PLAN",
-                            "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE",
-                            "PRIVATE_SOURCE_GENERATION_CHANGED",
-                            "PUBLIC_SOURCE_GENERATION_CHANGED",
-                        ]
-                        .iter()
-                        .any(|code| reason.contains(code)) =>
+                        && reason.retryable_source() =>
                 {
                     let remaining = until.saturating_duration_since(Instant::now());
                     let _ = tokio::time::timeout(
@@ -903,7 +895,7 @@ impl TradeService {
                     )
                     .await;
                 }
-                Err(reason) => return Err(reason),
+                Err(reason) => return Err(reason.into_reason()),
             }
         };
         let id = format!("intent_{}", &body_hash[..32]);
@@ -951,6 +943,7 @@ impl TradeService {
                     .map_err(err)?
             }
         };
+        tracing::Span::current().record("intent_id", prepared.intent_id.as_str());
         if Instant::now() >= until {
             return Err("COMMAND_EXPIRED".into());
         }
@@ -1245,6 +1238,8 @@ impl TradeService {
                             "NATIVE_RESERVE_DENIAL_COMMIT_UNCONFIRMED_NO_RESUBMIT",
                         ));
                     }
+                    tracing::warn!(owner="execution.unified_finance", stage="reserve",
+                        outcome="rejected", code=%reason, "reserve rejected");
                     return Ok(completed(json!({
                         "intent_id":prepared.intent_id,"state":"REJECTED",
                         "rejection_origin":"LOCAL","send_state":"NOT_STARTED",
@@ -1255,7 +1250,7 @@ impl TradeService {
                     // An enqueued native transaction may have committed before
                     // its reply was lost. Never reject/release it through the
                     // legacy account writer or obtain another send grant.
-                    return Ok(uncertain(&prepared.intent_id, reason));
+                    return Ok(uncertain(&prepared.intent_id, reason.into_reason()));
                 }
             };
             let held_received = Instant::now();
@@ -1802,7 +1797,7 @@ impl TradeService {
                 .risk
                 .post_produced(packet)
                 .await
-                .map_err(str::to_owned)?
+                .map_err(|failure| failure.into_reason().to_owned())?
             {
                 crate::native_finance_admission::PostAdmission::Authorized { result: v, claim } => {
                     if !post_receipt_bound(&v, &key, state.state.revision, sequence) {

@@ -93,17 +93,17 @@ fn fixture() -> (Connection, NativeReserveRequest) {
     let request = NativeReserveRequest {
         venue: "okx".into(),
         uid: "a".repeat(64),
-        run_id: "run_000001".into(),
-        intent_id: "intent_0001".into(),
+        run_id: crate::account_worker::AdmissionRunId::new("run_000001".into()).unwrap(),
+        intent_id: crate::account_worker::AdmissionIntentId::new("intent_0001".into()).unwrap(),
         strategy_id: "manual".into(),
         instrument_id: "BTC-USDT-SWAP".into(),
         plan_sha256: "e".repeat(64),
         entry_proof_digest: "f".repeat(64),
         conversion_digest: "b".repeat(64),
         conversion_rate: "1".into(),
-        loss_usdt: "5".into(),
-        loss_usd: "5".into(),
-        entry_upper_usd: "100.05".into(),
+        loss_usdt: crate::risk::UsdtLoss::parse("5").unwrap(),
+        loss_usd: crate::risk::UsdLoss::parse("5").unwrap(),
+        entry_upper_usd: crate::risk::UsdEntryUpper::parse("100.05").unwrap(),
         native_incarnation: "f".repeat(32),
         conversion_observed_at_ms: NOW - 1,
         policy_revision: 1,
@@ -114,8 +114,8 @@ fn fixture() -> (Connection, NativeReserveRequest) {
 #[test]
 fn risk_book_contract_native_reported_reserve_rejects_understatement_before_any_write() {
     let (mut db, mut request) = fixture();
-    request.loss_usdt = "1".into();
-    request.loss_usd = "1".into();
+    request.loss_usdt = crate::risk::UsdtLoss::parse("1").unwrap();
+    request.loss_usd = crate::risk::UsdLoss::parse("1").unwrap();
     let tx = db.transaction().unwrap();
     let changes = tx.total_changes();
     assert!(matches!(

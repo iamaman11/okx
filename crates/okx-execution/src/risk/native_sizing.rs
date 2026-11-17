@@ -1,4 +1,7 @@
 //! Shared sizing for the native producer and original SQL-plan verification.
+#[cfg(test)]
+#[path = "native_sizing_property_tests.rs"]
+mod native_sizing_property_tests;
 use crate::{StoreError, StoreResult};
 use okx_kernel::risk::money::RiskAmount;
 use rust_decimal::{Decimal, RoundingStrategy};
@@ -10,6 +13,30 @@ pub struct UsdtLoss(RiskAmount);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsdLoss(RiskAmount);
 
+/// Upper bound of entry spending, distinct from modeled loss.
+///
+/// The real admission request accepts its three matching money types:
+/// ```
+/// use okx_execution::{account_worker::NativeReserveRequest, risk::{UsdtLoss, UsdLoss, UsdEntryUpper}};
+/// fn bind(request: &mut NativeReserveRequest, usdt: UsdtLoss, usd: UsdLoss, entry: UsdEntryUpper) {
+///     request.loss_usdt = usdt; request.loss_usd = usd; request.entry_upper_usd = entry;
+/// }
+/// ```
+/// ```compile_fail,E0308
+/// use okx_execution::{account_worker::NativeReserveRequest, risk::UsdtLoss};
+/// fn bind(request: &mut NativeReserveRequest, usdt: UsdtLoss) {
+///     request.loss_usd = usdt;
+/// }
+/// ```
+/// ```compile_fail,E0308
+/// use okx_execution::{account_worker::NativeReserveRequest, risk::UsdLoss};
+/// fn bind(request: &mut NativeReserveRequest, usd: UsdLoss) {
+///     request.entry_upper_usd = usd;
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsdEntryUpper(RiskAmount);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeReservedLoss {
     pub usdt: UsdtLoss,
@@ -17,6 +44,14 @@ pub struct NativeReservedLoss {
 }
 
 impl UsdtLoss {
+    pub fn parse(value: &str) -> StoreResult<Self> {
+        RiskAmount::parse(value)
+            .map(Self)
+            .map_err(|_| StoreError::Invalid("NATIVE_ADMISSION_MONEY_INVALID"))
+    }
+    pub(crate) fn amount(&self) -> &RiskAmount {
+        &self.0
+    }
     pub fn checked_canonical(&self) -> StoreResult<String> {
         self.0
             .canonical()
@@ -24,10 +59,33 @@ impl UsdtLoss {
     }
 }
 impl UsdLoss {
+    pub fn parse(value: &str) -> StoreResult<Self> {
+        RiskAmount::parse(value)
+            .map(Self)
+            .map_err(|_| StoreError::Invalid("NATIVE_ADMISSION_MONEY_INVALID"))
+    }
+    pub(crate) fn amount(&self) -> &RiskAmount {
+        &self.0
+    }
     pub fn checked_canonical(&self) -> StoreResult<String> {
         self.0
             .canonical()
             .map_err(|_| StoreError::Invalid("NATIVE_RESERVE_LOSS_RANGE"))
+    }
+}
+impl UsdEntryUpper {
+    pub fn parse(value: &str) -> StoreResult<Self> {
+        RiskAmount::parse(value)
+            .map(Self)
+            .map_err(|_| StoreError::Invalid("NATIVE_ADMISSION_MONEY_INVALID"))
+    }
+    pub(crate) fn amount(&self) -> &RiskAmount {
+        &self.0
+    }
+    pub fn checked_canonical(&self) -> StoreResult<String> {
+        self.0
+            .canonical()
+            .map_err(|_| StoreError::Invalid("NATIVE_ADMISSION_MONEY_INVALID"))
     }
 }
 
@@ -112,5 +170,21 @@ mod tests {
         assert!(native_reserved_loss(Decimal::ZERO, dec("1")).is_err());
         assert!(native_reserved_loss(dec("1"), Decimal::ZERO).is_err());
         assert!(native_reserved_loss(dec("-1"), dec("1")).is_err());
+    }
+
+    #[test]
+    fn typed_admission_money_rejects_nonfinite_negative_and_out_of_range() {
+        for raw in ["NaN", "inf", "-1", "10000000000000000000000000000"] {
+            assert!(UsdtLoss::parse(raw).is_err());
+            assert!(UsdLoss::parse(raw).is_err());
+            assert!(UsdEntryUpper::parse(raw).is_err());
+        }
+        assert_eq!(
+            UsdEntryUpper::parse("5.00")
+                .unwrap()
+                .checked_canonical()
+                .unwrap(),
+            "5"
+        );
     }
 }

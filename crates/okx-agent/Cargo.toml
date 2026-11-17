@@ -31,13 +31,15 @@ sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "ansi"] }
 zeroize = { version = "1", features = ["derive"] }
 
 # Native crash acceptance uses a real OS child launched by a Rust test.
 # Keep Tokio process support test-only; production Agent features are unchanged.
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false }
-tokio = { version = "1", features = ["process", "io-util"] }
+tokio = { version = "1", features = ["process", "io-util", "test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "4.2", default-features = false, features = ["v1"] }

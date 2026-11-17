@@ -19,24 +19,24 @@ pub struct ReportedRiskCensus {
 pub struct NativeReserveRequest {
     pub venue: String,
     pub uid: String,
-    pub run_id: String,
-    pub intent_id: String,
+    pub run_id: AdmissionRunId,
+    pub intent_id: AdmissionIntentId,
     pub strategy_id: String,
     pub instrument_id: String,
     pub plan_sha256: String,
     pub entry_proof_digest: String,
     pub conversion_digest: String,
     pub conversion_rate: String,
-    pub loss_usdt: String,
-    pub loss_usd: String,
-    pub entry_upper_usd: String,
+    pub loss_usdt: crate::risk::UsdtLoss,
+    pub loss_usd: crate::risk::UsdLoss,
+    pub entry_upper_usd: crate::risk::UsdEntryUpper,
     pub native_incarnation: String,
     pub conversion_observed_at_ms: i64,
     pub policy_revision: u64,
 }
 #[derive(Debug, Clone)]
 pub struct NativePostRequest {
-    pub reservation_key: String,
+    pub reservation_key: AdmissionReservationKey,
     pub plan_sha256: String,
     pub source_proof_digest: String,
     pub policy_revision: u64,
@@ -176,14 +176,17 @@ pub(crate) fn reserve_reported_sql(
     now: i64,
 ) -> StoreResult<NativeReserveDecision> {
     let account = format!("{}:real:{}", request.venue, request.uid);
-    let source =
-        AccountStore::reserve_source_sql(tx, Some((installation, &account)), &request.intent_id)?;
+    let source = AccountStore::reserve_source_sql(
+        tx,
+        Some((installation, &account)),
+        request.intent_id.as_str(),
+    )?;
     if source.intent.plan_hash != request.plan_sha256
         || source.intent.plan.strategy_instance != request.strategy_id
         || source.intent.instrument_id != request.instrument_id
         || source.intent.policy_revision as u64 != request.policy_revision
         || amount(&source.admission.entry_upper_usd.to_string())?
-            != amount(&request.entry_upper_usd)?
+            != *request.entry_upper_usd.amount()
         || source.admission.entry_proof_digest != request.entry_proof_digest
         || amount(&source.admission.admission_usd_per_usdt.to_string())?
             != amount(&request.conversion_rate)?
@@ -195,19 +198,19 @@ pub(crate) fn reserve_reported_sql(
     verify_reserved_loss(
         source.intent.plan.planned_loss_usd,
         source.admission.admission_usd_per_usdt,
-        &request.loss_usdt,
-        &request.loss_usd,
+        &request.loss_usdt.checked_canonical()?,
+        &request.loss_usd.checked_canonical()?,
     )?;
     let census = bind_census(tx, installation, campaign, &reported, now)?;
-    let denial_intent = request.intent_id.clone();
+    let denial_intent = request.intent_id.as_str().to_owned();
     let denial_plan = request.plan_sha256.clone();
-    let denial_entry = request.entry_upper_usd.clone();
-    let denial_loss = request.loss_usd.clone();
+    let denial_entry = request.entry_upper_usd.checked_canonical()?;
+    let denial_loss = request.loss_usd.checked_canonical()?;
     let input = crate::risk::ReserveInput {
         venue: request.venue,
         uid: request.uid,
-        run_id: request.run_id,
-        intent_id: request.intent_id,
+        run_id: request.run_id.into_string(),
+        intent_id: request.intent_id.into_string(),
         strategy_id: request.strategy_id,
         instrument_id: request.instrument_id,
         plan_sha256: request.plan_sha256,
@@ -217,9 +220,9 @@ pub(crate) fn reserve_reported_sql(
         conversion_rate: amount(&request.conversion_rate)?,
         native_incarnation: request.native_incarnation,
         proposal: RiskProposal {
-            loss_usdt: amount(&request.loss_usdt)?,
-            loss_usd: amount(&request.loss_usd)?,
-            entry_upper_usd: amount(&request.entry_upper_usd)?,
+            loss_usdt: request.loss_usdt.amount().clone(),
+            loss_usd: request.loss_usd.amount().clone(),
+            entry_upper_usd: request.entry_upper_usd.amount().clone(),
         },
         policy_revision: request.policy_revision,
         now_ms: now,
@@ -357,7 +360,7 @@ pub(super) fn begin_post_reported_on_connection(
     let now = super::opening_ingress::owner_now_ms()?;
     let census = bind_census(&tx, &installation, &campaign, &request.census, now)?;
     let input = crate::risk::PostFenceInput {
-        reservation_key: request.reservation_key.clone(),
+        reservation_key: request.reservation_key.as_str().to_owned(),
         plan_sha256: request.plan_sha256.clone(),
         policy_revision: request.policy_revision,
         expected_sequence: request.expected_sequence,
@@ -387,7 +390,7 @@ pub(super) fn begin_post_reported_on_connection(
                 rusqlite::params![
                     installation,
                     campaign,
-                    request.reservation_key,
+                    request.reservation_key.as_str(),
                     request.plan_sha256
                 ],
                 |r| Ok((r.get(0)?, r.get(1)?)),

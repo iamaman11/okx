@@ -126,6 +126,38 @@ const STALE_DIAGNOSTIC: Witness = Witness {
     package: "okx-agent",
     test: "accounts::native_trade_contracts::native_stale_diagnostic::risk_book_contract_native_stale_post_held_tariff_diagnostic_is_exact_and_read_only",
 };
+const SOURCE_REOPEN: Witness = Witness {
+    package: "okx-execution",
+    test: "account_worker::unified::owner_entry_diagnostic_tests::risk_book_contract_entry_diagnostic_reopens_original_sources_without_financial_effect",
+};
+const MONEY_SCALE_PROPERTY: Witness = Witness {
+    package: "okx-kernel",
+    test: "risk::money::money_property_tests::risk_amount_canonical_round_trip_and_scale_equivalence",
+};
+const MONEY_RANGE_PROPERTY: Witness = Witness {
+    package: "okx-kernel",
+    test: "risk::money::money_property_tests::risk_amount_rejects_out_of_range_and_leading_zero",
+};
+const SIZING_PROPERTY: Witness = Witness {
+    package: "okx-execution",
+    test: "risk::native_sizing::native_sizing_property_tests::native_reserved_loss_covers_plan_with_minimal_nine_place_quantum",
+};
+const IDENTITY_PROPERTY: Witness = Witness {
+    package: "okx-protocol",
+    test: "trading::trading_property_tests::trade_semantic_identity_preserves_scale_and_field_order",
+};
+const TYPED_PLAN_RETRY: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::plan::tests::planning_retry_categories_preserve_codes_and_reject_unrelated_text",
+};
+const TYPED_ADMISSION_FAILURE: Witness = Witness {
+    package: "okx-agent",
+    test: "admission_failure::tests::store_failure_preserves_typed_cause_and_safe_wire_code",
+};
+const LOGICAL_READ_DEADLINE: Witness = Witness {
+    package: "okx-agent",
+    test: "diagnostics::native_intent::tests::logical_diagnostic_deadline_waits_until_boundary_without_real_sleep",
+};
 const SOURCE_FEE: Witness = Witness {
     package: "okx-agent",
     test: "trade_service::entry_budget::tests::e1_fee_source_must_be_current_exact_and_content_bound",
@@ -465,7 +497,13 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB02.checked_decimal_syntax_range_and_rounding",
-        witnesses: &[DECIMAL, ARITHMETIC],
+        witnesses: &[
+            DECIMAL,
+            ARITHMETIC,
+            MONEY_SCALE_PROPERTY,
+            MONEY_RANGE_PROPERTY,
+            SIZING_PROPERTY,
+        ],
         missing: None,
     },
     Contract {
@@ -514,7 +552,7 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB04.canonical_semantic_identity",
-        witnesses: &[SEMANTIC_HASH, SEMANTIC_DECIMAL],
+        witnesses: &[SEMANTIC_HASH, SEMANTIC_DECIMAL, IDENTITY_PROPERTY],
         missing: None,
     },
     Contract {
@@ -698,6 +736,7 @@ pub const CONTRACTS: &[Contract] = &[
             HELD_RECOVERY,
             DIAGNOSTIC_BUSY_COMPONENT,
             DIAGNOSTIC_EVICTION_COMPONENT,
+            LOGICAL_READ_DEADLINE,
         ],
         missing: None,
     },
@@ -770,12 +809,17 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB14.direct_stale_source_diagnostic_drill",
-        witnesses: &[STALE_DIAGNOSTIC],
+        witnesses: &[STALE_DIAGNOSTIC, SOURCE_REOPEN, TYPED_PLAN_RETRY],
         missing: None,
     },
     Contract {
         id: "RB14.direct_commit_reply_lost_diagnostic_drill",
-        witnesses: &[RESERVE_REPLY, POST_REPLY, DIAGNOSTIC],
+        witnesses: &[
+            RESERVE_REPLY,
+            POST_REPLY,
+            DIAGNOSTIC,
+            TYPED_ADMISSION_FAILURE,
+        ],
         // The actual lost-COMMIT-reply tests now invoke the SAME coherent
         // inspection operation used by the public projection, before/after
         // reopen. Public projection separately proves zero HTTP/POST.

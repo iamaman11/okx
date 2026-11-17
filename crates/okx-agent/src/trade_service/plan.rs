@@ -3,6 +3,74 @@ use okx_api::MarginMode;
 #[cfg(test)]
 use okx_execution::instance_nav_gate;
 
+/// The retry category is assigned only at the source that observed it.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PlanningError {
+    Source(PlanningSourceFailure),
+    Other(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PlanningSourceFailure {
+    AccountGenerationUnverified,
+    AccountEvidenceExpired,
+    FinancialIncompleteOrStale,
+    PrivateGenerationChanged,
+    PublicGenerationChanged,
+}
+
+impl PlanningError {
+    pub(super) fn retryable_source(&self) -> bool {
+        matches!(self, Self::Source(_))
+    }
+
+    pub(super) fn into_reason(self) -> String {
+        match self {
+            Self::Other(reason) => reason,
+            Self::Source(source) => match source {
+                PlanningSourceFailure::AccountGenerationUnverified => {
+                    "ACCOUNT_SOURCE_GENERATION_UNVERIFIED"
+                }
+                PlanningSourceFailure::AccountEvidenceExpired => {
+                    "ACCOUNT_EVIDENCE_EXPIRED_DURING_PLAN"
+                }
+                PlanningSourceFailure::FinancialIncompleteOrStale => {
+                    "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE"
+                }
+                PlanningSourceFailure::PrivateGenerationChanged => {
+                    "PRIVATE_SOURCE_GENERATION_CHANGED"
+                }
+                PlanningSourceFailure::PublicGenerationChanged => {
+                    "PUBLIC_SOURCE_GENERATION_CHANGED"
+                }
+            }
+            .to_owned(),
+        }
+    }
+}
+
+impl From<String> for PlanningError {
+    fn from(reason: String) -> Self {
+        Self::Other(reason)
+    }
+}
+
+impl From<&str> for PlanningError {
+    fn from(reason: &str) -> Self {
+        Self::Other(reason.to_owned())
+    }
+}
+
+// The financial owner exposes this source failure as a typed store error.
+fn financial_admission_error(error: okx_execution::StoreError) -> PlanningError {
+    match error {
+        okx_execution::StoreError::Invalid("FINANCIAL_SOURCE_INCOMPLETE_OR_STALE") => {
+            PlanningError::Source(PlanningSourceFailure::FinancialIncompleteOrStale)
+        }
+        other => PlanningError::Other(err(other)),
+    }
+}
+
 /// Select the actual venue price before calculating stop, size or reserving risk.
 ///
 /// A limit is a hard adverse-price bound.  Rounding it in the adverse direction
@@ -173,7 +241,7 @@ impl TradeService {
         protection: Option<&Protection>,
         until: Instant,
         record_risk_state: bool,
-    ) -> Result<IntentPlan, String> {
+    ) -> Result<IntentPlan, PlanningError> {
         let increase = matches!(
             operation,
             TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace
@@ -246,7 +314,9 @@ impl TradeService {
             return Err("INSTRUMENT_RULES_OR_GENERATION_UNSUPPORTED".into());
         }
         if increase && !r.source_identity_ready().await {
-            return Err("ACCOUNT_SOURCE_GENERATION_UNVERIFIED".into());
+            return Err(PlanningError::Source(
+                PlanningSourceFailure::AccountGenerationUnverified,
+            ));
         }
         let private_generation = r.private_ws.status().await.connection_generation;
         // One caller-owned read deadline for BOTH admission and read-only
@@ -487,7 +557,9 @@ impl TradeService {
             }
         }
         if increase && r.private_ws.status().await.connection_generation != private_generation {
-            return Err("PRIVATE_SOURCE_GENERATION_CHANGED".into());
+            return Err(PlanningError::Source(
+                PlanningSourceFailure::PrivateGenerationChanged,
+            ));
         }
         let fresh = self
             .public_ws
@@ -503,10 +575,14 @@ impl TradeService {
         if fresh.generation != market.generation
             || fresh.market.reference_generation != rules.reference_generation
         {
-            return Err("PUBLIC_SOURCE_GENERATION_CHANGED".into());
+            return Err(PlanningError::Source(
+                PlanningSourceFailure::PublicGenerationChanged,
+            ));
         }
         if !crate::config::evidence_fresh(received, now(), crate::config::ACCOUNT_MAX_AGE_MS) {
-            return Err("ACCOUNT_EVIDENCE_EXPIRED_DURING_PLAN".into());
+            return Err(PlanningError::Source(
+                PlanningSourceFailure::AccountEvidenceExpired,
+            ));
         }
         if Instant::now() >= until {
             return Err("COMMAND_EXPIRED".into());
@@ -547,7 +623,7 @@ impl TradeService {
         snapshot: &okx_observation::AccountSnapshot,
         candidate: Decimal,
         record_risk_state: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), PlanningError> {
         let rate = dec(&Self::usd_conversion(snapshot)?.usd_per_usdt)?;
         let daily = dec(control
             .limits
@@ -573,10 +649,10 @@ impl TradeService {
             owner
                 .check_financial_admission(deadline(), account.to_owned(), request)
                 .await
-                .map_err(err)?
+                .map_err(financial_admission_error)?
         };
         if let Some(reason) = decision {
-            return Err(reason);
+            return Err(reason.into());
         }
         Ok(())
     }
@@ -614,6 +690,52 @@ impl TradeService {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn planning_retry_categories_preserve_codes_and_reject_unrelated_text() {
+        use super::{PlanningError, PlanningSourceFailure as Source, financial_admission_error};
+        let causes = [
+            (
+                Source::AccountGenerationUnverified,
+                "ACCOUNT_SOURCE_GENERATION_UNVERIFIED",
+            ),
+            (
+                Source::AccountEvidenceExpired,
+                "ACCOUNT_EVIDENCE_EXPIRED_DURING_PLAN",
+            ),
+            (
+                Source::FinancialIncompleteOrStale,
+                "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE",
+            ),
+            (
+                Source::PrivateGenerationChanged,
+                "PRIVATE_SOURCE_GENERATION_CHANGED",
+            ),
+            (
+                Source::PublicGenerationChanged,
+                "PUBLIC_SOURCE_GENERATION_CHANGED",
+            ),
+        ];
+        for (cause, code) in causes {
+            let error = PlanningError::Source(cause);
+            assert!(error.retryable_source());
+            assert_eq!(error.into_reason(), code);
+            for unrelated in [code.to_owned(), format!("unrelated: {code}")] {
+                let error = PlanningError::from(unrelated.clone());
+                assert!(!error.retryable_source());
+                assert_eq!(error.into_reason(), unrelated);
+            }
+        }
+        let error = financial_admission_error(okx_execution::StoreError::Invalid(
+            "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE",
+        ));
+        assert!(error.retryable_source());
+        assert_eq!(error.into_reason(), "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE");
+        let reason = "unrelated: FINANCIAL_SOURCE_INCOMPLETE_OR_STALE";
+        let error = financial_admission_error(okx_execution::StoreError::Invalid(reason));
+        assert!(!error.retryable_source());
+        assert_eq!(error.into_reason(), reason);
+    }
+
     #[test]
     fn exposure_count_never_guesses_flat_on_malformed_size() {
         assert_eq!(

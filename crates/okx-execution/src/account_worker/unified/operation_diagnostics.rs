@@ -36,6 +36,8 @@ pub struct NativeIntentDiagnosticSnapshot {
     pub receipt_state: Option<String>,
     pub unsent: Option<crate::UnsentSqlReceipt>,
     pub budget_denial: Option<NativeBudgetDenial>,
+    pub entry_quote: Option<crate::EntryQuoteEvidence>,
+    pub entry_admission: Option<crate::EntryAdmissionEvidence>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -222,6 +224,8 @@ impl UnifiedFinanceHandle {
                 begin_post_at_ms,
                 receipt_state,
                 budget_denial,
+                entry_quote: AccountStore::entry_quote_sql(&tx, scope, &intent_id)?,
+                entry_admission: AccountStore::entry_admission_sql(&tx, scope, &intent_id)?,
                 unsent: AccountStore::unsent_release_receipt_sql(
                     &tx, Some(&installation), &account, &intent_id,
                 )?,

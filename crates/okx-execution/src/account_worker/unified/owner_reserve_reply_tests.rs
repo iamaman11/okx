@@ -308,17 +308,18 @@ async fn setup_inner(
     let request = NativeReserveRequest {
         venue: "okx".into(),
         uid: "a".repeat(64),
-        run_id: "reply_run".into(),
-        intent_id: INTENT.into(),
+        run_id: crate::account_worker::AdmissionRunId::new("reply_run".into()).unwrap(),
+        intent_id: crate::account_worker::AdmissionIntentId::new(INTENT.into()).unwrap(),
         strategy_id: "manual".into(),
         instrument_id: "BTC-USDT-SWAP".into(),
         plan_sha256: stored.plan_hash,
         entry_proof_digest: "f".repeat(64),
         conversion_digest: "b".repeat(64),
         conversion_rate: "1".into(),
-        loss_usdt: if deny_order_limit { "3" } else { "0.1" }.into(),
-        loss_usd: if deny_order_limit { "3" } else { "0.1" }.into(),
-        entry_upper_usd: "1.0005".into(),
+        loss_usdt: crate::risk::UsdtLoss::parse(if deny_order_limit { "3" } else { "0.1" })
+            .unwrap(),
+        loss_usd: crate::risk::UsdLoss::parse(if deny_order_limit { "3" } else { "0.1" }).unwrap(),
+        entry_upper_usd: crate::risk::UsdEntryUpper::parse("1.0005").unwrap(),
         native_incarnation: "f".repeat(32),
         conversion_observed_at_ms: at,
         policy_revision: 1,
@@ -462,7 +463,8 @@ async fn post(owner: &UnifiedFinanceHandle, sequence: u64, held_at: Instant) -> 
     nav(owner, at).await;
     let completed = held_at.elapsed().as_millis() as u64;
     NativePostRequest {
-        reservation_key: reservation(),
+        reservation_key: crate::account_worker::AdmissionReservationKey::new(reservation())
+            .unwrap(),
         plan_sha256: "e".repeat(64),
         source_proof_digest: "b".repeat(64),
         policy_revision: 1,

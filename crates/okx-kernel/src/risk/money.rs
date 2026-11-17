@@ -199,3 +199,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "money_property_tests.rs"]
+mod money_property_tests;

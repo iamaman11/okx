@@ -231,11 +231,43 @@ async fn risk_book_contract_native_public_b_uses_remaining_budget_after_a_settle
         &fixture.feed,
         &[(STOP, &format!("s{}", &original.client_order_id[..31]))],
     );
-    let denied = fixture
-        .trade
-        .trade("fixture-b", &request(), Some(&fixture.authority))
-        .await
-        .unwrap();
+    use tracing::instrument::WithSubscriber;
+    #[derive(Clone)]
+    struct TraceWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for TraceWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let trace_bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = TraceWriter(trace_bytes.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let b_request = request();
+    let denied = async {
+        fixture
+            .trade
+            .trade_with_invocation(
+                "fixture-b",
+                &b_request,
+                Some(&fixture.authority),
+                Some(crate::trade_service::TradeInvocation {
+                    request_id: "public-b-denial-001",
+                    origin: "agent_request.trade",
+                }),
+            )
+            .await
+    }
+    .with_subscriber(subscriber)
+    .await
+    .unwrap();
     assert!(
         denied.to_string().contains("CAMPAIGN_ENTRY_BUDGET"),
         "{denied}"
@@ -245,6 +277,30 @@ async fn risk_book_contract_native_public_b_uses_remaining_budget_after_a_settle
     let denied_id = denied["data"]["intent_id"]
         .as_str()
         .expect("denial retains original intent id");
+    let trace = String::from_utf8(trace_bytes.lock().unwrap().clone()).unwrap();
+    let denial_event = trace
+        .lines()
+        .find(|line| line.contains("reserve rejected"))
+        .expect("missing reserve denial event");
+    assert!(
+        denial_event.contains("public-b-denial-001"),
+        "missing request correlation"
+    );
+    assert!(
+        denial_event.contains(denied_id),
+        "missing denied intent correlation"
+    );
+    assert!(
+        denial_event.contains("stage=\"reserve\""),
+        "missing reserve stage"
+    );
+    assert!(
+        denial_event.contains("CAMPAIGN_ENTRY_BUDGET_EXHAUSTED"),
+        "missing denial reason"
+    );
+    for secret in ["observer-secret", "executor-secret"] {
+        assert!(!trace.contains(secret), "trace contained a credential");
+    }
     let diagnostic_reference = format!("intent:{denied_id}");
     let requests_before = fixture.feed.requests.lock().unwrap().clone();
     let posts_before = fixture.feed.outbound_posts.lock().unwrap().clone();

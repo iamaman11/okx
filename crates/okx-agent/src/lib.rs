@@ -1,6 +1,7 @@
 pub mod account_bootstrap;
 pub(crate) mod account_opening;
 pub mod accounts;
+mod admission_failure;
 pub mod analytics;
 pub mod cloudflare_auth;
 pub mod cloudflare_transport;

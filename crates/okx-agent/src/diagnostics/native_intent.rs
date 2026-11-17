@@ -4,6 +4,9 @@ use okx_execution::IntentState;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
+// #512 S0 fixed read-only diagnostic budget; no financial operation is canceled.
+const READ_BUDGET: Duration = Duration::from_millis(250);
+
 // Classify only facts already recorded by the owner; this is not a replay of
 // admission and cannot establish why a response was lost.
 #[derive(Clone, Copy)]
@@ -79,7 +82,7 @@ pub(crate) async fn read(account: &AccountResources, installation: &str, referen
         result["next_action"] = "verify_account_and_installation_identity".into();
         return result;
     }
-    let until = Instant::now() + Duration::from_secs(2);
+    let until = Instant::now() + READ_BUDGET;
     let snapshot = bounded_snapshot(
         until,
         owner.inspect_intent_operation(until, scope.into(), id.into()),
@@ -94,6 +97,25 @@ pub(crate) async fn read(account: &AccountResources, installation: &str, referen
         }
     };
     result["observed_at_ms"] = snapshot.observed_at_ms.into();
+    result["entry_source"] = snapshot.entry_quote.as_ref().map_or_else(
+        || json!({"state":"NOT_RECORDED_IN_ACCOUNT_SQL", "failure_check":"UNKNOWN"}),
+        |quote| json!({
+            "state":"STORED_ORIGINAL_QUOTE", "quality":"HISTORICAL_NOT_CURRENT_HEALTH",
+            "quote":quote,
+            "quote_observation_freshness_ms":{
+                "fee_exchange":quote.observed_at - quote.fee_exchange_at,
+                "fee_receipt":quote.observed_at - quote.fee_received_at,
+                "conversion_receipt":quote.observed_at - quote.conversion_received_at,
+                "maximum":crate::config::ACCOUNT_MAX_AGE_MS
+            },
+            "admission":snapshot.entry_admission.as_ref(),
+            "admission_quote_freshness_ms":snapshot.entry_admission.as_ref().map(|admission| json!({
+                "actual":admission.observed_at - quote.observed_at, "maximum":5000
+            })),
+            "failure_check":"UNKNOWN", "failure_source":"NOT_RECORDED_IN_QUOTE",
+            "current_validity":"NOT_EVALUATED"
+        }),
+    );
     result["budget_denial"] = snapshot.budget_denial.as_ref().map_or_else(
         || json!({"state":"NOT_RECORDED_IN_ACCOUNT_SQL","current_budget":"NOT_EVALUATED"}),
         |fact| {
@@ -218,5 +240,23 @@ mod tests {
     async fn risk_book_contract_native_diagnostic_busy_read_has_bounded_unknown_result() {
         let result = bounded_snapshot::<(), _>(Instant::now(), std::future::pending()).await;
         assert!(matches!(result, Err(reason) if reason == "UNIFIED_FINANCE_DIAGNOSTIC_TIMEOUT"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn logical_diagnostic_deadline_waits_until_boundary_without_real_sleep() {
+        let until = Instant::now() + READ_BUDGET;
+        let read = tokio::spawn(bounded_snapshot::<(), _>(until, std::future::pending()));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        assert!(!read.is_finished());
+        tokio::time::advance(Duration::from_millis(150)).await;
+        assert_eq!(
+            read.await.unwrap(),
+            Err("UNIFIED_FINANCE_DIAGNOSTIC_TIMEOUT".into())
+        );
+        assert_eq!(
+            bounded_snapshot(until, std::future::ready(Ok(()))).await,
+            Ok(())
+        );
     }
 }

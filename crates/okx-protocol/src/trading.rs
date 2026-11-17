@@ -684,3 +684,7 @@ mod capital_assignment_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "trading_property_tests.rs"]
+mod trading_property_tests;

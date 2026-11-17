@@ -148,6 +148,13 @@ fn input() -> AgentResult<Zeroizing<String>> {
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Process entrypoint only. stdout remains reserved for command responses.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .try_init()
+        .map_err(|_| std::io::Error::other("TRACING_SUBSCRIBER_INIT_FAILED"))?;
     run(Cli::parse()).await?;
     Ok(())
 }

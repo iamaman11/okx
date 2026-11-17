@@ -1,5 +1,6 @@
 //! One local financial authority; Cloudflare is authenticated delivery only.
 //! A stopped owner supports inspection and never grants write permission.
+use crate::admission_failure::{AdmissionFailure, AdmissionStage};
 use crate::native_finance_risk::{NativeFinanceRisk, NativePolicyObservation};
 use okx_execution::account_worker::UnifiedFinanceHandle;
 use okx_protocol::account_governance::CentralGovernanceSnapshot;
@@ -39,18 +40,24 @@ impl NativeRiskClient {
     pub(crate) async fn reserve_produced(
         &self,
         packet: crate::trade_service::ProducedReserve,
-    ) -> Result<crate::native_finance_admission::ReserveAdmission, &'static str> {
+    ) -> Result<crate::native_finance_admission::ReserveAdmission, AdmissionFailure> {
         self.backend
             .resolved()
-            .await?
+            .await
+            .map_err(|code| AdmissionFailure::local(AdmissionStage::ReserveResolve, code))?
             .reserve_produced(packet)
             .await
     }
     pub(crate) async fn post_produced(
         &self,
         packet: crate::trade_service::ProducedPost,
-    ) -> Result<crate::native_finance_admission::PostAdmission, &'static str> {
-        self.backend.resolved().await?.post_produced(packet).await
+    ) -> Result<crate::native_finance_admission::PostAdmission, AdmissionFailure> {
+        self.backend
+            .resolved()
+            .await
+            .map_err(|code| AdmissionFailure::local(AdmissionStage::PostResolve, code))?
+            .post_produced(packet)
+            .await
     }
     pub(crate) async fn install_produced_opening(
         &self,

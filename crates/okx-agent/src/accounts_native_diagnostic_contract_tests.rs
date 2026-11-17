@@ -233,3 +233,6 @@ async fn risk_book_contract_native_intent_diagnostic_is_account_scoped_and_refus
     drop(b);
     fixture.finish().await;
 }
+
+#[path = "accounts_native_diagnostic_measurement_tests.rs"]
+mod measurement;

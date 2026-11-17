@@ -1,9 +1,11 @@
 //! Source-produced admission, committed by the existing unified SQL owner.
 //! Wire commands alone never confer census provenance or permission to send.
+use crate::admission_failure::{AdmissionFailure, AdmissionStage};
 use crate::native_finance_risk::NativeFinanceRisk;
 use okx_execution::account_worker::{
-    CensusObservedAtMs, CensusReadFloorMs, NativePostDecision, NativePostRequest,
-    NativeReserveDecision, NativeReserveRequest, ReportedRiskCensus,
+    AdmissionIntentId, AdmissionReservationKey, AdmissionRunId, CensusObservedAtMs,
+    CensusReadFloorMs, NativePostDecision, NativePostRequest, NativeReserveDecision,
+    NativeReserveRequest, ReportedRiskCensus,
 };
 use okx_execution::risk::{PostAccountRead, PostCausalProof};
 use okx_execution::{CentralReceipt, CommittedVenueSend};
@@ -90,10 +92,12 @@ impl NativeFinanceRisk {
     pub(crate) async fn reserve_produced(
         &self,
         packet: crate::trade_service::ProducedReserve,
-    ) -> Result<ReserveAdmission, &'static str> {
+    ) -> Result<ReserveAdmission, AdmissionFailure> {
+        let input = |code| AdmissionFailure::local(AdmissionStage::ReserveInput, code);
+        let output = |code| AdmissionFailure::local(AdmissionStage::ReserveResult, code);
         let (command, native_incarnation, native_loss_usd) = packet.into_parts();
         if !command.valid() || command.installation_id != self.installation {
-            return Err("NATIVE_RESERVE_PRODUCER_INVALID");
+            return Err(input("NATIVE_RESERVE_PRODUCER_INVALID"));
         }
         let RiskCommandAction::Reserve {
             venue,
@@ -112,47 +116,52 @@ impl NativeFinanceRisk {
             census,
         } = &command.action
         else {
-            return Err("NATIVE_RESERVE_COMMAND_REQUIRED");
+            return Err(input("NATIVE_RESERVE_COMMAND_REQUIRED"));
         };
         let request = NativeReserveRequest {
             venue: venue.clone(),
             uid: account_uid.clone(),
-            run_id: run_id.clone(),
-            intent_id: intent_id.clone(),
+            run_id: AdmissionRunId::new(run_id.clone())
+                .map_err(|_| input("NATIVE_ADMISSION_IDENTITY_REQUIRED"))?,
+            intent_id: AdmissionIntentId::new(intent_id.clone())
+                .map_err(|_| input("NATIVE_ADMISSION_IDENTITY_REQUIRED"))?,
             strategy_id: strategy_id.clone(),
             instrument_id: instrument_id.clone(),
             plan_sha256: plan_sha256.clone(),
             entry_proof_digest: entry_proof_digest
                 .clone()
-                .ok_or("NATIVE_RESERVE_ENTRY_PROOF_REQUIRED")?,
+                .ok_or_else(|| input("NATIVE_RESERVE_ENTRY_PROOF_REQUIRED"))?,
             conversion_digest: format!(
                 "{:x}",
                 Sha256::digest(
                     serde_json::to_vec(usd_conversion)
-                        .map_err(|_| "NATIVE_RESERVE_CONVERSION_INVALID")?
+                        .map_err(|_| input("NATIVE_RESERVE_CONVERSION_INVALID"))?
                 )
             ),
             conversion_rate: usd_conversion.usd_per_usdt.clone(),
             conversion_observed_at_ms: i64::try_from(usd_conversion.observed_at_ms)
-                .map_err(|_| "NATIVE_ADMISSION_TIME_INVALID")?,
-            loss_usdt: requested_loss_usdt.clone(),
-            loss_usd: native_loss_usd
-                .checked_canonical()
-                .map_err(|_| "NATIVE_RESERVE_LOSS_RANGE")?,
-            entry_upper_usd: entry_upper_usd
-                .clone()
-                .ok_or("NATIVE_RESERVE_ENTRY_BOUND_REQUIRED")?,
+                .map_err(|_| input("NATIVE_ADMISSION_TIME_INVALID"))?,
+            loss_usdt: okx_execution::risk::UsdtLoss::parse(requested_loss_usdt)
+                .map_err(|_| input("NATIVE_ADMISSION_MONEY_INVALID"))?,
+            loss_usd: native_loss_usd,
+            entry_upper_usd: okx_execution::risk::UsdEntryUpper::parse(
+                entry_upper_usd
+                    .as_deref()
+                    .ok_or_else(|| input("NATIVE_RESERVE_ENTRY_BOUND_REQUIRED"))?,
+            )
+            .map_err(|_| input("NATIVE_ADMISSION_MONEY_INVALID"))?,
             native_incarnation,
             policy_revision: *policy_revision,
         };
         let decision = self
             .owner
-            .reserve_reported(self.campaign.clone(), request, reported(census)?)
+            .reserve_reported(
+                self.campaign.clone(),
+                request,
+                reported(census).map_err(input)?,
+            )
             .await
-            .map_err(|e| match e {
-                okx_execution::StoreError::Invalid(reason) => reason,
-                _ => "NATIVE_RESERVE_OUTCOME_UNKNOWN",
-            })?;
+            .map_err(|e| AdmissionFailure::store(AdmissionStage::ReserveOwner, e))?;
         match decision {
             NativeReserveDecision::Held {
                 receipt,
@@ -164,7 +173,7 @@ impl NativeFinanceRisk {
                 held.risk_book_sequence = Some(book_sequence);
                 held.policy_revision = Some(policy_revision);
                 Ok(ReserveAdmission::Held {
-                    result: checked(held)?,
+                    result: checked(held).map_err(output)?,
                     receipt,
                 })
             }
@@ -172,9 +181,10 @@ impl NativeFinanceRisk {
                 let mut denied = result(&command, RiskDecisionStatus::Denied);
                 denied.reason = Some(reason);
                 Ok(ReserveAdmission::Denied {
-                    reason: checked(denied)?
+                    reason: checked(denied)
+                        .map_err(output)?
                         .reason
-                        .ok_or("NATIVE_RESERVE_DENIAL_REASON_MISSING")?,
+                        .ok_or_else(|| output("NATIVE_RESERVE_DENIAL_REASON_MISSING"))?,
                 })
             }
         }
@@ -183,10 +193,12 @@ impl NativeFinanceRisk {
     pub(crate) async fn post_produced(
         &self,
         packet: crate::trade_service::ProducedPost,
-    ) -> Result<PostAdmission, &'static str> {
+    ) -> Result<PostAdmission, AdmissionFailure> {
+        let input = |code| AdmissionFailure::local(AdmissionStage::PostInput, code);
+        let output = |code| AdmissionFailure::local(AdmissionStage::PostResult, code);
         let command = packet.into_parts();
         if !command.valid() || command.installation_id != self.installation {
-            return Err("NATIVE_POST_PRODUCER_INVALID");
+            return Err(input("NATIVE_POST_PRODUCER_INVALID"));
         }
         let RiskCommandAction::BeginPost {
             reservation_key,
@@ -198,15 +210,16 @@ impl NativeFinanceRisk {
             causal_proof,
         } = &command.action
         else {
-            return Err("NATIVE_POST_COMMAND_REQUIRED");
+            return Err(input("NATIVE_POST_COMMAND_REQUIRED"));
         };
         let request = NativePostRequest {
-            reservation_key: reservation_key.clone(),
+            reservation_key: AdmissionReservationKey::new(reservation_key.clone())
+                .map_err(|_| input("NATIVE_ADMISSION_IDENTITY_REQUIRED"))?,
             plan_sha256: plan_sha256.clone(),
             source_proof_digest: source_proof_sha256.clone(),
             policy_revision: *policy_revision,
             expected_sequence: *expected_risk_book_sequence,
-            census: reported(census)?,
+            census: reported(census).map_err(input)?,
             causal: PostCausalProof {
                 reserve_anchor: causal_proof.reserve_anchor.clone(),
                 native_incarnation: causal_proof.native_incarnation.clone(),
@@ -229,10 +242,7 @@ impl NativeFinanceRisk {
             .owner
             .begin_post_reported(self.campaign.clone(), request)
             .await
-            .map_err(|e| match e {
-                okx_execution::StoreError::Invalid(reason) => reason,
-                _ => "NATIVE_POST_OUTCOME_UNKNOWN_DO_NOT_REPLAY",
-            })?;
+            .map_err(|e| AdmissionFailure::store(AdmissionStage::PostOwner, e))?;
         match decision {
             NativePostDecision::Authorized {
                 claim,
@@ -245,7 +255,7 @@ impl NativeFinanceRisk {
                 authorized.policy_revision = Some(*policy_revision);
                 authorized.existing_modelled_loss_usdt = Some(existing_modelled_loss_usdt);
                 Ok(PostAdmission::Authorized {
-                    result: checked(authorized)?,
+                    result: checked(authorized).map_err(output)?,
                     claim,
                 })
             }
@@ -253,7 +263,7 @@ impl NativeFinanceRisk {
                 let mut denied = result(&command, RiskDecisionStatus::Denied);
                 denied.reason = Some(reason);
                 Ok(PostAdmission::Denied {
-                    result: checked(denied)?,
+                    result: checked(denied).map_err(output)?,
                 })
             }
         }

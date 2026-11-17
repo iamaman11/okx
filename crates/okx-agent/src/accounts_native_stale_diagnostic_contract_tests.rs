@@ -134,6 +134,48 @@ async fn risk_book_contract_native_stale_post_held_tariff_diagnostic_is_exact_an
     );
     assert_eq!(explanation["intent"]["intent_id"], held.intent_id);
     assert_eq!(explanation["intent"]["plan_hash"], held.plan_hash);
+    let quote = original_source.0.as_ref().unwrap();
+    assert_eq!(
+        explanation["entry_source"]["state"],
+        "STORED_ORIGINAL_QUOTE"
+    );
+    assert_eq!(
+        explanation["entry_source"]["quote"],
+        serde_json::to_value(quote).unwrap()
+    );
+    assert_eq!(
+        explanation["entry_source"]["quote"]["plan_hash"],
+        held.plan_hash
+    );
+    assert_eq!(
+        explanation["entry_source"]["quote"]["fee_generation"],
+        quote.fee_generation
+    );
+    assert_eq!(
+        explanation["entry_source"]["quote"]["reference_generation"],
+        quote.reference_generation
+    );
+    assert_eq!(
+        explanation["entry_source"]["quote"]["fee_exchange_at"],
+        quote.fee_exchange_at
+    );
+    assert_eq!(
+        explanation["entry_source"]["quote"]["fee_received_at"],
+        quote.fee_received_at
+    );
+    assert_eq!(
+        explanation["entry_source"]["quote"]["conversion_received_at"],
+        quote.conversion_received_at
+    );
+    assert_eq!(explanation["entry_source"]["failure_check"], "UNKNOWN");
+    assert_eq!(
+        explanation["entry_source"]["failure_source"],
+        "NOT_RECORDED_IN_QUOTE"
+    );
+    assert_eq!(
+        explanation["entry_source"]["current_validity"],
+        "NOT_EVALUATED"
+    );
     assert_eq!(
         explanation["durable_receipt"]["receipt_hash"],
         original_receipt.receipt_hash

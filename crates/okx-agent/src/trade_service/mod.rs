@@ -204,6 +204,36 @@ fn completed(data: Value) -> Value {
 fn uncertain(intent: &str, reason: &str) -> Value {
     json!({"status":"unknown","intent_id":intent,"reason_code":reason,"scope":"intent","retryable":false,"next_action":"trade.status","as_of_ms":now()})
 }
+/// Observational context supplied by the public dispatcher.
+#[derive(Clone, Copy)]
+pub(crate) struct TradeInvocation<'a> {
+    pub(crate) request_id: &'a str,
+    pub(crate) origin: &'static str,
+}
+
+fn trace_trade<'a, F: std::future::Future + Send + 'a>(
+    invocation: Option<TradeInvocation<'a>>,
+    future: F,
+) -> impl std::future::Future<Output = F::Output> + Send + 'a {
+    use tracing::Instrument;
+    let request_id = invocation
+        .map(|v| v.request_id)
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= 128
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_:.".contains(&b))
+        })
+        .unwrap_or("unavailable");
+    let origin = invocation.map_or("direct", |v| v.origin);
+    future.instrument(tracing::info_span!(
+        "trade",
+        request_id,
+        origin,
+        intent_id = tracing::field::Empty
+    ))
+}
+
 impl TradeService {
     pub fn new(
         accounts: Arc<AccountRuntimeRegistry>,
@@ -453,14 +483,14 @@ impl TradeService {
         account: &'a str,
         request: &'a TradeRequest,
         governance: Option<&'a CentralGovernanceSnapshot>,
-        invocation: Option<crate::diagnostics::ProtectionCleanupInvocation<'a>>,
+        invocation: Option<TradeInvocation<'a>>,
     ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<Value, String>> + Send + 'a>>
     {
         // Bound the state embedded in callers. Otherwise every composed caller
         // inherits the largest trade branch's future layout; even an unpolled
         // campaign can overflow a standard Windows thread stack. One allocation
         // at the command boundary isolates that layout without changing effects.
-        Box::pin(async move {
+        Box::pin(trace_trade(invocation, async move {
             if !request.valid() {
                 return Err("INVALID_TRADE_REQUEST".into());
             }
@@ -610,7 +640,19 @@ impl TradeService {
                     "side_effects":"none","quality":"partial"}))
                 }
                 TradeRequest::Status { reference } => {
-                    self.status_intent(&r, reference, invocation).await
+                    self.status_intent(
+                        &r,
+                        reference,
+                        invocation.and_then(|v| {
+                            (v.origin == "agent_request.trade.status").then_some(
+                                crate::diagnostics::ProtectionCleanupInvocation {
+                                    request_id: v.request_id,
+                                    origin: v.origin,
+                                },
+                            )
+                        }),
+                    )
+                    .await
                 }
                 TradeRequest::Cancel {
                     idempotency_key,
@@ -649,7 +691,8 @@ impl TradeService {
                             preview_until,
                             false,
                         )
-                        .await?;
+                        .await
+                        .map_err(plan::PlanningError::into_reason)?;
                     // A manual trade uses account capital. For a separately funded
                     // strategy, a preview exposes missing capital without granting
                     // permission to post. Neither path is an execution admission.
@@ -862,7 +905,7 @@ impl TradeService {
                 } => self.replace(&r, request, governance).await,
                 TradeRequest::Execute { .. } => self.execute(&r, request, governance).await,
             }
-        })
+        }))
     }
 }
 
@@ -876,6 +919,60 @@ mod command_future_layout_tests {
         // Infer the real production future type without running a trade,
         // constructing account fixtures or dereferencing a fabricated service.
         std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn trade_trace_binds_request_and_admission_failure_without_private_error() {
+        use crate::admission_failure::{AdmissionFailure, AdmissionStage};
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = Capture(buffer.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(trace_trade(
+                Some(TradeInvocation {
+                    request_id: "request-123",
+                    origin: "agent_request.trade",
+                }),
+                async {
+                    AdmissionFailure::store(
+                        AdmissionStage::ReserveOwner,
+                        okx_execution::StoreError::Io(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "sensitive-payload",
+                        )),
+                    )
+                    .into_reason()
+                },
+            ))
+        });
+        let captured = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert!(captured.contains("request-123"), "{captured}");
+        assert!(captured.contains("ReserveOwner"), "{captured}");
+        assert!(
+            captured.contains("NATIVE_RESERVE_OUTCOME_UNKNOWN"),
+            "{captured}"
+        );
+        assert!(!captured.contains("sensitive-payload"), "{captured}");
     }
 
     #[test]

@@ -12,6 +12,8 @@ mod owner_admission_crash_tests;
 #[cfg(test)]
 mod owner_diagnostic_busy_tests;
 #[cfg(test)]
+mod owner_entry_diagnostic_tests;
+#[cfg(test)]
 mod owner_finance_snapshot_tests;
 #[cfg(test)]
 mod owner_financial_crash_tests;
@@ -32,7 +34,9 @@ mod owner_workload_tests;
 pub(crate) use opening_ingress::install_reported_opening_sql;
 pub use opening_ingress::{ReportedOpeningCensus, ReportedOpeningReceipt};
 mod account_initialization;
+mod admission_identity;
 mod admission_lifecycle;
+pub use admission_identity::{AdmissionIntentId, AdmissionReservationKey, AdmissionRunId};
 mod authority_reads;
 mod campaign_initialization;
 mod campaign_readiness;

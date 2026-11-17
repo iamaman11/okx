@@ -159,15 +159,17 @@ async fn execute(
                     account.unwrap_or_default(),
                     request,
                     g,
-                    match request {
-                        okx_protocol::trading::TradeRequest::Status { .. } => {
-                            Some(crate::diagnostics::ProtectionCleanupInvocation {
-                                request_id: &r.request_id,
-                                origin: "agent_request.trade.status",
-                            })
-                        }
-                        _ => None,
-                    },
+                    Some(crate::trade_service::TradeInvocation {
+                        request_id: &r.request_id,
+                        origin: if matches!(
+                            request,
+                            okx_protocol::trading::TradeRequest::Status { .. }
+                        ) {
+                            "agent_request.trade.status"
+                        } else {
+                            "agent_request.trade"
+                        },
+                    }),
                 )
                 .await
         }
