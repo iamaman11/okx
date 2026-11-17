@@ -38,6 +38,76 @@ pub struct NativeIntentDiagnosticSnapshot {
     pub budget_denial: Option<NativeBudgetDenial>,
     pub entry_quote: Option<crate::EntryQuoteEvidence>,
     pub entry_admission: Option<crate::EntryAdmissionEvidence>,
+    pub entry_source_failure: Option<NativeEntrySourceFailure>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeEntrySourceFailure {
+    pub installation_id: String,
+    pub account_key: String,
+    pub intent_id: String,
+    pub plan_hash: String,
+    pub phase: String,
+    pub reason: String,
+    pub source_kind: NativeEntrySourceKind,
+    pub source_version: String,
+    pub reference_version: String,
+    pub source_at_ms: i64,
+    pub checked_at_ms: i64,
+    pub max_age_ms: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeEntrySourceKind {
+    FeeExchange,
+    FeeReceipt,
+}
+
+fn decode_entry_source_failure(
+    receipt: &crate::OperationReceipt,
+    installation: &str,
+    account: &str,
+    intent: &str,
+    plan: &str,
+) -> StoreResult<NativeEntrySourceFailure> {
+    let invalid = || crate::StoreError::Invalid("ENTRY_SOURCE_FAILURE_INVALID");
+    if receipt.kind != "ENTRY_SOURCE_FAILURE"
+        || receipt.request_hash != plan
+        || receipt.result_ref.len() > 4096
+    {
+        return Err(invalid());
+    }
+    let fact: NativeEntrySourceFailure =
+        serde_json::from_str(&receipt.result_ref).map_err(|_| invalid())?;
+    if fact.installation_id != installation
+        || fact.account_key != account
+        || fact.intent_id != intent
+        || fact.plan_hash != plan
+        || fact.phase != "POST_HELD_SOURCE_CHECK"
+        || fact.max_age_ms != 5000
+        || !matches!(
+            (fact.reason.as_str(), &fact.source_kind),
+            (
+                "ENTRY_FEE_EXCHANGE_TIME_STALE",
+                NativeEntrySourceKind::FeeExchange
+            ) | ("ENTRY_FEE_SOURCE_STALE", NativeEntrySourceKind::FeeReceipt)
+        )
+        || fact.source_version.is_empty()
+        || fact.source_version.len() > 256
+        || fact.reference_version.is_empty()
+        || fact.reference_version.len() > 256
+        || fact.source_at_ms <= 0
+        || fact.checked_at_ms > receipt.committed_at
+        || fact
+            .checked_at_ms
+            .checked_sub(fact.source_at_ms)
+            .is_none_or(|age| age <= fact.max_age_ms)
+    {
+        return Err(invalid());
+    }
+    Ok(fact)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -204,6 +274,11 @@ impl UnifiedFinanceHandle {
                 (None, Some(_)) => return Err(crate::StoreError::Invalid("NATIVE_DENIAL_INTENT_MISSING")),
                 (_, None) => None,
             };
+            let entry_source_failure = match (&intent, AccountStore::operation_sql(&tx, scope, &format!("entry-source-failure:{intent_id}"))?) {
+                (Some(original), Some(receipt)) => Some(decode_entry_source_failure(&receipt, &installation, &account, &intent_id, &original.plan_hash)?),
+                (None, Some(_)) => return Err(crate::StoreError::Invalid("ENTRY_SOURCE_FAILURE_INTENT_MISSING")),
+                (_, None) => None,
+            };
             let result = NativeIntentDiagnosticSnapshot {
                 observed_at_ms: super::opening_ingress::owner_now_ms()?,
                 protection: AccountStore::protection_sql(&tx, scope, &intent_id)?,
@@ -226,6 +301,7 @@ impl UnifiedFinanceHandle {
                 budget_denial,
                 entry_quote: AccountStore::entry_quote_sql(&tx, scope, &intent_id)?,
                 entry_admission: AccountStore::entry_admission_sql(&tx, scope, &intent_id)?,
+                entry_source_failure,
                 unsent: AccountStore::unsent_release_receipt_sql(
                     &tx, Some(&installation), &account, &intent_id,
                 )?,

@@ -1671,7 +1671,18 @@ impl TradeService {
             return Err("POST_ENTRY_ACCOUNT_CHANGED".into());
         }
         let fx = Self::usd_conversion(&snap)?;
-        verify_post_held_entry_sources(&quote, &fee, &rules.reference_generation, ct, &fx, now())?;
+        let checked_at = now();
+        if let Err(reason) = verify_post_held_entry_sources(
+            &quote,
+            &fee,
+            &rules.reference_generation,
+            ct,
+            &fx,
+            checked_at,
+        ) {
+            super::entry_source_failure::record(r, intent, &fee, checked_at, &reason, until).await;
+            return Err(reason);
+        }
         // Do not rely on the PRE-RESERVE account funds, borrowing or mode:
         // they can change while the distributed reservation is HELD.
         // Refuse the only possible POST unless the SAME production assessment

@@ -117,6 +117,55 @@ async fn risk_book_contract_native_stale_post_held_tariff_diagnostic_is_exact_an
     )
     .await;
     assert_eq!(explanation["state"], "REJECTED");
+    let failure = &explanation["entry_source_failure"];
+    assert_eq!(failure["state"], "STORED_FIRST_FAILURE");
+    assert_eq!(failure["fact"]["reason"], "ENTRY_FEE_EXCHANGE_TIME_STALE");
+    assert_eq!(failure["fact"]["source_kind"], "fee_exchange");
+    assert_eq!(
+        failure["fact"]["source_at_ms"],
+        stale_exchange_at.parse::<i64>().unwrap()
+    );
+    assert!(
+        failure["actual_age_ms"].as_i64().unwrap()
+            > failure["required_max_age_ms"].as_i64().unwrap()
+    );
+    assert_eq!(failure["fact"]["plan_hash"], held.plan_hash);
+    assert_eq!(failure["quality"], "HISTORICAL_NOT_CURRENT_HEALTH");
+    let failure_id = crate::execution_store::OperationId::new(format!(
+        "entry-source-failure:{}",
+        held.intent_id
+    ))
+    .unwrap();
+    let stored_failure = account_resources
+        .execution
+        .store
+        .operation(deadline(), failure_id.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        account_resources
+            .execution
+            .store
+            .operation_receipt(
+                deadline(),
+                failure_id.clone(),
+                held.plan_hash.clone(),
+                "ENTRY_SOURCE_FAILURE".into(),
+                "{}".into()
+            )
+            .await
+            .is_err()
+    );
+    let retained_failure = account_resources
+        .execution
+        .store
+        .operation(deadline(), failure_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored_failure.result_ref, retained_failure.result_ref);
+    assert_eq!(stored_failure.committed_at, retained_failure.committed_at);
     assert_eq!(explanation["owner"], "execution.unified_finance");
     assert_eq!(explanation["stage"], "REJECTED");
     assert_eq!(explanation["reason_code"], "ENTRY_FEE_EXCHANGE_TIME_STALE");

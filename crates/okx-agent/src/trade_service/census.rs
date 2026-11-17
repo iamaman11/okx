@@ -48,7 +48,7 @@ impl TradeService {
         &self,
         state: &CentralGovernanceSnapshot,
     ) -> Result<NativeRiskCensus, String> {
-        self.census_with_reads(state, None, None, None, None, None)
+        Self::census_with_reads(&self.accounts, state, None, None, None, None, None)
             .await
             .map(|v| v.0)
     }
@@ -63,7 +63,7 @@ impl TradeService {
     ) -> Result<NativeRiskCensus, String> {
         tokio::time::timeout_at(
             until.into(),
-            self.census_with_reads(state, None, None, Some(until), None, None),
+            Self::census_with_reads(&self.accounts, state, None, None, Some(until), None, None),
         )
         .await
         .map_err(|_| "ENTRY_CENSUS_SOURCE_DEADLINE".to_owned())?
@@ -81,7 +81,7 @@ impl TradeService {
     ) -> Result<NativeRiskCensus, ManagedProtectionCensusError> {
         let result = tokio::time::timeout_at(
             until.into(),
-            self.census_with_reads(state, None, None, Some(until), None, None),
+            Self::census_with_reads(&self.accounts, state, None, None, Some(until), None, None),
         )
         .await
         .map_err(|_| ManagedProtectionCensusError::Denied("MANAGED_CENSUS_SOURCE_DEADLINE".into()))?
@@ -105,7 +105,7 @@ impl TradeService {
             reservation_key,
             plan_hash,
         };
-        self.census_with_reads(state, None, None, None, None, Some(scope))
+        Self::census_with_reads(&self.accounts, state, None, None, None, None, Some(scope))
             .await
             .map(|v| v.0)
     }
@@ -119,16 +119,16 @@ impl TradeService {
         reserved_usd_per_usdt: &str,
         selected: &PostHeldSelected,
     ) -> Result<(NativeRiskCensus, CausalPostProof), String> {
-        let (census, account_reads) = self
-            .census_with_reads(
-                state,
-                Some(held_received),
-                Some((&selected.account_key, reserved_usd_per_usdt)),
-                Some(until),
-                Some(selected),
-                None,
-            )
-            .await?;
+        let (census, account_reads) = Self::census_with_reads(
+            &self.accounts,
+            state,
+            Some(held_received),
+            Some((&selected.account_key, reserved_usd_per_usdt)),
+            Some(until),
+            Some(selected),
+            None,
+        )
+        .await?;
         let proof = CausalPostProof {
             reserve_anchor: reservation.to_owned(),
             native_incarnation: native_process_incarnation()?.to_owned(),
@@ -142,7 +142,7 @@ impl TradeService {
     }
 
     async fn census_with_reads(
-        &self,
+        accounts: &AccountRuntimeRegistry,
         state: &CentralGovernanceSnapshot,
         held_received: Option<Instant>,
         fx_rate_check: Option<(&str, &str)>,
@@ -150,7 +150,7 @@ impl TradeService {
         selected: Option<&PostHeldSelected>,
         terminal_release: Option<TerminalReleaseCensusScope<'_>>,
     ) -> Result<(NativeRiskCensus, Vec<PostAccountReadProof>), String> {
-        if !self.accounts.failures().await.is_empty() {
+        if !accounts.failures().await.is_empty() {
             return Err("ACCOUNT_COHORT_UNAVAILABLE".into());
         }
         let mut keys = Vec::new();
@@ -175,7 +175,10 @@ impl TradeService {
                 let started = selected
                     .map(|w| w.started_after_held_ms)
                     .or_else(|| held_received.map(|tick| tick.elapsed().as_millis() as u64));
-                let r = self.resources(&c.account_key).await?;
+                let r = accounts
+                    .resolve(&c.account_key)
+                    .await
+                    .ok_or_else(|| "ACCOUNT_NOT_CONNECTED".to_owned())?;
                 if !r.source_identity_ready().await {
                     return Err("COHORT_SOURCE_GENERATION_UNVERIFIED".into());
                 }

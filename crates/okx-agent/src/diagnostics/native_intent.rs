@@ -97,6 +97,14 @@ pub(crate) async fn read(account: &AccountResources, installation: &str, referen
         }
     };
     result["observed_at_ms"] = snapshot.observed_at_ms.into();
+    result["entry_source_failure"] = snapshot.entry_source_failure.as_ref().map_or_else(
+        || json!({"state":"NOT_RECORDED_IN_ACCOUNT_SQL", "failure_check":"UNKNOWN"}),
+        |fact| {
+            json!({"state":"STORED_FIRST_FAILURE", "quality":"HISTORICAL_NOT_CURRENT_HEALTH",
+            "fact":fact, "actual_age_ms":fact.checked_at_ms - fact.source_at_ms,
+            "required_max_age_ms":fact.max_age_ms, "current_validity":"NOT_EVALUATED"})
+        },
+    );
     result["entry_source"] = snapshot.entry_quote.as_ref().map_or_else(
         || json!({"state":"NOT_RECORDED_IN_ACCOUNT_SQL", "failure_check":"UNKNOWN"}),
         |quote| json!({

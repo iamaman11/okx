@@ -1,6 +1,6 @@
 ## #512 A — frozen changed contracts and direct checks (r13)
 
-This cut extends d1b6b8bf in PR #513. It does not certify all C0–C13 or Research Worker independence. The original F01–F12 map below stays the navigation index; historical checkpoints are not current acceptance.
+This cut extends d1b6b8bf in PR #513. It does not certify all C0–C13 or Research Worker independence. The census core now takes only the account registry, not the entire TradeService. The original F01–F12 map below stays the navigation index; historical checkpoints are not current acceptance.
 
 | Contract | Actual boundary / responsibility | Removed ambiguity / proof |
 |---|---|---|
@@ -9,7 +9,7 @@ This cut extends d1b6b8bf in PR #513. It does not certify all C0–C13 or Resear
 | T03 | ReportedRiskCensus CensusObservedAtMs/CensusReadFloorMs, existing std Instant deadlines | No timestamp renewal; original TTL/frontier checks and current session/generation guards remain KEEP. Paused-time diagnostic test does not replace SQLite/OS tests. |
 | T04 | plan::PlanningError, native admission_failure, EntrySettlementError | Producer-assigned source retry replaces substring branching. Reserve/Post failures retain safe SQL/IO cause/stage and existing unknown outcome codes; no new send permission. |
 | D01 | original scoped reserve-denied receipt + public B denial | First requested/remaining budget facts, immutable replay/reopen; actual request→intent→denial tracing and no extra POST. |
-| D02 | unified::operation_diagnostics + diagnostics::native_intent | One snapshot revalidates retained quote/admission; exact original tariff/FX/reference facts, age at original quote/admission, historical quality. Later failed-check source/time remains UNKNOWN if not persisted, never inferred from current clock. Original sources survive reopen. |
+| D02 | unified::operation_diagnostics + diagnostics::native_intent | One snapshot revalidates retained quote/admission; exact original tariff/FX/reference facts, age at original quote/admission, historical quality. The first two known post-HELD fee freshness failures retain the actual failed source/check time and threshold in an existing scoped receipt; other unrecorded checks stay UNKNOWN. Public producer and separate reopen component tests distinguish these boundaries. Original sources survive reopen. |
 | D03–D05 | existing reserve/post lost-reply, unknown-intent, busy/reopen and scoped read contracts | Original receipt/send uncertainty and no second effect; busy is unavailable, not NOT_FOUND. Read-only diagnostic deadline 250ms; no cancellation of financial work. |
 | D06 | current analytics::job_diagnostics owner tests | Existing state/artifact/cancel/expiry/reopen/contended projection contracts remain KEEP. Cross-process job/IPC identity and resource ownership remain S6–S8 work. |
 | L03–L05 | trade_with_invocation→trace_trade→Execute prepared intent; typed admission events; pure property tests | Subscriber only in EXE/stderr; Instrument across await, no raw request/error payloads. Public denied Execute asserts request/intent/stage/reason; 128-case canonical identity/range/rounding properties use production functions. |

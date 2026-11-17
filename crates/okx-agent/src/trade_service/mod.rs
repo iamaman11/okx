@@ -28,6 +28,7 @@ mod census;
 mod entry_budget;
 pub(crate) use admission_source::{ProducedPost, ProducedReserve};
 mod entry_settlement;
+mod entry_source_failure;
 mod execute;
 mod opening_source;
 pub(crate) use opening_source::ProducedOpening;
