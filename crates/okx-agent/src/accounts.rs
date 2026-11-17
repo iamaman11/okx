@@ -742,25 +742,9 @@ impl AccountRuntimeRegistry {
                 ));
             }
         };
-        let source_generation_seed = if let Some((owner, account)) = store.native_scope() {
-            owner.source_generation_base(account.to_owned()).await?
-        } else {
-            #[cfg(test)]
-            {
-                store
-                    .call(
-                        std::time::Instant::now() + std::time::Duration::from_secs(2),
-                        |s| s.source_generation_base(),
-                    )
-                    .await?
-            }
-            #[cfg(not(test))]
-            {
-                return Err(AgentError::FinancialCaptureTask(
-                    "NATIVE_FINANCE_OWNER_REQUIRED".into(),
-                ));
-            }
-        };
+        let source_generation_seed = store
+            .source_generation_base(Instant::now() + std::time::Duration::from_secs(2))
+            .await?;
         let execution = Arc::new(ExecutionRuntime::from_client(
             store,
             clients.executor,

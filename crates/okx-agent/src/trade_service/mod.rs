@@ -26,6 +26,7 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock};
 mod admission_source;
+mod census;
 mod entry_budget;
 pub(crate) use admission_source::{ProducedPost, ProducedReserve};
 mod entry_settlement;
