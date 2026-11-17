@@ -1,46 +1,26 @@
 //! Public Strategies routing against the real registry and SQL owner. Recorded
 //! HTTP/WS ports provide delivery only; no strategy or money owner is replaced.
 use super::*;
-use crate::accounts::{initialize_installation, recorded_support};
+use crate::accounts::{native_trade_contracts::fixture as native, recorded_support};
 use okx_protocol::{AgentOperation, AgentRequest, AgentResponse, AgentResponseStatus, DataQuality};
 
-const INSTALLATION: &str = "strategy-public-contract";
 const INSTANCE: &str = "ema_contract";
 
 struct Fixture {
-    root: std::path::PathBuf,
+    native: native::NativeFixture,
     ctx: crate::query::DispatchContext,
     feed: Arc<recorded_support::RecordedAccountHttp>,
     _coordinator: okx_runtime::PublicWsCoordinator,
-    risk: tokio::sync::mpsc::Receiver<crate::risk_bridge::OutboundRiskCommand>,
     owner: Arc<AccountResources>,
 }
 
 impl Fixture {
     async fn new() -> Self {
-        // Windows clock resolution cannot identify concurrent fixtures.
-        let mut nonce = [0u8; 16];
-        getrandom::fill(&mut nonce).unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "okx-strategy-public-{}-{:x}",
-            std::process::id(),
-            u128::from_le_bytes(nonce)
-        ));
-        initialize_installation(&root, INSTALLATION).unwrap();
-        let budget = okx_api::RateBudget::new();
-        let accounts = Arc::new(
-            AccountRuntimeRegistry::open(&root, budget.clone())
-                .await
-                .unwrap(),
-        );
-        let feed = Arc::new(recorded_support::RecordedAccountHttp::default());
-        let (config, clients) = recorded_support::prepared("a", feed.clone(), budget.clone());
-        accounts
-            .connect_prepared(config.clone(), clients)
-            .await
-            .unwrap();
-        let owner = accounts.resolve(&config.alias).await.unwrap();
+        let native = native::fixture().await;
+        let owner = native._account.clone();
+        let feed = native.feed.clone();
         let environment = okx_api::OkxEnvironment::new(okx_api::Region::Global, false);
+        let budget = okx_api::RateBudget::new();
         let (coordinator, public_ws) = okx_runtime::PublicWsCoordinator::new_with_connector(
             environment,
             okx_observation::ReferenceRegistry::from_public("fixture", vec![]).unwrap(),
@@ -51,55 +31,33 @@ impl Fixture {
             okx_api::OkxPublicClient::with_http_transport(environment, budget, feed.clone())
                 .unwrap(),
         );
-        let (tx, risk) = tokio::sync::mpsc::channel(4);
-        let trade = Arc::new(TradeService::new(
-            accounts.clone(),
-            public_ws.clone(),
-            crate::risk_bridge::NativeRiskClient::new(tx),
-        ));
         let ctx = crate::query::DispatchContext {
-            accounts,
+            accounts: native.registry.clone(),
             analytics: crate::analytics::AnalyticsService::new(
-                root.join("research"),
+                native.root.join("research"),
                 market.clone(),
             )
             .unwrap(),
             public_ws,
-            trade,
+            trade: native.trade.clone(),
             market,
         };
-        let result = Self {
-            root,
+        Self {
+            native,
             ctx,
             feed,
             _coordinator: coordinator,
-            risk,
             owner,
-        };
-        result.authority(false).await;
-        result
+        }
     }
 
     async fn authority(&self, paused: bool) {
-        let config = &self.owner.configuration;
-        let authority: CentralGovernanceSnapshot = serde_json::from_value(json!({
-            "state":{"schema":"okx.governance/v3","revision":if paused {2} else {1},
-                "installation_id":INSTALLATION,"campaign_id":format!("sha256:{}", "a".repeat(64)),
-                "campaign_loss_limit_usd":"20","max_total_modelled_loss_usdt":"20",
-                "accounts":[{"id":"account_a","label":"Fixture A","venue":"okx","environment":"real",
-                    "uid_fingerprint":config.account_key.verified_uid,"identity_verified":true,
-                    "enabled":true,"explicit_pause":paused,"policy_revision":if paused {2} else {1},
-                    "account_key":config.account_key.wire(),"strategies":[],
-                    "limits":{"max_modelled_loss_usdt":"20","max_order_loss_usdt":"10",
-                        "max_notional_usdt":"1000","max_leverage":"5","max_daily_realized_loss_usdt":"20",
-                        "max_drawdown_ratio":"0.5","allowed_instruments":["BTC-USDT-SWAP"]}}]},
-            "issued_at_ms":1792910000000_u64,"session_generation":673
-        })).unwrap();
-        assert!(authority.valid());
-        // Use the production authority owner to apply the same policy before
-        // taking no-effect snapshots. Rejected commands may observe this policy.
-        *self.ctx.trade.governance.write().await = Some(authority);
-        self.ctx.trade.authority(&self.owner, None).await.unwrap();
+        let mut authority = self.native.authority.clone();
+        authority.state.revision += 1;
+        authority.state.accounts[0].policy_revision = authority.state.revision;
+        authority.state.accounts[0].explicit_pause = paused;
+        authority.issued_at_ms = chrono::Utc::now().timestamp_millis() as _;
+        self.ctx.trade.update_governance(&authority).await.unwrap();
     }
 
     async fn operation(&self, operation: AgentOperation, account: Option<&str>) -> AgentResponse {
@@ -123,20 +81,19 @@ impl Fixture {
         .await
     }
 
-    async fn finish(mut self) {
-        assert!(matches!(
-            self.risk.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
-        let mut terminated = self.owner.execution.store.termination_signal();
-        self.ctx.accounts.shutdown().await;
-        let root = self.root.clone();
-        drop(self);
-        tokio::time::timeout(Duration::from_secs(5), terminated.wait_for(|v| *v))
-            .await
-            .unwrap()
-            .unwrap();
-        std::fs::remove_dir_all(root).unwrap();
+    async fn finish(self) {
+        let Self {
+            native,
+            ctx,
+            owner,
+            feed,
+            _coordinator,
+        } = self;
+        drop(ctx);
+        drop(owner);
+        drop(feed);
+        drop(_coordinator);
+        native.finish().await;
     }
 }
 
@@ -178,26 +135,38 @@ fn rejected(response: AgentResponse, code: &str) {
     assert!(response.result.is_none());
     assert_eq!(response.failure.unwrap().code, code);
 }
-async fn money(store: &crate::execution_store::ExecutionStore) -> Value {
-    store
-        .call(deadline(), |s| {
-            Ok(json!({
-                "finance_revision":s.finance_revision()?,
-                "finance":s.finance_totals(i64::MIN,i64::MAX,None)?.into_iter().collect::<Vec<_>>(),
-                "lots":s.active_lots("BTC-USDT-SWAP")?,
-                "intents":s.reconcilable_intents_page(100,0)?,
-                "fills":s.cursor("fills","SWAP")?,"bills":s.cursor("bills","account")?
-            }))
-        })
+async fn money(fixture: &Fixture) -> Value {
+    let owner = &fixture.native.owner;
+    let account = fixture.native.config.account_key.wire();
+    let report = owner
+        .finance_report(
+            account.clone(),
+            okx_execution::FinanceReportQuery {
+                from: i64::MIN,
+                through: i64::MAX,
+                instances: vec![],
+                currencies: vec![],
+                view: okx_execution::FinanceReportView::Summary,
+            },
+            deadline(),
+        )
         .await
-        .unwrap()
+        .unwrap();
+    json!({
+        "finance_revision": report.revision,
+        "finance": report.entries,
+        "lots": owner.active_lots(account.clone(), "BTC-USDT-SWAP".into(), deadline()).await.unwrap(),
+        "intents": owner.reconcilable_intents_page(account.clone(), 100, 0, deadline()).await.unwrap(),
+        "fills": owner.source_cursor(account.clone(), "fills".into(), "SWAP".into()).await.unwrap(),
+        "bills": owner.source_cursor(account, "bills".into(), "account".into()).await.unwrap(),
+    })
 }
 
 #[tokio::test]
 async fn public_strategy_lifecycle_replays_cas_and_read_models_preserve_money() {
     let fixture = Fixture::new().await;
     let capture = fixture.owner.recorded_capture_gate.write().await;
-    let baseline = money(&fixture.owner.execution.store).await;
+    let baseline = money(&fixture).await;
     let requests = fixture.feed.requests.lock().unwrap().clone();
     let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
     let denied = fixture.feed.denied_routes.lock().unwrap().clone();
@@ -210,10 +179,14 @@ async fn public_strategy_lifecycle_replays_cas_and_read_models_preserve_money() 
         created
     );
     let old_definition = fixture
+        .native
         .owner
-        .execution
-        .store
-        .call(deadline(), |s| s.strategy_definition(INSTANCE))
+        .plan_definition(
+            deadline(),
+            fixture.native.config.account_key.wire(),
+            INSTANCE.into(),
+            false,
+        )
         .await
         .unwrap();
     let mut conflicting = create("create_contract");
@@ -233,22 +206,31 @@ async fn public_strategy_lifecycle_replays_cas_and_read_models_preserve_money() 
         fixture.request(update("stale_contract", 1)).await,
         "INSTANCE_REVISION_CONFLICT",
     );
-    let old_for_sql = old_definition.clone();
-    fixture
+    let new_definition = fixture
+        .native
         .owner
-        .execution
-        .store
-        .call(deadline(), move |s| {
-            assert_eq!(
-                s.definition_version(&old_for_sql.definition_id, &old_for_sql.version)?
-                    .unwrap(),
-                old_for_sql
-            );
-            assert!(s.operation("stale_contract")?.is_none());
-            Ok(())
-        })
+        .plan_definition(
+            deadline(),
+            fixture.native.config.account_key.wire(),
+            INSTANCE.into(),
+            false,
+        )
         .await
         .unwrap();
+    assert_ne!(old_definition.version, new_definition.version);
+    assert!(
+        fixture
+            .native
+            .owner
+            .operation(
+                deadline(),
+                fixture.native.config.account_key.wire(),
+                "stale_contract".into()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
     let start = StrategyRequest::Start {
         idempotency_key: "start_contract".into(),
         instance_id: INSTANCE.into(),
@@ -304,7 +286,7 @@ async fn public_strategy_lifecycle_replays_cas_and_read_models_preserve_money() 
             .await,
         "ACCOUNT_NOT_CONNECTED",
     );
-    assert_eq!(money(&fixture.owner.execution.store).await, baseline);
+    assert_eq!(money(&fixture).await, baseline);
     assert_eq!(*fixture.feed.requests.lock().unwrap(), requests);
     assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
     assert_eq!(*fixture.feed.denied_routes.lock().unwrap(), denied);
@@ -320,15 +302,14 @@ async fn public_strategy_capital_uses_authenticated_flat_opening_and_paused_auth
     // initialize_flat received the real observer's identity-bound, stable flat
     // opening; do not insert a COMPLETE NAV point or set a test coverage flag.
     let capital_before = fixture
+        .native
         .owner
-        .execution
-        .store
-        .call(deadline(), |s| s.capital_state(now()))
+        .capital_state(fixture.native.config.account_key.wire(), now(), deadline())
         .await
         .unwrap();
     assert_eq!(capital_before.coverage, "COMPLETE");
     assert!(!capital_before.nav_source_ref.is_empty());
-    let financial_before = money(&fixture.owner.execution.store).await;
+    let financial_before = money(&fixture).await;
     let requests = fixture.feed.requests.lock().unwrap().clone();
     let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
     let assign = StrategyRequest::CapitalAssign {
@@ -336,7 +317,7 @@ async fn public_strategy_capital_uses_authenticated_flat_opening_and_paused_auth
         instance_id: INSTANCE.into(),
         direction: CapitalDirection::Assign,
         amount_usd: "10".into(),
-        expected_authority_revision: 1,
+        expected_authority_revision: fixture.native.authority.state.revision,
     };
     let assigned = completed_data(fixture.request(assign.clone()).await);
     assert_eq!(assigned["capital"]["assigned_usd"], "10");
@@ -345,19 +326,19 @@ async fn public_strategy_capital_uses_authenticated_flat_opening_and_paused_auth
         assigned["capital"]["nav_source_ref"],
         capital_before.nav_source_ref
     );
-    let after_assign = money(&fixture.owner.execution.store).await;
+    let after_assign = money(&fixture).await;
     assert_eq!(after_assign["lots"], financial_before["lots"]);
     assert_eq!(after_assign["intents"], financial_before["intents"]);
     let replay = completed_data(fixture.request(assign.clone()).await);
     assert_eq!(replay["receipt"], assigned["receipt"]);
-    assert_eq!(money(&fixture.owner.execution.store).await, after_assign);
+    assert_eq!(money(&fixture).await, after_assign);
     let mut conflict = assign;
     if let StrategyRequest::CapitalAssign { amount_usd, .. } = &mut conflict {
         *amount_usd = "11".into();
     }
     rejected(fixture.request(conflict).await, "IDEMPOTENCY_CONFLICT");
     fixture.authority(true).await;
-    let paused_before = money(&fixture.owner.execution.store).await;
+    let paused_before = money(&fixture).await;
     rejected(
         fixture
             .request(StrategyRequest::Start {
@@ -374,7 +355,7 @@ async fn public_strategy_capital_uses_authenticated_flat_opening_and_paused_auth
                 instance_id: INSTANCE.into(),
                 direction: CapitalDirection::Assign,
                 amount_usd: "1".into(),
-                expected_authority_revision: 2,
+                expected_authority_revision: fixture.native.authority.state.revision + 1,
             })
             .await,
         "ACCOUNT_NEW_RISK_PAUSED",
@@ -386,24 +367,27 @@ async fn public_strategy_capital_uses_authenticated_flat_opening_and_paused_auth
                 instance_id: INSTANCE.into(),
                 direction: CapitalDirection::Assign,
                 amount_usd: "1".into(),
-                expected_authority_revision: 1,
+                expected_authority_revision: fixture.native.authority.state.revision,
             })
             .await,
         "CAPITAL_AUTHORITY_REVISION_MISMATCH",
     );
-    assert_eq!(money(&fixture.owner.execution.store).await, paused_before);
-    fixture
-        .owner
-        .execution
-        .store
-        .call(deadline(), |s| {
-            for key in ["paused_start", "paused_assign", "stale_authority"] {
-                assert!(s.operation(key)?.is_none());
-            }
-            Ok(())
-        })
-        .await
-        .unwrap();
+    assert_eq!(money(&fixture).await, paused_before);
+    for key in ["paused_start", "paused_assign", "stale_authority"] {
+        assert!(
+            fixture
+                .native
+                .owner
+                .operation(
+                    deadline(),
+                    fixture.native.config.account_key.wire(),
+                    key.into()
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
     assert_eq!(*fixture.feed.requests.lock().unwrap(), requests);
     assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
     drop(capture);
@@ -451,57 +435,63 @@ async fn public_strategy_update_keeps_sql_bound_original_execute_replay_immutabl
                 .as_bytes()
         )
     );
-    let saved = fixture
+    let account_key = fixture.native.config.account_key.wire();
+    let definition = fixture
+        .native
         .owner
-        .execution
-        .store
-        .call(deadline(), move |s| {
-            let definition = s.strategy_definition(INSTANCE)?;
-            let at = now();
-            s.prepare(
-                &Decision {
-                    decision_id: "binding_decision".into(),
-                    instance_id: Some(INSTANCE.into()),
-                    decision_at: at,
-                    input_digest: "b".repeat(64),
-                    policy_revision: 1,
-                    code_version: "fixture".into(),
+        .plan_definition(deadline(), account_key.clone(), INSTANCE.into(), false)
+        .await
+        .unwrap();
+    let at = now();
+    let revision = fixture.native.authority.state.revision as i64;
+    let saved = fixture
+        .native
+        .owner
+        .prepare_admission(
+            deadline(),
+            account_key.clone(),
+            Decision {
+                decision_id: "binding_decision".into(),
+                instance_id: Some(INSTANCE.into()),
+                decision_at: at,
+                input_digest: "b".repeat(64),
+                policy_revision: revision,
+                code_version: "fixture".into(),
+            },
+            NewIntent {
+                intent_id: "binding_intent".into(),
+                idempotency_key: "strategy_original_trade".into(),
+                request_hash: original_hash,
+                client_order_id: "b".repeat(32),
+                deadline: at + 30_000,
+                plan_hash: "c".repeat(64),
+                policy_revision: revision,
+                risk_increase: true,
+                instrument_id: "BTC-USDT-SWAP".into(),
+                plan: IntentPlan {
+                    strategy_definition_id: definition.definition_id,
+                    strategy_definition_version: definition.version,
+                    strategy_parameters_digest: definition.parameters_digest,
+                    operation: "open".into(),
+                    side: "buy".into(),
+                    position_side: "long".into(),
+                    quantity: Decimal::ONE,
+                    limit_price: Decimal::from(100),
+                    stop_price: Some(Decimal::from(99)),
+                    strategy_instance: INSTANCE.into(),
+                    planned_loss_usd: Decimal::ONE,
+                    source_generation: 1,
+                    private_source_generation: 1,
+                    contract_value: Decimal::ONE,
+                    inverse: false,
+                    settlement_currency: "USDT".into(),
                 },
-                &NewIntent {
-                    intent_id: "binding_intent".into(),
-                    idempotency_key: "strategy_original_trade".into(),
-                    request_hash: original_hash,
-                    client_order_id: "b".repeat(32),
-                    deadline: at + 30_000,
-                    plan_hash: "c".repeat(64),
-                    policy_revision: 1,
-                    risk_increase: true,
-                    instrument_id: "BTC-USDT-SWAP".into(),
-                    plan: IntentPlan {
-                        strategy_definition_id: definition.definition_id,
-                        strategy_definition_version: definition.version,
-                        strategy_parameters_digest: definition.parameters_digest,
-                        operation: "open".into(),
-                        side: "buy".into(),
-                        position_side: "long".into(),
-                        quantity: Decimal::ONE,
-                        limit_price: Decimal::from(100),
-                        stop_price: Some(Decimal::from(99)),
-                        strategy_instance: INSTANCE.into(),
-                        planned_loss_usd: Decimal::ONE,
-                        source_generation: 1,
-                        private_source_generation: 1,
-                        contract_value: Decimal::ONE,
-                        inverse: false,
-                        settlement_currency: "USDT".into(),
-                    },
-                },
-            )
-        })
+            },
+        )
         .await
         .unwrap();
     completed_data(fixture.request(update("binding_update", 1)).await);
-    let before = money(&fixture.owner.execution.store).await;
+    let before = money(&fixture).await;
     let requests = fixture.feed.requests.lock().unwrap().clone();
     let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
     let replay = completed_data(
@@ -515,63 +505,71 @@ async fn public_strategy_update_keeps_sql_bound_original_execute_replay_immutabl
             .await,
     );
     assert_eq!(replay["intent"], serde_json::to_value(&saved).unwrap());
-    let saved_for_sql = saved.clone();
-    fixture
+    let old = fixture
+        .native
         .owner
-        .execution
-        .store
-        .call(deadline(), move |s| {
-            let old = s.intent("binding_intent")?.unwrap();
-            assert_eq!(
-                serde_json::to_value(&old).unwrap(),
-                serde_json::to_value(&saved_for_sql).unwrap()
-            );
-            assert_ne!(
-                s.strategy_definition(INSTANCE)?.version,
-                old.plan.strategy_definition_version
-            );
-            assert!(
-                s.definition_version(
-                    &old.plan.strategy_definition_id,
-                    &old.plan.strategy_definition_version
-                )?
-                .is_some()
-            );
-            // A different SQL intent cannot bind the pre-edit definition. This is
-            // the store's version gate, explicitly not public new-key admission.
-            let fresh = NewIntent {
-                intent_id: "binding_new_intent".into(),
-                idempotency_key: "binding_new_key".into(),
-                request_hash: "d".repeat(64),
-                client_order_id: "d".repeat(32),
-                deadline: now() + 30_000,
-                plan_hash: "e".repeat(64),
-                policy_revision: 1,
-                risk_increase: true,
-                instrument_id: old.instrument_id,
-                plan: old.plan,
-            };
-            assert_eq!(
-                s.prepare(
-                    &Decision {
-                        decision_id: "binding_new_decision".into(),
-                        instance_id: Some(INSTANCE.into()),
-                        decision_at: now(),
-                        input_digest: "e".repeat(64),
-                        policy_revision: 1,
-                        code_version: "fixture".into()
-                    },
-                    &fresh
-                )
-                .unwrap_err()
-                .to_string(),
-                "STRATEGY_VERSION_CHANGED"
-            );
-            assert!(s.by_idempotency("binding_new_key")?.is_none());
-            Ok(())
-        })
+        .lookup_intent(
+            account_key.clone(),
+            okx_execution::TradeIntentLookup::IntentId("binding_intent".into()),
+            deadline(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&old).unwrap(),
+        serde_json::to_value(&saved).unwrap()
+    );
+    let current = fixture
+        .native
+        .owner
+        .plan_definition(deadline(), account_key.clone(), INSTANCE.into(), false)
         .await
         .unwrap();
+    assert_ne!(current.version, old.plan.strategy_definition_version);
+    let fresh = NewIntent {
+        intent_id: "binding_new_intent".into(),
+        idempotency_key: "binding_new_key".into(),
+        request_hash: "d".repeat(64),
+        client_order_id: "d".repeat(32),
+        deadline: now() + 30_000,
+        plan_hash: "e".repeat(64),
+        policy_revision: revision,
+        risk_increase: true,
+        instrument_id: old.instrument_id,
+        plan: old.plan,
+    };
+    let result = fixture
+        .native
+        .owner
+        .prepare_admission(
+            deadline(),
+            account_key.clone(),
+            Decision {
+                decision_id: "binding_new_decision".into(),
+                instance_id: Some(INSTANCE.into()),
+                decision_at: now(),
+                input_digest: "e".repeat(64),
+                policy_revision: revision,
+                code_version: "fixture".into(),
+            },
+            fresh,
+        )
+        .await;
+    assert_eq!(result.unwrap_err().to_string(), "STRATEGY_VERSION_CHANGED");
+    assert!(
+        fixture
+            .native
+            .owner
+            .lookup_intent(
+                account_key,
+                okx_execution::TradeIntentLookup::IdempotencyKey("binding_new_key".into()),
+                deadline()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
     let mut conflict = command;
     if let TradeRequest::Execute { sizing, .. } = &mut conflict {
         *sizing = Sizing::Contracts {
@@ -587,7 +585,7 @@ async fn public_strategy_update_keeps_sql_bound_original_execute_replay_immutabl
             .await,
         "IDEMPOTENCY_CONFLICT",
     );
-    assert_eq!(money(&fixture.owner.execution.store).await, before);
+    assert_eq!(money(&fixture).await, before);
     assert_eq!(*fixture.feed.requests.lock().unwrap(), requests);
     assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
     drop(capture);

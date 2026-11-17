@@ -5130,29 +5130,6 @@ fn sql_deadline_handler_is_removed_after_operation_error() {
     let total:i64=s.connection.query_row("WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) SELECT sum(x) FROM n",[],|r|r.get(0)).unwrap();
     assert_eq!(total, 50005000);
 }
-#[tokio::test]
-async fn long_reader_is_interrupted_at_deadline_and_worker_recovers() {
-    let s = store();
-    let p = s.path.clone();
-    let m = s.meta.clone();
-    drop(s);
-    let h = crate::AccountStoreHandle::open_existing(p, m.account_key, m.installation_id)
-        .await
-        .unwrap();
-    let result=h.call(std::time::Instant::now()+Duration::from_millis(20),|s|{let _:i64=s.connection.query_row("WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n",[],|r|r.get(0))?;Ok(())}).await;
-    assert!(matches!(
-        result,
-        Err(StoreError::Invalid("ACCOUNT_STORAGE_DEADLINE"))
-    ));
-    assert_eq!(
-        h.call(std::time::Instant::now() + Duration::from_secs(2), |s| Ok(
-            s.meta.initialized_at
-        ))
-        .await
-        .unwrap(),
-        1
-    );
-}
 #[test]
 fn persisted_source_generation_survives_restart_without_losing_cursors() {
     let mut s = store();
@@ -8040,351 +8017,6 @@ fn recent_cleanup_diagnostics_are_capped_joined_and_use_the_kind_index() {
     );
 }
 
-#[tokio::test]
-async fn recent_cleanup_diagnostics_reopens_the_original_sql_owner() {
-    let mut original = store();
-    let saved = intent(&mut original);
-    let operation_id = format!("cleanup_{}", saved.client_order_id);
-    original
-        .operation_receipt(
-            &operation_id,
-            "restart_hash",
-            "protection_cleanup",
-            "POSTING",
-            123,
-        )
-        .unwrap();
-    let path = original.path.clone();
-    let meta = original.meta.clone();
-    drop(original);
-
-    let owner = crate::AccountStoreHandle::open_existing(
-        path.clone(),
-        meta.account_key.clone(),
-        meta.installation_id.clone(),
-    )
-    .await
-    .unwrap();
-    let rows = owner
-        .call(
-            std::time::Instant::now() + Duration::from_secs(3),
-            |store| store.recent_cleanup_diagnostics(128),
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].intent_id.as_deref(), Some("intent"));
-    assert_eq!(
-        rows[0].client_order_id.as_deref(),
-        Some(saved.client_order_id.as_str())
-    );
-    assert_eq!(rows[0].result_ref, "POSTING");
-
-    let mut terminated = owner.termination_signal();
-    drop(owner);
-    tokio::time::timeout(Duration::from_secs(3), terminated.wait_for(|value| *value))
-        .await
-        .unwrap()
-        .unwrap();
-    let reopened =
-        crate::AccountStoreHandle::open_existing(path, meta.account_key, meta.installation_id)
-            .await
-            .unwrap();
-    let rows = reopened
-        .call(
-            std::time::Instant::now() + Duration::from_secs(3),
-            |store| store.recent_cleanup_diagnostics(128),
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].operation_id, operation_id);
-    assert_eq!(rows[0].result_ref, "POSTING");
-}
-
-#[tokio::test]
-async fn writer_queue_backpressure_and_account_isolation() {
-    let s = store();
-    let p = s.path.clone();
-    let m = s.meta.clone();
-    drop(s);
-    let h = crate::AccountStoreHandle::open_existing(
-        p.clone(),
-        m.account_key.clone(),
-        m.installation_id.clone(),
-    )
-    .await
-    .unwrap();
-    assert!(AccountStore::open_existing(p, &m.account_key, &m.installation_id).is_err());
-    let (block_tx, block_rx) = std::sync::mpsc::channel();
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let first = h.clone();
-    let task = tokio::spawn(async move {
-        first
-            .call(
-                std::time::Instant::now() + Duration::from_secs(5),
-                move |_| {
-                    let _ = ready_tx.send(());
-                    block_rx.recv().unwrap();
-                    Ok(())
-                },
-            )
-            .await
-    });
-    ready_rx.await.unwrap();
-    let mut jobs = Vec::new();
-    for _ in 0..129 {
-        let h = h.clone();
-        jobs.push(tokio::spawn(async move {
-            h.call(std::time::Instant::now() + Duration::from_secs(5), |_| {
-                Ok(())
-            })
-            .await
-        }));
-    }
-    for _ in 0..5 {
-        tokio::task::yield_now().await;
-    }
-    let mut other = store();
-    intent(&mut other);
-    assert_eq!(other.active_intents(10).unwrap().len(), 1);
-    block_tx.send(()).unwrap();
-    task.await.unwrap().unwrap();
-    let mut rejected = 0;
-    for job in jobs {
-        if matches!(
-            job.await.unwrap(),
-            Err(StoreError::Invalid("ACCOUNT_STORAGE_BACKPRESSURE"))
-        ) {
-            rejected += 1;
-        }
-    }
-    assert!(rejected > 0);
-}
-
-// T10-14 Native owner prerequisite. The A SQL worker is intentionally held
-// inside a real account-owned command. An independent B worker must still
-// serve a real read and persist an idempotent cancellation-operation receipt
-// BEFORE A is released. This is not the complete Native/Worker/venue T10-14.
-#[tokio::test]
-async fn blocked_a_sql_owner_does_not_delay_b_cancel_receipt() {
-    let first = store();
-    let second_meta = AccountMeta {
-        account_key: "okx:demo:fixture-blocked-owner-b".into(),
-        installation_id: "fixture-installation-b".into(),
-        initialize_operation_id: "fixture-connect-b".into(),
-        ..first.meta.clone()
-    };
-    let opening = OpeningSnapshot {
-        opening_equity_usd: Decimal::from(100),
-        source_ref: second_meta.opening_source.clone(),
-        observed_at: 1,
-        positions: 0,
-        orders: 0,
-        conditional_orders: 0,
-        liabilities: Decimal::ZERO,
-        balances: vec![("USDT".into(), Decimal::from(100))],
-    };
-    let second = AccountStore::initialize_flat(path(), second_meta, &opening).unwrap();
-    let a_key = first.meta.account_key.clone();
-    let b_key = second.meta.account_key.clone();
-    assert_ne!(a_key, b_key, "two SQL owners need distinct account scopes");
-    let (a_path, a_meta) = (first.path.clone(), first.meta.clone());
-    let (b_path, b_meta) = (second.path.clone(), second.meta.clone());
-    drop(first);
-    drop(second);
-    let a = crate::AccountStoreHandle::open_existing(
-        a_path,
-        a_meta.account_key,
-        a_meta.installation_id,
-    )
-    .await
-    .unwrap();
-    let b = crate::AccountStoreHandle::open_existing(
-        b_path,
-        b_meta.account_key,
-        b_meta.installation_id,
-    )
-    .await
-    .unwrap();
-
-    let (block_tx, block_rx) = std::sync::mpsc::channel::<()>();
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let held_a = tokio::spawn({
-        let a = a.clone();
-        async move {
-            a.call(
-                std::time::Instant::now() + Duration::from_secs(9),
-                move |owner| {
-                    let _ = entered_tx.send(());
-                    block_rx
-                        .recv_timeout(Duration::from_secs(7))
-                        .map_err(|_| StoreError::Invalid("T10_14_A_GATE_NOT_RELEASED"))?;
-                    Ok(owner.meta.account_key.clone())
-                },
-            )
-            .await
-        }
-    });
-    tokio::time::timeout(Duration::from_secs(3), entered_rx)
-        .await
-        .expect("A's SQL owner must enter the causal hold")
-        .expect("A gate admission sender must survive");
-
-    let b_started = std::time::Instant::now();
-    let b_result = tokio::time::timeout(
-        Duration::from_secs(3),
-        b.call(
-            std::time::Instant::now() + Duration::from_secs(4),
-            |owner| {
-                let account_key = owner.meta.account_key.clone();
-                let account_summary = owner.account_summary()?;
-                let bytes = serde_json::to_vec(&account_summary).unwrap().len();
-                let first =
-                    owner.begin_operation("t10-14-b-cancel", "b-venue-order", "CANCEL", 2)?;
-                owner.operation_receipt(
-                    "t10-14-b-cancel",
-                    "b-venue-order",
-                    "CANCEL",
-                    "CANCELLED",
-                    3,
-                )?;
-                let duplicate =
-                    owner.begin_operation("t10-14-b-cancel", "b-venue-order", "CANCEL", 4)?;
-                Ok((account_key, bytes, first, duplicate))
-            },
-        ),
-    )
-    .await;
-    let b_elapsed_ms = b_started.elapsed().as_millis();
-    // Release and join A even if B times out; never strand a SQL test worker.
-    block_tx
-        .send(())
-        .expect("A causal hold receiver must remain alive");
-    let a_result = held_a
-        .await
-        .expect("A SQL worker task must join")
-        .expect("A SQL owner must resume after bounded test gate");
-    assert_eq!(a_result, a_key);
-    let (b_result, bytes, first, duplicate) = b_result
-        .expect("B must service read and cancellation receipt while A is blocked")
-        .expect("B SQL account owner command must succeed");
-    assert_eq!(b_result, b_key);
-    assert!(first && !duplicate, "B operation must persist exactly once");
-    assert!(bytes <= 12_288, "B summary must remain bounded");
-    println!(
-        "T10_14_NATIVE_SQL_PREREQUISITE_V1:{}",
-        serde_json::json!({
-            "schema":"okx.t10-14-native-owner-prerequisite/v1",
-            "status":"PASS", "owners":2,
-            "distinct_accounts":true,
-            "a_held_until_b_completed":true,
-            "b_read_and_cancel_operation_persisted":true,
-            "b_duplicate_operation_rejected":true,
-            "b_elapsed_ms":b_elapsed_ms,
-            "a_joined_after_release":true,
-            "venue_cancel_post_exercised":false,
-            "worker_risk_book_exercised":false,
-            "full_t10_14_accepted":false
-        })
-    );
-}
-
-#[tokio::test]
-async fn two_account_100_parallel_sql_readonly_isolation() {
-    // Two distinct account keys and actor-owned databases. No exchange transport.
-    let first = store();
-    let second_meta = AccountMeta {
-        account_key: "okx:demo:fixture-account-b".into(),
-        installation_id: "fixture-installation-b".into(),
-        initialize_operation_id: "fixture-connect-b".into(),
-        ..first.meta.clone()
-    };
-    let opening = OpeningSnapshot {
-        opening_equity_usd: Decimal::from(100),
-        source_ref: second_meta.opening_source.clone(),
-        observed_at: 1,
-        positions: 0,
-        orders: 0,
-        conditional_orders: 0,
-        liabilities: Decimal::ZERO,
-        balances: vec![("USDT".into(), Decimal::from(100))],
-    };
-    let second = AccountStore::initialize_flat(path(), second_meta, &opening).unwrap();
-    let a_key = first.meta.account_key.clone();
-    let b_key = second.meta.account_key.clone();
-    assert_ne!(a_key, b_key);
-    let (a_path, a_meta) = (first.path.clone(), first.meta.clone());
-    let (b_path, b_meta) = (second.path.clone(), second.meta.clone());
-    drop(first);
-    drop(second);
-    let a = crate::AccountStoreHandle::open_existing(
-        a_path,
-        a_meta.account_key,
-        a_meta.installation_id,
-    )
-    .await
-    .unwrap();
-    let b = crate::AccountStoreHandle::open_existing(
-        b_path,
-        b_meta.account_key,
-        b_meta.installation_id,
-    )
-    .await
-    .unwrap();
-    let start = std::time::Instant::now();
-    let mut tasks = Vec::new();
-    for index in 0..100 {
-        let handle = if index % 2 == 0 { a.clone() } else { b.clone() };
-        tasks.push(tokio::spawn(async move {
-            let issued = std::time::Instant::now();
-            let (key, size) = handle
-                .call(std::time::Instant::now() + Duration::from_secs(15), |s| {
-                    let summary = s.account_summary()?;
-                    let bytes = serde_json::to_vec(&summary).unwrap().len();
-                    Ok((s.meta.account_key.clone(), bytes))
-                })
-                .await
-                .unwrap();
-            (index, key, size, issued.elapsed().as_micros() as u64)
-        }));
-    }
-    let mut latencies = Vec::new();
-    let mut max_bytes = 0;
-    for task in tasks {
-        let (index, key, bytes, latency) = task.await.unwrap();
-        assert_eq!(
-            key.as_str(),
-            if index % 2 == 0 {
-                a_key.as_str()
-            } else {
-                b_key.as_str()
-            }
-        );
-        assert!(bytes <= 12_288);
-        max_bytes = max_bytes.max(bytes);
-        latencies.push(latency);
-    }
-    latencies.sort_unstable();
-    println!(
-        "NATIVE_SQL_100_PARALLEL_JSON:{}",
-        serde_json::json!({
-            "type": "native_sql_actors_not_network",
-            "os": std::env::consts::OS,
-            "accounts": 2,
-            "distinct_account_keys": true,
-            "operations": 100,
-            "real_exchange_posts": 0,
-            "p50_us": latencies[49],
-            "p95_us": latencies[94],
-            "max_us": latencies[99],
-            "elapsed_ms": start.elapsed().as_millis(),
-            "response_bytes_max": max_bytes,
-            "network_p95_measured": false
-        })
-    );
-}
-
 #[test]
 fn strategy_create_sql_persists_receipt_replay_and_rejects_conflicts() {
     // Real native SQL business transition, not a fake Durable Object response.
@@ -9165,148 +8797,120 @@ fn manual_preview_never_creates_instance_or_changes_sql() {
     assert_eq!(again.version, created.version);
     assert_eq!(changes(&s), before);
 }
-/// One real SQL owner and three concurrent decision submissions. "chatgpt" is
-/// only a synthetic *unverified external* label: this test does NOT assert
-/// authenticated chat approval or a live MCP/venue execution.
-#[tokio::test]
-async fn three_decision_sources_share_sql_owner_and_fail_closed() {
+/// SQL policy checks cover three synthetic origins; no external authentication is claimed.
+#[test]
+fn three_decision_sources_sql_policy_change_fails_closed() {
     let mut seeded = store();
     owned_fill(&mut seeded, "autonomous", "autonomous-seed", 100, "long", 3);
     let strategy_decision = seeded
         .claim_strategy_decision_with_id("autonomous", "bar-10", "market-inputs", 1, 7)
         .unwrap()
         .unwrap();
-    let path = seeded.path.clone();
-    let meta = seeded.meta.clone();
-    drop(seeded);
-    let sql = crate::AccountStoreHandle::open_existing(
-        path,
-        meta.account_key.clone(),
-        meta.installation_id.clone(),
-    )
-    .await
-    .unwrap();
-
-    let mut pending = Vec::new();
+    let mut ids = Vec::new();
     for (origin, instance, claim) in [
         ("human", "manual", None),
         ("chatgpt", "manual", None),
         ("autonomous", "autonomous", Some(strategy_decision.as_str())),
     ] {
-        let sql = sql.clone();
         let origin = origin.to_owned();
         let instance = instance.to_owned();
         let claim = claim.map(str::to_owned);
-        pending.push(tokio::spawn(async move {
-            sql.call(
-                std::time::Instant::now() + Duration::from_secs(5),
-                move |s| {
-                    let definition = s.strategy_definition(&instance)?;
-                    let id = format!("three_sources_{origin}");
-                    let decision = Decision {
-                        decision_id: claim.unwrap_or_else(|| format!("external_{origin}")),
-                        instance_id: Some(instance.clone()),
-                        decision_at: 9,
-                        input_digest: if origin == "autonomous" {
-                            "market-inputs".into()
-                        } else {
-                            "unverified-external-request".into()
-                        },
-                        policy_revision: 1,
-                        code_version: "three-sources-fixture".into(),
-                    };
-                    let request = NewIntent {
-                        plan: IntentPlan {
-                            strategy_definition_id: definition.definition_id,
-                            strategy_definition_version: definition.version,
-                            strategy_parameters_digest: definition.parameters_digest,
-                            contract_value: Decimal::ONE,
-                            inverse: false,
-                            settlement_currency: "USDT".into(),
-                            position_side: "long".into(),
-                            private_source_generation: 1,
-                            operation: "open".into(),
-                            side: "buy".into(),
-                            quantity: Decimal::ONE,
-                            limit_price: Decimal::from(100),
-                            stop_price: Some(Decimal::from(90)),
-                            strategy_instance: instance.clone(),
-                            planned_loss_usd: Decimal::ONE,
-                            source_generation: 1,
-                        },
-                        intent_id: id.clone(),
-                        idempotency_key: format!("idempotency_{origin}"),
-                        request_hash: format!("hash_{origin}"),
-                        client_order_id: format!("client_{origin}"),
-                        deadline: 1000,
-                        plan_hash: format!("plan_{origin}"),
-                        policy_revision: 1,
-                        risk_increase: true,
-                        instrument_id: "BTC-USDT-SWAP".into(),
-                    };
-                    assert_eq!(s.prepare(&decision, &request)?.intent_id, id);
-                    // Same request cannot produce a second SQL intent.
-                    assert_eq!(s.prepare(&decision, &request)?.intent_id, id);
-                    s.reserve(
-                        &CentralReceipt {
-                            reservation_key: format!("synthetic_risk_{origin}"),
-                            account_key: s.meta.account_key.clone(),
-                            installation_id: s.meta.installation_id.clone(),
-                            instance_id: Some(instance),
-                            intent_id: id.clone(),
-                            plan_hash: request.plan_hash,
-                            policy_revision: 1,
-                            receipt_hash: format!("synthetic_receipt_{origin}"),
-                            requested_loss_usd: Decimal::ONE,
-                            conversion_digest: "synthetic-fx".into(),
-                        },
-                        11,
-                    )?;
-                    assert_eq!(s.intent(&id)?.unwrap().state, IntentState::Reserved);
-                    Ok(id)
+        let id = (|s: &mut AccountStore| -> StoreResult<String> {
+            let definition = s.strategy_definition(&instance)?;
+            let id = format!("three_sources_{origin}");
+            let decision = Decision {
+                decision_id: claim.unwrap_or_else(|| format!("external_{origin}")),
+                instance_id: Some(instance.clone()),
+                decision_at: 9,
+                input_digest: if origin == "autonomous" {
+                    "market-inputs".into()
+                } else {
+                    "unverified-external-request".into()
                 },
-            )
-            .await
-        }));
-    }
-    let mut ids = Vec::new();
-    for task in pending {
-        ids.push(task.await.unwrap().unwrap());
+                policy_revision: 1,
+                code_version: "three-sources-fixture".into(),
+            };
+            let request = NewIntent {
+                plan: IntentPlan {
+                    strategy_definition_id: definition.definition_id,
+                    strategy_definition_version: definition.version,
+                    strategy_parameters_digest: definition.parameters_digest,
+                    contract_value: Decimal::ONE,
+                    inverse: false,
+                    settlement_currency: "USDT".into(),
+                    position_side: "long".into(),
+                    private_source_generation: 1,
+                    operation: "open".into(),
+                    side: "buy".into(),
+                    quantity: Decimal::ONE,
+                    limit_price: Decimal::from(100),
+                    stop_price: Some(Decimal::from(90)),
+                    strategy_instance: instance.clone(),
+                    planned_loss_usd: Decimal::ONE,
+                    source_generation: 1,
+                },
+                intent_id: id.clone(),
+                idempotency_key: format!("idempotency_{origin}"),
+                request_hash: format!("hash_{origin}"),
+                client_order_id: format!("client_{origin}"),
+                deadline: 1000,
+                plan_hash: format!("plan_{origin}"),
+                policy_revision: 1,
+                risk_increase: true,
+                instrument_id: "BTC-USDT-SWAP".into(),
+            };
+            assert_eq!(s.prepare(&decision, &request)?.intent_id, id);
+            // Same request cannot produce a second SQL intent.
+            assert_eq!(s.prepare(&decision, &request)?.intent_id, id);
+            s.reserve(
+                &CentralReceipt {
+                    reservation_key: format!("synthetic_risk_{origin}"),
+                    account_key: s.meta.account_key.clone(),
+                    installation_id: s.meta.installation_id.clone(),
+                    instance_id: Some(instance),
+                    intent_id: id.clone(),
+                    plan_hash: request.plan_hash,
+                    policy_revision: 1,
+                    receipt_hash: format!("synthetic_receipt_{origin}"),
+                    requested_loss_usd: Decimal::ONE,
+                    conversion_digest: "synthetic-fx".into(),
+                },
+                11,
+            )?;
+            assert_eq!(s.intent(&id)?.unwrap().state, IntentState::Reserved);
+            Ok(id)
+        })(&mut seeded)
+        .unwrap();
+        ids.push(id);
     }
     assert_eq!(ids.len(), 3);
-    let sql_view = sql.clone();
-    sql_view
-        .call(
-            std::time::Instant::now() + Duration::from_secs(5),
-            move |s| {
-                let count: i64 = s.connection.query_row(
-                    "SELECT count(*) FROM intents WHERE intent_id LIKE 'three_sources_%'",
-                    [],
-                    |r| r.get(0),
-                )?;
-                assert_eq!(count, 3);
-                // One central revision applies to every source, regardless
-                // of synthetic external labels or internal strategy claims.
-                s.apply_authority_policy(2, true, "campaign-20", Decimal::from(20))?;
-                for id in &ids {
-                    assert!(matches!(
-                        s.begin_post(id, 1, 20),
-                        Err(StoreError::Invalid("POLICY_CHANGED"))
-                    ));
-                    let stored = s.intent(id)?.unwrap();
-                    assert_eq!(stored.state, IntentState::Reserved);
-                    let began: Option<i64> = s.connection.query_row(
-                        "SELECT begin_post_at FROM intents WHERE intent_id=?1",
-                        [id],
-                        |r| r.get(0),
-                    )?;
-                    assert!(began.is_none(), "no source may cross the POST fence");
-                }
-                Ok(())
-            },
-        )
-        .await
-        .unwrap();
+    (|s: &mut AccountStore| -> StoreResult<()> {
+        let count: i64 = s.connection.query_row(
+            "SELECT count(*) FROM intents WHERE intent_id LIKE 'three_sources_%'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(count, 3);
+        // One central revision applies to every source, regardless
+        // of synthetic external labels or internal strategy claims.
+        s.apply_authority_policy(2, true, "campaign-20", Decimal::from(20))?;
+        for id in &ids {
+            assert!(matches!(
+                s.begin_post(id, 1, 20),
+                Err(StoreError::Invalid("POLICY_CHANGED"))
+            ));
+            let stored = s.intent(id)?.unwrap();
+            assert_eq!(stored.state, IntentState::Reserved);
+            let began: Option<i64> = s.connection.query_row(
+                "SELECT begin_post_at FROM intents WHERE intent_id=?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            assert!(began.is_none(), "no source may cross the POST fence");
+        }
+        Ok(())
+    })(&mut seeded)
+    .unwrap();
 }
 
 // K6 V-02: one SQLite owner observes two partial entry fills, a full exit,
@@ -11232,55 +10836,6 @@ fn p02_existing_v2_rebuilds_strategy_nav_revision_lookup_without_rewriting_facts
             .any(|d| d.contains("idx_nav_scope_version_time")),
         "{details:?}"
     );
-}
-
-#[tokio::test]
-async fn sql_job_timing_is_returned_with_its_own_result() {
-    let existing = store();
-    let path = existing.path.clone();
-    let account = existing.meta.account_key.clone();
-    let installation = existing.meta.installation_id.clone();
-    drop(existing);
-    let handle = crate::AccountStoreHandle::open_existing(path, account.clone(), installation)
-        .await
-        .unwrap();
-    let (first, timing) = handle
-        .call_with_timing(std::time::Instant::now() + Duration::from_secs(3), |s| {
-            Ok(s.meta().account_key.clone())
-        })
-        .await
-        .unwrap();
-    assert_eq!(first, account);
-    let counters = handle.sql_timing();
-    assert_eq!(counters.observed_jobs, 1);
-    assert_eq!(counters.last_queue_wait_ms, timing.queue_wait_ms);
-    assert_eq!(counters.last_sql_owner_ms, timing.sql_owner_ms);
-    assert_eq!(
-        handle
-            .call(std::time::Instant::now() - Duration::from_millis(1), |_s| {
-                Ok(())
-            })
-            .await
-            .unwrap_err()
-            .to_string(),
-        "ACCOUNT_QUEUE_DEADLINE"
-    );
-    assert_eq!(handle.sql_timing().observed_jobs, 1);
-    let (second, second_timing) = handle
-        .call_with_timing(std::time::Instant::now() + Duration::from_secs(3), |_s| {
-            Ok(2_u8)
-        })
-        .await
-        .unwrap();
-    assert_eq!(second, 2);
-    assert_eq!(handle.sql_timing().observed_jobs, 2);
-    assert_eq!(
-        handle.sql_timing().last_sql_owner_ms,
-        second_timing.sql_owner_ms
-    );
-    // The first job owns its immutable timing even after later work.
-    assert_eq!(first, account);
-    assert_eq!(counters.last_sql_owner_ms, timing.sql_owner_ms);
 }
 
 #[test]

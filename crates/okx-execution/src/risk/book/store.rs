@@ -52,16 +52,14 @@ mod unsent;
 #[cfg(test)]
 use integrity::verify_reservation_aggregates;
 pub use opening::{NativeOpeningAccount, NativeOpeningSource};
-#[cfg(test)]
-pub(super) use post::PostAuthorized;
 pub(crate) use post::PostFenceInput;
 pub(in crate::risk::book) use post::{PostDecision, begin_unified_post_and_account_transaction};
 pub(crate) use queries::{AccountReadback, ReservationReadback};
 #[cfg(test)]
-pub(super) use settlement::{EntrySettlementReceipt, PartialEntrySqlProof};
+pub(super) use settlement::PartialEntrySqlProof;
 pub(crate) use terminal::TerminalResolveInput;
 #[cfg(test)]
-pub(super) use unsent::{UnsentReceipt, UnsentSqlProof};
+pub(super) use unsent::UnsentSqlProof;
 
 #[derive(Debug, Error)]
 pub(super) enum RiskStoreError {
@@ -78,15 +76,6 @@ pub(super) enum RiskStoreError {
     #[error("RISK_BOOK_UNINITIALIZED")]
     #[cfg(test)]
     Uninitialized,
-    #[error("RISK_OWNER_QUEUE_FULL")]
-    #[cfg(test)]
-    QueueFull,
-    #[error("RISK_OWNER_STOPPED")]
-    #[cfg(test)]
-    WorkerStopped,
-    #[error("RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY")]
-    #[cfg(test)]
-    OutcomeUnknown,
     #[error("RISK_WRITER_ALREADY_RUNNING")]
     #[cfg(test)]
     WriterBusy,
@@ -103,14 +92,8 @@ pub(super) enum RiskStoreError {
     CensusUnproven,
     #[error("DURABLE_ENTRY_SQL_PROOF_MISSING")]
     EntrySqlUnproven,
-    #[error("ENTRY_SQL_PROOF_UNAVAILABLE")]
-    #[cfg(test)]
-    EntrySqlUnavailable,
     #[error("DURABLE_UNSENT_SQL_PROOF_MISSING")]
     UnsentSqlUnproven,
-    #[error("UNSENT_SQL_PROOF_UNAVAILABLE")]
-    #[cfg(test)]
-    UnsentSqlUnavailable,
     #[error("CUMULATIVE_LOSS_SOURCE_REGRESSION")]
     LossRegression,
     #[error("IDEMPOTENCY_CONFLICT")]

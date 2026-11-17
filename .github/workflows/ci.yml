@@ -695,7 +695,7 @@ jobs:
       - name: Check Rust format before expensive Native/Worker scenarios
         run: cargo fmt --all -- --check
 
-      - name: Direct unsent release contract (#501)
+      - name: Native unsent authority and Demo guards (economic replay in Native contracts)
         shell: pwsh
         run: |
           $output = & cargo test --locked -p okx-agent --lib trade_service::unsent_release::tests:: -- --nocapture 2>&1
@@ -703,7 +703,22 @@ jobs:
           $output | Out-Host
           if ($code -ne 0) { exit $code }
           $proof = [regex]::Match(($output -join "`n"), 'test result: ok\.\s+(\d+) passed;')
-          if (-not $proof.Success -or [int]$proof.Groups[1].Value -ne 10) { throw 'UNSENT_RELEASE_TEST_COUNT_INVALID' }
+          if (-not $proof.Success -or [int]$proof.Groups[1].Value -ne 2) { throw 'UNSENT_RELEASE_NATIVE_GUARD_COUNT_INVALID' }
+          # The removed Inspect/CAS/second-ACK fixture no longer represents
+          # financial execution. Require actual local release + cold replay
+          # and post-HELD source refusal, rather than counting only guards.
+          foreach ($case in @(
+            'accounts::native_trade_contracts::native_reserve_recovery::risk_book_contract_native_public_cancel_after_held_replays_and_cold_reopens_without_send',
+            'accounts::native_trade_contracts::native_changed_source::risk_book_contract_native_changed_post_held_fee_releases_unsent_and_replans'
+          )) {
+            $output = & cargo test --locked -p okx-agent --lib $case -- --exact --nocapture 2>&1
+            $code = $LASTEXITCODE
+            $output | Out-Host
+            if ($code -ne 0) { exit $code }
+            if (($output -join "`n") -notmatch 'test result: ok\.\s+1 passed;') {
+              throw "UNSENT_RELEASE_CURRENT_OWNER_NOT_EXECUTED: $case"
+            }
+          }
 
       - name: Verify recovery owner failures before integration
         if: inputs.target_case != 'UnsentRelease'
