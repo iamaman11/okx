@@ -154,7 +154,6 @@ impl NativeRiskClient {
         }
     }
 
-
     /// The authoritative policy commit is one finance owner operation.
     pub async fn apply_required_governance(
         &self,
@@ -164,9 +163,7 @@ impl NativeRiskClient {
             #[cfg(test)]
             RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED".into()),
             RiskRoute::Local(backend) => backend.apply_governance(snapshot).await,
-            RiskRoute::LocalStopped(backend) => {
-                backend.verify_stopped_observation(snapshot).await
-            }
+            RiskRoute::LocalStopped(backend) => backend.verify_stopped_observation(snapshot).await,
         }
     }
 
@@ -183,7 +180,6 @@ impl NativeRiskClient {
             }
         }
     }
-
 
     pub async fn request(&self, command: RiskCommand) -> Result<RiskResult, &'static str> {
         if !command.valid() {

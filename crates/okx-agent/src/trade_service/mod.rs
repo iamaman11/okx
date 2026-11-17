@@ -300,9 +300,7 @@ impl TradeService {
         let observation = self.risk.observe_required_governance(snapshot).await?;
         // Transport observation never grants execution. The strict financial
         // policy application still occurs at the account's authority gate.
-        if observation
-            == crate::native_finance_risk::NativePolicyObservation::WaitingForAccounts
-        {
+        if observation == crate::native_finance_risk::NativePolicyObservation::WaitingForAccounts {
             eprintln!(
                 "OKX_NATIVE_POLICY_V1 state=WAITING_FOR_ACCOUNTS reason=NATIVE_CAMPAIGN_ACCOUNTS_NOT_CONNECTED"
             );
@@ -434,10 +432,7 @@ impl TradeService {
         {
             // Production has exactly one account-scoped financial owner.
             let (owner, account) = resource.execution.store.native_owner().map_err(err)?;
-            let risk_owner = self
-                .risk
-                .required_finance_owner()
-                .map_err(str::to_owned)?;
+            let risk_owner = self.risk.required_finance_owner().map_err(str::to_owned)?;
             if owner.installation_id() == self.accounts.installation_id()
                 && risk_owner.installation_id() == owner.installation_id()
                 && account == resource.configuration.account_key.wire()

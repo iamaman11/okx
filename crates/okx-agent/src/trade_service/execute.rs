@@ -1808,10 +1808,7 @@ impl TradeService {
                 .map_err(err)
         };
         let result = if let Some(claim) = native_send_claim {
-            let owner = self
-                .risk
-                .required_finance_owner()
-                .map_err(str::to_owned)?;
+            let owner = self.risk.required_finance_owner().map_err(str::to_owned)?;
             submission::post_committed_native(
                 &owner,
                 self.accounts.installation_id(),
