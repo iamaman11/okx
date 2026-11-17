@@ -58,7 +58,10 @@ stored-job access do not perform that fetch.
 
 ## Installation versus activation
 
-CONTROL stages a verified content-addressed worker and publishes
+`HostControlOperation::DeployResearch` dispatches through `okx-host-control::runtime`
+to `artifact::research_component::deploy_research`. CONTROL verifies the source,
+component origins, compatibility and installed non-Research components, stages a
+verified content-addressed worker and publishes
 `installed-research.json`. This does not replace the running child. Agent detects
 the candidate, drains admissions, waits for old jobs, commands, and public-source
 handlers, then closes the old process before starting a verified replacement.
@@ -93,5 +96,8 @@ To add an experiment with existing rules, submit another validated
 operator/replay registry and its direct tests, then connect it through the worker
 planner. Financial state and CONTROL do not belong to that calculation change.
 
-CODE acceptance remains governed by #512. Temporary fixture process tests are
-not evidence of installation, real exchange connectivity, or live trading.
+CODE acceptance remains governed by #512: U01–U05 and the final exact-SHA gates
+remain outstanding until their required evidence is accepted. Temporary fixture
+process tests are not evidence of installation, real exchange connectivity, or
+live trading. The [operation map](acceptance/512/operation-map.md) links the
+current supported families to their owners and direct tests.

@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod activation_tests;
 mod installed;
+#[cfg(test)]
+mod measurement_tests;
 use futures_util::{SinkExt, StreamExt};
 use okx_protocol::{
     analytics::{MarketRequest, ResearchRequest},

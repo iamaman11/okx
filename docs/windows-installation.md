@@ -22,6 +22,26 @@ their SHA-256, exact source HEAD/tree and Rust version in `manifest.json`.
 The existing CONTROL operations deploy Agent, stage/activate controller and
 upgrade Launcher from an explicitly identified GitHub run/artifact.
 
+### Research-only component update
+
+`HostControlOperation::DeployResearch` takes `run_id`, `artifact_id`, and
+`expected_source_tree`. CONTROL fetches the accepted GitHub archive and verifies
+its v2 composition, component bytes and origins, source tree, and compatibility.
+It checks the reused Agent and Controller against their installed provenance and
+executable hashes, and checks Launcher bytes. A verified Worker is staged in a
+content-addressed location and `installed-research.json` records the candidate.
+The running Agent's `ResearchClient` separately drains the old child and activates
+the verified candidate; installation and active worker are distinct states. A
+failed validation does not authorize activation or a financial Engine restart.
+Use the existing authenticated CONTROL operation, not an unverified local EXE.
+
+This describes the implemented path, not installed acceptance. #512 r15 checks
+the separate Worker build and existing verification/staging/handoff contracts.
+The first release requires full CI; later Research-only releases reuse a verified
+base. Actual host installation, process/PID continuity and physical/live acceptance
+remain under #449. An expired or missing origin artifact is rejected; there is
+no additional credential-backed archive cache or recovery installer.
+
 Production installation/update must retain all of these checks:
 
 1. Canonical repository/owner identity; successful, completed PR `CI` run.

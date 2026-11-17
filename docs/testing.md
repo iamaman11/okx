@@ -1,3 +1,9 @@
+## #512 current navigation and evidence status (r15)
+
+The current F01–F12 handler/owner/effect/test map is [operation-map.md](acceptance/512/operation-map.md); [research-boundaries.md](research-boundaries.md) describes the Worker and finance boundary. The sections below are historical checkpoints, including the former S0 map; their source identities, measurements and statements about then-unfinished code remain evidence of those cuts only.
+
+#512 CODE, independent release U01–U05, final exact-SHA gates, and physical/installed/live acceptance are not established by these historical reports. Reproduce direct tests on the candidate and report their actual result and source identity; a filtered test or fixture is not the full gate. No current run is asserted by this document.
+
 ## #512 A — frozen changed contracts and direct checks (r13)
 
 This cut extends d1b6b8bf in PR #513. It does not certify all C0–C13 or Research Worker independence. The census core now takes only the account registry, not the entire TradeService. The original F01–F12 map below stays the navigation index; historical checkpoints are not current acceptance.

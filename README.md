@@ -17,7 +17,7 @@ installation and lifecycle. Research cannot place orders or write financial stat
 **#510 CODE is accepted; #512 remains in progress in Draft PR #513.**
 This branch has not completed independent-release, installed or live acceptance.
 Current evidence: [testing](docs/testing.md). Research ownership and direct
-commands: [source map](docs/research-boundaries.md). The boundaries and acceptance
+commands: [source map](docs/research-boundaries.md); supported operation owners and direct tests: [F01–F12 map](docs/acceptance/512/operation-map.md). The boundaries and acceptance
 criteria are in [#512](https://github.com/iamaman11/okx/issues/512). This refactoring
 does not claim that the complete acceptance campaign finishes in seconds.
 
@@ -26,7 +26,7 @@ does not claim that the complete acceptance campaign finishes in seconds.
 | Module | Owns | Does not own |
 | --- | --- | --- |
 | `crates/okx-agent` | One runtime and request orchestration | A second venue execution state machine |
-| `crates/okx-agent/src/research_client` | Typed child communication and verified worker activation | Research calculations or financial decisions |
+| `crates/okx-agent/src/research_client.rs` | Typed child communication and verified worker activation | Research calculations or financial decisions |
 | `crates/okx-research-worker/src/analytics/market.rs` | Market queries and computations using host-owned public observations | Trading decisions and account SQL |
 | `crates/okx-research-worker/src/analytics/result.rs` | Verified immutable result reads, page cursors and export integrity | Research CPU execution or SQL mutations |
 | `crates/okx-research-worker/src/analytics/{jobs,executor,budget,benchmark}.rs` | Research catalog, CPU/memory admission and benchmark jobs | Financial storage and live permissions |
