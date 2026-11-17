@@ -60,6 +60,13 @@ recorded multi-page capture and historical diagnostic recovery **remain**
 until equivalent direct Native properties are demonstrated. This does not
 remove the test-only registry fallback or justify S1 acceptance.
 
+The full Windows CI exact-name recovery gate must not silently invoke a
+removed legacy fixture. It now requires **two** real current-owner witnesses,
+`accounts::native_trade_contracts::risk_book_contract_native_public_execute_lost_ack_and_replay_send_once`
+and `accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_after_create_recovers_original_unknown`.
+Both must report exactly one executed PASS, including a cold OS-kill/reopen
+boundary; a filtered-out test is a failure, not a passing substitution.
+
 ### #512 — Native POST/replay/UNKNOWN witnesses replace retired worker tests
 
 Eight old per-account `AccountStoreHandle` send/recovery simulations were removed
