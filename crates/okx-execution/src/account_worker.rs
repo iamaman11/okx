@@ -47,7 +47,6 @@ pub struct AccountStorageReadback {
     pub owner_terminated: bool,
 }
 
-
 #[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
 mod legacy;
 #[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
@@ -75,4 +74,3 @@ pub(crate) use unified::{
 };
 #[cfg(test)]
 pub(crate) use unified::{test_bind_native_census, test_reserve_reported_sql};
-
