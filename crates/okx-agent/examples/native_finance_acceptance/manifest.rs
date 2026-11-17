@@ -154,6 +154,10 @@ const TYPED_ADMISSION_FAILURE: Witness = Witness {
     package: "okx-agent",
     test: "admission_failure::tests::store_failure_preserves_typed_cause_and_safe_wire_code",
 };
+const TYPED_SETTLEMENT_UNKNOWN: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::entry_settlement::direct_tests::native_committed_reply_unknown_is_awaiting_evidence_at_both_boundaries",
+};
 const LOGICAL_READ_DEADLINE: Witness = Witness {
     package: "okx-agent",
     test: "diagnostics::native_intent::tests::logical_diagnostic_deadline_waits_until_boundary_without_real_sleep",
@@ -819,6 +823,7 @@ pub const CONTRACTS: &[Contract] = &[
             POST_REPLY,
             DIAGNOSTIC,
             TYPED_ADMISSION_FAILURE,
+            TYPED_SETTLEMENT_UNKNOWN,
         ],
         // The actual lost-COMMIT-reply tests now invoke the SAME coherent
         // inspection operation used by the public projection, before/after

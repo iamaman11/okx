@@ -55,6 +55,32 @@ pub(super) struct EntrySettlementError {
     pub(super) reason_code: String,
 }
 
+fn store_failure_kind(error: &okx_execution::StoreError) -> SettlementFailureKind {
+    match error {
+        okx_execution::StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY") => {
+            SettlementFailureKind::AwaitingEvidence
+        }
+        okx_execution::StoreError::Sql(_) | okx_execution::StoreError::Io(_) => {
+            SettlementFailureKind::Unavailable
+        }
+        okx_execution::StoreError::Invalid(_) => SettlementFailureKind::Failed,
+    }
+}
+
+fn risk_failure_kind(reason: &str) -> SettlementFailureKind {
+    match reason {
+        "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY"
+        | "RISK_TRANSPORT_LOST_DO_NOT_REPLAY"
+        | "UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY" => {
+            SettlementFailureKind::AwaitingEvidence
+        }
+        "NATIVE_RISK_INSPECT_SOURCE_UNAVAILABLE"
+        | "NATIVE_RISK_SETTLEMENT_OWNER_UNAVAILABLE"
+        | "FINANCE_CAMPAIGN_IDENTITY_UNAVAILABLE" => SettlementFailureKind::Unavailable,
+        _ => SettlementFailureKind::Failed,
+    }
+}
+
 /// Explicit dependencies: verified account identity, existing intent/readback,
 /// real AccountStore, RiskAuthority transport and current governance.
 /// Read governance at the original point, after venue validation. Re-evaluate
@@ -90,26 +116,13 @@ async fn settle_inner(
         reason_code,
     };
     let store_failure = |error: okx_execution::StoreError| {
-        let kind = match &error {
-            okx_execution::StoreError::Sql(_) | okx_execution::StoreError::Io(_) => {
-                Kind::Unavailable
-            }
-            okx_execution::StoreError::Invalid(_) => Kind::Failed,
-        };
+        let kind = store_failure_kind(&error);
         failure(Stage::Settlement, kind, err(error))
     };
     // This transport boundary exposes exact static outcomes. An unrecognized
     // outcome remains a failure and cannot be mistaken for a successful replay.
     let risk_failure = |reason: &str| {
-        let kind = match reason {
-            "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY" | "RISK_TRANSPORT_LOST_DO_NOT_REPLAY" => {
-                Kind::AwaitingEvidence
-            }
-            "NATIVE_RISK_INSPECT_SOURCE_UNAVAILABLE"
-            | "NATIVE_RISK_SETTLEMENT_OWNER_UNAVAILABLE"
-            | "FINANCE_CAMPAIGN_IDENTITY_UNAVAILABLE" => Kind::Unavailable,
-            _ => Kind::Failed,
-        };
+        let kind = risk_failure_kind(reason);
         failure(Stage::RiskResponse, kind, reason.to_owned())
     };
     if account.environment != okx_protocol::accounts::Environment::Real || !i.risk_increase {

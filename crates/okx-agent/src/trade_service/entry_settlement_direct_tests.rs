@@ -21,6 +21,27 @@ fn deadline() -> Instant {
     Instant::now() + std::time::Duration::from_secs(3)
 }
 
+#[test]
+fn native_committed_reply_unknown_is_awaiting_evidence_at_both_boundaries() {
+    let code = "UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY";
+    assert_eq!(
+        store_failure_kind(&okx_execution::StoreError::Invalid(code)),
+        SettlementFailureKind::AwaitingEvidence
+    );
+    assert_eq!(
+        risk_failure_kind(code),
+        SettlementFailureKind::AwaitingEvidence
+    );
+    assert_eq!(
+        risk_failure_kind("NATIVE_RISK_SETTLEMENT_OWNER_UNAVAILABLE"),
+        SettlementFailureKind::Unavailable
+    );
+    assert_eq!(
+        risk_failure_kind("PREFIX_UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY"),
+        SettlementFailureKind::Failed
+    );
+}
+
 #[tokio::test]
 async fn native_entry_preconditions_reject_before_financial_mutation() {
     let fixture = native::fixture().await;
