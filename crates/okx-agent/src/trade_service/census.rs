@@ -15,10 +15,8 @@ fn census_request(
         .positions
         .iter()
         .filter_map(|p| {
-            match super::reconcile::verified_venue_position_direction(
-                &p.position_side,
-                &p.position,
-            ) {
+            match super::reconcile::verified_venue_position_direction(&p.position_side, &p.position)
+            {
                 Ok(Some((direction, _))) => {
                     Some(Ok((p.instrument_id.clone(), direction.to_owned())))
                 }
@@ -1226,4 +1224,3 @@ pub(super) fn verify_post_held_fx(reserved: &str, observed: &str) -> Result<(), 
     }
     Ok(())
 }
-

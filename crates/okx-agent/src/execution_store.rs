@@ -649,7 +649,9 @@ impl ExecutionStore {
         match self {
             #[cfg(test)]
             Self::Legacy(store) => {
-                store.call(deadline, |sql| sql.source_generation_base()).await
+                store
+                    .call(deadline, |sql| sql.source_generation_base())
+                    .await
             }
             Self::Native { owner, account } => {
                 let _ = deadline;
