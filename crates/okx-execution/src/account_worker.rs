@@ -54,13 +54,14 @@ pub struct AccountStorageReadback {
 mod unified;
 pub use crate::risk::{NativeOpeningAccount, NativeOpeningSource};
 pub use unified::{
-    NativeAccountDiagnosticSnapshot, NativeCampaignAccountPolicy, NativeCampaignPolicy,
-    NativeCampaignPolicyReceipt, NativeCampaignStrategyPolicy, NativeIntentDiagnosticSnapshot,
-    NativePostDecision, NativePostRequest, NativeRecoveryProof, NativeReserveDecision,
-    NativeReserveRequest, NativeRiskStopDiagnostic, ReportedOpeningCensus, ReportedOpeningReceipt,
-    ReportedRiskCensus, StrategyDecisionClaimCommand, StrategyMutationCommand,
-    UnifiedFinanceAccountPolicyReadback, UnifiedFinanceAccountReadback,
-    UnifiedFinanceBoundSettlement, UnifiedFinanceBoundSettlementReceipt, UnifiedFinanceBoundUnsent,
+    CensusObservedAtMs, CensusReadFloorMs, NativeAccountDiagnosticSnapshot, NativeBudgetDenial,
+    NativeCampaignAccountPolicy, NativeCampaignPolicy, NativeCampaignPolicyReceipt,
+    NativeCampaignStrategyPolicy, NativeIntentDiagnosticSnapshot, NativePostDecision,
+    NativePostRequest, NativeRecoveryProof, NativeReserveDecision, NativeReserveRequest,
+    NativeRiskStopDiagnostic, ReportedOpeningCensus, ReportedOpeningReceipt, ReportedRiskCensus,
+    StrategyDecisionClaimCommand, StrategyMutationCommand, UnifiedFinanceAccountPolicyReadback,
+    UnifiedFinanceAccountReadback, UnifiedFinanceBoundSettlement,
+    UnifiedFinanceBoundSettlementReceipt, UnifiedFinanceBoundUnsent,
     UnifiedFinanceBoundUnsentReceipt, UnifiedFinanceCampaignSummary, UnifiedFinanceHandle,
     UnifiedFinanceInventory, UnifiedFinancePolicy, UnifiedFinancePolicyAccount,
     UnifiedFinanceReservationReadback,

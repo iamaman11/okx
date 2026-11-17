@@ -120,6 +120,18 @@ async fn risk_book_contract_native_stale_post_held_tariff_diagnostic_is_exact_an
     assert_eq!(explanation["owner"], "execution.unified_finance");
     assert_eq!(explanation["stage"], "REJECTED");
     assert_eq!(explanation["reason_code"], "ENTRY_FEE_EXCHANGE_TIME_STALE");
+    assert_eq!(
+        explanation["reference"],
+        format!("intent:{}", held.intent_id)
+    );
+    assert_eq!(
+        explanation["recorded_incident"],
+        "ENTRY_FEE_EXCHANGE_TIME_STALE"
+    );
+    assert_eq!(
+        explanation["recorded_incident_quality"],
+        "DURABLE_INTENT_INCIDENT_NOT_VENUE_CONFIRMATION"
+    );
     assert_eq!(explanation["intent"]["intent_id"], held.intent_id);
     assert_eq!(explanation["intent"]["plan_hash"], held.plan_hash);
     assert_eq!(
@@ -134,6 +146,10 @@ async fn risk_book_contract_native_stale_post_held_tariff_diagnostic_is_exact_an
     assert_eq!(explanation["send_state"], "NOT_STARTED_IN_SQL");
     assert_eq!(explanation["reservation_state"], "RELEASED");
     assert_eq!(explanation["source_as_of"]["state"], "STORED_SQL_SOURCE");
+    assert_eq!(
+        explanation["source_as_of"]["quality"],
+        "durable_historical_source_not_current_health"
+    );
     assert_eq!(
         explanation["source_as_of"]["current_validity"],
         "NOT_EVALUATED"

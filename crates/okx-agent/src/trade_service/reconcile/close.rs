@@ -22,7 +22,10 @@ impl TradeService {
             .store
             .lookup_intent(
                 deadline(),
-                okx_execution::TradeIntentLookup::IdempotencyKey(k),
+                crate::execution_store::IntentLookup::new(
+                    okx_execution::TradeIntentLookup::IdempotencyKey(k),
+                )
+                .map_err(err)?,
             )
             .await
             .map_err(err)?

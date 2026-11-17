@@ -510,13 +510,16 @@ async fn diagnostics_inner(
                     return (key, None, Some(String::from("ACCOUNT_UNAVAILABLE")));
                 };
                 let query = reference.clone();
+                let lookup = match crate::execution_store::IntentLookup::new(
+                    okx_execution::TradeIntentLookup::Reference(query),
+                ) {
+                    Ok(lookup) => lookup,
+                    Err(_) => return (key, None, Some(String::from("INVALID_INTENT_REFERENCE"))),
+                };
                 match r
                     .execution
                     .store
-                    .lookup_intent(
-                        Instant::now() + Duration::from_secs(3),
-                        okx_execution::TradeIntentLookup::Reference(query),
-                    )
+                    .lookup_intent(Instant::now() + Duration::from_secs(3), lookup)
                     .await
                 {
                     Ok(Some(_)) => (key, Some(r), None),

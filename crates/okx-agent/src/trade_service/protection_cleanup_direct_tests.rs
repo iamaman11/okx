@@ -76,7 +76,10 @@ fn positions(qty: &str) -> Vec<(String, String)> {
 }
 async fn operation(store: &ExecutionStore, key: &str) -> okx_execution::OperationReceipt {
     store
-        .operation(deadline(), key.to_owned())
+        .operation(
+            deadline(),
+            crate::execution_store::OperationId::new(key.to_owned()).unwrap(),
+        )
         .await
         .unwrap()
         .unwrap()
@@ -318,7 +321,7 @@ async fn pc_05_restart_recovers_the_same_sql_begin_without_new_send() {
     let begin = operation(&f.store, "pc-05").await;
     let root = f.native.root.clone();
     let installation = f.native.owner.installation_id().to_owned();
-    let account_key = f.native.config.account_key.wire();
+    let account_key = f.native.config.account_key.clone();
     let verified_uid = f.native.config.account_key.verified_uid.clone();
     f.native.registry.shutdown().await;
     let mut terminated = f.native.owner.termination_signal();
@@ -661,7 +664,13 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     .unwrap();
     assert!(feed.outbound_posts.lock().unwrap().is_empty());
     let sql_key = format!("cleanup_{}", stored.client_order_id);
-    let sql_none = store.operation(deadline(), sql_key.clone()).await.unwrap();
+    let sql_none = store
+        .operation(
+            deadline(),
+            crate::execution_store::OperationId::new(sql_key.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
     assert!(sql_none.is_none(), "live order cannot begin cancel SQL");
 
     feed.expect_public_clock(raw(serde_json::json!([{

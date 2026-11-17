@@ -240,11 +240,62 @@ async fn risk_book_contract_native_public_b_uses_remaining_budget_after_a_settle
         denied.to_string().contains("CAMPAIGN_ENTRY_BUDGET"),
         "{denied}"
     );
+    assert_eq!(denied["status"], "completed", "{denied}");
+    assert_eq!(denied["data"]["state"], "REJECTED", "{denied}");
+    let denied_id = denied["data"]["intent_id"]
+        .as_str()
+        .expect("denial retains original intent id");
+    let diagnostic_reference = format!("intent:{denied_id}");
+    let requests_before = fixture.feed.requests.lock().unwrap().clone();
+    let posts_before = fixture.feed.outbound_posts.lock().unwrap().clone();
+    let explanation = crate::diagnostics::native_intent::read(
+        &b,
+        fixture.owner.installation_id(),
+        &diagnostic_reference,
+    )
+    .await;
+    let evidence = &explanation["budget_denial"];
+    assert_eq!(explanation["reference"], diagnostic_reference);
+    assert_eq!(explanation["stage"], "REJECTED");
+    assert_eq!(
+        explanation["reason_code"],
+        "CAMPAIGN_ENTRY_BUDGET_EXHAUSTED"
+    );
+    assert_eq!(evidence["state"], "STORED_FIRST_DENIAL");
+    assert_eq!(evidence["quality"], "HISTORICAL_NOT_CURRENT_BUDGET");
+    assert_eq!(evidence["current_budget"], "NOT_EVALUATED");
+    assert_eq!(evidence["account_policy_cap"], "UNKNOWN");
+    assert_eq!(evidence["fact"]["intent_id"], denied_id);
+    assert_eq!(
+        evidence["fact"]["account_key"],
+        b.configuration.account_key.wire()
+    );
+    assert_eq!(evidence["fact"]["requested_entry_usd"], "1.0005");
+    assert_eq!(evidence["fact"]["remaining_entry_usd"], "0.4995");
+    assert_eq!(
+        evidence["fact"]["reason"],
+        "CAMPAIGN_ENTRY_BUDGET_EXHAUSTED"
+    );
+    assert_eq!(
+        fixture.feed.requests.lock().unwrap().as_slice(),
+        requests_before
+    );
+    assert_eq!(
+        fixture.feed.outbound_posts.lock().unwrap().as_slice(),
+        posts_before
+    );
     let after = fixture
         .owner
         .campaign_summary(fixture.campaign.clone())
         .await
         .unwrap();
+    // B's admission census can advance the source-backed loss high-water even
+    // when it denies the order. The recorded fact belongs to that transaction,
+    // not the earlier summary before B's capture/admission.
+    assert_eq!(
+        evidence["fact"]["remaining_loss_usd"],
+        after.remaining_loss_usd
+    );
     assert_eq!(after.consumed_entry_usd, before.consumed_entry_usd);
     assert_eq!(after.reserved_entry_usd, before.reserved_entry_usd);
     assert_eq!(after.remaining_entry_usd, before.remaining_entry_usd);

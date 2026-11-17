@@ -34,7 +34,10 @@ async fn operation(account: &AccountResources, id: String) -> okx_execution::Ope
     account
         .execution
         .store
-        .operation(deadline(), id)
+        .operation(
+            deadline(),
+            crate::execution_store::OperationId::new(id).unwrap(),
+        )
         .await
         .unwrap()
         .unwrap()

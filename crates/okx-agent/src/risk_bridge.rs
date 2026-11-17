@@ -39,7 +39,7 @@ impl NativeRiskClient {
     pub(crate) async fn reserve_produced(
         &self,
         packet: crate::trade_service::ProducedReserve,
-    ) -> Result<(RiskResult, Option<okx_execution::CentralReceipt>), &'static str> {
+    ) -> Result<crate::native_finance_admission::ReserveAdmission, &'static str> {
         self.backend
             .resolved()
             .await?
@@ -49,7 +49,7 @@ impl NativeRiskClient {
     pub(crate) async fn post_produced(
         &self,
         packet: crate::trade_service::ProducedPost,
-    ) -> Result<(RiskResult, Option<okx_execution::CommittedVenueSend>), &'static str> {
+    ) -> Result<crate::native_finance_admission::PostAdmission, &'static str> {
         self.backend.resolved().await?.post_produced(packet).await
     }
     pub(crate) async fn install_produced_opening(

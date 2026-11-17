@@ -184,7 +184,10 @@ async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
     let original = store
         .lookup_intent(
             deadline(),
-            okx_execution::TradeIntentLookup::IntentId(id.clone()),
+            crate::execution_store::IntentLookup::new(okx_execution::TradeIntentLookup::IntentId(
+                id.clone(),
+            ))
+            .unwrap(),
         )
         .await
         .unwrap()

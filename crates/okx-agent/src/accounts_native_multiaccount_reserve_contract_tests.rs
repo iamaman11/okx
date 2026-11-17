@@ -315,12 +315,18 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
     }
     let census = ReportedRiskCensus {
         source_digest: hash(&json!((&sources, &losses))),
-        generated_at_ms: chrono::Utc::now().timestamp_millis(),
-        read_floor_ms: sources
-            .iter()
-            .map(|(_, risk)| risk.source_as_of)
-            .min()
-            .unwrap(),
+        generated_at_ms: okx_execution::account_worker::CensusObservedAtMs::new(
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap(),
+        read_floor_ms: okx_execution::account_worker::CensusReadFloorMs::new(
+            sources
+                .iter()
+                .map(|(_, risk)| risk.source_as_of)
+                .min()
+                .unwrap(),
+        )
+        .unwrap(),
         occupied,
         cumulative_loss_usd: losses,
     };

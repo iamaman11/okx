@@ -769,7 +769,13 @@ impl TradeService {
         let prior = r
             .execution
             .store
-            .lookup_intent(until, okx_execution::TradeIntentLookup::IdempotencyKey(key))
+            .lookup_intent(
+                until,
+                crate::execution_store::IntentLookup::new(
+                    okx_execution::TradeIntentLookup::IdempotencyKey(key),
+                )
+                .map_err(err)?,
+            )
             .await
             .map_err(err)?;
         if let Some(i) = prior {
@@ -1209,33 +1215,16 @@ impl TradeService {
                 .await
                 .map_err(err)?;
 
-            let reserved = {
-                let packet = ProducedReserve::from_production(
-                    reserve,
-                    native_process_incarnation()?.to_owned(),
-                    plan.planned_loss_usd,
-                )?;
-                self.risk
-                    .reserve_produced(packet)
-                    .await
-                    .map_err(|reason| (reason.to_owned(), false))
-                    .and_then(|(result, receipt)| {
-                        if result.status == RiskDecisionStatus::Held {
-                            Ok((result, receipt))
-                        } else {
-                            let denied = result.status == RiskDecisionStatus::Denied;
-                            Err((
-                                result.reason.unwrap_or_else(|| {
-                                    "NATIVE_RESERVE_DENIED_OUTCOME_REQUIRES_READBACK".into()
-                                }),
-                                denied,
-                            ))
-                        }
-                    })
-            };
-            let (held, native_receipt) = match reserved {
-                Ok(held) => held,
-                Err((reason, true)) => {
+            let packet = ProducedReserve::from_production(
+                reserve,
+                native_process_incarnation()?.to_owned(),
+                plan.planned_loss_usd,
+            )?;
+            let (held, receipt) = match self.risk.reserve_produced(packet).await {
+                Ok(crate::native_finance_admission::ReserveAdmission::Held { result, receipt }) => {
+                    (result, receipt)
+                }
+                Ok(crate::native_finance_admission::ReserveAdmission::Denied { reason }) => {
                     // This is the actual local owner's explicit Denied reply,
                     // not a timeout or lost reply. Its scoped transaction also
                     // refuses rejection if any original reservation exists.
@@ -1262,15 +1251,14 @@ impl TradeService {
                         "primary_reason":reason,"risk_release_state":"NOT_RESERVED"
                     })));
                 }
-                Err((reason, _)) => {
+                Err(reason) => {
                     // An enqueued native transaction may have committed before
                     // its reply was lost. Never reject/release it through the
                     // legacy account writer or obtain another send grant.
-                    return Ok(uncertain(&prepared.intent_id, &reason));
+                    return Ok(uncertain(&prepared.intent_id, reason));
                 }
             };
             let held_received = Instant::now();
-            let receipt = native_receipt.ok_or("NATIVE_RESERVE_DURABLE_RECEIPT_MISSING")?;
             if receipt.intent_id != prepared.intent_id
                 || receipt.plan_hash != prepared.plan_hash
                 || receipt.account_key != r.configuration.account_key.wire()
@@ -1298,7 +1286,7 @@ impl TradeService {
                 Ok((v, witness, claim)) => {
                     central = Some(v);
                     post_held_selected = Some(witness);
-                    native_send_claim = claim;
+                    native_send_claim = Some(claim);
                 }
                 Err(reason) => {
                     // The sole local owner can prove no BeginPost and atomically
@@ -1762,7 +1750,7 @@ impl TradeService {
         (
             RiskResult,
             PostHeldSelected,
-            Option<okx_execution::CommittedVenueSend>,
+            okx_execution::CommittedVenueSend,
         ),
         String,
     > {
@@ -1809,27 +1797,23 @@ impl TradeService {
                 },
             );
 
-            let (response, claim) = {
-                let packet = ProducedPost::from_production(command)?;
-                let (result, claim) = self
-                    .risk
-                    .post_produced(packet)
-                    .await
-                    .map_err(str::to_owned)?;
-                (Ok::<RiskResult, &'static str>(result), claim)
-            };
-            match response {
-                Ok(v) if v.status == RiskDecisionStatus::PostAuthorized => {
+            let packet = ProducedPost::from_production(command)?;
+            match self
+                .risk
+                .post_produced(packet)
+                .await
+                .map_err(str::to_owned)?
+            {
+                crate::native_finance_admission::PostAdmission::Authorized { result: v, claim } => {
                     if !post_receipt_bound(&v, &key, state.state.revision, sequence) {
                         return Err("POST_FENCE_RECEIPT_BINDING_MISMATCH".into());
                     }
 
-                    if claim.is_none() {
-                        return Err("NATIVE_POST_CLAIM_MISSING_NO_POST".into());
-                    }
                     return Ok((v, selected, claim));
                 }
-                Ok(v) if v.reason.as_deref() != Some("STALE_RISK_BOOK_SEQUENCE") => {
+                crate::native_finance_admission::PostAdmission::Denied { result: v }
+                    if v.reason.as_deref() != Some("STALE_RISK_BOOK_SEQUENCE") =>
+                {
                     return Err(v.reason.unwrap_or("CENTRAL_POST_FENCE_DENIED".into()));
                 }
                 _ => {

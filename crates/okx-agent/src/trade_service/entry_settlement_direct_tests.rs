@@ -109,7 +109,10 @@ async fn native_entry_preconditions_reject_before_financial_mutation() {
         missing.reason_code,
         "PARTIAL_ENTRY_ORDER_READBACK_UNAVAILABLE"
     );
-    assert_eq!(missing.stage, "venue_verification");
+    assert_eq!(missing.stage, EntrySettlementStage::VenueVerification);
+    assert_eq!(missing.kind, SettlementFailureKind::Failed);
+    assert_eq!(missing.intent_id, intent.intent_id);
+    assert_eq!(missing.intent_revision, intent.revision);
     let alien = TradeOrderDetails {
         instrument_id: intent.instrument_id.clone(),
         order_id: "foreign-order".into(),
@@ -138,7 +141,8 @@ async fn native_entry_preconditions_reject_before_financial_mutation() {
     .await
     .unwrap_err();
     assert_eq!(mismatch.reason_code, "ORDER_READBACK_IDENTITY_MISMATCH");
-    assert_eq!(mismatch.stage, "identity");
+    assert_eq!(mismatch.stage, EntrySettlementStage::Identity);
+    assert_eq!(mismatch.kind, SettlementFailureKind::Conflict);
     assert_eq!(
         fixture
             .owner

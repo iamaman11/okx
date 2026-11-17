@@ -21,7 +21,12 @@ impl TradeService {
         let fresh = r
             .execution
             .store
-            .begin_operation(deadline(), op, h, "cancel".into())
+            .begin_operation(
+                deadline(),
+                crate::execution_store::OperationId::new(op).map_err(err)?,
+                h,
+                "cancel".into(),
+            )
             .await
             .map_err(err)?;
         if !fresh {
@@ -68,7 +73,13 @@ impl TradeService {
         let result = i.intent_id.clone();
         r.execution
             .store
-            .operation_receipt(deadline(), op, h, "cancel".into(), result)
+            .operation_receipt(
+                deadline(),
+                crate::execution_store::OperationId::new(op).map_err(err)?,
+                h,
+                "cancel".into(),
+                result,
+            )
             .await
             .map_err(err)?;
         // Cancel ACK is not a terminal financial proof. Reconciliation

@@ -286,6 +286,10 @@ const DIAGNOSTIC_SCOPE: Witness = Witness {
     package: "okx-agent",
     test: "accounts::native_trade_contracts::native_diagnostics::risk_book_contract_native_intent_diagnostic_is_account_scoped_and_refuses_foreign_installation",
 };
+const DENIAL_REOPEN: Witness = Witness {
+    package: "okx-execution",
+    test: "account_worker::unified::owner_reserve_reply_tests::risk_book_contract_first_denial_survives_replay_reopen_and_rejects_corruption",
+};
 const DIAGNOSTIC_BUSY_COMPONENT: Witness = Witness {
     package: "okx-agent",
     test: "diagnostics::protection_trace::tests::contention_is_counted_and_readback_marks_a_gap",
@@ -758,9 +762,10 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB14.direct_budget_denied_diagnostic_drill",
-        witnesses: &[SHARED_CAP_PUBLIC],
-        // Actual read-only diagnostic asserts owner, refusal, no receipt/send
-        // and no extra HTTP while the other account remains held.
+        witnesses: &[SHARED_CAP_PUBLIC, SEQUENTIAL_B, DENIAL_REOPEN],
+        // Public refusal exposes the original requested/remaining amounts.
+        // Replay/reopen retains the first observation; corrupt evidence fails
+        // explicitly, and no diagnostic read grants a reserve or venue send.
         missing: None,
     },
     Contract {

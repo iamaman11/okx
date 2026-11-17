@@ -2,9 +2,9 @@
 //! No send claim is manufactured here. Real owner activation remains mandatory.
 use super::*;
 use crate::account_worker::{
-    NativeReserveDecision, NativeReserveRequest, ReportedRiskCensus, UnifiedFinanceWrite,
-    UnifiedFinanceWriteReceipt, apply_original_unified_finance_transaction,
-    test_bind_native_census, test_reserve_reported_sql,
+    CensusObservedAtMs, CensusReadFloorMs, NativeReserveDecision, NativeReserveRequest,
+    ReportedRiskCensus, UnifiedFinanceWrite, UnifiedFinanceWriteReceipt,
+    apply_original_unified_finance_transaction, test_bind_native_census, test_reserve_reported_sql,
 };
 use std::collections::BTreeMap;
 const NOW: i64 = 10;
@@ -18,8 +18,8 @@ fn amount(v: &str) -> okx_kernel::risk::money::RiskAmount {
 fn census(at: i64) -> ReportedRiskCensus {
     ReportedRiskCensus {
         source_digest: "d".repeat(64),
-        generated_at_ms: at,
-        read_floor_ms: at - 1,
+        generated_at_ms: CensusObservedAtMs::new(at).unwrap(),
+        read_floor_ms: CensusReadFloorMs::new(at - 1).unwrap(),
         occupied: BTreeMap::from([(account(), "0".into())]),
         cumulative_loss_usd: BTreeMap::from([(account(), "0".into())]),
     }

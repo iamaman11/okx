@@ -522,7 +522,7 @@ impl AccountRuntimeRegistry {
             .await?;
         let store = crate::execution_store::ExecutionStore::native(
             owner.clone(),
-            configuration.account_key.wire(),
+            configuration.account_key.clone(),
         )?;
         let source_generation_seed = store
             .source_generation_base(Instant::now() + std::time::Duration::from_secs(2))

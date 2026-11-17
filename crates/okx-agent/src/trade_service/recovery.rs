@@ -199,7 +199,10 @@ impl TradeService {
                 .store
                 .lookup_intent(
                     deadline(),
-                    okx_execution::TradeIntentLookup::ClientOrderId(client),
+                    crate::execution_store::IntentLookup::new(
+                        okx_execution::TradeIntentLookup::ClientOrderId(client),
+                    )
+                    .map_err(err)?,
                 )
                 .await
                 .map_err(err)?
@@ -325,7 +328,10 @@ impl TradeService {
                 .store
                 .lookup_intent(
                     deadline(),
-                    okx_execution::TradeIntentLookup::ClientOrderId(client),
+                    crate::execution_store::IntentLookup::new(
+                        okx_execution::TradeIntentLookup::ClientOrderId(client),
+                    )
+                    .map_err(err)?,
                 )
                 .await
                 .map_err(err)?
@@ -365,7 +371,13 @@ impl TradeService {
             let intent = r
                 .execution
                 .store
-                .lookup_intent(deadline(), okx_execution::TradeIntentLookup::IntentId(id))
+                .lookup_intent(
+                    deadline(),
+                    crate::execution_store::IntentLookup::new(
+                        okx_execution::TradeIntentLookup::IntentId(id),
+                    )
+                    .map_err(err)?,
+                )
                 .await
                 .map_err(err)?
                 .ok_or("STORAGE_RECOVERY_INTENT_MISSING")?;

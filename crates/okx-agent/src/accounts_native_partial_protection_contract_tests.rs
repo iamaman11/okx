@@ -97,7 +97,11 @@ async fn risk_book_contract_native_safety_cancel_unavailable_ack_is_not_reposted
             .store
             .operation(
                 Instant::now() + Duration::from_secs(3),
-                format!("safety_cancel_{}", original.client_order_id),
+                crate::execution_store::OperationId::new(format!(
+                    "safety_cancel_{}",
+                    original.client_order_id
+                ))
+                .unwrap(),
             )
             .await
             .unwrap();

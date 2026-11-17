@@ -2,13 +2,37 @@
 //! Wire commands alone never confer census provenance or permission to send.
 use crate::native_finance_risk::NativeFinanceRisk;
 use okx_execution::account_worker::{
-    NativePostDecision, NativePostRequest, NativeReserveDecision, NativeReserveRequest,
-    ReportedRiskCensus,
+    CensusObservedAtMs, CensusReadFloorMs, NativePostDecision, NativePostRequest,
+    NativeReserveDecision, NativeReserveRequest, ReportedRiskCensus,
 };
 use okx_execution::risk::{PostAccountRead, PostCausalProof};
 use okx_execution::{CentralReceipt, CommittedVenueSend};
 use okx_protocol::risk_authority::*;
 use sha2::{Digest, Sha256};
+
+// A denial is not a lost reply, and a grant always includes its actual durable proof.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Retain the existing bounded result and receipt inline without allocating on every admitted order."
+)]
+pub(crate) enum ReserveAdmission {
+    Held {
+        result: RiskResult,
+        receipt: CentralReceipt,
+    },
+    Denied {
+        reason: String,
+    },
+}
+pub(crate) enum PostAdmission {
+    Authorized {
+        result: RiskResult,
+        claim: CommittedVenueSend,
+    },
+    Denied {
+        result: RiskResult,
+    },
+}
 
 pub(crate) fn reported(census: &NativeRiskCensus) -> Result<ReportedRiskCensus, &'static str> {
     if !census.valid() {
@@ -16,10 +40,15 @@ pub(crate) fn reported(census: &NativeRiskCensus) -> Result<ReportedRiskCensus, 
     }
     Ok(ReportedRiskCensus {
         source_digest: census.source_digest.clone(),
-        generated_at_ms: i64::try_from(census.generated_at_ms)
-            .map_err(|_| "NATIVE_ADMISSION_TIME_INVALID")?,
-        read_floor_ms: i64::try_from(census.source_read_floor_ms)
-            .map_err(|_| "NATIVE_ADMISSION_TIME_INVALID")?,
+        generated_at_ms: CensusObservedAtMs::new(
+            i64::try_from(census.generated_at_ms).map_err(|_| "NATIVE_ADMISSION_TIME_INVALID")?,
+        )
+        .map_err(|_| "NATIVE_ADMISSION_CENSUS_INVALID")?,
+        read_floor_ms: CensusReadFloorMs::new(
+            i64::try_from(census.source_read_floor_ms)
+                .map_err(|_| "NATIVE_ADMISSION_TIME_INVALID")?,
+        )
+        .map_err(|_| "NATIVE_ADMISSION_CENSUS_INVALID")?,
         occupied: census
             .occupied
             .iter()
@@ -61,7 +90,7 @@ impl NativeFinanceRisk {
     pub(crate) async fn reserve_produced(
         &self,
         packet: crate::trade_service::ProducedReserve,
-    ) -> Result<(RiskResult, Option<CentralReceipt>), &'static str> {
+    ) -> Result<ReserveAdmission, &'static str> {
         let (command, native_incarnation, native_loss_usd) = packet.into_parts();
         if !command.valid() || command.installation_id != self.installation {
             return Err("NATIVE_RESERVE_PRODUCER_INVALID");
@@ -107,7 +136,9 @@ impl NativeFinanceRisk {
             conversion_observed_at_ms: i64::try_from(usd_conversion.observed_at_ms)
                 .map_err(|_| "NATIVE_ADMISSION_TIME_INVALID")?,
             loss_usdt: requested_loss_usdt.clone(),
-            loss_usd: native_loss_usd,
+            loss_usd: native_loss_usd
+                .checked_canonical()
+                .map_err(|_| "NATIVE_RESERVE_LOSS_RANGE")?,
             entry_upper_usd: entry_upper_usd
                 .clone()
                 .ok_or("NATIVE_RESERVE_ENTRY_BOUND_REQUIRED")?,
@@ -132,12 +163,19 @@ impl NativeFinanceRisk {
                 held.reservation_key = Some(receipt.reservation_key.clone());
                 held.risk_book_sequence = Some(book_sequence);
                 held.policy_revision = Some(policy_revision);
-                Ok((checked(held)?, Some(receipt)))
+                Ok(ReserveAdmission::Held {
+                    result: checked(held)?,
+                    receipt,
+                })
             }
             NativeReserveDecision::Denied { reason } => {
                 let mut denied = result(&command, RiskDecisionStatus::Denied);
                 denied.reason = Some(reason);
-                Ok((checked(denied)?, None))
+                Ok(ReserveAdmission::Denied {
+                    reason: checked(denied)?
+                        .reason
+                        .ok_or("NATIVE_RESERVE_DENIAL_REASON_MISSING")?,
+                })
             }
         }
     }
@@ -145,7 +183,7 @@ impl NativeFinanceRisk {
     pub(crate) async fn post_produced(
         &self,
         packet: crate::trade_service::ProducedPost,
-    ) -> Result<(RiskResult, Option<CommittedVenueSend>), &'static str> {
+    ) -> Result<PostAdmission, &'static str> {
         let command = packet.into_parts();
         if !command.valid() || command.installation_id != self.installation {
             return Err("NATIVE_POST_PRODUCER_INVALID");
@@ -206,12 +244,17 @@ impl NativeFinanceRisk {
                 authorized.risk_book_sequence = Some(book_sequence);
                 authorized.policy_revision = Some(*policy_revision);
                 authorized.existing_modelled_loss_usdt = Some(existing_modelled_loss_usdt);
-                Ok((checked(authorized)?, Some(claim)))
+                Ok(PostAdmission::Authorized {
+                    result: checked(authorized)?,
+                    claim,
+                })
             }
             NativePostDecision::Denied { reason } => {
                 let mut denied = result(&command, RiskDecisionStatus::Denied);
                 denied.reason = Some(reason);
-                Ok((checked(denied)?, None))
+                Ok(PostAdmission::Denied {
+                    result: checked(denied)?,
+                })
             }
         }
     }
@@ -246,8 +289,8 @@ mod tests {
         let wire = census();
         let mapped = reported(&wire).unwrap();
         assert_eq!(mapped.source_digest, wire.source_digest);
-        assert_eq!(mapped.generated_at_ms, 10);
-        assert_eq!(mapped.read_floor_ms, 9);
+        assert_eq!(mapped.generated_at_ms.raw_millis(), 10);
+        assert_eq!(mapped.read_floor_ms.raw_millis(), 9);
         assert_eq!(mapped.occupied[&wire.account_keys[0]], "1.230000000");
         assert_eq!(
             mapped.cumulative_loss_usd[&wire.account_keys[0]],

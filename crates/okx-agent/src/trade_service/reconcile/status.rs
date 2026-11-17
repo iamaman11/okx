@@ -13,7 +13,10 @@ impl TradeService {
             .store
             .lookup_intent(
                 deadline(),
-                okx_execution::TradeIntentLookup::Reference(reference),
+                crate::execution_store::IntentLookup::new(
+                    okx_execution::TradeIntentLookup::Reference(reference),
+                )
+                .map_err(err)?,
             )
             .await
             .map_err(err)?
@@ -524,7 +527,9 @@ impl TradeService {
             .await
             {
                 Ok(_) => json!({"state":"verified_or_no_change"}),
-                Err(reason) => json!({"state":"pending","reason_code":reason.reason_code}),
+                Err(reason) => json!({"state":"pending","reason_code":reason.reason_code,
+                    "stage":reason.stage,"kind":reason.kind,
+                    "intent_id":reason.intent_id,"intent_revision":reason.intent_revision}),
             }
         } else {
             json!({"state":"not_evaluated"})
@@ -887,7 +892,12 @@ impl TradeService {
             let fresh = r
                 .execution
                 .store
-                .begin_operation(deadline(), k, h, "safety_cancel".into())
+                .begin_operation(
+                    deadline(),
+                    crate::execution_store::OperationId::new(k).map_err(err)?,
+                    h,
+                    "safety_cancel".into(),
+                )
                 .await
                 .map_err(err)?;
             if !fresh {
@@ -919,7 +929,7 @@ impl TradeService {
                 .store
                 .operation_receipt(
                     deadline(),
-                    key,
+                    crate::execution_store::OperationId::new(key).map_err(err)?,
                     hash,
                     "safety_cancel".into(),
                     "TERMINAL_VERIFIED".into(),

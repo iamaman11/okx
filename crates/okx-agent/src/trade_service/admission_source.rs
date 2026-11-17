@@ -3,7 +3,7 @@ use super::*;
 pub(crate) struct ProducedReserve {
     command: RiskCommand,
     incarnation: String,
-    native_loss_usd: String,
+    native_loss_usd: okx_execution::risk::UsdLoss,
 }
 pub(crate) struct ProducedPost {
     command: RiskCommand,
@@ -28,21 +28,21 @@ impl ProducedReserve {
         // The legacy transport envelope has a nine-place USD limit. Native
         // admission carries the exact product separately; SQL independently
         // rederives it from the immutable plan before reserving any money.
-        let (native_usdt, native_loss_usd) = okx_execution::risk::native_reserved_loss(
+        let native_loss = okx_execution::risk::native_reserved_loss(
             planned_loss_usd,
             dec(&usd_conversion.usd_per_usdt)?,
         )
         .map_err(err)?;
-        if dec(&native_usdt)? != dec(requested_loss_usdt)? {
+        if dec(&native_loss.usdt.checked_canonical().map_err(err)?)? != dec(requested_loss_usdt)? {
             return Err("NATIVE_RESERVE_PRODUCER_LOSS_MISMATCH".into());
         }
         Ok(Self {
             command,
             incarnation,
-            native_loss_usd,
+            native_loss_usd: native_loss.usd,
         })
     }
-    pub(crate) fn into_parts(self) -> (RiskCommand, String, String) {
+    pub(crate) fn into_parts(self) -> (RiskCommand, String, okx_execution::risk::UsdLoss) {
         (self.command, self.incarnation, self.native_loss_usd)
     }
 }
@@ -112,7 +112,10 @@ mod tests {
         let packet = ProducedReserve::from_production(wire, "d".repeat(32), Decimal::ONE).unwrap();
         let (wire, _, native_usd) = packet.into_parts();
         assert!(wire.valid());
-        assert_eq!(native_usd, "1.000000001123456788");
+        assert_eq!(
+            native_usd.checked_canonical().unwrap(),
+            "1.000000001123456788"
+        );
         let RiskCommandAction::Reserve {
             requested_loss_usd, ..
         } = wire.action

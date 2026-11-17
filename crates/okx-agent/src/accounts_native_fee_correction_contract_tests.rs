@@ -158,7 +158,7 @@ async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutabl
         .store
         .operation(
             Instant::now() + Duration::from_secs(3),
-            format!("entry-partial:{entry}:r1"),
+            crate::execution_store::OperationId::new(format!("entry-partial:{entry}:r1")).unwrap(),
         )
         .await
         .unwrap()

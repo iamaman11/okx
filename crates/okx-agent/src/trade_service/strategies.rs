@@ -115,7 +115,10 @@ impl TradeService {
             if let Some(old) = r
                 .execution
                 .store
-                .operation(deadline(), operation.clone())
+                .operation(
+                    deadline(),
+                    crate::execution_store::OperationId::new(operation.clone())?,
+                )
                 .await?
             {
                 if old.request_hash != request_hash {

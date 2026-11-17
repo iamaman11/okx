@@ -2,7 +2,7 @@ pub mod admission;
 mod native_sizing;
 pub mod stops;
 pub use admission::*;
-pub use native_sizing::native_reserved_loss;
+pub use native_sizing::{NativeReservedLoss, UsdLoss, UsdtLoss, native_reserved_loss};
 pub use okx_kernel::risk::model::{PostAccountRead, PostCausalProof};
 pub use stops::*;
 

@@ -178,7 +178,7 @@ impl TradeService {
             .store
             .begin_operation(
                 deadline(),
-                operation_key,
+                crate::execution_store::OperationId::new(operation_key).map_err(err)?,
                 operation_hash,
                 "protection_shrink".into(),
             )
@@ -205,7 +205,7 @@ impl TradeService {
             .store
             .operation_receipt(
                 deadline(),
-                key,
+                crate::execution_store::OperationId::new(key).map_err(err)?,
                 hash,
                 "protection_shrink".into(),
                 "ACK_SOURCE_PENDING".into(),

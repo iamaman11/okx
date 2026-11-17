@@ -35,6 +35,55 @@ pub struct NativeIntentDiagnosticSnapshot {
     pub begin_post_at_ms: Option<i64>,
     pub receipt_state: Option<String>,
     pub unsent: Option<crate::UnsentSqlReceipt>,
+    pub budget_denial: Option<NativeBudgetDenial>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeBudgetDenial {
+    pub installation_id: String,
+    pub account_key: String,
+    pub campaign_id: String,
+    pub intent_id: String,
+    pub plan_hash: String,
+    pub policy_revision: u64,
+    pub book_sequence: u64,
+    pub reason: String,
+    pub requested_entry_usd: String,
+    pub requested_loss_usd: String,
+    pub remaining_entry_usd: String,
+    pub remaining_loss_usd: String,
+    pub census_source_digest: String,
+    pub census_as_of_ms: i64,
+    pub census_read_floor_ms: i64,
+    pub observed_at_ms: i64,
+}
+
+pub(super) fn decode_budget_denial(
+    receipt: &crate::OperationReceipt,
+    installation: &str,
+    account: &str,
+    intent: &str,
+    plan: &str,
+) -> StoreResult<NativeBudgetDenial> {
+    let invalid = || crate::StoreError::Invalid("NATIVE_DENIAL_EVIDENCE_INVALID");
+    if receipt.kind != "RESERVE_DENIED"
+        || receipt.request_hash != plan
+        || receipt.result_ref.len() > 4096
+    {
+        return Err(invalid());
+    }
+    let fact: NativeBudgetDenial =
+        serde_json::from_str(&receipt.result_ref).map_err(|_| invalid())?;
+    if fact.installation_id != installation
+        || fact.account_key != account
+        || fact.intent_id != intent
+        || fact.plan_hash != plan
+        || fact.observed_at_ms != receipt.committed_at
+    {
+        return Err(invalid());
+    }
+    Ok(fact)
 }
 
 impl UnifiedFinanceHandle {
@@ -138,6 +187,21 @@ impl UnifiedFinanceHandle {
                 "SELECT state FROM risk_receipts WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
                 rusqlite::params![installation, account, intent_id], |r| r.get(0),
             ).optional()?;
+            let budget_denial = match (&intent, AccountStore::operation_sql(
+                &tx, scope, &format!("reserve-denied:{intent_id}"),
+            )?) {
+                (Some(original), Some(receipt)) => {
+                    let fact = decode_budget_denial(
+                        &receipt, &installation, &account, &intent_id, &original.plan_hash,
+                    )?;
+                    if i64::try_from(fact.policy_revision).ok() != Some(original.policy_revision) {
+                        return Err(crate::StoreError::Invalid("NATIVE_DENIAL_EVIDENCE_INVALID"));
+                    }
+                    Some(fact)
+                },
+                (None, Some(_)) => return Err(crate::StoreError::Invalid("NATIVE_DENIAL_INTENT_MISSING")),
+                (_, None) => None,
+            };
             let result = NativeIntentDiagnosticSnapshot {
                 observed_at_ms: super::opening_ingress::owner_now_ms()?,
                 protection: AccountStore::protection_sql(&tx, scope, &intent_id)?,
@@ -157,6 +221,7 @@ impl UnifiedFinanceHandle {
                 intent,
                 begin_post_at_ms,
                 receipt_state,
+                budget_denial,
                 unsent: AccountStore::unsent_release_receipt_sql(
                     &tx, Some(&installation), &account, &intent_id,
                 )?,
