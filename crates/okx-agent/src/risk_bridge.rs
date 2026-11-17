@@ -31,6 +31,7 @@ enum RiskRoute {
     LocalStopped(crate::native_finance_risk::NativeFinanceRisk),
 }
 impl NativeRiskClient {
+    #[cfg(test)]
     pub(crate) fn is_native_finance(&self) -> bool {
         match &self.route {
             #[cfg(test)]

@@ -75,9 +75,15 @@ pub(super) async fn release_unsent(
                     None,
                 )
             })?;
-            if !deps.risk.is_native_finance()
-                || state.state.installation_id != owner.installation_id()
-            {
+            #[cfg(test)]
+            if !deps.risk.is_native_finance() {
+                return Err(failure(
+                    UnsentReleaseStage::Authority,
+                    "NATIVE_UNSENT_AUTHORITY_MISMATCH".into(),
+                    None,
+                ));
+            }
+            if state.state.installation_id != owner.installation_id() {
                 return Err(failure(
                     UnsentReleaseStage::Authority,
                     "NATIVE_UNSENT_AUTHORITY_MISMATCH".into(),
@@ -118,9 +124,15 @@ pub(super) async fn release_unsent(
                     None,
                 )
             })?;
-            if !deps.risk.is_native_finance()
-                || state.state.installation_id != owner.installation_id()
-            {
+            #[cfg(test)]
+            if !deps.risk.is_native_finance() {
+                return Err(failure(
+                    UnsentReleaseStage::Authority,
+                    "NATIVE_UNSENT_AUTHORITY_MISMATCH".into(),
+                    None,
+                ));
+            }
+            if state.state.installation_id != owner.installation_id() {
                 return Err(failure(
                     UnsentReleaseStage::Authority,
                     "NATIVE_UNSENT_AUTHORITY_MISMATCH".into(),

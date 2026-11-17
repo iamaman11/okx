@@ -1271,7 +1271,10 @@ impl TradeService {
                 .mark_reserve_attempt(until, intent_id, reserve_key)
                 .await
                 .map_err(err)?;
+            #[cfg(test)]
             let native_reserve = self.risk.is_native_finance();
+            #[cfg(not(test))]
+            let native_reserve = true;
             let reserved = if native_reserve {
                 let packet = ProducedReserve::from_production(
                     reserve,
@@ -2230,6 +2233,7 @@ impl TradeService {
                     causal_proof,
                 },
             );
+            #[cfg(test)]
             let (response, claim) = if self.risk.is_native_finance() {
                 let packet = ProducedPost::from_production(command)?;
                 let (result, claim) = self
@@ -2239,21 +2243,28 @@ impl TradeService {
                     .map_err(str::to_owned)?;
                 (Ok::<RiskResult, &'static str>(result), claim)
             } else {
-                #[cfg(test)]
-                {
-                    (self.risk.request(command).await, None)
-                }
-                #[cfg(not(test))]
-                {
-                    return Err("NATIVE_POST_ROUTE_REQUIRED_NO_POST".into());
-                }
+                (self.risk.request(command).await, None)
+            };
+            #[cfg(not(test))]
+            let (response, claim) = {
+                let packet = ProducedPost::from_production(command)?;
+                let (result, claim) = self
+                    .risk
+                    .post_produced(packet)
+                    .await
+                    .map_err(str::to_owned)?;
+                (Ok::<RiskResult, &'static str>(result), claim)
             };
             match response {
                 Ok(v) if v.status == RiskDecisionStatus::PostAuthorized => {
                     if !post_receipt_bound(&v, &key, state.state.revision, sequence) {
                         return Err("POST_FENCE_RECEIPT_BINDING_MISMATCH".into());
                     }
-                    if self.risk.is_native_finance() && claim.is_none() {
+                    #[cfg(test)]
+                    let claim_required = self.risk.is_native_finance();
+                    #[cfg(not(test))]
+                    let claim_required = true;
+                    if claim_required && claim.is_none() {
                         return Err("NATIVE_POST_CLAIM_MISSING_NO_POST".into());
                     }
                     return Ok((v, selected, claim));
