@@ -194,11 +194,18 @@ jobs:
       - name: Compile all Agent targets including examples and integration targets
         run: cargo check --locked -p okx-agent --all-targets
       - name: Negative compile contracts for retired public financial APIs
-        run: cargo test --locked -p okx-agent --doc
+        run: |
+          cargo test --locked -p okx-execution --doc
+          cargo test --locked -p okx-agent --doc
       - name: Finance owner durable diagnostic restore and both indexed query plans
         run: |
           cargo test --locked -p okx-execution --lib risk_book_contract_native_durable_operation_diagnostics_scoped_readback -- --nocapture
           cargo test --locked -p okx-execution --lib terminal_diagnostics_ -- --nocapture
+      - name: Current finance owner startup queue and busy diagnostics, not legacy workers
+        run: |
+          cargo test --locked -p okx-execution --lib risk_book_contract_new_owner_exact_replay_reopen_and_no_trade_permission -- --nocapture
+          cargo test --locked -p okx-execution --lib risk_book_contract_fresh_owner_queue_bounded_128_fifo_and_shutdown -- --nocapture
+          cargo test --locked -p okx-execution --lib risk_book_contract_native_diagnostic_busy_deadline_preserves_identity_across_reopen -- --nocapture
       - name: Original failed SQL job and unchanged receipt on current finance owner
         run: cargo test --locked -p okx-execution --lib risk_book_contract_fresh_owner_failed_job_counts_and_preserves_installation -- --nocapture
       - name: Existing risk client and bound raw-frame regressions

@@ -2,6 +2,11 @@
 pub mod account_store;
 pub use account_store::*;
 mod account_submission;
+// A default shipping dependency must not be able to open a second SQL worker.
+#[cfg_attr(
+    not(feature = "legacy-account-worker-fixtures"),
+    doc = "This historical writer is absent from the default public API.\n\n\u0060\u0060\u0060compile_fail,E0432\nuse okx_execution::AccountStoreHandle;\n\u0060\u0060\u0060"
+)]
 pub mod account_worker;
 pub use account_submission::{CommittedVenueSend, IntentOutcome};
 mod finance_owner_gate;
