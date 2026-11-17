@@ -419,22 +419,40 @@ impl TradeService {
         Ok((state, account))
     }
     fn verify_runtime_finance_route(&self, resource: &AccountResources) -> Result<(), String> {
-        match (
-            resource.execution.store.native_scope(),
-            self.risk.native_finance_owner(),
-        ) {
-            // Only old unit fixtures may represent a financial route with no
-            // unified owner. The supported runtime must never accept it.
-            #[cfg(test)]
-            (None, None) => Ok(()),
-            (Some((owner, account)), Some(risk_owner))
-                if owner.installation_id() == self.accounts.installation_id()
-                    && risk_owner.installation_id() == owner.installation_id()
-                    && account == resource.configuration.account_key.wire() =>
+        #[cfg(test)]
+        {
+            match (
+                resource.execution.store.native_scope(),
+                self.risk.native_finance_owner(),
+            ) {
+                // Historical remote-risk fixtures are not an installed runtime.
+                (None, None) => Ok(()),
+                (Some((owner, account)), Some(risk_owner))
+                    if owner.installation_id() == self.accounts.installation_id()
+                        && risk_owner.installation_id() == owner.installation_id()
+                        && account == resource.configuration.account_key.wire() =>
+                {
+                    Ok(())
+                }
+                _ => Err("NATIVE_RUNTIME_FINANCE_ROUTE_MISMATCH".into()),
+            }
+        }
+        #[cfg(not(test))]
+        {
+            // Production has exactly one account-scoped financial owner.
+            let (owner, account) = resource.execution.store.native_owner().map_err(err)?;
+            let risk_owner = self
+                .risk
+                .native_finance_owner()
+                .ok_or("NATIVE_RUNTIME_FINANCE_ROUTE_MISMATCH")?;
+            if owner.installation_id() == self.accounts.installation_id()
+                && risk_owner.installation_id() == owner.installation_id()
+                && account == resource.configuration.account_key.wire()
             {
                 Ok(())
+            } else {
+                Err("NATIVE_RUNTIME_FINANCE_ROUTE_MISMATCH".into())
             }
-            _ => Err("NATIVE_RUNTIME_FINANCE_ROUTE_MISMATCH".into()),
         }
     }
     /// A preview observes an already-applied governance revision; only the

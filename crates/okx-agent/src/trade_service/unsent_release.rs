@@ -65,6 +65,8 @@ pub(super) async fn release_unsent(
         intent_id: intent.intent_id.clone(),
         reservation_key: reservation_key.map(str::to_owned),
     };
+    {
+    #[cfg(test)]
     if let Some((owner, account)) = deps.store.native_scope() {
         let state = deps.governance.read().await.clone().ok_or_else(|| {
             failure(
@@ -101,6 +103,47 @@ pub(super) async fn release_unsent(
             })
             .map_err(|e| failure(UnsentReleaseStage::Release, e.to_string(), None));
     }
+    #[cfg(not(test))]
+    {
+        let (owner, account) = deps.store.native_owner().map_err(|e| failure(UnsentReleaseStage::SqlProof, e.to_string(), None))?;
+        
+        let state = deps.governance.read().await.clone().ok_or_else(|| {
+            failure(
+                UnsentReleaseStage::Authority,
+                "AUTHORITY_UNAVAILABLE".into(),
+                None,
+            )
+        })?;
+        if !deps.risk.is_native_finance() || state.state.installation_id != owner.installation_id()
+        {
+            return Err(failure(
+                UnsentReleaseStage::Authority,
+                "NATIVE_UNSENT_AUTHORITY_MISMATCH".into(),
+                None,
+            ));
+        }
+        // Original SQL proof, current sequence, RiskBook release/tombstone
+        // and account acknowledgement are read/committed by the SAME owner.
+        // There is no second ACK or generic transport mutation on this path.
+        return owner
+            .release_unsent_status(
+                (deps.sql_deadline)(),
+                account.into(),
+                intent.intent_id.clone(),
+                intent.plan_hash.clone(),
+            )
+            .await
+            .map(|local| {
+                if local {
+                    UnsentReleaseOutcome::LocalAcknowledged
+                } else {
+                    UnsentReleaseOutcome::CentralAcknowledged
+                }
+            })
+            .map_err(|e| failure(UnsentReleaseStage::Release, e.to_string(), None));
+    
+    }
+}
     #[cfg(test)]
     {
         let store = deps

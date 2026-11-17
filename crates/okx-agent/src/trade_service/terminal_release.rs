@@ -199,7 +199,9 @@ impl TradeService {
                 observe(stage, reservation_key.as_deref(), "running", None, &facts);
                 let id = i.intent_id.clone();
                 let order_id = venue.order_id.clone();
-                if let Some((owner, account)) = r.execution.store.native_scope() {
+                {
+    #[cfg(test)]
+    if let Some((owner, account)) = r.execution.store.native_scope() {
                     owner
                         .acknowledge_local_terminal_close(
                             deadline(),
@@ -232,6 +234,24 @@ impl TradeService {
                         return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
                     }
                 }
+    #[cfg(not(test))]
+    {
+        let (owner, account) = r.execution.store.native_owner().map_err(|e| e.to_string())?;
+        
+                    owner
+                        .acknowledge_local_terminal_close(
+                            deadline(),
+                            account.to_owned(),
+                            id,
+                            order_id,
+                            filled,
+                            venue_updated_at,
+                        )
+                        .await
+                        .map_err(err)?;
+                
+    }
+}
                 return Ok(());
             }
             stage = TerminalReleaseStage::Inspection;
@@ -292,7 +312,9 @@ impl TradeService {
                 }
                 stage = TerminalReleaseStage::SqlAcknowledgement;
                 observe(stage, reservation_key.as_deref(), "running", None, &facts);
-                if let Some((owner, account)) = r.execution.store.native_scope() {
+                {
+    #[cfg(test)]
+    if let Some((owner, account)) = r.execution.store.native_scope() {
                     owner
                         .verify_terminal_release_ack(
                             deadline(),
@@ -305,6 +327,24 @@ impl TradeService {
                         .map_err(err)?;
                     return Ok(());
                 }
+    #[cfg(not(test))]
+    {
+        let (owner, account) = r.execution.store.native_owner().map_err(|e| e.to_string())?;
+        
+                    owner
+                        .verify_terminal_release_ack(
+                            deadline(),
+                            account.to_owned(),
+                            i.intent_id.clone(),
+                            i.plan_hash.clone(),
+                            receipt.reservation_key.clone(),
+                        )
+                        .await
+                        .map_err(err)?;
+                    return Ok(());
+                
+    }
+}
                 #[cfg(test)]
                 {
                     let k = receipt.reservation_key.clone();
@@ -323,7 +363,9 @@ impl TradeService {
             }
             stage = TerminalReleaseStage::BillCoverage;
             observe(stage, reservation_key.as_deref(), "running", None, &facts);
-            let (through, loss) = if let Some((owner, account)) = r.execution.store.native_scope() {
+            let (through, loss) = {
+    #[cfg(test)]
+    if let Some((owner, account)) = r.execution.store.native_scope() {
                 owner
                     .terminal_financial_snapshot(deadline(), account.to_owned())
                     .await
@@ -348,7 +390,18 @@ impl TradeService {
                 {
                     return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
                 }
-            };
+            }
+    #[cfg(not(test))]
+    {
+        let (owner, account) = r.execution.store.native_owner().map_err(|e| e.to_string())?;
+        
+                owner
+                    .terminal_financial_snapshot(deadline(), account.to_owned())
+                    .await
+                    .map_err(err)?
+            
+    }
+};
             facts.bills = Some((&through).into());
             if !source_covers_terminal(&through, venue_updated_at) {
                 return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
@@ -450,7 +503,9 @@ impl TradeService {
                 .await?;
             stage = TerminalReleaseStage::Release;
             observe(stage, reservation_key.as_deref(), "running", None, &facts);
-            if let Some((owner, account)) = r.execution.store.native_scope() {
+            {
+    #[cfg(test)]
+    if let Some((owner, account)) = r.execution.store.native_scope() {
                 if self.governance.read().await.as_ref().is_none_or(|latest| {
                     latest.session_generation != state.session_generation
                         || latest.state.installation_id != state.state.installation_id
@@ -476,6 +531,37 @@ impl TradeService {
                 stage = TerminalReleaseStage::SqlAcknowledgement;
                 return Ok(());
             }
+    #[cfg(not(test))]
+    {
+        let (owner, account) = r.execution.store.native_owner().map_err(|e| e.to_string())?;
+        
+                if self.governance.read().await.as_ref().is_none_or(|latest| {
+                    latest.session_generation != state.session_generation
+                        || latest.state.installation_id != state.state.installation_id
+                }) {
+                    return Err("TERMINAL_INSPECTION_SESSION_CHANGED".into());
+                }
+                let reported =
+                    crate::native_finance_admission::reported(&census).map_err(str::to_owned)?;
+                owner
+                    .resolve_terminal_status(
+                        deadline(),
+                        account.to_owned(),
+                        i.intent_id.clone(),
+                        i.plan_hash.clone(),
+                        receipt.reservation_key.clone(),
+                        settlement_sequence,
+                        reported,
+                    )
+                    .await
+                    .map_err(err)?;
+                // The original joint Resolve writes AccountStore release ACK
+                // in this same COMMIT. No separate account acknowledgement.
+                stage = TerminalReleaseStage::SqlAcknowledgement;
+                return Ok(());
+            
+    }
+}
             #[cfg(test)]
             {
                 let proof = TerminalRiskLedgerProof {

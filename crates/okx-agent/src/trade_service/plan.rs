@@ -513,7 +513,9 @@ impl TradeService {
             return Err("COMMAND_EXPIRED".into());
         }
         let binding_id = instance_id.clone();
-        let definition = if let Some((owner, account)) = r.execution.store.native_scope() {
+        let definition = {
+    #[cfg(test)]
+    if let Some((owner, account)) = r.execution.store.native_scope() {
             owner
                 .plan_definition(until, account.to_owned(), binding_id, record_risk_state)
                 .await
@@ -541,7 +543,18 @@ impl TradeService {
             {
                 return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
             }
-        };
+        }
+    #[cfg(not(test))]
+    {
+        let (owner, account) = r.execution.store.native_owner().map_err(|e| e.to_string())?;
+        
+            owner
+                .plan_definition(until, account.to_owned(), binding_id, record_risk_state)
+                .await
+                .map_err(err)?
+        
+    }
+};
         Ok(IntentPlan {
             strategy_definition_id: definition.definition_id,
             strategy_definition_version: definition.version,
@@ -589,7 +602,9 @@ impl TradeService {
             strategy_instance: instance.to_owned(),
             record_risk_state,
         };
-        let decision = if let Some((owner, account)) = r.execution.store.native_scope() {
+        let decision = {
+    #[cfg(test)]
+    if let Some((owner, account)) = r.execution.store.native_scope() {
             owner
                 .check_financial_admission(deadline(), account.to_owned(), request)
                 .await
@@ -609,7 +624,18 @@ impl TradeService {
             {
                 return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
             }
-        };
+        }
+    #[cfg(not(test))]
+    {
+        let (owner, account) = r.execution.store.native_owner().map_err(|e| e.to_string())?;
+        
+            owner
+                .check_financial_admission(deadline(), account.to_owned(), request)
+                .await
+                .map_err(err)?
+        
+    }
+};
         if let Some(reason) = decision {
             return Err(reason);
         }

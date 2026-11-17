@@ -652,6 +652,7 @@ impl ExecutionStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn native_scope(&self) -> Option<(&UnifiedFinanceHandle, &str)> {
         match self {
             Self::Native { owner, account } => Some((owner, account)),

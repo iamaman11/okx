@@ -622,7 +622,9 @@ async fn account_diagnostics(
 ) -> Result<Value, String> {
     let key = resources.configuration.account_key.wire();
     let lookup_reference = reference.clone();
-    let facts = if let Some((owner, account)) = resources.execution.store.native_scope() {
+    let facts = {
+    #[cfg(test)]
+    if let Some((owner, account)) = resources.execution.store.native_scope() {
         owner
             .account_diagnostic_snapshot(
                 Instant::now() + Duration::from_secs(3),
@@ -693,7 +695,72 @@ async fn account_diagnostics(
         {
             return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
         }
-    };
+    }
+    #[cfg(not(test))]
+    {
+        let (owner, account) = resources.execution.store.native_owner().map_err(|e| e.to_string())?;
+        
+        owner
+            .account_diagnostic_snapshot(
+                Instant::now() + Duration::from_secs(3),
+                account.to_owned(),
+                lookup_reference.clone(),
+            )
+            .await
+            .map(|facts| {
+                let intent = facts.intent;
+                let policy = &facts.policy;
+                let coverage = facts
+                    .source_coverage
+                    .iter()
+                    .map(|(source, partition, cursor)| {
+                        json!({
+                            "source": source,
+                            "partition": partition,
+                            "state": if cursor.is_some() { "observed" } else { "not_evaluated" },
+                            "watermark": cursor.as_ref().map(|c| c.watermark),
+                            "generation": cursor.as_ref().map(|c| c.generation),
+                            "gaps": cursor.as_ref().map(|c| c.coverage_gaps.chars().take(256).collect::<String>()),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let stops = facts
+                    .stops
+                    .iter()
+                    .map(|stop| {
+                        json!({
+                            "id": stop.id,
+                            "scope": stop.scope,
+                            "reason_code": safe_code(&stop.reason, "ACCOUNT_STOP"),
+                            "latched_at_ms": stop.latched_at_ms,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    intent,
+                    json!({
+                        "policy": {
+                            "revision": policy.revision,
+                            "explicit_pause": policy.paused,
+                            "campaign_id": policy.campaign_id,
+                            "campaign_limit_usd": policy.campaign_limit.to_string(),
+                            "campaign_loss_usd": policy.campaign_loss.to_string(),
+                        },
+                        "stop_count": facts.stop_count,
+                        "stops": stops,
+                        "sqlite_version": facts.sqlite_version,
+                        "sqlite_source_id": facts.sqlite_source_id,
+                        "database_bytes": null,
+                        "wal_bytes": null,
+                        "storage_size_reason": "NATIVE_FILE_BYTES_NOT_EVALUATED",
+                        "maintenance_error": null,
+                        "source_coverage": coverage,
+                    }),
+                )
+            })
+    
+    }
+};
     let (intent, facts) = match facts {
         Ok(f) => f,
         Err(error) => {
