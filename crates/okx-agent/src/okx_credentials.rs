@@ -69,7 +69,8 @@ pub fn store_native_account_credentials(reference: &str, payload: &[u8]) -> Agen
     #[cfg(windows)]
     {
         let service = format!("iamaman11.okx-agent.account.{reference}");
-        let entry = keyring::Entry::new(&service, "credentials").map_err(secret_store_error)?;
+        let entry = crate::windows_credentials::entry(&service, "credentials")
+            .map_err(secret_store_error)?;
         entry.set_secret(payload).map_err(secret_store_error)?;
         Ok(())
     }
@@ -86,7 +87,8 @@ pub fn load_native_account_credentials(reference: &str) -> AgentResult<NamedAcco
     #[cfg(windows)]
     {
         let service = format!("iamaman11.okx-agent.account.{reference}");
-        let entry = keyring::Entry::new(&service, "credentials").map_err(secret_store_error)?;
+        let entry = crate::windows_credentials::entry(&service, "credentials")
+            .map_err(secret_store_error)?;
         let encoded = Zeroizing::new(match entry.get_secret() {
             Ok(value) => value,
             Err(keyring::Error::NoEntry) => return Err(AgentError::OkxCredentialsNotFound),

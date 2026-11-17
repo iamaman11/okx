@@ -32,6 +32,8 @@ mod research_test_support;
 pub mod source_capture;
 pub mod storage_commands;
 pub mod trade_service;
+#[cfg(windows)]
+mod windows_credentials;
 
 mod native_finance_admission;
 mod native_finance_opening;

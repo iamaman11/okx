@@ -1,10 +1,24 @@
 # Baseline permissive licenses; a new license requires explicit review.
 [licenses]
 allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "ISC", "Unicode-3.0", "Zlib", "BSL-1.0"]
+# Reviewed exact-package grants; texts and obligations are retained in
+# docs/acceptance/512/licenses and dependency-baseline.md.
+exceptions = [
+  { name = "curve25519-dalek", version = "=5.0.0", allow = ["BSD-3-Clause"] },
+  { name = "subtle", version = "=2.6.1", allow = ["BSD-3-Clause"] },
+  { name = "x25519-dalek", version = "=3.0.0", allow = ["BSD-3-Clause"] },
+  { name = "webpki-roots", version = "=0.26.11", allow = ["CDLA-Permissive-2.0"] },
+  { name = "webpki-roots", version = "=1.0.12", allow = ["CDLA-Permissive-2.0"] },
+]
 
-# No advisory exceptions. Advisory database retrieval must succeed.
+# No vulnerability/unsoundness exceptions. One explicitly bounded maintenance
+# decision preserves the currently tested timestamp behavior; see the record.
 [advisories]
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "#512: chrono maintenance-only; no patched release; preserve tested UTC/freshness semantics pending migration review. Exact version/consumers and 2026-12-18 expiry are enforced by scripts/check_dependency_policy.py from workspace metadata. See docs/acceptance/512/dependency-baseline.md" },
+]
+yanked = "deny"
+unused-ignored-advisory = "deny"
 
 # Only crates.io sources are accepted without explicit review.
 [sources]

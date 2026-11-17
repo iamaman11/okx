@@ -111,7 +111,7 @@ async fn verify_component_origin(
     if head != c.source_head_sha || github.repository_commit_tree(&head).await? != c.source_tree {
         return Err(HostControlError::ArtifactSourceTreeMismatch);
     }
-    let mut archive = ZipArchive::new(Cursor::new(bytes.as_slice()))?;
+    let mut archive = validated_archive(bytes.as_slice())?;
     let manifest_bytes = read_entry(&mut archive, "manifest.json", MAX_MANIFEST_BYTES)?;
     let value: Value = serde_json::from_slice(&manifest_bytes)?;
     match value.get("schema").and_then(Value::as_str) {
@@ -170,7 +170,7 @@ pub async fn deploy_research(
     expected_source_tree: &str,
 ) -> HostControlResult<Value> {
     let (head, bytes) = accepted_archive(github, run_id, artifact_id).await?;
-    let mut archive = ZipArchive::new(Cursor::new(bytes.as_slice()))?;
+    let mut archive = validated_archive(bytes.as_slice())?;
     let manifest: BundleManifestV2 = serde_json::from_slice(&read_entry(
         &mut archive,
         "manifest.json",
@@ -428,7 +428,7 @@ pub(super) fn parse_persisted_manifest(bytes: &[u8]) -> HostControlResult<Bundle
 }
 
 pub(super) fn parse_bundle_compatible(zip_bytes: &[u8]) -> HostControlResult<VerifiedBundle> {
-    let mut archive = ZipArchive::new(Cursor::new(zip_bytes))?;
+    let mut archive = validated_archive(zip_bytes)?;
     let raw = read_entry(&mut archive, "manifest.json", MAX_MANIFEST_BYTES)?;
     let value: Value = serde_json::from_slice(&raw)?;
     if value.get("schema").and_then(Value::as_str) == Some(BUNDLE_SCHEMA_V1) {
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn fresh_v2_bundle_requires_all_component_bytes_and_compatibility() {
-        fn bundle(corrupt: bool) -> Vec<u8> {
+        fn bundle(corrupt: bool, method: zip::CompressionMethod) -> Vec<u8> {
             let mut components = BTreeMap::new();
             for name in COMPONENT_NAMES {
                 let bytes = name.as_bytes();
@@ -638,7 +638,7 @@ mod tests {
                 components,
             };
             let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-            let options = zip::write::SimpleFileOptions::default();
+            let options = zip::write::SimpleFileOptions::default().compression_method(method);
             zip.start_file("manifest.json", options).unwrap();
             zip.write_all(&serde_json::to_vec(&manifest).unwrap())
                 .unwrap();
@@ -655,8 +655,13 @@ mod tests {
             }
             zip.finish().unwrap().into_inner()
         }
-        assert!(parse_bundle_compatible(&bundle(false)).is_ok());
-        assert!(parse_bundle_compatible(&bundle(true)).is_err());
+        for method in [
+            zip::CompressionMethod::Stored,
+            zip::CompressionMethod::Deflated,
+        ] {
+            assert!(parse_bundle_compatible(&bundle(false, method)).is_ok());
+            assert!(parse_bundle_compatible(&bundle(true, method)).is_err());
+        }
     }
 
     #[test]

@@ -40,11 +40,13 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/cargo-deny" --strip-components=1
           deny="$RUNNER_TEMP/cargo-deny/cargo-deny"
           "$deny" --version | tee "$RUNNER_TEMP/dependency-policy.log"
-          cargo metadata --locked --format-version 1 > /dev/null
+          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/dependency-graph.json"
           "$deny" fetch 2>&1 | tee -a "$RUNNER_TEMP/dependency-policy.log"
           mapfile -t dbs < <(find "$CARGO_HOME/advisory-dbs" -mindepth 1 -maxdepth 1 -type d)
           test "${#dbs[@]}" -eq 1
           git -C "${dbs[0]}" rev-parse HEAD | tee "$RUNNER_TEMP/advisory-db-commit.txt"
+          python3 scripts/check_dependency_policy.py --self-test
+          python3 scripts/check_dependency_policy.py --graph "$RUNNER_TEMP/dependency-graph.json" --advisory-db "${dbs[0]}" 2>&1 | tee -a "$RUNNER_TEMP/dependency-policy.log"
           # Offline check fixes the fetched DB revision and fails if it is missing
           # or stale; cargo metadata above populated the locked crate graph.
           "$deny" --locked --offline --color never check advisories licenses sources 2>&1 | tee -a "$RUNNER_TEMP/dependency-policy.log"
