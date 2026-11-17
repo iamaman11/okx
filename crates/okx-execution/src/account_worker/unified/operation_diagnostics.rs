@@ -68,21 +68,23 @@ impl UnifiedFinanceHandle {
             )?;
             let stop_count = u64::try_from(stop_count)
                 .map_err(|_| crate::StoreError::Invalid("ACCOUNT_DIAGNOSTIC_STOP_COUNT_INVALID"))?;
-            let stops = tx
-                .prepare(
+            let stops = {
+                let mut query = tx.prepare(
                     "SELECT stop_id,scope,reason,latched_at FROM risk_stops
                      WHERE installation_id=?1 AND account_key=?2 AND resolution IS NULL
                      ORDER BY latched_at DESC,stop_id LIMIT 10",
-                )?
-                .query_map(rusqlite::params![installation, account], |row| {
-                    Ok(NativeRiskStopDiagnostic {
-                        id: row.get(0)?,
-                        scope: row.get(1)?,
-                        reason: row.get(2)?,
-                        latched_at_ms: row.get(3)?,
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
+                )?;
+                query
+                    .query_map(rusqlite::params![installation, account], |row| {
+                        Ok(NativeRiskStopDiagnostic {
+                            id: row.get(0)?,
+                            scope: row.get(1)?,
+                            reason: row.get(2)?,
+                            latched_at_ms: row.get(3)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
             let mut source_coverage = Vec::new();
             for (source, partition) in [
                 ("account_snapshot", "account"),

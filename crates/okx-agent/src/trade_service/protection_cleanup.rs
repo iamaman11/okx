@@ -174,7 +174,7 @@ async fn protection_cleanup_step(
     {
         Err("NATIVE_FINANCE_OWNER_REQUIRED".into())
     }
-
+}
 
 // The exact same authenticated cancellation and ACK verdict are exercised
 // by the direct recorded-HTTP regression and by the live Status owner.
@@ -318,7 +318,7 @@ async fn commit_cleanup_confirmation(
     {
         Err("NATIVE_FINANCE_OWNER_REQUIRED".into())
     }
-
+}
 
 async fn cleanup_operation(
     store: &ExecutionStore,

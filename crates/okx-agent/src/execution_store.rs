@@ -1,9 +1,12 @@
 //! Exclusive runtime composition. Native never exposes a legacy account writer.
+#[cfg(test)]
+use okx_execution::account_worker::AccountSqlJobTiming;
 use okx_execution::account_worker::{
-    AccountMaintenanceTimingV1, AccountSqlJobTiming, AccountSqlTimingV1, AccountStorageReadback,
-    UnifiedFinanceHandle,
+    AccountMaintenanceTimingV1, AccountSqlTimingV1, AccountStorageReadback, UnifiedFinanceHandle,
 };
-use okx_execution::{AccountStore, AccountStoreHandle, StoreError, StoreResult};
+#[cfg(test)]
+use okx_execution::{AccountStore, AccountStoreHandle};
+use okx_execution::{StoreError, StoreResult};
 use std::time::Instant;
 
 /// Shipping code cannot construct the old per-account financial writer.
@@ -613,6 +616,7 @@ impl ExecutionStore {
         }
         Ok(Self::Native { owner, account })
     }
+    #[cfg(test)]
     pub fn legacy(&self) -> StoreResult<&AccountStoreHandle> {
         match self {
             #[cfg(test)]
@@ -655,8 +659,9 @@ impl ExecutionStore {
             Self::Legacy(_) => None,
         }
     }
-    // Compatibility for unported legacy operations. This method NEVER gives
-    // Native callers a Connection or AccountStore, nor opens another writer.
+    // Raw financial callbacks are retained only for historical unit fixtures.
+    // Shipping operations must use typed, account-scoped finance-owner commands.
+    #[cfg(test)]
     pub async fn call<T, F>(&self, deadline: Instant, operation: F) -> StoreResult<T>
     where
         T: Send + 'static,
@@ -664,6 +669,7 @@ impl ExecutionStore {
     {
         self.legacy()?.call(deadline, operation).await
     }
+    #[cfg(test)]
     pub async fn call_with_timing_observed<T, F, O>(
         &self,
         deadline: Instant,
