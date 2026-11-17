@@ -563,7 +563,8 @@ pub(crate) async fn capture_account_sources_traced(
     let nav_started = Instant::now();
     let nav_trace = trace.clone();
     let owner_trace = trace;
-    let nav_sql_timing = if let Some((owner, account)) = execution.store.native_scope() {
+    let nav_sql_timing: Option<okx_execution::account_worker::AccountSqlJobTiming> =
+        if let Some((owner, account)) = execution.store.native_scope() {
         native_nav::reconcile(
             owner,
             account,
