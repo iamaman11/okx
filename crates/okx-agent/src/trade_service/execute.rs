@@ -166,7 +166,7 @@ pub(super) enum ManagedProtectionCensusError {
 // that this owned stop failed. Never turn that uncertainty into an
 // unverified emergency reduction. The positive protection test and
 // all other denial reasons remain unchanged.
-fn classify_managed_protection_census_error(reason: String) -> ManagedProtectionCensusError {
+pub(super) fn classify_managed_protection_census_error(reason: String) -> ManagedProtectionCensusError {
     match reason.as_str() {
         POSITION_SOURCE_BEFORE_SQL_FILL => ManagedProtectionCensusError::SourceBeforeLedgerFill,
         "COHORT_UNRESOLVED_POST_OUTCOME" => ManagedProtectionCensusError::PendingPeerPost,

@@ -1,8 +1,8 @@
 //! One owner for pre-reserve, post-HELD, protection and terminal-release
 //! cohort census. Source proof is not permission to send an exchange order.
 use super::execute::{
-    PostHeldSelected, native_process_incarnation, position_mismatch_reason,
-    verify_post_held_selected,
+    ManagedProtectionCensusError, PostHeldSelected, classify_managed_protection_census_error,
+    native_process_incarnation, position_mismatch_reason, verify_post_held_selected,
 };
 use super::*;
 

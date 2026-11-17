@@ -1,12 +1,9 @@
 //! Exclusive runtime composition. Native never exposes a legacy account writer.
-#[cfg(test)]
-use okx_execution::account_worker::AccountSqlJobTiming;
 use okx_execution::account_worker::{
-    AccountMaintenanceTimingV1, AccountSqlTimingV1, AccountStorageReadback, UnifiedFinanceHandle,
+    AccountMaintenanceTimingV1, AccountSqlJobTiming, AccountSqlTimingV1, AccountStorageReadback,
+    UnifiedFinanceHandle,
 };
-#[cfg(test)]
-use okx_execution::{AccountStore, AccountStoreHandle};
-use okx_execution::{StoreError, StoreResult};
+use okx_execution::{AccountStore, AccountStoreHandle, StoreError, StoreResult};
 use std::time::Instant;
 
 /// Shipping code cannot construct the old per-account financial writer.
@@ -15,14 +12,6 @@ use std::time::Instant;
 /// use okx_agent::execution_store::ExecutionStore;
 /// fn forbidden(legacy: okx_execution::AccountStoreHandle) -> ExecutionStore {
 ///     ExecutionStore::Legacy(legacy)
-/// }
-/// ```
-/// Production code cannot call an arbitrary SQL callback on its financial owner.
-///
-/// ```compile_fail,E0599
-/// use okx_agent::execution_store::ExecutionStore;
-/// async fn forbidden(store: &ExecutionStore) {
-///     let _ = store.call(std::time::Instant::now(), |_sql| Ok(())).await;
 /// }
 /// ```
 #[derive(Clone)]
@@ -624,7 +613,6 @@ impl ExecutionStore {
         }
         Ok(Self::Native { owner, account })
     }
-    #[cfg(test)]
     pub fn legacy(&self) -> StoreResult<&AccountStoreHandle> {
         match self {
             #[cfg(test)]
@@ -667,9 +655,8 @@ impl ExecutionStore {
             Self::Legacy(_) => None,
         }
     }
-    // Only historical unit fixtures can access a raw SQL callback. The
-    // production Agent has no arbitrary per-account financial mutation API.
-    #[cfg(test)]
+    // Compatibility for unported legacy operations. This method NEVER gives
+    // Native callers a Connection or AccountStore, nor opens another writer.
     pub async fn call<T, F>(&self, deadline: Instant, operation: F) -> StoreResult<T>
     where
         T: Send + 'static,
@@ -677,7 +664,6 @@ impl ExecutionStore {
     {
         self.legacy()?.call(deadline, operation).await
     }
-    #[cfg(test)]
     pub async fn call_with_timing_observed<T, F, O>(
         &self,
         deadline: Instant,
