@@ -367,6 +367,52 @@ const COVERAGE_SYMBOLS: Witness = Witness {
     test: "native_acceptance_coverage::coverage_verifier_requires_each_symbol_for_a_property_and_valid_manifest_context",
 };
 
+// Current Rust-side delivery/source/send properties after retiring the remote financial actor.
+const RUST_SESSION_DATA: Witness = Witness {
+    package: "okx-agent",
+    test: "cloudflare_transport::session_tests::native_session_public_data_is_acked_and_dispatched",
+};
+const RUST_SESSION_SCOPE: Witness = Witness {
+    package: "okx-agent",
+    test: "cloudflare_transport::session_tests::native_session_rejects_foreign_session_and_generation",
+};
+const RUST_SESSION_RETIRED_FINANCE: Witness = Witness {
+    package: "okx-agent",
+    test: "cloudflare_transport::session_tests::native_session_rejects_bound_retired_financial_result",
+};
+const RUST_SESSION_POLICY: Witness = Witness {
+    package: "okx-agent",
+    test: "cloudflare_transport::session_tests::native_session_applies_valid_policy_and_rejects_foreign_installation",
+};
+const ORDER_READBACK: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_observation::native_order_observation_requires_exact_plan_and_replays_terminal_once",
+};
+const FINITE_PENDING_SOURCE: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_observation::pending_orders_signed_empty_page_is_finite_and_never_inferred",
+};
+const INCOMPLETE_BALANCE: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_observation::native_incomplete_balance_blocks_source_capture_then_signed_source_recovers",
+};
+const STOP_POSITION_RECOVERY: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_observation::native_stop_blocks_open_but_close_recovers_after_malformed_positions",
+};
+const PERSISTED_EXPIRY: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::submission::native_contract_tests::persisted_expired_command_cannot_acquire_a_later_send_claim",
+};
+const CLAIM_EXPIRY: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::submission::native_contract_tests::expired_committed_claim_never_invokes_sender_or_creates_an_unknown_outcome",
+};
+const GATEWAY_EXPIRY: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::submission::native_contract_tests::deadline_expires_after_commit_before_gateway_send_preserves_durable_no_send",
+};
+
 pub const CONTRACTS: &[Contract] = &[
     Contract {
         id: "RB02.real_reference_refresh_and_coherent_spec_generation",
@@ -390,7 +436,7 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB01.strict_campaign_policy",
-        witnesses: &[POLICY, POLICY_REFUSAL],
+        witnesses: &[POLICY, POLICY_REFUSAL, INCOMPLETE_BALANCE],
         missing: None,
     },
     Contract {
@@ -430,7 +476,7 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB03.concurrent_public_shared_entry_cap",
-        witnesses: &[SHARED_CAP_PUBLIC, SHARED_CAP_OWNER],
+        witnesses: &[SHARED_CAP_PUBLIC, SHARED_CAP_OWNER, FINITE_PENDING_SOURCE],
         missing: None,
     },
     Contract {
@@ -479,12 +525,18 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB05.committed_begin_post_reply_loss_and_single_claim",
-        witnesses: &[POST_REPLY],
+        witnesses: &[POST_REPLY, PERSISTED_EXPIRY, CLAIM_EXPIRY, GATEWAY_EXPIRY],
         missing: None,
     },
     Contract {
         id: "RB05.bound_rejection_versus_unknown_venue_outcome",
-        witnesses: &[BOUND_REJECTION, FAILED_ENVELOPE, FOREIGN_ACK, LOST_ACK],
+        witnesses: &[
+            BOUND_REJECTION,
+            FAILED_ENVELOPE,
+            FOREIGN_ACK,
+            LOST_ACK,
+            ORDER_READBACK,
+        ],
         missing: None,
     },
     Contract {
@@ -523,6 +575,7 @@ pub const CONTRACTS: &[Contract] = &[
             CANCEL_ACK_LOSS,
             EMERGENCY_REMEDIATION,
             TERMINAL_CONFIG_FRONTIER,
+            STOP_POSITION_RECOVERY,
         ],
         missing: None,
     },
@@ -590,7 +643,15 @@ pub const CONTRACTS: &[Contract] = &[
         // kill schedule is RETIRED, not proved by dispose(). Actual workerd
         // retains auth/session/delivery and refuses former money commands.
         // Native real SQLite OS-kill tests retain the financial guarantee.
-        witnesses: &[RETAINED_TRANSPORT, CAPITAL_CRASH, VENUE_CRASH],
+        witnesses: &[
+            RETAINED_TRANSPORT,
+            CAPITAL_CRASH,
+            VENUE_CRASH,
+            RUST_SESSION_DATA,
+            RUST_SESSION_SCOPE,
+            RUST_SESSION_RETIRED_FINANCE,
+            RUST_SESSION_POLICY,
+        ],
         missing: None,
     },
     Contract {

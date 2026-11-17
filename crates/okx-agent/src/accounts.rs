@@ -8,8 +8,6 @@ use crate::{
 };
 use okx_api::{AccountApi, Credentials, OkxEnvironment, OkxRestClient, RateBudget};
 use okx_execution::account_worker::UnifiedFinanceHandle;
-#[cfg(test)]
-use okx_execution::{AccountMeta, AccountStoreHandle};
 use okx_protocol::{
     account_catalog_proto,
     accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
@@ -126,17 +124,6 @@ pub struct AccountResources {
     #[cfg(test)]
     pub(crate) recorded_capture_gate: tokio::sync::RwLock<()>,
 }
-#[cfg(test)]
-impl AccountResources {
-    pub(crate) fn source_task_debug_ids(&self) -> Vec<String> {
-        self.source_tasks
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|task| format!("{:?}", task.id()))
-            .collect()
-    }
-}
 
 impl Drop for AccountResources {
     fn drop(&mut self) {
@@ -173,7 +160,7 @@ impl PreparedAccountClients {
 }
 
 /// A production installation cannot open a legacy per-account SQL registry.
-/// The old constructor exists only for recorded in-crate tests:
+/// An obsolete per-account constructor cannot be used:
 ///
 /// ```compile_fail,E0599
 /// let _ = okx_agent::accounts::AccountRuntimeRegistry::open;
@@ -190,7 +177,7 @@ pub struct AccountRuntimeRegistry {
     /// An opened stopped finance import has ZERO account-local writers.
     /// No connect/recovery source task or venue POST can start in this mode.
     native_stopped_finance: bool,
-    native_finance_owner: Option<UnifiedFinanceHandle>,
+    native_finance_owner: UnifiedFinanceHandle,
 }
 
 fn invalid() -> AgentError {
@@ -211,109 +198,9 @@ pub fn initialize_installation(root: &Path, installation_id: &str) -> AgentResul
 }
 
 impl AccountRuntimeRegistry {
-    // Retired per-account SQL composition is retained exclusively for recorded
-    // historical fixtures. Shipping Engine starts with open_native_finance().
-    #[cfg(test)]
-    pub async fn open(root: &Path, rate_budget: RateBudget) -> AgentResult<Self> {
-        // #510: A stopped unified finance import is NOT trading authority.
-        // The old account registry must not start its per-account writers or
-        // the Cloudflare financial command route over a staged finance.sqlite,
-        // even when the catalog is empty (no legacy account worker to lock).
-        // Checking metadata, not is_file(), also fails closed for symlinks
-        // and partially created targets. There is no Cloudflare lease RPC.
-        match std::fs::symlink_metadata(root.join("finance").join("finance.sqlite")) {
-            Ok(_) => {
-                return Err(AgentError::FinancialCaptureTask(
-                    "FINANCE_CUTOVER_NOT_ACCEPTED".into(),
-                ));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => {
-                return Err(AgentError::FinancialCaptureTask(
-                    "FINANCE_AUTHORITY_STATUS_UNAVAILABLE".into(),
-                ));
-            }
-        }
-        let catalog = account_catalog_proto::promote_existing_once(root, |catalog| {
-            for account in &catalog.accounts {
-                let path = root
-                    .join("accounts")
-                    .join(key_hash(&account.account_key))
-                    .join("account.sqlite");
-                let connection = rusqlite::Connection::open_with_flags(
-                    path,
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-                )
-                .map_err(|_| std::io::Error::other("ACCOUNT_SQL_IDENTITY_UNAVAILABLE"))?;
-                let (key, installation_id, version):(String,String,i64) = connection.query_row(
-                    "SELECT account_key,installation_id,schema_version FROM account_meta WHERE singleton=1",
-                    [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
-                ).map_err(|_|std::io::Error::other("ACCOUNT_SQL_IDENTITY_UNAVAILABLE"))?;
-                if key != account.account_key.wire()
-                    || installation_id != catalog.installation_id
-                    || version != 2
-                {
-                    return Err(std::io::Error::other("ACCOUNT_SQL_IDENTITY_MISMATCH"));
-                }
-            }
-            Ok(())
-        })?;
-        let configs = catalog.accounts.clone();
-        let registry = Self {
-            root: root.into(),
-            installation_id: catalog.installation_id,
-            routes: RwLock::new(BTreeMap::new()),
-            configurations: RwLock::new(
-                configs
-                    .iter()
-                    .map(|c| (c.account_key.wire(), c.clone()))
-                    .collect(),
-            ),
-            failures: RwLock::new(BTreeMap::new()),
-            catalog_write: tokio::sync::Mutex::new(()),
-            rate_budget,
-            native_stopped_finance: false,
-            native_finance_owner: None,
-        };
-        // Build independently: one account's slow verification cannot block another.
-        use futures_util::{StreamExt, stream};
-        let owner = &registry;
-        let opened = stream::iter(configs.into_iter().map(|config| async move {
-            let result = async {
-                let credentials = load_native_account_credentials(&config.credential_ref)?;
-                owner
-                    .open_resources(config.clone(), credentials, false)
-                    .await
-            };
-            let result = tokio::time::timeout(std::time::Duration::from_secs(15), result).await;
-            (config, result)
-        }))
-        .buffer_unordered(4)
-        .collect::<Vec<_>>()
-        .await;
-        for (config, result) in opened {
-            match result {
-                Ok(Ok(resources)) => {
-                    registry
-                        .routes
-                        .write()
-                        .await
-                        .insert(config.account_key.wire(), resources);
-                }
-                _ => {
-                    registry.failures.write().await.insert(
-                        config.account_key.wire(),
-                        "ACCOUNT_CONTEXT_UNAVAILABLE".into(),
-                    );
-                }
-            }
-        }
-        Ok(registry)
-    }
-
     /// Actual Engine startup path for the original unified finance import.
     /// The ONE finance.sqlite writer is opened before any account resources,
-    /// and NO AccountStoreHandle/venue observer/executor is created. The
+    /// and NO venue observer/executor is created. The
     /// account-catalog roster is independent of the immutable SQL manifest;
     /// both must match. One campaign only until native multi-campaign
     /// routing is implemented; never infer other campaigns away.
@@ -370,7 +257,7 @@ impl AccountRuntimeRegistry {
             catalog_write: tokio::sync::Mutex::new(()),
             rate_budget,
             native_stopped_finance: true,
-            native_finance_owner: None,
+            native_finance_owner: owner.clone(),
         };
         Ok((registry, owner))
     }
@@ -436,7 +323,7 @@ impl AccountRuntimeRegistry {
             catalog_write: tokio::sync::Mutex::new(()),
             rate_budget,
             native_stopped_finance: false,
-            native_finance_owner: Some(owner.clone()),
+            native_finance_owner: owner.clone(),
         };
         Ok((registry, owner))
     }
@@ -459,54 +346,6 @@ impl AccountRuntimeRegistry {
     }
     pub async fn failures(&self) -> BTreeMap<String, String> {
         self.failures.read().await.clone()
-    }
-
-    /// Re-open unavailable contexts without changing configuration or storage.
-    /// An unreachable account never holds another account's mutation owner.
-    pub async fn recover_unavailable(&self) {
-        // No legacy resource can be re-opened while the new installation
-        // writer owns finance.sqlite; stopped mode never heals to two owners.
-        if self.native_stopped_finance || self.native_finance_owner.is_some() {
-            return;
-        }
-        use futures_util::{StreamExt, stream};
-        let unavailable = self
-            .failures
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        let configs = self
-            .configurations
-            .read()
-            .await
-            .values()
-            .filter(|c| unavailable.contains(&c.account_key.wire()))
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut opened = stream::iter(configs.into_iter().map(|config| async move {
-            let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-                let credentials = load_native_account_credentials(&config.credential_ref)?;
-                self.open_resources(config.clone(), credentials, false)
-                    .await
-            })
-            .await;
-            (config, result)
-        }))
-        .buffer_unordered(4);
-        while let Some((config, result)) = opened.next().await {
-            if let Ok(Ok(resources)) = result {
-                self.routes
-                    .write()
-                    .await
-                    .insert(config.account_key.wire(), resources);
-                self.failures
-                    .write()
-                    .await
-                    .remove(&config.account_key.wire());
-            }
-        }
     }
 
     pub async fn connect(
@@ -614,11 +453,7 @@ impl AccountRuntimeRegistry {
             drop(configs);
             drop(_publication);
             resources.stop_sources().await;
-            return Err(if self.native_finance_owner.is_some() {
-                AgentError::AccountCatalogPublicationPending { source }
-            } else {
-                AgentError::Io(source)
-            });
+            return Err(AgentError::AccountCatalogPublicationPending { source });
         }
         configs.insert(configuration.account_key.wire(), configuration.clone());
         self.routes
@@ -653,12 +488,9 @@ impl AccountRuntimeRegistry {
         if !configuration.valid() {
             return Err(invalid());
         }
-        // Fail before any private API request, identity lease or SQL creation.
-        // A stopped/no-owner installation must never fall back to account.sqlite.
-        #[cfg(not(test))]
-        if self.native_finance_owner.is_none() {
+        if self.native_stopped_finance {
             return Err(AgentError::FinancialCaptureTask(
-                "NATIVE_FINANCE_OWNER_REQUIRED".into(),
+                "FINANCE_STOPPED_ACCOUNT_CONNECTION_DISABLED".into(),
             ));
         }
         let uid =
@@ -672,76 +504,26 @@ impl AccountRuntimeRegistry {
             ));
         }
         let observer = AccountBootstrapper::new(clients.observer);
-        #[cfg(test)]
-        let root = self
-            .root
-            .join("accounts")
-            .join(key_hash(&configuration.account_key));
         let identity_lease = acquire_identity_lease(lease_root, &configuration.account_key)?;
-        #[cfg(test)]
-        if self.native_finance_owner.is_none() {
-            fs::create_dir_all(&root)?;
-        }
-        #[cfg(test)]
-        let database = root.join("account.sqlite");
-        let store = if let Some(owner) = &self.native_finance_owner {
-            crate::native_account_connection::ensure_account(
-                owner,
-                &configuration,
-                &observer,
-                &uid,
-                initialize,
+        let owner = &self.native_finance_owner;
+        crate::native_account_connection::ensure_account(
+            owner,
+            &configuration,
+            &observer,
+            &uid,
+            initialize,
+        )
+        .await?;
+        owner
+            .recover_posting(
+                configuration.account_key.wire(),
+                Instant::now() + std::time::Duration::from_secs(2),
             )
             .await?;
-            owner
-                .recover_posting(
-                    configuration.account_key.wire(),
-                    Instant::now() + std::time::Duration::from_secs(2),
-                )
-                .await?;
-            crate::execution_store::ExecutionStore::native(
-                owner.clone(),
-                configuration.account_key.wire(),
-            )?
-        } else {
-            #[cfg(test)]
-            {
-                let legacy = if initialize {
-                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-                    let opening =
-                        crate::account_opening::capture_opening(&observer, &uid, deadline).await?;
-                    let meta = AccountMeta {
-                        account_key: configuration.account_key.wire(),
-                        installation_id: self.installation_id.clone(),
-                        initialized_at: opening.observed_at,
-                        opening_source: opening.source_ref.clone(),
-                        initialize_operation_id: configuration.connect_operation_id.clone(),
-                        release_id: build_release().into(),
-                    };
-                    AccountStoreHandle::initialize_flat(database, meta, opening).await?
-                } else {
-                    AccountStoreHandle::open_existing(
-                        database,
-                        configuration.account_key.wire(),
-                        self.installation_id.clone(),
-                    )
-                    .await?
-                };
-                legacy
-                    .call(
-                        std::time::Instant::now() + std::time::Duration::from_secs(2),
-                        |s| s.recover_posting(chrono::Utc::now().timestamp_millis()),
-                    )
-                    .await?;
-                crate::execution_store::ExecutionStore::from(legacy)
-            }
-            #[cfg(not(test))]
-            {
-                return Err(AgentError::FinancialCaptureTask(
-                    "NATIVE_FINANCE_OWNER_REQUIRED".into(),
-                ));
-            }
-        };
+        let store = crate::execution_store::ExecutionStore::native(
+            owner.clone(),
+            configuration.account_key.wire(),
+        )?;
         let source_generation_seed = store
             .source_generation_base(Instant::now() + std::time::Duration::from_secs(2))
             .await?;
@@ -1874,19 +1656,6 @@ pub(crate) mod recorded_support {
             }
         }
 
-        pub(crate) fn balance_read_probe(&self) -> serde_json::Value {
-            let events = self.signed_balance_reads.lock().unwrap();
-            let mut by_task = std::collections::BTreeMap::<String, usize>::new();
-            for (actor, task, _) in events.iter() {
-                *by_task.entry(format!("{actor}/{task}")).or_default() += 1;
-            }
-            serde_json::json!({
-                "admitted_attempts": events.len(),
-                "by_actor_and_task": by_task,
-                "recent": events.iter().rev().take(6).cloned().collect::<Vec<_>>(),
-            })
-        }
-
         /// Install the FIRST snapshot of an account-owned REST route. These
         /// three routes are read-only and idempotent between source events.
         /// Fills, bills, order status, clock and algo inventories stay under
@@ -2795,23 +2564,8 @@ pub(crate) mod recorded_support {
             self.public_clock_reads.lock().unwrap().push(raw_response);
         }
 
-        /// At a proven LOCAL/NOT_STARTED admission denial, retire an unused
-        /// recorded exchange-clock reply and install new raw venue bytes.
-        /// This changes only the test HTTP boundary, not ClockEvidence.
-        pub(crate) fn advance_recorded_public_clock(&self, raw_response: Vec<u8>) -> usize {
-            let mut pending = self.public_clock_reads.lock().unwrap();
-            let retired = pending.len();
-            pending.clear();
-            pending.push(raw_response);
-            retired
-        }
-
         pub(crate) fn unconsumed_public_clock(&self) -> usize {
             self.public_clock_reads.lock().unwrap().len()
-        }
-
-        pub(crate) fn public_clock_deliveries(&self) -> u64 {
-            self.public_clock_deliveries.load(Ordering::Acquire)
         }
 
         /// Only a scripted external clock publisher may replace an unused
@@ -6333,6 +6087,81 @@ pub(crate) mod tests {
             .unwrap();
         root
     }
+    /// Tests the stopped capability guard and shared handle lifetime on a
+    /// real fresh owner. Import provenance remains a separate execution test.
+    #[tokio::test]
+    async fn stopped_registry_retains_owner_and_never_starts_account_sources() {
+        let root = native_root().await;
+        let (mut registry, owner) = open_native_test_registry(&root, RateBudget::new()).await;
+        registry.native_stopped_finance = true;
+        let baseline = owner
+            .installation_receipt(Instant::now() + std::time::Duration::from_secs(3))
+            .await
+            .unwrap();
+        let jobs = owner.sql_timing().observed_jobs;
+        let refusal = registry
+            .connect(
+                "missing-credentials",
+                "blocked-account",
+                "stopped_connect_001",
+                &"a".repeat(64),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            refusal
+                .to_string()
+                .contains("FINANCE_STOPPED_ACCOUNT_CONNECTION_DISABLED")
+        );
+        assert_eq!(owner.sql_timing().observed_jobs, jobs);
+        assert!(registry.routes.read().await.is_empty());
+        assert!(!root.join("accounts").exists());
+        let mut closed = owner.termination_signal();
+        drop(owner);
+        assert!(
+            !*closed.borrow(),
+            "registry retains the same financial owner"
+        );
+        assert_eq!(
+            registry
+                .native_finance_owner
+                .installation_receipt(Instant::now() + std::time::Duration::from_secs(3))
+                .await
+                .unwrap(),
+            baseline
+        );
+        registry.shutdown().await;
+        assert!(
+            !*closed.borrow(),
+            "shutdown stops sources; dropping the last handle closes SQLite"
+        );
+        drop(registry);
+        tokio::time::timeout(std::time::Duration::from_secs(3), closed.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
+        let owner = UnifiedFinanceHandle::open_native(root.clone(), "installation-test".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            owner
+                .installation_receipt(Instant::now() + std::time::Duration::from_secs(3))
+                .await
+                .unwrap(),
+            baseline
+        );
+        let mut reopened_closed = owner.termination_signal();
+        drop(owner);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            reopened_closed.wait_for(|v| *v),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     async fn close_native(registry: AccountRuntimeRegistry, owner: UnifiedFinanceHandle) {
         registry.shutdown().await;
         let mut closed = owner.termination_signal();
@@ -6854,7 +6683,10 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let account = registry.resolve(&config.account_key.wire()).await.unwrap();
-            assert!(account.execution.store.native_scope().is_some());
+            assert_eq!(
+                account.execution.store.scope().0.installation_id(),
+                registry.installation_id()
+            );
             sockets.push(ws);
         }
         for (label, ws) in ["a", "b"].into_iter().zip(&sockets) {

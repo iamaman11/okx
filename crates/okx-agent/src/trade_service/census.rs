@@ -70,55 +70,6 @@ impl TradeService {
         .map(|v| v.0)
     }
 
-    #[cfg(test)]
-    pub(super) fn b_census_probe_failure(
-        phase: &str,
-        account: &str,
-        reason: &str,
-        until: Option<Instant>,
-    ) {
-        if std::env::var("OKX_B_CENSUS_CAUSE_PROBE").as_deref() != Ok("1") {
-            return;
-        }
-        let fingerprint = format!("{:x}", Sha256::digest(account.as_bytes()));
-        let code = [
-            "COHORT_FINANCIAL_SOURCE_INCOMPLETE",
-            "COHORT_ALGO_SOURCE_STALE",
-            "COHORT_EVIDENCE_INCOMPLETE",
-            "COHORT_SOURCE_GENERATION_CHANGED",
-            "ENTRY_CENSUS_SOURCE_DEADLINE",
-            "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED",
-            "TRANSCRIPT_CLOCK_EXHAUSTED",
-            "TRANSCRIPT_REPEAT_EXCEEDED",
-            "RateLimited",
-            "rate/backpressure defer",
-            "SourceDeadline",
-        ]
-        .into_iter()
-        .find(|s| reason.contains(s))
-        .unwrap_or("OTHER_TYPED_FAILURE");
-        let endpoint = [
-            "/api/v5/account/config",
-            "/api/v5/account/balance",
-            "/api/v5/account/positions",
-            "/api/v5/account/trade-fee",
-            "/api/v5/trade/orders-algo-pending",
-            "/api/v5/trade/orders-pending",
-        ]
-        .into_iter()
-        .find(|s| reason.contains(s));
-        eprintln!(
-            "B_CENSUS_FIRST_FAILURE_V1:{}",
-            json!({
-              "schema":"okx.b-census-first-failure/v1","phase":phase,
-              "account_digest_prefix":&fingerprint[..12],
-              "reason_code":code,"endpoint":endpoint,
-              "reason_sha256":format!("{:x}",Sha256::digest(reason.as_bytes())),
-              "remaining_ms":until.map(|v|v.saturating_duration_since(Instant::now()).as_millis() as u64)
-            })
-        );
-    }
-
     /// Only the protection reconciliation of an existing managed position
     /// may wait for LOCAL/NO-SEND private reads. The same complete cohort
     /// proof and freshness rules apply; failure remains fail-closed within
@@ -229,11 +180,7 @@ impl TradeService {
                     return Err("COHORT_SOURCE_GENERATION_UNVERIFIED".into());
                 }
                 let generation = r.private_ws.status().await.connection_generation;
-                let report=|_phase: &str, reason: String| {
-                    #[cfg(test)]
-                    Self::b_census_probe_failure(_phase,&c.account_key,&reason,until);
-                    reason
-                };
+                let report = |_phase: &str, reason: String| reason;
                 // Inventory can span several bounded REST scopes. Read the
                 // authenticated account snapshot AFTER inventory so source
                 // freshness is checked at the final census proof, not before
@@ -243,12 +190,12 @@ impl TradeService {
                         r.observer
                             .pending_derivative_risk_algos_until(until)
                             .await
-                            .map_err(|e|report("ALGO_INVENTORY_DEADLINE_OWNED",err(e)))?
+                            .map_err(|e| report("ALGO_INVENTORY_DEADLINE_OWNED", err(e)))?
                     } else {
                         r.observer
                             .pending_derivative_risk_algos()
                             .await
-                            .map_err(|e|report("ALGO_INVENTORY_NORMAL",err(e)))?
+                            .map_err(|e| report("ALGO_INVENTORY_NORMAL", err(e)))?
                     }
                 } else {
                     // POST-HELD is still within the original Execute's
@@ -260,11 +207,9 @@ impl TradeService {
                     // page, changed generation or expired deadline still
                     // prevents BEGIN_POST.
                     r.observer
-                        .pending_derivative_risk_algos_until(
-                            until.ok_or("POST_DEADLINE_MISSING")?
-                        )
+                        .pending_derivative_risk_algos_until(until.ok_or("POST_DEADLINE_MISSING")?)
                         .await
-                        .map_err(|e|report("ALGO_INVENTORY_POST_HELD",err(e)))?
+                        .map_err(|e| report("ALGO_INVENTORY_POST_HELD", err(e)))?
                 };
                 let snapshot = if let Some(witness) = selected {
                     verify_post_held_selected(
@@ -281,7 +226,7 @@ impl TradeService {
                     r.observer
                         .snapshot_after_held_until(until.ok_or("POST_DEADLINE_MISSING")?)
                         .await
-                        .map_err(|e|report("ACCOUNT_SNAPSHOT_POST_HELD",err(e)))?
+                        .map_err(|e| report("ACCOUNT_SNAPSHOT_POST_HELD", err(e)))?
                 } else if terminal_release.is_some() {
                     // All terminal census sources must follow the settlement
                     // frontier. snapshot_until retains the AUTHENTICATED time
@@ -289,17 +234,23 @@ impl TradeService {
                     // as fresh would be unsafe and can put the census before
                     // settlement even when its balances were fetched later.
                     // Reuse the existing actual fresh-config snapshot ingress.
-                    r.observer.snapshot_after_held_until(deadline()).await
-                        .map_err(|e|report("ACCOUNT_SNAPSHOT_TERMINAL",err(e)))?
+                    r.observer
+                        .snapshot_after_held_until(deadline())
+                        .await
+                        .map_err(|e| report("ACCOUNT_SNAPSHOT_TERMINAL", err(e)))?
                 } else if let Some(until) = until {
                     // The managed-protection census retries only authenticated
                     // LOCAL/NO-SEND read admission, bounded by its deadline.
                     // It still requires the complete current cohort evidence.
-                    r.observer.snapshot_until(until).await
-                        .map_err(|e|report("ACCOUNT_SNAPSHOT_PRE_RESERVE",err(e)))?
+                    r.observer
+                        .snapshot_until(until)
+                        .await
+                        .map_err(|e| report("ACCOUNT_SNAPSHOT_PRE_RESERVE", err(e)))?
                 } else {
-                    r.observer.snapshot().await
-                        .map_err(|e|report("ACCOUNT_SNAPSHOT_NORMAL",err(e)))?
+                    r.observer
+                        .snapshot()
+                        .await
+                        .map_err(|e| report("ACCOUNT_SNAPSHOT_NORMAL", err(e)))?
                 };
                 // The selected account's fresh USD/USDT conversion must
                 // still cover the identical reserved USD exposure. A rate
@@ -318,40 +269,23 @@ impl TradeService {
                 // This is the earliest REST response across every pending
                 // derivative-algo scope. Complete coverage is insufficient
                 // if the underlying source timestamp is absent or stale.
-                let algo_source_floor=verified_algo_source_time(algos.received_at_ms,now())
-                    .map_err(|e|report("ALGO_SOURCE_FRESHNESS",e))?;
+                let algo_source_floor = verified_algo_source_time(algos.received_at_ms, now())
+                    .map_err(|e| report("ALGO_SOURCE_FRESHNESS", e))?;
                 let mut managed_algos = std::collections::BTreeSet::new();
                 // Native reads all local obligations and financial facts in
                 // ONE owner snapshot, then compares them to the signed venue
                 // observation below. No per-position SQL hops or legacy owner.
-                #[cfg(test)]
-                let native_census = if let Some((owner, account)) = r.execution.store.native_scope() {
-                    Some(
-                        owner
-                            .census_snapshot(
-                                account.to_owned(),
-                                census_request(&snapshot, release_scope)?,
-                                until.unwrap_or_else(deadline),
-                            )
-                            .await
-                            .map_err(err)?,
-                    )
-                } else {
-                    None
-                };
-                #[cfg(not(test))]
+
                 let native_census = {
-                    let (owner, account) = r.execution.store.native_owner().map_err(err)?;
-                    Some(
-                        owner
-                            .census_snapshot(
-                                account.to_owned(),
-                                census_request(&snapshot, release_scope)?,
-                                until.unwrap_or_else(deadline),
-                            )
-                            .await
-                            .map_err(err)?,
-                    )
+                    let (owner, account) = r.execution.store.scope();
+                    owner
+                        .census_snapshot(
+                            account.to_owned(),
+                            census_request(&snapshot, release_scope)?,
+                            until.unwrap_or_else(deadline),
+                        )
+                        .await
+                        .map_err(err)?
                 };
                 // Identifiers here are populated ONLY after the independently
                 // observed venue position, SQL lots, central reserve and
@@ -374,43 +308,14 @@ impl TradeService {
                     // venue snapshot before the final freshness gate.
                     let instrument = p.instrument_id.clone();
                     let direction = position_direction.to_owned();
-                    let (lots, owned_proofs) = if let Some(census) = &native_census {
-                        let position = census.positions.iter()
+                    let (lots, owned_proofs) = {
+                        let position = native_census
+                            .positions
+                            .iter()
                             .find(|v| v.instrument == instrument && v.direction == direction)
                             .ok_or("COHORT_POSITION_SNAPSHOT_MISSING")?;
                         (position.lots.clone(), position.owned_proofs.clone())
-                    } else {
-                    #[cfg(test)]
-                    { r
-                        .execution
-                        .store
-                        .call(deadline(), move |s| {
-                            let lots = s.active_lots(&instrument)?;
-                            let proofs = lots
-                                .iter()
-                                .filter(|lot| lot.side == direction)
-                                .map(|lot| {
-                                    let id = lot.intent_id.as_ref().ok_or(
-                                        okx_execution::StoreError::Invalid(
-                                            "UNATTRIBUTED_POSITION_LOT",
-                                        ),
-                                    )?;
-                                    Ok((
-                                        id.clone(),
-                                        s.protection(id)?,
-                                        s.active_central_receipt(id)?,
-                                    ))
-                                })
-                                .collect::<okx_execution::StoreResult<Vec<_>>>()?;
-                            Ok((lots, proofs))
-                        })
-                        .await
-                        .map_err(err)? }
-                    #[cfg(not(test))]
-                    {
-                        return Err("NATIVE_CENSUS_POSITION_PROOFS_OWNER_REQUIRED".into());
-                    }
-                };
+                    };
                     let covered = lots
                         .iter()
                         .filter(|l| l.side == position_direction)
@@ -428,10 +333,11 @@ impl TradeService {
                             .filter(|lot| lot.side == position_direction)
                             .map(|lot| lot.opened_at)
                             .max();
-                        return Err(
-                            position_mismatch_reason(p.update_time_ms.as_deref(), newest_lot)
-                                .to_owned(),
-                        );
+                        return Err(position_mismatch_reason(
+                            p.update_time_ms.as_deref(),
+                            newest_lot,
+                        )
+                        .to_owned());
                     }
                     for (owner_id, protection, receipt) in owned_proofs {
                         let protection = protection.ok_or("PROTECTION_UNVERIFIED")?;
@@ -466,32 +372,19 @@ impl TradeService {
                 // The same one-owner readback applies to all pending orders.
                 // No missing client ID or unmatched SQL intent can disappear
                 // in a batch; every venue order is still checked separately.
-                let clients = snapshot.pending_orders
+                let clients = snapshot
+                    .pending_orders
                     .iter()
-                    .map(|order| order.client_order_id.clone()
-                        .ok_or("UNATTRIBUTED_PENDING_ORDER"))
+                    .map(|order| {
+                        order
+                            .client_order_id
+                            .clone()
+                            .ok_or("UNATTRIBUTED_PENDING_ORDER")
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut covered_order_count = 0_usize;
                 if !clients.is_empty() {
-                    let known_orders = if let Some(census) = &native_census {
-                        census.pending_orders.clone()
-                    } else {
-                    #[cfg(test)]
-                    { r
-                        .execution
-                        .store
-                        .call(deadline(), move |s| {
-                            clients.iter().map(|client|
-                                s.by_client_order_id(client)
-                            ).collect::<okx_execution::StoreResult<Vec<_>>>()
-                        })
-                        .await
-                        .map_err(err)? }
-                    #[cfg(not(test))]
-                    {
-                        return Err("NATIVE_CENSUS_PENDING_ORDERS_OWNER_REQUIRED".into());
-                    }
-                };
+                    let known_orders = native_census.pending_orders.clone();
                     for (order, known) in snapshot.pending_orders.iter().zip(known_orders) {
                         let known = known.ok_or("UNATTRIBUTED_PENDING_ORDER")?;
                         verify_pending_order_binding(order, &known)?;
@@ -507,25 +400,7 @@ impl TradeService {
                     // This is a HARD safety mismatch, never accepted as flat
                     // or retried with an expanded trading permission. Only
                     // the test transcript can emit source/SQL attribution.
-                    #[cfg(test)]
-                    if std::env::var("OKX_T09_4_SOURCE_COHERENCE_PROBE").as_deref() == Ok("1") {
-                        let positions = snapshot.positions.iter().map(|p| json!({
-                            "instrument":p.instrument_id,
-                            "side":p.position_side,
-                            "quantity":p.position,
-                        })).collect::<Vec<_>>();
-                        eprintln!("T09_4_CENSUS_ALGO_MISMATCH_V1:{}", json!({
-                            "account":c.account_key,
-                            "observed_algo_ids":observed_algos,
-                            "sql_protection_algo_ids":managed_algos,
-                            "positions":positions,
-                            "algo_received_at_ms":algos.received_at_ms,
-                            "snapshot_received_at":snapshot.source_received_at,
-                            "generation":generation,
-                            "held":held_received.is_some(),
-                            "remaining_ms":until.map(|v|v.saturating_duration_since(Instant::now()).as_millis() as u64),
-                        }));
-                    }
+
                     return Err("UNATTRIBUTED_CONDITIONAL_ORDER".into());
                 }
                 // Active SQL intents are obligations too. A fresh venue
@@ -545,108 +420,16 @@ impl TradeService {
                         .positions
                         .iter()
                         .all(|p| dec(&p.position).is_ok_and(|quantity| quantity == Decimal::ZERO));
-                #[cfg(test)]
-                let releasing_id = release_scope.map(|scope| scope.intent_id.to_owned());
-                let (local_intents, pending_central, verified_terminal_peers) = if let Some(census) = &native_census {
-                    (census.intents.clone(), census.pending_central.clone(),
-                     if venue_empty_for_terminal_peers {census.verified_terminal_peers.clone()}
-                     else {std::collections::BTreeSet::new()})
-                } else {
-                    #[cfg(test)]
-                    { r
-                    .execution
-                    .store
-                    .call(deadline(), move |s| {
-                        let (intents, pending) = s.risk_census_intents(100)?;
-                        let mut peers = std::collections::BTreeSet::new();
-                        if venue_empty_for_terminal_peers {
-                            for intent in &intents {
-                                if !intent.risk_increase
-                                    || intent.state != IntentState::Filled
-                                    || !intent.instrument_id.ends_with("-USDT-SWAP")
-                                    || releasing_id.as_deref() == Some(intent.intent_id.as_str())
-                                    || pending.binary_search(&intent.intent_id).is_err()
-                                {
-                                    continue;
-                                }
-                                let saved =
-                                    s.operation(&format!("entry-settlement:{}", intent.intent_id))?;
-                                let Some(saved) = saved.filter(|receipt| {
-                                    receipt.kind == "ENTRY_SETTLEMENT_PROVEN"
-                                        && receipt.request_hash == intent.plan_hash
-                                }) else {
-                                    continue;
-                                };
-                                let proof: okx_execution::EntrySettlementEvidence =
-                                    serde_json::from_str(&saved.result_ref).map_err(|_| {
-                                        okx_execution::StoreError::Invalid(
-                                            "COHORT_TERMINAL_PEER_PROOF_CORRUPT",
-                                        )
-                                    })?;
-                                if proof.schema != "okx.entry-terminal-settlement/v1"
-                                    || proof.intent_id != intent.intent_id
-                                    || proof.plan_hash != intent.plan_hash
-                                    || s.entry_late_pending(&intent.intent_id)?
-                                {
-                                    continue;
-                                }
-                                let fills = s.cursor("fills", "SWAP")?;
-                                let bills = s.cursor("bills", "account")?;
-                                let (Some(fills), Some(bills)) = (fills, bills) else {
-                                    continue;
-                                };
-                                if fills.generation <= 0
-                                    || bills.generation <= 0
-                                    || !fills.cursor.is_empty()
-                                    || !bills.cursor.is_empty()
-                                    || !fills.coverage_gaps.is_empty()
-                                    || !bills.coverage_gaps.is_empty()
-                                {
-                                    continue;
-                                }
-                                let frontier = fills.watermark.min(bills.watermark);
-                                if frontier < proof.venue_update_ms
-                                    || frontier < proof.source_covered_through_ms
-                                    || s.active_lots(&intent.instrument_id)?.iter().any(|lot| {
-                                        lot.intent_id.as_deref() == Some(&intent.intent_id)
-                                            && lot.remaining_qty > Decimal::ZERO
-                                    })
-                                {
-                                    continue;
-                                }
-                                // Existing receipt means this is a read-only
-                                // replay; the SQL source owner rechecks every
-                                // original immutable bill, fill and digest.
-                                let original = s.bind_terminal_entry_settlement(
-                                    &intent.intent_id,
-                                    proof.venue_update_ms,
-                                    proof.venue_filled_quantity,
-                                    frontier,
-                                )?;
-                                if original != proof {
-                                    return Err(okx_execution::StoreError::Invalid(
-                                        "COHORT_TERMINAL_PEER_SOURCE_CHANGED",
-                                    ));
-                                }
-                                peers.insert(intent.intent_id.clone());
-                            }
-                        }
-                        let covered = intents
-                            .into_iter()
-                            .map(|intent| {
-                                let central = s.active_central_receipt(&intent.intent_id)?;
-                                Ok((intent, central))
-                            })
-                            .collect::<okx_execution::StoreResult<Vec<_>>>()?;
-                        Ok((covered, pending, peers))
-                    })
-                    .await
-                    .map_err(err)? }
-                    #[cfg(not(test))]
-                    {
-                        return Err("NATIVE_CENSUS_INTENT_RECEIPTS_OWNER_REQUIRED".into());
-                    }
-                };
+
+                let (local_intents, pending_central, verified_terminal_peers) = (
+                    native_census.intents.clone(),
+                    native_census.pending_central.clone(),
+                    if venue_empty_for_terminal_peers {
+                        native_census.verified_terminal_peers.clone()
+                    } else {
+                        std::collections::BTreeSet::new()
+                    },
+                );
                 let local_intent_digest = verify_local_intent_coverage_with_managed(
                     &local_intents,
                     &pending_central,
@@ -669,43 +452,11 @@ impl TradeService {
                 {
                     return Err("COHORT_SOURCE_GENERATION_CHANGED".into());
                 }
-                let financial = if let Some(census) = &native_census {
-                    (census.financial_risk.clone(), census.policy.campaign_loss)
-                } else {
-                    #[cfg(test)]
-                    { r
-                    .execution
-                    .store
-                    .call(deadline(), |s| {
-                        Ok((s.financial_risk(now(), None)?, s.policy()?.4))
-                    })
-                    .await
-                    .map_err(|e|report("FINANCIAL_SQL_OWNER",err(e)))? }
-                    #[cfg(not(test))]
-                    {
-                        return Err("NATIVE_CENSUS_FINANCIAL_RISK_OWNER_REQUIRED".into());
-                    }
-                };
-                #[cfg(test)]
-                if std::env::var("OKX_B_CENSUS_CAUSE_PROBE").as_deref()==Ok("1")
-                    && !financial.0.nav_complete
-                {
-                    let h=r.source_capture_health.read().await;
-                    let fingerprint=format!("{:x}",Sha256::digest(c.account_key.as_bytes()));
-                    eprintln!("B_CENSUS_FINANCIAL_GAP_V1:{}",json!({
-                        "schema":"okx.b-census-financial-gap/v1",
-                        "account_digest_prefix":&fingerprint[..12],
-                        "nav_complete":financial.0.nav_complete,
-                        "source_as_of":financial.0.source_as_of,
-                        "snapshot_received_at":snapshot.source_received_at,
-                        "algo_received_ms":algos.received_at_ms,
-                        "capture_last_attempt_ms":h.last_attempt_ms,
-                        "capture_last_success_ms":h.last_success_ms,
-                        "capture_last_failure_ms":h.last_failure_ms,
-                        "capture_reason_code":h.reason_code,
-                        "remaining_ms":until.map(|v|v.saturating_duration_since(Instant::now()).as_millis() as u64)
-                    }));
-                }
+                let financial = (
+                    native_census.financial_risk.clone(),
+                    native_census.policy.campaign_loss,
+                );
+
                 // A freshly constructed census is not proof that its underlying
                 // account or ledger sources were fresh. Keep the actual oldest
                 // source timestamp, not just the time at which we read it.
@@ -717,7 +468,7 @@ impl TradeService {
                     financial.0.source_as_of,
                     now(),
                 )
-                .map_err(|e|report("FINANCIAL_SOURCE_FLOOR",e))?
+                .map_err(|e| report("FINANCIAL_SOURCE_FLOOR", e))?
                 .min(algo_source_floor);
                 // Bind SQL source quality and financial state to the same
                 // content proof as the account and conditional-order reads.

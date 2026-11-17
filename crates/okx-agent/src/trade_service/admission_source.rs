@@ -130,19 +130,4 @@ mod tests {
         }
         assert!(ProducedReserve::from_production(wire, "d".repeat(32), Decimal::ONE).is_err());
     }
-    #[tokio::test]
-    async fn produced_native_reserve_cannot_fall_back_to_cloudflare() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let client = NativeRiskClient::new(tx);
-        let packet =
-            ProducedReserve::from_production(command(), "d".repeat(32), Decimal::ONE).unwrap();
-        assert_eq!(
-            client.reserve_produced(packet).await.err(),
-            Some("NATIVE_FINANCE_ROUTE_REQUIRED")
-        );
-        assert!(matches!(
-            rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
-    }
 }

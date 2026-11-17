@@ -4,8 +4,6 @@ use crate::{
     risk_bridge::NativeRiskClient,
 };
 use chrono::Utc;
-#[cfg(test)]
-use okx_execution::AccountStoreHandle;
 use okx_execution::{
     CentralReceipt, Decision, IntentPlan, IntentState, NewIntent, StoredIntent, StrategyInstance,
 };
@@ -44,24 +42,6 @@ mod terminal_release;
 mod terminal_release_trace;
 pub(crate) use terminal_release_trace::TerminalReleaseTrace;
 mod unsent_release;
-#[cfg(test)]
-pub(crate) use submission::post_once;
-
-// Test-only causal boundary AFTER the genuine Worker HELD receipt has been
-// verified and committed as a central reservation in the original Native SQL
-// account owner. A separate third public Execute may now census this durable
-// RESERVED intent without declaring an unresolved network RESERVE attempt.
-// This hook never writes SQL/Worker money, returns risk, or authorizes POST.
-#[cfg(test)]
-pub(crate) static T10_07_HOLD_SQL_RESERVE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-#[cfg(test)]
-pub(crate) static T10_07_SQL_RESERVE_PERSISTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-#[cfg(test)]
-pub(crate) static T10_07_RELEASE_SQL_RESERVE_HOLD: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 pub struct TradeService {
     accounts: Arc<AccountRuntimeRegistry>,
     public_ws: PublicWsHandle,
@@ -274,29 +254,7 @@ impl TradeService {
         // route, the original account_policy and RiskBook revision have ONE
         // SQL transaction owner. Native rejection is FINAL, never a fallback
         // to the legacy per-account writer loop.
-        #[cfg(test)]
-        if self.risk.native_finance_owner().is_none() {
-            // The historical remote-finance fixture has no production writer.
-            let limit = dec(&snapshot.state.campaign_loss_limit_usd)?;
-            for account in &snapshot.state.accounts {
-                let Some(resources) = self.accounts.resolve(&account.account_key).await else {
-                    continue;
-                };
-                let revision = snapshot.state.revision as i64;
-                let paused = !account.access_enabled();
-                let campaign = snapshot.state.campaign_id.clone();
-                resources
-                    .execution
-                    .store
-                    .call(deadline(), move |store| {
-                        store.apply_authority_policy(revision, paused, &campaign, limit)
-                    })
-                    .await
-                    .map_err(err)?;
-            }
-            *latest = Some(snapshot.clone());
-            return Ok(());
-        }
+
         let observation = self.risk.observe_required_governance(snapshot).await?;
         // Transport observation never grants execution. The strict financial
         // policy application still occurs at the account's authority gate.
@@ -389,50 +347,15 @@ impl TradeService {
             .find(|a| a.account_key == r.configuration.account_key.wire())
             .cloned()
             .ok_or("ACCOUNT_ACCESS_MISSING")?;
-        #[cfg(test)]
-        if self.risk.native_finance_owner().is_none() {
-            // Historical remote-risk fixture only; its SQL writer is not a
-            // supported finance runtime and is never built into the Agent.
-            let revision = state.state.revision as i64;
-            let paused = !account.access_enabled();
-            let campaign = state.state.campaign_id.clone();
-            let limit = dec(&state.state.campaign_loss_limit_usd)?;
-            r.execution
-                .store
-                .call(deadline(), move |s| {
-                    s.apply_authority_policy(revision, paused, &campaign, limit)
-                })
-                .await
-                .map_err(err)?;
-            return Ok((state, account));
-        }
+
         self.risk.apply_required_governance(&state).await?;
         Ok((state, account))
     }
     fn verify_runtime_finance_route(&self, resource: &AccountResources) -> Result<(), String> {
-        #[cfg(test)]
-        {
-            match (
-                resource.execution.store.native_scope(),
-                self.risk.native_finance_owner(),
-            ) {
-                // Historical remote-risk fixtures are not an installed runtime.
-                (None, None) => Ok(()),
-                (Some((owner, account)), Some(risk_owner))
-                    if owner.installation_id() == self.accounts.installation_id()
-                        && risk_owner.installation_id() == owner.installation_id()
-                        && account == resource.configuration.account_key.wire() =>
-                {
-                    Ok(())
-                }
-                _ => Err("NATIVE_RUNTIME_FINANCE_ROUTE_MISMATCH".into()),
-            }
-        }
-        #[cfg(not(test))]
         {
             // Production has exactly one account-scoped financial owner.
-            let (owner, account) = resource.execution.store.native_owner().map_err(err)?;
-            let risk_owner = self.risk.required_finance_owner().map_err(str::to_owned)?;
+            let (owner, account) = resource.execution.store.scope();
+            let risk_owner = self.risk.finance_owner();
             if owner.installation_id() == self.accounts.installation_id()
                 && risk_owner.installation_id() == owner.installation_id()
                 && account == resource.configuration.account_key.wire()

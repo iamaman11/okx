@@ -5,10 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[features]
-# Temporary: for historical Agent unit fixtures pending direct unified-owner migration.
-legacy-account-worker-fixtures = []
-
 [dependencies]
 okx-kernel = { path = "../okx-kernel" }
 tokio = { version = "1", features = ["sync", "time"] }

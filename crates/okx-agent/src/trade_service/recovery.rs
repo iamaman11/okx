@@ -519,74 +519,29 @@ impl TradeService {
             &json!({"central":central,"storage_gate_only":true,"post_requires_fresh_all_account_reserve":true,"local_cumulative_loss_usd":exact(local.cumulative_loss_usd)}),
         )?;
         {
-            #[cfg(test)]
-            if let Some((owner, account)) = r.execution.store.native_scope() {
-                return owner
-                    .commit_storage_recovery(
-                        deadline(),
-                        account.to_owned(),
-                        okx_execution::account_worker::NativeRecoveryProof {
-                            generation: i64::try_from(generation)
-                                .map_err(|_| "STORAGE_RECOVERY_GENERATION_CHANGED")?,
-                            observed_at_ms: proof_floor,
-                            expected_receipts_digest: digest(&local.active_receipts)?,
-                            active_reservations: central.active_reservations,
-                            occupied_loss_usd: central.occupied_usd.clone(),
-                            cumulative_loss_usd: central.cumulative_loss_usd.clone(),
-                            exchange_evidence: exchange,
-                            financial_evidence: evidence,
-                        },
-                    )
-                    .await
-                    .map_err(err);
-            }
-            #[cfg(not(test))]
-            {
-                let (owner, account) = r
-                    .execution
-                    .store
-                    .native_owner()
-                    .map_err(|e| e.to_string())?;
+            let (owner, account) = r.execution.store.scope();
 
-                return owner
-                    .commit_storage_recovery(
-                        deadline(),
-                        account.to_owned(),
-                        okx_execution::account_worker::NativeRecoveryProof {
-                            generation: i64::try_from(generation)
-                                .map_err(|_| "STORAGE_RECOVERY_GENERATION_CHANGED")?,
-                            observed_at_ms: proof_floor,
-                            expected_receipts_digest: digest(&local.active_receipts)?,
-                            active_reservations: central.active_reservations,
-                            occupied_loss_usd: central.occupied_usd.clone(),
-                            cumulative_loss_usd: central.cumulative_loss_usd.clone(),
-                            exchange_evidence: exchange,
-                            financial_evidence: evidence,
-                        },
-                    )
-                    .await
-                    .map_err(err);
-            }
+            return owner
+                .commit_storage_recovery(
+                    deadline(),
+                    account.to_owned(),
+                    okx_execution::account_worker::NativeRecoveryProof {
+                        generation: i64::try_from(generation)
+                            .map_err(|_| "STORAGE_RECOVERY_GENERATION_CHANGED")?,
+                        observed_at_ms: proof_floor,
+                        expected_receipts_digest: digest(&local.active_receipts)?,
+                        active_reservations: central.active_reservations,
+                        occupied_loss_usd: central.occupied_usd.clone(),
+                        cumulative_loss_usd: central.cumulative_loss_usd.clone(),
+                        exchange_evidence: exchange,
+                        financial_evidence: evidence,
+                    },
+                )
+                .await
+                .map_err(err);
         }
         // The historical standalone SQL store is not a production recovery
         // backend. A missing Native owner cannot clear a recovery gate.
-        #[cfg(test)]
-        {
-            r.execution
-                .store
-                .call(deadline(), move |s| {
-                    if s.cursor("account_snapshot", "account")?
-                        .is_none_or(|c| c.generation != generation as i64)
-                    {
-                        return Err(okx_execution::StoreError::Invalid(
-                            "STORAGE_RECOVERY_GENERATION_CHANGED",
-                        ));
-                    }
-                    commit_recovery(s, &local, &central, proof_floor, &exchange, &evidence)
-                })
-                .await
-                .map_err(err)
-        }
     }
 }
 

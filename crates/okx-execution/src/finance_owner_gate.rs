@@ -131,7 +131,7 @@ pub(crate) fn unified_mode_for(root: &Path) -> Result<AuthorityModeLease, Author
 /// Public RAII holder for stopped-Engine legacy account maintenance.
 /// This is NOT an owner epoch, a Cloudflare fence or a new writer. It holds
 /// the SAME shared installation authority-mode lock used by the original
-/// AccountStoreHandle for the full backup/restore/initialize operation.
+/// The historical account writer for the full backup/restore/initialize operation.
 pub struct LegacyAccountMaintenanceLease {
     _lease: AuthorityModeLease,
 }

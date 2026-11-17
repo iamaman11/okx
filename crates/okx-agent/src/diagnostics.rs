@@ -8,8 +8,6 @@ pub(crate) use protection_trace::{
 use crate::{accounts::AccountResources, query::DispatchContext};
 use chrono::Utc;
 use futures_util::{StreamExt, stream};
-#[cfg(test)]
-use okx_execution::{AccountStore, StoreResult, StoredIntent};
 use okx_protocol::{
     analytics::ResearchRequest,
     trading::{DiagnosticsRequest, DiagnosticsView},
@@ -123,16 +121,6 @@ fn account_snapshot_fresh_at(source_as_of: Option<i64>, observed_now: i64) -> bo
 
 fn storage_failure_code(error: &okx_execution::StoreError) -> String {
     safe_code(&error.to_string(), "ACCOUNT_STORAGE_UNAVAILABLE")
-}
-#[cfg(test)]
-fn lookup(store: &AccountStore, reference: &str) -> StoreResult<Option<StoredIntent>> {
-    if let Some(i) = store.intent(reference)? {
-        return Ok(Some(i));
-    }
-    if let Some(i) = store.by_client_order_id(reference)? {
-        return Ok(Some(i));
-    }
-    store.by_exchange_order_id(reference)
 }
 fn central_budget_not_evaluated() -> Value {
     json!({
@@ -624,10 +612,8 @@ async fn account_diagnostics(
 ) -> Result<Value, String> {
     let key = resources.configuration.account_key.wire();
     let lookup_reference = reference.clone();
-    let facts = {
-        #[cfg(test)]
-        if let Some((owner, account)) = resources.execution.store.native_scope() {
-            owner
+    let (owner, account) = resources.execution.store.scope();
+    let facts = owner
             .account_diagnostic_snapshot(
                 Instant::now() + Duration::from_secs(3),
                 account.to_owned(),
@@ -684,88 +670,7 @@ async fn account_diagnostics(
                         "source_coverage": coverage,
                     }),
                 )
-            })
-        } else {
-            #[cfg(test)]
-            {
-                resources.execution.store.call(Instant::now()+Duration::from_secs(3),move|s|{
-  let intent=lookup_reference.as_deref().map(|r|lookup(s,r)).transpose()?.flatten();let policy=s.policy()?;let stops=s.stops()?;let(version,source_id)=s.sqlite_runtime()?;let(db,wal)=s.storage_bytes()?;let mut coverage=Vec::new();for(source,partition)in[("account_snapshot","account"),("fills","SPOT"),("fills","SWAP"),("fills","FUTURES"),("bills","account")]{let c=s.cursor(source,partition)?;coverage.push(json!({"source":source,"partition":partition,"state":if c.is_some(){"observed"}else{"not_evaluated"},"watermark":c.as_ref().map(|c|c.watermark),"generation":c.as_ref().map(|c|c.generation),"gaps":c.as_ref().map(|c|c.coverage_gaps.chars().take(256).collect::<String>())}));}
-  Ok((intent,json!({"policy":{"revision":policy.0,"explicit_pause":policy.1,"campaign_id":policy.2,"campaign_limit_usd":policy.3.to_string(),"campaign_loss_usd":policy.4.to_string()},"stop_count":stops.len(),"stops":stops.iter().take(10).map(|(id,scope,reason,time)|json!({"id":id,"scope":scope,"reason_code":safe_code(reason,"ACCOUNT_STOP"),"latched_at_ms":time})).collect::<Vec<_>>(),"sqlite_version":version,"sqlite_source_id":source_id,"database_bytes":db,"wal_bytes":wal,"maintenance_error":s.storage_health().map(|e|safe_code(e,"STORAGE_MAINTENANCE_ERROR")),"source_coverage":coverage})))
- }).await
-            }
-            #[cfg(not(test))]
-            {
-                return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
-            }
-        }
-        #[cfg(not(test))]
-        {
-            let (owner, account) = resources
-                .execution
-                .store
-                .native_owner()
-                .map_err(|e| e.to_string())?;
-
-            owner
-            .account_diagnostic_snapshot(
-                Instant::now() + Duration::from_secs(3),
-                account.to_owned(),
-                lookup_reference.clone(),
-            )
-            .await
-            .map(|facts| {
-                let intent = facts.intent;
-                let policy = &facts.policy;
-                let coverage = facts
-                    .source_coverage
-                    .iter()
-                    .map(|(source, partition, cursor)| {
-                        json!({
-                            "source": source,
-                            "partition": partition,
-                            "state": if cursor.is_some() { "observed" } else { "not_evaluated" },
-                            "watermark": cursor.as_ref().map(|c| c.watermark),
-                            "generation": cursor.as_ref().map(|c| c.generation),
-                            "gaps": cursor.as_ref().map(|c| c.coverage_gaps.chars().take(256).collect::<String>()),
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let stops = facts
-                    .stops
-                    .iter()
-                    .map(|stop| {
-                        json!({
-                            "id": stop.id,
-                            "scope": stop.scope,
-                            "reason_code": safe_code(&stop.reason, "ACCOUNT_STOP"),
-                            "latched_at_ms": stop.latched_at_ms,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                (
-                    intent,
-                    json!({
-                        "policy": {
-                            "revision": policy.revision,
-                            "explicit_pause": policy.paused,
-                            "campaign_id": policy.campaign_id,
-                            "campaign_limit_usd": policy.campaign_limit.to_string(),
-                            "campaign_loss_usd": policy.campaign_loss.to_string(),
-                        },
-                        "stop_count": facts.stop_count,
-                        "stops": stops,
-                        "sqlite_version": facts.sqlite_version,
-                        "sqlite_source_id": facts.sqlite_source_id,
-                        "database_bytes": null,
-                        "wal_bytes": null,
-                        "storage_size_reason": "NATIVE_FILE_BYTES_NOT_EVALUATED",
-                        "maintenance_error": null,
-                        "source_coverage": coverage,
-                    }),
-                )
-            })
-        }
-    };
+            });
     let (intent, facts) = match facts {
         Ok(f) => f,
         Err(error) => {
@@ -1009,11 +914,12 @@ mod tests {
             Arc::new(accounts::recorded_support::OfflineSocket),
         );
         let analytics = AnalyticsService::new(root.join("analytics"), market.clone()).unwrap();
-        let (risk_tx, mut risk_rx) = tokio::sync::mpsc::channel(4);
         let trade = Arc::new(TradeService::new(
             registry.clone(),
             public_ws.clone(),
-            crate::risk_bridge::NativeRiskClient::new(risk_tx),
+            crate::risk_bridge::NativeRiskClient::local(
+                crate::native_finance_risk::NativeFinanceRisk::from_owner(owner.clone()),
+            ),
         ));
         let ctx = DispatchContext {
             accounts: registry.clone(),
@@ -1150,10 +1056,6 @@ mod tests {
             feed_b.denied_routes.lock().unwrap().clone(),
             http_b_before.2
         );
-        assert!(matches!(
-            risk_rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
         drop(_source_health);
         drop(_source_snapshot);
         assert_eq!(

@@ -1,6 +1,4 @@
 //! Engine lifecycle: one process, one shutdown signal, account-local owners.
-#[cfg(test)]
-use crate::risk_bridge::OutboundRiskCommand;
 pub use crate::source_capture::capture_account_sources;
 use crate::{
     AgentResult,
@@ -22,8 +20,6 @@ pub struct EngineContext {
     pub dispatch: DispatchContext,
     pub public: PublicWsCoordinator,
     pub transport: Option<CloudflareTransportConfig>,
-    #[cfg(test)]
-    pub risk: mpsc::Receiver<OutboundRiskCommand>,
     pub mailbox: Option<GitHubMailboxClient>,
     pub private_key: zeroize::Zeroizing<[u8; 32]>,
     pub key_id: String,
@@ -70,8 +66,6 @@ pub(crate) async fn run_engine_until<F>(ctx: EngineContext, until: F) -> AgentRe
 where
     F: std::future::Future<Output = Option<NativeChildRequest>>,
 {
-    #[cfg(test)]
-    let risk = ctx.risk;
     let EngineContext {
         dispatch,
         public,
@@ -81,7 +75,6 @@ where
         key_id,
         poll_seconds,
         native_child_control_stdio: _,
-        ..
     } = ctx;
     let (tx, shutdown) = watch::channel(false);
     let mut tasks = tokio::task::JoinSet::new();
@@ -90,9 +83,6 @@ where
     tasks.spawn(async move {
         trade.run(signal).await;
     });
-    let d = dispatch.clone();
-    let mut recovery_shutdown = shutdown.clone();
-    tasks.spawn(async move{let mut interval=tokio::time::interval(Duration::from_secs(30));loop{tokio::select!{_=recovery_shutdown.changed()=>break,_=interval.tick()=>d.accounts.recover_unavailable().await}}});
     let signal = shutdown.clone();
     tasks.spawn(async move {
         let _ = public.run(signal).await;
@@ -101,9 +91,6 @@ where
         let signal = shutdown.clone();
         let d = dispatch.clone();
         tasks.spawn(async move {
-            #[cfg(test)]
-            let result = run_cloudflare_transport(&config, d, risk, signal).await;
-            #[cfg(not(test))]
             let result = run_cloudflare_transport(&config, d, signal).await;
             let _ = result;
         });

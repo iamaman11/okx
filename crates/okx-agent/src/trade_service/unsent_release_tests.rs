@@ -4,8 +4,6 @@
 //! and a second account acknowledgement are retired with the second owner.
 use super::*;
 use crate::accounts::native_trade_contracts::fixture::{NativeFixture, fixture};
-use crate::native_finance_risk::NativeFinanceRisk;
-use crate::risk_bridge::NativeRiskClient;
 use okx_execution::{Decision, IntentPlan, NewIntent};
 use rust_decimal::Decimal;
 use serde_json::json;
@@ -80,7 +78,6 @@ async fn prepared() -> (NativeFixture, StoredIntent) {
 async fn ur02_authority_failure_keeps_known_identity_and_reason() {
     let (f, intent) = prepared().await;
     let capture = f._account.recorded_capture_gate.write().await;
-    let risk = NativeRiskClient::local(NativeFinanceRisk::from_owner(f.owner.clone()));
     let before = f.owner.campaign_summary(f.campaign.clone()).await.unwrap();
     let requests = f.feed.requests.lock().unwrap().clone();
     for foreign in [false, true] {
@@ -93,7 +90,6 @@ async fn ur02_authority_failure_keeps_known_identity_and_reason() {
             &intent,
             UnsentReleaseDependencies {
                 store: &f._account.execution.store,
-                risk: &risk,
                 governance: &governance,
                 sql_deadline: deadline,
             },
@@ -120,7 +116,6 @@ async fn ur02_authority_failure_keeps_known_identity_and_reason() {
         assert_eq!(*f.feed.requests.lock().unwrap(), requests);
         assert!(f.feed.outbound_posts.lock().unwrap().is_empty());
     }
-    drop(risk);
     drop(capture);
     f.finish().await;
 }
@@ -129,7 +124,6 @@ async fn ur02_authority_failure_keeps_known_identity_and_reason() {
 async fn ur09_demo_release_is_inapplicable_before_authority_or_sql() {
     let (f, intent) = prepared().await;
     let capture = f._account.recorded_capture_gate.write().await;
-    let risk = NativeRiskClient::local(NativeFinanceRisk::from_owner(f.owner.clone()));
     let governance = RwLock::new(None);
     let before = f.owner.campaign_summary(f.campaign.clone()).await.unwrap();
     let requests = f.feed.requests.lock().unwrap().clone();
@@ -140,7 +134,6 @@ async fn ur09_demo_release_is_inapplicable_before_authority_or_sql() {
             &intent,
             UnsentReleaseDependencies {
                 store: &f._account.execution.store,
-                risk: &risk,
                 governance: &governance,
                 sql_deadline: expired,
             }
@@ -156,7 +149,6 @@ async fn ur09_demo_release_is_inapplicable_before_authority_or_sql() {
     );
     assert_eq!(*f.feed.requests.lock().unwrap(), requests);
     assert!(f.feed.outbound_posts.lock().unwrap().is_empty());
-    drop(risk);
     drop(capture);
     f.finish().await;
 }

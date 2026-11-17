@@ -103,11 +103,7 @@ async fn risk_book_contract_native_connect_two_accounts_and_reopen_one_original_
             .await
             .unwrap();
         let resources = registry.resolve(&config.alias).await.unwrap();
-        let (native, scope) = resources
-            .execution
-            .store
-            .native_scope()
-            .expect("production Native store");
+        let (native, scope) = resources.execution.store.scope();
         assert_eq!(native.installation_id(), INSTALLATION);
         assert_eq!(scope, config.account_key.wire());
         assert_eq!(resources.execution.uid(), config.account_key.verified_uid);

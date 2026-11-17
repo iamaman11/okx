@@ -505,3 +505,6 @@ mod native_engine;
 
 #[path = "accounts_native_source_diagnostic_contract_tests.rs"]
 mod native_source_diagnostic;
+
+#[path = "accounts_native_observation_contract_tests.rs"]
+mod native_observation;

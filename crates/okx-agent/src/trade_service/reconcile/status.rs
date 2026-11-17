@@ -43,51 +43,7 @@ impl TradeService {
                     // into the same test diagnosis. No public identity, raw
                     // payload or credential is emitted. Production remains
                     // fail-closed with the same UNKNOWN/no-resubmit result.
-                    #[cfg(test)]
-                    if std::env::var("OKX_T09_8_DENIAL_PROBE").as_deref() == Ok("1") {
-                        let (class, request_sent, local_defer_ms) = match &_error {
-                            okx_api::OkxError::RateLimited { evidence } => (
-                                "RATE_LIMITED",
-                                Some(evidence.request_sent),
-                                Some(evidence.local_defer_ms),
-                            ),
-                            okx_api::OkxError::Response(reason)
-                                if reason.starts_with(
-                                    "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED",
-                                ) =>
-                            {
-                                ("TRANSCRIPT_SOURCE_EXHAUSTED", None, None)
-                            }
-                            okx_api::OkxError::Response(reason)
-                                if reason == "ORDER_READBACK_DEADLINE_EXCEEDED" =>
-                            {
-                                ("READBACK_DEADLINE", None, None)
-                            }
-                            okx_api::OkxError::Response(reason)
-                                if reason.starts_with("TRANSCRIPT_") =>
-                            {
-                                ("TRANSCRIPT_SOURCE_OTHER", None, None)
-                            }
-                            okx_api::OkxError::Response(_) => {
-                                ("VENUE_RESPONSE_UNVERIFIED", None, None)
-                            }
-                            okx_api::OkxError::Json(_) => ("VENUE_ORDER_DECODE", None, None),
-                            okx_api::OkxError::Api { .. } => ("VENUE_API_DENIAL", None, None),
-                            okx_api::OkxError::Clock(_) => ("CLOCK_SOURCE", None, None),
-                            _ => ("OTHER_READBACK_FAILURE", None, None),
-                        };
-                        eprintln!(
-                            "T09_6_ORDER_READBACK_CAUSE_V1:{}",
-                            json!({
-                                "schema":"okx.t09-6-order-readback-cause/v1",
-                                "class":class,
-                                "request_sent":request_sent,
-                                "local_defer_ms":local_defer_ms,
-                                "sql_state":i.state.as_str(),
-                                "has_exchange_ack":i.exchange_order_id.is_some(),
-                            })
-                        );
-                    }
+
                     return Err("ORDER_READBACK_INCOMPLETE_NO_RESUBMIT".into());
                 }
             }
@@ -868,8 +824,6 @@ impl TradeService {
             i,
             unsent_release::UnsentReleaseDependencies {
                 store: &r.execution.store,
-                #[cfg(test)]
-                risk: &self.risk,
                 governance: &self.governance,
                 sql_deadline: deadline,
             },

@@ -129,6 +129,7 @@ export function validateUnsentKillBoundary(value){
 }
 
 export async function killAndRecoverUnsentNative({nativeProcess,handoffPath,cwd}){
+  throw Error("RETIRED_REMOTE_FINANCE_CRASH_BOUNDARY: no old Native crash fixture was executed");
   const waiting=new AbortController();
   const ready=(async()=>{
     const until=Date.now()+60_000;

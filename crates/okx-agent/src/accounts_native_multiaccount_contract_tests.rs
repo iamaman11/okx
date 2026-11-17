@@ -80,7 +80,7 @@ async fn risk_book_contract_native_two_accounts_share_budget_and_isolate_public_
         Some(fixture.campaign.clone())
     );
     for account in [&a, &b] {
-        let (owner, scope) = account.execution.store.native_scope().unwrap();
+        let (owner, scope) = account.execution.store.scope();
         assert_eq!(owner.installation_id(), fixture.owner.installation_id());
         assert_eq!(scope, account.configuration.account_key.wire());
         let policy = owner

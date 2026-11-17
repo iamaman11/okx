@@ -765,6 +765,7 @@ impl AccountStore {
     }
 }
 
+#[cfg(test)]
 impl AccountStore {
     pub(crate) fn run_before_deadline<T>(
         &mut self,

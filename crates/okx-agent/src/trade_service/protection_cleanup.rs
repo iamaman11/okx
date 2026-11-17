@@ -122,84 +122,30 @@ async fn protection_cleanup_step(
 ) -> Result<ProtectionCleanupStep, String> {
     let key = key.to_owned();
     let hash = hash.to_owned();
-    {
-        #[cfg(test)]
-        if let Some((owner, account)) = store.native_scope() {
-            if owner
-                .begin_operation(
-                    deadline(),
-                    account.into(),
-                    key.clone(),
-                    hash.clone(),
-                    "protection_cleanup".into(),
-                )
-                .await
-                .map_err(err)?
-            {
-                return Ok(ProtectionCleanupStep::SendOnce);
-            }
-            let old = owner
-                .operation(deadline(), account.into(), key)
-                .await
-                .map_err(err)?
-                .ok_or("PROTECTION_CLEANUP_BEGIN_MISSING")?;
-            return match old.result_ref.as_str() {
-                "POSTING" => Ok(ProtectionCleanupStep::Inspect),
-                "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
-                _ => Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into()),
-            };
-        }
-        #[cfg(not(test))]
-        {
-            let (owner, account) = store.native_owner().map_err(|e| e.to_string())?;
+    let (owner, account) = store.scope();
 
-            if owner
-                .begin_operation(
-                    deadline(),
-                    account.into(),
-                    key.clone(),
-                    hash.clone(),
-                    "protection_cleanup".into(),
-                )
-                .await
-                .map_err(err)?
-            {
-                return Ok(ProtectionCleanupStep::SendOnce);
-            }
-            let old = owner
-                .operation(deadline(), account.into(), key)
-                .await
-                .map_err(err)?
-                .ok_or("PROTECTION_CLEANUP_BEGIN_MISSING")?;
-            match old.result_ref.as_str() {
-                "POSTING" => Ok(ProtectionCleanupStep::Inspect),
-                "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
-                _ => Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into()),
-            }
-        }
-    }
-    #[cfg(test)]
+    if owner
+        .begin_operation(
+            deadline(),
+            account.into(),
+            key.clone(),
+            hash.clone(),
+            "protection_cleanup".into(),
+        )
+        .await
+        .map_err(err)?
     {
-        store
-            .call(deadline(), move |s| {
-                if s.begin_operation(&key, &hash, "protection_cleanup", now())? {
-                    return Ok(ProtectionCleanupStep::SendOnce);
-                }
-                let old = s
-                    .operation(&key)?
-                    .ok_or(okx_execution::StoreError::Invalid(
-                        "PROTECTION_CLEANUP_BEGIN_MISSING",
-                    ))?;
-                match old.result_ref.as_str() {
-                    "POSTING" => Ok(ProtectionCleanupStep::Inspect),
-                    "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
-                    _ => Err(okx_execution::StoreError::Invalid(
-                        "PROTECTION_CLEANUP_RECEIPT_CONFLICT",
-                    )),
-                }
-            })
-            .await
-            .map_err(err)
+        return Ok(ProtectionCleanupStep::SendOnce);
+    }
+    let old = owner
+        .operation(deadline(), account.into(), key)
+        .await
+        .map_err(err)?
+        .ok_or("PROTECTION_CLEANUP_BEGIN_MISSING")?;
+    match old.result_ref.as_str() {
+        "POSTING" => Ok(ProtectionCleanupStep::Inspect),
+        "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
+        _ => Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into()),
     }
 }
 
@@ -311,92 +257,32 @@ async fn commit_cleanup_confirmation(
     store: &ExecutionStore,
     proof: VerifiedCleanup,
 ) -> Result<(), String> {
-    {
-        #[cfg(test)]
-        if let Some((owner, account)) = store.native_scope() {
-            owner
-                .operation_receipt(
-                    deadline(),
-                    account.into(),
-                    proof.operation_key,
-                    proof.request_hash,
-                    "protection_cleanup".into(),
-                    "VERIFIED_CANCELED".into(),
-                )
-                .await
-                .map_err(err)?;
-            return Ok(());
-        }
-        #[cfg(not(test))]
-        {
-            let (owner, account) = store.native_owner().map_err(|e| e.to_string())?;
+    let (owner, account) = store.scope();
 
-            owner
-                .operation_receipt(
-                    deadline(),
-                    account.into(),
-                    proof.operation_key,
-                    proof.request_hash,
-                    "protection_cleanup".into(),
-                    "VERIFIED_CANCELED".into(),
-                )
-                .await
-                .map_err(err)?;
-            Ok(())
-        }
-    }
-    #[cfg(test)]
-    {
-        store
-            .call(deadline(), move |s| {
-                s.operation_receipt(
-                    &proof.operation_key,
-                    &proof.request_hash,
-                    "protection_cleanup",
-                    "VERIFIED_CANCELED",
-                    now(),
-                )
-            })
-            .await
-            .map_err(err)?;
-        Ok(())
-    }
+    owner
+        .operation_receipt(
+            deadline(),
+            account.into(),
+            proof.operation_key,
+            proof.request_hash,
+            "protection_cleanup".into(),
+            "VERIFIED_CANCELED".into(),
+        )
+        .await
+        .map_err(err)?;
+    Ok(())
 }
 
 async fn cleanup_operation(
     store: &ExecutionStore,
     key: String,
 ) -> Result<Option<okx_execution::OperationReceipt>, String> {
-    {
-        #[cfg(test)]
-        if let Some((owner, account)) = store.native_scope() {
-            owner
-                .operation(deadline(), account.into(), key)
-                .await
-                .map_err(err)
-        } else {
-            #[cfg(test)]
-            {
-                store
-                    .call(deadline(), move |s| s.operation(&key))
-                    .await
-                    .map_err(err)
-            }
-            #[cfg(not(test))]
-            {
-                return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
-            }
-        }
-        #[cfg(not(test))]
-        {
-            let (owner, account) = store.native_owner().map_err(|e| e.to_string())?;
+    let (owner, account) = store.scope();
 
-            owner
-                .operation(deadline(), account.into(), key)
-                .await
-                .map_err(err)
-        }
-    }
+    owner
+        .operation(deadline(), account.into(), key)
+        .await
+        .map_err(err)
 }
 
 async fn protection_cleanup_readback(
@@ -516,34 +402,12 @@ pub(super) async fn cleanup_flat_protection(
         .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
     let id = facts.intent_id.to_owned();
     let saved = {
-        #[cfg(test)]
-        if let Some((owner, account)) = deps.store.native_scope() {
-            owner
-                .protection(deadline(), account.into(), id)
-                .await
-                .map_err(err)?
-        } else {
-            #[cfg(test)]
-            {
-                deps.store
-                    .call(deadline(), move |s| s.protection(&id))
-                    .await
-                    .map_err(err)?
-            }
-            #[cfg(not(test))]
-            {
-                return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
-            }
-        }
-        #[cfg(not(test))]
-        {
-            let (owner, account) = deps.store.native_owner().map_err(|e| e.to_string())?;
+        let (owner, account) = deps.store.scope();
 
-            owner
-                .protection(deadline(), account.into(), id)
-                .await
-                .map_err(err)?
-        }
+        owner
+            .protection(deadline(), account.into(), id)
+            .await
+            .map_err(err)?
     };
     let Some(saved) = saved else {
         trace_cleanup(&deps, facts, ProtectionTraceEvent::NoProtection);

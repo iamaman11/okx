@@ -40,12 +40,10 @@ async fn risk_book_contract_native_engine_tasks_initialize_opening_and_drain_ori
         trade: fixture.trade.clone(),
         market: bootstrap,
     };
-    let (_tx, risk) = tokio::sync::mpsc::channel(32);
     let ctx = EngineContext {
         dispatch,
         public: market,
         transport: None,
-        risk,
         mailbox: None,
         private_key: zeroize::Zeroizing::new([0; 32]),
         key_id: "isolated-native-engine".into(),

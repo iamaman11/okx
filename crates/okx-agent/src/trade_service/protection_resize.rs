@@ -28,65 +28,20 @@ impl TradeService {
         let plan_hash = reduction.plan_hash.clone();
         let account_key = r.configuration.account_key.wire();
         let (opening, old_stop, key, prior, verified) = {
-            #[cfg(test)]
-            if let Some((owner, account)) = r.execution.store.native_scope() {
-                owner
-                    .protection_resize_source(
-                        deadline(),
-                        account.into(),
-                        reduction.intent_id.clone(),
-                        venue.order_id.clone(),
-                        venue_filled,
-                        update,
-                        position_qty,
-                    )
-                    .await
-                    .map_err(err)?
-            } else {
-                #[cfg(test)]
-                {
-                    let id = reduction.intent_id.clone();
-                    let order = venue.order_id.clone();
-                    r.execution
-                        .store
-                        .call(deadline(), move |s| {
-                            s.protection_resize_source(
-                                &id,
-                                &order,
-                                venue_filled,
-                                update,
-                                position_qty,
-                            )
-                        })
-                        .await
-                        .map_err(err)?
-                }
-                #[cfg(not(test))]
-                {
-                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
-                }
-            }
-            #[cfg(not(test))]
-            {
-                let (owner, account) = r
-                    .execution
-                    .store
-                    .native_owner()
-                    .map_err(|e| e.to_string())?;
+            let (owner, account) = r.execution.store.scope();
 
-                owner
-                    .protection_resize_source(
-                        deadline(),
-                        account.into(),
-                        reduction.intent_id.clone(),
-                        venue.order_id.clone(),
-                        venue_filled,
-                        update,
-                        position_qty,
-                    )
-                    .await
-                    .map_err(err)?
-            }
+            owner
+                .protection_resize_source(
+                    deadline(),
+                    account.into(),
+                    reduction.intent_id.clone(),
+                    venue.order_id.clone(),
+                    venue_filled,
+                    update,
+                    position_qty,
+                )
+                .await
+                .map_err(err)?
         };
         let hash = digest(&(
             "protection-shrink/v1",
@@ -166,61 +121,18 @@ impl TradeService {
             };
             let verification = format!("{key}:verified");
             {
-                #[cfg(test)]
-                if let Some((owner, account)) = r.execution.store.native_scope() {
-                    owner
-                        .confirm_protection_resize(
-                            deadline(),
-                            account.into(),
-                            new_protection,
-                            verification,
-                            hash,
-                        )
-                        .await
-                        .map_err(err)?;
-                } else {
-                    #[cfg(test)]
-                    {
-                        r.execution
-                            .store
-                            .call(deadline(), move |s| {
-                                s.verify_protection(&new_protection)?;
-                                s.operation_receipt(
-                                    &verification,
-                                    &hash,
-                                    "protection_shrink_verified",
-                                    "VERIFIED",
-                                    now(),
-                                )?;
-                                Ok(())
-                            })
-                            .await
-                            .map_err(err)?;
-                    }
-                    #[cfg(not(test))]
-                    {
-                        return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
-                    }
-                }
-                #[cfg(not(test))]
-                {
-                    let (owner, account) = r
-                        .execution
-                        .store
-                        .native_owner()
-                        .map_err(|e| e.to_string())?;
+                let (owner, account) = r.execution.store.scope();
 
-                    owner
-                        .confirm_protection_resize(
-                            deadline(),
-                            account.into(),
-                            new_protection,
-                            verification,
-                            hash,
-                        )
-                        .await
-                        .map_err(err)?;
-                }
+                owner
+                    .confirm_protection_resize(
+                        deadline(),
+                        account.into(),
+                        new_protection,
+                        verification,
+                        hash,
+                    )
+                    .await
+                    .map_err(err)?;
             }
             return Ok(json!({
                 "state":"verified",
@@ -280,11 +192,7 @@ impl TradeService {
             .trade
             .amend_algo_order_after_admission(&request, &timing, &rate)
             .await
-            .map_err(|_source| {
-                #[cfg(test)]
-                eprintln!("PROTECTION_SHRINK_SOURCE_SEND_FAILED_V1:{_source}");
-                "PROTECTION_SHRINK_OUTCOME_UNKNOWN_NO_RESUBMIT"
-            })?;
+            .map_err(|_source| "PROTECTION_SHRINK_OUTCOME_UNKNOWN_NO_RESUBMIT")?;
         if !ack.top_level_success()
             || ack.data.len() != 1
             || ack.data[0].status_code != "0"

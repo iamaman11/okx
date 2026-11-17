@@ -91,7 +91,7 @@ async fn readback(
     qty: &str,
 ) -> Result<(), String> {
     let positions = positions(qty);
-    let (_, account) = store.native_owner().unwrap();
+    let (_, account) = store.scope();
     let expected_uid = account.rsplit(':').next().unwrap();
     protection_cleanup_readback(
         store,
@@ -365,7 +365,7 @@ async fn pc_05_restart_recovers_the_same_sql_begin_without_new_send() {
             .unwrap(),
         ProtectionCleanupStep::Confirmed
     );
-    let (owner, _) = reopened.native_owner().unwrap();
+    let (owner, _) = reopened.scope();
     let mut terminated = owner.termination_signal();
     drop(reopened);
     tokio::time::timeout(

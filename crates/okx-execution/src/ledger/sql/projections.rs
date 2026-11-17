@@ -250,17 +250,11 @@ impl AccountStore {
     pub fn storage_health(&self) -> Option<&str> {
         self.maintenance_error.as_deref()
     }
-    pub(crate) fn set_maintenance_error(&mut self, error: String) {
-        self.maintenance_error = Some(error);
-    }
-
-    pub(crate) fn clear_maintenance_error(&mut self) {
-        self.maintenance_error = None;
-    }
     /// Existing single SQL owner remains responsible for all financial writes
     /// and WAL checkpoints. Copying a 150MB+ backup never runs in its FIFO.
     /// Observe the single existing PASSIVE checkpoint within its owner turn.
     /// Keep error and busy separate; do not silently claim full completion.
+    #[cfg(test)]
     pub(crate) fn maintenance_observed(
         &mut self,
         observe: impl FnOnce(WalMaintenanceObservation),
@@ -301,14 +295,11 @@ impl AccountStore {
         result
     }
 
-    pub(crate) fn backup_identity(&self) -> (PathBuf, AccountMeta) {
-        (self.path.clone(), self.meta.clone())
-    }
-
     /// A short-lived *read-only* SQLite snapshot reader. The sole account
     /// writer and its original connection are never borrowed by this backup.
     /// The destination is a separate immutable recovery artifact, not a second
     /// ledger or trading authority. The 15-minute cadence stays in the owner.
+    #[cfg(test)]
     pub(crate) fn periodic_backup_from_reader(
         source_path: PathBuf,
         meta: AccountMeta,

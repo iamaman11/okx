@@ -934,74 +934,10 @@ impl TradeService {
         {
             return Err("STRATEGY_VERSION_CHANGED".into());
         }
-        #[cfg(test)]
-        let manual_budget = dec(&state.state.campaign_loss_limit_usd)?;
-        #[cfg(test)]
-        let owner_account = r.configuration.account_key.wire();
-        #[cfg(test)]
-        let owner_uid = r.execution.uid().to_owned();
+
         let prepared = {
-            #[cfg(test)]
-            if let Some((owner, account)) = r.execution.store.native_scope() {
-                owner
-                    .prepare_admission(until, account.to_owned(), decision, intent)
-                    .await
-                    .map_err(err)?
-            } else {
-                // Original per-account owner survives only in historical test fixtures.
-                #[cfg(test)]
-                {
-                    prepare_on_owner(
-                        r.execution.store.legacy().map_err(err)?,
-                        until,
-                        &owner_account,
-                        &owner_uid,
-                        move |s| {
-                            if intent.plan.strategy_instance == "manual"
-                                && !s.instances()?.iter().any(|i| i.instance_id == "manual")
-                            {
-                                let manual = StrategyInstance {
-                                    instance_id: "manual".into(),
-                                    definition_id: "manual".into(),
-                                    definition_version: "1".into(),
-                                    parameters: "{}".into(),
-                                    enabled: false,
-                                    policy_revision: 1,
-                                    budget: manual_budget,
-                                    last_decision_key: None,
-                                };
-                                let h = format!(
-                                    "{:x}",
-                                    Sha256::digest(
-                                        format!("{}:manual", s.meta().account_key).as_bytes()
-                                    )
-                                );
-                                s.mutate_instance(
-                                    "internal_create_manual",
-                                    &h,
-                                    "create",
-                                    &manual,
-                                    None,
-                                    now(),
-                                )?;
-                            }
-                            s.prepare(&decision, &intent)
-                        },
-                    )
-                    .await?
-                }
-                #[cfg(not(test))]
-                {
-                    return Err("NATIVE_ADMISSION_OWNER_MISSING".into());
-                }
-            }
-            #[cfg(not(test))]
             {
-                let (owner, account) = r
-                    .execution
-                    .store
-                    .native_owner()
-                    .map_err(|e| e.to_string())?;
+                let (owner, account) = r.execution.store.scope();
 
                 owner
                     .prepare_admission(until, account.to_owned(), decision, intent)
@@ -1014,9 +950,7 @@ impl TradeService {
         }
         let mut central = None;
         let mut post_held_selected = None;
-        #[cfg(test)]
-        let mut native_send_claim = None;
-        #[cfg(not(test))]
+
         let native_send_claim;
         if increase
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
@@ -1274,11 +1208,8 @@ impl TradeService {
                 .mark_reserve_attempt(until, intent_id, reserve_key)
                 .await
                 .map_err(err)?;
-            #[cfg(test)]
-            let native_reserve = self.risk.is_native_finance();
-            #[cfg(not(test))]
-            let native_reserve = true;
-            let reserved = if native_reserve {
+
+            let reserved = {
                 let packet = ProducedReserve::from_production(
                     reserve,
                     native_process_incarnation()?.to_owned(),
@@ -1301,32 +1232,15 @@ impl TradeService {
                             ))
                         }
                     })
-            } else {
-                #[cfg(test)]
-                {
-                    self.reserve_inspect_retry(&state, reserve, &prepared, r)
-                        .await
-                        .map(|held| (held, None))
-                }
-                #[cfg(not(test))]
-                {
-                    return Err("NATIVE_RESERVE_ROUTE_REQUIRED".into());
-                }
             };
             let (held, native_receipt) = match reserved {
                 Ok(held) => held,
-                Err((reason, true)) if native_reserve => {
+                Err((reason, true)) => {
                     // This is the actual local owner's explicit Denied reply,
                     // not a timeout or lost reply. Its scoped transaction also
                     // refuses rejection if any original reservation exists.
-                    #[cfg(test)]
-                    let (owner, account) = r
-                        .execution
-                        .store
-                        .native_scope()
-                        .ok_or("NATIVE_RESERVE_OWNER_MISSING")?;
-                    #[cfg(not(test))]
-                    let (owner, account) = r.execution.store.native_owner().map_err(err)?;
+
+                    let (owner, account) = r.execution.store.scope();
                     if owner
                         .reject_denied_reserve(
                             deadline(),
@@ -1348,99 +1262,20 @@ impl TradeService {
                         "primary_reason":reason,"risk_release_state":"NOT_RESERVED"
                     })));
                 }
-                Err((reason, _)) if native_reserve => {
+                Err((reason, _)) => {
                     // An enqueued native transaction may have committed before
                     // its reply was lost. Never reject/release it through the
                     // legacy account writer or obtain another send grant.
                     return Ok(uncertain(&prepared.intent_id, &reason));
                 }
-                #[cfg(test)]
-                Err((reason, authoritative_denial)) => {
-                    let id = prepared.intent_id.clone();
-                    if authoritative_denial {
-                        let owner_reason = reason.clone();
-                        r.execution
-                            .store
-                            .call(deadline(), move |s| {
-                                s.reject_denied_reserve(&id, &owner_reason, now())
-                            })
-                            .await
-                            .map_err(err)?;
-                        return Ok(completed(json!({
-                            "intent_id":prepared.intent_id,
-                            "state":"REJECTED","rejection_origin":"CENTRAL",
-                            "send_state":"NOT_STARTED","primary_reason":reason,
-                            "risk_release_state":"NOT_RESERVED"
-                        })));
-                    }
-                    return match reject_prepost_denial(
-                        r.execution.store.legacy().map_err(err)?,
-                        &prepared,
-                        &reason,
-                    )
-                    .await
-                    {
-                        Ok(mut result) => {
-                            match self.release_unsent(r, &prepared).await {
-                                Ok(_) => result["data"]["risk_release_state"] = json!("RELEASED"),
-                                Err(release) => {
-                                    result["data"]["risk_release_error"] =
-                                        json!(release.reason_code);
-                                    result["data"]["risk_release_failure"] = json!(release);
-                                }
-                            }
-                            Ok(result)
-                        }
-                        Err(_) => Ok(uncertain(
-                            &prepared.intent_id,
-                            "RESERVE_LOCAL_COMMIT_UNCONFIRMED_NO_RESUBMIT",
-                        )),
-                    };
-                }
-                #[cfg(not(test))]
-                Err((_reason, _)) => return Err("NATIVE_RESERVE_ROUTE_REQUIRED".into()),
             };
             let held_received = Instant::now();
-            if native_reserve {
-                let receipt = native_receipt.ok_or("NATIVE_RESERVE_DURABLE_RECEIPT_MISSING")?;
-                if receipt.intent_id != prepared.intent_id
-                    || receipt.plan_hash != prepared.plan_hash
-                    || receipt.account_key != r.configuration.account_key.wire()
-                {
-                    return Err("NATIVE_RESERVE_DURABLE_RECEIPT_MISMATCH".into());
-                }
-            } else {
-                #[cfg(test)]
-                {
-                    let receipt = self.local_receipt(r, &prepared, &held, usd, &conversion)?;
-                    r.execution
-                        .store
-                        .call(until, move |s| s.reserve(&receipt, now()))
-                        .await
-                        .map_err(err)?;
-                }
-                #[cfg(not(test))]
-                return Err("NATIVE_RESERVE_RECEIPT_REQUIRED".into());
-            }
-            // TEST-ONLY: the true SQL owner has now persisted Worker HELD.
-            // Holding here (rather than withholding the WSS HELD reply)
-            // keeps the cohort census safe: a separate Execute can observe
-            // RESERVED plus its central receipt, not an unresolved PREPARED
-            // attempt. Production ordering and fail-closed source fences
-            // are identical when this opt-in test hook is absent.
-            #[cfg(test)]
-            if super::T10_07_HOLD_SQL_RESERVE.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                super::T10_07_SQL_RESERVE_PERSISTED
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                tokio::time::timeout_at(until.into(), async {
-                    while !super::T10_07_RELEASE_SQL_RESERVE_HOLD
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                    {
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                    }
-                })
-                .await
-                .map_err(|_| "T10_07_SQL_HELD_HANDOFF_ORIGINAL_DEADLINE_EXPIRED")?;
+            let receipt = native_receipt.ok_or("NATIVE_RESERVE_DURABLE_RECEIPT_MISSING")?;
+            if receipt.intent_id != prepared.intent_id
+                || receipt.plan_hash != prepared.plan_hash
+                || receipt.account_key != r.configuration.account_key.wire()
+            {
+                return Err("NATIVE_RESERVE_DURABLE_RECEIPT_MISMATCH".into());
             }
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
@@ -1465,45 +1300,14 @@ impl TradeService {
                     post_held_selected = Some(witness);
                     native_send_claim = claim;
                 }
-                Err(reason) if native_reserve => {
+                Err(reason) => {
                     // The sole local owner can prove no BeginPost and atomically
                     // retire the original HELD obligation. A queued/committed
                     // BeginPost wins the same writer order and makes rejection
                     // fail; lost replies must then remain UNKNOWN, never resend.
                     {
-                        #[cfg(test)]
-                        if let Some((owner, account)) = r.execution.store.native_scope() {
-                            let resolution = owner
-                                .reject_and_release_unsent(
-                                    deadline(),
-                                    account.into(),
-                                    prepared.intent_id.clone(),
-                                    prepared.plan_hash.clone(),
-                                    reason.clone(),
-                                )
-                                .await;
-                            if resolution.is_ok() {
-                                return Ok(completed(json!({
-                                    "intent_id":prepared.intent_id,"state":"REJECTED",
-                                    "rejection_origin":"LOCAL","send_state":"NOT_STARTED",
-                                    "primary_reason":reason,"risk_release_state":"RELEASED"
-                                })));
-                            }
-                            let mut result = uncertain(&prepared.intent_id, &reason);
-                            result["unsent_resolution"] = json!({
-                                "state":"NOT_PROVEN",
-                                "reason_code":err(resolution.unwrap_err()),
-                                "send_permission":"NOT_GRANTED"
-                            });
-                            return Ok(result);
-                        }
-                        #[cfg(not(test))]
                         {
-                            let (owner, account) = r
-                                .execution
-                                .store
-                                .native_owner()
-                                .map_err(|e| e.to_string())?;
+                            let (owner, account) = r.execution.store.scope();
 
                             let resolution = owner
                                 .reject_and_release_unsent(
@@ -1530,60 +1334,7 @@ impl TradeService {
                             return Ok(result);
                         }
                     }
-                    #[cfg(test)]
-                    return Ok(uncertain(&prepared.intent_id, &reason));
                 }
-                Err(reason)
-                    if matches!(
-                        reason.as_str(),
-                        "POST_FENCE_OUTCOME_UNKNOWN_NO_POST" | "RISK_TRANSPORT_LOST_DO_NOT_REPLAY"
-                    ) =>
-                {
-                    // A lost Worker BeginPost answer is not a negative
-                    // authorization. INSPECT may already have observed
-                    // POSTED, or its own WSS reply may be unavailable.
-                    // Native has NOT entered its venue-post section yet.
-                    // Preserve the original RESERVED SQL intent and its
-                    // persisted central receipt: do not REJECT it, attempt
-                    // RELEASE_UNSENT on a possibly POSTED Worker reserve,
-                    // or issue any venue POST to repair an ambiguous fence.
-                    // A same-key replay remains bound to this durable intent.
-                    return Ok(uncertain(
-                        &prepared.intent_id,
-                        "POST_FENCE_OUTCOME_UNCERTAIN_NATIVE_UNSENT",
-                    ));
-                }
-                #[cfg(test)]
-                Err(reason) => {
-                    // A proven ordinary pre-post denial may be rejected;
-                    // only an unambiguous unsent release can retire risk.
-                    // The ambiguous Worker outcomes above remain durable.
-                    return match reject_prepost_denial(
-                        r.execution.store.legacy().map_err(err)?,
-                        &prepared,
-                        &reason,
-                    )
-                    .await
-                    {
-                        Ok(mut result) => {
-                            match self.release_unsent(r, &prepared).await {
-                                Ok(_) => result["data"]["risk_release_state"] = json!("RELEASED"),
-                                Err(release) => {
-                                    result["data"]["risk_release_error"] =
-                                        json!(release.reason_code);
-                                    result["data"]["risk_release_failure"] = json!(release);
-                                }
-                            }
-                            Ok(result)
-                        }
-                        Err(_) => Ok(uncertain(
-                            &id,
-                            "PREPOST_LOCAL_COMMIT_UNCONFIRMED_NO_RESUBMIT",
-                        )),
-                    };
-                }
-                #[cfg(not(test))]
-                Err(_reason) => return Err("NATIVE_FENCE_ROUTE_REQUIRED_NO_POST".into()),
             }
         } else {
             // Demo and native-confirmed reductions use the same durable marker; no Real global capacity is minted.
@@ -1600,47 +1351,8 @@ impl TradeService {
                 conversion_digest: digest(&plan)?,
             };
             {
-                #[cfg(test)]
-                if let Some((owner, account)) = r.execution.store.native_scope() {
-                    owner
-                        .reserve_local_reduction(until, account.to_owned(), receipt)
-                        .await
-                        .map_err(err)?;
-                    native_send_claim = owner
-                        .claim_local_reduction_send(
-                            until,
-                            account.to_owned(),
-                            prepared.intent_id.clone(),
-                            prepared.plan_hash.clone(),
-                            prepared.policy_revision,
-                        )
-                        .await
-                        .map_err(err)?;
-                    if native_send_claim.is_none() {
-                        return Ok(uncertain(
-                            &prepared.intent_id,
-                            "NATIVE_REDUCTION_POST_ALREADY_CLAIMED_NO_RESEND",
-                        ));
-                    }
-                } else {
-                    #[cfg(test)]
-                    {
-                        r.execution
-                            .store
-                            .call(until, move |s| s.reserve(&receipt, now()))
-                            .await
-                            .map_err(err)?;
-                    }
-                    #[cfg(not(test))]
-                    return Err("NATIVE_REDUCTION_OWNER_REQUIRED_NO_POST".into());
-                }
-                #[cfg(not(test))]
                 {
-                    let (owner, account) = r
-                        .execution
-                        .store
-                        .native_owner()
-                        .map_err(|e| e.to_string())?;
+                    let (owner, account) = r.execution.store.scope();
 
                     owner
                         .reserve_local_reduction(until, account.to_owned(), receipt)
@@ -1815,7 +1527,7 @@ impl TradeService {
                 .map_err(err)
         };
         let result = if let Some(claim) = native_send_claim {
-            let owner = self.risk.required_finance_owner().map_err(str::to_owned)?;
+            let owner = self.risk.finance_owner();
             submission::post_committed_native(
                 &owner,
                 self.accounts.installation_id(),
@@ -1827,20 +1539,6 @@ impl TradeService {
             )
             .await?
         } else {
-            #[cfg(test)]
-            {
-                if increase && self.risk.is_native_finance() {
-                    return Err("NATIVE_SEND_CLAIM_MISSING_NO_POST".into());
-                }
-                post_once(
-                    r.execution.store.legacy().map_err(err)?,
-                    &prepared,
-                    until,
-                    send,
-                )
-                .await?
-            }
-            #[cfg(not(test))]
             {
                 return Err("NATIVE_SEND_CLAIM_MISSING_NO_POST".into());
             }
@@ -1924,31 +1622,7 @@ impl TradeService {
     ) -> RiskCommand {
         build_risk_command(state, id, action)
     }
-    #[cfg(test)]
-    pub(super) fn local_receipt(
-        &self,
-        r: &AccountResources,
-        intent: &StoredIntent,
-        result: &RiskResult,
-        usd: Decimal,
-        conversion: &UsdConversion,
-    ) -> Result<CentralReceipt, String> {
-        Ok(CentralReceipt {
-            reservation_key: result
-                .reservation_key
-                .clone()
-                .ok_or("RESERVATION_KEY_MISSING")?,
-            account_key: r.configuration.account_key.wire(),
-            installation_id: self.accounts.installation_id().into(),
-            instance_id: Some(intent.plan.strategy_instance.clone()),
-            intent_id: intent.intent_id.clone(),
-            plan_hash: intent.plan_hash.clone(),
-            policy_revision: intent.policy_revision,
-            receipt_hash: digest(result)?,
-            requested_loss_usd: usd,
-            conversion_digest: digest(conversion)?,
-        })
-    }
+
     fn risk_reservation_key(&self, r: &AccountResources, intent: &StoredIntent) -> String {
         [
             "okx",
@@ -1962,71 +1636,6 @@ impl TradeService {
         .collect::<String>()
     }
 
-    #[cfg(test)]
-    async fn reserve_inspect_retry(
-        &self,
-        state: &CentralGovernanceSnapshot,
-        command: RiskCommand,
-        intent: &StoredIntent,
-        r: &AccountResources,
-    ) -> Result<RiskResult, (String, bool)> {
-        let first = self.risk.request(command).await;
-        let expected_key = self.risk_reservation_key(r, intent);
-        if let Ok(held) = &first
-            && held.status == RiskDecisionStatus::Held
-        {
-            if !risk_receipt_bound(
-                held,
-                RiskDecisionStatus::Held,
-                &expected_key,
-                state.state.revision,
-            ) {
-                return Err(("RESERVE_RECEIPT_BINDING_MISMATCH".into(), false));
-            }
-            return Ok(held.clone());
-        }
-        // DENIED is not itself proof of no existing reservation: a replayed
-        // identity may have HELD capacity in Worker already. INSPECT the exact
-        // address before settling the SQL no-reservation marker.
-        let inspect = self.risk_command(
-            state,
-            format!("inspect_{}", &intent.plan_hash[..32]),
-            RiskCommandAction::Inspect {
-                reservation_key: expected_key.clone(),
-                plan_sha256: intent.plan_hash.clone(),
-            },
-        );
-        let observed = self.risk.request(inspect).await;
-        let central_denied = matches!(&first,
-            Ok(v) if v.status == RiskDecisionStatus::Denied);
-        let reason = match &first {
-            Ok(v) => v.reason.clone().unwrap_or("RESERVE_DENIED".into()),
-            Err(_) => "RESERVE_OUTCOME_UNKNOWN_NO_POST".into(),
-        };
-        match observed {
-            Ok(reply)
-                if risk_receipt_bound(
-                    &reply,
-                    RiskDecisionStatus::Observed,
-                    &expected_key,
-                    state.state.revision,
-                ) && reply.reservation_state == Some(RiskReservationState::Held)
-                    && !central_denied =>
-            {
-                // One original reservation is known; never replay stale
-                // reserve-time source as a second grant.
-                Ok(reply)
-            }
-            Ok(reply)
-                if central_denied
-                    && reply.status == RiskDecisionStatus::Denied
-                    && reply.reason.as_deref() == Some("RISK_RESERVATION_NOT_FOUND") =>
-            {
-                Err((reason, true))
-            }
-            _ => Err((reason, false)),
-        }
-    }
     async fn revalidate_held_entry_quote(
         &self,
         r: &AccountResources,
@@ -2069,32 +1678,12 @@ impl TradeService {
             .observer
             .snapshot_after_held_until(until)
             .await
-            .map_err(|e| {
-                let reason = err(e);
-                #[cfg(test)]
-                Self::b_census_probe_failure(
-                    "POST_HELD_SELECTED_SNAPSHOT",
-                    &r.configuration.account_key.wire(),
-                    &reason,
-                    Some(until),
-                );
-                reason
-            })?;
+            .map_err(err)?;
         let fee = r
             .observer
             .fee_schedule_until(&rules, until)
             .await
-            .map_err(|e| {
-                let reason = err(e);
-                #[cfg(test)]
-                Self::b_census_probe_failure(
-                    "POST_HELD_FEE_SOURCE",
-                    &r.configuration.account_key.wire(),
-                    &reason,
-                    Some(until),
-                );
-                reason
-            })?;
+            .map_err(err)?;
         if snap.account_uid_fingerprint != r.configuration.account_key.verified_uid {
             return Err("POST_ENTRY_ACCOUNT_CHANGED".into());
         }
@@ -2109,17 +1698,7 @@ impl TradeService {
             .account
             .config_wait(until.saturating_duration_since(Instant::now()))
             .await
-            .map_err(|e| {
-                let reason = err(e);
-                #[cfg(test)]
-                Self::b_census_probe_failure(
-                    "POST_HELD_EXECUTOR_CONFIG",
-                    &r.configuration.account_key.wire(),
-                    &reason,
-                    Some(until),
-                );
-                reason
-            })?;
+            .map_err(err)?;
         let leverage = dec(&r
             .observer
             .configured_leverage_until(
@@ -2133,17 +1712,7 @@ impl TradeService {
                 until,
             )
             .await
-            .map_err(|e| {
-                let reason = err(e);
-                #[cfg(test)]
-                Self::b_census_probe_failure(
-                    "POST_HELD_LEVERAGE",
-                    &r.configuration.account_key.wire(),
-                    &reason,
-                    Some(until),
-                );
-                reason
-            })?)?;
+            .map_err(err)?)?;
         let (reassessed, _) = entry_budget::assess_order(
             &intent.plan,
             entry_budget::EntryAssessmentSources {
@@ -2239,19 +1808,7 @@ impl TradeService {
                     causal_proof,
                 },
             );
-            #[cfg(test)]
-            let (response, claim) = if self.risk.is_native_finance() {
-                let packet = ProducedPost::from_production(command)?;
-                let (result, claim) = self
-                    .risk
-                    .post_produced(packet)
-                    .await
-                    .map_err(str::to_owned)?;
-                (Ok::<RiskResult, &'static str>(result), claim)
-            } else {
-                (self.risk.request(command).await, None)
-            };
-            #[cfg(not(test))]
+
             let (response, claim) = {
                 let packet = ProducedPost::from_production(command)?;
                 let (result, claim) = self
@@ -2266,11 +1823,8 @@ impl TradeService {
                     if !post_receipt_bound(&v, &key, state.state.revision, sequence) {
                         return Err("POST_FENCE_RECEIPT_BINDING_MISMATCH".into());
                     }
-                    #[cfg(test)]
-                    let claim_required = self.risk.is_native_finance();
-                    #[cfg(not(test))]
-                    let claim_required = true;
-                    if claim_required && claim.is_none() {
+
+                    if claim.is_none() {
                         return Err("NATIVE_POST_CLAIM_MISSING_NO_POST".into());
                     }
                     return Ok((v, selected, claim));
@@ -2321,32 +1875,6 @@ pub(super) fn native_process_incarnation() -> Result<&'static str, String> {
         .map(String::as_str)
         .map_err(Clone::clone)
 }
-#[cfg(test)]
-pub(super) async fn prepare_on_owner<T, F>(
-    store: &AccountStoreHandle,
-    until: Instant,
-    account: &str,
-    verified_uid: &str,
-    prepare: F,
-) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce(&mut okx_execution::AccountStore) -> okx_execution::StoreResult<T> + Send + 'static,
-{
-    let account = account.to_owned();
-    let uid = verified_uid.to_owned();
-    store
-        .call(until, move |s| {
-            if s.meta().account_key != account || account.rsplit(':').next() != Some(uid.as_str()) {
-                return Err(okx_execution::StoreError::Invalid(
-                    "VERIFIED_UID_OWNER_MISMATCH",
-                ));
-            }
-            prepare(s)
-        })
-        .await
-        .map_err(err)
-}
 fn validate_generation(expected: i64, observed: i64) -> Result<(), String> {
     if expected <= 0 || expected != observed {
         Err("SOURCE_GENERATION_CHANGED".into())
@@ -2354,126 +1882,9 @@ fn validate_generation(expected: i64, observed: i64) -> Result<(), String> {
         Ok(())
     }
 }
-/// The one durable send boundary, shared by real and fixture gateways.
-/// A central fence denial before the SQL POST claim proves the venue was
-/// never called. Keep the first reason and the reservation pending for
-/// central release; do not confuse this with a lost exchange POST response.
-/// Central release proofs require a reason <=128 UTF-8 bytes. Preserve
-/// readable error class plus a SHA-256 of the original full diagnosis;
-/// never truncate an economic event or mutate a risk reservation to fit.
-#[cfg(test)]
-fn bounded_unsent_reason(reason: &str) -> String {
-    if reason.len() <= 128 {
-        return reason.to_owned();
-    }
-    let prefix_end = (0..=48)
-        .rev()
-        .find(|&index| reason.is_char_boundary(index))
-        .unwrap_or(0);
-    let hash = format!("{:x}", Sha256::digest(reason.as_bytes()));
-    format!("{}:sha256:{hash}", &reason[..prefix_end])
-}
-#[cfg(test)]
-async fn reject_prepost_denial(
-    store: &AccountStoreHandle,
-    intent: &StoredIntent,
-    reason: &str,
-) -> Result<Value, String> {
-    let id = intent.intent_id.clone();
-    #[cfg(test)]
-    if std::env::var("OKX_B1_NATIVE_CAP_PROBE").as_deref() == Ok("1") {
-        // Test-only first cause BEFORE the economic ledger bounds its size.
-        // Report allowlisted route/code identifiers and the stable digest,
-        // NEVER the underlying signed HTTP request or response.
-        let codes = [
-            "TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED",
-            "TRANSCRIPT_REPEAT_EXCEEDED",
-            "TRANSCRIPT_CLOCK_EXHAUSTED",
-            "ENTRY_FEE_EXCHANGE_TIME_STALE",
-            "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE",
-            "ACCOUNT_EVIDENCE_EXPIRED_DURING_PLAN",
-            "POST_CENSUS_STALE",
-            "LOCAL_RATE_LIMIT",
-        ]
-        .into_iter()
-        .filter(|item| reason.contains(*item))
-        .collect::<Vec<_>>();
-        let routes = [
-            "/api/v5/trade/order",
-            "/api/v5/account/balance",
-            "/api/v5/account/trade-fee",
-            "/api/v5/account/leverage-info",
-            "/api/v5/trade/orders-pending",
-            "/api/v5/trade/orders-algo-pending",
-            "/api/v5/trade/fills-history",
-            "/api/v5/account/bills-archive",
-        ]
-        .into_iter()
-        .filter(|item| reason.contains(*item))
-        .collect::<Vec<_>>();
-        let actors = [
-            "fixture-executor-a",
-            "fixture-executor-b",
-            "fixture-observer-a",
-            "fixture-observer-b",
-        ]
-        .into_iter()
-        .filter(|item| reason.contains(*item))
-        .collect::<Vec<_>>();
-        println!(
-            "B1_B_PREPOST_CAUSE_V1:{}",
-            json!({
-                "source_digest":format!("{:x}",Sha256::digest(reason.as_bytes())),
-                "b_positive_key":intent.idempotency_key == "b1_b_positive_after_shared_denial_001",
-                "typed_codes":codes,"signed_routes":routes,"recorded_actors":actors,
-                "response_bounded":reason.len() > 128
-            })
-        );
-    }
-    let original = bounded_unsent_reason(reason);
-    store
-        .call(deadline(), move |s| s.reject_unsent(&id, &original, now()))
-        .await
-        .map_err(err)?;
-    let id = intent.intent_id.clone();
-    let saved = store
-        .lookup_intent(deadline(), okx_execution::TradeIntentLookup::IntentId(id))
-        .await
-        .map_err(err)?
-        .ok_or("PREPOST_INTENT_READBACK_MISSING")?;
-    if saved.state != IntentState::Rejected {
-        return Err("PREPOST_INTENT_REJECTION_UNCONFIRMED".into());
-    }
-    Ok(completed(json!({
-        "intent_id":saved.intent_id,
-        "state":"REJECTED",
-        "rejection_origin":"LOCAL",
-        "send_state":"NOT_STARTED",
-        "primary_reason":saved.incident.as_deref().unwrap_or(reason),
-        "risk_release_state":"PENDING",
-        "next_action":"trade.status"
-    })))
-}
-#[cfg(test)]
-#[test]
-fn prepost_unsent_proof_reason_is_bounded_and_stably_identifiable() {
-    let full = format!("OKX rate/backpressure defer: {}", "x".repeat(300));
-    let short = bounded_unsent_reason(&full);
-    assert!(short.len() <= 128);
-    assert!(short.starts_with("OKX rate/backpressure"));
-    assert!(short.ends_with(&format!("{:x}", Sha256::digest(full.as_bytes()))));
-    assert_eq!(short, bounded_unsent_reason(&full));
-    assert_eq!(
-        bounded_unsent_reason("POST_CENSUS_STALE"),
-        "POST_CENSUS_STALE"
-    );
-    let unicode = "🚨".repeat(100);
-    assert!(bounded_unsent_reason(&unicode).len() <= 128);
-}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn central_binding_fixture(status: RiskDecisionStatus) -> RiskResult {
         RiskResult {
@@ -3506,20 +2917,6 @@ mod tests {
         );
     }
 
-    struct FixtureGateway {
-        posts: AtomicUsize,
-        lose: bool,
-    }
-    impl FixtureGateway {
-        async fn send(&self) -> Result<u32, String> {
-            self.posts.fetch_add(1, Ordering::SeqCst);
-            if self.lose {
-                Err("reply_lost".into())
-            } else {
-                Ok(1)
-            }
-        }
-    }
     fn s2_08_legacy_request() -> TradeRequest {
         let request: TradeRequest = serde_json::from_str(
             r#"{"action":"execute","idempotency_key":"fixture_command_01","operation":"open","strategy_instance":"manual","instrument":"BTC-USDT-SWAP","side":"long","sizing":{"contracts":"1.00"},"order":{"type":"limit","limit_price":"100.00","max_entry_usd":"10.00","max_slippage_bps":0},"protection":{"stop_price":"99.00"},"expires_in_ms":30000}"#,
@@ -3529,656 +2926,6 @@ mod tests {
         request
     }
 
-    async fn reserved(
-        label: &str,
-        increase: bool,
-        paused: bool,
-        expired: bool,
-    ) -> (AccountStoreHandle, StoredIntent, std::path::PathBuf) {
-        reserved_with_price(label, increase, paused, expired, Decimal::from(100)).await
-    }
-
-    async fn reserved_with_price(
-        label: &str,
-        increase: bool,
-        paused: bool,
-        expired: bool,
-        limit_price: Decimal,
-    ) -> (AccountStoreHandle, StoredIntent, std::path::PathBuf) {
-        native_fixture_at_phase(label, increase, paused, expired, limit_price, "reserved").await
-    }
-
-    async fn native_fixture_at_phase(
-        label: &str,
-        increase: bool,
-        paused: bool,
-        expired: bool,
-        limit_price: Decimal,
-        phase: &str,
-    ) -> (AccountStoreHandle, StoredIntent, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "okx-native-orchestration-{label}-{}-{}",
-            std::process::id(),
-            now()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let account = format!(
-            "okx:real:{}",
-            if label == "two_b" { "b" } else { "a" }.repeat(64)
-        );
-        let t0 = now() - 1000;
-        let store = AccountStoreHandle::initialize_flat(
-            root.join("account.db"),
-            okx_execution::AccountMeta {
-                account_key: account.clone(),
-                installation_id: "installation_test".into(),
-                initialized_at: t0,
-                opening_source: "opening_fixture".into(),
-                initialize_operation_id: "initialize_fixture".into(),
-                release_id: "a".repeat(40),
-            },
-            okx_execution::OpeningSnapshot {
-                source_ref: "opening_fixture".into(),
-                observed_at: t0,
-                opening_equity_usd: Decimal::from(100),
-                positions: 0,
-                orders: 0,
-                conditional_orders: 0,
-                liabilities: Decimal::ZERO,
-                balances: vec![("USD".into(), Decimal::from(100))],
-            },
-        )
-        .await
-        .unwrap();
-        let at = now();
-        let definition = store
-            .call(deadline(), |s| s.ensure_manual_instance(now()))
-            .await
-            .unwrap();
-        let plan = IntentPlan {
-            strategy_definition_id: definition.definition_id,
-            strategy_definition_version: definition.version,
-            strategy_parameters_digest: definition.parameters_digest,
-            operation: if increase { "open" } else { "close" }.into(),
-            side: "buy".into(),
-            position_side: "long".into(),
-            quantity: Decimal::ONE,
-            limit_price,
-            stop_price: Some(if limit_price == Decimal::from(100) {
-                Decimal::from(99)
-            } else {
-                limit_price - Decimal::ONE
-            }),
-            strategy_instance: "manual".into(),
-            planned_loss_usd: Decimal::ONE,
-            source_generation: 1,
-            private_source_generation: 1,
-            contract_value: Decimal::ONE,
-            inverse: false,
-            settlement_currency: "USDT".into(),
-        };
-        let decision = Decision {
-            decision_id: "decision_fixture".into(),
-            instance_id: None,
-            decision_at: at - 100,
-            input_digest: "b".repeat(64),
-            policy_revision: 1,
-            code_version: "fixture".into(),
-        };
-        let intent = NewIntent {
-            plan,
-            intent_id: "intent_fixture".into(),
-            idempotency_key: "fixture_command_01".into(),
-            request_hash: if label == "s2_08_legacy" {
-                let original = s2_08_legacy_request();
-                digest(&(account.clone(), &original)).unwrap()
-            } else {
-                "b".repeat(64)
-            },
-            client_order_id: "b".repeat(32),
-            deadline: if expired { at - 1 } else { at + 30000 },
-            plan_hash: "c".repeat(64),
-            policy_revision: 1,
-            risk_increase: increase,
-            instrument_id: "BTC-USDT-SWAP".into(),
-        };
-        if phase == "f0" {
-            // An actual before-prepare barrier: the owner is live, but has
-            // not invoked prepare. Retain the original command for replay
-            // against this same database after the parent kills the owner.
-            let mut command = std::fs::File::create(root.join("original-command.json")).unwrap();
-            use std::io::Write as _;
-            command
-                .write_all(&serde_json::to_vec(&(&decision, &intent)).unwrap())
-                .unwrap();
-            command.sync_all().unwrap();
-            println!("OKX_K5_READY={}", root.display());
-            std::io::stdout().flush().unwrap();
-            std::future::pending::<()>().await;
-        }
-        let saved = store
-            .call(deadline(), move |s| {
-                s.apply_authority_policy(1, paused, "campaign_fixture", Decimal::from(20))?;
-                s.prepare(&decision, &intent)
-            })
-            .await
-            .unwrap();
-        if phase == "f1" {
-            return (store, saved, root);
-        }
-        let receipt = CentralReceipt {
-            reservation_key: "fixture_reservation".into(),
-            account_key: account,
-            installation_id: "installation_test".into(),
-            instance_id: None,
-            intent_id: saved.intent_id.clone(),
-            plan_hash: saved.plan_hash.clone(),
-            policy_revision: 1,
-            receipt_hash: "d".repeat(64),
-            requested_loss_usd: Decimal::ONE,
-            conversion_digest: "e".repeat(64),
-        };
-        let priced = limit_price != Decimal::from(100);
-        let saved_for_quote = saved.clone();
-        store
-            .call(deadline(), move |s| {
-                if priced {
-                    // Only the narrow native SQL+POST fixture creates its
-                    // own admitted quote; production source assessment is
-                    // independently exercised in entry_budget tests.
-                    let observed = now();
-                    let rate = Decimal::new(5, 4);
-                    let notional = saved_for_quote.plan.quantity
-                        * saved_for_quote.plan.contract_value
-                        * saved_for_quote.plan.limit_price;
-                    let fee = (notional * rate).round_dp_with_strategy(
-                        6,
-                        rust_decimal::RoundingStrategy::ToPositiveInfinity,
-                    );
-                    let total = notional + fee;
-                    let quote = okx_execution::EntryQuoteEvidence {
-                        schema: "okx.entry-known-quote/v1".into(),
-                        account_key: s.meta().account_key.clone(),
-                        installation_id: s.meta().installation_id.clone(),
-                        intent_id: saved_for_quote.intent_id.clone(),
-                        plan_hash: saved_for_quote.plan_hash.clone(),
-                        policy_revision: saved_for_quote.policy_revision,
-                        instrument_id: saved_for_quote.instrument_id.clone(),
-                        quantity: saved_for_quote.plan.quantity,
-                        limit_price: saved_for_quote.plan.limit_price,
-                        contract_value: saved_for_quote.plan.contract_value,
-                        fee_rate: rate,
-                        maker_rate: "-0.0002".into(),
-                        taker_rate: "0.0005".into(),
-                        fee_level: "Lv1".into(),
-                        fee_exchange_at: observed,
-                        usd_per_usdt: Decimal::ONE,
-                        notional_usdt: notional,
-                        fee_usdt: fee,
-                        total_usdt: total,
-                        total_usd: total,
-                        fee_generation: format!(
-                            "sha256:{:x}",
-                            Sha256::digest(
-                                serde_json::to_vec(&(
-                                    "BTC-USDT-SWAP",
-                                    "reference_fixture",
-                                    "Lv1",
-                                    "-0.0002",
-                                    "0.0005",
-                                    true
-                                ))
-                                .unwrap()
-                            )
-                        ),
-                        reference_generation: "reference_fixture".into(),
-                        fee_received_at: observed,
-                        conversion_digest: "b".repeat(64),
-                        conversion_received_at: observed,
-                        observed_at: observed,
-                    };
-                    let serialized = serde_json::to_vec(&quote).unwrap();
-                    let admission = okx_execution::EntryAdmissionEvidence {
-                        schema: "okx.entry-admission/v2".into(),
-                        account_key: quote.account_key.clone(),
-                        installation_id: quote.installation_id.clone(),
-                        intent_id: quote.intent_id.clone(),
-                        plan_hash: quote.plan_hash.clone(),
-                        quote_digest: format!("{:x}", Sha256::digest(serialized)),
-                        admission_usd_per_usdt: Decimal::ONE,
-                        other_entry_costs_upper_usd: Decimal::ZERO,
-                        entry_upper_usd: total,
-                        entry_proof_digest: "a".repeat(64),
-                        observed_at: observed,
-                    };
-                    s.bind_entry_quote(&quote)?;
-                    s.bind_entry_admission(&admission)?;
-                }
-                s.reserve(&receipt, now())
-            })
-            .await
-            .unwrap();
-        (store, saved, root)
-    }
-
-    // Genuine OS-level termination on the Windows CI runner. The child keeps
-    // the original SQLite writer lease open until TerminateProcess kills it.
-    // This is component evidence: Cloudflare is not connected, and the
-    // gateway is a file fixture. No phase is counted as full T10-11 proof.
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "called only as an isolated crash-test subprocess"]
-    fn k5_windows_process_kill_child_fixture() {
-        use std::io::Write as _;
-        let role = std::env::var("OKX_K5_KILL_ROLE").expect("crash fixture role");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (store, intent, root) = native_fixture_at_phase(
-                &format!("kill_{role}"),
-                true,
-                false,
-                role == "f1",
-                Decimal::from(100),
-                &role,
-            )
-            .await;
-            match role.as_str() {
-                "f1" | "f3" => {
-                    // F1 has no local receipt or reserve attempt; F3 has a
-                    // committed local HELD receipt and no BEGIN_POST claim.
-                    println!("OKX_K5_READY={}", root.display());
-                    std::io::stdout().flush().unwrap();
-                    std::future::pending::<()>().await;
-                }
-                "f5" => {
-                    assert!(
-                        store
-                            .call(deadline(), |s| s.begin_post("intent_fixture", 1, now()))
-                            .await
-                            .unwrap()
-                    );
-                    println!("OKX_K5_READY={}", root.display());
-                    std::io::stdout().flush().unwrap();
-                    // Parent kills this OS process after observing the durable claim.
-                    std::future::pending::<()>().await;
-                }
-                "f6" => {
-                    let witness = root.join("venue-accepted.marker");
-                    let ready_root = root.clone();
-                    // The gateway fixture has a durable external acceptance
-                    // witness but never supplies an ACK to the native owner.
-                    let _ = post_once(
-                        &store,
-                        &intent,
-                        Instant::now() + Duration::from_secs(60),
-                        || async move {
-                            let mut f = std::fs::File::create(witness).unwrap();
-                            f.write_all(b"accepted_once").unwrap();
-                            f.sync_all().unwrap();
-                            println!("OKX_K5_READY={}", ready_root.display());
-                            std::io::stdout().flush().unwrap();
-                            std::future::pending::<Result<u32, String>>().await
-                        },
-                    )
-                    .await;
-                    panic!("unresolved F6 gateway returned instead of being killed");
-                }
-                "f7" => {
-                    store
-                        .call(deadline(), |s| {
-                            assert!(s.begin_post("intent_fixture", 1, now())?);
-                            s.record_order_readback(
-                                "intent_fixture",
-                                "fixture-f7-order",
-                                IntentState::Filled,
-                                Decimal::ONE,
-                                now(),
-                            )?;
-                            // The production source-ingestion transaction
-                            // commits both the raw fill and pending marker.
-                            // Do not run its later projection before the kill.
-                            s.ingest_page(&okx_execution::IngestPage {
-                                fills: vec![okx_execution::Fill {
-                                    fill_id: "fixture-f7-fill".into(),
-                                    instrument_id: "BTC-USDT-SWAP".into(),
-                                    trade_id: "fixture-f7-trade".into(),
-                                    exchange_order_id: "fixture-f7-order".into(),
-                                    intent_id: Some("intent_fixture".into()),
-                                    time: now(),
-                                    qty: Decimal::ONE,
-                                    price: Decimal::from(100),
-                                    fee: Decimal::new(-1, 1),
-                                    currency: "USDT".into(),
-                                    side: "buy".into(),
-                                }],
-                                ..Default::default()
-                            })
-                        })
-                        .await
-                        .unwrap();
-                    println!("OKX_K5_READY={}", root.display());
-                    std::io::stdout().flush().unwrap();
-                    std::future::pending::<()>().await;
-                }
-                _ => panic!("unrecognized crash fixture role: {role}"),
-            }
-        });
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn k5_windows_actual_process_kill_native_component_phases_ten_times_each() {
-        use std::io::BufRead as _;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let mut repetitions = Vec::new();
-        let matrix_started = Instant::now();
-        for role in ["f0", "f1", "f3", "f5", "f6", "f7"] {
-            for run in 0..10 {
-                let started = Instant::now();
-                let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--ignored",
-                        "--exact",
-                        "trade_service::execute::tests::k5_windows_process_kill_child_fixture",
-                        "--nocapture",
-                    ])
-                    .env("OKX_K5_KILL_ROLE", role)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::inherit())
-                    .spawn()
-                    .unwrap();
-                let stdout = child.stdout.take().unwrap();
-                let (tx, rx) = std::sync::mpsc::sync_channel(1);
-                let reader = std::thread::spawn(move || {
-                    for line in std::io::BufReader::new(stdout).lines() {
-                        let line = line.unwrap();
-                        if let Some((_, root)) = line.split_once("OKX_K5_READY=") {
-                            let _ = tx.send(std::path::PathBuf::from(root.trim()));
-                            break;
-                        }
-                    }
-                });
-                // Event-driven readiness from the *durably committed* child,
-                // with a bounded deadline rather than a blind sleep.
-                let root = match rx.recv_timeout(Duration::from_secs(20)) {
-                    Ok(root) => root,
-                    Err(e) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        reader.join().unwrap();
-                        panic!("F{role} run {run} did not arm the crash point: {e}");
-                    }
-                };
-                assert!(
-                    child.try_wait().unwrap().is_none(),
-                    "child exited without actual OS termination"
-                );
-                let setup_ms = started.elapsed().as_millis();
-                let kill_started = Instant::now();
-                child.kill().unwrap();
-                let exit = child.wait().unwrap();
-                reader.join().unwrap();
-                assert!(!exit.success(), "forced-kill child exited successfully");
-                let kill_ms = kill_started.elapsed().as_millis();
-                let reconcile_started = Instant::now();
-
-                let venue_witness = root.join("venue-accepted.marker");
-                if role == "f6" {
-                    assert_eq!(std::fs::read(&venue_witness).unwrap(), b"accepted_once");
-                } else {
-                    assert!(!venue_witness.exists(), "only F6 sends through the fixture");
-                }
-
-                // Reopen the actual crash-surviving WAL database, NOT an
-                // online backup. Killing the child must free the writer lease.
-                runtime.block_on(async {
-                    let store = AccountStoreHandle::open_existing(
-                        root.join("account.db"),
-                        format!("okx:real:{}", "a".repeat(64)),
-                        "installation_test".into(),
-                    )
-                    .await
-                    .unwrap();
-                    if role == "f0" {
-                        assert!(store.call(deadline(), |s| s.intent("intent_fixture")).await.unwrap().is_none());
-                        assert!(store.call(deadline(), |s| s.central_receipt("intent_fixture")).await.unwrap().is_none());
-                        let (decision, original): (Decision, NewIntent) = serde_json::from_slice(
-                            &std::fs::read(root.join("original-command.json")).unwrap(),
-                        ).unwrap();
-                        let expected = original.clone();
-                        store.call(deadline(), move |s| {
-                            let first = s.prepare(&decision, &original)?;
-                            let duplicate = s.prepare(&decision, &original)?;
-                            assert_eq!(first.intent_id, duplicate.intent_id);
-                            assert_eq!(first.client_order_id, expected.client_order_id);
-                            assert_eq!(s.active_intents(10)?.len(), 1);
-                            assert_eq!(first.state, IntentState::Prepared);
-                            Ok(())
-                        }).await.unwrap();
-                        return;
-                    }
-                    if matches!(role, "f1" | "f3") {
-                        store.call(deadline(), move |s| {
-                            let prior = s.intent("intent_fixture")?.unwrap();
-                            assert_eq!(prior.state, if role == "f1" { IntentState::Prepared } else { IntentState::Reserved });
-                            if role == "f1" {
-                                assert!(now() >= prior.deadline);
-                                assert!(s.central_receipt("intent_fixture")?.is_none());
-                                assert!(s.operation("risk-reserve:intent_fixture")?.is_none());
-                            } else {
-                                assert_eq!(s.central_receipt("intent_fixture")?.unwrap().requested_loss_usd, Decimal::ONE);
-                            }
-                            assert!(s.reject_unsent("intent_fixture", if role == "f1" { "COMMAND_EXPIRED" } else { "RECOVERY_PROOF_INVALIDATED" }, now())?);
-                            assert!(!s.reject_unsent("intent_fixture", "DUPLICATE_RECOVERY", now())?);
-                            assert!(!s.begin_post("intent_fixture", 1, now())?);
-                            assert_eq!(s.intent("intent_fixture")?.unwrap().state, IntentState::Rejected);
-                            if role == "f1" {
-                                assert!(s.unsent_before_reserve("intent_fixture")?);
-                                assert!(s.unsent_release_receipt("intent_fixture")?.is_none());
-                            } else {
-                                let proof = s.unsent_release_receipt("intent_fixture")?.unwrap();
-                                assert_eq!(proof.reservation_key, "fixture_reservation");
-                                assert_eq!(proof.reason, "RECOVERY_PROOF_INVALIDATED");
-                                assert_eq!(s.reconcilable_intents(10)?.len(), 1, "central release is still pending; this component cannot fabricate its ACK");
-                                assert!(s.operation("central-release:fixture_reservation")?.is_none());
-                            }
-                            Ok(())
-                        }).await.unwrap();
-                        return;
-                    }
-                    if role == "f7" {
-                        // Inspect the original database through a read-only
-                        // connection, without bypassing its mutation owner.
-                        let reader = rusqlite::Connection::open_with_flags(
-                            root.join("account.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-                        ).unwrap();
-                        let before: (i64, i64, i64, i64) = reader.query_row(
-                            "SELECT (SELECT count(*) FROM fills), (SELECT count(*) FROM fill_projection_pending), (SELECT count(*) FROM position_lots), (SELECT count(*) FROM finance_entries WHERE component='FEE')", [],
-                            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
-                        ).unwrap();
-                        assert_eq!(before, (1, 1, 0, 0), "fact and pending marker survived before projection");
-                        store.call(deadline(), |s| {
-                            assert_eq!(s.project_pending_fills(10)?, 1);
-                            assert_eq!(s.project_pending_fills(10)?, 0);
-                            let lots = s.active_lots("BTC-USDT-SWAP")?;
-                            assert_eq!(lots.len(), 1);
-                            assert_eq!(lots[0].remaining_qty, Decimal::ONE);
-                            assert_eq!(s.finance_totals(0, i64::MAX, None)?.get(&("USDT".into(), "FEE".into())).copied(), Some(Decimal::new(-1, 1)));
-                            assert!(!s.begin_post("intent_fixture", 1, now())?);
-                            Ok(())
-                        }).await.unwrap();
-                        let after: (i64, i64, i64, i64) = reader.query_row(
-                            "SELECT (SELECT count(*) FROM fills), (SELECT count(*) FROM fill_projection_pending), (SELECT count(*) FROM position_lots), (SELECT count(*) FROM finance_entries WHERE component='FEE')", [],
-                            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
-                        ).unwrap();
-                        assert_eq!(after, (1, 0, 1, 1), "one projection, one fee, no pending loss");
-                        return;
-                    }
-                    let changed = store
-                        .call(deadline(), |s| s.recover_posting(now()))
-                        .await
-                        .unwrap();
-                    assert_eq!(changed, 1, "the crashed child left a POSTING claim");
-                    let intent = store
-                        .call(deadline(), |s| s.intent("intent_fixture"))
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    assert_eq!(intent.state, IntentState::Unknown);
-                    assert!(
-                        store
-                            .call(deadline(), |s| {
-                                s.unsent_release_receipt("intent_fixture")
-                            })
-                            .await
-                            .unwrap()
-                            .is_none(),
-                        "crash must never fabricate an unsent release witness"
-                    );
-
-                    let gateway = FixtureGateway {
-                        posts: AtomicUsize::new(0),
-                        lose: false,
-                    };
-                    for _ in 0..2 {
-                        assert_eq!(
-                            post_once(&store, &intent, deadline(), || gateway.send())
-                                .await
-                                .unwrap(),
-                            None,
-                            "replaying an unknown original intent cannot place an order"
-                        );
-                    }
-                    assert_eq!(gateway.posts.load(Ordering::SeqCst), 0);
-                    if role == "f6" {
-                        store
-                            .call(deadline(), |s| {
-                                s.record_order_readback(
-                                    "intent_fixture",
-                                    "fixture-venue-confirmed",
-                                    IntentState::Filled,
-                                    Decimal::ONE,
-                                    now(),
-                                )
-                            })
-                            .await
-                            .unwrap();
-                        assert_eq!(
-                            store
-                                .call(deadline(), |s| s.intent("intent_fixture"))
-                                .await
-                                .unwrap()
-                                .unwrap()
-                                .state,
-                            IntentState::Filled
-                        );
-                        // One and only one externally witnessed acceptance.
-                        assert_eq!(std::fs::read(&venue_witness).unwrap(), b"accepted_once");
-                    } else {
-                        assert_eq!(
-                            store
-                                .call(deadline(), |s| s.intent("intent_fixture"))
-                                .await
-                                .unwrap()
-                                .unwrap()
-                                .state,
-                            IntentState::Unknown,
-                            "F5 cannot be called no-send after a process crash"
-                        );
-                    }
-                });
-                let record = serde_json::json!({
-                    "phase":role.to_ascii_uppercase(),
-                    "repetition":run + 1,
-                    "process_id":child.id(),
-                    "os_killed":true,
-                    "original_store":root.join("account.db"),
-                    "setup_ms":setup_ms,
-                    "kill_ms":kill_ms,
-                    "reopen_reconcile_ms":reconcile_started.elapsed().as_millis(),
-                    "total_ms":started.elapsed().as_millis(),
-                    "venue_fixture_acceptances":if role == "f6" { 1 } else { 0 },
-                    "central_worker_connected":false,
-                    "local_outcome":match role {
-                        "f0" => "ONE_PREPARED_AFTER_IDEMPOTENT_REPLAY",
-                        "f1" => "REJECTED_UNSENT_NO_RESERVE",
-                        "f3" => "REJECTED_UNSENT_CENTRAL_RELEASE_PENDING",
-                        "f5" => "UNKNOWN_NO_RESUBMIT",
-                        "f6" => "FILLED_AFTER_FILE_FIXTURE_READBACK",
-                        "f7" => "FACT_PROJECTED_ONCE_ONE_LOT_ONE_FEE",
-                        _ => unreachable!(),
-                    },
-                });
-                println!("T10_11_NATIVE_WINDOWS_OS_KILL_RECORD_V2:{record}");
-                repetitions.push(record);
-            }
-        }
-        // These are 60 genuine kills at six distinct native barriers. F0
-        // stops before invoking prepare (not inside its transaction). F3
-        // proves the SQL no-send obligation, not a Worker release. F7 uses
-        // production ingest/projection APIs. Full T10-11 remains unproven.
-        println!(
-            "T10_11_NATIVE_WINDOWS_OS_KILLS_V2:{}",
-            serde_json::json!({
-                "schema":"okx.t10-11-native-windows-os-kills/v2",
-                "f0_os_kills":10,
-                "f1_os_kills":10,
-                "f3_os_kills":10,
-                "f5_os_kills":10,
-                "f6_os_kills":10,
-                "f7_os_kills":10,
-                "total_os_kills":60,
-                "original_wal_reopened":true,
-                "unknown_never_resubmitted":true,
-                "f6_independent_venue_readback":true,
-                "f7_exactly_once_projection":true,
-                "f3_central_release_proven":false,
-                "f2_f4_f8_proven":false,
-                "native_worker_same_campaign_proven":false,
-                "total_ms":matrix_started.elapsed().as_millis(),
-                "repetitions":repetitions,
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn close_under_stop() {
-        let (store, intent, _root) = reserved("close", false, true, false).await;
-        let gateway = FixtureGateway {
-            posts: AtomicUsize::new(0),
-            lose: false,
-        };
-        assert_eq!(
-            post_once(&store, &intent, deadline(), || gateway.send())
-                .await
-                .unwrap(),
-            Some(1)
-        );
-        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
-    }
-    #[tokio::test]
-    async fn expired_command_never_executes_later() {
-        let (store, intent, _root) = reserved("expired", true, false, true).await;
-        let gateway = FixtureGateway {
-            posts: AtomicUsize::new(0),
-            lose: false,
-        };
-        for _ in 0..2 {
-            assert!(
-                post_once(&store, &intent, deadline(), || gateway.send())
-                    .await
-                    .is_err()
-            );
-        }
-        assert_eq!(gateway.posts.load(Ordering::SeqCst), 0);
-    }
     #[test]
     fn stale_generation_rejects_before_financial_or_venue_action() {
         assert_eq!(
@@ -4187,540 +2934,23 @@ mod tests {
         );
         assert_eq!(validate_generation(2, 2), Ok(()));
     }
-    /// Test the actual Rust single-POST boundary, not an extra mock engine.
-    /// External source labels are synthetic and do not prove chat identity.
-    /// Risk receipts are fixtures: the independent RiskBook CAS tests remain separate.
-    #[tokio::test]
-    async fn three_sources_share_post_once_and_unknown_gate() {
-        let (store, human, _root) = reserved("three_sources", true, false, false).await;
-        let (chat, native) = store
-            .call(deadline(), |s| {
-                let native_instance = StrategyInstance {
-                    instance_id: "native_alpha".into(),
-                    definition_id: "ema_cross_v1".into(),
-                    definition_version: "1".into(),
-                    parameters: r#"{"parameters":{"fast":2,"slow":3},"instruments":["BTC-USDT-SWAP"],"timeframe_ms":60000}"#.into(),
-                    enabled: true,
-                    policy_revision: 1,
-                    budget: Decimal::from(2),
-                    last_decision_key: None,
-                };
-                s.mutate_instance(
-                    "three_source_create",
-                    "three_source_create_body",
-                    "create",
-                    &native_instance,
-                    None,
-                    now(),
-                )?;
-                let claim = s
-                    .claim_strategy_decision_with_id(
-                        "native_alpha",
-                        "bar_3sources",
-                        "native_inputs",
-                        1,
-                        now(),
-                    )?
-                    .ok_or(okx_execution::StoreError::Invalid("STRATEGY_CLAIM_MISSING"))?;
-                let prepare = |s: &mut okx_execution::AccountStore,
-                               source: &str,
-                               instance: &str,
-                               decision_id: String,
-                               inputs: &str|
-                 -> okx_execution::StoreResult<StoredIntent> {
-                    let definition = s.strategy_definition(instance)?;
-                    let intent_id = format!("three_sources_{source}");
-                    let decision = Decision {
-                        decision_id,
-                        instance_id: Some(instance.into()),
-                        decision_at: now(),
-                        input_digest: inputs.into(),
-                        policy_revision: 1,
-                        code_version: "three-sources-fixture".into(),
-                    };
-                    let new_intent = NewIntent {
-                        plan: IntentPlan {
-                            strategy_definition_id: definition.definition_id,
-                            strategy_definition_version: definition.version,
-                            strategy_parameters_digest: definition.parameters_digest,
-                            contract_value: Decimal::ONE,
-                            inverse: false,
-                            settlement_currency: "USDT".into(),
-                            position_side: "long".into(),
-                            private_source_generation: 1,
-                            operation: "open".into(),
-                            side: "buy".into(),
-                            quantity: Decimal::ONE,
-                            limit_price: Decimal::from(100),
-                            stop_price: Some(Decimal::from(90)),
-                            strategy_instance: instance.into(),
-                            planned_loss_usd: Decimal::ONE,
-                            source_generation: 1,
-                        },
-                        intent_id: intent_id.clone(),
-                        idempotency_key: format!("request_three_{source}"),
-                        request_hash: format!("request_body_three_{source}"),
-                        client_order_id: format!("client_three_{source}"),
-                        deadline: now() + 30_000,
-                        plan_hash: format!("plan_three_{source}"),
-                        policy_revision: 1,
-                        risk_increase: true,
-                        instrument_id: "BTC-USDT-SWAP".into(),
-                    };
-                    let saved = s.prepare(&decision, &new_intent)?;
-                    // Preserve the single SQL intent when the same command is replayed.
-                    assert_eq!(s.prepare(&decision, &new_intent)?.intent_id, intent_id);
-                    s.reserve(
-                        &CentralReceipt {
-                            reservation_key: format!("synthetic_reservation_{source}"),
-                            account_key: s.meta().account_key.clone(),
-                            installation_id: s.meta().installation_id.clone(),
-                            instance_id: Some(instance.into()),
-                            intent_id,
-                            plan_hash: new_intent.plan_hash,
-                            policy_revision: 1,
-                            receipt_hash: format!("synthetic_receipt_{source}"),
-                            requested_loss_usd: Decimal::ONE,
-                            conversion_digest: "synthetic_conversion".into(),
-                        },
-                        now(),
-                    )?;
-                    Ok(saved)
-                };
-                let chat = prepare(s, "chat", "manual", "external_chat".into(), "unverified_external")?;
-                let native = prepare(s, "native", "native_alpha", claim, "native_inputs")?;
-                Ok((chat, native))
-            })
-            .await
-            .unwrap();
-        let gateway = FixtureGateway {
-            posts: AtomicUsize::new(0),
-            lose: false,
-        };
-        // All three compete for the same AccountStoreHandle / durable POST fence.
-        let (first, second, third) = tokio::join!(
-            post_once(&store, &human, deadline(), || gateway.send()),
-            post_once(&store, &chat, deadline(), || gateway.send()),
-            post_once(&store, &native, deadline(), || gateway.send())
-        );
-        let intents = [human, chat, native];
-        let mut winner = None;
-        let mut blocked = Vec::new();
-        for (index, result) in [first, second, third].into_iter().enumerate() {
-            match result {
-                Ok(Some(1)) => {
-                    assert!(winner.replace(index).is_none(), "only one source may POST");
-                }
-                Err(reason) if reason.contains("ACCOUNT_UNKNOWN_EXPOSURE") => blocked.push(index),
-                other => panic!("unexpected POST admission result: {other:?}"),
-            }
-        }
-        assert_eq!(blocked.len(), 2);
-        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
-        let winner = winner.expect("one admitted source");
-        let winner_id = intents[winner].intent_id.clone();
-        store
-            .call(deadline(), move |s| {
-                s.record_outcome(
-                    &winner_id,
-                    IntentState::Filled,
-                    Some("first_fixture_order"),
-                    "verified-fixture-venue-readback",
-                    now(),
-                )
-            })
-            .await
-            .unwrap();
-        assert!(
-            post_once(&store, &intents[winner], deadline(), || gateway.send())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
-
-        let lost = FixtureGateway {
-            posts: AtomicUsize::new(0),
-            lose: true,
-        };
-        assert!(
-            post_once(&store, &intents[blocked[0]], deadline(), || lost.send())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(lost.posts.load(Ordering::SeqCst), 1);
-        let unknown_id = intents[blocked[0]].intent_id.clone();
-        assert_eq!(
-            store
-                .call(deadline(), move |s| s.intent(&unknown_id))
-                .await
-                .unwrap()
-                .unwrap()
-                .state,
-            IntentState::Unknown
-        );
-        assert!(
-            post_once(&store, &intents[blocked[1]], deadline(), || gateway.send())
-                .await
-                .unwrap_err()
-                .contains("ACCOUNT_UNKNOWN_EXPOSURE")
-        );
-        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
-        let resolved_id = intents[blocked[0]].intent_id.clone();
-        store
-            .call(deadline(), move |s| {
-                s.record_outcome(
-                    &resolved_id,
-                    IntentState::Filled,
-                    Some("resolved_fixture_order"),
-                    "verified-fixture-reconciliation",
-                    now(),
-                )
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            post_once(&store, &intents[blocked[1]], deadline(), || gateway.send())
-                .await
-                .unwrap(),
-            Some(1)
-        );
-        assert_eq!(gateway.posts.load(Ordering::SeqCst), 2);
-        let last_id = intents[blocked[1]].intent_id.clone();
-        store
-            .call(deadline(), move |s| {
-                s.record_outcome(
-                    &last_id,
-                    IntentState::Filled,
-                    Some("last_fixture_order"),
-                    "verified-fixture-venue-readback",
-                    now(),
-                )
-            })
-            .await
-            .unwrap();
-        for intent in &intents {
-            let id = intent.intent_id.clone();
-            let state = store
-                .call(deadline(), move |s| s.intent(&id))
-                .await
-                .unwrap();
-            assert_eq!(state.unwrap().state, IntentState::Filled);
-        }
-        // Two acknowledged fixture POSTs plus one lost-reply fixture POST.
-        assert_eq!(
-            gateway.posts.load(Ordering::SeqCst) + lost.posts.load(Ordering::SeqCst),
-            3
-        );
-    }
-
-    /// One Rust-native pipeline, deliberately using the production POST-once
-    /// gate and the existing account SQL owner. The Worker CAS/protection
-    /// fixture is independent; this test never claims their end-to-end proof.
-    #[tokio::test]
-    async fn t09_native_post_once_partial_fee_terminal_campaign_under_ten() {
-        let (store, intent, _root) =
-            reserved_with_price("t09_native_finance", true, false, false, Decimal::from(5)).await;
-        let gateway = FixtureGateway {
-            posts: AtomicUsize::new(0),
-            lose: false,
-        };
-        assert_eq!(
-            post_once(&store, &intent, deadline(), || gateway.send())
-                .await
-                .unwrap(),
-            Some(1)
-        );
-        assert!(
-            post_once(&store, &intent, deadline(), || gateway.send())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
-        let id = intent.intent_id.clone();
-        store
-            .call(deadline(), move |s| {
-                s.record_outcome(
-                    &id,
-                    IntentState::Acknowledged,
-                    Some("fixture_exchange_order"),
-                    "authenticated-fixture-venue-ack",
-                    now(),
-                )
-            })
-            .await
-            .unwrap();
-
-        let at = now() + 3;
-        let qty = Decimal::new(5, 1);
-        let fee = Decimal::new(-125, 5);
-        // Two real account-finance ingestion transactions: first one partial
-        // fill and one matching fee bill, then the terminal completion.
-        // Nothing is inserted into operation_receipts as a made-up settlement.
-        for (suffix, fill_at, filled, kind) in [
-            ("first", at, qty, IntentState::PartiallyFilled),
-            ("second", at + 4, Decimal::ONE, IntentState::Filled),
-        ] {
-            let fill_id = format!("t09-{suffix}");
-            let bill_id = format!("t09-bill-{suffix}");
-            let order_id = "fixture_exchange_order";
-            let bill_key = format!("bill:{bill_id}");
-            let entry = okx_execution::FinanceEntry {
-                entry_id: format!("{bill_key}:FEE"),
-                economic_event_key: bill_key.clone(),
-                component: "FEE".into(),
-                allocation_leg: "account".into(),
-                amount: fee,
-                currency: "USDT".into(),
-                instance_id: None,
-                source_ref: format!("fill:{fill_id}"),
-                time: fill_at,
-                reverses_entry_id: None,
-            };
-            let ingest_id = intent.intent_id.clone();
-            let fill_id_ingest = fill_id.clone();
-            store
-                .call(deadline(), move |s| {
-                    s.ingest_page(&okx_execution::IngestPage {
-                        fills: vec![okx_execution::Fill {
-                            fill_id: fill_id_ingest.clone(),
-                            instrument_id: "BTC-USDT-SWAP".into(),
-                            trade_id: format!("venue-{fill_id_ingest}"),
-                            exchange_order_id: order_id.into(),
-                            intent_id: Some(ingest_id),
-                            time: fill_at,
-                            qty,
-                            price: Decimal::from(5),
-                            fee,
-                            currency: "USDT".into(),
-                            side: "buy".into(),
-                        }],
-                        finance: vec![entry.clone()],
-                        cursor: Some(okx_execution::SourceCursor {
-                            source: "fills".into(),
-                            stream_partition: "SWAP".into(),
-                            cursor: String::new(),
-                            watermark: fill_at + 1,
-                            generation: 1,
-                            coverage_gaps: String::new(),
-                        }),
-                        ..Default::default()
-                    })
-                })
-                .await
-                .unwrap();
-            let fill_id_for_bill = fill_id.clone();
-            store
-                .call(deadline(), move |s| {
-                    s.ingest_page(&okx_execution::IngestPage {
-                        bills: vec![okx_execution::Bill {
-                            bill_id: bill_id.clone(),
-                            kind: "2:trade".into(),
-                            time: fill_at + 1,
-                            amount: fee,
-                            currency: "USDT".into(),
-                            economic_event_key: bill_key.clone(),
-                        }],
-                        finance: vec![okx_execution::FinanceEntry {
-                            entry_id: format!("{bill_key}:FEE"),
-                            economic_event_key: bill_key,
-                            component: "FEE".into(),
-                            allocation_leg: "account".into(),
-                            amount: fee,
-                            currency: "USDT".into(),
-                            instance_id: None,
-                            source_ref: format!("bill:{bill_id}"),
-                            time: fill_at + 1,
-                            reverses_entry_id: None,
-                        }],
-                        bill_order_sources: vec![okx_execution::BillOrderSource {
-                            bill_id,
-                            instrument_id: "BTC-USDT-SWAP".into(),
-                            exchange_order_id: "fixture_exchange_order".into(),
-                            trade_id: format!("venue-{fill_id_for_bill}"),
-                        }],
-                        cursor: Some(okx_execution::SourceCursor {
-                            source: "bills".into(),
-                            stream_partition: "account".into(),
-                            cursor: String::new(),
-                            watermark: fill_at + 1,
-                            generation: 1,
-                            coverage_gaps: String::new(),
-                        }),
-                        ..Default::default()
-                    })
-                })
-                .await
-                .unwrap();
-            let target = intent.intent_id.clone();
-            let state = kind;
-            let settlement = store
-                .call(deadline(), move |s| {
-                    s.record_order_readback(
-                        &target,
-                        "fixture_exchange_order",
-                        state,
-                        filled,
-                        fill_at + 1,
-                    )?;
-                    // One active protection per native intent; updating its
-                    // size after the second fill is a venue-readback fixture.
-                    // The SQL verifier rejects wrong side, trigger and amount.
-                    let protection = okx_execution::ProtectionReceipt {
-                        intent_id: target.clone(),
-                        algo_id: format!("fixture_protection_{state:?}"),
-                        side: "sell".into(),
-                        quantity: filled,
-                        trigger_price: Decimal::from(4),
-                        trigger_basis: "mark".into(),
-                        verified_at: fill_at + 1,
-                        source_digest: "f".repeat(64),
-                    };
-                    s.verify_protection(&protection)?;
-                    let observed =
-                        s.protection(&target)?
-                            .ok_or(okx_execution::StoreError::Invalid(
-                                "FIXTURE_PROTECTION_READBACK_MISSING",
-                            ))?;
-                    if observed.quantity != filled
-                        || observed.side != "sell"
-                        || observed.trigger_price != Decimal::from(4)
-                    {
-                        return Err(okx_execution::StoreError::Invalid(
-                            "FIXTURE_PROTECTION_READBACK_MISMATCH",
-                        ));
-                    }
-                    if state == IntentState::PartiallyFilled {
-                        s.bind_partial_entry_settlement(&target, fill_at + 1, filled, fill_at + 1)
-                    } else {
-                        s.bind_terminal_entry_settlement(&target, fill_at + 1, filled, fill_at + 1)
-                    }
-                })
-                .await
-                .unwrap();
-            assert_eq!(
-                settlement.cumulative_entry_usd,
-                if kind == IntentState::PartiallyFilled {
-                    Decimal::new(250125, 5)
-                } else {
-                    Decimal::new(50025, 4)
-                },
-                "source-linked native fill/bill money, no double fee"
-            );
-        }
-        let terminal_at = at + 5;
-        let campaign = format!("sha256:{}", "c".repeat(64));
-        let (money, proof) = store
-            .call(deadline(), move |s| {
-                s.acknowledge_central_release(
-                    "fixture_reservation",
-                    "fixture-central-release-evidence",
-                )?;
-                for partition in ["SPOT", "MARGIN", "FUTURES", "OPTION"] {
-                    s.ingest_page(&okx_execution::IngestPage {
-                        cursor: Some(okx_execution::SourceCursor {
-                            source: "fills".into(),
-                            stream_partition: partition.into(),
-                            cursor: String::new(),
-                            watermark: terminal_at,
-                            generation: 1,
-                            coverage_gaps: String::new(),
-                        }),
-                        ..Default::default()
-                    })?;
-                }
-                let from = s.meta().initialized_at + 1;
-                s.seal_captured_campaign_baseline(&campaign, from, terminal_at)
-            })
-            .await
-            .unwrap();
-        assert_eq!(money, Decimal::new(50025, 4));
-        assert!(money < Decimal::from(10));
-        let campaign_again = format!("sha256:{}", "c".repeat(64));
-        let (again, proof_again) = store
-            .call(deadline(), move |s| {
-                let from = s.meta().initialized_at + 1;
-                s.seal_captured_campaign_baseline(&campaign_again, from, terminal_at)
-            })
-            .await
-            .unwrap();
-        assert_eq!((again, proof_again), (money, proof));
-        assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn deadline_expires_after_commit_before_gateway_send() {
-        let (store, intent, _root) = reserved("commit_deadline", true, false, false).await;
-        let gateway = FixtureGateway {
-            posts: AtomicUsize::new(0),
-            lose: false,
-        };
-        let until = Instant::now() + Duration::from_millis(100);
-        let result = post_once(&store, &intent, until, || async {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            if Instant::now() >= until {
-                return Err("COMMAND_EXPIRED_BEFORE_SEND".into());
-            }
-            gateway.send().await
-        })
-        .await;
-        assert!(result.is_err());
-        assert_eq!(gateway.posts.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            store
-                .call(deadline(), |s| s.intent("intent_fixture"))
-                .await
-                .unwrap()
-                .unwrap()
-                .state,
-            IntentState::Rejected
-        );
-    }
-
-    #[tokio::test]
-    async fn s2_08_legacy_exact_raw_hash_survives_sql_backup_and_reopen() {
-        // The original-format receipt is produced by the genuine SQL
-        // prepare API. No existing intent, reserve, ID, deadline or finance
-        // row is rewritten to migrate it to the semantic hash format.
+    #[test]
+    fn s2_08_historical_raw_hash_requires_exact_original_request() {
         let original = s2_08_legacy_request();
         let account = format!("okx:real:{}", "a".repeat(64));
-        let exact_raw = digest(&(account.clone(), &original)).unwrap();
-        let canonical = original.canonical_semantic_json(&account).unwrap();
-        let semantic = format!("{:x}", Sha256::digest(canonical.as_bytes()));
-        assert_ne!(exact_raw, semantic);
-        let (store, saved, root) = reserved("s2_08_legacy", true, false, false).await;
-        assert_eq!(saved.request_hash, exact_raw);
-        let copy = root.join("original-legacy-account.db");
-        store
-            .call(deadline(), move |sql| sql.backup(&copy))
-            .await
-            .unwrap();
-        drop(store);
-        let reopened = AccountStoreHandle::open_existing(
-            root.join("original-legacy-account.db"),
-            account.clone(),
-            "installation_test".into(),
-        )
-        .await
-        .unwrap();
-        let restored = reopened
-            .call(deadline(), |sql| sql.by_idempotency("fixture_command_01"))
-            .await
-            .unwrap()
-            .expect("S2-08 old SQL intent must survive physical reopen");
-        assert_eq!(restored.intent_id, saved.intent_id);
-        assert_eq!(restored.request_hash, exact_raw);
-        assert_eq!(restored.plan_hash, saved.plan_hash);
-        assert_eq!(restored.client_order_id, saved.client_order_id);
-        assert_eq!(restored.deadline, saved.deadline);
-        assert_eq!(restored.policy_revision, saved.policy_revision);
-        assert!(existing_request_hash_matches(
-            &restored.request_hash,
-            &semantic,
-            &exact_raw
-        ));
+        let raw = digest(&(account.clone(), &original)).unwrap();
+        let semantic = format!(
+            "{:x}",
+            Sha256::digest(
+                original
+                    .canonical_semantic_json(&account)
+                    .unwrap()
+                    .as_bytes()
+            )
+        );
+        assert_ne!(raw, semantic);
+        assert!(existing_request_hash_matches(&raw, &semantic, &raw));
+        assert!(existing_request_hash_matches(&semantic, &semantic, &raw));
         let mut equivalent = original.clone();
         if let TradeRequest::Execute {
             sizing: Sizing::Contracts { contracts },
@@ -4734,7 +2964,7 @@ mod tests {
             order.max_entry_usd = Some("10".into());
             *stop_price = "99".into();
         } else {
-            panic!("S2-08 legacy replay fixture shape changed");
+            panic!("historical request shape");
         }
         let equivalent_raw = digest(&(account.clone(), &equivalent)).unwrap();
         let equivalent_semantic = format!(
@@ -4747,14 +2977,10 @@ mod tests {
             )
         );
         assert_eq!(equivalent_semantic, semantic);
-        assert_ne!(equivalent_raw, exact_raw);
+        assert_ne!(equivalent_raw, raw);
         assert!(
-            !existing_request_hash_matches(
-                &restored.request_hash,
-                &equivalent_semantic,
-                &equivalent_raw
-            ),
-            "S2-08 may not infer numeric equivalence for an old raw-only SQL receipt"
+            !existing_request_hash_matches(&raw, &equivalent_semantic, &equivalent_raw),
+            "an original raw receipt cannot infer decimal equivalence"
         );
     }
 }

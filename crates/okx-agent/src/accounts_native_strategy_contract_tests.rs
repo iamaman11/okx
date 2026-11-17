@@ -42,10 +42,10 @@ async fn risk_book_contract_native_public_strategies_crud_claim_no_trade_share_o
             .await
             .is_err()
     );
-    assert!(matches!(
-        account.execution.store,
-        crate::execution_store::ExecutionStore::Native { .. }
-    ));
+    assert_eq!(
+        account.execution.store.scope().0.installation_id(),
+        fixture.owner.installation_id()
+    );
 
     let created = request(&fixture, &create())
         .await

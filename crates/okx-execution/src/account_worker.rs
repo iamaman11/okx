@@ -1,4 +1,4 @@
-//! One current installation financial owner. Retired account worker is a temporary test fixture.
+//! One installation financial owner.
 use crate::{AccountStorageSnapshot, WalMaintenanceObservation};
 use std::sync::atomic::AtomicU64;
 
@@ -20,12 +20,6 @@ pub struct AccountSqlTimingV1 {
     pub last_sql_owner_ms: u64,
     pub max_queue_wait_ms: u64,
     pub max_sql_owner_ms: u64,
-}
-/// Timing tied to one accepted SQL-owner job, not shared last/max counters.
-#[derive(Debug, Clone, Copy)]
-pub struct AccountSqlJobTiming {
-    pub queue_wait_ms: u64,
-    pub sql_owner_ms: u64,
 }
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct MaintenanceEvent {
@@ -56,11 +50,6 @@ pub struct AccountStorageReadback {
     pub publication_skipped: u64,
     pub owner_terminated: bool,
 }
-
-#[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
-mod legacy;
-#[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
-pub use legacy::AccountStoreHandle;
 
 mod unified;
 pub use crate::risk::{NativeOpeningAccount, NativeOpeningSource};
