@@ -159,7 +159,6 @@ fn rejection(response: AgentResponse, code: &str) {
 
 #[tokio::test]
 async fn research_without_finance_uses_real_worker_and_cannot_create_financial_authority() {
-    use crate::finance_dispatch::FinanceDispatch;
     use okx_protocol::{
         analytics::ResearchRequest,
         trading::{DiagnosticsRequest, DiagnosticsView, TradeRequest},
@@ -173,6 +172,7 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
         std::fs::create_dir_all(&root).unwrap();
         let finance_file = root.join("finance/finance.sqlite");
         if invalid {
+            initialize_installation(&root, "research-boundary-installation").unwrap();
             std::fs::create_dir(root.join("finance")).unwrap();
             std::fs::write(
                 &finance_file,
@@ -181,24 +181,22 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
             .unwrap();
         }
         let before = invalid.then(|| std::fs::read(&finance_file).unwrap());
+        let catalog = root.join("account-catalog.pb");
+        let catalog_before = invalid.then(|| std::fs::read(&catalog).unwrap());
         let env = OkxEnvironment::new(okx_api::Region::Global, false);
         let network = Arc::new(ForbiddenNetwork::default());
-        let market = crate::market_bootstrap::MarketBootstrapper::new(
+        let client =
             okx_api::OkxPublicClient::with_http_transport(env, RateBudget::new(), network.clone())
-                .unwrap(),
-        );
-        let (_coordinator, public_ws) = okx_runtime::PublicWsCoordinator::new_with_connector(
-            env,
-            empty_reference(),
-            RateBudget::new(),
-            Arc::new(recorded_support::OfflineSocket),
-        );
+                .unwrap();
+        let market = crate::market_bootstrap::MarketBootstrapper::new(client.clone());
+        let (_coordinator, public_ws) =
+            okx_runtime::PublicWsCoordinator::new_uninitialized(env, RateBudget::new(), client);
+        let finance = crate::finance_startup::select(&root, RateBudget::new(), false, None)
+            .await
+            .finish(public_ws.clone(), market.clone())
+            .await;
         let context = DispatchContext {
-            finance: if invalid {
-                FinanceDispatch::invalid()
-            } else {
-                FinanceDispatch::missing()
-            },
+            finance,
             research: research_test_client(root.join("research"), market.clone()).unwrap(),
             public_ws,
             market,
@@ -239,7 +237,7 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
         rejection(
             denied,
             if invalid {
-                "FINANCE_AUTHORITY_INVALID"
+                "FINANCE_FILE_FORMAT_UNKNOWN"
             } else {
                 "FINANCE_INSTALLATION_NOT_INITIALIZED"
             },
@@ -281,11 +279,11 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
         context.research.shutdown().await;
         if let Some(bytes) = before {
             assert_eq!(std::fs::read(&finance_file).unwrap(), bytes);
-            assert_eq!(std::fs::read_dir(root.join("finance")).unwrap().count(), 1);
+            assert_eq!(std::fs::read(&catalog).unwrap(), catalog_before.unwrap());
         } else {
             assert!(!root.join("finance").exists());
+            assert!(!catalog.exists());
         }
-        assert!(!root.join("account-catalog.pb").exists());
         assert!(!root.join("installation.json").exists());
         drop(context);
         std::fs::remove_dir_all(root).unwrap();
@@ -336,6 +334,9 @@ async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero
     let executable = std::env::var_os("OKX_RESEARCH_WORKER_TEST_EXE")
         .map(PathBuf::from)
         .expect("real worker executable must be built before process contracts");
+    use sha2::{Digest, Sha256};
+    let expected_worker_sha256 =
+        format!("{:x}", Sha256::digest(std::fs::read(&executable).unwrap()));
     let research_root = fixture.root.join("public-research");
     fixture.context.research = ResearchClient::new(
         ResearchClientConfig {
@@ -387,8 +388,33 @@ async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero
     })
     .await
     .expect("bounded public research completion");
+    assert_eq!(complete["origin_invocation"], "query-dispatch-request-001");
+    assert_eq!(
+        complete["producer"]["binary_sha256"],
+        expected_worker_sha256
+    );
     assert_eq!(complete["candidate_progress"]["completed_candidates"], 64);
     assert_eq!(complete["candidate_progress"]["total_work_units"], 193);
+    let result = fixture
+        .request(
+            AgentOperation::Research {
+                request: ResearchRequest::Result {
+                    job_id: id.clone(),
+                    cursor: None,
+                    limit: 1,
+                    view: okx_protocol::analytics::ResearchResultView::Summary,
+                },
+            },
+            None,
+        )
+        .await;
+    assert_eq!(result.status, AgentResponseStatus::Completed, "{result:?}");
+    let result = result.result.unwrap();
+    assert_eq!(result["metadata"]["job_id"], id);
+    assert_eq!(
+        result["metadata"]["producer"]["binary_sha256"],
+        expected_worker_sha256
+    );
     let result_id = complete["artifact"].as_str().unwrap().to_owned();
     let record = ResearchRequest::RecordDecision {
         job_id: id.clone(),

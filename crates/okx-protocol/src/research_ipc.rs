@@ -43,6 +43,7 @@ id!(RequestId);
 id!(WorkerSession);
 id!(ResearchScope);
 id!(JobId);
+id!(InvocationId);
 /// Public research keys accept any nonempty UTF-8 string up to 128 bytes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
@@ -94,6 +95,8 @@ pub enum HostFrame {
     Request {
         id: RequestId,
         session: WorkerSession,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invocation: Option<InvocationId>,
         command: Box<ResearchCommand>,
     },
     SourceReply {
@@ -110,17 +113,96 @@ pub enum WorkerFrame {
         storage: u32,
         session: WorkerSession,
         scope: ResearchScope,
+        producer_sha256: String,
     },
     Response {
         id: RequestId,
         session: WorkerSession,
-        result: Result<Value, String>,
+        result: Result<WorkerReply, String>,
     },
     SourceRequest {
         id: RequestId,
         session: WorkerSession,
         request: PublicSourceRequest,
     },
+}
+
+/// Control outcomes are typed; product projections stay bounded JSON at the wire boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum WorkerReply {
+    Product(Value),
+    Draining(DrainStatus),
+    Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrainStatus {
+    pub active_jobs: u64,
+}
+
+impl WorkerReply {
+    pub fn product(self) -> Result<Value, String> {
+        match self {
+            Self::Product(value) => Ok(value),
+            _ => Err("WORKER_REPLY_KIND_MISMATCH".into()),
+        }
+    }
+    pub fn drain(self) -> Result<DrainStatus, String> {
+        match self {
+            Self::Draining(value) => Ok(value),
+            _ => Err("WORKER_REPLY_KIND_MISMATCH".into()),
+        }
+    }
+    pub fn shutdown(self) -> Result<(), String> {
+        match self {
+            Self::Shutdown => Ok(()),
+            _ => Err("WORKER_REPLY_KIND_MISMATCH".into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod reply_contract_tests {
+    use super::*;
+
+    #[test]
+    fn control_replies_have_explicit_kinds_and_product_cannot_authorize_drain() {
+        let drain = WorkerReply::Draining(DrainStatus { active_jobs: 2 });
+        let bytes = serde_json::to_vec(&drain).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<WorkerReply>(&bytes)
+                .unwrap()
+                .drain()
+                .unwrap()
+                .active_jobs,
+            2
+        );
+        assert!(
+            WorkerReply::Product(serde_json::json!({"active_jobs": 0}))
+                .drain()
+                .is_err()
+        );
+        assert!(WorkerReply::Shutdown.product().is_err());
+        assert!(
+            WorkerReply::Draining(DrainStatus { active_jobs: 0 })
+                .shutdown()
+                .is_err()
+        );
+        for malformed in [
+            r#"{"type":"draining","data":{"active_jobs":-1}}"#,
+            r#"{"type":"draining","data":{"active_jobs":0,"ready":true}}"#,
+            r#"{"type":"unknown"}"#,
+        ] {
+            assert!(serde_json::from_str::<WorkerReply>(malformed).is_err());
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]

@@ -54,6 +54,7 @@ pub struct PublicWsHandle {
     market_updates: watch::Sender<PublicMarketWakeup>,
     pub(super) reference_client: Result<OkxPublicClient, String>,
     pub(super) reference_revision: Arc<AtomicU64>,
+    pub(super) reference_refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub struct PublicWsCoordinator {
@@ -122,6 +123,13 @@ impl PublicWsHandle {
             );
         }
         Ok(())
+    }
+
+    pub async fn reference_available(&self) -> Result<(), PublicRuntimeError> {
+        match &self.state.read().await.reference_unavailable {
+            Some(reason) => Err(PublicRuntimeError::ReferenceSource(reason.clone())),
+            None => Ok(()),
+        }
     }
 
     pub async fn reference_snapshot(&self) -> ReferenceRegistry {
@@ -215,6 +223,40 @@ impl PublicWsCoordinator {
         Self::new_with_rate_budget(environment, reference, RateBudget::new())
     }
 
+    /// Construct the existing owner without waiting for public HTTP.
+    pub fn new_uninitialized(
+        environment: OkxEnvironment,
+        rate_budget: RateBudget,
+        client: OkxPublicClient,
+    ) -> (Self, PublicWsHandle) {
+        Self::new_uninitialized_with_connector(
+            environment,
+            rate_budget,
+            Arc::new(LiveWsConnector),
+            client,
+        )
+    }
+
+    pub fn new_uninitialized_with_connector(
+        environment: OkxEnvironment,
+        rate_budget: RateBudget,
+        connector: Arc<dyn WsConnector>,
+        client: OkxPublicClient,
+    ) -> (Self, PublicWsHandle) {
+        // This sentinel is never source evidence; availability is tracked separately.
+        let reference = ReferenceRegistry::from_public("1970-01-01T00:00:00Z", Vec::new())
+            .expect("empty reference sentinel");
+        let (coordinator, handle) =
+            Self::compose(environment, reference, rate_budget, connector, Ok(client));
+        // The state is not yet shared with any running task.
+        handle
+            .state
+            .try_write()
+            .expect("new state unlocked")
+            .reference_unavailable = Some("public reference has not been acquired".into());
+        (coordinator, handle)
+    }
+
     pub fn new_with_rate_budget(
         environment: OkxEnvironment,
         reference: ReferenceRegistry,
@@ -290,6 +332,7 @@ impl PublicWsCoordinator {
                 market_updates,
                 reference_client,
                 reference_revision,
+                reference_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             },
         )
     }
@@ -312,14 +355,31 @@ impl PublicWsCoordinator {
             self.state.write().await.set_connecting();
             let connection_scope =
                 format!("public-generation-{}", self.generation.saturating_add(1));
-            let outcome = match PublicWsConnection::connect_with_connector(
+            let connector = Arc::clone(&self.connector);
+            let connect = PublicWsConnection::connect_with_connector(
                 self.environment,
                 self.rate_budget.clone(),
                 connection_scope,
-                self.connector.as_ref(),
-            )
-            .await
-            {
+                connector.as_ref(),
+            );
+            tokio::pin!(connect);
+            let mut commands_open = true;
+            let connection = loop {
+                tokio::select! {
+                    result = &mut connect => break result,
+                    command = self.commands.recv(), if commands_open => match command {
+                        Some(command) => { self.apply_command(command).await; }
+                        None => commands_open = false,
+                    },
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            self.state.write().await.set_disconnected(false, "runtime shutdown");
+                            return Ok(());
+                        }
+                    }
+                }
+            };
+            let outcome = match connection {
                 Ok(mut connection) => {
                     self.generation = self.generation.saturating_add(1);
                     self.state
@@ -619,6 +679,7 @@ impl PublicWsCoordinator {
                 }
                 let changed = reference.generation() != state.reference.generation();
                 state.reference = reference;
+                state.reference_unavailable = None;
                 self.reference_revision.fetch_add(1, Ordering::SeqCst);
                 if changed {
                     state.set_disconnected(true, "REST reference content changed");
@@ -647,6 +708,9 @@ impl PublicWsCoordinator {
 
         let reference_changed: Result<bool, PublicRuntimeError> = match arg.channel {
             PublicChannel::Instruments => {
+                if state.reference_unavailable.is_some() {
+                    return Ok(false);
+                }
                 let updates: Vec<PublicInstrument> = data
                     .into_iter()
                     .map(serde_json::from_value)

@@ -252,6 +252,23 @@ jobs:
         run: |
           cargo build --locked -p okx-research-worker --bin okx-research-worker
           echo "OKX_RESEARCH_WORKER_TEST_EXE=$GITHUB_WORKSPACE/target/debug/okx-research-worker" >> "$GITHUB_ENV"
+      - name: Production startup, source independence and correlated research failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          required_contract() {
+            local output
+            output=$(mktemp)
+            cargo test --locked "$@" 2>&1 | tee "$output"
+            grep -Eq 'test result: ok\. +[1-9][0-9]* passed;' "$output"
+          }
+          required_contract -p okx-agent finance_startup
+          required_contract -p okx-agent --lib query::public_dispatch_tests::
+          required_contract -p okx-runtime --lib public::reference_refresh::tests::
+          required_contract -p okx-protocol --lib research_ipc::reply_contract_tests::
+          required_contract -p okx-research-worker --lib ipc::correlation_tests::
+          required_contract -p okx-research-worker --lib analytics::jobs::tests::producer
+          required_contract -p okx-research-worker --lib analytics::jobs::tests::historical_rows_keep_unknown_producer
       - name: Existing risk client and bound raw-frame regressions
         run: |
           cargo test --locked -p okx-agent --lib risk_bridge::tests -- --nocapture
@@ -708,6 +725,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $env:OKX_BUILD_SOURCE_TREE = (git rev-parse "HEAD^{tree}").Trim()
+          $env:OKX_BUILD_SOURCE_HEAD = (git rev-parse HEAD).Trim()
           $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
           New-Item -ItemType Directory -Path $dist -Force | Out-Null
           $names = @('okx-agent.exe', 'okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-worker.exe')
@@ -806,6 +824,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $env:OKX_BUILD_SOURCE_TREE = (git rev-parse "HEAD^{tree}").Trim()
+          $env:OKX_BUILD_SOURCE_HEAD = (git rev-parse HEAD).Trim()
           $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
           New-Item -ItemType Directory -Path $dist -Force | Out-Null
           $names = @('okx-agent.exe', 'okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-worker.exe')

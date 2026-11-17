@@ -37,20 +37,104 @@ impl PublicWsHandle {
                 "REFERENCE_REFRESH_DEADLINE",
             ));
         }
-        let (expected_generation, expected_revision) = {
+        let _refresh = tokio::time::timeout_at(deadline.into(), self.reference_refresh_lock.lock())
+            .await
+            .map_err(|_| PublicRuntimeError::ReferenceRefresh("REFERENCE_REFRESH_DEADLINE"))?;
+        let (expected_generation, expected_revision, initial) = {
             let state = self.state.read().await;
-            let rules = state
-                .reference
-                .instrument_rules(instrument_id)
-                .ok_or_else(|| PublicRuntimeError::InstrumentNotFound(instrument_id.into()))?;
-            if fresh(&rules.source_received_at, Utc::now().timestamp_millis()) {
-                return Ok(rules);
+            let rules = state.reference.instrument_rules(instrument_id);
+            if state.reference_unavailable.is_none() {
+                let rules = rules
+                    .ok_or_else(|| PublicRuntimeError::InstrumentNotFound(instrument_id.into()))?;
+                if fresh(&rules.source_received_at, Utc::now().timestamp_millis()) {
+                    return Ok(rules);
+                }
             }
             (
-                rules.reference_generation,
+                state.reference.generation().as_str().to_owned(),
+                self.reference_revision.load(Ordering::SeqCst),
+                state.reference_unavailable.is_some(),
+            )
+        };
+        let refreshed = self
+            .refresh_reference(
+                Some(instrument_id),
+                deadline,
+                expected_generation.clone(),
+                expected_revision,
+            )
+            .await;
+        match refreshed {
+            Ok(()) => {}
+            Err(PublicRuntimeError::ReferenceRefresh("REFERENCE_REFRESH_CONTENT_CHANGED"))
+                if initial => {}
+            Err(error) => return Err(error),
+        }
+        let state = self.state.read().await;
+        if (initial
+            && (state.reference_unavailable.is_some()
+                || self.reference_revision.load(Ordering::SeqCst)
+                    != expected_revision.saturating_add(1)))
+            || (!initial && state.reference.generation().as_str() != expected_generation)
+        {
+            return Err(PublicRuntimeError::ReferenceRefresh(
+                "REFERENCE_REFRESH_CONTENT_CHANGED",
+            ));
+        }
+        let rules = state
+            .reference
+            .instrument_rules(instrument_id)
+            .ok_or_else(|| PublicRuntimeError::InstrumentNotFound(instrument_id.into()))?;
+        if !fresh(&rules.source_received_at, Utc::now().timestamp_millis()) {
+            return Err(PublicRuntimeError::ReferenceRefresh(
+                "REFERENCE_REFRESH_SOURCE_STALE",
+            ));
+        }
+        Ok(rules)
+    }
+    /// Acquire the initial full reference on a request that needs it. Requests
+    /// independent of reference data never wait for this source.
+    pub async fn ensure_reference_available(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), PublicRuntimeError> {
+        if deadline <= Instant::now() {
+            return Err(PublicRuntimeError::ReferenceRefresh(
+                "REFERENCE_REFRESH_DEADLINE",
+            ));
+        }
+        let _refresh = tokio::time::timeout_at(deadline.into(), self.reference_refresh_lock.lock())
+            .await
+            .map_err(|_| PublicRuntimeError::ReferenceRefresh("REFERENCE_REFRESH_DEADLINE"))?;
+        let (generation, revision) = {
+            let state = self.state.read().await;
+            if state.reference_unavailable.is_none() {
+                return Ok(());
+            }
+            (
+                state.reference.generation().as_str().to_owned(),
                 self.reference_revision.load(Ordering::SeqCst),
             )
         };
+        match self
+            .refresh_reference(None, deadline, generation, revision)
+            .await
+        {
+            Ok(())
+            | Err(PublicRuntimeError::ReferenceRefresh("REFERENCE_REFRESH_CONTENT_CHANGED")) => {
+                self.reference_available().await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn refresh_reference(
+        &self,
+        instrument_id: Option<&str>,
+        deadline: Instant,
+        expected_generation: String,
+        expected_revision: u64,
+    ) -> Result<(), PublicRuntimeError> {
         let client = self
             .reference_client
             .as_ref()
@@ -83,13 +167,20 @@ impl PublicWsHandle {
         })
         .await
         .map_err(|_| PublicRuntimeError::ReferenceRefresh("REFERENCE_REFRESH_DEADLINE"))??;
+        if reference.is_empty() {
+            return Err(PublicRuntimeError::ReferenceRefresh(
+                "REFERENCE_REFRESH_EMPTY",
+            ));
+        }
         if !fresh(&source_floor, Utc::now().timestamp_millis()) {
             return Err(PublicRuntimeError::ReferenceRefresh(
                 "REFERENCE_REFRESH_SOURCE_STALE",
             ));
         }
-        if reference.get(instrument_id).is_none() {
-            return Err(PublicRuntimeError::InstrumentNotFound(instrument_id.into()));
+        if let Some(id) = instrument_id
+            && reference.get(id).is_none()
+        {
+            return Err(PublicRuntimeError::InstrumentNotFound(id.into()));
         }
         let (reply, receive) = oneshot::channel();
         self.commands
@@ -113,22 +204,7 @@ impl PublicWsHandle {
             .map_err(|_| PublicRuntimeError::ReferenceRefresh("REFERENCE_REFRESH_DEADLINE"))?
             .map_err(|_| PublicRuntimeError::CommandChannelClosed)?
             .map_err(PublicRuntimeError::ReferenceRefresh)?;
-        let state = self.state.read().await;
-        if state.reference.generation().as_str() != expected_generation {
-            return Err(PublicRuntimeError::ReferenceRefresh(
-                "REFERENCE_REFRESH_CONTENT_CHANGED",
-            ));
-        }
-        let rules = state
-            .reference
-            .instrument_rules(instrument_id)
-            .ok_or_else(|| PublicRuntimeError::InstrumentNotFound(instrument_id.into()))?;
-        if !fresh(&rules.source_received_at, Utc::now().timestamp_millis()) {
-            return Err(PublicRuntimeError::ReferenceRefresh(
-                "REFERENCE_REFRESH_SOURCE_STALE",
-            ));
-        }
-        Ok(rules)
+        Ok(())
     }
 }
 

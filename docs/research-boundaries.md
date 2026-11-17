@@ -9,6 +9,7 @@ are Cargo dependencies, Rust visibility, the IPC enums, and the SQL owners.
 |---|---|
 | Authenticated product command | `okx-agent::query::dispatch_with_governance` |
 | Available or unavailable finance | `okx-agent::finance_dispatch::FinanceDispatch` |
+| Existing finance startup and exact rejection cause | `okx-agent::finance_startup::select` |
 | Live execution, protection, reconciliation | `okx-agent::trade_service::TradeService` |
 | Financial persistence and RiskBook | Existing `UnifiedFinanceHandle`, one financial SQLite |
 | Live closed candles | `okx-runtime::live_source::LiveCandleSource` |
@@ -41,6 +42,20 @@ terminal state, and cursor identity. An exclusive root lease precedes recovery.
 Interrupted work is reported as interrupted; it is not promoted to success.
 Cancellation is terminal even when a previously issued source response arrives.
 
+`InvocationId` links the originating product request to the IPC request and job;
+it is not the durable idempotency key. The catalog records the creator's actual
+Worker executable SHA-256 and available build-time source identity at admission.
+Reopening under another executable preserves that identity. Result manifests
+record the executable that computed the result. Legacy records retain unknown
+provenance rather than inheriting the currently running Worker.
+
+Financial startup retains a typed cause and returns the original safe rejection
+code. Missing, corrupt, busy and foreign storage are not interchangeable. Research
+does not require successful finance startup or an initial HTTP instrument fetch.
+The existing public source owner initializes the reference only when a request
+needs it; until then reference-dependent requests fail closed. Capabilities and
+stored-job access do not perform that fetch.
+
 ## Installation versus activation
 
 CONTROL stages a verified content-addressed worker and publishes
@@ -64,6 +79,8 @@ cargo test --locked -p okx-agent --lib research_dispatch_tests::
 cargo test --locked -p okx-agent --lib research_client::
 cargo test --locked -p okx-agent --lib query::public_dispatch_tests::
 cargo test --locked -p okx-agent --lib cloudflare_transport::session_tests::
+cargo test --locked -p okx-agent --lib finance_startup::
+cargo test --locked -p okx-runtime --lib public::reference_refresh::tests::
 ```
 
 The dedicated Engine-under-Research-load check runs in its own test process so

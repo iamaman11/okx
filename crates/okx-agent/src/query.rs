@@ -26,7 +26,7 @@ pub async fn dispatch_with_governance(
     g: Option<&CentralGovernanceSnapshot>,
 ) -> AgentResponse {
     let result = match r.validate() {
-        Ok(()) => execute(ctx, r, g).await,
+        Ok(()) => crate::research_client::with_invocation(&r.request_id, execute(ctx, r, g)).await,
         Err(_) => Err("INVALID_COMMAND".into()),
     };
     response(&r.request_id, result)
@@ -214,6 +214,12 @@ async fn execute(
             settle_currency,
             instrument_type,
         } => {
+            ctx.public_ws
+                .ensure_reference_available(
+                    std::time::Instant::now() + std::time::Duration::from_secs(5),
+                )
+                .await
+                .map_err(|_| "REFERENCE_SOURCE_UNAVAILABLE")?;
             let refs = ctx.public_ws.reference_snapshot().await;
             Ok(find_instruments_response(
                 &refs,
@@ -223,6 +229,12 @@ async fn execute(
             ))
         }
         AgentOperation::MarketOverview { instrument } => {
+            ctx.public_ws
+                .ensure_reference_available(
+                    std::time::Instant::now() + std::time::Duration::from_secs(5),
+                )
+                .await
+                .map_err(|_| "REFERENCE_SOURCE_UNAVAILABLE")?;
             ctx.public_ws
                 .demand_instrument(instrument)
                 .await
@@ -291,6 +303,12 @@ async fn execute_market(
     let mut universe_page = None;
     let mut resolved_instruments = None;
     if let Some(universe) = &request.universe {
+        public_ws
+            .ensure_reference_available(
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .await
+            .map_err(|_| "REFERENCE_SOURCE_UNAVAILABLE")?;
         let reference = public_ws.reference_snapshot().await;
         if universe
             .reference_generation

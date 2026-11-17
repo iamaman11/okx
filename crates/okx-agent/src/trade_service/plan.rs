@@ -263,6 +263,12 @@ impl TradeService {
                     .map_err(err)?,
             )
         } else {
+            // A restarted owner has no reference yet. Acquire it once for
+            // reductions, without refreshing an already available stale source.
+            self.public_ws
+                .ensure_reference_available(until)
+                .await
+                .map_err(err)?;
             None
         };
         // Subscribe before the first predicate read: an observation arriving

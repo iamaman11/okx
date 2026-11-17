@@ -633,3 +633,78 @@ fn job_status_reads_bounded_rows_at_100k_jobs() {
     }
     assert_eq!(s.retention_candidates(u64::MAX, 64).unwrap().len(), 0);
 }
+
+#[test]
+fn producer_and_origin_survive_replay_failure_and_reopen() {
+    let file = path("durable-producer");
+    let first =
+        crate::producer::Producer::new("a".repeat(64), Some("b".repeat(40)), Some("c".repeat(40)))
+            .unwrap();
+    let second = crate::producer::Producer::new("d".repeat(64), None, None).unwrap();
+    let origin = okx_protocol::research_ipc::InvocationId::new("first-invocation".into()).unwrap();
+    let jobs = Jobs::open(file.clone())
+        .unwrap()
+        .with_producer(Some(first.clone()));
+    let key = IdempotencyKey::new("producer-key".into()).unwrap();
+    let (job, _, _) = jobs
+        .enqueue_semantic_with_origin(
+            key.clone(),
+            "e".repeat(64),
+            "semantic".into(),
+            Some(origin.clone()),
+        )
+        .unwrap();
+    assert_eq!(job.producer, Some(first.clone()));
+    jobs.update(
+        &job.id,
+        State::Failed,
+        None,
+        Some("CANDLE_RANGE_UNAVAILABLE".into()),
+    )
+    .unwrap();
+    drop(jobs);
+    let jobs = Jobs::open(file).unwrap().with_producer(Some(second));
+    let restored = jobs.diagnostic_readback(&job.id);
+    assert_eq!(restored["job"]["origin_invocation"], origin.as_str());
+    assert_eq!(
+        restored["job"]["producer"],
+        serde_json::to_value(&first).unwrap()
+    );
+    assert_eq!(restored["job"]["origin"], "durable_startup_subset");
+    let (replayed, fresh, _) = jobs
+        .enqueue_semantic_with_origin(key, job.id.clone(), "semantic".into(), None)
+        .unwrap();
+    assert!(!fresh);
+    assert_eq!(replayed.producer, Some(first));
+    assert_eq!(replayed.origin_invocation, Some(origin.clone()));
+    assert_eq!(replayed.state, State::Failed);
+    assert_eq!(replayed.error.as_deref(), Some("CANDLE_RANGE_UNAVAILABLE"));
+    assert_eq!(
+        jobs.diagnostic_readback(&job.id)["job"]["origin_invocation"],
+        origin.as_str()
+    );
+}
+
+#[test]
+fn historical_rows_keep_unknown_producer_on_replay() {
+    let file = path("legacy-producer");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let db = rusqlite::Connection::open(&file).unwrap();
+    db.execute_batch("CREATE TABLE research_jobs(id TEXT PRIMARY KEY,request_hash TEXT NOT NULL,idempotency_key TEXT NOT NULL UNIQUE,state TEXT NOT NULL,progress INTEGER NOT NULL,artifact TEXT,error TEXT,created_ms INTEGER NOT NULL,pinned INTEGER NOT NULL) STRICT;").unwrap();
+    let id = "f".repeat(64);
+    db.execute("INSERT INTO research_jobs VALUES(?1,?1,'legacy-key','failed',0,NULL,'CANDLE_RANGE_UNAVAILABLE',1,0)", [&id]).unwrap();
+    drop(db);
+    let jobs = Jobs::open(file.clone()).unwrap();
+    let job = jobs.get(&id).unwrap();
+    assert!(job.producer.is_none());
+    drop(jobs);
+    let jobs = Jobs::open(file).unwrap().with_producer(Some(
+        crate::producer::Producer::new("a".repeat(64), None, None).unwrap(),
+    ));
+    let (again, _, _) = jobs.enqueue("legacy-key".into(), job.id).unwrap();
+    assert!(again.producer.is_none());
+    assert!(again.origin_invocation.is_none());
+    let diagnostic = jobs.diagnostic_readback(&again.id);
+    assert!(diagnostic["job"]["producer"].is_null());
+    assert!(diagnostic["job"]["origin_invocation"].is_null());
+}

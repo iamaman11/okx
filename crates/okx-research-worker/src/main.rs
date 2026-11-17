@@ -2,6 +2,16 @@ use okx_protocol::research_ipc::ResearchScope;
 use std::path::PathBuf;
 #[tokio::main]
 async fn main() {
+    if tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .try_init()
+        .is_err()
+    {
+        eprintln!("research worker: TRACING_SUBSCRIBER_INIT_FAILED");
+        std::process::exit(1);
+    }
     match run().await {
         Ok(()) => std::process::exit(0),
         Err(error) => {

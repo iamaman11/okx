@@ -13,36 +13,54 @@ pub enum FinanceReadiness {
 pub struct FinanceDispatch {
     readiness: FinanceReadiness,
     owner: Option<(Arc<AccountRuntimeRegistry>, Arc<TradeService>)>,
+    failure: Option<Arc<crate::finance_startup::FinanceStartupFailure>>,
 }
 impl FinanceDispatch {
     pub fn ready(accounts: Arc<AccountRuntimeRegistry>, trade: Arc<TradeService>) -> Self {
         Self {
             readiness: FinanceReadiness::Ready,
             owner: Some((accounts, trade)),
+            failure: None,
         }
     }
     pub fn stopped(accounts: Arc<AccountRuntimeRegistry>, trade: Arc<TradeService>) -> Self {
         Self {
             readiness: FinanceReadiness::Stopped,
             owner: Some((accounts, trade)),
+            failure: None,
         }
     }
     pub fn missing() -> Self {
         Self {
             readiness: FinanceReadiness::Missing,
             owner: None,
+            failure: None,
         }
     }
     pub fn invalid() -> Self {
         Self {
             readiness: FinanceReadiness::Invalid,
             owner: None,
+            failure: None,
         }
+    }
+    pub fn failed(failure: crate::finance_startup::FinanceStartupFailure) -> Self {
+        Self {
+            readiness: FinanceReadiness::Invalid,
+            owner: None,
+            failure: Some(Arc::new(failure)),
+        }
+    }
+    pub fn startup_failure(&self) -> Option<&crate::finance_startup::FinanceStartupFailure> {
+        self.failure.as_deref()
     }
     pub fn readiness(&self) -> FinanceReadiness {
         self.readiness
     }
     fn unavailable(&self) -> String {
+        if let Some(failure) = &self.failure {
+            return failure.code().into();
+        }
         match self.readiness {
             FinanceReadiness::Missing => "FINANCE_INSTALLATION_NOT_INITIALIZED",
             FinanceReadiness::Invalid => "FINANCE_AUTHORITY_INVALID",

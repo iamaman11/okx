@@ -60,6 +60,7 @@ async fn grid_result_includes_selected_train_test_and_equity() {
         &dataset,
         Some(grid),
         None,
+        None,
         &|| false,
     )
     .unwrap();

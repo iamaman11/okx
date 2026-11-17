@@ -25,6 +25,24 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tracing::Instrument;
+
+tokio::task_local! { static HOST_INVOCATION: Option<InvocationId>; }
+
+/// Correlate an authenticated product invocation without changing its durable key.
+pub(crate) async fn with_invocation<F: Future>(request_id: &str, future: F) -> F::Output {
+    let span = tracing::info_span!(
+        "product_invocation",
+        invocation_id = request_id,
+        owner = "agent_dispatch"
+    );
+    HOST_INVOCATION
+        .scope(
+            InvocationId::new(request_id.to_owned()).ok(),
+            future.instrument(span),
+        )
+        .await
+}
 
 pub type SourceHandler = Arc<
     dyn Fn(
@@ -54,7 +72,7 @@ pub struct ResearchClient {
     deployment: Arc<std::sync::Mutex<ResearchDeploymentStatus>>,
 }
 type PendingReplies =
-    Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
+    Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Result<WorkerReply, String>>>>>;
 
 struct Connection {
     tx: mpsc::Sender<HostFrame>,
@@ -215,10 +233,7 @@ impl ResearchClient {
                     state.draining = true;
                 }
                 let drain = Self::send(&c, ResearchCommand::Drain, None).await?;
-                let active = drain
-                    .get("active_jobs")
-                    .and_then(Value::as_u64)
-                    .ok_or("WORKER_INVALID_DRAIN")?;
+                let active = drain.drain()?.active_jobs;
                 if active != 0 || installed.is_none() {
                     return Ok(c);
                 }
@@ -240,7 +255,9 @@ impl ResearchClient {
                     .await
                     .map_err(|_| "WORKER_CLOSED")?;
                 let mut done = c.closed.subscribe();
-                Self::send(&c, ResearchCommand::Shutdown, None).await?;
+                Self::send(&c, ResearchCommand::Shutdown, None)
+                    .await?
+                    .shutdown()?;
                 while !*done.borrow_and_update() {
                     done.changed().await.map_err(|_| "WORKER_DISCONNECTED")?;
                 }
@@ -307,7 +324,15 @@ impl ResearchClient {
                 storage: STORAGE_VERSION,
                 session: s,
                 scope,
-            } if s == session && scope == self.config.scope => {}
+                producer_sha256,
+            } if s == session
+                && scope == self.config.scope
+                && producer_sha256.len() == 64
+                && producer_sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && (self.installation_runtime.is_none()
+                    || version_name(&executable).as_ref() == Some(&producer_sha256)) => {}
             _ => return Err("WORKER_HELLO_MISMATCH".into()),
         }
         let (tx, mut rx) = mpsc::channel::<HostFrame>(QUEUE_CAPACITY);
@@ -399,7 +424,7 @@ impl ResearchClient {
         c: &Arc<Connection>,
         command: ResearchCommand,
         dispatched: Option<&AtomicBool>,
-    ) -> Result<Value, String> {
+    ) -> Result<WorkerReply, String> {
         let _permit = if matches!(command, ResearchCommand::Shutdown) {
             None
         } else if is_control(&command) {
@@ -424,6 +449,19 @@ impl ResearchClient {
             let id = RequestId::new(format!("h{number}")).map_err(str::to_owned)?;
             let (tx, rx) = oneshot::channel();
             pending.insert(id.as_str().to_owned(), tx);
+            tracing::info!(
+                owner = "research_client",
+                stage = "dispatch",
+                ipc_request_id = id.as_str(),
+                session = c.session.as_str(),
+                invocation_id = HOST_INVOCATION
+                    .try_with(Clone::clone)
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                    .map(InvocationId::as_str),
+                "research request dispatched"
+            );
             let guard = PendingReply {
                 pending: c.pending.clone(),
                 id: id.as_str().to_owned(),
@@ -432,6 +470,7 @@ impl ResearchClient {
             queue_slot.send(HostFrame::Request {
                 id,
                 session: c.session.clone(),
+                invocation: HOST_INVOCATION.try_with(Clone::clone).ok().flatten(),
                 command: Box::new(command),
             });
             if let Some(dispatched) = dispatched {
@@ -442,7 +481,7 @@ impl ResearchClient {
         drop(order);
         rx.await.map_err(|_| "WORKER_DISCONNECTED")?
     }
-    async fn call(&self, command: ResearchCommand, start: bool) -> Result<Value, String> {
+    async fn call(&self, command: ResearchCommand, start: bool) -> Result<WorkerReply, String> {
         let mut used = None;
         let dispatched = AtomicBool::new(false);
         let diagnostic = matches!(command, ResearchCommand::Explain { .. });
@@ -483,7 +522,9 @@ impl ResearchClient {
             .unwrap_or_default()
     }
     pub async fn research(&self, request: ResearchRequest) -> Result<Value, String> {
-        self.call(ResearchCommand::Research { request }, true).await
+        self.call(ResearchCommand::Research { request }, true)
+            .await?
+            .product()
     }
     pub async fn market(
         &self,
@@ -499,10 +540,13 @@ impl ResearchClient {
             },
             true,
         )
-        .await
+        .await?
+        .product()
     }
     pub async fn capabilities(&self) -> Result<Value, String> {
-        self.call(ResearchCommand::Capabilities, true).await
+        self.call(ResearchCommand::Capabilities, true)
+            .await?
+            .product()
     }
     pub async fn diagnostic_job(&self, id: &str) -> Result<Value, String> {
         self.call(
@@ -511,7 +555,8 @@ impl ResearchClient {
             },
             false,
         )
-        .await
+        .await?
+        .product()
     }
     pub async fn shutdown(&self) {
         let c = self.connection.lock().await.as_ref().cloned();

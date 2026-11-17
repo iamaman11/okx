@@ -29,7 +29,32 @@ const COLUMNS: &str = "substr(id,1,129),state,progress,
       WHEN error LIKE 'OKX rate/backpressure defer:%'
         OR error LIKE 'public OKX market API error: OKX rate/backpressure defer:%' THEN 'MARKET_SOURCE_RETRYABLE'
       ELSE 'UNCLASSIFIED_RESEARCH_ERROR' END,pinned,
-    CASE WHEN length(candidate_progress)<=512 THEN candidate_progress ELSE NULL END";
+    CASE WHEN length(candidate_progress)<=512 THEN candidate_progress ELSE NULL END,
+    CASE WHEN length(origin_invocation)<=256 THEN origin_invocation ELSE NULL END,
+    CASE WHEN length(producer)<=512 THEN producer ELSE NULL END";
+
+// Safe bounded event labels only; never emit raw source or request errors.
+pub(in crate::analytics) fn safe_reason(error: &str) -> &'static str {
+    match error {
+        "CANCELLED" | "JOB_CANCELLED" => "CANCELLED",
+        "SOURCE_INVALID" => "SOURCE_INVALID",
+        "CANDLE_RANGE_UNAVAILABLE" => "CANDLE_RANGE_UNAVAILABLE",
+        "CANDLE_RANGE_INCOMPLETE" => "CANDLE_RANGE_INCOMPLETE",
+        "CANDLE_INTERIOR_GAP" => "CANDLE_INTERIOR_GAP",
+        "FUNDING_RANGE_UNAVAILABLE" => "FUNDING_RANGE_UNAVAILABLE",
+        "FUNDING_RANGE_INCOMPLETE" => "FUNDING_RANGE_INCOMPLETE",
+        "RESEARCH_MEMORY_LIMIT" => "RESEARCH_MEMORY_LIMIT",
+        "CPU_QUEUE_FULL" => "CPU_QUEUE_FULL",
+        "LIVE_SOURCE_DEADLINE" => "LIVE_SOURCE_DEADLINE",
+        "UNSUPPORTED_STRATEGY" => "UNSUPPORTED_STRATEGY",
+        _ if okx_protocol::research_ipc::is_retryable_source_defer(error) => {
+            "MARKET_SOURCE_RETRYABLE"
+        }
+        _ if error.starts_with("RESOURCE_BUSY:") => "RESOURCE_BUSY",
+        _ if error.starts_with("LIMIT_") => "LIMIT_EXCEEDED",
+        _ => "UNCLASSIFIED_RESEARCH_ERROR",
+    }
+}
 
 #[derive(Clone, Serialize)]
 struct Snapshot {
@@ -38,6 +63,8 @@ struct Snapshot {
     progress: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     candidate_progress: Option<super::super::candidate_progress::CandidateProgress>,
+    origin_invocation: Option<okx_protocol::research_ipc::InvocationId>,
+    producer: Option<crate::producer::Producer>,
     result_ref: Option<String>,
     error_code: Option<String>,
     pinned: bool,
@@ -66,6 +93,12 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
                     })
             })
             .transpose()?,
+        origin_invocation: row
+            .get::<_, Option<String>>(7)?
+            .and_then(|v| serde_json::from_str(&v).ok()),
+        producer: row
+            .get::<_, Option<String>>(8)?
+            .and_then(|v| serde_json::from_str(&v).ok()),
         result_ref: artifact.filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())),
         // SQL emits only the fixed whitelist above, never raw failure payloads.
         error_code: error,

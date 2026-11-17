@@ -50,6 +50,7 @@ pub struct AnalyticsService {
     sources: sources::Sources,
     cpu: executor::CpuExecutor,
     jobs: jobs::Jobs,
+    producer: Option<crate::producer::Producer>,
     artifacts: ResearchArtifactStore,
     heavy: Arc<tokio::sync::Semaphore>,
     research_memory: Arc<tokio::sync::Semaphore>,
@@ -76,6 +77,18 @@ impl AnalyticsService {
         let jobs = jobs::Jobs::open_scoped(root.join("research-catalog.sqlite"), scope)?;
         Self::with_jobs(root, bootstrapper.into(), jobs)
     }
+    pub fn new_scoped_with_producer(
+        root: PathBuf,
+        bootstrapper: impl Into<crate::source_api::PublicSourceClient>,
+        scope: &okx_protocol::research_ipc::ResearchScope,
+        producer: crate::producer::Producer,
+    ) -> Result<Self, String> {
+        let jobs = jobs::Jobs::open_scoped(root.join("research-catalog.sqlite"), scope)?
+            .with_producer(Some(producer.clone()));
+        let mut service = Self::with_jobs(root, bootstrapper.into(), jobs)?;
+        service.producer = Some(producer);
+        Ok(service)
+    }
     fn with_jobs(
         root: PathBuf,
         bootstrapper: crate::source_api::PublicSourceClient,
@@ -89,6 +102,7 @@ impl AnalyticsService {
             },
             cpu: Default::default(),
             jobs,
+            producer: None,
             runners: Arc::new(AtomicUsize::new(0)),
             artifacts: ResearchArtifactStore::at(root),
             heavy: Arc::new(tokio::sync::Semaphore::new(2)),
@@ -99,12 +113,14 @@ impl AnalyticsService {
         service.apply_retention(chrono::Utc::now().timestamp_millis().max(0) as u64)?;
         Ok(service)
     }
-    pub async fn begin_drain(&self) -> Result<Value, String> {
+    pub async fn begin_drain(&self) -> Result<okx_protocol::research_ipc::DrainStatus, String> {
         let jobs = self.jobs.clone();
         let active_jobs = tokio::task::spawn_blocking(move || jobs.begin_drain())
             .await
             .map_err(|_| "RESEARCH_DRAIN_FAILED")??;
-        Ok(json!({"active_jobs": drain_count(active_jobs, &self.runners)}))
+        Ok(okx_protocol::research_ipc::DrainStatus {
+            active_jobs: drain_count(active_jobs, &self.runners),
+        })
     }
     pub async fn research(&self, request: ResearchRequest) -> Result<Value, String> {
         if !request.valid() {
@@ -245,6 +261,7 @@ fn publish_replay(
     dataset: &str,
     grid: Option<Value>,
     experiment: Option<&str>,
+    producer: Option<&crate::producer::Producer>,
     cancel: &impl Fn() -> bool,
 ) -> Result<String, String> {
     let mut trade_pages = Vec::new();
@@ -261,7 +278,7 @@ fn publish_replay(
         }
         curve_pages.push(store.publish_evidence(&chunk).map_err(|e| e.to_string())?.0);
     }
-    let manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"experiment_artifact":experiment,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
+    let manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"experiment_artifact":experiment,"producer":producer,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
     Ok(store
         .publish_evidence(&manifest)
         .map_err(|e| e.to_string())?

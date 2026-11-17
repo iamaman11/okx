@@ -21,9 +21,9 @@ async fn drain_waits_for_runner_after_durable_cancellation() {
         service.jobs.get(&job.id).unwrap().state,
         jobs::State::Cancelled
     );
-    assert_eq!(service.begin_drain().await.unwrap()["active_jobs"], 1);
+    assert_eq!(service.begin_drain().await.unwrap().active_jobs, 1);
     drop(guard);
-    assert_eq!(service.begin_drain().await.unwrap()["active_jobs"], 0);
+    assert_eq!(service.begin_drain().await.unwrap().active_jobs, 0);
 }
 pub(super) fn service() -> (PathBuf, AnalyticsService) {
     let root = unique_fixture_root();
@@ -701,7 +701,8 @@ async fn immutable_result_pages_and_restart_catalog() {
             })
             .collect(),
     };
-    let artifact = publish_replay(&s.artifacts, &result, &data, None, None, &|| false).unwrap();
+    let artifact =
+        publish_replay(&s.artifacts, &result, &data, None, None, None, &|| false).unwrap();
     let id = "a".repeat(64);
     s.jobs
         .enqueue("fixture-request".into(), id.clone())

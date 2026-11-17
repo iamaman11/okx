@@ -27,6 +27,7 @@ pub(super) async fn run(
     cpu: CpuExecutor,
     artifacts: ResearchArtifactStore,
     cancel: Arc<super::executor::Cancel>,
+    producer: Option<crate::producer::Producer>,
 ) -> Result<String, String> {
     // Run source construction on the existing bounded CPU executor, not on
     // the WSS/SQL/REST async control thread. Fixture never contacts an exchange.
@@ -189,6 +190,7 @@ pub(super) async fn run(
     artifacts
         .publish_evidence(&json!({
             "kind": "k9_native_benchmark",
+            "producer": producer,
             "summary": summary,
             "hash": result_hash,
             "code_version": "448-k9-native/v1"

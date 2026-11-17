@@ -84,6 +84,7 @@ async fn child_round_trip_source_and_eof_restart() {
         send(
             &mut input,
             HostFrame::Request {
+                invocation: None,
                 id: id.clone(),
                 session: session.clone(),
                 command: Box::new(command),
@@ -99,6 +100,7 @@ async fn child_round_trip_source_and_eof_restart() {
     send(
         &mut input,
         HostFrame::Request {
+            invocation: None,
             id: id.clone(),
             session: session.clone(),
             command: Box::new(ResearchCommand::Market {
@@ -144,6 +146,7 @@ async fn child_round_trip_source_and_eof_restart() {
     send(
         &mut input,
         HostFrame::Request {
+            invocation: None,
             id: RequestId::new("h4".into()).unwrap(),
             session: session.clone(),
             command: Box::new(ResearchCommand::Capabilities),
@@ -294,6 +297,7 @@ async fn replay_and_wrong_session_terminate_worker() {
         send(
             &mut input,
             HostFrame::Request {
+                invocation: None,
                 id: id.clone(),
                 session: session.clone(),
                 command: Box::new(ResearchCommand::Capabilities),
@@ -306,6 +310,7 @@ async fn replay_and_wrong_session_terminate_worker() {
         send(
             &mut input,
             HostFrame::Request {
+                invocation: None,
                 id: if replay {
                     id
                 } else {
@@ -356,6 +361,7 @@ async fn lost_enqueue_ack_retry_preserves_job_and_rejects_conflict() {
     send(
         &mut input,
         HostFrame::Request {
+            invocation: None,
             id: RequestId::new("h1".into()).unwrap(),
             session: session.clone(),
             command: Box::new(ResearchCommand::Research {
@@ -392,6 +398,7 @@ async fn lost_enqueue_ack_retry_preserves_job_and_rejects_conflict() {
     send(
         &mut input,
         HostFrame::Request {
+            invocation: None,
             id: RequestId::new("h1".into()).unwrap(),
             session: next.clone(),
             command: Box::new(ResearchCommand::Research {
@@ -402,13 +409,15 @@ async fn lost_enqueue_ack_retry_preserves_job_and_rejects_conflict() {
     .await;
     match receive(&mut output).await {
         WorkerFrame::Response {
-            result: Ok(value), ..
+            result: Ok(WorkerReply::Product(value)),
+            ..
         } => assert_eq!(value["id"].as_str(), Some(durable_id.as_str())),
         _ => panic!("missing retry response"),
     }
     send(
         &mut input,
         HostFrame::Request {
+            invocation: None,
             id: RequestId::new("h2".into()).unwrap(),
             session: next,
             command: Box::new(ResearchCommand::Research {
@@ -439,6 +448,7 @@ async fn draining_preserves_active_job_and_rejects_new_admission() {
     send(
         &mut input,
         HostFrame::Request {
+            invocation: None,
             id: RequestId::new("h1".into()).unwrap(),
             session: session.clone(),
             command: Box::new(ResearchCommand::Research {
@@ -453,7 +463,8 @@ async fn draining_preserves_active_job_and_rejects_new_admission() {
         match receive(&mut output).await {
             WorkerFrame::SourceRequest { id, session, .. } => source = Some((id, session)),
             WorkerFrame::Response {
-                result: Ok(value), ..
+                result: Ok(WorkerReply::Product(value)),
+                ..
             } => job = value["id"].as_str().map(str::to_owned),
             _ => panic!("unexpected enqueue frame"),
         }
@@ -461,6 +472,7 @@ async fn draining_preserves_active_job_and_rejects_new_admission() {
     send(
         &mut input,
         HostFrame::Request {
+            invocation: None,
             id: RequestId::new("h2".into()).unwrap(),
             session: session.clone(),
             command: Box::new(ResearchCommand::Drain),
@@ -468,7 +480,7 @@ async fn draining_preserves_active_job_and_rejects_new_admission() {
     )
     .await;
     assert!(
-        matches!(receive(&mut output).await, WorkerFrame::Response { result: Ok(v), .. } if v["active_jobs"] == 1)
+        matches!(receive(&mut output).await, WorkerFrame::Response { result: Ok(WorkerReply::Draining(v)), .. } if v.active_jobs == 1)
     );
     let mut next = backtest(1);
     if let ResearchRequest::Backtest {
@@ -480,6 +492,7 @@ async fn draining_preserves_active_job_and_rejects_new_admission() {
     send(
         &mut input,
         HostFrame::Request {
+            invocation: None,
             id: RequestId::new("h3".into()).unwrap(),
             session: session.clone(),
             command: Box::new(ResearchCommand::Research { request: next }),
@@ -505,6 +518,7 @@ async fn draining_preserves_active_job_and_rejects_new_admission() {
             send(
                 &mut input,
                 HostFrame::Request {
+                    invocation: None,
                     id: id.clone(),
                     session: session.clone(),
                     command: Box::new(ResearchCommand::Drain),
@@ -515,9 +529,9 @@ async fn draining_preserves_active_job_and_rejects_new_admission() {
                 match receive(&mut output).await {
                     WorkerFrame::Response {
                         id: got,
-                        result: Ok(v),
+                        result: Ok(WorkerReply::Draining(v)),
                         ..
-                    } if got == id && v["active_jobs"] == 0 => return,
+                    } if got == id && v.active_jobs == 0 => return,
                     WorkerFrame::Response {
                         id: got,
                         result: Ok(_),

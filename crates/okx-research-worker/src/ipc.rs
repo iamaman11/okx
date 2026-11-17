@@ -19,6 +19,7 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tracing::Instrument;
 
 fn is_control(command: &ResearchCommand) -> bool {
     matches!(
@@ -160,13 +161,21 @@ where
         pending: pending.clone(),
         permits: Semaphore::new(MAX_IN_FLIGHT),
     });
-    let service =
-        AnalyticsService::new_scoped(root, PublicSourceClient::new(provider), &expected_scope)?;
+    let producer = tokio::task::spawn_blocking(crate::producer::Producer::current)
+        .await
+        .map_err(|_| "WORKER_PRODUCER_UNAVAILABLE")??;
+    let service = AnalyticsService::new_scoped_with_producer(
+        root,
+        PublicSourceClient::new(provider),
+        &expected_scope,
+        producer.clone(),
+    )?;
     let hello = WorkerFrame::Hello {
         protocol: PROTOCOL_VERSION,
         storage: STORAGE_VERSION,
         session: session.clone(),
         scope: expected_scope,
+        producer_sha256: producer.binary_sha256().to_owned(),
     };
     tokio::time::timeout(
         Duration::from_millis(REQUEST_TIMEOUT_MS),
@@ -211,26 +220,36 @@ where
                     HostFrame::SourceReply { id, session: s, result } if s == session => {
                         accept_source_reply(&pending, next_source.load(Ordering::Acquire), &id, result)?;
                     },
-                    HostFrame::Request { id, session: s, command } if s == session => {
+                    HostFrame::Request { id, session: s, invocation, command } if s == session => {
                         let command = *command;
                         let number = id.as_str().strip_prefix('h').and_then(|s| s.parse::<u64>().ok()).ok_or("INVALID_REQUEST_ID")?;
                         if number <= last_request || format!("h{number}") != id.as_str() { return Err("DUPLICATE_REQUEST".into()); }
                         last_request = number;
-                        if matches!(command, ResearchCommand::Shutdown) { let response = WorkerFrame::Response { id, session: session.clone(), result: Ok(serde_json::Value::Null) }; let (ack, done) = oneshot::channel(); tokio::time::timeout(Duration::from_millis(REQUEST_TIMEOUT_MS), async { tx.send((response, Some(ack))).await.map_err(|_| "WRITER_CLOSED")?; done.await.map_err(|_| "WRITER_CLOSED") }).await.map_err(|_| "WRITE_TIMEOUT")??; break; }
+                        if matches!(command, ResearchCommand::Shutdown) { let response = WorkerFrame::Response { id, session: session.clone(), result: Ok(WorkerReply::Shutdown) }; let (ack, done) = oneshot::channel(); tokio::time::timeout(Duration::from_millis(REQUEST_TIMEOUT_MS), async { tx.send((response, Some(ack))).await.map_err(|_| "WRITER_CLOSED")?; done.await.map_err(|_| "WRITER_CLOSED") }).await.map_err(|_| "WRITE_TIMEOUT")??; break; }
                         let control = is_control(&command);
                         let permit = match if control { controls.clone().try_acquire_owned() } else { permits.clone().try_acquire_owned() } {
                             Ok(permit) => permit,
                             Err(_) => { tx.try_send((WorkerFrame::Response { id, session: session.clone(), result: Err("RESEARCH_BUSY".into()) }, None)).map_err(|_| "WRITER_CLOSED")?; continue; }
                         };
                         let service = service.clone(); let tx = tx.clone(); let session = session.clone();
-                        jobs.spawn(async move { let _permit = permit; let result = match command {
-                            ResearchCommand::Research { request } => service.research(request).await,
-                            ResearchCommand::Market { request, universe_page, resolved_instruments } => service.market(request, universe_page, resolved_instruments).await,
-                            ResearchCommand::Capabilities => Ok(service.market_capabilities()),
-                            ResearchCommand::Drain => service.begin_drain().await,
-                            ResearchCommand::Explain { job_id } => Ok(service.diagnostic_job(job_id.as_str())),
-                            ResearchCommand::Shutdown => unreachable!(),
-                        }; let _ = tx.send((WorkerFrame::Response { id, session, result }, None)).await; });
+                        let span = tracing::info_span!("research_command", owner="research_worker", ipc_request_id=id.as_str(), session=session.as_str(), invocation_id=invocation.as_ref().map(InvocationId::as_str));
+                        jobs.spawn(crate::invocation::scope(invocation, async move {
+                            let _permit = permit;
+                            let result = match command {
+                                ResearchCommand::Research { request } => service.research(request).await.map(WorkerReply::Product),
+                                ResearchCommand::Market { request, universe_page, resolved_instruments } => service.market(request, universe_page, resolved_instruments).await.map(WorkerReply::Product),
+                                ResearchCommand::Capabilities => Ok(WorkerReply::Product(service.market_capabilities())),
+                                ResearchCommand::Drain => service.begin_drain().await.map(WorkerReply::Draining),
+                                ResearchCommand::Explain { job_id } => Ok(WorkerReply::Product(service.diagnostic_job(job_id.as_str()))),
+                                ResearchCommand::Shutdown => unreachable!(),
+                            };
+                            match &result {
+                                Ok(WorkerReply::Product(value)) => tracing::info!(stage="reply", job_id=value.get("id").and_then(serde_json::Value::as_str), "research command completed"),
+                                Ok(_) => tracing::info!(stage="control_reply", "research control completed"),
+                                Err(_) => tracing::warn!(stage="reply", reason="RESEARCH_COMMAND_REJECTED", "research command rejected; inspect scoped job diagnostic"),
+                            }
+                            let _ = tx.send((WorkerFrame::Response { id, session, result }, None)).await;
+                        }).instrument(span));
                     },
                     _ => return Err("INVALID_SESSION_OR_FRAME".into()),
                 }
@@ -383,3 +402,6 @@ mod tests {
         assert!(serde_json::from_str::<RequestId>("\"\"").is_err());
     }
 }
+
+#[cfg(test)]
+mod correlation_tests;

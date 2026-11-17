@@ -185,6 +185,7 @@ impl AnalyticsService {
                 "dataset_hash":value.get("dataset_hash"),
                 "result_hash":value.get("hash"),
                 "code_version":value.get("code_version"),
+                "producer":value.get("producer"),
                 "experiment_artifact":value.get("experiment_artifact"),
                 "read_data_via":["trades","equity"],"side_effects":"none"
             }));
@@ -203,6 +204,7 @@ impl AnalyticsService {
             })),
             "dataset_hash":value.get("dataset_hash"),
             "code_version":value.get("code_version"),
+            "producer":value.get("producer"),
             "result_hash":value.get("hash"),
             "experiment_artifact":value.get("experiment_artifact")
         });

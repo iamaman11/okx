@@ -11,6 +11,7 @@ pub mod execution_runtime;
 pub mod execution_store;
 pub mod finance_dispatch;
 pub mod finance_inspection;
+pub mod finance_startup;
 pub(crate) mod finance_trace;
 pub(crate) mod finance_window;
 pub mod github_auth;

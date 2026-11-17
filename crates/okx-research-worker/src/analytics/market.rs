@@ -1,6 +1,7 @@
 use super::*;
 use okx_analysis::operators::{Operator, registry, scalar};
 use replay::Bar;
+use tracing::Instrument;
 struct Loaded {
     instrument: String,
     bars: Result<Arc<Vec<Bar>>, String>,
@@ -130,6 +131,7 @@ impl AnalyticsService {
                 hash.clone(),
             )
             .await?;
+        tracing::info!(job_id = %job.id, stage = "admission", state = if new { "queued" } else { "replayed" }, "market job admission");
         if !new {
             if let Some(artifact) = job.artifact {
                 let store = self.artifacts.clone();
@@ -150,6 +152,7 @@ impl AnalyticsService {
             this.jobs
                 .update_async(hash.clone(), jobs::State::Running, None, None)
                 .await?;
+            tracing::info!(job_id = %hash, stage = "execution", state = "running", "market job running");
             // Two global scans at most, using the existing analytics semaphore.
             let _permit = if global_rank {
                 Some(
@@ -186,8 +189,11 @@ impl AnalyticsService {
                     this.jobs
                         .update_async(hash.clone(), jobs::State::Completed, Some(artifact), None)
                         .await?;
+                    tracing::info!(job_id = %hash, stage = "terminal", state = "completed", "market job completed");
                 }
                 Err(e) => {
+                    let reason_code = jobs::job_diagnostics::safe_reason(e);
+                    let state = if cancel.load(Ordering::Acquire) { "cancelled" } else { "failed" };
                     this.jobs
                         .update_async(
                             hash.clone(),
@@ -200,10 +206,11 @@ impl AnalyticsService {
                             Some(e.clone()),
                         )
                         .await?;
+                    tracing::info!(job_id = %hash, stage = "terminal", state, reason_code, "market job ended");
                 }
             }
             outcome
-        });
+        }.instrument(tracing::Span::current()));
         match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
             Ok(result) => result.map_err(|e| e.to_string())?,
             Err(_) => with_universe_page(json!(job), queued_page.as_ref()),
@@ -229,6 +236,7 @@ impl AnalyticsService {
             .market_rows(&request, cancel.clone(), global_rank)
             .await?;
         let store = self.artifacts.clone();
+        let producer = self.producer.clone();
         self.cpu.run(cancel,move |cancel| {
         if cancel.load(Ordering::Acquire){return Err("CANCELLED".into())}
         // Only the first page computes; subsequent pages read exact stored
@@ -244,7 +252,7 @@ impl AnalyticsService {
                     .0,
             );
         }
-        let result_artifact=store.publish_evidence(&json!({"kind":"market_pages","row_pages":row_pages,"total_rows":total,"sources":plan.sources,"correlation_matrix":correlation_matrix})).map_err(|e|e.to_string())?.0;
+        let result_artifact=store.publish_evidence(&json!({"kind":"market_pages","producer":producer,"row_pages":row_pages,"total_rows":total,"sources":plan.sources,"correlation_matrix":correlation_matrix})).map_err(|e|e.to_string())?.0;
         let mut page = rows
             .into_iter()
             .skip(offset)

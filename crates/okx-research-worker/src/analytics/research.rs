@@ -1,4 +1,5 @@
 use super::*;
+use tracing::Instrument;
 
 impl AnalyticsService {
     pub(super) async fn submit(&self, request: ResearchRequest) -> Result<Value, String> {
@@ -32,6 +33,7 @@ impl AnalyticsService {
             .enqueue_semantic_async(key, hash.clone(), semantic_hash)
             .await?;
         let hash = job.id.clone();
+        tracing::info!(job_id = %hash, stage = "admission", state = if new { "queued" } else { "replayed" }, "research job admission");
         if !new {
             return Ok(json!(job));
         }
@@ -79,11 +81,13 @@ impl AnalyticsService {
                 this.jobs
                     .update_async(hash.clone(), jobs::State::Running, None, None)
                     .await?;
+                tracing::info!(job_id = %hash, stage = "execution", state = "running", "research job running");
                 if matches!(request, ResearchRequest::Benchmark { .. }) {
                     return benchmark::run(
                         this.cpu.clone(),
                         this.artifacts.clone(),
                         cancel.clone(),
+                        this.producer.clone(),
                     )
                     .await;
                 }
@@ -133,6 +137,7 @@ impl AnalyticsService {
                         return Err("CANCELLED".into());
                     }
                     let store = this.artifacts.clone();
+                    let producer = this.producer.clone();
                     let previous_rows = rows;
                     let previous_artifacts = artifacts;
                     let (next_rows,next_artifacts,manifest)=this.cpu.run(cancel.clone(),move |_|{
@@ -140,7 +145,7 @@ impl AnalyticsService {
                     let row=match outcome {Ok(artifact)=>{let result:Value=store.read_evidence_json(&artifact).map_err(|e|e.to_string())?;artifacts.push(artifact.clone());json!({"index":index,"instrument":instrument,"state":"completed","artifact":artifact,"summary":result["summary"],"dataset_hash":result["dataset_hash"],"grid":result["grid"],"trades_cursor":format!("instrument:{index}:0")})},Err(error)=>json!({"index":index,"instrument":instrument,"state":"failed","reason_code":error})};
                     rows.push(row);rows.sort_by_key(|r|r["index"].as_u64().unwrap_or(0));
                     let page=store.publish_evidence(&rows).map_err(|e|e.to_string())?.0;
-                    let manifest=store.publish_evidence(&json!({"kind":"research_batch","summary":{"semantics":"independent_instruments","quality":if artifacts.len()==rows.len(){"complete"}else{"partial"},"completed":artifacts.len(),"failed":rows.len()-artifacts.len()},"row_pages":[page],"total_rows":rows.len(),"instrument_artifacts":artifacts,"instruments":rows})).map_err(|e|e.to_string())?.0;
+                    let manifest=store.publish_evidence(&json!({"kind":"research_batch","producer":producer,"summary":{"semantics":"independent_instruments","quality":if artifacts.len()==rows.len(){"complete"}else{"partial"},"completed":artifacts.len(),"failed":rows.len()-artifacts.len()},"row_pages":[page],"total_rows":rows.len(),"instrument_artifacts":artifacts,"instruments":rows})).map_err(|e|e.to_string())?.0;
 
                         Ok((rows,artifacts,manifest))
                     }).await?;
@@ -183,10 +188,9 @@ impl AnalyticsService {
             }
             match outcome {
                 Ok(a) => {
-                    let _ = this
-                        .jobs
-                        .update_async(hash.clone(), jobs::State::Completed, Some(a), None)
-                        .await;
+                    if this.jobs.update_async(hash.clone(), jobs::State::Completed, Some(a), None).await.is_ok() {
+                        tracing::info!(job_id = %hash, stage = "terminal", state = "completed", "research job completed");
+                    }
                 }
                 Err(e) => {
                     let state = if cancel.load(Ordering::Acquire) {
@@ -194,19 +198,20 @@ impl AnalyticsService {
                     } else {
                         jobs::State::Failed
                     };
+                    let reason_code = jobs::job_diagnostics::safe_reason(&e);
+                    let terminal_state = if state == jobs::State::Cancelled { "cancelled" } else { "failed" };
                     let artifact = this
                         .jobs
                         .get_async(hash.clone())
                         .await
                         .ok()
                         .and_then(|j| j.artifact);
-                    let _ = this
-                        .jobs
-                        .update_async(hash.clone(), state, artifact, Some(e))
-                        .await;
+                    if this.jobs.update_async(hash.clone(), state, artifact, Some(e)).await.is_ok() {
+                        tracing::info!(job_id = %hash, stage = "terminal", state = terminal_state, reason_code, "research job ended");
+                    }
                 }
             }
-        });
+        }.instrument(tracing::Span::current()));
         Ok(json!(job))
     }
     #[cfg(test)]
@@ -396,6 +401,7 @@ impl AnalyticsService {
             take_profit_fraction: None,
         };
         let store = self.artifacts.clone();
+        let producer = self.producer.clone();
         let artifact=self.cpu.run(cancel.clone(),move|c|{
                     let cancelled=||c.load(Ordering::Acquire);
                     let mut chunks=Vec::new();for chunk in bars.chunks(4096){if cancelled(){return Err("CANCELLED".into())}chunks.push(store.publish_evidence(&chunk).map_err(|e|e.to_string())?.0);}
@@ -410,12 +416,12 @@ impl AnalyticsService {
                         "requested_range":{"start_ms":start,"end_ms":end},
                         "effective_range":{"start_ms":bars.first().map(|b|b.time),"end_ms":bars.last().map(|b|b.time+ms)},
                         "bar_count":bars.len(),"timeframe_ms":ms,
-                        "code_version":replay::CAUSAL_REPLAY_VERSION,"spec":spec,
+                        "code_version":replay::CAUSAL_REPLAY_VERSION,"producer":producer,"spec":spec,
                         "variants":variants,"selection_policy":policy,
                         "result_role":"counterfactual_research_only"
                     })).map_err(|e|e.to_string())?.0;
                     let(result,grid)=if is_grid{let g=replay::grid_with_observer(&bars,&spec,&variants,&cancelled,&|value|{if let Some((tracker,index))=&observation {tracker.observe(*index,value)}})?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":spec.seed,"strategy_id":spec.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.slow,bars.len(),&cancelled)?,None)};
-                    publish_replay(&store,&result,&dataset,grid,Some(&experiment),&cancelled)
+                    publish_replay(&store,&result,&dataset,grid,Some(&experiment),producer.as_ref(),&cancelled)
                 }).await?;
         Ok::<_, String>(artifact)
     }

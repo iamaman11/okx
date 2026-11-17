@@ -1,7 +1,7 @@
 use okx_protocol::research_ipc::{IdempotencyKey, JobId};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 #[path = "job_diagnostics.rs"]
-mod job_diagnostics;
+pub(super) mod job_diagnostics;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -51,6 +51,10 @@ pub(super) fn is_transient_rate_defer(error: Option<&str>) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
+    #[serde(default)]
+    pub producer: Option<crate::producer::Producer>,
+    #[serde(default)]
+    pub origin_invocation: Option<okx_protocol::research_ipc::InvocationId>,
     pub request_hash: String,
     pub idempotency_key: String,
     #[serde(default)]
@@ -76,6 +80,7 @@ pub struct Job {
 #[derive(Clone)]
 pub struct Jobs {
     db: Arc<Mutex<Connection>>,
+    producer: Option<crate::producer::Producer>,
     _root_lock: Arc<std::fs::File>,
     cancel: Arc<Mutex<BTreeMap<String, Arc<super::executor::Cancel>>>>,
     diagnostic: Arc<job_diagnostics::Projection>,
@@ -242,16 +247,38 @@ impl Jobs {
                 )
                 .map_err(|e| e.to_string())?;
         }
+        for column in ["producer", "origin_invocation"] {
+            let columns = migration
+                .prepare("PRAGMA table_info(research_jobs)")
+                .map_err(|e| e.to_string())?
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?;
+            if !columns.iter().any(|existing| existing == column) {
+                migration
+                    .execute(
+                        &format!("ALTER TABLE research_jobs ADD COLUMN {column} TEXT"),
+                        [],
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+        }
         migration.commit().map_err(|e| e.to_string())?;
         let diagnostic = Arc::new(job_diagnostics::Projection::default());
         diagnostic.restore(&connection);
         Ok(Self {
             db: Arc::new(Mutex::new(connection)),
+            producer: None,
             _root_lock: Arc::new(root_lock),
             cancel: Default::default(),
             diagnostic,
             draining: Arc::new(AtomicBool::new(false)),
         })
+    }
+    pub(super) fn with_producer(mut self, producer: Option<crate::producer::Producer>) -> Self {
+        self.producer = producer;
+        self
     }
     fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
         let state: String = row.get(3)?;
@@ -271,6 +298,18 @@ impl Jobs {
         JobId::new(id.clone()).map_err(|_| rusqlite::Error::InvalidQuery)?;
         Ok(Job {
             id,
+            producer: row
+                .get::<_, Option<String>>(11)?
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|_| rusqlite::Error::InvalidQuery)
+                })
+                .transpose()?,
+            origin_invocation: row
+                .get::<_, Option<String>>(12)?
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|_| rusqlite::Error::InvalidQuery)
+                })
+                .transpose()?,
             request_hash: row.get(1)?,
             idempotency_key: row.get(2)?,
             cancel_keys: BTreeSet::new(),
@@ -301,7 +340,7 @@ impl Jobs {
     fn read(connection: &Connection, id: &str) -> Result<Option<Job>, String> {
         let mut job = connection
             .query_row(
-                "SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned,decision_artifact,candidate_progress
+                "SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned,decision_artifact,candidate_progress,producer,origin_invocation
                  FROM research_jobs WHERE id=?1",
                 [id],
                 Self::row,
@@ -337,6 +376,15 @@ impl Jobs {
         idempotency_key: IdempotencyKey,
         hash: String,
         semantic_hash: String,
+    ) -> Result<(Job, bool, Arc<super::executor::Cancel>), String> {
+        self.enqueue_semantic_with_origin(idempotency_key, hash, semantic_hash, None)
+    }
+    fn enqueue_semantic_with_origin(
+        &self,
+        idempotency_key: IdempotencyKey,
+        hash: String,
+        semantic_hash: String,
+        origin: Option<okx_protocol::research_ipc::InvocationId>,
     ) -> Result<(Job, bool, Arc<super::executor::Cancel>), String> {
         let mut db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let tx = db
@@ -404,9 +452,11 @@ impl Jobs {
         } else {
             let now = chrono::Utc::now().timestamp_millis().max(0);
             tx.execute(
-                "INSERT INTO research_jobs(id,request_hash,idempotency_key,state,progress,created_ms,pinned,semantic_hash)
-                 VALUES(?1,?1,?2,'queued',0,?3,0,?4)",
-                params![hash, idempotency_key.as_str(), now, semantic_hash],
+                "INSERT INTO research_jobs(id,request_hash,idempotency_key,state,progress,created_ms,pinned,semantic_hash,producer,origin_invocation)
+                 VALUES(?1,?1,?2,'queued',0,?3,0,?4,?5,?6)",
+                params![hash, idempotency_key.as_str(), now, semantic_hash,
+                    self.producer.as_ref().map(serde_json::to_string).transpose().map_err(|e| e.to_string())?,
+                    origin.as_ref().map(serde_json::to_string).transpose().map_err(|e| e.to_string())?],
             )
             .map_err(|e| e.to_string())?;
             true
@@ -753,9 +803,12 @@ impl Jobs {
         semantic: String,
     ) -> Result<(Job, bool, Arc<super::executor::Cancel>), String> {
         let owner = self.clone();
-        tokio::task::spawn_blocking(move || owner.enqueue_semantic(key, hash, semantic))
-            .await
-            .map_err(|e| e.to_string())?
+        let origin = crate::invocation::current();
+        tokio::task::spawn_blocking(move || {
+            owner.enqueue_semantic_with_origin(key, hash, semantic, origin)
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
     pub async fn enqueue_async(
         &self,
@@ -763,8 +816,9 @@ impl Jobs {
         hash: String,
     ) -> Result<(Job, bool, Arc<super::executor::Cancel>), String> {
         let owner = self.clone();
+        let origin = crate::invocation::current();
         tokio::task::spawn_blocking(move || {
-            owner.enqueue_semantic(idempotency_key, hash.clone(), hash)
+            owner.enqueue_semantic_with_origin(idempotency_key, hash.clone(), hash, origin)
         })
         .await
         .map_err(|_| "RESEARCH_SQL_WORKER_FAILED".to_owned())?
