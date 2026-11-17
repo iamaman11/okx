@@ -52,14 +52,6 @@ impl MaintenanceCadence {
         true
     }
 }
-#[derive(Default)]
-struct SqlTimingCounters {
-    jobs: AtomicU64,
-    last_queue_wait_ms: AtomicU64,
-    last_sql_owner_ms: AtomicU64,
-    max_queue_wait_ms: AtomicU64,
-    max_sql_owner_ms: AtomicU64,
-}
 const MAINTENANCE_HISTORY_MAX: usize = 64;
 #[derive(Default)]
 struct MaintenanceHistory {

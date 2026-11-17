@@ -1,6 +1,8 @@
 //! Typed identity and lot reads, shared by both storage layouts.
 use super::*;
+#[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
 use crate::AccountStoreHandle;
+#[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -43,6 +45,7 @@ impl AccountStore {
     }
 }
 
+#[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
 impl AccountStoreHandle {
     pub async fn lookup_intent(
         &self,

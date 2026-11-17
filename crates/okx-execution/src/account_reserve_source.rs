@@ -36,6 +36,7 @@ impl AccountStore {
         })
     }
 }
+#[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
 impl crate::AccountStoreHandle {
     pub async fn reserve_source(
         &self,

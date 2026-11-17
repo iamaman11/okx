@@ -1,6 +1,8 @@
 //! Account policy and reservation observations, not financial or venue grants.
 use super::*;
+#[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
 use crate::AccountStoreHandle;
+#[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
 use std::time::Instant;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountPolicySnapshot {
@@ -129,6 +131,7 @@ impl AccountStore {
         .map(Option::flatten)
     }
 }
+#[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
 impl AccountStoreHandle {
     pub async fn account_policy(&self, deadline: Instant) -> StoreResult<AccountPolicySnapshot> {
         self.call(deadline, |s| s.account_policy()).await

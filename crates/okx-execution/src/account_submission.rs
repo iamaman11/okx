@@ -1,5 +1,8 @@
 //! SQL side of venue submission. A recorded state is never a fresh send grant.
-use crate::{AccountStoreHandle, IntentState, StoreResult};
+use crate::IntentState;
+#[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
+use crate::{AccountStoreHandle, StoreResult};
+#[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
 use std::time::Instant;
 /// Ephemeral result of the first successful durable send claim.
 /// Deliberately no Clone/Serialize/Deserialize/public constructor. Durable
@@ -49,6 +52,7 @@ pub struct IntentOutcome {
     pub evidence: String,
     pub observed_at: i64,
 }
+#[cfg(any(test, feature = "legacy-account-worker-fixtures"))]
 impl AccountStoreHandle {
     /// Legacy account-only CAS. Native risk+account fencing must use its
     /// combined transaction; it must not invoke this claim a second time.

@@ -1,5 +1,15 @@
 //! One current installation financial owner. Retired account worker is a temporary test fixture.
 use crate::{AccountStorageSnapshot, WalMaintenanceObservation};
+use std::sync::atomic::AtomicU64;
+
+#[derive(Default)]
+struct SqlTimingCounters {
+    jobs: AtomicU64,
+    last_queue_wait_ms: AtomicU64,
+    last_sql_owner_ms: AtomicU64,
+    max_queue_wait_ms: AtomicU64,
+    max_sql_owner_ms: AtomicU64,
+}
 
 /// Diagnostic-only timings for jobs that reached this account's SQL owner.
 #[derive(Clone, Debug, serde::Serialize)]
