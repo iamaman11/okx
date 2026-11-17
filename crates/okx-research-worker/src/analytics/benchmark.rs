@@ -1,10 +1,7 @@
 //! K9 measures the existing replay kernel *inside* the running AnalyticsService.
 //! No second agent, Cargo process, controller research owner, exchange I/O, or SQL ledger copy.
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
     time::Instant,
 };
 
@@ -29,7 +26,7 @@ const SAMPLES: usize = 30;
 pub(super) async fn run(
     cpu: CpuExecutor,
     artifacts: ResearchArtifactStore,
-    cancel: Arc<AtomicBool>,
+    cancel: Arc<super::executor::Cancel>,
 ) -> Result<String, String> {
     // Run source construction on the existing bounded CPU executor, not on
     // the WSS/SQL/REST async control thread. Fixture never contacts an exchange.
@@ -207,7 +204,7 @@ async fn run_grid(
     sources: &Arc<Vec<Arc<Vec<Bar>>>>,
     variants: &Arc<Vec<EmaParameters>>,
     spec: &Arc<ReplaySpec>,
-    cancel: Arc<AtomicBool>,
+    cancel: Arc<super::executor::Cancel>,
     workers: usize,
 ) -> Result<Vec<String>, String> {
     let tasks = (0..sources.len()).map(|index| {

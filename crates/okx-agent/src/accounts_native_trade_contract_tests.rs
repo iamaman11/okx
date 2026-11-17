@@ -502,6 +502,8 @@ mod native_stale_diagnostic;
 
 #[path = "accounts_native_engine_contract_tests.rs"]
 mod native_engine;
+#[path = "accounts_native_engine_research_contract_tests.rs"]
+mod native_engine_research;
 
 #[path = "accounts_native_source_diagnostic_contract_tests.rs"]
 mod native_source_diagnostic;

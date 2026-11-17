@@ -1525,6 +1525,7 @@ name = "okx-agent"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "clap",
  "futures-util",
@@ -1536,7 +1537,6 @@ dependencies = [
  "okx-github",
  "okx-observation",
  "okx-protocol",
- "okx-research",
  "okx-runtime",
  "reqwest",
  "rusqlite",
@@ -1547,6 +1547,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "zeroize",
@@ -1703,6 +1704,7 @@ dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
  "hkdf 0.12.4",
+ "okx-kernel",
  "proptest",
  "prost",
  "serde",
@@ -1725,12 +1727,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "okx-research-worker"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "getrandom 0.4.3",
+ "okx-analysis",
+ "okx-api",
+ "okx-kernel",
+ "okx-protocol",
+ "okx-research",
+ "okx-runtime",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "okx-runtime"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "okx-api",
  "okx-observation",
+ "okx-protocol",
  "okx-ws",
  "serde",
  "serde_json",
@@ -2680,6 +2708,21 @@ dependencies = [
  "tokio-rustls",
  "tungstenite",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.7.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+ "libc",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]

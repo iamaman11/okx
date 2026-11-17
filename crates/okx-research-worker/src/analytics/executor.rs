@@ -3,6 +3,22 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::Semaphore;
+/// One cancellation signal supplies event-driven async waits and a cheap CPU probe.
+#[derive(Debug, Default)]
+pub struct Cancel {
+    flag: AtomicBool,
+    token: tokio_util::sync::CancellationToken,
+}
+impl Cancel {
+    pub fn load(&self, ordering: Ordering) -> bool {
+        self.flag.load(ordering)
+    }
+    pub fn store(&self, value: bool, ordering: Ordering) {
+        assert!(value, "cancellation cannot be reset");
+        self.flag.store(true, ordering);
+        self.token.cancel();
+    }
+}
 #[derive(Clone)]
 pub struct CpuExecutor {
     cpu: Arc<Semaphore>,
@@ -32,8 +48,8 @@ impl CpuExecutor {
     }
     pub async fn run<T: Send + 'static>(
         &self,
-        cancel: Arc<AtomicBool>,
-        f: impl FnOnce(Arc<AtomicBool>) -> Result<T, String> + Send + 'static,
+        cancel: Arc<Cancel>,
+        f: impl FnOnce(Arc<Cancel>) -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
         let queue = self
             .queue
@@ -42,8 +58,9 @@ impl CpuExecutor {
             .map_err(|_| "CPU_QUEUE_FULL")?;
         let acquire = self.cpu.clone().acquire_owned();
         tokio::pin!(acquire);
-        let permit = loop {
-            tokio::select! {result=&mut acquire=>break result.map_err(|e|e.to_string())?,_=tokio::time::sleep(std::time::Duration::from_millis(25))=>{if cancel.load(Ordering::Acquire){return Err("CANCELLED".into())}}}
+        let permit = tokio::select! {
+            result = &mut acquire => result.map_err(|e| e.to_string())?,
+            _ = cancel.token.cancelled() => return Err("CANCELLED".into()),
         };
         if cancel.load(Ordering::Acquire) {
             return Err("CANCELLED".into());
@@ -56,13 +73,8 @@ impl CpuExecutor {
         .map_err(|e| e.to_string())?
     }
 }
-pub async fn cancelled(cancel: Arc<AtomicBool>) {
-    loop {
-        if cancel.load(Ordering::Acquire) {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
+pub async fn cancelled(cancel: Arc<Cancel>) {
+    cancel.token.cancelled().await;
 }
 #[cfg(test)]
 mod tests {
@@ -70,7 +82,7 @@ mod tests {
     #[tokio::test]
     async fn cpu_job_does_not_block_stop() {
         let executor = CpuExecutor::default();
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(Cancel::default());
         let work = executor.run(cancel.clone(), |c| {
             while !c.load(Ordering::Acquire) {
                 std::thread::yield_now()
@@ -101,7 +113,7 @@ mod tests {
             cpu: Arc::new(Semaphore::new(0)),
             queue: Arc::new(Semaphore::new(1)),
         };
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(Cancel::default());
         let work = executor.run(cancel.clone(), |_| Ok(()));
         let stop = async {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -170,7 +182,7 @@ mod heavy_fixtures {
             let mut starts = Vec::new();
             let mut tokens = Vec::new();
             for _ in 0..2 {
-                let c = Arc::new(AtomicBool::new(false));
+                let c = Arc::new(Cancel::default());
                 tokens.push(c.clone());
                 let executor = cpu.clone();
                 let data = bars.clone();

@@ -1,0 +1,652 @@
+#[cfg(test)]
+mod activation_tests;
+mod installed;
+use futures_util::{SinkExt, StreamExt};
+use okx_protocol::{
+    analytics::{MarketRequest, ResearchRequest},
+    research_ipc::*,
+};
+use serde::Serialize;
+use serde_json::Value;
+use std::{
+    collections::HashMap,
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::{
+    process::Command,
+    sync::{Mutex, Notify, Semaphore, mpsc, oneshot, watch},
+    task::JoinSet,
+};
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+
+pub type SourceHandler = Arc<
+    dyn Fn(
+            PublicSourceRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<PublicSourceReply, String>> + Send>>
+        + Send
+        + Sync,
+>;
+#[derive(Clone)]
+pub struct ResearchClientConfig {
+    pub executable: PathBuf,
+    pub root: PathBuf,
+    pub scope: ResearchScope,
+}
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ResearchDeploymentStatus {
+    pub installed: Option<String>,
+    pub active: Option<String>,
+    pub draining: bool,
+}
+#[derive(Clone)]
+pub struct ResearchClient {
+    config: ResearchClientConfig,
+    installation_runtime: Option<PathBuf>,
+    source: SourceHandler,
+    connection: Arc<Mutex<Option<Arc<Connection>>>>,
+    deployment: Arc<std::sync::Mutex<ResearchDeploymentStatus>>,
+}
+type PendingReplies =
+    Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
+
+struct Connection {
+    tx: mpsc::Sender<HostFrame>,
+    pending: PendingReplies,
+    session: WorkerSession,
+    executable: PathBuf,
+    draining: AtomicBool,
+    next: AtomicU64,
+    send_order: Mutex<()>,
+    live: AtomicBool,
+    permits: Semaphore,
+    control_permits: Semaphore,
+    source_permits: Arc<Semaphore>,
+    stop: Notify,
+    closed: watch::Sender<bool>,
+}
+struct PendingReply {
+    pending: PendingReplies,
+    id: String,
+}
+impl Drop for PendingReply {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.id);
+        }
+    }
+}
+fn issued_host_id(id: &RequestId, next: u64) -> bool {
+    id.as_str()
+        .strip_prefix('h')
+        .and_then(|s| s.parse::<u64>().ok())
+        .is_some_and(|n| n > 0 && n < next && format!("h{n}") == id.as_str())
+}
+fn codec() -> LengthDelimitedCodec {
+    LengthDelimitedCodec::builder()
+        .max_frame_length(MAX_FRAME_BYTES)
+        .new_codec()
+}
+fn unique() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+fn stop_if_dispatched(c: Option<&Arc<Connection>>, dispatched: bool) {
+    if dispatched && let Some(c) = c {
+        c.stop.notify_one();
+    }
+}
+fn version_name(path: &std::path::Path) -> Option<String> {
+    path.parent()?.file_name()?.to_str().map(str::to_owned)
+}
+fn is_control(command: &ResearchCommand) -> bool {
+    matches!(
+        command,
+        ResearchCommand::Drain
+            | ResearchCommand::Explain { .. }
+            | ResearchCommand::Research {
+                request: ResearchRequest::Cancel { .. }
+            }
+    )
+}
+fn next_id(id: &RequestId, prefix: char, previous: &mut u64) -> bool {
+    let Some(number) = id
+        .as_str()
+        .strip_prefix(prefix)
+        .and_then(|n| n.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    if number <= *previous || format!("{prefix}{number}") != id.as_str() {
+        return false;
+    }
+    *previous = number;
+    true
+}
+impl ResearchClient {
+    pub fn new(config: ResearchClientConfig, source: SourceHandler) -> Self {
+        Self {
+            config,
+            installation_runtime: None,
+            source,
+            connection: Arc::new(Mutex::new(None)),
+            deployment: Arc::new(std::sync::Mutex::new(ResearchDeploymentStatus::default())),
+        }
+    }
+    /// Production factory. Pointer changes are checked on demand; images are hashed before launch.
+    pub fn installed(
+        runtime_root: PathBuf,
+        research_root: PathBuf,
+        scope: ResearchScope,
+        bootstrap: crate::market_bootstrap::MarketBootstrapper,
+    ) -> Self {
+        let source: SourceHandler = Arc::new(move |request| {
+            let bootstrap = bootstrap.clone();
+            Box::pin(async move { bootstrap.research_source(request).await })
+        });
+        Self {
+            config: ResearchClientConfig {
+                executable: PathBuf::new(),
+                root: research_root,
+                scope,
+            },
+            installation_runtime: Some(runtime_root),
+            source,
+            connection: Arc::new(Mutex::new(None)),
+            deployment: Arc::new(std::sync::Mutex::new(ResearchDeploymentStatus::default())),
+        }
+    }
+    async fn connect(&self) -> Result<Arc<Connection>, String> {
+        let mut slot = self.connection.lock().await;
+        let installed = match &self.installation_runtime {
+            Some(root) => match tokio::task::spawn_blocking({
+                let root = root.clone();
+                move || installed::candidate(&root)
+            })
+            .await
+            .map_err(|_| "RESEARCH_INSTALL_CHECK_FAILED")?
+            {
+                Ok(path) => {
+                    if let Ok(mut state) = self.deployment.lock() {
+                        state.installed = version_name(&path);
+                    }
+                    Some(path)
+                }
+                Err(error) => {
+                    if let Ok(mut state) = self.deployment.lock() {
+                        state.installed = None;
+                    }
+                    if slot
+                        .as_ref()
+                        .is_some_and(|c| c.live.load(Ordering::Acquire))
+                    {
+                        None
+                    } else {
+                        return Err(error);
+                    }
+                }
+            },
+            None => None,
+        };
+        if let Some(c) = slot
+            .as_ref()
+            .filter(|c| c.live.load(Ordering::Acquire))
+            .cloned()
+        {
+            if installed.as_ref().is_some_and(|path| *path != c.executable)
+                || c.draining.load(Ordering::Acquire)
+            {
+                c.draining.store(true, Ordering::Release);
+                if let Ok(mut state) = self.deployment.lock() {
+                    state.draining = true;
+                }
+                let drain = Self::send(&c, ResearchCommand::Drain, None).await?;
+                let active = drain
+                    .get("active_jobs")
+                    .and_then(Value::as_u64)
+                    .ok_or("WORKER_INVALID_DRAIN")?;
+                if active != 0 || installed.is_none() {
+                    return Ok(c);
+                }
+                // No old command may remain in flight when the old worker exits.
+                // Drain already prevents any racing enqueue from committing.
+                let _all = c
+                    .permits
+                    .acquire_many(MAX_IN_FLIGHT as u32)
+                    .await
+                    .map_err(|_| "WORKER_CLOSED")?;
+                let _control = c
+                    .control_permits
+                    .acquire_many(4)
+                    .await
+                    .map_err(|_| "WORKER_CLOSED")?;
+                let _sources = c
+                    .source_permits
+                    .acquire_many(MAX_IN_FLIGHT as u32)
+                    .await
+                    .map_err(|_| "WORKER_CLOSED")?;
+                let mut done = c.closed.subscribe();
+                Self::send(&c, ResearchCommand::Shutdown, None).await?;
+                while !*done.borrow_and_update() {
+                    done.changed().await.map_err(|_| "WORKER_DISCONNECTED")?;
+                }
+            } else {
+                return Ok(c);
+            }
+        }
+        if let Some(c) = slot.as_ref() {
+            let mut done = c.closed.subscribe();
+            while !*done.borrow_and_update() {
+                done.changed().await.map_err(|_| "WORKER_DISCONNECTED")?;
+            }
+        }
+        let session = WorkerSession::new(unique()).map_err(str::to_owned)?;
+        // Re-read after shutdown: installation may have changed during drain.
+        let executable = match &self.installation_runtime {
+            Some(root) => {
+                let root = root.clone();
+                let path = tokio::task::spawn_blocking(move || installed::resolve(&root))
+                    .await
+                    .map_err(|_| "RESEARCH_INSTALL_CHECK_FAILED")??;
+                if let Ok(mut state) = self.deployment.lock() {
+                    state.installed = version_name(&path);
+                }
+                path
+            }
+            None => self.config.executable.clone(),
+        };
+        let mut child = Command::new(&executable)
+            .arg("--root")
+            .arg(&self.config.root)
+            .arg("--scope")
+            .arg(self.config.scope.as_str())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| "WORKER_START")?;
+        let stdin = child.stdin.take().ok_or("WORKER_STDIN")?;
+        let stdout = child.stdout.take().ok_or("WORKER_STDOUT")?;
+        let mut writer = FramedWrite::new(stdin, codec());
+        let mut reader = FramedRead::new(stdout, codec());
+        let hello = HostFrame::Hello {
+            protocol: PROTOCOL_VERSION,
+            storage: STORAGE_VERSION,
+            session: session.clone(),
+            scope: self.config.scope.clone(),
+        };
+        writer
+            .send(bytes::Bytes::from(
+                serde_json::to_vec(&hello).map_err(|_| "WORKER_HELLO_ENCODE")?,
+            ))
+            .await
+            .map_err(|_| "WORKER_HELLO_WRITE")?;
+        let frame = reader
+            .next()
+            .await
+            .ok_or("WORKER_EOF")?
+            .map_err(|_| "WORKER_HELLO_READ")?;
+        match serde_json::from_slice::<WorkerFrame>(&frame).map_err(|_| "WORKER_HELLO_DECODE")? {
+            WorkerFrame::Hello {
+                protocol: PROTOCOL_VERSION,
+                storage: STORAGE_VERSION,
+                session: s,
+                scope,
+            } if s == session && scope == self.config.scope => {}
+            _ => return Err("WORKER_HELLO_MISMATCH".into()),
+        }
+        let (tx, mut rx) = mpsc::channel::<HostFrame>(QUEUE_CAPACITY);
+        let (closed, _) = watch::channel(false);
+        let c = Arc::new(Connection {
+            tx,
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session,
+            executable: executable.clone(),
+            draining: AtomicBool::new(false),
+            next: AtomicU64::new(1),
+            send_order: Mutex::new(()),
+            live: AtomicBool::new(true),
+            permits: Semaphore::new(MAX_IN_FLIGHT),
+            control_permits: Semaphore::new(4),
+            source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            stop: Notify::new(),
+            closed,
+        });
+        let driver = c.clone();
+        let source = self.source.clone();
+        let deployment = self.deployment.clone();
+        tokio::spawn(async move {
+            let mut writer_task = tokio::spawn(async move {
+                while let Some(frame) = rx.recv().await {
+                    let data = serde_json::to_vec(&frame).map_err(|_| ())?;
+                    if data.len() > MAX_FRAME_BYTES {
+                        return Err(());
+                    }
+                    tokio::time::timeout(
+                        Duration::from_millis(REQUEST_TIMEOUT_MS),
+                        writer.send(bytes::Bytes::from(data)),
+                    )
+                    .await
+                    .map_err(|_| ())?
+                    .map_err(|_| ())?;
+                }
+                Ok::<(), ()>(())
+            });
+            let mut sources = JoinSet::new();
+            let source_permits = driver.source_permits.clone();
+            let mut last_source = 0;
+            let mut writer_done = false;
+            loop {
+                tokio::select! {
+                    _ = driver.stop.notified() => break,
+                    _ = &mut writer_task => { writer_done = true; break; },
+                    Some(_) = sources.join_next(), if !sources.is_empty() => {},
+                    incoming = reader.next() => match incoming {
+                        Some(Ok(bytes)) => match serde_json::from_slice::<WorkerFrame>(&bytes) {
+                            Ok(WorkerFrame::Response { id, session, result }) if session == driver.session => { let reply = driver.pending.lock().ok().and_then(|mut p| p.remove(id.as_str())); if let Some(reply) = reply { let _ = reply.send(result); } else if !issued_host_id(&id, driver.next.load(Ordering::Acquire)) { break; } },
+                            Ok(WorkerFrame::SourceRequest { id, session, request }) if session == driver.session => { if !request.valid() || !next_id(&id, 's', &mut last_source) { break; } let permit = match source_permits.clone().try_acquire_owned() { Ok(p) => p, Err(_) => break }; let source = source.clone(); let tx = driver.tx.clone(); sources.spawn(async move { let _permit = permit; let result = source(request).await; let _ = tx.send(HostFrame::SourceReply { id, session, result }).await; }); },
+                            _ => break,
+                        }, _ => break,
+                    },
+                    _ = child.wait() => break,
+                }
+            }
+            driver.live.store(false, Ordering::Release);
+            sources.abort_all();
+            while sources.join_next().await.is_some() {}
+            if !writer_done {
+                writer_task.abort();
+                let _ = writer_task.await;
+            }
+            if let Ok(mut pending) = driver.pending.lock() {
+                for (_, reply) in pending.drain() {
+                    let _ = reply.send(Err("WORKER_DISCONNECTED".into()));
+                }
+            }
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            if let Ok(mut state) = deployment.lock()
+                && state.active == version_name(&driver.executable)
+            {
+                state.active = None;
+                state.draining = false;
+            }
+            driver.closed.send_replace(true);
+        });
+        if let Ok(mut state) = self.deployment.lock() {
+            state.active = version_name(&executable);
+            state.draining = false;
+        }
+        *slot = Some(c.clone());
+        Ok(c)
+    }
+    async fn send(
+        c: &Arc<Connection>,
+        command: ResearchCommand,
+        dispatched: Option<&AtomicBool>,
+    ) -> Result<Value, String> {
+        let _permit = if matches!(command, ResearchCommand::Shutdown) {
+            None
+        } else if is_control(&command) {
+            Some(
+                c.control_permits
+                    .acquire()
+                    .await
+                    .map_err(|_| "WORKER_CLOSED")?,
+            )
+        } else {
+            Some(c.permits.acquire().await.map_err(|_| "WORKER_CLOSED")?)
+        };
+        if !c.live.load(Ordering::Acquire) {
+            return Err("WORKER_DISCONNECTED".into());
+        }
+        let order = c.send_order.lock().await;
+        let queue_slot = c.tx.reserve().await.map_err(|_| "WORKER_DISCONNECTED")?;
+        let (rx, _guard) = {
+            let mut pending = c.pending.lock().map_err(|_| "WORKER_CLOSED")?;
+            let number = c.next.load(Ordering::Acquire);
+            let next = number.checked_add(1).ok_or("WORKER_ID_EXHAUSTED")?;
+            let id = RequestId::new(format!("h{number}")).map_err(str::to_owned)?;
+            let (tx, rx) = oneshot::channel();
+            pending.insert(id.as_str().to_owned(), tx);
+            let guard = PendingReply {
+                pending: c.pending.clone(),
+                id: id.as_str().to_owned(),
+            };
+            c.next.store(next, Ordering::Release);
+            queue_slot.send(HostFrame::Request {
+                id,
+                session: c.session.clone(),
+                command: Box::new(command),
+            });
+            if let Some(dispatched) = dispatched {
+                dispatched.store(true, Ordering::Release);
+            }
+            (rx, guard)
+        };
+        drop(order);
+        rx.await.map_err(|_| "WORKER_DISCONNECTED")?
+    }
+    async fn call(&self, command: ResearchCommand, start: bool) -> Result<Value, String> {
+        let mut used = None;
+        let dispatched = AtomicBool::new(false);
+        let diagnostic = matches!(command, ResearchCommand::Explain { .. });
+        let result = tokio::time::timeout(
+            Duration::from_millis(if diagnostic { 100 } else { REQUEST_TIMEOUT_MS }),
+            async {
+                let c = if start {
+                    self.connect().await?
+                } else {
+                    self.connection
+                        .lock()
+                        .await
+                        .as_ref()
+                        .filter(|c| c.live.load(Ordering::Acquire))
+                        .cloned()
+                        .ok_or("WORKER_UNAVAILABLE")?
+                };
+                used = Some(c.clone());
+                Self::send(&c, command, Some(&dispatched)).await
+            },
+        )
+        .await;
+        match result {
+            Ok(result) => result,
+            Err(_) => {
+                if !diagnostic {
+                    stop_if_dispatched(used.as_ref(), dispatched.load(Ordering::Acquire));
+                }
+                Err("WORKER_TIMEOUT".into())
+            }
+        }
+    }
+    /// Cached projection only; this does not read the pointer or start a worker.
+    pub fn deployment_status(&self) -> ResearchDeploymentStatus {
+        self.deployment
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
+    }
+    pub async fn research(&self, request: ResearchRequest) -> Result<Value, String> {
+        self.call(ResearchCommand::Research { request }, true).await
+    }
+    pub async fn market(
+        &self,
+        request: MarketRequest,
+        universe_page: Option<Value>,
+        resolved_instruments: Option<Vec<String>>,
+    ) -> Result<Value, String> {
+        self.call(
+            ResearchCommand::Market {
+                request,
+                universe_page,
+                resolved_instruments,
+            },
+            true,
+        )
+        .await
+    }
+    pub async fn capabilities(&self) -> Result<Value, String> {
+        self.call(ResearchCommand::Capabilities, true).await
+    }
+    pub async fn diagnostic_job(&self, id: &str) -> Result<Value, String> {
+        self.call(
+            ResearchCommand::Explain {
+                job_id: JobId::new(id.to_owned()).map_err(str::to_owned)?,
+            },
+            false,
+        )
+        .await
+    }
+    pub async fn shutdown(&self) {
+        let c = self.connection.lock().await.as_ref().cloned();
+        if let Some(c) = c {
+            let mut closed = c.closed.subscribe();
+            if c.live.load(Ordering::Acquire) {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(REQUEST_TIMEOUT_MS),
+                    Self::send(&c, ResearchCommand::Shutdown, None),
+                )
+                .await;
+                c.stop.notify_one();
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(REQUEST_TIMEOUT_MS), async {
+                while !*closed.borrow_and_update() {
+                    if closed.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    #[tokio::test]
+    async fn diagnostic_timeout_cleans_pending_without_stopping_worker() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let (closed, _) = watch::channel(false);
+        let c = Arc::new(Connection {
+            tx,
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session: WorkerSession::new("test".into()).unwrap(),
+            executable: PathBuf::new(),
+            draining: AtomicBool::new(false),
+            next: AtomicU64::new(1),
+            send_order: Mutex::new(()),
+            live: AtomicBool::new(true),
+            permits: Semaphore::new(MAX_IN_FLIGHT),
+            control_permits: Semaphore::new(4),
+            source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            stop: Notify::new(),
+            closed,
+        });
+        let source: SourceHandler = Arc::new(|_| Box::pin(async { Err("unused".into()) }));
+        let client = ResearchClient::new(
+            ResearchClientConfig {
+                executable: PathBuf::new(),
+                root: PathBuf::new(),
+                scope: ResearchScope::new("test".into()).unwrap(),
+            },
+            source,
+        );
+        *client.connection.lock().await = Some(c.clone());
+        let normal = c.permits.acquire_many(MAX_IN_FLIGHT as u32).await.unwrap();
+        let task = tokio::spawn(async move { client.diagnostic_job("job").await });
+        let frame = rx.recv().await.unwrap();
+        let id = match frame {
+            HostFrame::Request { id, command, .. }
+                if matches!(*command, ResearchCommand::Explain { .. }) =>
+            {
+                id
+            }
+            _ => panic!("expected diagnostic"),
+        };
+        assert_eq!(task.await.unwrap().unwrap_err(), "WORKER_TIMEOUT");
+        assert!(c.pending.lock().unwrap().is_empty());
+        assert!(issued_host_id(&id, c.next.load(Ordering::Acquire)));
+        assert!(!issued_host_id(
+            &RequestId::new("h2".into()).unwrap(),
+            c.next.load(Ordering::Acquire)
+        ));
+        assert!(c.live.load(Ordering::Acquire));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), c.stop.notified())
+                .await
+                .is_err()
+        );
+        drop(normal);
+    }
+    #[tokio::test]
+    async fn timeout_before_handoff_does_not_stop_other_work() {
+        let (tx, _rx) = mpsc::channel(1);
+        let (closed, _) = watch::channel(false);
+        let c = Arc::new(Connection {
+            tx,
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session: WorkerSession::new("test".into()).unwrap(),
+            executable: PathBuf::new(),
+            draining: AtomicBool::new(false),
+            next: AtomicU64::new(1),
+            send_order: Mutex::new(()),
+            live: AtomicBool::new(true),
+            permits: Semaphore::new(MAX_IN_FLIGHT),
+            control_permits: Semaphore::new(4),
+            source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            stop: Notify::new(),
+            closed,
+        });
+        let held = c.permits.acquire_many(MAX_IN_FLIGHT as u32).await.unwrap();
+        let sent = AtomicBool::new(false);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                ResearchClient::send(&c, ResearchCommand::Capabilities, Some(&sent))
+            )
+            .await
+            .is_err()
+        );
+        stop_if_dispatched(Some(&c), sent.load(Ordering::Acquire));
+        assert!(!sent.load(Ordering::Acquire));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), c.stop.notified())
+                .await
+                .is_err()
+        );
+        assert!(c.pending.lock().unwrap().is_empty());
+        drop(held);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                ResearchClient::send(&c, ResearchCommand::Capabilities, Some(&sent))
+            )
+            .await
+            .is_err()
+        );
+        assert!(sent.load(Ordering::Acquire));
+        stop_if_dispatched(Some(&c), sent.load(Ordering::Acquire));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), c.stop.notified())
+                .await
+                .is_ok()
+        );
+    }
+}

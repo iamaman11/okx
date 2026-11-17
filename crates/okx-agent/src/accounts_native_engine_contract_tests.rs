@@ -3,9 +3,9 @@
 //! physical boundaries; this test supplies only the shutdown notification.
 use super::*;
 use crate::{
-    analytics::AnalyticsService,
     market_bootstrap::MarketBootstrapper,
     query::DispatchContext,
+    research_test_support::client as research_test_client,
     runtime::{EngineContext, run_engine_until},
 };
 
@@ -21,7 +21,7 @@ async fn risk_book_contract_native_engine_tasks_initialize_opening_and_drain_ori
     .unwrap();
     let bootstrap = MarketBootstrapper::new(client);
     let analytics =
-        AnalyticsService::new(fixture.root.join("analytics"), bootstrap.clone()).unwrap();
+        research_test_client(fixture.root.join("analytics"), bootstrap.clone()).unwrap();
     fixture.trade = Arc::new(TradeService::new(
         fixture.registry.clone(),
         public.clone(),
@@ -32,12 +32,19 @@ async fn risk_book_contract_native_engine_tasks_initialize_opening_and_drain_ori
         .update_governance(&fixture.authority)
         .await
         .unwrap();
-    fixture.trade.set_analytics(analytics.clone()).await;
+    fixture
+        .trade
+        .set_live_source(okx_runtime::live_source::LiveCandleSource::new(
+            bootstrap.clone(),
+        ))
+        .await;
     let dispatch = DispatchContext {
-        accounts: fixture.registry.clone(),
-        analytics,
+        research: analytics,
         public_ws: public,
-        trade: fixture.trade.clone(),
+        finance: crate::finance_dispatch::FinanceDispatch::ready(
+            fixture.registry.clone(),
+            fixture.trade.clone(),
+        ),
         market: bootstrap,
     };
     let ctx = EngineContext {

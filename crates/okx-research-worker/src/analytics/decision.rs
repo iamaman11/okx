@@ -410,136 +410,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[tokio::test]
-    async fn query_dispatch_records_and_reads_decisions_with_scope_and_zero_external_effects() {
-        use okx_api::{HttpSend, HttpTransport, OkxEnvironment, RateBudget};
-        use okx_protocol::{
-            AGENT_REQUEST_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponseStatus,
-        };
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        struct ForbiddenNetwork(AtomicUsize);
-        impl HttpTransport for ForbiddenNetwork {
-            fn send(&self, _: okx_api::HttpRequest, _: std::time::Instant) -> HttpSend<'_> {
-                self.0.fetch_add(1, Ordering::Relaxed);
-                Box::pin(async {
-                    Err(okx_api::OkxError::Response(
-                        "RESEARCH_NETWORK_FORBIDDEN".into(),
-                    ))
-                })
-            }
-        }
-        let (root, mut service) = super::super::artifact_job_fixtures::service();
-        let (job, result) = fixture(&service, 'a');
-        let (other_job, _) = fixture(&service, 'b');
-        let result_bytes = service.artifacts.read_evidence(&result).unwrap();
-        let network = Arc::new(ForbiddenNetwork(AtomicUsize::new(0)));
-        let environment = OkxEnvironment::new(okx_api::Region::Global, false);
-        let market = crate::market_bootstrap::MarketBootstrapper::new(
-            okx_api::OkxPublicClient::with_http_transport(
-                environment,
-                RateBudget::new(),
-                network.clone(),
-            )
-            .unwrap(),
-        );
-        service.sources.bootstrap = market.clone();
-        service.heavy.close();
-        service.research_memory.close();
-        let installation = root.join("installation");
-        crate::accounts::initialize_installation(&installation, "decision-dispatch-installation")
-            .unwrap();
-        let initial_owner = okx_execution::account_worker::UnifiedFinanceHandle::initialize_new(
-            installation.clone(),
-            okx_execution::NewFinanceInstallation {
-                installation_id: "decision-dispatch-installation".into(),
-                initialize_request_id: "initialize_readonly_dispatch_001".into(),
-                source_tree: "a".repeat(40),
-            },
-        )
-        .await
-        .unwrap();
-        let mut initial_closed = initial_owner.termination_signal();
-        drop(initial_owner);
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            initial_closed.wait_for(|v| *v),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let (accounts, finance_owner) =
-            crate::accounts::tests::open_native_test_registry(&installation, RateBudget::new())
-                .await;
-        let accounts = Arc::new(accounts);
-        let (coordinator, public_ws) = okx_runtime::PublicWsCoordinator::new_with_connector(
-            environment,
-            okx_observation::ReferenceRegistry::from_public("fixture", vec![]).unwrap(),
-            RateBudget::new(),
-            Arc::new(crate::accounts::recorded_support::OfflineSocket),
-        );
-        let finance_jobs_before = finance_owner.sql_timing().observed_jobs;
-        let trade = Arc::new(crate::trade_service::TradeService::new(
-            accounts.clone(),
-            public_ws.clone(),
-            crate::risk_bridge::NativeRiskClient::local(
-                crate::native_finance_risk::NativeFinanceRisk::from_owner(finance_owner.clone()),
-            ),
-        ));
-        let context = crate::query::DispatchContext {
-            accounts,
-            analytics: service,
-            public_ws,
-            trade,
-            market,
-        };
-        let envelope = |request| AgentRequest {
-            schema: AGENT_REQUEST_SCHEMA_V1.into(),
-            request_id: "decision-dispatch-request-001".into(),
-            account: None,
-            operation: AgentOperation::Research { request },
-        };
-        let recorded = crate::query::dispatch(
-            &context,
-            &envelope(record(&job, &result, None, "Dispatch hypothesis")),
-        )
-        .await;
-        assert_eq!(recorded.status, AgentResponseStatus::Completed);
-        let first = recorded.result.unwrap();
-        let decision_id = first["decision_id"].as_str().unwrap();
-        let reopened =
-            crate::query::dispatch(&context, &envelope(read(&job, Some(decision_id)))).await;
-        assert_eq!(reopened.status, AgentResponseStatus::Completed);
-        assert_eq!(reopened.result.unwrap(), first);
-        context
-            .analytics
-            .research_decision(record(&other_job, &result, None, "Other job"))
-            .unwrap();
-        let foreign =
-            crate::query::dispatch(&context, &envelope(read(&other_job, Some(decision_id)))).await;
-        assert_eq!(foreign.status, AgentResponseStatus::Rejected);
-        assert_eq!(foreign.failure.unwrap().code, "DECISION_NOT_FOUND");
-        assert_eq!(
-            context.analytics.artifacts.read_evidence(&result).unwrap(),
-            result_bytes
-        );
-        assert_eq!(context.analytics.jobs.snapshot().len(), 2);
-        assert_eq!(network.0.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            finance_owner.sql_timing().observed_jobs,
-            finance_jobs_before
-        );
-        context.accounts.shutdown().await;
-        let mut closed = finance_owner.termination_signal();
-        drop(context);
-        drop(coordinator);
-        drop(finance_owner);
-        tokio::time::timeout(std::time::Duration::from_secs(5), closed.wait_for(|v| *v))
-            .await
-            .unwrap()
-            .unwrap();
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     #[test]
     fn decision_rejects_foreign_unreachable_corrupt_expired_and_incomplete_results() {
         let (root, service) = super::super::artifact_job_fixtures::service();
@@ -722,6 +592,7 @@ mod tests {
             )
             .unwrap();
         drop(legacy);
+        drop(service.jobs);
         service.jobs = jobs::Jobs::open(legacy_path.clone()).unwrap();
         assert!(service.jobs.get(&job).unwrap().decision_artifact.is_none());
         let original_result = service.artifacts.read_evidence(&result).unwrap();
@@ -739,6 +610,7 @@ mod tests {
             service.research_decision(read(&job, None)).unwrap(),
             decision
         );
+        drop(service.jobs);
         service.jobs = jobs::Jobs::open(legacy_path).unwrap();
         assert_eq!(
             service.research_decision(read(&job, None)).unwrap(),

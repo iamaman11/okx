@@ -1,3 +1,4 @@
+use okx_protocol::research_ipc::{IdempotencyKey, JobId};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 #[path = "job_diagnostics.rs"]
 mod job_diagnostics;
@@ -45,7 +46,7 @@ impl State {
     }
 }
 pub(super) fn is_transient_rate_defer(error: Option<&str>) -> bool {
-    error.is_some_and(|value| value.contains("OKX rate/backpressure defer:"))
+    error.is_some_and(okx_protocol::research_ipc::is_retryable_source_defer)
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
@@ -75,11 +76,26 @@ pub struct Job {
 #[derive(Clone)]
 pub struct Jobs {
     db: Arc<Mutex<Connection>>,
-    cancel: Arc<Mutex<BTreeMap<String, Arc<AtomicBool>>>>,
+    _root_lock: Arc<std::fs::File>,
+    cancel: Arc<Mutex<BTreeMap<String, Arc<super::executor::Cancel>>>>,
     diagnostic: Arc<job_diagnostics::Projection>,
+    draining: Arc<AtomicBool>,
 }
 impl Jobs {
+    #[cfg(test)]
     pub fn open(path: PathBuf) -> Result<Self, String> {
+        Self::open_impl(path, None)
+    }
+    pub fn open_scoped(
+        path: PathBuf,
+        scope: &okx_protocol::research_ipc::ResearchScope,
+    ) -> Result<Self, String> {
+        Self::open_impl(path, Some(scope))
+    }
+    fn open_impl(
+        path: PathBuf,
+        scope: Option<&okx_protocol::research_ipc::ResearchScope>,
+    ) -> Result<Self, String> {
         std::fs::create_dir_all(path.parent().ok_or("INVALID_CATALOG_PATH")?)
             .map_err(|e| e.to_string())?;
         if path
@@ -88,7 +104,50 @@ impl Jobs {
         {
             return Err("RESEARCH_SQLITE_PATH_REQUIRED".into());
         }
+        let lock_path = path
+            .parent()
+            .ok_or("INVALID_CATALOG_PATH")?
+            .join("research-worker.lock");
+        let root_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .map_err(|e| e.to_string())?;
+        root_lock
+            .try_lock()
+            .map_err(|_| "RESEARCH_ROOT_LOCKED".to_string())?;
         let mut connection = Connection::open(path).map_err(|e| e.to_string())?;
+        // The authorized host assigns a legacy unscoped catalog to its configured
+        // scope once, under the root lease, before recovery or schema migration.
+        if let Some(scope) = scope {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+            let present: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_catalog_metadata')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+            if present {
+                let stored: Option<String> = tx
+                    .query_row(
+                        "SELECT value FROM research_catalog_metadata WHERE name='scope'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                if stored.as_deref() != Some(scope.as_str()) {
+                    return Err("RESEARCH_SCOPE_MISMATCH".into());
+                }
+            } else {
+                tx.execute_batch("CREATE TABLE research_catalog_metadata(name TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;").map_err(|e| e.to_string())?;
+                tx.execute(
+                    "INSERT INTO research_catalog_metadata(name,value) VALUES('scope',?1)",
+                    [scope.as_str()],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+        }
         connection
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
@@ -166,13 +225,32 @@ impl Jobs {
                 )
                 .map_err(|e| e.to_string())?;
         }
+        let has_semantic = migration
+            .prepare("PRAGMA table_info(research_jobs)")
+            .map_err(|e| e.to_string())?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|column| column == "semantic_hash");
+        if !has_semantic {
+            migration
+                .execute(
+                    "ALTER TABLE research_jobs ADD COLUMN semantic_hash TEXT",
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+        }
         migration.commit().map_err(|e| e.to_string())?;
         let diagnostic = Arc::new(job_diagnostics::Projection::default());
         diagnostic.restore(&connection);
         Ok(Self {
             db: Arc::new(Mutex::new(connection)),
+            _root_lock: Arc::new(root_lock),
             cancel: Default::default(),
             diagnostic,
+            draining: Arc::new(AtomicBool::new(false)),
         })
     }
     fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
@@ -189,8 +267,10 @@ impl Jobs {
             } else {
                 None
             };
+        let id: String = row.get(0)?;
+        JobId::new(id.clone()).map_err(|_| rusqlite::Error::InvalidQuery)?;
         Ok(Job {
-            id: row.get(0)?,
+            id,
             request_hash: row.get(1)?,
             idempotency_key: row.get(2)?,
             cancel_keys: BTreeSet::new(),
@@ -240,11 +320,24 @@ impl Jobs {
         }
         Ok(job)
     }
+    #[cfg(test)]
     pub fn enqueue(
         &self,
         idempotency_key: String,
         hash: String,
-    ) -> Result<(Job, bool, Arc<AtomicBool>), String> {
+    ) -> Result<(Job, bool, Arc<super::executor::Cancel>), String> {
+        self.enqueue_semantic(
+            IdempotencyKey::new(idempotency_key).map_err(str::to_owned)?,
+            hash.clone(),
+            hash,
+        )
+    }
+    pub fn enqueue_semantic(
+        &self,
+        idempotency_key: IdempotencyKey,
+        hash: String,
+        semantic_hash: String,
+    ) -> Result<(Job, bool, Arc<super::executor::Cancel>), String> {
         let mut db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -255,18 +348,30 @@ impl Jobs {
                     e.to_string()
                 }
             })?;
-        let owner: Option<String> = tx
+        let owner: Option<(String, Option<String>)> = tx
             .query_row(
-                "SELECT id FROM research_jobs WHERE idempotency_key=?1",
-                [&idempotency_key],
-                |row| row.get(0),
+                "SELECT id,semantic_hash FROM research_jobs WHERE idempotency_key=?1",
+                [idempotency_key.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        if owner.as_deref().is_some_and(|existing| existing != hash) {
+        if owner.as_ref().is_some_and(|(id, digest)| {
+            digest
+                .as_deref()
+                .map_or(id != &hash, |value| value != semantic_hash)
+        }) {
             return Err("IDEMPOTENCY_CONFLICT".into());
         }
+        let hash = owner.map(|(id, _)| id).unwrap_or(hash);
         let existing = Self::read(&tx, &hash)?;
+        let would_start = existing.is_none()
+            || existing.as_ref().is_some_and(|j| {
+                j.state == State::Failed && is_transient_rate_defer(j.error.as_deref())
+            });
+        if would_start && self.draining.load(Ordering::Acquire) {
+            return Err("RESEARCH_UPDATING".into());
+        }
         // One SQL transaction owns the bounded research/market admission.
         // Duplicate idempotent submissions do not consume new queue slots.
         if existing.is_none()
@@ -299,9 +404,9 @@ impl Jobs {
         } else {
             let now = chrono::Utc::now().timestamp_millis().max(0);
             tx.execute(
-                "INSERT INTO research_jobs(id,request_hash,idempotency_key,state,progress,created_ms,pinned)
-                 VALUES(?1,?1,?2,'queued',0,?3,0)",
-                params![hash, idempotency_key, now],
+                "INSERT INTO research_jobs(id,request_hash,idempotency_key,state,progress,created_ms,pinned,semantic_hash)
+                 VALUES(?1,?1,?2,'queued',0,?3,0,?4)",
+                params![hash, idempotency_key.as_str(), now, semantic_hash],
             )
             .map_err(|e| e.to_string())?;
             true
@@ -309,15 +414,18 @@ impl Jobs {
         tx.commit().map_err(|e| e.to_string())?;
         let job = Self::read(&db, &hash)?.ok_or("JOB_NOT_FOUND")?;
         self.diagnostic.publish_id(&db, &hash);
-        drop(db);
+        // Publish the token before releasing admission: cancellation takes the
+        // same DB lock and must never observe a job without its token.
         let mut running = self.cancel.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let token = if is_new {
-            let token = Arc::new(AtomicBool::new(false));
+            let token = Arc::new(super::executor::Cancel::default());
             running.insert(hash, token.clone());
             token
         } else {
             running.get(&hash).cloned().unwrap_or_default()
         };
+        drop(running);
+        drop(db);
         Ok((job, is_new, token))
     }
     /// Persisted per-catalog cursor authenticator. Distinct installations
@@ -411,13 +519,13 @@ impl Jobs {
             }
         }
         self.diagnostic.publish_id(&db, id);
-        drop(db);
         if !matches!(state, State::Queued | State::Running) {
             self.cancel
                 .lock()
                 .map_err(|_| "CATALOG_LOCK_POISONED")?
                 .remove(id);
         }
+        drop(db);
         Ok(())
     }
     /// Same catalog owner and terminal fence as job transitions. Late CPU
@@ -498,7 +606,6 @@ impl Jobs {
         tx.commit().map_err(|e| e.to_string())?;
         let job = Self::read(&db, id)?.ok_or("JOB_NOT_FOUND")?;
         self.diagnostic.publish_id(&db, id);
-        drop(db);
         if job.state == State::Cancelled
             && let Some(token) = self
                 .cancel
@@ -508,6 +615,7 @@ impl Jobs {
         {
             token.store(true, Ordering::Release);
         }
+        drop(db);
         Ok(job)
     }
     /// Legacy test-only snapshot. Production retention uses SQL window selection.
@@ -598,6 +706,19 @@ impl Jobs {
             u64::try_from(count).map_err(|_| "RESEARCH_REFERENCE_COUNT_INVALID".into())
         })
     }
+    /// Seal admission and observe all accepted work under the same SQL owner lock.
+    pub fn begin_drain(&self) -> Result<u64, String> {
+        let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
+        self.draining.store(true, Ordering::Release);
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM research_jobs WHERE state IN ('queued','running')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        u64::try_from(count).map_err(|_| "RESEARCH_COUNT_INVALID".into())
+    }
     pub fn any_running(&self) -> Result<bool, String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         db.query_row(
@@ -625,15 +746,28 @@ impl Jobs {
 }
 
 impl Jobs {
+    pub async fn enqueue_semantic_async(
+        &self,
+        key: IdempotencyKey,
+        hash: String,
+        semantic: String,
+    ) -> Result<(Job, bool, Arc<super::executor::Cancel>), String> {
+        let owner = self.clone();
+        tokio::task::spawn_blocking(move || owner.enqueue_semantic(key, hash, semantic))
+            .await
+            .map_err(|e| e.to_string())?
+    }
     pub async fn enqueue_async(
         &self,
-        idempotency_key: String,
+        idempotency_key: IdempotencyKey,
         hash: String,
-    ) -> Result<(Job, bool, Arc<AtomicBool>), String> {
+    ) -> Result<(Job, bool, Arc<super::executor::Cancel>), String> {
         let owner = self.clone();
-        tokio::task::spawn_blocking(move || owner.enqueue(idempotency_key, hash))
-            .await
-            .map_err(|_| "RESEARCH_SQL_WORKER_FAILED".to_owned())?
+        tokio::task::spawn_blocking(move || {
+            owner.enqueue_semantic(idempotency_key, hash.clone(), hash)
+        })
+        .await
+        .map_err(|_| "RESEARCH_SQL_WORKER_FAILED".to_owned())?
     }
     pub async fn get_async(&self, id: String) -> Result<Job, String> {
         let owner = self.clone();
@@ -662,474 +796,5 @@ impl Jobs {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    fn path(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "okx-research-sqlite-{label}-{}-{}.sqlite",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
-        ))
-    }
-    #[test]
-    fn k9_sql_busy_admission_is_bounded_and_does_not_commit() {
-        let file = path("k9-busy-100ms");
-        let jobs = Jobs::open(file.clone()).unwrap();
-        let blocker = Connection::open(file).unwrap();
-        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let began = std::time::Instant::now();
-        let blocked = jobs.enqueue("idempotent".into(), "new-job".into());
-        let elapsed = began.elapsed();
-        assert_eq!(blocked.unwrap_err(), "RESEARCH_SQL_BUSY");
-        assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "elapsed: {elapsed:?}"
-        );
-        blocker.execute_batch("ROLLBACK").unwrap();
-        assert!(jobs.get("new-job").is_err());
-        let (accepted, fresh, _) = jobs.enqueue("idempotent".into(), "new-job".into()).unwrap();
-        assert!(fresh);
-        assert_eq!(accepted.state, State::Queued);
-    }
-
-    #[test]
-    fn c16_two_active_and_thirty_two_queued_bound_admission() {
-        let jobs = Jobs::open(path("c16-capacity")).unwrap();
-        for i in 0..34 {
-            let id = format!("c16-job-{i}");
-            let (job, new, _) = jobs.enqueue(format!("idem-{i}"), id.clone()).unwrap();
-            assert!(new);
-            assert_eq!(job.id, id);
-            if i < 2 {
-                jobs.update(&id, State::Running, None, None).unwrap();
-            }
-        }
-        assert_eq!(
-            jobs.enqueue("overflow".into(), "c16-overflow".into())
-                .unwrap_err(),
-            "RESOURCE_BUSY:RESEARCH_QUEUE_FULL"
-        );
-        // Repeating an accepted idempotent request does not take another slot.
-        assert!(!jobs.enqueue("idem-0".into(), "c16-job-0".into()).unwrap().1);
-        jobs.cancel("c16-job-2", "cancel-c16-slot").unwrap();
-        assert!(
-            jobs.enqueue("overflow".into(), "c16-overflow".into())
-                .unwrap()
-                .1
-        );
-    }
-
-    /// Runs only when selected by the parent OS-kill acceptance test.
-    /// The child genuinely holds an open SQLite WAL connection until killed.
-    #[test]
-    #[ignore]
-    fn c17_os_kill_child_process() {
-        let Ok(file) = std::env::var("OKX_C17_CHILD_SQLITE") else {
-            return;
-        };
-        let phase = std::env::var("OKX_C17_CHILD_PHASE").unwrap();
-        let jobs = Jobs::open(PathBuf::from(&file)).unwrap();
-        let id = format!("os-kill-{phase}");
-        jobs.enqueue(id.clone(), id.clone()).unwrap();
-        let evidence = okx_research::ResearchArtifactStore::at(
-            PathBuf::from(&file).with_extension("evidence-root"),
-        );
-        let artifact = evidence
-            .publish_evidence(&serde_json::json!({"phase":phase,"quality":"verified"}))
-            .unwrap()
-            .0;
-        if phase == "running" {
-            jobs.update(&id, State::Running, Some(artifact), None)
-                .unwrap();
-        } else if phase == "completed" {
-            jobs.update(&id, State::Running, None, None).unwrap();
-            jobs.update(&id, State::Completed, Some(artifact), None)
-                .unwrap();
-        }
-        let ready = PathBuf::from(&file).with_extension(format!("{phase}.ready"));
-        std::fs::write(ready, b"committed").unwrap();
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
-    }
-
-    #[test]
-    fn c17_actual_child_os_kill_recovers_wal_and_blocks_false_success() {
-        use std::{
-            process::{Command, Stdio},
-            time::{Duration, Instant},
-        };
-        let file = path("c17-physical-kill");
-        let exe = std::env::current_exe().unwrap();
-        let phases = ["queued", "running", "completed"];
-        for phase in phases {
-            let ready = file.with_extension(format!("{phase}.ready"));
-            let mut child = Command::new(&exe)
-                .args([
-                    "--ignored",
-                    "--exact",
-                    "analytics::jobs::tests::c17_os_kill_child_process",
-                    "--nocapture",
-                ])
-                .env("OKX_C17_CHILD_SQLITE", file.as_os_str())
-                .env("OKX_C17_CHILD_PHASE", phase)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
-            let deadline = Instant::now() + Duration::from_secs(8);
-            while !ready.exists() && Instant::now() < deadline {
-                assert!(
-                    child.try_wait().unwrap().is_none(),
-                    "child exited before evidence commit"
-                );
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            if !ready.exists() {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("OS-KILL_SETUP_TIMEOUT: {phase}");
-            }
-            // Real OS process termination (TerminateProcess on Windows,
-            // SIGKILL on Linux); no cooperative runtime shutdown.
-            child.kill().unwrap();
-            child.wait().unwrap();
-            let restarted = Jobs::open(file.clone()).unwrap();
-            let id = format!("os-kill-{phase}");
-            let job = restarted.get(&id).unwrap();
-            if phase == "completed" {
-                assert_eq!(job.state, State::Completed);
-                let proof = job.artifact.clone().unwrap();
-                let store =
-                    okx_research::ResearchArtifactStore::at(file.with_extension("evidence-root"));
-                let readback: serde_json::Value = store.read_evidence_json(&proof).unwrap();
-                assert_eq!(readback["phase"], "completed");
-                assert_eq!(
-                    restarted
-                        .update(&id, State::Completed, Some("forged".into()), None)
-                        .unwrap_err(),
-                    "RESEARCH_TERMINAL_IMMUTABLE"
-                );
-            } else {
-                assert_eq!(job.state, State::Interrupted);
-                assert_eq!(
-                    restarted
-                        .update(&id, State::Completed, Some("forged".into()), None)
-                        .unwrap_err(),
-                    "RESEARCH_TERMINAL_IMMUTABLE"
-                );
-            }
-            std::fs::remove_file(ready).unwrap();
-        }
-        println!(
-            "C17_OS_KILL_JSON:{}",
-            serde_json::json!({
-                "runner_os":std::env::consts::OS,
-                "test_binary":exe.file_name().and_then(|name|name.to_str()).unwrap_or("unknown"),
-                "phases":phases,
-                "kill_mode":"OS process kill + WAL reopen, no graceful shutdown",
-                "assertions":"completed remains immutable; queued/running interrupted; SHA artifact readback",
-                "trading_effects":"none"
-            })
-        );
-    }
-
-    #[test]
-    fn c17_terminal_manifest_survives_restart_and_rejects_late_overwrite() {
-        let file = path("c17-terminal");
-        let original = Jobs::open(file.clone()).unwrap();
-        original
-            .enqueue("c17-idem".into(), "c17-id".into())
-            .unwrap();
-        original
-            .update("c17-id", State::Running, None, None)
-            .unwrap();
-        original
-            .update(
-                "c17-id",
-                State::Completed,
-                Some("sha256:verified".into()),
-                None,
-            )
-            .unwrap();
-        let saved = original.get("c17-id").unwrap();
-        assert_eq!(saved.expires_at_ms, Some(saved.created_ms + 7 * 86_400_000));
-        assert_eq!(
-            original
-                .update("c17-id", State::Running, None, None)
-                .unwrap_err(),
-            "RESEARCH_TERMINAL_IMMUTABLE"
-        );
-        assert_eq!(
-            original
-                .update(
-                    "c17-id",
-                    State::Completed,
-                    Some("other-result".into()),
-                    None
-                )
-                .unwrap_err(),
-            "RESEARCH_TERMINAL_IMMUTABLE"
-        );
-        let restarted = Jobs::open(file).unwrap();
-        assert_eq!(restarted.get("c17-id").unwrap().state, State::Completed);
-        assert_eq!(restarted.get("c17-id").unwrap().artifact, saved.artifact);
-        assert!(
-            !restarted
-                .enqueue("c17-idem".into(), "c17-id".into())
-                .unwrap()
-                .1
-        );
-        restarted.pin("c17-id", true).unwrap();
-        assert!(restarted.get("c17-id").unwrap().expires_at_ms.is_none());
-        restarted.pin("c17-id", false).unwrap();
-        assert_eq!(
-            restarted.get("c17-id").unwrap().expires_at_ms,
-            saved.expires_at_ms
-        );
-        assert!(
-            restarted
-                .update("c17-id", State::Completed, None, None)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn c17_restart_interrupts_incomplete_without_resurrecting_it() {
-        let file = path("c17-crash");
-        let before = Jobs::open(file.clone()).unwrap();
-        before
-            .enqueue("c17-queued".into(), "queued".into())
-            .unwrap();
-        before
-            .enqueue("c17-running".into(), "running".into())
-            .unwrap();
-        before
-            .update(
-                "running",
-                State::Running,
-                Some("partial-artifact".into()),
-                None,
-            )
-            .unwrap();
-        let after = Jobs::open(file).unwrap();
-        assert_eq!(after.get("queued").unwrap().state, State::Interrupted);
-        assert_eq!(after.get("running").unwrap().state, State::Interrupted);
-        assert_eq!(
-            after.get("running").unwrap().artifact.as_deref(),
-            Some("partial-artifact")
-        );
-        assert_eq!(
-            after
-                .update(
-                    "running",
-                    State::Completed,
-                    Some("false-success".into()),
-                    None
-                )
-                .unwrap_err(),
-            "RESEARCH_TERMINAL_IMMUTABLE"
-        );
-        assert!(
-            !after
-                .enqueue("c17-running".into(), "running".into())
-                .unwrap()
-                .1
-        );
-    }
-
-    #[test]
-    fn restart_marks_job_interrupted() {
-        let p = path("restart");
-        let s = Jobs::open(p.clone()).unwrap();
-        s.enqueue("fixture-key".into(), "fixture".into()).unwrap();
-        s.update("fixture", State::Running, None, None).unwrap();
-        let t = Jobs::open(p.clone()).unwrap();
-        assert_eq!(t.get("fixture").unwrap().state, State::Interrupted);
-    }
-    #[test]
-    fn wrapped_source_throttle_is_retryable() {
-        assert!(is_transient_rate_defer(Some(
-            "public OKX market API error: OKX rate/backpressure defer: LocalBudget"
-        )));
-        assert!(!is_transient_rate_defer(Some("CANDLE_INTERIOR_GAP")));
-    }
-    #[test]
-    fn transient_rate_defer_is_requeued_instead_of_cached_as_failed() {
-        let p = path("retry");
-        let s = Jobs::open(p).unwrap();
-        s.enqueue("fixture-key".into(), "rate-defer".into())
-            .unwrap();
-        s.update(
-            "rate-defer",
-            State::Failed,
-            None,
-            Some("OKX rate/backpressure defer: fixture".into()),
-        )
-        .unwrap();
-        let (job, new, _) = s
-            .enqueue("fixture-key".into(), "rate-defer".into())
-            .unwrap();
-        assert!(new);
-        assert_eq!(job.state, State::Queued);
-        assert!(job.error.is_none());
-        s.update(
-            "rate-defer",
-            State::Failed,
-            None,
-            Some("SOURCE_INVALID".into()),
-        )
-        .unwrap();
-        assert!(
-            !s.enqueue("fixture-key".into(), "rate-defer".into())
-                .unwrap()
-                .1
-        );
-    }
-    #[test]
-    fn new_catalog_starts_without_old_json() {
-        let p = path("strict");
-        let obsolete = p.with_extension("json");
-        std::fs::write(&obsolete, b"{malformed obsolete catalog").unwrap();
-        let jobs = Jobs::open(p.clone()).unwrap();
-        assert!(jobs.get("old").is_err());
-        jobs.enqueue("new-idempotency".into(), "new-id".into())
-            .unwrap();
-        assert_eq!(jobs.get("new-id").unwrap().state, State::Queued);
-        assert!(obsolete.is_file()); // not loaded, migrated or silently deleted
-        let _ = std::fs::remove_file(obsolete);
-    }
-    #[test]
-    fn cancelled_partial_job_retention_tombstones_before_delete() {
-        let catalog = Jobs::open(path("cancel-expire")).unwrap();
-        catalog
-            .enqueue("cancel-key".into(), "cancelled-job".into())
-            .unwrap();
-        catalog
-            .update(
-                "cancelled-job",
-                State::Running,
-                Some("partial-artifact".into()),
-                None,
-            )
-            .unwrap();
-        let cancelled = catalog.cancel("cancelled-job", "cancel-receipt").unwrap();
-        assert_eq!(cancelled.state, State::Cancelled);
-        assert_eq!(cancelled.artifact.as_deref(), Some("partial-artifact"));
-        // General late async writes cannot mutate a cancelled job.
-        catalog
-            .update(
-                "cancelled-job",
-                State::Completed,
-                Some("late-result".into()),
-                None,
-            )
-            .unwrap();
-        assert_eq!(
-            catalog.get("cancelled-job").unwrap().state,
-            State::Cancelled
-        );
-        // The dedicated terminal CAS is allowed to expire this reference.
-        catalog
-            .expire_terminal_artifact("cancelled-job", "partial-artifact")
-            .unwrap();
-        let after = catalog.get("cancelled-job").unwrap();
-        assert_eq!(after.state, State::Cancelled);
-        assert!(after.artifact.is_none());
-        assert_eq!(
-            after.error.as_deref(),
-            Some("RESULT_EXPIRED_BY_7_DAY_RETENTION")
-        );
-        assert!(
-            catalog
-                .expire_terminal_artifact("cancelled-job", "partial-artifact")
-                .is_err()
-        );
-    }
-    #[test]
-    fn expired_result_returns_expired_not_rerun() {
-        let p = path("expiry");
-        let jobs = Jobs::open(p.clone()).unwrap();
-        jobs.enqueue("key".into(), "hash".into()).unwrap();
-        jobs.update(
-            "hash",
-            State::Completed,
-            Some("immutable-result".into()),
-            None,
-        )
-        .unwrap();
-        jobs.expire_terminal_artifact("hash", "immutable-result")
-            .unwrap();
-        let (old, spawn, _) = jobs.enqueue("key".into(), "hash".into()).unwrap();
-        assert!(!spawn);
-        assert_eq!(
-            old.error.as_deref(),
-            Some("RESULT_EXPIRED_BY_7_DAY_RETENTION")
-        );
-        assert_eq!(old.artifact, None);
-        assert_eq!(old.state, State::Completed);
-    }
-    #[tokio::test(flavor = "current_thread")]
-    async fn research_io_does_not_block_trade_loop() {
-        let jobs = Jobs::open(path("nonblocking")).unwrap();
-        jobs.enqueue("key".into(), "job".into()).unwrap();
-        let holder = jobs.clone();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let thread = std::thread::spawn(move || {
-            let _lock = holder.db.lock().unwrap();
-            ready_tx.send(()).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(160));
-        });
-        ready_rx.recv().unwrap();
-        let operation = jobs.get_async("job".into());
-        tokio::pin!(operation);
-        let timer = tokio::time::sleep(std::time::Duration::from_millis(25));
-        tokio::pin!(timer);
-        tokio::select! {
-            _=&mut timer=>{},
-            _=&mut operation=>panic!("SQLite lock unexpectedly ran on Tokio event-loop thread"),
-        }
-        thread.join().unwrap();
-        assert_eq!(operation.await.unwrap().state, State::Queued);
-    }
-    #[test]
-    fn job_status_reads_bounded_rows_at_100k_jobs() {
-        let p = path("load");
-        let s = Jobs::open(p).unwrap();
-        {
-            let mut db = s.db.lock().unwrap();
-            let tx = db.transaction().unwrap();
-            {
-                let mut stmt = tx.prepare_cached(
-                    "INSERT INTO research_jobs(id,request_hash,idempotency_key,state,progress,created_ms,pinned)
-                     VALUES(?1,?1,?2,'completed',100,0,0)",
-                ).unwrap();
-                for i in 0..100_000 {
-                    stmt.execute(params![format!("job_{i:06}"), format!("key_{i:06}")])
-                        .unwrap();
-                }
-            }
-            tx.commit().unwrap();
-        }
-        let connection = s.db.lock().unwrap();
-        let mut stmt = connection.prepare(
-            "EXPLAIN QUERY PLAN SELECT id,request_hash,idempotency_key,state,progress,artifact,error,created_ms,pinned,decision_artifact
-             FROM research_jobs WHERE id=?1",
-        ).unwrap();
-        let plan = stmt
-            .query_map(["job_099999"], |row| row.get::<_, String>(3))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        drop(stmt);
-        drop(connection);
-        assert!(plan.iter().any(|detail| detail.contains("INDEX")));
-        for i in [0, 1, 50_000, 99_999] {
-            assert_eq!(
-                s.get(&format!("job_{i:06}")).unwrap().state,
-                State::Completed
-            );
-        }
-        assert_eq!(s.retention_candidates(u64::MAX, 64).unwrap().len(), 0);
-    }
-}
+#[path = "tests/jobs.rs"]
+mod tests;

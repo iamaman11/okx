@@ -1,0 +1,14 @@
+# Baseline permissive licenses; a new license requires explicit review.
+[licenses]
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "ISC", "Unicode-3.0", "Zlib", "BSL-1.0"]
+
+# No advisory exceptions. Advisory database retrieval must succeed.
+[advisories]
+ignore = []
+
+# Only crates.io sources are accepted without explicit review.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

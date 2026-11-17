@@ -478,8 +478,8 @@ impl TradeService {
         r: &Arc<AccountResources>,
         instance: &StrategyInstance,
     ) -> Result<(), String> {
-        let analytics = self
-            .analytics
+        let live_source = self
+            .live_source
             .read()
             .await
             .clone()
@@ -492,7 +492,7 @@ impl TradeService {
         let (fast, slow) = (config.parameters.fast, config.parameters.slow);
         let timeframe = config.timeframe_ms;
         for instrument in &config.instruments {
-            let bars = analytics
+            let bars = live_source
                 .load_closed_closes(instrument, timeframe, (slow * 4).clamp(100, 10000))
                 .await?;
             let last = bars.last().ok_or("STRATEGY_HISTORY_UNAVAILABLE")?.0;

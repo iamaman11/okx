@@ -395,7 +395,10 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn public_finance_diagnostic_does_not_queue_behind_sql_or_trace() {
-        use crate::{accounts, analytics::AnalyticsService, query, trade_service::TradeService};
+        use crate::{
+            accounts, query, research_test_support::client as research_test_client,
+            trade_service::TradeService,
+        };
         use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
         use okx_protocol::{
             AgentOperation, AgentRequest, DataQuality,
@@ -445,7 +448,7 @@ mod tests {
                 .unwrap();
         let (_public, public_ws) =
             okx_runtime::PublicWsCoordinator::new_with_rate_budget(env, reference, budget);
-        let analytics = AnalyticsService::new(root.join("analytics"), market.clone()).unwrap();
+        let analytics = research_test_client(root.join("analytics"), market.clone()).unwrap();
         let trade = Arc::new(TradeService::new(
             registry.clone(),
             public_ws.clone(),
@@ -454,10 +457,9 @@ mod tests {
             ),
         ));
         let ctx = query::DispatchContext {
-            accounts: registry.clone(),
-            analytics,
+            research: analytics,
             public_ws,
-            trade,
+            finance: crate::finance_dispatch::FinanceDispatch::ready(registry.clone(), trade),
             market,
         };
         resources.finance_trace.begin(99, 100, 1);

@@ -7,44 +7,45 @@ directories. See [installation, migration and verified GitHub updates](docs/wind
 **Single implementation cursor:** [#449](https://github.com/iamaman11/okx/issues/449).
 Issue #398 records historical **read-only** acceptance; it is not a competing roadmap or proof of Real execution.
 
-The product has one installed **`okx-agent` Engine** on `windows-primary` for accounts,
-trading, research and finance. Cloudflare Worker provides the authenticated MCP/WSS
-gateway; the #510 Native runtime constructs its financial authority in Rust on
-one shared SQLite. Native Windows CONTROL only owns
-install/restart/diagnostics. GitHub CI builds signed, version-addressed release
-artifacts. No separate Demo Agent, research benchmark executable, second financial
-ledger, alternate transport or bypass for real orders.
+The product has one **`okx-agent` financial Engine** for accounts and trading.
+Research runs in an on-demand **`okx-research-worker`**, with its own jobs and
+artifacts. Both are Rust components of the same Windows application. Cloudflare
+provides authenticated MCP/WSS routing; financial authority is Rust with one
+shared financial SQLite. Existing Windows CONTROL owns verified component
+installation and lifecycle. Research cannot place orders or write financial state.
 
-**#510 is Draft / NO-GO.** Fresh initialization, verified account sources,
-campaign policy and Native financial ports are under acceptance. Legacy
-Cloudflare financial handlers still require retirement; Native startup has no
-remote finance fallback. This branch is not an accepted trading release.
-Current evidence and remaining public lifecycle checks: [testing](docs/testing.md).
-The complete fast 26/26 runner is the subsequent [#512](https://github.com/iamaman11/okx/issues/512), not the current direct-test subset.
+**#510 CODE is accepted; #512 remains in progress in Draft PR #513.**
+This branch has not completed independent-release, installed or live acceptance.
+Current evidence: [testing](docs/testing.md). Research ownership and direct
+commands: [source map](docs/research-boundaries.md). The boundaries and acceptance
+criteria are in [#512](https://github.com/iamaman11/okx/issues/512). This refactoring
+does not claim that the complete acceptance campaign finishes in seconds.
 
 ## Modules and responsibility
 
 | Module | Owns | Does not own |
 | --- | --- | --- |
 | `crates/okx-agent` | One runtime and request orchestration | A second venue execution state machine |
-| `crates/okx-agent/src/analytics/market.rs` | Market use case, source reads and market computations | Trading decisions and account SQL |
-| `crates/okx-agent/src/analytics/result.rs` | Verified immutable result reads, page cursors and export integrity | Research CPU execution or SQL mutations |
-| `crates/okx-agent/src/analytics/{jobs,executor,budget,benchmark}.rs` | SQLite research jobs, shared CPU/memory admission, in-Agent K9 diagnostics | A separate benchmark service |
+| `crates/okx-agent/src/research_client` | Typed child communication and verified worker activation | Research calculations or financial decisions |
+| `crates/okx-research-worker/src/analytics/market.rs` | Market queries and computations using host-owned public observations | Trading decisions and account SQL |
+| `crates/okx-research-worker/src/analytics/result.rs` | Verified immutable result reads, page cursors and export integrity | Research CPU execution or SQL mutations |
+| `crates/okx-research-worker/src/analytics/{jobs,executor,budget,benchmark}.rs` | Research catalog, CPU/memory admission and benchmark jobs | Financial storage and live permissions |
+| `crates/okx-runtime/src/{market_bootstrap,live_source}.rs` | Shared public source admission and live closed candles | Research job ownership |
 | `crates/okx-research` / `crates/okx-analysis` | Replay, research artifacts and analytics formulas | Transport permissions or exchange orders |
 | `crates/okx-execution` | Scoped orders/fills/bills, NAV and RiskBook in one SQLite writer | Network requests or research jobs |
 | `cloudflare/okx-mcp` | Public MCP schema, authorization and routing | Native financial grants or a second trading engine |
 | `crates/okx-host-control` | Verified GitHub artifact install, lifecycle and Windows diagnostics | Research/strategy calculation or venue execution |
 
-**Market:** `market` MCP → Worker/WSS → Agent `AnalyticsService.market`
-→ K7 planner → `analytics/market.rs` → bounded result and immutable artifact.
+**Market:** `market` MCP → gateway/WSS → Agent `ResearchClient` → local research
+IPC → worker planner and market handler → bounded result and immutable artifact.
 
 **Research:** `research.validate/grid/backtest/benchmark` MCP → Agent
-`AnalyticsService` → shared SQLite jobs and CPU/memory admission →
-replay → `analytics/result.rs` summary/detail/export. The K9 fixed fixture
-runs inside this same Engine; CI microbenchmarks are not physical acceptance.
+`ResearchClient` → research worker's catalog and CPU/memory admission → replay →
+verified summary/detail/export. Live strategies use their own source path and
+pure signal kernel. CI microbenchmarks are not installed acceptance.
 
-**Trading:** an authorized `trade` MCP action → Worker risk authority →
-the single Agent trade service / account SQLite → exchange API; reconcile
+**Trading:** an authorized `trade` MCP action → gateway → the single Agent trade
+service and financial SQLite/RiskBook → exchange API; reconcile
 the venue outcome before changing financial state. External restrictions
 are reported, never hidden behind strategy or read-only actions.
 

@@ -23,6 +23,14 @@ import {
   transportFailure,
 } from "./shared.js";
 
+// The scope is an authenticated host's namespace claim, not proof of a key.
+function researchOnlyPermits(request: any): boolean {
+  if (request.account != null || !request.operation || typeof request.operation !== "object") return false;
+  const op = request.operation;
+  if (["market", "market_capabilities", "market_microstructure", "research", "find_instruments", "market_overview"].includes(op.type)) return true;
+  return op.type === "diagnostics" && op.request?.view === "research" && op.request?.account == null;
+}
+
 export class RuntimeSession {
   private state: any;
   private env: Env;
@@ -154,7 +162,7 @@ export class RuntimeSession {
 
   private async publishPolicy():Promise<void>{
     const state=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);if(!validGovernance(state))return;
-    for(const ws of this.state.getWebSockets?.("runtime")??[]){const a=ws.deserializeAttachment() as SocketAttachment;if(!a.hello||a.runtimeProfile!=="engine")continue;
+    for(const ws of this.state.getWebSockets?.("runtime")??[]){const a=ws.deserializeAttachment() as SocketAttachment;if(!a.hello||a.runtimeProfile!=="engine"||a.sessionMode==="research_only")continue;
       try{ws.send(JSON.stringify({type:"policy_snapshot",schema:FRAME_SCHEMA,session_id:a.sessionId,connection_generation:a.generation,snapshot:{state,issued_at_ms:Date.now(),session_generation:a.generation}}));}catch{try{ws.close(1011,"policy delivery failed");}catch{}}
     }
   }
@@ -217,7 +225,8 @@ export class RuntimeSession {
       return;
     }
 
-    if (frame.type === "hello") {
+    if (frame.type === "hello" || frame.type === "hello_research") {
+      if (attachment.hello) { ws.close(1008, "hello already accepted"); return; }
       if (frame.runtime_id !== RUNTIME_NAME || typeof frame.connection_id !== "string"
         || !Number.isSafeInteger(frame.agent_pid) || frame.agent_pid <= 0
         || typeof frame.agent_binary_sha256 !== "string"
@@ -232,12 +241,25 @@ export class RuntimeSession {
         ws.close(1008, "invalid runtime profile");
         return;
       }
-      const configuration=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);
-      if(!validGovernance(configuration)||frame.installation_id!==configuration.installation_id||frame.contract!=="okx.product/v1"||runtimeProfile!=="engine"){
-        ws.close(1008,"installation or contract mismatch");return;
+      if (frame.type === "hello_research") {
+        const fields = ["agent_binary_sha256","agent_incarnation","agent_pid","connection_id","contract","host_scope","runtime_id","runtime_profile","schema","type"];
+        if (Object.keys(frame).sort().join(",") !== fields.sort().join(",") || !/^[A-Za-z0-9_-]{16,128}$/.test(frame.connection_id) || typeof frame.host_scope !== "string" || !/^[0-9a-f]{64}$/.test(frame.host_scope) || frame.contract !== "okx.product/v1" || runtimeProfile !== "engine") {
+          ws.close(1008, "invalid research hello"); return;
+        }
+        attachment.sessionMode = "research_only";
+        attachment.hostScope = frame.host_scope;
+        delete attachment.installationId;
+      } else {
+        if ("host_scope" in frame) { ws.close(1008, "mixed hello fields"); return; }
+        const configuration=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);
+        if(!validGovernance(configuration)||frame.installation_id!==configuration.installation_id||frame.contract!=="okx.product/v1"||runtimeProfile!=="engine"){
+          ws.close(1008,"installation or contract mismatch");return;
+        }
+        attachment.sessionMode = "finance";
+        attachment.installationId = frame.installation_id;
+        delete attachment.hostScope;
       }
       attachment.runtimeProfile = runtimeProfile;
-      attachment.installationId = frame.installation_id;
       attachment.agentPid = frame.agent_pid;
       attachment.agentBinarySha256 = frame.agent_binary_sha256;
       attachment.agentIncarnation = frame.agent_incarnation;
@@ -249,7 +271,7 @@ export class RuntimeSession {
         session_id: attachment.sessionId,
         connection_generation: attachment.generation,
       }));
-      await this.publishPolicy();
+      if (attachment.sessionMode !== "research_only") await this.publishPolicy();
       return;
     }
 
@@ -279,6 +301,7 @@ export class RuntimeSession {
       return;
     }
     if(frame.type==="risk_control") {
+      if (attachment.sessionMode === "research_only") { ws.close(1008, "research finance forbidden"); return; }
       const result=await handleNativeRiskCommand(this.state.storage,{
         connection_generation:attachment.generation,
         runtime_profile:attachment.runtimeProfile??"unverified",
@@ -399,6 +422,10 @@ export class RuntimeSession {
       return transportFailure("EXECUTION_PROFILE_OPERATION_UNSUPPORTED", false);
     }
 
+    if (active.attachment.sessionMode === "research_only" && !researchOnlyPermits(request)) {
+      return transportFailure("RESEARCH_OPERATION_FORBIDDEN", false);
+    }
+
     if(this.activeRequests.has(request.request_id))
       return transportFailure("REQUEST_ALREADY_IN_FLIGHT",false);
     // Keep protective trading commands and exact-intent status above both
@@ -437,7 +464,8 @@ export class RuntimeSession {
       const terminalStatus = request.operation?.type === "trade";
       let operator_governance: Record<string, unknown> | undefined;
       if ((tradeMutation || terminalStatus) &&
-          active.attachment.runtimeProfile === "engine") {
+          active.attachment.runtimeProfile === "engine" &&
+          active.attachment.sessionMode !== "research_only") {
         const current:unknown=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);
         if(current!==undefined){
           if(!validGovernance(current))

@@ -73,3 +73,38 @@ const offline:any=await(await owner.fetch(new Request('https://runtime.internal/
 check(offline.status==='OFFLINE'&&offline.connected===false,
  'offline transport stays offline independently of native installation');
 console.log('runtime_native_owner_and_wss_separation PASS');
+
+// The bearer-authenticated scope is a namespace claim, not key attestation.
+{
+ let stored:any={runtimeId:"windows-primary",sessionId:"session_research_0123",generation:9,hello:false,connectedAtMs:Date.now()};
+ let closed=""; const sent:any[]=[]; let instance:any;
+ const ws:any={deserializeAttachment:()=>({...stored}),serializeAttachment:(v:any)=>{stored=v;},close:(_:number,why:string)=>{closed=why;},send:(text:string)=>{
+   const frame=JSON.parse(text);sent.push(frame);
+   if(frame.type==="ping")queueMicrotask(()=>instance.resolvePending(`pong:${frame.nonce}`,9,{}));
+   if(frame.type==="request")queueMicrotask(()=>{instance.resolvePending(`ack:${frame.request.request_id}`,9,{});instance.resolvePending(`response:${frame.request.request_id}`,9,{status:"completed"});});
+ }};
+ instance=new RuntimeSession({storage:{get:async()=>undefined},getWebSockets:()=>[ws]} as any,{} as any);
+ const hello:any={type:"hello_research",schema:FRAME_SCHEMA,runtime_id:"windows-primary",connection_id:"native_0123456789abcdef0123456789abcdef",runtime_profile:"engine",host_scope:"a".repeat(64),contract:"okx.product/v1",agent_pid:12,agent_binary_sha256:"b".repeat(64),agent_incarnation:"ctl_"+"c".repeat(32)};
+ await instance.webSocketMessage(ws,JSON.stringify({...hello,installation_id:"fake_install"}));
+ check(closed==="invalid research hello"&&!stored.hello,"mixed finance claim rejected");
+ closed="";await instance.webSocketMessage(ws,JSON.stringify({...hello,host_scope:"BAD"}));
+ check(closed==="invalid research hello"&&!stored.hello,"invalid scope rejected");
+ closed="";await instance.webSocketMessage(ws,JSON.stringify({...hello,connection_id:""}));
+ check(closed==="invalid research hello"&&!stored.hello,"invalid connection id rejected");
+ closed="";await instance.webSocketMessage(ws,JSON.stringify(hello));
+ check(stored.hello&&stored.sessionMode==="research_only"&&!stored.installationId,"research namespace only");
+ check(sent.some(f=>f.type==="hello_ack")&&!sent.some(f=>f.type==="policy_snapshot"),"no policy");
+ instance.state.storage.get=async()=>{throw new Error("research must not read governance");};
+ const req=(operation:any)=>({schema:"okx.agent.request/v1",request_id:"request_research_012345",operation});
+ check((await instance.dispatch(req({type:"trade",request:{action:"status"}}))).reason==="RESEARCH_OPERATION_FORBIDDEN","trade status denied");
+ check((await instance.dispatch(req({type:"portfolio",request:{action:"summary"}}))).reason==="RESEARCH_OPERATION_FORBIDDEN","portfolio denied");
+ check((await instance.dispatch(req({type:"diagnostics",request:{view:"finance"}}))).reason==="RESEARCH_OPERATION_FORBIDDEN","finance diagnostics denied");
+ check((await instance.dispatch(req({type:"research",request:{action:"capabilities"}}))).status==="completed","research reaches session");
+ for(const action of ["backtest","grid","cancel","record_decision"]){
+   check((await instance.dispatch(req({type:"research",request:{action}}))).status==="completed",`${action} reaches research session without finance`);
+ }
+ check(sent.filter(f=>f.type==="request").length===5,"all research requests delivered");
+ check(sent.filter(f=>f.type==="request").every(f=>!("operator_governance" in f)),"no governance delivered");
+ await instance.webSocketMessage(ws,JSON.stringify({type:"ping",schema:FRAME_SCHEMA,session_id:stored.sessionId,connection_generation:8,nonce:"stale"}));
+ check(closed==="stale generation","stale generation denied");
+}

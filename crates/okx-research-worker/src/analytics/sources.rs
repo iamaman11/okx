@@ -1,12 +1,14 @@
 use super::cache::{SourceCache, SourceKey};
-use crate::market_bootstrap::MarketBootstrapper;
+use crate::source_api::PublicSourceClient;
 use okx_research::strategy_registry::Bar;
+#[cfg(test)]
+use okx_runtime::market_bootstrap::MarketBootstrapper;
 use std::sync::Arc;
 #[derive(Clone)]
 pub struct Sources {
     pub excluded: Arc<std::sync::Mutex<std::collections::BTreeMap<SourceKey, usize>>>,
     pub cache: SourceCache,
-    pub bootstrap: MarketBootstrapper,
+    pub bootstrap: PublicSourceClient,
 }
 pub fn timeframe(ms: u64) -> Result<&'static str, String> {
     match ms {
@@ -247,7 +249,8 @@ mod extension_tests {
                 transport.clone(),
             )
             .unwrap(),
-        );
+        )
+        .into();
         assert_eq!(
             service
                 .sources
@@ -313,7 +316,8 @@ mod extension_tests {
                 transport.clone(),
             )
             .unwrap(),
-        );
+        )
+        .into();
         let mut wire = json!({"action":"validate","instruments":["BTC-USDT"],"timeframe_ms":60000,
             "start_ms":0,"end_ms":1200000,"range_mode":"strict","strategy_id":"ema_momentum_confirm_v1",
             "parameters":{"fast":1,"slow":2},"costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,"funding_mode":"zero_assumption"},
@@ -386,7 +390,8 @@ mod extension_tests {
                 transport.clone(),
             )
             .unwrap(),
-        );
+        )
+        .into();
         // This exercises the existing real delivery decoder and Sources boundary,
         // rather than inserting normalized bars directly into the source cache.
         let bars = service

@@ -8,10 +8,7 @@ pub(crate) use protection_trace::{
 use crate::{accounts::AccountResources, query::DispatchContext};
 use chrono::Utc;
 use futures_util::{StreamExt, stream};
-use okx_protocol::{
-    analytics::ResearchRequest,
-    trading::{DiagnosticsRequest, DiagnosticsView},
-};
+use okx_protocol::trading::{DiagnosticsRequest, DiagnosticsView};
 use serde_json::{Value, json};
 use std::{
     sync::Arc,
@@ -36,13 +33,15 @@ async fn operation_diagnostics(
         .or(route)
         .ok_or("ACCOUNT_REQUIRED")?;
     let account = ctx
-        .accounts
+        .finance
+        .accounts()?
         .resolve(requested)
         .await
         .ok_or("ACCOUNT_UNAVAILABLE")?;
     if let Some(route) = route {
         let selected = ctx
-            .accounts
+            .finance
+            .accounts()?
             .resolve(route)
             .await
             .ok_or("ACCOUNT_UNAVAILABLE")?;
@@ -51,7 +50,12 @@ async fn operation_diagnostics(
         }
     }
     if reference.starts_with("intent:") {
-        return Ok(native_intent::read(&account, ctx.accounts.installation_id(), reference).await);
+        return Ok(native_intent::read(
+            &account,
+            ctx.finance.accounts()?.installation_id(),
+            reference,
+        )
+        .await);
     }
     if let Some(intent) = reference.strip_prefix("terminal_release:") {
         let state = account.terminal_release_trace.read(intent);
@@ -159,7 +163,7 @@ pub async fn diagnostics(
         if request.account.is_some() || account.is_some() {
             return Err("RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE".into());
         }
-        return Ok(ctx.analytics.diagnostic_job(id));
+        return ctx.research.diagnostic_job(id).await;
     }
     if request.view == Some(DiagnosticsView::Operation) {
         return Ok(operation_diagnostics(ctx, request, account)
@@ -233,16 +237,21 @@ async fn storage_diagnostics(
         .or(route)
         .ok_or("ACCOUNT_REQUIRED")?;
     // Registry locks only: no credential lookup, SQL job or source refresh.
-    let resources =
-        tokio::time::timeout(Duration::from_millis(20), ctx.accounts.resolve(requested))
-            .await
-            .map_err(|_| "ACCOUNT_ROUTING_BUSY")?
-            .ok_or("ACCOUNT_UNAVAILABLE")?;
+    let resources = tokio::time::timeout(
+        Duration::from_millis(20),
+        ctx.finance.accounts()?.resolve(requested),
+    )
+    .await
+    .map_err(|_| "ACCOUNT_ROUTING_BUSY")?
+    .ok_or("ACCOUNT_UNAVAILABLE")?;
     if let Some(route) = route {
-        let selected = tokio::time::timeout(Duration::from_millis(20), ctx.accounts.resolve(route))
-            .await
-            .map_err(|_| "ACCOUNT_ROUTING_BUSY")?
-            .ok_or("ACCOUNT_UNAVAILABLE")?;
+        let selected = tokio::time::timeout(
+            Duration::from_millis(20),
+            ctx.finance.accounts()?.resolve(route),
+        )
+        .await
+        .map_err(|_| "ACCOUNT_ROUTING_BUSY")?
+        .ok_or("ACCOUNT_UNAVAILABLE")?;
         if selected.configuration.account_key != resources.configuration.account_key {
             return Err("ACCOUNT_ROUTE_MISMATCH".into());
         }
@@ -280,7 +289,7 @@ async fn storage_diagnostics(
         "private_ws":private.unwrap_or_else(||json!({"state":"NOT_EVALUATED","reason_code":"PRIVATE_STATE_BUSY"})),
         "sources":source.unwrap_or_else(||json!({"state":"NOT_EVALUATED","reason_code":"SOURCE_SNAPSHOT_BUSY"})),
         "source_capture":health.unwrap_or_else(||json!({"state":"NOT_EVALUATED","reason_code":"HEALTH_BUSY"})),
-        "access":ctx.trade.diagnostic_access_now(&resources.configuration.account_key.wire()),
+        "access":ctx.finance.trade()?.diagnostic_access_now(&resources.configuration.account_key.wire()),
         "central_budget":central_budget_not_evaluated(),"next_action":"inspect_snapshot_age_and_refresh_pending"}),
     )
 }
@@ -303,13 +312,15 @@ async fn finance_diagnostics(
         .or(route)
         .ok_or("ACCOUNT_REQUIRED")?;
     let resources = ctx
-        .accounts
+        .finance
+        .accounts()?
         .resolve(requested)
         .await
         .ok_or("ACCOUNT_UNAVAILABLE")?;
     if let Some(route) = route {
         let routed = ctx
-            .accounts
+            .finance
+            .accounts()?
             .resolve(route)
             .await
             .ok_or("ACCOUNT_UNAVAILABLE")?;
@@ -407,12 +418,14 @@ async fn diagnostics_inner(
     let explicit = request.account.as_deref().or(account);
     if let (Some(body), Some(route)) = (request.account.as_deref(), account) {
         let a = ctx
-            .accounts
+            .finance
+            .accounts()?
             .resolve(body)
             .await
             .ok_or("ACCOUNT_UNAVAILABLE")?;
         let b = ctx
-            .accounts
+            .finance
+            .accounts()?
             .resolve(route)
             .await
             .ok_or("ACCOUNT_UNAVAILABLE")?;
@@ -423,58 +436,16 @@ async fn diagnostics_inner(
     if let Some(reference) = &request.reference
         && reference.len() == 64
         && reference.bytes().all(|b| b.is_ascii_hexdigit())
-        && let Ok(job) = ctx
-            .analytics
-            .research(ResearchRequest::Status {
-                job_id: reference.clone(),
-            })
-            .await
+        && let Ok(job) = ctx.research.diagnostic_job(reference).await
     {
-        let state = job["state"].as_str().unwrap_or("unknown");
-        let failure = job["error"].as_str();
-        let (reason, retry, next) = match state {
-            "completed" => ("JOB_COMPLETED", false, "read the bounded result page"),
-            "queued" | "running" => (
-                "JOB_RUNNING",
-                true,
-                "poll research.status or cancel the job",
-            ),
-            "cancelled" => (
-                "JOB_CANCELLED",
-                false,
-                "submit a new request only if desired",
-            ),
-            "interrupted" => (
-                "JOB_INTERRUPTED",
-                false,
-                "submit a new request with a new idempotency key",
-            ),
-            _ => (
-                "RESEARCH_FAILED",
-                false,
-                "correct the reported source gap or parameters",
-            ),
-        };
-        let reason = failure
-            .map(|e| safe_code(e, reason))
-            .unwrap_or(reason.into());
-        let mut out = report(
-            "research",
-            &reason,
-            &format!("job:{reference}"),
-            if matches!(state, "failed" | "interrupted") {
-                vec![reason.clone()]
-            } else {
-                vec![]
-            },
-            retry,
-            next,
-        );
-        out["job"] = json!({"job_id":job["id"],"state":job["state"],"progress":job["progress"],"artifact":job["artifact"],"created_ms":job["created_ms"],"result_pinned":job["pinned"]});
-        return Ok(out);
+        // The worker owns the bounded diagnostic projection. Do not reinterpret
+        // it as a fresh SQL status or turn an unknown projection into failure.
+        if job["job"].is_object() {
+            return Ok(job);
+        }
     }
     if let Some(key) = explicit {
-        let Some(resources) = ctx.accounts.resolve(key).await else {
+        let Some(resources) = ctx.finance.accounts()?.resolve(key).await else {
             return Ok(report(
                 "account",
                 "ACCOUNT_UNAVAILABLE",
@@ -486,7 +457,7 @@ async fn diagnostics_inner(
         };
         return account_diagnostics(ctx, resources, request.reference.clone()).await;
     }
-    let configurations = ctx.accounts.list().await;
+    let configurations = ctx.finance.accounts()?.list().await;
     let total = configurations.len();
     if let Some(reference) = &request.reference {
         if total > 8 {
@@ -502,11 +473,12 @@ async fn diagnostics_inner(
         let mut found = Vec::new();
         let mut incomplete = Vec::new();
         let reference = reference.clone();
+        let accounts = ctx.finance.accounts()?;
         let matches = stream::iter(configurations.into_iter().map(|config| {
             let reference = reference.clone();
             async move {
                 let key = config.account_key.wire();
-                let Some(r) = ctx.accounts.resolve(&key).await else {
+                let Some(r) = accounts.resolve(&key).await else {
                     return (key, None, Some(String::from("ACCOUNT_UNAVAILABLE")));
                 };
                 let query = reference.clone();
@@ -576,13 +548,13 @@ async fn diagnostics_inner(
     let mut rows = Vec::new();
     for c in configurations.into_iter().take(8) {
         let key = c.account_key.wire();
-        let ready = match ctx.accounts.resolve(&key).await {
+        let ready = match ctx.finance.accounts()?.resolve(&key).await {
             Some(a) => Some(a.source_identity_ready().await),
             None => None,
         };
         rows.push(json!({"account":key,"alias":c.alias,"source_identity_ready":ready}));
     }
-    let failures = ctx.accounts.failures().await;
+    let failures = ctx.finance.accounts()?.failures().await;
     let mut out = report(
         "engine",
         "OBSERVED",
@@ -795,7 +767,7 @@ async fn account_diagnostics(
     out["storage"] = facts;
     // Existing diagnostics surface; no new transport, DB owner or persistent journal.
     out["storage"]["account_sql_timing"] = json!(resources.execution.store.sql_timing());
-    out["access"] = ctx.trade.diagnostic_access(&key).await;
+    out["access"] = ctx.finance.trade()?.diagnostic_access(&key).await;
     out["intent"]=intent.as_ref().map(|i|json!({"intent_id":i.intent_id,"client_order_id":i.client_order_id,"exchange_order_id":i.exchange_order_id,"state":i.state.as_str(),"instrument":i.instrument_id,"risk_increase":i.risk_increase,"policy_revision":i.policy_revision,"revision":i.revision,"deadline_ms":i.deadline,"incident":i.incident.as_ref().map(|e|safe_code(e,"INTENT_INCIDENT"))})).unwrap_or(Value::Null);
     Ok(out)
 }
@@ -804,8 +776,8 @@ mod tests {
     use super::*;
     use crate::{
         accounts,
-        analytics::AnalyticsService,
         query::{self, DispatchContext},
+        research_test_support::client as research_test_client,
         trade_service::TradeService,
     };
     use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
@@ -916,7 +888,7 @@ mod tests {
             budget,
             Arc::new(accounts::recorded_support::OfflineSocket),
         );
-        let analytics = AnalyticsService::new(root.join("analytics"), market.clone()).unwrap();
+        let analytics = research_test_client(root.join("analytics"), market.clone()).unwrap();
         let trade = Arc::new(TradeService::new(
             registry.clone(),
             public_ws.clone(),
@@ -925,10 +897,9 @@ mod tests {
             ),
         ));
         let ctx = DispatchContext {
-            accounts: registry.clone(),
-            analytics,
+            research: analytics,
             public_ws,
-            trade,
+            finance: crate::finance_dispatch::FinanceDispatch::ready(registry.clone(), trade),
             market,
         };
         let make_request = |request_id: &str, body_account: &str, reference: &str| AgentRequest {

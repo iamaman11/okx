@@ -103,6 +103,7 @@ try {
     Add-Type -AssemblyName System.IO.Compression.ZipFile
     $archive = [IO.Compression.ZipFile]::OpenRead($zip)
     $expectedFiles = @('okx-agent.exe','okx-host-control.exe','okx-host-launcher.exe','Cargo.lock','manifest.json')
+    if (@($archive.Entries | Where-Object { $_.FullName -ceq 'okx-research-worker.exe' }).Count -eq 1) { $expectedFiles += 'okx-research-worker.exe' }
     try {
         $actualFiles = @($archive.Entries | ForEach-Object { $_.FullName })
         if ($actualFiles.Count -ne $expectedFiles.Count -or
@@ -121,14 +122,30 @@ try {
         Assert-Sha256 (Join-Path $extract $name) (Get-ExpectedChecksum $checksums $name)
     }
     $manifest = Get-Content -LiteralPath (Join-Path $extract 'manifest.json') -Raw | ConvertFrom-Json
-    if ($manifest.schema -cne 'okx.windows.bundle/v1' -or [string]$manifest.repository_id -cne '1388071566' -or
+    if ($manifest.schema -cnotin @('okx.windows.bundle/v1','okx.windows.bundle/v2') -or [string]$manifest.repository_id -cne '1388071566' -or
         $manifest.source_tree -cne $sourceTree -or $manifest.source_head_sha -cnotmatch '^[0-9a-f]{40}$') {
         throw 'Manifest does not match accepted main.'
     }
     $prGit = Get-GitHubJson ("git/commits/" + $manifest.source_head_sha)
     if ($prGit.tree.sha -cne $sourceTree) { throw 'Tested PR and merged main trees differ.' }
-    foreach ($name in @('okx-agent.exe','okx-host-control.exe','okx-host-launcher.exe')) {
-        $declared = [string]$manifest.files.PSObject.Properties[$name].Value.sha256
+    $names = @('okx-agent.exe','okx-host-control.exe','okx-host-launcher.exe')
+    if ($manifest.schema -ceq 'okx.windows.bundle/v2') {
+        $names += 'okx-research-worker.exe'
+        if (@($manifest.components.PSObject.Properties).Count -ne 4 -or
+            @($expectedFiles | Where-Object { $_ -ceq 'okx-research-worker.exe' }).Count -ne 1 -or
+            [string]::IsNullOrWhiteSpace([string]$manifest.rust_version)) { throw 'Invalid v2 composition.' }
+    } elseif ($expectedFiles -ccontains 'okx-research-worker.exe') { throw 'A v1 bundle cannot contain a Research worker.' }
+    foreach ($name in $names) {
+        if ($manifest.schema -ceq 'okx.windows.bundle/v2') {
+            $component = $manifest.components.PSObject.Properties[$name].Value
+            if ($null -eq $component -or [long]$component.run_id -ne 0 -or [long]$component.artifact_id -ne 0 -or
+                $component.source_head_sha -cne $manifest.source_head_sha -or $component.source_tree -cne $sourceTree -or
+                [int]$component.protocol_version -ne 1 -or [int]$component.storage_version -ne 1 -or
+                [long]$component.size -ne (Get-Item -LiteralPath (Join-Path $extract $name)).Length) {
+                throw "Invalid v2 component: $name"
+            }
+            $declared = [string]$component.sha256
+        } else { $declared = [string]$manifest.files.PSObject.Properties[$name].Value.sha256 }
         Assert-Sha256 (Join-Path $extract $name) $declared
     }
 
@@ -169,7 +186,9 @@ try {
         }
         Assert-Sha256 $previousManifest $existingHash
     }
-    $controllerHash = [string]$manifest.files.PSObject.Properties['okx-host-control.exe'].Value.sha256
+    $controllerHash = if ($manifest.schema -ceq 'okx.windows.bundle/v2') {
+        [string]$manifest.components.PSObject.Properties['okx-host-control.exe'].Value.sha256
+    } else { [string]$manifest.files.PSObject.Properties['okx-host-control.exe'].Value.sha256 }
     # Explicit old-SHA authorization prevents adopting an unknown executable.
     if ($entrypointExists -and $previousEntrypointHash -cne $controllerHash -and
         $previousEntrypointHash -cne $ExpectedLegacyControlSha256) {

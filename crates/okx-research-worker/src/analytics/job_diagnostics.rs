@@ -178,24 +178,14 @@ impl Projection {
 mod tests {
     use super::super::{Jobs, State as JobState};
     use super::*;
-    #[derive(Default)]
-    struct ForbiddenNetwork(std::sync::atomic::AtomicUsize);
-    impl okx_api::HttpTransport for ForbiddenNetwork {
-        fn send(&self, _: okx_api::HttpRequest, _: std::time::Instant) -> okx_api::HttpSend<'_> {
-            self.0.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async {
-                Err(okx_api::OkxError::Response(
-                    "DIAGNOSTIC_NETWORK_FORBIDDEN".into(),
-                ))
-            })
-        }
-    }
     fn jobs(label: &str) -> (Jobs, std::path::PathBuf) {
-        let path = std::env::temp_dir().join(format!(
-            "okx-job-diagnostic-{label}-{}-{}.sqlite",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
-        ));
+        let path = std::env::temp_dir()
+            .join(format!(
+                "okx-job-diagnostic-{label}-{}-{}.sqlite",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap()
+            ))
+            .join("catalog.sqlite");
         (Jobs::open(path.clone()).unwrap(), path)
     }
     #[test]
@@ -324,158 +314,6 @@ mod tests {
             assert_eq!(observed["job"]["error_code"], expected);
             assert!(!observed.to_string().contains("DO_NOT_LEAK"));
         }
-    }
-    #[tokio::test]
-    async fn public_job_diagnostic_completes_with_known_state_while_catalog_sql_is_locked() {
-        use crate::{
-            accounts::initialize_installation, analytics::AnalyticsService,
-            market_bootstrap::MarketBootstrapper, query::DispatchContext,
-            risk_bridge::NativeRiskClient, trade_service::TradeService,
-        };
-        use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
-        use okx_observation::ReferenceRegistry;
-        use okx_runtime::PublicWsCoordinator;
-        use std::sync::Arc;
-        let root = std::env::temp_dir().join(format!(
-            "okx-public-job-diagnostic-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
-        ));
-        initialize_installation(&root, "installation-diagnostic").unwrap();
-        let budget = RateBudget::new();
-        let initial_owner = okx_execution::account_worker::UnifiedFinanceHandle::initialize_new(
-            root.clone(),
-            okx_execution::NewFinanceInstallation {
-                installation_id: "installation-diagnostic".into(),
-                initialize_request_id: "initialize_readonly_dispatch_001".into(),
-                source_tree: "a".repeat(40),
-            },
-        )
-        .await
-        .unwrap();
-        let mut initial_closed = initial_owner.termination_signal();
-        drop(initial_owner);
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            initial_closed.wait_for(|v| *v),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let (accounts, finance_owner) =
-            crate::accounts::tests::open_native_test_registry(&root, budget.clone()).await;
-        let accounts = Arc::new(accounts);
-        let env = OkxEnvironment::new(Region::Global, false);
-        let network = Arc::new(ForbiddenNetwork::default());
-        let market = MarketBootstrapper::new(
-            OkxPublicClient::with_http_transport(env, budget.clone(), network.clone()).unwrap(),
-        );
-        let reference = ReferenceRegistry::from_public("2026-10-31T00:00:00Z", vec![]).unwrap();
-        let (_coordinator, public_ws) =
-            PublicWsCoordinator::new_with_rate_budget(env, reference, budget);
-        let analytics = AnalyticsService::new(root.join("analytics"), market.clone()).unwrap();
-        let jobs = analytics.jobs.clone();
-        let id = "a".repeat(64);
-        jobs.enqueue("public-query".into(), id.clone()).unwrap();
-        let finance_jobs_before = finance_owner.sql_timing().observed_jobs;
-        let trade = Arc::new(TradeService::new(
-            accounts.clone(),
-            public_ws.clone(),
-            NativeRiskClient::local(crate::native_finance_risk::NativeFinanceRisk::from_owner(
-                finance_owner.clone(),
-            )),
-        ));
-        let ctx = DispatchContext {
-            accounts,
-            analytics,
-            public_ws,
-            trade,
-            market,
-        };
-        let request = okx_protocol::AgentRequest {
-            schema: okx_protocol::AGENT_REQUEST_SCHEMA_V1.into(),
-            request_id: "job_diagnostic_public".into(),
-            account: None,
-            operation: okx_protocol::AgentOperation::Diagnostics {
-                request: okx_protocol::trading::DiagnosticsRequest {
-                    reference: Some(id),
-                    account: None,
-                    view: Some(okx_protocol::trading::DiagnosticsView::Research),
-                    cycle_id: None,
-                    limit: None,
-                },
-            },
-        };
-        request.validate().unwrap();
-        let (ctx, response) = {
-            let held = jobs.db.lock().unwrap();
-            let changes_before = held.total_changes();
-            let (send, recv) = std::sync::mpsc::channel();
-            let thread = std::thread::spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                let response = runtime.block_on(crate::query::dispatch(&ctx, &request));
-                let mut routed = request.clone();
-                routed.account = Some("another-account".into());
-                let refused = runtime.block_on(crate::query::dispatch(&ctx, &routed));
-                assert_eq!(
-                    refused.failure.unwrap().code,
-                    "RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE"
-                );
-                let mut absent = request.clone();
-                if let okx_protocol::AgentOperation::Diagnostics { request } = &mut absent.operation
-                {
-                    request.reference = Some("b".repeat(64));
-                }
-                let unknown = runtime
-                    .block_on(crate::query::dispatch(&ctx, &absent))
-                    .result
-                    .unwrap();
-                assert_eq!(unknown["reason_code"], "UNKNOWN_NOT_RETAINED");
-                assert!(unknown["job"].is_null());
-                send.send(response).unwrap();
-                ctx
-            });
-            let response = recv.recv_timeout(std::time::Duration::from_millis(500));
-            assert_eq!(
-                held.total_changes(),
-                changes_before,
-                "diagnostic cannot mutate catalog"
-            );
-            let ctx = thread.join().unwrap();
-            (ctx, response)
-        };
-        let response = response.expect("public diagnostic waited behind catalog SQL");
-        assert_eq!(
-            response.status,
-            okx_protocol::AgentResponseStatus::Completed
-        );
-        assert_eq!(response.quality, okx_protocol::DataQuality::Degraded);
-        let result = response.result.unwrap();
-        assert_eq!(result["job"]["state"], "queued");
-        assert_eq!(result["job"]["progress"], 0);
-        assert_eq!(result["history"], "UNKNOWN");
-        assert_eq!(
-            network.0.load(Ordering::Relaxed),
-            0,
-            "diagnostic cannot fetch remote facts"
-        );
-        assert_eq!(
-            finance_owner.sql_timing().observed_jobs,
-            finance_jobs_before
-        );
-        drop(jobs);
-        ctx.accounts.shutdown().await;
-        let mut closed = finance_owner.termination_signal();
-        drop(ctx);
-        drop(finance_owner);
-        tokio::time::timeout(std::time::Duration::from_secs(5), closed.wait_for(|v| *v))
-            .await
-            .unwrap()
-            .unwrap();
-        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn failed_startup_seed_is_explicit_and_does_not_invent_missing_history() {

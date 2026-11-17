@@ -4,7 +4,7 @@ use replay::Bar;
 struct Loaded {
     instrument: String,
     bars: Result<Arc<Vec<Bar>>, String>,
-    ticker: Option<Result<okx_api::PublicTicker, String>>,
+    ticker: Option<Result<okx_protocol::research_ipc::ResearchTicker, String>>,
     funding: Option<Result<Vec<(u64, f64)>, String>>,
     oi: Option<Result<Vec<f64>, String>>,
     excluded: Option<usize>,
@@ -124,7 +124,11 @@ impl AnalyticsService {
         }
         let (job, new, cancel) = self
             .jobs
-            .enqueue_async(format!("market-{hash}"), hash.clone())
+            .enqueue_async(
+                okx_protocol::research_ipc::IdempotencyKey::new(format!("market-{hash}"))
+                    .map_err(str::to_owned)?,
+                hash.clone(),
+            )
             .await?;
         if !new {
             if let Some(artifact) = job.artifact {
@@ -208,7 +212,7 @@ impl AnalyticsService {
     async fn market_execute(
         &self,
         request: MarketRequest,
-        cancel: Arc<std::sync::atomic::AtomicBool>,
+        cancel: Arc<super::executor::Cancel>,
         global_rank: bool,
     ) -> Result<Value, String> {
         // The public request was validated before expanding the immutable
@@ -281,7 +285,7 @@ impl AnalyticsService {
     pub(super) async fn market_rows(
         &self,
         request: &MarketRequest,
-        cancel: Arc<std::sync::atomic::AtomicBool>,
+        cancel: Arc<super::executor::Cancel>,
         global_rank: bool,
     ) -> Result<(Vec<Value>, Option<Value>), String> {
         let plan = planner::AnalysisPlan::compile_market(request)?;
@@ -871,7 +875,7 @@ mod performance_fixtures {
                         funding_rate: None,
                     })
                     .collect();
-                let ticker: okx_api::PublicTicker = serde_json::from_value(
+                let ticker: okx_protocol::research_ipc::ResearchTicker = serde_json::from_value(
                     json!({"instId":format!("fixture-{symbol}"),"bidPx":"100","askPx":"100.1"}),
                 )
                 .unwrap();

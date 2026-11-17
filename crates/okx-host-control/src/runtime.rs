@@ -361,6 +361,20 @@ async fn process_control_batch(
             (Err(error), ProcessTransition::None)
         } else {
             match &operation {
+                HostControlOperation::DeployResearch {
+                    run_id,
+                    artifact_id,
+                    expected_source_tree,
+                } => (
+                    crate::artifact::deploy_research(
+                        github,
+                        *run_id,
+                        *artifact_id,
+                        expected_source_tree,
+                    )
+                    .await,
+                    ProcessTransition::None,
+                ),
                 HostControlOperation::DeployAgent {
                     run_id,
                     artifact_id,

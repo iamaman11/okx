@@ -1,7 +1,5 @@
 //! Product dispatcher; explicit account routing and bounded native responses.
-use crate::{
-    accounts::AccountRuntimeRegistry, analytics::AnalyticsService, trade_service::TradeService,
-};
+use crate::{finance_dispatch::FinanceDispatch, research_client::ResearchClient};
 use chrono::Utc;
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest, AgentResponse,
@@ -9,13 +7,11 @@ use okx_protocol::{
 };
 use okx_runtime::PublicWsHandle;
 use serde_json::{Value, json};
-use std::sync::Arc;
 #[derive(Clone)]
 pub struct DispatchContext {
-    pub accounts: Arc<AccountRuntimeRegistry>,
-    pub analytics: AnalyticsService,
+    pub finance: FinanceDispatch,
+    pub research: ResearchClient,
     pub public_ws: PublicWsHandle,
-    pub trade: Arc<TradeService>,
     pub market: crate::market_bootstrap::MarketBootstrapper,
 }
 #[cfg(test)]
@@ -89,7 +85,7 @@ pub fn response(id: &str, result: Result<Value, String>) -> AgentResponse {
     let (status, data, failure) = match result {
         Ok(v) => (AgentResponseStatus::Completed, Some(v), None),
         Err(code) => {
-            let retryable = crate::analytics::is_retryable_market_source_defer(&code);
+            let retryable = okx_protocol::research_ipc::is_retryable_source_defer(&code);
             let public_code = if retryable {
                 "MARKET_SOURCE_RETRYABLE".to_owned()
             } else {
@@ -135,16 +131,17 @@ async fn execute(
             request_digest,
         } => {
             let c = ctx
-                .accounts
+                .finance
+                .accounts()?
                 .connect(credential_ref, alias, operation_id, request_digest)
                 .await
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(c).map_err(|_| "SERIALIZATION_FAILED".into())
         }
         AgentOperation::Market { request } => {
-            execute_market(&ctx.public_ws, &ctx.analytics, request).await
+            execute_market(&ctx.public_ws, &ctx.research, request).await
         }
-        AgentOperation::MarketCapabilities => Ok(ctx.analytics.market_capabilities()),
+        AgentOperation::MarketCapabilities => ctx.research.capabilities().await,
         AgentOperation::MarketMicrostructure {
             instrument,
             size_contracts,
@@ -152,9 +149,10 @@ async fn execute(
             execute_market_microstructure(&ctx.public_ws, instrument, size_contracts.as_deref())
                 .await
         }
-        AgentOperation::Research { request } => ctx.analytics.research(request.clone()).await,
+        AgentOperation::Research { request } => ctx.research.research(request.clone()).await,
         AgentOperation::Trade { request } => {
-            ctx.trade
+            ctx.finance
+                .trade()?
                 .trade_with_invocation(
                     account.unwrap_or_default(),
                     request,
@@ -174,20 +172,23 @@ async fn execute(
                 .await
         }
         AgentOperation::Strategies { request } => {
-            ctx.trade
+            ctx.finance
+                .trade()?
                 .strategies(account.unwrap_or_default(), request, g)
                 .await
         }
         AgentOperation::PortfolioScenario { request } => crate::portfolio::scenario(request),
         AgentOperation::Portfolio { request } => {
-            crate::portfolio::portfolio(&ctx.accounts, request, &ctx.trade).await
+            crate::portfolio::portfolio(ctx.finance.accounts()?, request, ctx.finance.trade()?)
+                .await
         }
         AgentOperation::Diagnostics { request } => {
             crate::diagnostics::diagnostics(ctx, request, account).await
         }
         AgentOperation::AccountSummary => {
             let a = ctx
-                .accounts
+                .finance
+                .accounts()?
                 .resolve(account.unwrap_or_default())
                 .await
                 .ok_or("ACCOUNT_UNAVAILABLE")?;
@@ -274,17 +275,17 @@ async fn execute(
             }
         }
         AgentOperation::MailboxTelemetry => Ok(
-            json!({"contract":"okx.product/v1","installation_id":ctx.accounts.installation_id()}),
+            json!({"contract":"okx.product/v1","installation_id":ctx.finance.accounts()?.installation_id()}),
         ),
     }
 }
 
 /// Resolve an optional bounded instrument universe, then delegate market work
-/// to AnalyticsService. Kept outside the command dispatcher so routing stays
+/// to the isolated Research Worker. Kept outside the command dispatcher so routing stays
 /// visible and this market-specific boundary can be reviewed independently.
 async fn execute_market(
     public_ws: &PublicWsHandle,
-    analytics: &AnalyticsService,
+    research: &ResearchClient,
     request: &okx_protocol::analytics::MarketRequest,
 ) -> Result<Value, String> {
     let mut universe_page = None;
@@ -349,7 +350,7 @@ async fn execute_market(
         }));
         resolved_instruments = Some(names);
     }
-    analytics
+    research
         .market(request.clone(), universe_page, resolved_instruments)
         .await
 }

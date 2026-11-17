@@ -48,7 +48,7 @@ pub struct TradeService {
     public_ws: PublicWsHandle,
     risk: NativeRiskClient,
     governance: RwLock<Option<CentralGovernanceSnapshot>>,
-    analytics: RwLock<Option<crate::analytics::AnalyticsService>>,
+    live_source: RwLock<Option<okx_runtime::live_source::LiveCandleSource>>,
     /// Non-authoritative polling schedule only; SQLite and RiskBook retain
     /// all decision, reservation, order, and financial state.
     recovery_schedule: Mutex<RecoverySchedule>,
@@ -246,12 +246,12 @@ impl TradeService {
             public_ws,
             risk,
             governance: RwLock::new(None),
-            analytics: RwLock::new(None),
+            live_source: RwLock::new(None),
             recovery_schedule: Mutex::new(RecoverySchedule::default()),
         }
     }
-    pub async fn set_analytics(&self, analytics: crate::analytics::AnalyticsService) {
-        *self.analytics.write().await = Some(analytics);
+    pub async fn set_live_source(&self, source: okx_runtime::live_source::LiveCandleSource) {
+        *self.live_source.write().await = Some(source);
     }
     pub async fn update_governance(
         &self,

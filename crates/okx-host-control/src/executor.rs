@@ -180,6 +180,7 @@ impl HostExecutor {
             HostControlOperation::Sync => self.sync(),
             HostControlOperation::BuildAgent => Err(HostControlError::InvalidExecutionPath),
             HostControlOperation::DeployAgent { .. }
+            | HostControlOperation::DeployResearch { .. }
             | HostControlOperation::InstallLauncherRoot { .. }
             | HostControlOperation::UpgradeLauncherRoot { .. }
             | HostControlOperation::StageControllerUpdate { .. }

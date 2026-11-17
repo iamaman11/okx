@@ -20,6 +20,10 @@ use crate::{
     root_migration,
 };
 
+mod research_component;
+pub use research_component::deploy_research;
+use research_component::{parse_bundle_compatible, parse_persisted_manifest};
+
 const BUNDLE_SCHEMA_V1: &str = "okx.windows.bundle/v1";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_AGENT_BYTES: u64 = 128 * 1024 * 1024;
@@ -275,7 +279,7 @@ async fn verified_bundle(
     }
 
     let zip_bytes = github.download_artifact_zip(artifact_id).await?;
-    let bundle = parse_bundle(&zip_bytes)?;
+    let bundle = parse_bundle_compatible(&zip_bytes)?;
 
     if bundle.manifest.schema != BUNDLE_SCHEMA_V1
         || bundle.manifest.repository_id != REPOSITORY_ID
@@ -333,7 +337,7 @@ fn preflight_verified_manifest(manifest: &BundleManifest) -> HostControlResult<(
                     "accepted release manifest is not a plain file",
                 ));
             }
-            let old: BundleManifest = serde_json::from_slice(&fs::read(path)?)?;
+            let old = parse_persisted_manifest(&fs::read(path)?)?;
             if old != *manifest {
                 return Err(HostControlError::ArtifactVerification(
                     "accepted release manifest conflicts with existing installation",
@@ -362,7 +366,7 @@ fn persist_verified_manifest(manifest: &BundleManifest) -> HostControlResult<()>
                     "accepted release manifest is not a plain file",
                 ));
             }
-            let old: BundleManifest = serde_json::from_slice(&fs::read(path)?)?;
+            let old = parse_persisted_manifest(&fs::read(path)?)?;
             if old != *manifest {
                 return Err(HostControlError::ArtifactVerification(
                     "accepted release manifest conflicts with existing installation",
@@ -399,6 +403,11 @@ fn parse_bundle(zip_bytes: &[u8]) -> HostControlResult<VerifiedBundle> {
 
     let manifest_bytes = read_entry(&mut archive, "manifest.json", MAX_MANIFEST_BYTES)?;
     let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)?;
+    if archive.by_name("okx-research-worker.exe").is_ok() {
+        return Err(HostControlError::ArtifactVerification(
+            "v1 bundle cannot carry Research worker",
+        ));
+    }
     let agent_bytes = read_entry(&mut archive, "okx-agent.exe", MAX_AGENT_BYTES)?;
     let controller_bytes = read_entry(&mut archive, "okx-host-control.exe", MAX_CONTROLLER_BYTES)?;
     let launcher_bytes =

@@ -32,14 +32,16 @@ impl Fixture {
                 .unwrap(),
         );
         let ctx = crate::query::DispatchContext {
-            accounts: native.registry.clone(),
-            analytics: crate::analytics::AnalyticsService::new(
+            research: crate::research_test_support::client(
                 native.root.join("research"),
                 market.clone(),
             )
             .unwrap(),
             public_ws,
-            trade: native.trade.clone(),
+            finance: crate::finance_dispatch::FinanceDispatch::ready(
+                native.registry.clone(),
+                native.trade.clone(),
+            ),
             market,
         };
         Self {
@@ -57,7 +59,13 @@ impl Fixture {
         authority.state.accounts[0].policy_revision = authority.state.revision;
         authority.state.accounts[0].explicit_pause = paused;
         authority.issued_at_ms = chrono::Utc::now().timestamp_millis() as _;
-        self.ctx.trade.update_governance(&authority).await.unwrap();
+        self.ctx
+            .finance
+            .trade()
+            .unwrap()
+            .update_governance(&authority)
+            .await
+            .unwrap();
     }
 
     async fn operation(&self, operation: AgentOperation, account: Option<&str>) -> AgentResponse {

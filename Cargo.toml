@@ -15,6 +15,7 @@ members = [
     "crates/okx-kernel",
     "crates/okx-analysis",
     "crates/okx-research",
+    "crates/okx-research-worker",
     "crates/okx-execution",
 ]
 

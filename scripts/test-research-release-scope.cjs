@@ -1,0 +1,13 @@
+'use strict';
+const assert = require('node:assert/strict');
+const {check} = require('./research-release-scope.cjs');
+const root = process.cwd();
+const packages = ['okx-agent','okx-host-control','okx-host-launcher','okx-protocol','okx-research-worker'].map(name => ({id:name,name,manifest_path:require('node:path').join(root,'crates',name,'Cargo.toml')}));
+const meta = {workspace_root:root,workspace_members:packages.map(p=>p.id),packages,resolve:{nodes:packages.map(p=>({id:p.id,deps:p.id==='okx-agent'?[{pkg:'okx-protocol',dep_kinds:[{kind:null}]}]:[]}))}};
+assert.equal(check(meta,['crates/okx-research-worker/src/ipc.rs']).changed_files,1);
+assert.throws(()=>check(meta,['.github/research-release-base.json']));
+assert.throws(()=>check({...meta, resolve:{nodes:[]}},['crates/okx-research-worker/src/ipc.rs']));
+for (const file of ['crates/okx-agent/src/query.rs','crates/okx-protocol/src/lib.rs','Cargo.lock','crates/okx-research-worker/Cargo.toml','.cargo/config.toml','crates/okx-runtime/src/lib.rs']) assert.throws(()=>check(meta,[file]),file);
+meta.resolve.nodes.find(n=>n.id==='okx-agent').deps.push({pkg:'okx-research-worker',dep_kinds:[{kind:'build'}]});
+assert.throws(()=>check(meta,['crates/okx-research-worker/src/ipc.rs']));
+console.log('research release scope negative controls passed');

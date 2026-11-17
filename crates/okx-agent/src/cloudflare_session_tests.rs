@@ -47,10 +47,14 @@ struct Session {
     output: mpsc::UnboundedReceiver<Message>,
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<AgentResult<()>>,
+    research: crate::research_client::ResearchClient,
     _coordinator: okx_runtime::PublicWsCoordinator,
 }
 impl Session {
     async fn new() -> Self {
+        Self::with_research_only(false).await
+    }
+    async fn with_research_only(research_only: bool) -> Self {
         let native = native::fixture().await;
         let environment = okx_api::OkxEnvironment::new(okx_api::Region::Global, false);
         let budget = okx_api::RateBudget::new();
@@ -65,29 +69,50 @@ impl Session {
                 .unwrap(),
         );
         let ctx = DispatchContext {
-            accounts: native.registry.clone(),
-            analytics: crate::analytics::AnalyticsService::new(
+            research: crate::research_test_support::client(
                 native.root.join("session-analytics"),
                 market.clone(),
             )
             .unwrap(),
             public_ws,
-            trade: native.trade.clone(),
+            finance: if research_only {
+                crate::finance_dispatch::FinanceDispatch::missing()
+            } else {
+                crate::finance_dispatch::FinanceDispatch::ready(
+                    native.registry.clone(),
+                    native.trade.clone(),
+                )
+            },
             market,
         };
+        let research = ctx.research.clone();
         let (input, incoming) = mpsc::unbounded_channel();
         let (outgoing, output) = mpsc::unbounded_channel();
         let (stop, stopped) = watch::channel(false);
-        let hello = F::Hello {
-            schema: SCHEMA.into(),
-            runtime_id: "windows-primary".into(),
-            connection_id: "native_0123456789abcdef0123456789abcdef".into(),
-            installation_id: native.owner.installation_id().into(),
-            contract: okx_protocol::accounts::PRODUCT_CONTRACT.into(),
-            runtime_profile: DirectRuntimeProfile::Engine,
-            agent_pid: 100,
-            agent_binary_sha256: "a".repeat(64),
-            agent_incarnation: format!("ctl_{}", "b".repeat(32)),
+        let hello = if research_only {
+            F::HelloResearch {
+                schema: SCHEMA.into(),
+                runtime_id: "windows-primary".into(),
+                connection_id: "native_0123456789abcdef0123456789abcdef".into(),
+                host_scope: "a".repeat(64),
+                contract: okx_protocol::accounts::PRODUCT_CONTRACT.into(),
+                runtime_profile: DirectRuntimeProfile::Engine,
+                agent_pid: 100,
+                agent_binary_sha256: "a".repeat(64),
+                agent_incarnation: format!("ctl_{}", "b".repeat(32)),
+            }
+        } else {
+            F::Hello {
+                schema: SCHEMA.into(),
+                runtime_id: "windows-primary".into(),
+                connection_id: "native_0123456789abcdef0123456789abcdef".into(),
+                installation_id: native.owner.installation_id().into(),
+                contract: okx_protocol::accounts::PRODUCT_CONTRACT.into(),
+                runtime_profile: DirectRuntimeProfile::Engine,
+                agent_pid: 100,
+                agent_binary_sha256: "a".repeat(64),
+                agent_incarnation: format!("ctl_{}", "b".repeat(32)),
+            }
         };
         let task = tokio::spawn(run_connected_session(
             RawFrames {
@@ -104,9 +129,15 @@ impl Session {
             output,
             stop,
             task,
+            research,
             _coordinator: coordinator,
         };
-        assert!(matches!(session.next().await, F::Hello { .. }));
+        let sent_hello = session.next().await;
+        assert!(if research_only {
+            matches!(sent_hello, F::HelloResearch { .. })
+        } else {
+            matches!(sent_hello, F::Hello { .. })
+        });
         session.send(F::HelloAck {
             schema: SCHEMA.into(),
             session_id: SESSION.into(),
@@ -118,13 +149,13 @@ impl Session {
         self.input.send(Ok(wire(frame))).unwrap();
     }
     async fn next(&mut self) -> F {
-        let message = tokio::time::timeout(Duration::from_secs(3), self.output.recv())
+        let message = tokio::time::timeout(Duration::from_secs(15), self.output.recv())
             .await
             .unwrap()
             .unwrap();
         serde_json::from_str(message.to_text().unwrap()).unwrap()
     }
-    async fn end(self, expected: Option<&str>) {
+    async fn end(mut self, expected: Option<&str>) {
         if expected.is_none() {
             self.stop.send(true).unwrap();
         }
@@ -136,11 +167,148 @@ impl Session {
             Some(reason) => assert!(result.unwrap_err().to_string().contains(reason)),
             None => result.unwrap(),
         }
+        if expected == Some("RESEARCH_OPERATION_FORBIDDEN") {
+            while let Ok(message) = self.output.try_recv() {
+                let frame: F = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                assert!(
+                    !matches!(frame, F::DeliveryAck { .. } | F::Response { .. }),
+                    "forbidden operation must not reach dispatch"
+                );
+            }
+        }
         drop(self.input);
         drop(self.output);
         drop(self._coordinator);
+        self.research.shutdown().await;
         self.native.finish().await;
     }
+}
+
+fn research_request() -> AgentRequest {
+    AgentRequest {
+        schema: AGENT_REQUEST_SCHEMA_V1.into(),
+        request_id: "research_session_capabilities_001".into(),
+        account: None,
+        operation: AgentOperation::Research {
+            request: okx_protocol::analytics::ResearchRequest::Capabilities {},
+        },
+    }
+}
+
+#[tokio::test]
+async fn research_session_forwards_to_real_worker_without_finance() {
+    let mut s = Session::with_research_only(true).await;
+    s.send(F::Request {
+        schema: SCHEMA.into(),
+        session_id: SESSION.into(),
+        connection_generation: GENERATION,
+        request: research_request(),
+        operator_governance: None,
+    });
+    let mut ack = false;
+    loop {
+        match s.next().await {
+            F::DeliveryAck { request_id, .. } => {
+                assert_eq!(request_id, "research_session_capabilities_001");
+                ack = true;
+            }
+            F::Response { response, .. } => {
+                assert!(ack);
+                assert_eq!(
+                    response.status,
+                    okx_protocol::AgentResponseStatus::Completed
+                );
+                let data = response.result.unwrap();
+                assert_eq!(data["schema"], "okx.research.capabilities/v1");
+                assert!(!data.as_object().unwrap().is_empty());
+                break;
+            }
+            F::Ping { .. } => {}
+            other => panic!("unexpected frame {other:?}"),
+        }
+    }
+    assert!(s.native.feed.outbound_posts.lock().unwrap().is_empty());
+    s.end(None).await;
+}
+
+#[tokio::test]
+async fn research_session_rejects_finance_and_governance_before_ack() {
+    for governance in [false, true] {
+        let s = Session::with_research_only(true).await;
+        let request = if governance {
+            research_request()
+        } else {
+            AgentRequest {
+                schema: AGENT_REQUEST_SCHEMA_V1.into(),
+                request_id: "research_session_forbidden_001".into(),
+                account: None,
+                operation: AgentOperation::Strategies {
+                    request: StrategyRequest::List {},
+                },
+            }
+        };
+        let snapshot = if governance {
+            Some(s.native.authority.clone())
+        } else {
+            None
+        };
+        s.send(F::Request {
+            schema: SCHEMA.into(),
+            session_id: SESSION.into(),
+            connection_generation: GENERATION,
+            request,
+            operator_governance: snapshot,
+        });
+        s.end(Some("RESEARCH_OPERATION_FORBIDDEN")).await;
+    }
+    let s = Session::with_research_only(true).await;
+    s.send(F::PolicySnapshot {
+        schema: SCHEMA.into(),
+        session_id: SESSION.into(),
+        connection_generation: GENERATION,
+        snapshot: s.native.authority.clone(),
+    });
+    s.end(Some("RESEARCH_POLICY_FORBIDDEN")).await;
+    let s = Session::with_research_only(true).await;
+    s.send(F::RiskControl {
+        schema: SCHEMA.into(),
+        session_id: SESSION.into(),
+        connection_generation: GENERATION,
+        command: okx_protocol::risk_authority::RiskCommand {
+            schema: okx_protocol::risk_authority::RISK_COMMAND_SCHEMA_V1.into(),
+            command_id: "research_risk_command_001".into(),
+            installation_id: s.native.owner.installation_id().into(),
+            action: okx_protocol::risk_authority::RiskCommandAction::Summary {},
+        },
+    });
+    s.end(Some("UNEXPECTED_FRAME")).await;
+}
+
+#[test]
+fn research_hello_protocol_rejects_mixed_fields_and_bad_scope() {
+    let hello = F::HelloResearch {
+        schema: SCHEMA.into(),
+        runtime_id: "windows-primary".into(),
+        connection_id: "native_0123456789abcdef0123456789abcdef".into(),
+        host_scope: "a".repeat(64),
+        contract: okx_protocol::accounts::PRODUCT_CONTRACT.into(),
+        runtime_profile: DirectRuntimeProfile::Engine,
+        agent_pid: 100,
+        agent_binary_sha256: "b".repeat(64),
+        agent_incarnation: format!("ctl_{}", "c".repeat(32)),
+    };
+    assert!(hello.validate().is_ok());
+    let mut value = serde_json::to_value(&hello).unwrap();
+    value["installation_id"] = "mixed_installation".into();
+    assert!(serde_json::from_value::<F>(value).is_err());
+    let mut value = serde_json::to_value(hello).unwrap();
+    value["host_scope"] = "BAD".into();
+    assert!(
+        serde_json::from_value::<F>(value)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
 }
 
 #[tokio::test]

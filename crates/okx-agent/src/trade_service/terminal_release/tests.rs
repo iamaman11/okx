@@ -282,14 +282,13 @@ async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
         .unwrap(),
     );
     let ctx = crate::query::DispatchContext {
-        accounts: f.registry.clone(),
-        analytics: crate::analytics::AnalyticsService::new(
-            f.root.join("analytics"),
-            market.clone(),
-        )
-        .unwrap(),
+        research: crate::research_test_support::client(f.root.join("analytics"), market.clone())
+            .unwrap(),
         public_ws: public,
-        trade: f.trade.clone(),
+        finance: crate::finance_dispatch::FinanceDispatch::ready(
+            f.registry.clone(),
+            f.trade.clone(),
+        ),
         market,
     };
     // The old independent account SQL owner is gone. Occupied Native FIFO

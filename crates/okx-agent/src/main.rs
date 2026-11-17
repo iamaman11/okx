@@ -2,10 +2,10 @@ use clap::{Parser, Subcommand};
 use okx_agent::{
     AgentError, AgentResult,
     accounts::AccountRuntimeRegistry,
-    analytics::AnalyticsService,
     cloudflare_auth::{load_native_cloudflare_token, store_native_cloudflare_token},
     cloudflare_transport::CloudflareTransportConfig,
     config::{AgentConfig, default_root},
+    finance_dispatch::FinanceDispatch,
     github_auth::{load_native_github_token, store_native_github_token},
     github_mailbox::GitHubMailboxClient,
     identity::{
@@ -15,6 +15,7 @@ use okx_agent::{
     native_finance_risk::NativeFinanceRisk,
     query::DispatchContext,
     reference_bootstrap::bootstrap_reference,
+    research_client::ResearchClient,
     risk_bridge::NativeRiskClient,
     runtime::{EngineContext, run_engine},
     trade_service::TradeService,
@@ -295,7 +296,13 @@ async fn run(cli: Cli) -> AgentResult<()> {
             );
         }
         command => {
-            // Existing installation is required. Startup never creates financial storage.
+            // Authenticate the existing host identity before source, network, or worker startup.
+            let private_key = Zeroizing::new(load_native_private_key(&config.key_id)?);
+            use sha2::{Digest, Sha256};
+            let public_key = okx_protocol::crypto::public_key_from_private(*private_key);
+            let scope = format!("{:x}", Sha256::digest(public_key));
+            // Existing installation only: startup never creates financial storage.
+            std::fs::create_dir_all(&config.root)?;
             let _engine_lease = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -310,90 +317,105 @@ async fn run(cli: Cli) -> AgentResult<()> {
             // is opened. A finance.sqlite can only open via the single
             // native owner; a legacy Cloudflare finance fallback is never
             // constructed for the same installation.
-            let finance_present =
-                match std::fs::symlink_metadata(config.root.join("finance").join("finance.sqlite"))
-                {
-                    Ok(_) => true,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-                    Err(_) => {
-                        return Err(AgentError::FinancialCaptureTask(
-                            "FINANCE_AUTHORITY_STATUS_UNAVAILABLE".into(),
-                        ));
+            let finance_status =
+                std::fs::symlink_metadata(config.root.join("finance").join("finance.sqlite"));
+            let opened = match &finance_status {
+                Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                    let campaign = stopped_finance_campaign
+                        .as_deref()
+                        .or(native_finance_campaign.as_deref())
+                        .unwrap_or("");
+                    let result = if stopped_finance_mode {
+                        AccountRuntimeRegistry::open_stopped_finance(
+                            &config.root,
+                            budget.clone(),
+                            campaign,
+                        )
+                        .await
+                    } else {
+                        AccountRuntimeRegistry::open_native_finance(
+                            &config.root,
+                            budget.clone(),
+                            campaign,
+                        )
+                        .await
+                    };
+                    match result {
+                        Ok((registry, owner)) => Some((Arc::new(registry), owner)),
+                        Err(_) => {
+                            eprintln!(
+                                "financial authority unavailable; research remains available"
+                            );
+                            None
+                        }
                     }
-                };
-            let (accounts, native_owner) = if finance_present {
-                let campaign = stopped_finance_campaign
-                    .as_deref()
-                    .or(native_finance_campaign.as_deref())
-                    .unwrap_or("");
-                if stopped_finance_mode && campaign.is_empty() {
-                    return Err(AgentError::FinancialCaptureTask(
-                        "FINANCE_STOPPED_CAMPAIGN_REQUIRED".into(),
-                    ));
                 }
-                let (registry, owner) = if stopped_finance_mode {
-                    AccountRuntimeRegistry::open_stopped_finance(
-                        &config.root,
-                        budget.clone(),
-                        campaign,
-                    )
-                    .await?
-                } else {
-                    AccountRuntimeRegistry::open_native_finance(
-                        &config.root,
-                        budget.clone(),
-                        campaign,
-                    )
-                    .await?
-                };
-                (Arc::new(registry), owner)
-            } else {
-                // Absence of the canonical SQLite is a stopped installation,
-                // never permission to construct a remote financial owner.
-                return Err(AgentError::FinancialCaptureTask(if stopped_finance_mode {
-                    "FINANCE_STOPPED_IMPORT_REQUIRED".into()
-                } else {
-                    "FINANCE_INSTALLATION_NOT_INITIALIZED".into()
-                }));
+                _ => None,
             };
+            let finance_missing =
+                matches!(finance_status, Err(ref e) if e.kind() == std::io::ErrorKind::NotFound);
             let public_client = OkxPublicClient::with_rate_budget(env, budget.clone())?;
             let reference = bootstrap_reference(public_client.clone()).await?;
             let (public, public_ws) =
                 PublicWsCoordinator::new_with_rate_budget(env, reference, budget);
             let market = MarketBootstrapper::new(public_client);
-            let analytics = AnalyticsService::new(config.root.join("analytics"), market.clone())
-                .map_err(AgentError::ResearchSessionTask)?;
-            // Financial authority is the single local SQL owner. Cloudflare
-            // transports authenticated product commands, never risk grants.
-            let campaign = stopped_finance_campaign.or(native_finance_campaign);
-            let backend = match campaign {
-                Some(campaign) => NativeFinanceRisk::new(
-                    native_owner,
-                    accounts.installation_id().to_owned(),
-                    campaign,
-                )
-                .map_err(|reason| AgentError::FinancialCaptureTask(reason.into()))?,
-                None => NativeFinanceRisk::from_owner(native_owner),
-            };
-            let risk_client = if stopped_finance_mode {
-                NativeRiskClient::local_stopped(backend)
+            let research = ResearchClient::installed(
+                config.root.clone(),
+                config.root.join("analytics"),
+                okx_protocol::research_ipc::ResearchScope::new(scope.clone())
+                    .map_err(|reason| AgentError::ResearchSessionTask(reason.into()))?,
+                market.clone(),
+            );
+            // Construct trading only when the existing native financial owner opened.
+            let finance = if let Some((accounts, native_owner)) = opened {
+                let campaign = stopped_finance_campaign.or(native_finance_campaign);
+                let backend = match campaign {
+                    Some(campaign) => NativeFinanceRisk::new(
+                        native_owner,
+                        accounts.installation_id().to_owned(),
+                        campaign,
+                    ),
+                    None => Ok(NativeFinanceRisk::from_owner(native_owner)),
+                };
+                match backend {
+                    Ok(backend) => {
+                        let risk_client = if stopped_finance_mode {
+                            NativeRiskClient::local_stopped(backend)
+                        } else {
+                            NativeRiskClient::local(backend)
+                        };
+                        let trade = Arc::new(TradeService::new(
+                            accounts.clone(),
+                            public_ws.clone(),
+                            risk_client,
+                        ));
+                        trade
+                            .set_live_source(okx_runtime::live_source::LiveCandleSource::new(
+                                market.clone(),
+                            ))
+                            .await;
+                        if stopped_finance_mode {
+                            FinanceDispatch::stopped(accounts, trade)
+                        } else {
+                            FinanceDispatch::ready(accounts, trade)
+                        }
+                    }
+                    Err(_) => {
+                        accounts.shutdown().await;
+                        FinanceDispatch::invalid()
+                    }
+                }
+            } else if finance_missing {
+                FinanceDispatch::missing()
             } else {
-                NativeRiskClient::local(backend)
+                FinanceDispatch::invalid()
             };
-            let trade = Arc::new(TradeService::new(
-                accounts.clone(),
-                public_ws.clone(),
-                risk_client,
-            ));
-            trade.set_analytics(analytics.clone()).await;
             let dispatch = DispatchContext {
-                accounts,
-                analytics,
+                finance,
+                research,
                 public_ws,
-                trade,
                 market,
             };
-            let private_key = Zeroizing::new(load_native_private_key(&config.key_id)?);
             match command {
                 Command::Once { input: path } => {
                     let mut data = match path {
@@ -410,7 +432,8 @@ async fn run(cli: Cli) -> AgentResult<()> {
                     )
                     .await?;
                     println!("{}", serde_json::to_string(&reply)?);
-                    dispatch.accounts.shutdown().await;
+                    dispatch.research.shutdown().await;
+                    dispatch.finance.shutdown().await;
                 }
                 Command::Run {
                     mailbox_issue,
@@ -429,6 +452,7 @@ async fn run(cli: Cli) -> AgentResult<()> {
                                 cloudflare_runtime_id,
                                 load_native_cloudflare_token()?,
                                 DirectRuntimeProfile::Engine,
+                                scope.clone(),
                             )
                         })
                         .transpose()?;
