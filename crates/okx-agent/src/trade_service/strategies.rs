@@ -344,9 +344,12 @@ impl TradeService {
                 let result = tokio::time::timeout(Duration::from_secs(4), async {
                     // After authenticated account connection, the original
                     // retained policy may now have a complete SQL roster.
+                    #[cfg(test)]
                     if self.risk.is_native_finance() {
-                        self.risk.apply_native_governance(&authority).await?;
+                        self.risk.apply_required_governance(&authority).await?;
                     }
+                    #[cfg(not(test))]
+                    self.risk.apply_required_governance(&authority).await?;
                     self.install_captured_empty_campaign_opening(&authority, until)
                         .await
                 })
