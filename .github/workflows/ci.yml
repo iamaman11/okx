@@ -229,6 +229,10 @@ jobs:
           cargo test --locked -p okx-agent --lib risk_book_contract_native_public_cancel_after_held_replays_and_cold_reopens_without_send -- --nocapture
           cargo test --locked -p okx-agent --lib risk_book_contract_native_os_kill_after_create_recovers_original_unknown -- --nocapture
           cargo test --locked -p okx-agent --lib risk_book_contract_native_two_accounts_share_budget_and_isolate_public_capital_receipts -- --nocapture
+      - name: Native connected-account identity and original shared finance owner
+        run: |
+          cargo test --locked -p okx-agent --lib risk_book_contract_native_connect_two_accounts_and_reopen_one_original_sqlite -- --nocapture
+          cargo test --locked -p okx-agent --lib risk_book_contract_native_connect_wrong_uid_does_not_create_account_or_publish_catalog -- --nocapture
       - name: Census original source, scope, receipt and post-HELD regressions
         run: |
           cargo test --locked -p okx-agent --lib trade_service::execute::tests::e2_ -- --nocapture

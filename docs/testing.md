@@ -25,6 +25,22 @@ Source of truth: issue #512 r11, code of accepted main commit 9c36f50fc9a02d59d6
 
 **Performance measurement status:** #510 accepted CI reported 95.996s post-build runtime and 126.048s test build for its declared workload (not a new #512 baseline). S0's direct-test 5/10/30s and diagnostic p95/250ms targets remain *UNMEASURED / NOT YET FIXED* until three equivalent Windows runner runs with exact test IDs, seeds, fixture sizes, cache state and separate build/setup/execution times. No baseline or budget is invented from source inspection; S0 cannot be accepted on this note alone.
 
+### #512 — Native account bootstrap supersedes per-account worker fixtures
+
+Two old tests were retired from `accounts.rs` because they opened
+independent legacy `account.sqlite` writers; current installed Engine never
+does that:
+
+| Removed test | Current-owner equivalent |
+|---|---|
+| `prepared_account_rejects_unverified_identity_before_sql` | `risk_book_contract_native_connect_wrong_uid_does_not_create_account_or_publish_catalog` — original native signed-UID denial cannot create an account or publish catalog state |
+| `recorded_two_account_bootstrap_opens_independent_sql_owners` | `risk_book_contract_native_connect_two_accounts_and_reopen_one_original_sqlite` + `risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_entry_cap` — verified two-account isolation and reopen on one original `finance.sqlite` owner, not two retired writers |
+
+The `accounts.rs` tests for original source-frontier readiness,
+recorded multi-page capture and historical diagnostic recovery **remain**
+until equivalent direct Native properties are demonstrated. This does not
+remove the test-only registry fallback or justify S1 acceptance.
+
 ### #512 — Native POST/replay/UNKNOWN witnesses replace retired worker tests
 
 Eight old per-account `AccountStoreHandle` send/recovery simulations were removed
