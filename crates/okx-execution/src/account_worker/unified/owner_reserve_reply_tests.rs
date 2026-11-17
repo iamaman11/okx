@@ -106,7 +106,16 @@ async fn nav(owner: &UnifiedFinanceHandle, at: i64) {
         .unwrap();
 }
 
-async fn setup() -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
+pub(super) async fn setup() -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
+    setup_inner(true).await
+}
+
+pub(super) async fn setup_before_reserve_attempt()
+-> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
+    setup_inner(false).await
+}
+
+async fn setup_inner(mark_attempt: bool) -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
     let (root, owner) = fresh().await;
     let started = owner
         .campaign_summary(campaign())
@@ -281,10 +290,12 @@ async fn setup() -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
         .bind_entry_evidence(deadline(), account(), quote, Some(admission))
         .await
         .unwrap();
-    owner
-        .mark_reserve_attempt(deadline(), account(), INTENT.into(), reservation())
-        .await
-        .unwrap();
+    if mark_attempt {
+        owner
+            .mark_reserve_attempt(deadline(), account(), INTENT.into(), reservation())
+            .await
+            .unwrap();
+    }
     nav(&owner, now()).await;
     let request = NativeReserveRequest {
         venue: "okx".into(),
@@ -481,7 +492,7 @@ async fn close(owner: UnifiedFinanceHandle) {
     }
     assert!(*stopped.borrow());
 }
-async fn cleanup(root: PathBuf, owner: UnifiedFinanceHandle) {
+pub(super) async fn cleanup(root: PathBuf, owner: UnifiedFinanceHandle) {
     close(owner).await;
     assert_eq!(
         root.parent().unwrap().canonicalize().unwrap(),

@@ -4,7 +4,7 @@ use super::*;
 // Finite external market observations, causally delivered after each of the
 // two Execute inventory scans. No periodic publisher or source freshness bypass.
 pub(super) struct ExecuteMarketBoundary {
-    pub(super) feed: Arc<RecordedAccountHttp>,
+    pub(crate) feed: Arc<RecordedAccountHttp>,
     pub(super) market: Mutex<Option<(Arc<RecordedWsConnector>, okx_runtime::PublicWsHandle)>>,
     pub(super) market_quote: Mutex<Option<ExecuteMarketQuote>>,
     pub(super) updates: AtomicUsize,
@@ -192,11 +192,11 @@ impl HttpTransport for ExecuteMarketBoundary {
     }
 }
 
-pub(super) fn envelope(data: Value) -> Vec<u8> {
+pub(crate) fn envelope(data: Value) -> Vec<u8> {
     serde_json::to_vec(&json!({"code":"0","msg":"","data":data})).unwrap()
 }
 
-pub(super) fn record_fee(feed: &RecordedAccountHttp, observed_at: &str) {
+pub(crate) fn record_fee(feed: &RecordedAccountHttp, observed_at: &str) {
     feed.expect_get(RecordedGet {
         access_key: "fixture-observer-a".into(),
         path: "/api/v5/account/trade-fee".into(),
@@ -209,7 +209,7 @@ pub(super) fn record_fee(feed: &RecordedAccountHttp, observed_at: &str) {
     });
 }
 
-pub(super) fn record_leverage(feed: &RecordedAccountHttp) {
+pub(crate) fn record_leverage(feed: &RecordedAccountHttp) {
     feed.expect_get(RecordedGet {
         access_key: "fixture-observer-a".into(),
         path: "/api/v5/account/leverage-info".into(),
@@ -337,21 +337,21 @@ pub(super) fn raw_market_with_public_client(
     (coordinator, handle, socket)
 }
 
-pub(super) struct NativeFixture {
-    pub(super) root: PathBuf,
-    pub(super) registry: Arc<AccountRuntimeRegistry>,
-    pub(super) owner: UnifiedFinanceHandle,
-    pub(super) _account: Arc<AccountResources>,
-    pub(super) config: VerifiedAccountConfig,
-    pub(super) feed: Arc<RecordedAccountHttp>,
+pub(crate) struct NativeFixture {
+    pub(crate) root: PathBuf,
+    pub(crate) registry: Arc<AccountRuntimeRegistry>,
+    pub(crate) owner: UnifiedFinanceHandle,
+    pub(crate) _account: Arc<AccountResources>,
+    pub(crate) config: VerifiedAccountConfig,
+    pub(crate) feed: Arc<RecordedAccountHttp>,
     pub(super) market_boundary: Arc<ExecuteMarketBoundary>,
     pub(super) _market: okx_runtime::PublicWsCoordinator,
-    pub(super) trade: Arc<TradeService>,
-    pub(super) authority: CentralGovernanceSnapshot,
-    pub(super) campaign: String,
+    pub(crate) trade: Arc<TradeService>,
+    pub(crate) authority: CentralGovernanceSnapshot,
+    pub(crate) campaign: String,
 }
 
-pub(super) async fn fixture() -> NativeFixture {
+pub(crate) async fn fixture() -> NativeFixture {
     fixture_for_accounts(&["a"]).await
 }
 
@@ -622,7 +622,7 @@ pub(super) async fn fixture_for_accounts(labels: &[&str]) -> NativeFixture {
     }
 }
 
-pub(super) fn execute() -> TradeRequest {
+pub(crate) fn execute() -> TradeRequest {
     serde_json::from_value(serde_json::json!({
         "action":"execute","idempotency_key":"native_opening_required_001",
         "operation":"open","strategy_instance":"manual","instrument":"BTC-USDT-SWAP",
@@ -634,7 +634,7 @@ pub(super) fn execute() -> TradeRequest {
 }
 
 impl NativeFixture {
-    pub(super) async fn finish(self) {
+    pub(crate) async fn finish(self) {
         assert!(
             !self.root.join("accounts").exists(),
             "one original financial SQLite only"

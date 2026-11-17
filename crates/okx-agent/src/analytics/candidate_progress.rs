@@ -119,20 +119,7 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize},
     };
 
-    fn financial_files(
-        root: &std::path::Path,
-    ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
-        let mut files = std::collections::BTreeMap::new();
-        for entry in std::fs::read_dir(root).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                files.extend(financial_files(&path));
-            } else {
-                files.insert(path.clone(), std::fs::read(path).unwrap());
-            }
-        }
-        files
-    }
+    use crate::accounts::tests::read_only_fixture_files as financial_files;
 
     fn fixture() -> (
         Vec<replay::Bar>,
@@ -243,22 +230,42 @@ mod tests {
         let installation = root.join("installation");
         crate::accounts::initialize_installation(&installation, "candidate-progress-installation")
             .unwrap();
-        let accounts = Arc::new(
-            crate::accounts::AccountRuntimeRegistry::open(&installation, RateBudget::new())
-                .await
-                .unwrap(),
-        );
+        let initial_owner = okx_execution::account_worker::UnifiedFinanceHandle::initialize_new(
+            installation.clone(),
+            okx_execution::NewFinanceInstallation {
+                installation_id: "candidate-progress-installation".into(),
+                initialize_request_id: "initialize_readonly_dispatch_001".into(),
+                source_tree: "a".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+        let mut initial_closed = initial_owner.termination_signal();
+        drop(initial_owner);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            initial_closed.wait_for(|v| *v),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (accounts, finance_owner) =
+            crate::accounts::tests::open_native_test_registry(&installation, RateBudget::new())
+                .await;
+        let accounts = Arc::new(accounts);
         let (coordinator, public_ws) = okx_runtime::PublicWsCoordinator::new_with_connector(
             environment,
             okx_observation::ReferenceRegistry::from_public("fixture", vec![]).unwrap(),
             RateBudget::new(),
             Arc::new(crate::accounts::recorded_support::OfflineSocket),
         );
-        let (risk_tx, mut risk_rx) = tokio::sync::mpsc::channel(4);
+        let finance_jobs_before = finance_owner.sql_timing().observed_jobs;
         let trade = Arc::new(crate::trade_service::TradeService::new(
             accounts.clone(),
             public_ws.clone(),
-            crate::risk_bridge::NativeRiskClient::new(risk_tx),
+            crate::risk_bridge::NativeRiskClient::local(
+                crate::native_finance_risk::NativeFinanceRisk::from_owner(finance_owner.clone()),
+            ),
         ));
         let context = crate::query::DispatchContext {
             accounts,
@@ -330,11 +337,20 @@ mod tests {
             .unwrap();
         assert_eq!(context.analytics.jobs.get(&id).unwrap().progress, 100);
         assert_eq!(network.0.load(Ordering::Relaxed), 0);
-        assert!(risk_rx.try_recv().is_err());
+        assert_eq!(
+            finance_owner.sql_timing().observed_jobs,
+            finance_jobs_before
+        );
         assert_eq!(before, financial_files(&installation));
         context.accounts.shutdown().await;
+        let mut closed = finance_owner.termination_signal();
         drop(context);
         drop(coordinator);
+        drop(finance_owner);
+        tokio::time::timeout(std::time::Duration::from_secs(5), closed.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

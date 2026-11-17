@@ -545,6 +545,7 @@ impl TradeService {
                         .positions
                         .iter()
                         .all(|p| dec(&p.position).is_ok_and(|quantity| quantity == Decimal::ZERO));
+                #[cfg(test)]
                 let releasing_id = release_scope.map(|scope| scope.intent_id.to_owned());
                 let (local_intents, pending_central, verified_terminal_peers) = if let Some(census) = &native_census {
                     (census.intents.clone(), census.pending_central.clone(),

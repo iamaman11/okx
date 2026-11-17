@@ -171,11 +171,11 @@ async fn protection_cleanup_step(
                 .await
                 .map_err(err)?
                 .ok_or("PROTECTION_CLEANUP_BEGIN_MISSING")?;
-            return match old.result_ref.as_str() {
+            match old.result_ref.as_str() {
                 "POSTING" => Ok(ProtectionCleanupStep::Inspect),
                 "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
                 _ => Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into()),
-            };
+            }
         }
     }
     #[cfg(test)]
@@ -200,10 +200,6 @@ async fn protection_cleanup_step(
             })
             .await
             .map_err(err)
-    }
-    #[cfg(not(test))]
-    {
-        Err("NATIVE_FINANCE_OWNER_REQUIRED".into())
     }
 }
 
@@ -346,7 +342,7 @@ async fn commit_cleanup_confirmation(
                 )
                 .await
                 .map_err(err)?;
-            return Ok(());
+            Ok(())
         }
     }
     #[cfg(test)]
@@ -364,10 +360,6 @@ async fn commit_cleanup_confirmation(
             .await
             .map_err(err)?;
         Ok(())
-    }
-    #[cfg(not(test))]
-    {
-        Err("NATIVE_FINANCE_OWNER_REQUIRED".into())
     }
 }
 

@@ -65,13 +65,13 @@ pub use legacy::AccountStoreHandle;
 mod unified;
 pub use crate::risk::{NativeOpeningAccount, NativeOpeningSource};
 pub use unified::{
-    NativeCampaignAccountPolicy, NativeCampaignPolicy, NativeCampaignPolicyReceipt,
-    NativeCampaignStrategyPolicy, NativeIntentDiagnosticSnapshot, NativePostDecision,
-    NativePostRequest, NativeRecoveryProof, NativeReserveDecision, NativeReserveRequest,
-    ReportedOpeningCensus, ReportedOpeningReceipt, ReportedRiskCensus,
-    StrategyDecisionClaimCommand, StrategyMutationCommand, UnifiedFinanceAccountPolicyReadback,
-    UnifiedFinanceAccountReadback, UnifiedFinanceBoundSettlement,
-    UnifiedFinanceBoundSettlementReceipt, UnifiedFinanceBoundUnsent,
+    NativeAccountDiagnosticSnapshot, NativeCampaignAccountPolicy, NativeCampaignPolicy,
+    NativeCampaignPolicyReceipt, NativeCampaignStrategyPolicy, NativeIntentDiagnosticSnapshot,
+    NativePostDecision, NativePostRequest, NativeRecoveryProof, NativeReserveDecision,
+    NativeReserveRequest, NativeRiskStopDiagnostic, ReportedOpeningCensus, ReportedOpeningReceipt,
+    ReportedRiskCensus, StrategyDecisionClaimCommand, StrategyMutationCommand,
+    UnifiedFinanceAccountPolicyReadback, UnifiedFinanceAccountReadback,
+    UnifiedFinanceBoundSettlement, UnifiedFinanceBoundSettlementReceipt, UnifiedFinanceBoundUnsent,
     UnifiedFinanceBoundUnsentReceipt, UnifiedFinanceCampaignSummary, UnifiedFinanceHandle,
     UnifiedFinanceInventory, UnifiedFinancePolicy, UnifiedFinancePolicyAccount,
     UnifiedFinanceReservationReadback,

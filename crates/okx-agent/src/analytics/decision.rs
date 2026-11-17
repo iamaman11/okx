@@ -448,22 +448,42 @@ mod tests {
         let installation = root.join("installation");
         crate::accounts::initialize_installation(&installation, "decision-dispatch-installation")
             .unwrap();
-        let accounts = Arc::new(
-            crate::accounts::AccountRuntimeRegistry::open(&installation, RateBudget::new())
-                .await
-                .unwrap(),
-        );
+        let initial_owner = okx_execution::account_worker::UnifiedFinanceHandle::initialize_new(
+            installation.clone(),
+            okx_execution::NewFinanceInstallation {
+                installation_id: "decision-dispatch-installation".into(),
+                initialize_request_id: "initialize_readonly_dispatch_001".into(),
+                source_tree: "a".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+        let mut initial_closed = initial_owner.termination_signal();
+        drop(initial_owner);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            initial_closed.wait_for(|v| *v),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (accounts, finance_owner) =
+            crate::accounts::tests::open_native_test_registry(&installation, RateBudget::new())
+                .await;
+        let accounts = Arc::new(accounts);
         let (coordinator, public_ws) = okx_runtime::PublicWsCoordinator::new_with_connector(
             environment,
             okx_observation::ReferenceRegistry::from_public("fixture", vec![]).unwrap(),
             RateBudget::new(),
             Arc::new(crate::accounts::recorded_support::OfflineSocket),
         );
-        let (risk_tx, mut risk_rx) = tokio::sync::mpsc::channel(4);
+        let finance_jobs_before = finance_owner.sql_timing().observed_jobs;
         let trade = Arc::new(crate::trade_service::TradeService::new(
             accounts.clone(),
             public_ws.clone(),
-            crate::risk_bridge::NativeRiskClient::new(risk_tx),
+            crate::risk_bridge::NativeRiskClient::local(
+                crate::native_finance_risk::NativeFinanceRisk::from_owner(finance_owner.clone()),
+            ),
         ));
         let context = crate::query::DispatchContext {
             accounts,
@@ -504,10 +524,19 @@ mod tests {
         );
         assert_eq!(context.analytics.jobs.snapshot().len(), 2);
         assert_eq!(network.0.load(Ordering::Relaxed), 0);
-        assert!(risk_rx.try_recv().is_err());
+        assert_eq!(
+            finance_owner.sql_timing().observed_jobs,
+            finance_jobs_before
+        );
         context.accounts.shutdown().await;
+        let mut closed = finance_owner.termination_signal();
         drop(context);
         drop(coordinator);
+        drop(finance_owner);
+        tokio::time::timeout(std::time::Duration::from_secs(5), closed.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

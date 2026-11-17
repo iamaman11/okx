@@ -25,6 +25,21 @@ Source of truth: issue #512 r11, code of accepted main commit 9c36f50fc9a02d59d6
 
 **Performance measurement status:** #510 accepted CI reported 95.996s post-build runtime and 126.048s test build for its declared workload (not a new #512 baseline). S0's direct-test 5/10/30s and diagnostic p95/250ms targets remain *UNMEASURED / NOT YET FIXED* until three equivalent Windows runner runs with exact test IDs, seeds, fixture sizes, cache state and separate build/setup/execution times. No baseline or budget is invented from source inspection; S0 cannot be accepted on this note alone.
 
+### #512 — coordinated Native fixture and command ownership slice
+
+Base: PR #513 `c25340d`. Cancel/Replace/Close now live in `trade_service/reconcile/{cancel,replace,close}.rs`; Status and corrective protection in `reconcile/status.rs`; shared evidence guards stay in `reconcile.rs`. Existing status test namespace is retained through `reconcile/status_tests.rs`. Command bodies were compared to the base after visibility/format normalization.
+
+Current-owner replacements:
+- Source frontier and cold diagnostic restore: `accounts::native_trade_contracts::native_source_diagnostic::{campaign_readiness_requires_capture_of_new_source_frontier,recovery_prepared_account_reopens_catalog_and_original_sql}`. The latter replaces the old `accounts::tests` exact CI name; zero execution still fails.
+- PC01–PC07: same direct-test names, current `UnifiedFinanceHandle` and scoped operations; PC05 reopens the same financial database. PC07 obtains intent/protection through public Execute, signed fill capture and Status before its direct cleanup/concurrent-call checks. Its independent flat observation is a component input, not a full public Close lifecycle proof.
+- F1: `account_worker::unified::owner_admission_crash_tests::risk_book_contract_native_os_kill_prepared_before_reserve_rejects_unsent` kills after actual prepare and before the reserve-attempt marker, then verifies durable absence of risk/POST and idempotent rejection.
+- F7: `accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once` kills after signed fill ingestion, before projection; original fee and one lot survive exact replay. This is not a kill inside projection COMMIT.
+- Research/public dispatch and trace/source contention use current Native fixtures. The Native storage metadata view explicitly remains NOT_EVALUATED/null with NATIVE_STORAGE_PROJECTION_NOT_AVAILABLE; it must not invent the retired per-account cached policy. Occupied FIFO and known durable receipt recovery remain separately proved by existing Native diagnostic contracts.
+
+Local Windows debug verification: Agent 462 PASS / 4 historical ignored (K9 separate), K9 1 PASS with 30 measurements, Execution 350 PASS / 2 ignored, Protocol 41 PASS / 1 ignored; compile-negative docs Execution 1 and Agent 2 PASS. Agent runtime 164.01s, Execution 22.87s, K9 3.72s; not the full 61-property runner or GitHub Windows gate. The first broad run failed 3 file-byte checks on active Native lock files. A shared test inventory now retains coordination paths without reading their lock bytes; DB/WAL/data bytes and new files remain checked, with a negative control. Focused fix 5/5 and subsequent broad Agent run passed. Strict multi-package all-target Clippy passed; standalone default Execution doc build still reports legacy-only unused helpers, to remove with S1. This is not an accepted SHA_A.
+
+Historical K5 phase repetition and Worker F7 are not replaced wholesale by these two new crash points. Legacy worker/feature/branches still exist; S1, SHA_A, SHA_B and full #512 acceptance remain incomplete. Actual executed results belong to their exact source and report, not this navigation map. No installation or live trading is accepted by this slice.
+
 ### #512 — Scope and stale-generation properties on current owner
 
 The old `wrong_uid_rejected_before_post` and `view_selection_does_not_reroute_intent`

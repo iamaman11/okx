@@ -1194,7 +1194,7 @@ mod native_connect_contracts;
 
 #[cfg(test)]
 #[path = "accounts_native_trade_contract_tests.rs"]
-mod native_trade_contracts;
+pub(crate) mod native_trade_contracts;
 
 #[cfg(test)]
 pub(crate) mod recorded_support {
@@ -6214,8 +6214,88 @@ pub(crate) mod recorded_support {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    /// Compare durable files while an actual SQLite owner holds Windows locks.
+    /// Coordination files remain in the manifest, but their bytes are not money.
+    pub(crate) fn read_only_fixture_files(
+        root: &Path,
+    ) -> std::collections::BTreeMap<PathBuf, Option<Vec<u8>>> {
+        fn collect(
+            root: &Path,
+            dir: &Path,
+            rows: &mut std::collections::BTreeMap<PathBuf, Option<Vec<u8>>>,
+        ) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let meta = std::fs::symlink_metadata(&path).unwrap();
+                assert!(
+                    !meta.file_type().is_symlink(),
+                    "fixture must not follow links"
+                );
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt as _;
+                    assert_eq!(meta.file_attributes() & 0x400, 0, "fixture reparse point");
+                }
+                if meta.is_dir() {
+                    collect(root, &path, rows);
+                } else {
+                    assert!(meta.is_file());
+                    let relative = path.strip_prefix(root).unwrap().to_owned();
+                    let native_lock = relative == Path::new("finance/authority-mode.lock")
+                        || relative == Path::new("finance/finance.sqlite.writer.lock");
+                    let sqlite_shm = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.strip_suffix(".sqlite-shm"))
+                        .is_some_and(|n| path.with_file_name(format!("{n}.sqlite")).is_file());
+                    let bytes = if native_lock || sqlite_shm {
+                        None
+                    } else {
+                        Some(std::fs::read(&path).unwrap_or_else(|error| {
+                            panic!("fixture file {}: {error}", path.display())
+                        }))
+                    };
+                    rows.insert(relative, bytes);
+                }
+            }
+        }
+        let mut rows = std::collections::BTreeMap::new();
+        collect(root, root, &mut rows);
+        rows
+    }
+
+    #[test]
+    fn fixture_file_manifest_detects_durable_and_wal_changes_without_reading_coordination() {
+        let root = root();
+        std::fs::create_dir_all(root.join("finance")).unwrap();
+        let db = root.join("finance/finance.sqlite");
+        let wal = root.join("finance/finance.sqlite-wal");
+        let shm = root.join("finance/finance.sqlite-shm");
+        std::fs::write(&db, [1]).unwrap();
+        std::fs::write(&wal, [2]).unwrap();
+        std::fs::write(&shm, [0]).unwrap();
+        std::fs::write(root.join("finance/authority-mode.lock"), []).unwrap();
+        let original = read_only_fixture_files(&root);
+        assert_eq!(original[Path::new("finance/finance.sqlite-shm")], None);
+        std::fs::write(&shm, [9]).unwrap();
+        assert_eq!(read_only_fixture_files(&root), original);
+        std::fs::write(&wal, [3]).unwrap();
+        assert_ne!(read_only_fixture_files(&root), original);
+        std::fs::write(&wal, [2]).unwrap();
+        std::fs::write(&db, [4]).unwrap();
+        assert_ne!(read_only_fixture_files(&root), original);
+        std::fs::write(&db, [1]).unwrap();
+        std::fs::write(root.join("unexpected"), [5]).unwrap();
+        assert_ne!(read_only_fixture_files(&root), original);
+        assert_eq!(
+            root.parent().unwrap().canonicalize().unwrap(),
+            std::env::temp_dir().canonicalize().unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn root() -> PathBuf {
         let mut nonce = [0; 16];
         getrandom::fill(&mut nonce).unwrap();
@@ -6223,6 +6303,45 @@ mod tests {
             "okx-clean-accounts-{:032x}",
             u128::from_le_bytes(nonce)
         ))
+    }
+    pub(crate) async fn open_native_test_registry(
+        root: &Path,
+        budget: RateBudget,
+    ) -> (AccountRuntimeRegistry, UnifiedFinanceHandle) {
+        AccountRuntimeRegistry::open_native_catalog(root, budget, "")
+            .await
+            .unwrap()
+    }
+    async fn native_root() -> PathBuf {
+        let root = root();
+        initialize_installation(&root, "installation-test").unwrap();
+        let owner = UnifiedFinanceHandle::initialize_new(
+            root.clone(),
+            okx_execution::NewFinanceInstallation {
+                installation_id: "installation-test".into(),
+                initialize_request_id: "initialize_recorded_sources_001".into(),
+                source_tree: "a".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+        let mut closed = owner.termination_signal();
+        drop(owner);
+        tokio::time::timeout(std::time::Duration::from_secs(3), closed.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
+        root
+    }
+    async fn close_native(registry: AccountRuntimeRegistry, owner: UnifiedFinanceHandle) {
+        registry.shutdown().await;
+        let mut closed = owner.termination_signal();
+        drop(registry);
+        drop(owner);
+        tokio::time::timeout(std::time::Duration::from_secs(5), closed.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
     }
     fn key() -> AccountKey {
         AccountKey {
@@ -6299,106 +6418,6 @@ mod tests {
         assert!(feed.outbound_posts.lock().unwrap().is_empty());
     }
 
-    #[tokio::test]
-    async fn recovery_prepared_account_reopens_catalog_and_original_sql() {
-        use recorded_support::{RecordedAccountHttp, prepared};
-        let root = root();
-        initialize_installation(&root, "installation-test").unwrap();
-        let budget = RateBudget::new();
-        let feed = Arc::new(RecordedAccountHttp::default());
-        let registry = AccountRuntimeRegistry::open(&root, budget.clone())
-            .await
-            .unwrap();
-        let (config, clients) = prepared("a", feed.clone(), budget.clone());
-        registry
-            .connect_prepared(config.clone(), clients)
-            .await
-            .unwrap();
-        let owner = registry.resolve("fixture-a").await.unwrap();
-        let definition = owner
-            .execution
-            .store
-            .call(
-                std::time::Instant::now() + std::time::Duration::from_secs(3),
-                |s| {
-                    // A durable BEGIN alone cannot reconstruct send or ACK.
-                    // No matching intent is fabricated for this orphan receipt.
-                    s.begin_operation(
-                        "cleanup_restart_diagnostic",
-                        "restart-diagnostic-hash",
-                        "protection_cleanup",
-                        1234,
-                    )?;
-                    s.ensure_manual_instance(1234)
-                },
-            )
-            .await
-            .unwrap();
-        let mut ended = owner.execution.store.termination_signal();
-        drop(owner);
-        registry.shutdown().await;
-        drop(registry);
-        tokio::time::timeout(std::time::Duration::from_secs(3), ended.wait_for(|v| *v))
-            .await
-            .unwrap()
-            .unwrap();
-
-        let reopened = AccountRuntimeRegistry::open(&root, budget.clone())
-            .await
-            .unwrap();
-        let (mut mismatch, clients) = prepared("a", feed.clone(), budget.clone());
-        mismatch.alias = "wrong-alias".into();
-        assert!(
-            reopened
-                .reconnect_prepared(mismatch, clients)
-                .await
-                .is_err()
-        );
-        let (_, clients) = prepared("a", feed.clone(), budget.clone());
-        reopened
-            .reconnect_prepared(config.clone(), clients)
-            .await
-            .unwrap();
-        assert_eq!(reopened.list().await, vec![config.clone()]);
-        let owner = reopened.resolve("fixture-a").await.unwrap();
-        let recovered = owner
-            .execution
-            .store
-            .call(
-                std::time::Instant::now() + std::time::Duration::from_secs(3),
-                |s| s.instance("manual"),
-            )
-            .await
-            .unwrap()
-            .expect("original persisted instance");
-        assert_eq!(recovered.definition_id, definition.definition_id);
-        let projection = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            loop {
-                if let Ok(report) = owner
-                    .protection_operation_trace
-                    .read("cleanup_restart_diagnostic")
-                    && report["state"] == "OBSERVED"
-                {
-                    break report;
-                }
-                // Observe completion of the actual startup task, not a new
-                // Status/capture or a hand-published diagnostic event.
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("startup must restore the bounded durable diagnostic projection");
-        assert_eq!(projection["snapshot"]["durable_state"], "POSTING");
-        assert_eq!(projection["snapshot"]["venue_ack"], "UNKNOWN_PRIOR_CALL");
-        assert!(projection["snapshot"]["parent_invocation"].is_null());
-        assert!(projection["snapshot"]["intent_id"].is_null());
-        assert_eq!(projection["trace_health"]["history_complete"], "UNKNOWN");
-        let (_, clients) = prepared("a", feed.clone(), budget);
-        assert!(reopened.reconnect_prepared(config, clients).await.is_err());
-        assert_eq!(feed.outbound_posts.lock().unwrap().len(), 0);
-        drop(owner);
-        reopened.shutdown().await;
-    }
     /// This exercises the same identity/permission bootstrap with an exhausted
     /// raw HTTP transcript. A failed identity proof must never create SQL or
     /// a durable account route; no real network/credential store is contacted.
@@ -6812,180 +6831,19 @@ mod tests {
         );
     }
 
-    /// T09 bootstrap component: independent UIDs create separate real SQL
-    /// owners from bounded raw HTTP records, not from a fake exchange state.
-    /// Source publication precedes the real capture owner, which precedes
-    /// readiness. This is a boundary regression, not a claim that the long
-    /// T09.8 run exhausted this particular source.
-    #[tokio::test]
-    async fn campaign_readiness_requires_capture_of_new_source_frontier() {
-        use super::recorded_support::{
-            RecordedAccountHttp, RecordedGet, RecordedWsConnector, prepared_with_socket,
-        };
-        let temp = root();
-        initialize_installation(&temp, "installation-test").unwrap();
-        let budget = RateBudget::new();
-        let registry = AccountRuntimeRegistry::open(&temp, budget.clone())
-            .await
-            .unwrap();
-        let http = Arc::new(RecordedAccountHttp::default());
-        let (config, clients) = prepared_with_socket(
-            "a",
-            http.clone(),
-            Arc::new(RecordedWsConnector::default()),
-            budget,
-        );
-        registry.connect_prepared(config, clients).await.unwrap();
-        let account = registry.resolve("fixture-a").await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(12), async {
-            loop {
-                if account
-                    .source_capture_health
-                    .read()
-                    .await
-                    .last_success_ms
-                    .is_some()
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("initial production capture");
-        // Pause only the timer so this test can invoke the SAME capture
-        // function at the source boundary; SQL and capture ownership stay real.
-        let timer_lease = account.recorded_capture_gate.write().await;
-        let campaign = format!("sha256:{}", "c".repeat(64));
-        let id = campaign.clone();
-        let (from, covered) = account
-            .execution
-            .store
-            .call(
-                Instant::now() + std::time::Duration::from_secs(3),
-                move |s| {
-                    let from = s.meta().initialized_at;
-                    let mut covered = i64::MAX;
-                    for (name, partition) in [
-                        ("fills", "SPOT"),
-                        ("fills", "MARGIN"),
-                        ("fills", "SWAP"),
-                        ("fills", "FUTURES"),
-                        ("fills", "OPTION"),
-                        ("bills", "account"),
-                    ] {
-                        covered = covered.min(s.cursor(name, partition)?.unwrap().watermark);
-                    }
-                    s.seal_captured_campaign_baseline(&id, from, covered)?;
-                    Ok((from, covered))
-                },
-            )
-            .await
-            .unwrap();
-        let through = covered + 1;
-        let id = campaign.clone();
-        let diagnostic = account
-            .execution
-            .store
-            .call(
-                Instant::now() + std::time::Duration::from_secs(3),
-                move |s| {
-                    assert!(matches!(
-                        s.refresh_campaign_entry_readiness(&id, from, through),
-                        Err(okx_execution::StoreError::Invalid(
-                            "ENTRY_BASELINE_CAPTURE_PENDING"
-                        ))
-                    ));
-                    s.campaign_readiness_diagnostic(&id, from, through)
-                },
-            )
-            .await
-            .unwrap();
-        assert!(diagnostic.contains("requested_frontiers=ENTRY_BASELINE_CAPTURE_PENDING"));
-        assert!(diagnostic.contains("frontiers=COMPLETE"));
-        assert!(diagnostic.contains("fills/SWAP:lag_ms=1"));
-        let wrap = |data| {
-            serde_json::to_vec(&serde_json::json!({
-                "code":"0", "msg":"", "data":data,
-            }))
-            .unwrap()
-        };
-        // One finite, unchanged-balance observation and exactly six history
-        // pages. No extra retry, fallback, readiness stamp or GET allowance.
-        http.expect_get(RecordedGet {
-            access_key: "fixture-observer-a".into(),
-            path: "/api/v5/account/balance".into(),
-            required_query: vec![],
-            raw_response: wrap(serde_json::json!([{
-                "totalEq":"100", "adjEq":"100", "uTime":through.to_string(),
-                "details":[{"ccy":"USDT", "eq":"100", "liab":"0",
-                    "availEq":"100", "availBal":"100", "eqUsd":"100",
-                    "uTime":through.to_string()}]
-            }])),
-        });
-        for partition in ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"] {
-            http.expect_get(RecordedGet {
-                access_key: "fixture-executor-a".into(),
-                path: "/api/v5/trade/fills-history".into(),
-                required_query: vec![("instType".into(), partition.into())],
-                raw_response: wrap(serde_json::json!([])),
-            });
-        }
-        http.expect_get(RecordedGet {
-            access_key: "fixture-executor-a".into(),
-            path: "/api/v5/account/bills-archive".into(),
-            required_query: vec![],
-            raw_response: wrap(serde_json::json!([])),
-        });
-        crate::source_capture::capture_account_sources_measured(
-            &account.observer,
-            &account.private_ws,
-            &account.execution,
-        )
-        .await
-        .expect("real source capture after source publication");
-        account
-            .execution
-            .store
-            .call(
-                Instant::now() + std::time::Duration::from_secs(3),
-                move |s| {
-                    s.refresh_campaign_entry_readiness(&campaign, from, through)?;
-                    s.verify_campaign_entry_readiness(&campaign, from, through)
-                },
-            )
-            .await
-            .expect("captured source frontier can be reconciled");
-        assert!(http.outbound_posts.lock().unwrap().is_empty());
-        let mut terminated = account.execution.store.termination_signal();
-        drop(timer_lease);
-        registry.shutdown().await;
-        drop(account);
-        drop(registry);
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !*terminated.borrow_and_update() {
-                terminated.changed().await.unwrap();
-            }
-        })
-        .await
-        .unwrap();
-        std::fs::remove_dir_all(temp).unwrap();
-    }
-
     /// The original public account capture, not a fixture-set "fresh" flag.
     #[tokio::test]
     async fn recorded_ws_login_business_ack_and_six_history_pages_capture_both_sql_accounts() {
         use super::recorded_support::{
             RecordedAccountHttp, RecordedWsConnector, prepared_with_socket,
         };
-        let temp = root();
-        initialize_installation(&temp, "installation-test").unwrap();
+        let temp = native_root().await;
         let budget = RateBudget::new();
-        let registry = AccountRuntimeRegistry::open(&temp, budget.clone())
-            .await
-            .unwrap();
+        let (registry, owner) =
+            AccountRuntimeRegistry::open_native_catalog(&temp, budget.clone(), "")
+                .await
+                .unwrap();
         let http = Arc::new(RecordedAccountHttp::default());
-        let mut receipts = Vec::new();
         let mut sockets = Vec::new();
         for label in ["a", "b"] {
             let ws = Arc::new(RecordedWsConnector::default());
@@ -6996,7 +6854,7 @@ mod tests {
                 .await
                 .unwrap();
             let account = registry.resolve(&config.account_key.wire()).await.unwrap();
-            receipts.push(account.execution.store.termination_signal());
+            assert!(account.execution.store.native_scope().is_some());
             sockets.push(ws);
         }
         for (label, ws) in ["a", "b"].into_iter().zip(&sockets) {
@@ -7025,33 +6883,23 @@ mod tests {
                 assert_eq!(sent.iter().filter(|v| v["op"] == "login").count(), 2);
                 assert_eq!(sent.iter().filter(|v| v["op"] == "subscribe").count(), 2);
             }
-            let recorded = account
-                .execution
-                .store
-                .call(Instant::now() + std::time::Duration::from_secs(3), |s| {
-                    Ok((s.cursor("fills", "SWAP")?, s.cursor("bills", "account")?))
-                })
-                .await
-                .unwrap();
+            let scope = account.configuration.account_key.wire();
+            let recorded = (
+                owner
+                    .source_cursor(scope.clone(), "fills".into(), "SWAP".into())
+                    .await
+                    .unwrap(),
+                owner
+                    .source_cursor(scope, "bills".into(), "account".into())
+                    .await
+                    .unwrap(),
+            );
             assert!(recorded.0.is_some(), "SWAP history source not committed");
             assert!(recorded.1.is_some(), "bills history source not committed");
             assert_eq!(recorded.0.unwrap().coverage_gaps, "");
             assert_eq!(recorded.1.unwrap().coverage_gaps, "");
         }
-        registry.shutdown().await;
-        drop(registry);
-        for mut receipt in receipts {
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                while !*receipt.borrow_and_update() {
-                    receipt
-                        .changed()
-                        .await
-                        .expect("SQL owner exited without receipt");
-                }
-            })
-            .await
-            .expect("SQL owner not closed");
-        }
+        close_native(registry, owner).await;
         std::fs::remove_dir_all(temp).unwrap();
     }
 
@@ -7066,31 +6914,35 @@ mod tests {
         )
         .unwrap();
         // Even zero registered accounts cannot produce a legacy sender.
-        assert!(matches!(
-            AccountRuntimeRegistry::open(&root, RateBudget::new()).await,
-            Err(AgentError::FinancialCaptureTask(reason))
-                if reason == "FINANCE_CUTOVER_NOT_ACCEPTED"
-        ));
+        assert!(
+            AccountRuntimeRegistry::open_native_catalog(&root, RateBudget::new(), "")
+                .await
+                .is_err()
+        );
         assert!(!root.join("accounts").exists());
+        assert_eq!(
+            std::fs::read(root.join("finance").join("finance.sqlite")).unwrap(),
+            b"OFFLINE_NOT_AUTHORIZED"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
     async fn initialize_without_any_legacy_files() {
-        let root = root();
-        initialize_installation(&root, "installation-test").unwrap();
-        let registry = AccountRuntimeRegistry::open(&root, RateBudget::new())
-            .await
-            .unwrap();
+        let root = native_root().await;
+        let (registry, owner) =
+            AccountRuntimeRegistry::open_native_catalog(&root, RateBudget::new(), "")
+                .await
+                .unwrap();
         assert!(registry.list().await.is_empty());
         assert_eq!(registry.installation_id(), "installation-test");
         assert!(!root.join("accounts").exists());
+        close_native(registry, owner).await;
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn legacy_stop_claims_and_epochs_are_never_read() {
-        let root = root();
-        initialize_installation(&root, "installation-test").unwrap();
+        let root = native_root().await;
         for name in [
             "execution-ledger.json",
             "production-policy.json",
@@ -7100,12 +6952,14 @@ mod tests {
         ] {
             std::fs::create_dir(root.join(name)).unwrap();
         }
-        let registry = AccountRuntimeRegistry::open(&root, RateBudget::new())
-            .await
-            .unwrap();
+        let (registry, owner) =
+            AccountRuntimeRegistry::open_native_catalog(&root, RateBudget::new(), "")
+                .await
+                .unwrap();
         assert!(registry.list().await.is_empty());
         assert!(registry.failures().await.is_empty());
         assert!(!root.join("accounts").exists());
+        close_native(registry, owner).await;
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

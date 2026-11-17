@@ -1,12 +1,12 @@
 //! Finite external observations for the original Native fill/Close owners.
 use super::*;
 
-pub(super) const INSTRUMENT: &str = "BTC-USDT-SWAP";
-pub(super) const OPEN_ORDER: &str = "native-filled-open-001";
+pub(crate) const INSTRUMENT: &str = "BTC-USDT-SWAP";
+pub(crate) const OPEN_ORDER: &str = "native-filled-open-001";
 pub(super) const CLOSE_ORDER: &str = "native-filled-close-001";
-pub(super) const STOP: &str = "900000002";
+pub(crate) const STOP: &str = "900000002";
 
-pub(super) async fn opened_market(
+pub(crate) async fn opened_market(
     fixture: &mut NativeFixture,
 ) -> (
     watch::Sender<bool>,
@@ -113,7 +113,7 @@ pub(super) fn get(
 
 /// One independently timestamped balance and position snapshot. Repetition is
 /// explicit at the caller: each item names a real production assessment.
-pub(super) fn snapshot(feed: &RecordedAccountHttp, equity: &str, quantity: &str) {
+pub(crate) fn snapshot(feed: &RecordedAccountHttp, equity: &str, quantity: &str) {
     let at = chrono::Utc::now().timestamp_millis().to_string();
     get(
         feed,
@@ -143,7 +143,7 @@ pub(super) fn snapshot(feed: &RecordedAccountHttp, equity: &str, quantity: &str)
 /// Exactly one production monetary capture turn, five original partitions and
 /// one independently signed bill page. Later turns may be empty incremental
 /// windows; immutable prior fills and bills remain in the original SQL owner.
-pub(super) fn history(feed: &RecordedAccountHttp, execution: Option<(&str, &str, &str, i64)>) {
+pub(crate) fn history(feed: &RecordedAccountHttp, execution: Option<(&str, &str, &str, i64)>) {
     history_amount(feed, execution, "0.1", "-0.0005");
 }
 
@@ -216,7 +216,7 @@ fn history_amount_sources(
     );
 }
 
-pub(super) fn order(feed: &RecordedAccountHttp, id: &str, side: &str, at: i64) {
+pub(crate) fn order(feed: &RecordedAccountHttp, id: &str, side: &str, at: i64) {
     order_cumulative(feed, id, side, at, "filled", "0.1");
 }
 
@@ -241,7 +241,7 @@ pub(super) fn order_cumulative(
     );
 }
 
-pub(super) fn protection(feed: &RecordedAccountHttp, client: &str) {
+pub(crate) fn protection(feed: &RecordedAccountHttp, client: &str) {
     get(
         feed,
         "fixture-executor-a",
@@ -254,7 +254,7 @@ pub(super) fn protection(feed: &RecordedAccountHttp, client: &str) {
     );
 }
 
-pub(super) async fn capture(fixture: &NativeFixture) {
+pub(crate) async fn capture(fixture: &NativeFixture) {
     crate::source_capture::capture_account_sources_measured(
         &fixture._account.observer,
         &fixture._account.private_ws,

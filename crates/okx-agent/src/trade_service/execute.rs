@@ -1014,7 +1014,10 @@ impl TradeService {
         }
         let mut central = None;
         let mut post_held_selected = None;
+        #[cfg(test)]
         let mut native_send_claim = None;
+        #[cfg(not(test))]
+        let native_send_claim;
         if increase
             && r.configuration.account_key.environment == okx_protocol::accounts::Environment::Real
         {
@@ -1527,6 +1530,7 @@ impl TradeService {
                             return Ok(result);
                         }
                     }
+                    #[cfg(test)]
                     return Ok(uncertain(&prepared.intent_id, &reason));
                 }
                 Err(reason)
@@ -1920,6 +1924,7 @@ impl TradeService {
     ) -> RiskCommand {
         build_risk_command(state, id, action)
     }
+    #[cfg(test)]
     pub(super) fn local_receipt(
         &self,
         r: &AccountResources,
@@ -1957,6 +1962,7 @@ impl TradeService {
         .collect::<String>()
     }
 
+    #[cfg(test)]
     async fn reserve_inspect_retry(
         &self,
         state: &CentralGovernanceSnapshot,
@@ -2355,6 +2361,7 @@ fn validate_generation(expected: i64, observed: i64) -> Result<(), String> {
 /// Central release proofs require a reason <=128 UTF-8 bytes. Preserve
 /// readable error class plus a SHA-256 of the original full diagnosis;
 /// never truncate an economic event or mutate a risk reservation to fit.
+#[cfg(test)]
 fn bounded_unsent_reason(reason: &str) -> String {
     if reason.len() <= 128 {
         return reason.to_owned();

@@ -1,18 +1,18 @@
 //! Release only a durably rejected, never-sent intent. AccountStore owns the
 //! no-send proof/ack; RiskBook owns the reservation. No venue adapter is needed.
+#[cfg(test)]
 use super::{build_risk_command, digest};
 use crate::execution_store::ExecutionStore;
+#[cfg(test)]
 use crate::risk_bridge::NativeRiskClient;
 #[cfg(test)]
 use okx_execution::AccountStoreHandle;
 use okx_execution::StoredIntent;
-use okx_protocol::{
-    account_governance::CentralGovernanceSnapshot,
-    accounts::Environment,
-    risk_authority::{
-        RiskCommandAction, RiskDecisionStatus, RiskReservationState, UnsentRiskReleaseProof,
-    },
+#[cfg(test)]
+use okx_protocol::risk_authority::{
+    RiskCommandAction, RiskDecisionStatus, RiskReservationState, UnsentRiskReleaseProof,
 };
+use okx_protocol::{account_governance::CentralGovernanceSnapshot, accounts::Environment};
 use serde::Serialize;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -22,8 +22,10 @@ use tokio::sync::RwLock;
 pub(super) enum UnsentReleaseStage {
     SqlProof,
     Authority,
+    #[cfg(test)]
     Inspect,
     Release,
+    #[cfg(test)]
     SqlAck,
 }
 
@@ -46,6 +48,7 @@ pub(super) enum UnsentReleaseOutcome {
 /// SQL deadline is obtained per call, preserving the original operation bounds.
 pub(super) struct UnsentReleaseDependencies<'a> {
     pub store: &'a ExecutionStore,
+    #[cfg(test)]
     pub risk: &'a NativeRiskClient,
     pub governance: &'a RwLock<Option<CentralGovernanceSnapshot>>,
     pub sql_deadline: fn() -> Instant,
@@ -284,14 +287,6 @@ pub(super) async fn release_unsent(
         Err(fail(
             UnsentReleaseStage::Release,
             "CENTRAL_UNSENT_RELEASE_CAS_BUSY".into(),
-        ))
-    }
-    #[cfg(not(test))]
-    {
-        Err(failure(
-            UnsentReleaseStage::SqlProof,
-            "NATIVE_FINANCE_OWNER_REQUIRED".into(),
-            None,
         ))
     }
 }

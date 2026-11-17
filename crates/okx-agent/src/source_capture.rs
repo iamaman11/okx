@@ -6,10 +6,11 @@ use crate::{
 };
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
-    AccountNavSnapshot, AccountSqlStatementStat, Fill, IngestPage, SourceCursor, StoreError,
-    StoreResult, StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition, VenueMark,
-    build_account_nav_page,
+    AccountNavSnapshot, Fill, IngestPage, SourceCursor, StoreError, StoreResult,
+    StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition, VenueMark,
 };
+#[cfg(test)]
+use okx_execution::{AccountSqlStatementStat, build_account_nav_page};
 use okx_runtime::PrivateWsHandle;
 use rust_decimal::Decimal;
 use sha2::Digest;
@@ -116,6 +117,7 @@ fn phase_elapsed_ms(started: Instant) -> u64 {
 // Fixed vocabulary: a slow or failed operation identifies its owning phase
 // without storing any finance facts, arbitrary SQL text or secret labels.
 #[derive(Clone, Copy)]
+#[cfg(test)]
 enum NavPhase {
     FillProjection,
     FundingAttribution,
@@ -128,6 +130,7 @@ enum NavPhase {
     CursorRead,
     CursorCommit,
 }
+#[cfg(test)]
 impl NavPhase {
     fn code(self) -> &'static str {
         match self {
@@ -144,6 +147,7 @@ impl NavPhase {
         }
     }
 }
+#[cfg(test)]
 fn record_statement(
     trace: &Option<(Arc<crate::finance_trace::FinanceTrace>, u64)>,
     stat: AccountSqlStatementStat,
@@ -153,6 +157,7 @@ fn record_statement(
     }
 }
 
+#[cfg(test)]
 fn measured_nav_phase<T>(
     trace: &Option<(Arc<crate::finance_trace::FinanceTrace>, u64)>,
     phase: NavPhase,
@@ -562,6 +567,7 @@ pub(crate) async fn capture_account_sources_traced(
     let version = format!("{generation}:{}", snapshot.account_generation);
     let nav_started = Instant::now();
     let nav_trace = trace.clone();
+    #[cfg(test)]
     let owner_trace = trace;
     let nav_sql_timing: Option<okx_execution::account_worker::AccountSqlJobTiming> = {
         #[cfg(test)]
@@ -752,10 +758,7 @@ pub(crate) async fn capture_account_sources_traced(
         }
         #[cfg(not(test))]
         {
-            let (owner, account) = execution
-                .store
-                .native_owner()
-                .map_err(|e| AgentError::from(e))?;
+            let (owner, account) = execution.store.native_owner().map_err(AgentError::from)?;
 
             native_nav::reconcile(
                 owner,

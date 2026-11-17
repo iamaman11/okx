@@ -719,7 +719,7 @@ jobs:
           if (-not $proof.Success -or [int]$proof.Groups[1].Value -ne 4) {
             throw 'RECOVERY_WAIT_TEST_COUNT_INVALID'
           }
-          $output = & cargo test --locked -p okx-agent --lib accounts::tests::recovery_prepared_account_reopens_catalog_and_original_sql -- --exact --nocapture 2>&1
+          $output = & cargo test --locked -p okx-agent --lib accounts::native_trade_contracts::native_source_diagnostic::recovery_prepared_account_reopens_catalog_and_original_sql -- --exact --nocapture 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }

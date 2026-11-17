@@ -8,6 +8,8 @@ mod owner;
 #[cfg(test)]
 mod owner_account_source_scope_tests;
 #[cfg(test)]
+mod owner_admission_crash_tests;
+#[cfg(test)]
 mod owner_diagnostic_busy_tests;
 #[cfg(test)]
 mod owner_finance_snapshot_tests;

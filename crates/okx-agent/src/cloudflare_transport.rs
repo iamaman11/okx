@@ -289,7 +289,7 @@ where
         #[cfg(test)]
         let risk_source = risk.recv();
         #[cfg(not(test))]
-        let risk_source = std::future::pending::<Option<()>>();
+        let risk_source = std::future::pending::<Option<std::convert::Infallible>>();
         #[cfg(test)]
         let legacy_finance_admitted = pending.len() < 32;
         #[cfg(not(test))]
@@ -337,7 +337,7 @@ where
             }).await?;
             }
             #[cfg(not(test))]
-            { let _ = outbound; unreachable!("retired financial channel cannot be polled"); }
+            { match outbound {} }
         },
         Some((id,result))=flights.next(),if !flights.is_empty()=>{active.remove(&id);send(&mut sink,F::Response{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,response:result}).await?;},
         message=source.next()=>{

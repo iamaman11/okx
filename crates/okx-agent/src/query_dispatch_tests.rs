@@ -28,7 +28,7 @@ struct Fixture {
     // Keep the actual command receiver alive without starting a network task.
     _coordinator: okx_runtime::PublicWsCoordinator,
     network: Arc<ForbiddenNetwork>,
-    risk: tokio::sync::mpsc::Receiver<crate::risk_bridge::OutboundRiskCommand>,
+    finance_owner: okx_execution::account_worker::UnifiedFinanceHandle,
 }
 impl Fixture {
     async fn new(reference: okx_observation::ReferenceRegistry) -> Self {
@@ -40,11 +40,28 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         initialize_installation(&root, "query-dispatch-installation").unwrap();
-        let accounts = Arc::new(
-            AccountRuntimeRegistry::open(&root, RateBudget::new())
-                .await
-                .unwrap(),
-        );
+        let initial_owner = okx_execution::account_worker::UnifiedFinanceHandle::initialize_new(
+            root.clone(),
+            okx_execution::NewFinanceInstallation {
+                installation_id: "query-dispatch-installation".into(),
+                initialize_request_id: "initialize_readonly_dispatch_001".into(),
+                source_tree: "a".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+        let mut initial_closed = initial_owner.termination_signal();
+        drop(initial_owner);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            initial_closed.wait_for(|v| *v),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (accounts, finance_owner) =
+            crate::accounts::tests::open_native_test_registry(&root, RateBudget::new()).await;
+        let accounts = Arc::new(accounts);
         let environment = OkxEnvironment::new(okx_api::Region::Global, false);
         let network = Arc::new(ForbiddenNetwork::default());
         let market = crate::market_bootstrap::MarketBootstrapper::new(
@@ -62,11 +79,12 @@ impl Fixture {
             RateBudget::new(),
             Arc::new(recorded_support::OfflineSocket),
         );
-        let (tx, risk) = tokio::sync::mpsc::channel(4);
         let trade = Arc::new(TradeService::new(
             accounts.clone(),
             public_ws.clone(),
-            crate::risk_bridge::NativeRiskClient::new(tx),
+            crate::risk_bridge::NativeRiskClient::local(
+                crate::native_finance_risk::NativeFinanceRisk::from_owner(finance_owner.clone()),
+            ),
         ));
         Self {
             root,
@@ -79,11 +97,12 @@ impl Fixture {
             },
             _coordinator: coordinator,
             network,
-            risk,
+            finance_owner,
         }
     }
     async fn request(&self, operation: AgentOperation, account: Option<&str>) -> AgentResponse {
-        dispatch(
+        let finance_jobs_before = self.finance_owner.sql_timing().observed_jobs;
+        let response = dispatch(
             &self.context,
             &AgentRequest {
                 schema: AGENT_REQUEST_SCHEMA_V1.into(),
@@ -92,21 +111,36 @@ impl Fixture {
                 operation,
             },
         )
-        .await
+        .await;
+        assert_eq!(
+            self.finance_owner.sql_timing().observed_jobs,
+            finance_jobs_before,
+            "read-only public dispatch cannot enqueue financial work"
+        );
+        response
     }
-    async fn finish(mut self) {
+    async fn finish(self) {
         assert_eq!(
             self.network.0.load(Ordering::Relaxed),
             0,
             "read-only fixture must not fetch external data"
         );
         assert!(
-            self.risk.try_recv().is_err(),
-            "read-only query must not request a risk mutation"
+            self.finance_owner
+                .configured_campaign(Instant::now() + std::time::Duration::from_secs(3),)
+                .await
+                .unwrap()
+                .is_none(),
+            "read-only dispatch cannot install financial policy"
         );
         self.context.accounts.shutdown().await;
         let root = self.root.clone();
+        let mut closed = self.finance_owner.termination_signal();
         drop(self);
+        tokio::time::timeout(std::time::Duration::from_secs(5), closed.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 }
@@ -205,7 +239,7 @@ async fn instrument_search_routes_type_filter_before_public_limit() {
 
 #[tokio::test]
 async fn account_summary_checks_account_and_source_at_public_boundary() {
-    let mut fixture = Fixture::new(empty_reference()).await;
+    let fixture = Fixture::new(empty_reference()).await;
     rejection(
         fixture.request(AgentOperation::AccountSummary, None).await,
         "EXPLICIT_ACCOUNT_REQUIRED",
@@ -273,7 +307,14 @@ async fn account_summary_checks_account_and_source_at_public_boundary() {
         json!(original.balance.total_equity_usd)
     );
     assert_eq!(fixture.network.0.load(Ordering::Relaxed), 0);
-    assert!(fixture.risk.try_recv().is_err());
+    assert!(
+        fixture
+            .finance_owner
+            .configured_campaign(Instant::now() + std::time::Duration::from_secs(3),)
+            .await
+            .unwrap()
+            .is_none()
+    );
     drop(owner);
     fixture.context.accounts.shutdown().await;
     let root = fixture.root.clone();
@@ -351,26 +392,8 @@ fn two_position_scenario() -> okx_protocol::trading::PortfolioScenarioRequest {
     }
 }
 
-// Compare existing files and their bytes as well as absence of new artifacts.
-fn fixture_artifacts(root: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
-    fn collect(root: &std::path::Path, dir: &std::path::Path, rows: &mut Vec<(PathBuf, Vec<u8>)>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                collect(root, &path, rows);
-            } else {
-                rows.push((
-                    path.strip_prefix(root).unwrap().to_owned(),
-                    std::fs::read(&path).unwrap(),
-                ));
-            }
-        }
-    }
-    let mut rows = Vec::new();
-    collect(root, root, &mut rows);
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    rows
-}
+// SQLite coordination bytes are not a durable financial-state fingerprint.
+use crate::accounts::tests::read_only_fixture_files as fixture_artifacts;
 
 #[tokio::test]
 async fn portfolio_scenario_public_dispatch_returns_independent_virtual_risk_values() {

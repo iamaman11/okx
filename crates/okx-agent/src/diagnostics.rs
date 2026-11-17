@@ -8,6 +8,7 @@ pub(crate) use protection_trace::{
 use crate::{accounts::AccountResources, query::DispatchContext};
 use chrono::Utc;
 use futures_util::{StreamExt, stream};
+#[cfg(test)]
 use okx_execution::{AccountStore, StoreResult, StoredIntent};
 use okx_protocol::{
     analytics::ResearchRequest,
@@ -123,6 +124,7 @@ fn account_snapshot_fresh_at(source_as_of: Option<i64>, observed_now: i64) -> bo
 fn storage_failure_code(error: &okx_execution::StoreError) -> String {
     safe_code(&error.to_string(), "ACCOUNT_STORAGE_UNAVAILABLE")
 }
+#[cfg(test)]
 fn lookup(store: &AccountStore, reference: &str) -> StoreResult<Option<StoredIntent>> {
     if let Some(i) = store.intent(reference)? {
         return Ok(Some(i));
@@ -906,8 +908,8 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn public_operation_diagnostic_survives_busy_owners_and_unknown_history() {
-        use std::time::{Duration, Instant};
+    async fn public_operation_diagnostic_survives_busy_sources_and_unknown_history() {
+        use std::time::Duration;
 
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce).unwrap();
@@ -916,12 +918,26 @@ mod tests {
             u128::from_le_bytes(nonce)
         ));
         accounts::initialize_installation(&root, "installation-operation-diagnostic-test").unwrap();
+        let initial_owner = okx_execution::account_worker::UnifiedFinanceHandle::initialize_new(
+            root.clone(),
+            okx_execution::NewFinanceInstallation {
+                installation_id: "installation-operation-diagnostic-test".into(),
+                initialize_request_id: "initialize_operation_diagnostic_001".into(),
+                source_tree: "a".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+        let mut initial_closed = initial_owner.termination_signal();
+        drop(initial_owner);
+        tokio::time::timeout(Duration::from_secs(3), initial_closed.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
         let budget = RateBudget::new();
-        let registry = Arc::new(
-            accounts::AccountRuntimeRegistry::open(&root, budget.clone())
-                .await
-                .unwrap(),
-        );
+        let (registry, owner) =
+            accounts::tests::open_native_test_registry(&root, budget.clone()).await;
+        let registry = Arc::new(registry);
         let feed_a = Arc::new(accounts::recorded_support::RecordedAccountHttp::default());
         let feed_b = Arc::new(accounts::recorded_support::RecordedAccountHttp::default());
         let (config_a, clients_a) =
@@ -1021,21 +1037,8 @@ mod tests {
             },
         };
 
-        // Hold the actual SQL owner and source locks. Operation diagnostics
-        // must read its bounded local projection without queuing on either.
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let store = account.execution.store.clone();
-        let blocked_sql = tokio::spawn(async move {
-            store
-                .call(Instant::now() + Duration::from_secs(5), move |_| {
-                    let _ = entered_tx.send(());
-                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                    Ok(())
-                })
-                .await
-        });
-        entered_rx.await.unwrap();
+        // Public projection must not queue on SQL or source locks. The real
+        // busy FIFO deadline is covered by the unified owner diagnostic test.
         let _source_snapshot = account.latest_snapshot.write().await;
         let _source_health = account.source_capture_health.write().await;
         let sql_before = account.execution.store.sql_timing().observed_jobs;
@@ -1153,34 +1156,19 @@ mod tests {
         ));
         drop(_source_health);
         drop(_source_snapshot);
-        let _ = release_tx.send(());
-        blocked_sql.await.unwrap().unwrap();
-        account
-            .execution
-            .store
-            .call(Instant::now() + Duration::from_secs(5), |_| Ok(()))
-            .await
-            .unwrap();
-        // The blocked owner job and this FIFO fence account for the only two
-        // accepted SQL jobs after the baseline. Any diagnostics SQL enqueue
-        // ahead of the fence changes this count.
         assert_eq!(
             account.execution.store.sql_timing().observed_jobs,
-            sql_before + 2
+            sql_before
         );
-        let mut terminated_a = account.execution.store.termination_signal();
-        let mut terminated_b = account_b.execution.store.termination_signal();
+        let mut terminated = owner.termination_signal();
         registry.shutdown().await;
         drop(account_b);
         drop(account);
         drop(ctx);
         drop(registry);
         drop(_public);
-        tokio::time::timeout(Duration::from_secs(5), terminated_a.wait_for(|done| *done))
-            .await
-            .unwrap()
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), terminated_b.wait_for(|done| *done))
+        drop(owner);
+        tokio::time::timeout(Duration::from_secs(5), terminated.wait_for(|done| *done))
             .await
             .unwrap()
             .unwrap();

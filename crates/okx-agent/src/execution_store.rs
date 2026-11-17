@@ -13,8 +13,8 @@ use std::time::Instant;
 ///
 /// ```compile_fail,E0599
 /// use okx_agent::execution_store::ExecutionStore;
-/// fn forbidden(owner: okx_execution::account_worker::UnifiedFinanceHandle) -> ExecutionStore {
-///     ExecutionStore::Legacy(owner)
+/// fn forbidden() -> ExecutionStore {
+///     ExecutionStore::Legacy(todo!())
 /// }
 /// ```
 #[derive(Clone)]
@@ -654,11 +654,7 @@ impl ExecutionStore {
 
     #[cfg(test)]
     pub(crate) fn native_scope(&self) -> Option<(&UnifiedFinanceHandle, &str)> {
-        match self {
-            Self::Native { owner, account } => Some((owner, account)),
-            #[cfg(test)]
-            Self::Legacy(_) => None,
-        }
+        self.native_owner().ok()
     }
     // Raw financial callbacks are retained only for historical unit fixtures.
     // Shipping operations must use typed, account-scoped finance-owner commands.
@@ -948,6 +944,7 @@ impl ExecutionStore {
             #[cfg(test)]
             Self::Legacy(s) => s.call(deadline, move |sql| sql.ingest_page(&page)).await,
             Self::Native { owner, account } => {
+                let _ = deadline;
                 owner.ingest_source_page(account.clone(), page).await
             }
         }

@@ -328,12 +328,9 @@ mod tests {
     #[tokio::test]
     async fn public_job_diagnostic_completes_with_known_state_while_catalog_sql_is_locked() {
         use crate::{
-            accounts::{AccountRuntimeRegistry, initialize_installation},
-            analytics::AnalyticsService,
-            market_bootstrap::MarketBootstrapper,
-            query::DispatchContext,
-            risk_bridge::NativeRiskClient,
-            trade_service::TradeService,
+            accounts::initialize_installation, analytics::AnalyticsService,
+            market_bootstrap::MarketBootstrapper, query::DispatchContext,
+            risk_bridge::NativeRiskClient, trade_service::TradeService,
         };
         use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
         use okx_observation::ReferenceRegistry;
@@ -346,11 +343,28 @@ mod tests {
         ));
         initialize_installation(&root, "installation-diagnostic").unwrap();
         let budget = RateBudget::new();
-        let accounts = Arc::new(
-            AccountRuntimeRegistry::open(&root, budget.clone())
-                .await
-                .unwrap(),
-        );
+        let initial_owner = okx_execution::account_worker::UnifiedFinanceHandle::initialize_new(
+            root.clone(),
+            okx_execution::NewFinanceInstallation {
+                installation_id: "installation-diagnostic".into(),
+                initialize_request_id: "initialize_readonly_dispatch_001".into(),
+                source_tree: "a".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+        let mut initial_closed = initial_owner.termination_signal();
+        drop(initial_owner);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            initial_closed.wait_for(|v| *v),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (accounts, finance_owner) =
+            crate::accounts::tests::open_native_test_registry(&root, budget.clone()).await;
+        let accounts = Arc::new(accounts);
         let env = OkxEnvironment::new(Region::Global, false);
         let network = Arc::new(ForbiddenNetwork::default());
         let market = MarketBootstrapper::new(
@@ -363,11 +377,13 @@ mod tests {
         let jobs = analytics.jobs.clone();
         let id = "a".repeat(64);
         jobs.enqueue("public-query".into(), id.clone()).unwrap();
-        let (risk_tx, mut risk_rx) = tokio::sync::mpsc::channel(8);
+        let finance_jobs_before = finance_owner.sql_timing().observed_jobs;
         let trade = Arc::new(TradeService::new(
             accounts.clone(),
             public_ws.clone(),
-            NativeRiskClient::new(risk_tx),
+            NativeRiskClient::local(crate::native_finance_risk::NativeFinanceRisk::from_owner(
+                finance_owner.clone(),
+            )),
         ));
         let ctx = DispatchContext {
             accounts,
@@ -391,42 +407,46 @@ mod tests {
             },
         };
         request.validate().unwrap();
-        let held = jobs.db.lock().unwrap();
-        let changes_before = held.total_changes();
-        let (send, recv) = std::sync::mpsc::channel();
-        let thread = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let response = runtime.block_on(crate::query::dispatch(&ctx, &request));
-            let mut routed = request.clone();
-            routed.account = Some("another-account".into());
-            let refused = runtime.block_on(crate::query::dispatch(&ctx, &routed));
+        let (ctx, response) = {
+            let held = jobs.db.lock().unwrap();
+            let changes_before = held.total_changes();
+            let (send, recv) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let response = runtime.block_on(crate::query::dispatch(&ctx, &request));
+                let mut routed = request.clone();
+                routed.account = Some("another-account".into());
+                let refused = runtime.block_on(crate::query::dispatch(&ctx, &routed));
+                assert_eq!(
+                    refused.failure.unwrap().code,
+                    "RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE"
+                );
+                let mut absent = request.clone();
+                if let okx_protocol::AgentOperation::Diagnostics { request } = &mut absent.operation
+                {
+                    request.reference = Some("b".repeat(64));
+                }
+                let unknown = runtime
+                    .block_on(crate::query::dispatch(&ctx, &absent))
+                    .result
+                    .unwrap();
+                assert_eq!(unknown["reason_code"], "UNKNOWN_NOT_RETAINED");
+                assert!(unknown["job"].is_null());
+                send.send(response).unwrap();
+                ctx
+            });
+            let response = recv.recv_timeout(std::time::Duration::from_millis(500));
             assert_eq!(
-                refused.failure.unwrap().code,
-                "RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE"
+                held.total_changes(),
+                changes_before,
+                "diagnostic cannot mutate catalog"
             );
-            let mut absent = request.clone();
-            if let okx_protocol::AgentOperation::Diagnostics { request } = &mut absent.operation {
-                request.reference = Some("b".repeat(64));
-            }
-            let unknown = runtime
-                .block_on(crate::query::dispatch(&ctx, &absent))
-                .result
-                .unwrap();
-            assert_eq!(unknown["reason_code"], "UNKNOWN_NOT_RETAINED");
-            assert!(unknown["job"].is_null());
-            send.send(response).unwrap();
-        });
-        let response = recv.recv_timeout(std::time::Duration::from_millis(500));
-        assert_eq!(
-            held.total_changes(),
-            changes_before,
-            "diagnostic cannot mutate catalog"
-        );
-        drop(held);
-        thread.join().unwrap();
+            let ctx = thread.join().unwrap();
+            (ctx, response)
+        };
         let response = response.expect("public diagnostic waited behind catalog SQL");
         assert_eq!(
             response.status,
@@ -442,12 +462,19 @@ mod tests {
             0,
             "diagnostic cannot fetch remote facts"
         );
-        assert!(matches!(
-            risk_rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-                | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
-        ));
+        assert_eq!(
+            finance_owner.sql_timing().observed_jobs,
+            finance_jobs_before
+        );
         drop(jobs);
+        ctx.accounts.shutdown().await;
+        let mut closed = finance_owner.termination_signal();
+        drop(ctx);
+        drop(finance_owner);
+        tokio::time::timeout(std::time::Duration::from_secs(5), closed.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

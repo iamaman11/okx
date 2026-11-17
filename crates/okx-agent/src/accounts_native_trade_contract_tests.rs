@@ -18,7 +18,7 @@ use std::sync::{
 use std::time::Duration;
 
 #[path = "accounts_native_trade_fixture.rs"]
-mod fixture;
+pub(crate) mod fixture;
 use fixture::*;
 
 #[path = "accounts_native_filled_close_contract_tests.rs"]
@@ -369,9 +369,23 @@ async fn risk_book_contract_native_public_execute_lost_ack_and_replay_send_once(
     assert!(fixture.feed.lost_create_ack_was_consumed());
     assert_eq!(fixture.feed.outbound_posts.lock().unwrap().len(), 1);
     let reference = first["intent_id"].as_str().unwrap().to_owned();
+    // The retry is semantically identical, but its decimal spelling differs.
+    // It must resolve the original durable intent, not claim another Create.
+    let mut retry = request.clone();
+    if let TradeRequest::Execute {
+        sizing, protection, ..
+    } = &mut retry
+    {
+        *sizing = okx_protocol::trading::Sizing::Contracts {
+            contracts: "0.1000".into(),
+        };
+        *protection = Some(okx_protocol::trading::Protection::Price {
+            stop_price: "900.000".into(),
+        });
+    }
     let replay = fixture
         .trade
-        .trade(&fixture.config.alias, &request, Some(&fixture.authority))
+        .trade(&fixture.config.alias, &retry, Some(&fixture.authority))
         .await
         .expect("same-key replay must reconcile original Native intent");
     assert_eq!(replay["data"]["intent"]["intent_id"], reference, "{replay}");
@@ -436,7 +450,7 @@ mod native_crash;
 mod native_partial_entry;
 
 #[path = "accounts_native_filled_fixture.rs"]
-mod filled_fixture;
+pub(crate) mod filled_fixture;
 
 #[path = "accounts_native_execute_safety_contract_tests.rs"]
 mod native_execute_safety;
@@ -488,3 +502,6 @@ mod native_stale_diagnostic;
 
 #[path = "accounts_native_engine_contract_tests.rs"]
 mod native_engine;
+
+#[path = "accounts_native_source_diagnostic_contract_tests.rs"]
+mod native_source_diagnostic;

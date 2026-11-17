@@ -1,12 +1,13 @@
 //! Terminal reservation settlement and release for a reconciled intent.
+#[cfg(test)]
+use super::digest;
 use super::reconcile::{verified_order_readback, verified_terminal_order_update_time};
-use super::{AccountResources, StoredIntent, TradeService, deadline, digest, err, exact};
+use super::{AccountResources, StoredIntent, TradeService, deadline, err, exact};
 use crate::execution_store::ExecutionStore;
 use okx_execution::{CentralReceipt, IntentState, SourceCursor};
-use okx_protocol::risk_authority::{
-    RiskCommandAction, RiskDecisionStatus, RiskReservationState, RiskResolution,
-    TerminalRiskLedgerProof,
-};
+use okx_protocol::risk_authority::{RiskCommandAction, RiskDecisionStatus, RiskReservationState};
+#[cfg(test)]
+use okx_protocol::risk_authority::{RiskResolution, TerminalRiskLedgerProof};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -361,10 +362,7 @@ impl TradeService {
                         .await
                         .map_err(err)?;
                 }
-                #[cfg(not(test))]
-                {
-                    return Err("NATIVE_FINANCE_OWNER_REQUIRED".into());
-                }
+                #[cfg(test)]
                 return Ok(());
             }
             stage = TerminalReleaseStage::BillCoverage;
@@ -413,6 +411,8 @@ impl TradeService {
                         .map_err(err)?
                 }
             };
+            #[cfg(not(test))]
+            let _ = loss;
             facts.bills = Some((&through).into());
             if !source_covers_terminal(&through, venue_updated_at) {
                 return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
@@ -573,7 +573,7 @@ impl TradeService {
                     // The original joint Resolve writes AccountStore release ACK
                     // in this same COMMIT. No separate account acknowledgement.
                     stage = TerminalReleaseStage::SqlAcknowledgement;
-                    return Ok(());
+                    Ok(())
                 }
             }
             #[cfg(test)]
@@ -629,10 +629,6 @@ impl TradeService {
                     .map_err(err)?;
 
                 Ok(())
-            }
-            #[cfg(not(test))]
-            {
-                Err("NATIVE_FINANCE_OWNER_REQUIRED".into())
             }
         }
         .await;

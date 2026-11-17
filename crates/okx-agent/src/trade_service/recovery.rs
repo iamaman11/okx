@@ -587,8 +587,6 @@ impl TradeService {
                 .await
                 .map_err(err)
         }
-        #[cfg(not(test))]
-        Err("NATIVE_RECOVERY_OWNER_REQUIRED".into())
     }
 }
 
