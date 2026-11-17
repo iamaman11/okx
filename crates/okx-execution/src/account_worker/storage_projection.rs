@@ -135,4 +135,5 @@ impl RefreshCadence {
 }
 
 #[cfg(test)]
+#[path = "storage_projection/tests.rs"]
 mod tests;
