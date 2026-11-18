@@ -107,6 +107,11 @@ The dedicated Engine-under-Research-load check runs in its own test process so
 Windows job accounting includes its descendants rather than unrelated tests.
 Compilation, process startup, execution, and resource evidence are reported
 separately. Measured resources do not by themselves establish a resource budget.
+The first fully green four-component candidate was `dacab8c5` in
+[CI #44222225744](https://github.com/iamaman11/okx/actions/runs/44222225744).
+Its direct financial budget was verified, while the Research process-tree
+resource budget was explicitly `NOT_PROVEN`. The latter is not a shipping resource
+guarantee merely because the enclosing CI job succeeded.
 
 In the full CI, Linux runs the Worker library, real IPC children and doctests
 in the dedicated Research step; the portable workspace step excludes that
@@ -124,8 +129,17 @@ To add an experiment with existing rules, submit another validated
 operator/replay registry and its direct tests, then connect it through the worker
 planner. Financial state and CONTROL do not belong to that calculation change.
 
-CODE acceptance remains governed by #512: U01–U05 and the final exact-SHA gates
-remain outstanding until their required evidence is accepted. Temporary fixture
+Research-only CI needs a previously successful, accepted and **merged** complete
+base, an unexpired exact GitHub bundle and its explicit
+`.github/research-release-base.json` selection. The first full-build PR has no
+such prior merged base, so its skipped `research-only-windows` step does not
+prove the next independent update. The separate Worker Cargo build, scope
+negative controls, real child handoff and CONTROL staging checks provide CODE
+evidence for the implemented route; actual use of a subsequent Worker release
+is a separate acceptance event. No artificial second implementation is needed.
+
+CODE acceptance remains governed by #512: C0–C13, U01–U05 and the exact-SHA
+required gates are accepted only with their recorded evidence. Temporary fixture
 process tests are not evidence of installation, real exchange connectivity, or
 live trading. The [operation map](acceptance/512/operation-map.md) links the
 current supported families to their owners and direct tests.

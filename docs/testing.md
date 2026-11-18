@@ -2,7 +2,17 @@
 
 The current F01–F12 handler/owner/effect/test map is [operation-map.md](acceptance/512/operation-map.md); [research-boundaries.md](research-boundaries.md) describes the Worker and finance boundary. The sections below are historical checkpoints, including the former S0 map; their source identities, measurements and statements about then-unfinished code remain evidence of those cuts only.
 
-#512 CODE, independent release U01–U05, final exact-SHA gates, and physical/installed/live acceptance are not established by these historical reports. Reproduce direct tests on the candidate and report their actual result and source identity; a filtered test or fixture is not the full gate. No current run is asserted by this document.
+#512 CODE and U01–U05 acceptance are decided against the current exact SHA/tree in [issue #512](https://github.com/iamaman11/okx/issues/512) and [PR #513](https://github.com/iamaman11/okx/pull/513). The following completed run is an independently verifiable checkpoint, **not** automatic acceptance for a later documentation or code commit. Physical/installed/live checks belong to #449.
+
+### First green complete candidate — exact historical checkpoint
+
+- Source: `dacab8c5730102bf5b9437f466391a64dfbf2f70`, tree `85cbf0836c073da798518b12b190bcc18779d625`, git clean; [CI #44222225744](https://github.com/iamaman11/okx/actions/runs/44222225744) completed **SUCCESS** on 2026-11-18.
+- Windows `native-finance-full.json` from artifact `native-finance-full-dacab8c5730102bf5b9437f466391a64dfbf2f70`: `FULL_PASS`, **61/61** current contracts and **106** executed witnesses, no failed witness, test threads **4** on a **4-logical-CPU** runner. Setup through teardown **94.027s** and internal build **83.939s** are separately reported; current direct-process budget status `VERIFIED`.
+- Windows remaining Agent/execution/CONTROL/Launcher, Engine autonomy with real Research children, Worker library and seven actual IPC child contracts, Research dispatch, K9 heavy cancellation and four-component bundle: required steps **PASS** on this same source. Linux Rust, architecture, dependency policy, Cloudflare and Windows prerequisite jobs **PASS**. The Draft jobs and `research-only-windows` were intentionally skipped; the latter is **not** evidence of a separate accepted-base Worker release.
+- Worker K9 evidence: 30 two-heavy samples, STOP p95 **1.039ms**, cancellation p95 **68.92ms**; no exchange HTTP. The process-tree artifact includes the real test descendants and resource measurements, but reports `budget_status: NOT_PROVEN`; do not convert that measurement into an accepted general resource limit.
+- Full-build artifact: `okx-windows-bundle-dacab8c5730102bf5b9437f466391a64dfbf2f70`. It is a CI deliverable, **not** an installed or published user release. The original explicit `chrono` maintenance exception and package notices still require their documented release review.
+
+Any later SHA must pass its own required gate. Do not combine passing jobs or witness counts from different commits, and do not call an unexecuted Research-only promotion an independent installation proof.
 
 ## #512 A — frozen changed contracts and direct checks (r13)
 

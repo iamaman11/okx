@@ -14,8 +14,9 @@ provides authenticated MCP/WSS routing; financial authority is Rust with one
 shared financial SQLite. Existing Windows CONTROL owns verified component
 installation and lifecycle. Research cannot place orders or write financial state.
 
-**#510 CODE is accepted; #512 remains in progress in Draft PR #513.**
-This branch has not completed independent-release, installed or live acceptance.
+**#510 CODE is accepted; #512 is under final CODE review in Ready PR #513 (not merged).**
+The first complete green #512 candidate was `dacab8c5` ([full CI](https://github.com/iamaman11/okx/actions/runs/44222225744)); the exact current-HEAD acceptance and any remaining conditions are tracked in [#512](https://github.com/iamaman11/okx/issues/512), not inferred from an earlier SHA.
+Independent Research-only promotion requires a previously accepted merged base and has not been demonstrated by this first full-build run. Installed, physical and live acceptance remain separate under #449.
 Current evidence: [testing](docs/testing.md). Research ownership and direct
 commands: [source map](docs/research-boundaries.md); supported operation owners and direct tests: [F01–F12 map](docs/acceptance/512/operation-map.md). The boundaries and acceptance
 criteria are in [#512](https://github.com/iamaman11/okx/issues/512). This refactoring
