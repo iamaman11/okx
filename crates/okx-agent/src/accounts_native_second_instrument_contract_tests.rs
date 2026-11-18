@@ -137,10 +137,9 @@ async fn risk_book_contract_native_public_second_instrument_spec_precision_and_p
         .trade(&fixture.config.alias, &positive, Some(&fixture.authority))
         .await
         .expect("public Execute must authorize its actual permitted DOGE spec");
-    assert_eq!(
-        result["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
-        "{result}"
-    );
+    fixture
+        .expect_trade_reason(&result, "EXCHANGE_POST_OUTCOME_UNKNOWN")
+        .await;
     let intent = fixture
         .owner
         .lookup_intent(

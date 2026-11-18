@@ -4,6 +4,7 @@ use crate::{
     AccountStore, CentralReceipt, CentralReceiptView, ProtectionReceipt, SourceCursor, StoreResult,
     StoredIntent, TradeIntentLookup,
 };
+use rusqlite::OptionalExtension;
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -17,6 +18,9 @@ pub struct NativeRiskStopDiagnostic {
 /// Bounded account facts; inspection never grants mutation or a venue POST.
 #[derive(Debug, Clone)]
 pub struct NativeAccountDiagnosticSnapshot {
+    pub observed_at_ms: i64,
+    pub financial: crate::FinancialRisk,
+    pub nav_coverage: Option<String>,
     pub intent: Option<StoredIntent>,
     pub policy: crate::AccountPolicySnapshot,
     pub stop_count: u64,
@@ -171,6 +175,12 @@ impl UnifiedFinanceHandle {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
             AccountStore::verify_source_account_sql(&tx, &installation, &account)?;
             let scope = Some((installation.as_str(), account.as_str()));
+            let observed_at_ms = super::opening_ingress::owner_now_ms()?;
+            let financial = AccountStore::financial_risk_sql(&tx, scope, observed_at_ms, None)?;
+            let nav_coverage = tx.query_row(
+                "SELECT coverage FROM nav_watermarks WHERE installation_id=?1 AND account_key=?2 AND scope_id='account'",
+                rusqlite::params![installation, account], |row| row.get(0),
+            ).optional()?;
             let policy = AccountStore::account_policy_sql(&tx, scope)?;
             let intent = reference
                 .map(|id| {
@@ -210,8 +220,10 @@ impl UnifiedFinanceHandle {
             for (source, partition) in [
                 ("account_snapshot", "account"),
                 ("fills", "SPOT"),
+                ("fills", "MARGIN"),
                 ("fills", "SWAP"),
                 ("fills", "FUTURES"),
+                ("fills", "OPTION"),
                 ("bills", "account"),
             ] {
                 let cursor = AccountStore::scoped_source_cursor_sql(
@@ -225,6 +237,7 @@ impl UnifiedFinanceHandle {
                 tx.query_row("SELECT sqlite_source_id()", [], |row| row.get(0))?;
             tx.commit()?;
             Ok(NativeAccountDiagnosticSnapshot {
+                observed_at_ms, financial, nav_coverage,
                 intent, policy, stop_count, stops, source_coverage,
                 sqlite_version, sqlite_source_id,
             })

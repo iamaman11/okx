@@ -634,6 +634,22 @@ pub(crate) fn execute() -> TradeRequest {
 }
 
 impl NativeFixture {
+    pub(crate) async fn expect_trade_reason(&self, response: &Value, expected: &str) {
+        if response["reason_code"] != expected {
+            let facts = self
+                .owner
+                .account_diagnostic_snapshot(
+                    Instant::now() + Duration::from_secs(3),
+                    self.config.account_key.wire(),
+                    response["intent_id"].as_str().map(str::to_owned),
+                )
+                .await;
+            panic!(
+                "expected trade reason={expected}; actual={response}; current_account_snapshot={facts:?}; historical_failure_cause=NOT_INFERRED"
+            );
+        }
+    }
+
     pub(crate) async fn finish(self) {
         assert!(
             !self.root.join("accounts").exists(),

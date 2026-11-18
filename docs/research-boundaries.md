@@ -72,6 +72,18 @@ authorizes a new executable or restarts the financial Engine.
 start a child, refresh market sources, enqueue research, or recover finance.
 A diagnostic timeout does not terminate the worker.
 
+Account diagnostics read NAV completeness, raw coverage, source time and checked
+time from one scoped financial snapshot, with a 250ms read deadline. They report
+the current observed state, not an inferred historical admission cause, and
+never refresh sources or grant a send. Coverage includes all five fill-history
+partitions, bills and the account snapshot.
+
+The financial collector retains verified earlier packages after a later
+failure. Its property report distinguishes PASS, observed FAIL, NOT_PROVEN,
+NOT_RUN and MISSING; the overall gate still fails on any incomplete execution.
+Concurrent fixture tests report an early Execute reply immediately rather than
+waiting for a phase the operation can no longer reach.
+
 ## Direct checks after building
 
 ```powershell

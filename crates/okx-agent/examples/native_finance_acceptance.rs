@@ -7,6 +7,8 @@ mod budgets;
 mod manifest;
 #[path = "native_finance_acceptance/process.rs"]
 mod process;
+#[path = "native_finance_acceptance/reporting.rs"]
+mod reporting;
 #[path = "native_finance_acceptance/repository_guards.rs"]
 mod repository_guards;
 #[path = "native_finance_acceptance/resources.rs"]
@@ -208,6 +210,11 @@ async fn execute(
                 Err(code) => failure(report, "libtest", Some(package), code, None),
                 _ => {}
             }
+            if let Ok(output) = &out
+                && !output.success
+            {
+                reporting::record_failures(report, package, &output.stdout, &names);
+            }
             if snapshot(repo).await? != *baseline {
                 return Err("GIT_TREE_CHANGED");
             }
@@ -227,6 +234,7 @@ async fn execute(
             for name in verified {
                 observed.insert((package.to_owned(), name));
             }
+            reporting::record_verified(report, &observed);
         }
         if wanted.contains(&("repository".into(), repository_guards::WITNESS.into())) {
             if snapshot(repo).await? != *baseline {
@@ -271,6 +279,8 @@ async fn execute(
         Err("FUNCTIONAL_WITNESS_FAILED")
     };
     report["runtime_setup_to_teardown_ms"] = json!(runtime_start.elapsed().as_millis());
+    // Preserve successful repository guards too when a later external stage fails.
+    reporting::record_verified(report, &observed);
     execution?;
     report["owner_workload"] = workload?;
     if budgets::verify(report, &observed)? {
@@ -351,6 +361,9 @@ async fn main() {
         for sample in 0..samples {
             report["run_id"] = json!(format!("{root_run_id}_{sample}"));
             report["stages"] = json!([]);
+            report["observed_witnesses"] = json!([]);
+            report["failed_witnesses"] = json!([]);
+            report["failure"] = Value::Null;
             report["repository_guards"] = json!([]);
             report["resource_budgets"] = Value::Null;
             report["owner_workload"] = Value::Null;
@@ -375,18 +388,7 @@ async fn main() {
         Ok(observed)
     }
     .await;
-    let observed = result.as_ref().ok();
-    let blocked = report["overall"] == "BLOCKED";
-    let mut contracts: Vec<Value> = CONTRACTS.iter().map(|c| {
-        let missing = c.missing.or(if c.witnesses.is_empty() { Some("NO_WITNESS") }
-            else if c.witnesses.iter().any(|w|w.test==budgets::WITNESS)
-                && report["resource_budgets"]["status"]!="VERIFIED" {
-                Some("RESOURCE_MEASUREMENTS_NOT_VERIFIED")
-            } else { None });
-        let passed = c.witnesses.iter().all(|w| observed.is_some_and(|o| o.contains(&(w.package.to_owned(), w.test.to_owned()))));
-        json!({"id":c.id,"status":if missing.is_some(){"MISSING"}else if blocked{"NOT_RUN"}else if passed{"PASS"}else{"FAIL"},"missing":missing,
-            "reason":if blocked && missing.is_none(){Some("FULL_MODE_BLOCKED_BY_MISSING_CONTRACTS")}else{missing}})
-    }).collect();
+    let mut contracts = reporting::contracts(&report);
     contracts.extend(
         absent_umbrellas()
             .into_iter()

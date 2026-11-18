@@ -336,6 +336,9 @@ async fn risk_book_contract_native_public_execute_lost_ack_and_replay_send_once(
                 execute_started.elapsed().as_millis(),
             )
         });
+    fixture
+        .expect_trade_reason(&first, "EXCHANGE_POST_OUTCOME_UNKNOWN")
+        .await;
     // Native financial evidence: one canonical semantic hash survives a lost
     // exchange ACK on the original installation writer, not a retired fixture.
     let account_key = fixture.config.account_key.wire();

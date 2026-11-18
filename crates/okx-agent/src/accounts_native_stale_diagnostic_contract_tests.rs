@@ -31,14 +31,22 @@ async fn risk_book_contract_native_stale_post_held_tariff_diagnostic_is_exact_an
     let trade = fixture.trade.clone();
     let authority = fixture.authority.clone();
     let alias = fixture.config.alias.clone();
-    let pending = tokio::spawn(async move {
+    let mut pending = tokio::spawn(async move {
         let mut request = execute();
         if let TradeRequest::Execute { expires_in_ms, .. } = &mut request {
             *expires_in_ms = 10_000;
         }
         trade.trade(&alias, &request, Some(&authority)).await
     });
-    tokio::time::timeout(Duration::from_secs(8), gate.entered.notified())
+    tokio::time::timeout(Duration::from_secs(8), async {
+        tokio::select! {
+            _ = gate.entered.notified() => {},
+            outcome = &mut pending => {
+                let facts = fixture.owner.account_diagnostic_snapshot(Instant::now() + Duration::from_secs(3), fixture.config.account_key.wire(), None).await;
+                panic!("Execute returned before post-HELD stale-source check: outcome={outcome:?}; current_account_snapshot={facts:?}");
+            }
+        }
+    })
         .await
         .unwrap();
     let deadline = || Instant::now() + Duration::from_secs(3);

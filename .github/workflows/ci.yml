@@ -648,6 +648,7 @@ jobs:
       # Keep the process tree exclusive to this one heavy test so resource
       # observations cannot include unrelated financial regression fixtures.
       - name: Engine autonomy under heavy research process tree
+        id: engine-autonomy
         shell: pwsh
         run: |
           $env:OKX_RESEARCH_WORKER_TEST_EXE = (Resolve-Path 'target/debug/okx-research-worker.exe').Path
@@ -664,7 +665,7 @@ jobs:
           $matches[0].Groups[1].Value | Set-Content -LiteralPath "$env:RUNNER_TEMP\b-process-tree.json" -Encoding utf8NoBOM
 
       - name: Upload Engine research process-tree observation
-        if: always()
+        if: always() && steps.engine-autonomy.outcome != 'skipped'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: engine-research-process-tree-${{ github.event.pull_request.head.sha || github.sha }}

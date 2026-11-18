@@ -41,12 +41,20 @@ async fn risk_book_contract_native_public_cancel_after_held_replays_and_cold_reo
     let trade = fixture.trade.clone();
     let authority = fixture.authority.clone();
     let sent_request = request.clone();
-    let caller = tokio::spawn(async move {
+    let mut caller = tokio::spawn(async move {
         trade
             .trade("fixture-a", &sent_request, Some(&authority))
             .await
     });
-    tokio::time::timeout(Duration::from_secs(8), gate.entered.notified())
+    tokio::time::timeout(Duration::from_secs(8), async {
+        tokio::select! {
+            _ = gate.entered.notified() => {},
+            outcome = &mut caller => {
+                let facts = fixture.owner.account_diagnostic_snapshot(deadline(), fixture.config.account_key.wire(), None).await;
+                panic!("Execute returned before post-HELD fee read: outcome={outcome:?}; current_account_snapshot={facts:?}");
+            }
+        }
+    })
         .await
         .expect("public Execute must reach its third fee read after original HELD");
     let account = fixture._account.clone();

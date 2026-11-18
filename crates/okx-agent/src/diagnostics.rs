@@ -588,13 +588,15 @@ async fn account_diagnostics(
     let key = resources.configuration.account_key.wire();
     let lookup_reference = reference.clone();
     let (owner, account) = resources.execution.store.scope();
-    let facts = owner
+    let until = Instant::now() + Duration::from_millis(250);
+    let facts = tokio::time::timeout_at(until.into(), owner
             .account_diagnostic_snapshot(
-                Instant::now() + Duration::from_secs(3),
+                until,
                 account.to_owned(),
                 lookup_reference.clone(),
-            )
+            ))
             .await
+            .unwrap_or(Err(okx_execution::StoreError::Invalid("UNIFIED_FINANCE_DIAGNOSTIC_TIMEOUT")))
             .map(|facts| {
                 let intent = facts.intent;
                 let policy = &facts.policy;
@@ -643,6 +645,18 @@ async fn account_diagnostics(
                         "storage_size_reason": "NATIVE_FILE_BYTES_NOT_EVALUATED",
                         "maintenance_error": null,
                         "source_coverage": coverage,
+                        "financial_projection": {
+                            "owner":"execution.unified_finance",
+                            "quality":"CURRENT_READ_ONLY_SNAPSHOT_NOT_HISTORICAL_CAUSE",
+                            "checked_at_ms":facts.observed_at_ms,
+                            "nav_complete":facts.financial.nav_complete,
+                            "coverage":facts.nav_coverage,
+                            "source_as_of_ms":facts.financial.source_as_of,
+                            "source_age_ms":facts.observed_at_ms.checked_sub(facts.financial.source_as_of)
+                                .filter(|age| *age >= 0 && facts.financial.source_as_of > 0),
+                            "required_max_age_ms":okx_execution::FINANCIAL_SOURCE_MAX_AGE_MS,
+                            "send_permission":"NOT_GRANTED",
+                        },
                     }),
                 )
             });
@@ -683,6 +697,9 @@ async fn account_diagnostics(
     }
     if facts["stop_count"].as_u64().unwrap_or(0) > 0 {
         blockers.push("ACCOUNT_STOP".into());
+    }
+    if facts["financial_projection"]["nav_complete"] == false {
+        blockers.push("FINANCIAL_SOURCE_INCOMPLETE".into());
     }
     if !facts["maintenance_error"].is_null() {
         blockers.push("STORAGE_MAINTENANCE_ERROR".into());
@@ -1035,6 +1052,46 @@ mod tests {
         assert_eq!(
             account.execution.store.sql_timing().observed_jobs,
             sql_before
+        );
+        let account_request = AgentRequest {
+            schema: okx_protocol::AGENT_REQUEST_SCHEMA_V1.into(),
+            request_id: "account-financial-explain-001".into(),
+            account: Some("fixture-a".into()),
+            operation: AgentOperation::Diagnostics {
+                request: DiagnosticsRequest {
+                    account: Some("fixture-a".into()),
+                    reference: None,
+                    view: None,
+                    cycle_id: None,
+                    limit: None,
+                },
+            },
+        };
+        account_request.validate().unwrap();
+        let explained = query::dispatch(&ctx, &account_request)
+            .await
+            .result
+            .unwrap();
+        let financial = &explained["storage"]["financial_projection"];
+        assert_eq!(financial["owner"], "execution.unified_finance");
+        assert!(financial["nav_complete"].is_boolean());
+        assert!(financial["checked_at_ms"].as_i64().unwrap() > 0);
+        assert_eq!(
+            financial["required_max_age_ms"],
+            okx_execution::FINANCIAL_SOURCE_MAX_AGE_MS
+        );
+        assert_eq!(financial["send_permission"], "NOT_GRANTED");
+        assert_eq!(
+            explained["storage"]["source_coverage"]
+                .as_array()
+                .unwrap()
+                .len(),
+            7
+        );
+        assert_eq!(feed_a.requests.lock().unwrap().clone(), http_a_before.0);
+        assert_eq!(
+            feed_a.outbound_posts.lock().unwrap().clone(),
+            http_a_before.1
         );
         let mut terminated = owner.termination_signal();
         registry.shutdown().await;

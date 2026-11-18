@@ -618,6 +618,8 @@ pub struct OpeningSnapshot {
     pub liabilities: Decimal,
     pub balances: Vec<(String, Decimal)>,
 }
+pub const FINANCIAL_SOURCE_MAX_AGE_MS: i64 = 5000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinancialRisk {
     pub daily_loss_usd: Decimal,
