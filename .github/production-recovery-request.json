@@ -1,5 +1,5 @@
 {
   "schema": "okx.production-recovery.request/v1",
   "promote": true,
-  "purpose": "PR #503: promote the exact accepted GitHub CI Windows bundle after merge to main. Native CONTROL bootstrap, CI-CLEAN, source-tree equality and artifact hashes must pass. No Windows install, Agent start, SQLite reset, account catalog initialization, central RiskBook change, Cloudflare deploy or live trading is authorized."
+  "purpose": "PR #516: publish the exact full Windows v2 CI artifact after merging to main for a clean C:\\okx bootstrap. All four components and SHA/source-tree parity required. This request does not itself authorize trading, account linkage, financial data deletion, legacy SQLite migration or Cloudflare state reset."
 }
