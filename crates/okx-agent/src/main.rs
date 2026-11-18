@@ -188,7 +188,8 @@ async fn inspect_venue(root: &Path, account: &str) -> AgentResult<serde_json::Va
     let complete = algos.complete_within_bound && algos.scopes_checked == 16;
     let state = if !complete {
         "INCOMPLETE"
-    } else if snapshot.positions.is_empty() && snapshot.pending_orders.is_empty() && algos.rows == 0 {
+    } else if snapshot.positions.is_empty() && snapshot.pending_orders.is_empty() && algos.rows == 0
+    {
         "DERIVATIVE_EXPOSURE_EMPTY"
     } else {
         "EXPOSURE_PRESENT"
