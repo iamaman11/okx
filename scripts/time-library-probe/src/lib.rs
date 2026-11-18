@@ -66,7 +66,7 @@ mod tests {
             let expected = original.checked_sub_months(Months::new(3)).unwrap().timestamp_millis();
             let timestamp: Timestamp = date.parse().unwrap();
             let actual = timestamp
-                .to_zoned(JiffTimeZone::UTC)
+                .to_zoned_datetime(JiffTimeZone::UTC)
                 .checked_sub(Span::new().months(3))
                 .unwrap()
                 .timestamp()
@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn windows_local_scheduler_boundary_is_available() {
-        let local = jiff::Zoned::now()
+        let local = jiff::ZonedDateTime::now()
             .checked_add(Span::new().seconds(10))
             .unwrap()
             .strftime("%Y-%m-%dT%H:%M:%S")
