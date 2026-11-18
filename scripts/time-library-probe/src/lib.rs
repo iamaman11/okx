@@ -2,8 +2,8 @@
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Months, SecondsFormat, TimeZone, Utc};
-    use jiff::{Span, Timestamp, tz::TimeZone};
+    use chrono::{DateTime, Months, SecondsFormat, TimeZone as _, Utc};
+    use jiff::{Span, Timestamp, tz::TimeZone as JiffTimeZone};
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
     #[test]
@@ -66,7 +66,7 @@ mod tests {
             let expected = original.checked_sub_months(Months::new(3)).unwrap().timestamp_millis();
             let timestamp: Timestamp = date.parse().unwrap();
             let actual = timestamp
-                .to_zoned(TimeZone::UTC)
+                .to_zoned(JiffTimeZone::UTC)
                 .checked_sub(Span::new().months(3))
                 .unwrap()
                 .timestamp()
