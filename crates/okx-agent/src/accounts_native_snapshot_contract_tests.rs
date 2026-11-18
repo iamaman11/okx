@@ -170,9 +170,10 @@ async fn risk_book_contract_native_restored_snapshot_blocks_public_execute_until
     let mut venue_quotes = tokio::time::interval(Duration::from_millis(450));
     venue_quotes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut extra_quotes = 0;
-    let execution = restored
-        .trade
-        .trade(&restored.config.alias, &request, Some(&restored.authority));
+    let execution =
+        restored
+            .trade
+            .trade(&restored.config.alias, &request, Some(&restored.authority));
     tokio::pin!(execution);
     let result = loop {
         tokio::select! {
