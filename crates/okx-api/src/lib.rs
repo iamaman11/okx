@@ -61,7 +61,6 @@ pub use trade::{
     ApiPositionSide, ApiTradeMode, ApiTriggerPriceType, AttachedAlgoOrderRequest,
     CancelAlgoOrderAck, CancelAlgoOrderRequest, CancelOrderRequest, OrderOperationAck,
     PendingAccountAlgoRiskInventory, PendingDerivativeAlgoRiskInventory,
-    PendingProtectiveAlgoInventory,
-    PendingProtectiveAlgoSample, PlaceOrderRequest, TradeAlgoOrderDetails, TradeApi,
-    TradeOrderDetails, TradeResponse,
+    PendingProtectiveAlgoInventory, PendingProtectiveAlgoSample, PlaceOrderRequest,
+    TradeAlgoOrderDetails, TradeApi, TradeOrderDetails, TradeResponse,
 };
