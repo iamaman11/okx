@@ -16,6 +16,11 @@ export const RESPONSE_DEADLINE_MS = 20_000;
 export const TOOL_TEXT_FALLBACK = "Structured result attached; use structuredContent for the typed payload.";
 export const TOOL_TEXT_FALLBACK_MAX_BYTES = 96;
 export const RUNTIME_NAME = "windows-primary";
+// A clean native-v2 installation must never inherit the legacy "primary"
+// Durable Object's account governance or historical financial namespace.
+// Changing this name selects a distinct persisted object; it does not delete
+// or migrate the previous one.
+export const RUNTIME_OBJECT_NAME = "primary-clean-v2";
 export const PUBLIC_ORIGIN = "https://okx-cloudflare-mcp.okx-794.workers.dev";
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -137,7 +142,7 @@ export function sameHex(left: string, right: string): boolean {
 }
 
 export async function runtimeStub(env: Env): Promise<any> {
-  const id = env.RUNTIME.idFromName("primary");
+  const id = env.RUNTIME.idFromName(RUNTIME_OBJECT_NAME);
   return env.RUNTIME.get(id);
 }
 
