@@ -191,7 +191,9 @@ async fn inspect_venue(root: &Path, account: &str) -> AgentResult<serde_json::Va
     let account_algos = observer
         .pending_account_algo_risk_until(deadline)
         .await
-        .map_err(|_| AgentError::FinancialCaptureTask("VENUE_ACCOUNT_ALGO_INVENTORY_INCOMPLETE".into()))?;
+        .map_err(|_| {
+            AgentError::FinancialCaptureTask("VENUE_ACCOUNT_ALGO_INVENTORY_INCOMPLETE".into())
+        })?;
     let complete_derivative = algos.complete_within_bound && algos.scopes_checked == 16;
     let complete_account = account_algos.complete_within_bound && account_algos.scopes_checked == 8;
     let complete = complete_derivative && complete_account;
