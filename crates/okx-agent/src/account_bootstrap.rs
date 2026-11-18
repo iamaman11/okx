@@ -3,8 +3,7 @@ use okx_api::{
     AccountApi, AccountConfig, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate,
     InstrumentType, LeverageInfo, MarginMode, OkxError, OkxRestClient,
     PendingAccountAlgoRiskInventory, PendingDerivativeAlgoRiskInventory,
-    PendingProtectiveAlgoInventory, PositionBuilderRequest,
-    PositionBuilderSnapshot, TradeApi,
+    PendingProtectiveAlgoInventory, PositionBuilderRequest, PositionBuilderSnapshot, TradeApi,
 };
 use okx_observation::{
     AccountError, AccountLedgerError, AccountLedgerFacts, AccountSnapshot, ExecutionFillEvidence,
