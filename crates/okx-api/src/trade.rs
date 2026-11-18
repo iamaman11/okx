@@ -445,6 +445,89 @@ pub struct PendingDerivativeAlgoRiskInventory {
     pub samples: Vec<PendingProtectiveAlgoSample>,
 }
 
+/** Account-wide pending OKX algo orders across all documented instrument types.
+ * An absent instType parameter is a venue account-wide query; a full page is
+ * incomplete because subsequent pages have not been enumerated. */
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingAccountAlgoRiskInventory {
+    pub schema: &'static str,
+    pub instrument_types: &'static str,
+    pub order_types: &'static str,
+    pub scopes_checked: usize,
+    pub rows: usize,
+    pub complete_within_bound: bool,
+    pub received_at_ms: u64,
+    pub samples: Vec<PendingProtectiveAlgoSample>,
+}
+
+fn normalize_account_algo_risk_inventory(
+    batches: Vec<(String, Vec<PendingAlgoOrderDetails>, u64)>,
+) -> Result<PendingAccountAlgoRiskInventory, OkxError> {
+    let mut ids = BTreeSet::<String>::new();
+    let mut seen = BTreeSet::<String>::new();
+    let mut rows_total = 0_usize;
+    let mut complete = true;
+    let mut samples = Vec::new();
+    let received_at_ms = batches
+        .iter()
+        .map(|(_, _, received)| *received)
+        .min()
+        .unwrap_or(0);
+    for (order_type, rows, _) in batches {
+        if !DERIVATIVE_ALGO_TYPES.contains(&order_type.as_str())
+            || !seen.insert(order_type.clone())
+            || rows.len() > PROTECTIVE_ALGO_PAGE_LIMIT
+        {
+            return Err(OkxError::Response(
+                "invalid or repeated account risk algo query scope".to_owned(),
+            ));
+        }
+        if rows.len() == PROTECTIVE_ALGO_PAGE_LIMIT {
+            complete = false;
+        }
+        for item in rows {
+            if !matches!(
+                item.instrument_type.as_str(),
+                "SPOT" | "MARGIN" | "SWAP" | "FUTURES"
+            ) || item.order_type != order_type
+                || item.algo_order_id.is_empty()
+                || item.instrument_id.is_empty()
+                || !matches!(item.state.as_str(), "live" | "pause")
+                || !ids.insert(item.algo_order_id.clone())
+            {
+                return Err(OkxError::Response(
+                    "inconsistent or duplicate account pending algo".to_owned(),
+                ));
+            }
+            rows_total += 1;
+            if samples.len() < PROTECTIVE_ALGO_SAMPLE_LIMIT {
+                samples.push(PendingProtectiveAlgoSample {
+                    instrument_id: item.instrument_id,
+                    algo_order_id: item.algo_order_id,
+                    client_order_id: item.client_order_id,
+                    order_type: item.order_type,
+                    state: item.state,
+                });
+            }
+        }
+    }
+    if seen.len() != DERIVATIVE_ALGO_TYPES.len() {
+        return Err(OkxError::Response(
+            "one or more account pending algo categories are missing".to_owned(),
+        ));
+    }
+    Ok(PendingAccountAlgoRiskInventory {
+        schema: "okx.pending-account-risk-algos/v1",
+        instrument_types: "SPOT,MARGIN,SWAP,FUTURES",
+        order_types: "conditional,oco,trigger,move_order_stop,chase,iceberg,twap,smart_iceberg",
+        scopes_checked: seen.len(),
+        rows: rows_total,
+        complete_within_bound: complete,
+        received_at_ms,
+        samples,
+    })
+}
+
 async fn read_derivative_scope(
     client: OkxRestClient,
     kind: String,
@@ -695,6 +778,44 @@ impl TradeApi {
             .try_collect::<Vec<_>>()
             .await?;
         receipted_derivative_inventory(responses)
+    }
+
+    /// Signed account-wide GET census of every documented pending algo type,
+    /// including SPOT/MARGIN. Missing instType intentionally requests all.
+    /// Never infer FLAT from a full 100-row page or malformed source.
+    pub async fn pending_account_algo_risk_until(
+        &self,
+        admission_deadline: Instant,
+    ) -> Result<PendingAccountAlgoRiskInventory, OkxError> {
+        use futures_util::{StreamExt, TryStreamExt, stream};
+        let calls = DERIVATIVE_ALGO_TYPES
+            .into_iter()
+            .map(|kind| {
+                let client = self.client.clone();
+                async move {
+                    let rows: Vec<PendingAlgoOrderDetails> = client
+                        .private_get_wait(
+                            ALGO_PENDING_PATH,
+                            &[
+                                ("ordType", kind.to_owned()),
+                                ("limit", PROTECTIVE_ALGO_PAGE_LIMIT.to_string()),
+                            ],
+                            admission_deadline.saturating_duration_since(Instant::now()),
+                        )
+                        .await?;
+                    Ok::<_, OkxError>((
+                        kind.to_owned(),
+                        rows,
+                        jiff::Timestamp::now().as_millisecond().max(1) as u64,
+                    ))
+                }
+            })
+            .collect::<Vec<_>>();
+        let responses = stream::iter(calls)
+            .buffer_unordered(4)
+            .try_collect::<Vec<_>>()
+            .await?;
+        normalize_account_algo_risk_inventory(responses)
     }
 
     pub fn admit_place_order(
@@ -1319,6 +1440,49 @@ mod tests {
             .push(pending_algo("shared", "conditional", "SWAP"));
         dupe[1].2.push(pending_algo("shared", "oco", "SWAP"));
         assert!(normalize_derivative_algo_risk_inventory(dupe).is_err());
+    }
+
+    #[test]
+    fn account_wide_algo_census_covers_spot_margin_and_derivatives() {
+        let mut all = DERIVATIVE_ALGO_TYPES
+            .iter()
+            .map(|kind| ((*kind).to_owned(), Vec::new(), 1000_u64))
+            .collect::<Vec<_>>();
+        all.iter_mut()
+            .find(|(kind, _, _)| kind == "trigger")
+            .unwrap()
+            .1
+            .push(pending_algo("spot-1", "trigger", "SPOT"));
+        all.iter_mut()
+            .find(|(kind, _, _)| kind == "twap")
+            .unwrap()
+            .1
+            .push(pending_algo("margin-1", "twap", "MARGIN"));
+        let inv = normalize_account_algo_risk_inventory(all.clone()).unwrap();
+        assert_eq!(inv.scopes_checked, 8);
+        assert_eq!(inv.rows, 2);
+        assert!(inv.complete_within_bound);
+        assert_eq!(inv.received_at_ms, 1000);
+        all.pop();
+        assert!(normalize_account_algo_risk_inventory(all).is_err());
+    }
+
+    #[test]
+    fn account_wide_algo_census_fails_closed_on_full_page_and_duplicate_id() {
+        let mut all = DERIVATIVE_ALGO_TYPES
+            .iter()
+            .map(|kind| ((*kind).to_owned(), Vec::new(), 1000_u64))
+            .collect::<Vec<_>>();
+        all[0].1 = (0..PROTECTIVE_ALGO_PAGE_LIMIT)
+            .map(|i| pending_algo(&format!("spot-{i}"), "conditional", "SPOT"))
+            .collect();
+        assert!(
+            !normalize_account_algo_risk_inventory(all.clone())
+                .unwrap()
+                .complete_within_bound
+        );
+        all[1].1.push(pending_algo("spot-0", "oco", "MARGIN"));
+        assert!(normalize_account_algo_risk_inventory(all).is_err());
     }
 
     fn all_protective_scopes(
