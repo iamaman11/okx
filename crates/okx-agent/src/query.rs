@@ -1,6 +1,7 @@
 //! Product dispatcher; explicit account routing and bounded native responses.
+use std::str::FromStr;
 use crate::{finance_dispatch::FinanceDispatch, research_client::ResearchClient};
-use chrono::Utc;
+use jiff::Timestamp;
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest, AgentResponse,
     AgentResponseStatus, DataQuality, account_governance::CentralGovernanceSnapshot,
@@ -106,7 +107,7 @@ pub fn response(id: &str, result: Result<Value, String>) -> AgentResponse {
         schema: AGENT_RESPONSE_SCHEMA_V1.into(),
         request_id: id.into(),
         status,
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: Timestamp::now().to_string(),
         quality,
         result_schema: Some("okx.product/v1".into()),
         result: data,
@@ -198,10 +199,10 @@ async fn execute(
                 .await
                 .clone()
                 .ok_or("WAITING_ACCOUNT_EVIDENCE")?;
-            let observed = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+            let observed = jiff::Timestamp::from_str(&snapshot.source_received_at)
                 .map_err(|_| "ACCOUNT_SOURCE_TIME_INVALID")?
-                .timestamp_millis();
-            let now = Utc::now().timestamp_millis();
+                .as_millisecond();
+            let now = Timestamp::now().as_millisecond();
             if !crate::config::evidence_fresh(observed, now, crate::config::ACCOUNT_MAX_AGE_MS) {
                 return Err("WAITING_ACCOUNT_EVIDENCE".into());
             }
@@ -243,10 +244,10 @@ async fn execute(
                 .public_ws
                 .risk_fresh_snapshot(
                     instrument,
-                    Utc::now().timestamp_millis() as u64,
+                    Timestamp::now().as_millisecond() as u64,
                     crate::config::QUOTE_MAX_AGE_MS,
                     crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
-                    Utc::now().to_rfc3339(),
+                    Timestamp::now().to_string(),
                 )
                 .await;
             match snapshot {
@@ -258,7 +259,7 @@ async fn execute(
                         .public_ws
                         .risk_quality_snapshot(
                             instrument,
-                            Utc::now().timestamp_millis().max(0) as u64,
+                            Timestamp::now().as_millisecond().max(0) as u64,
                             crate::config::QUOTE_MAX_AGE_MS,
                             crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
                         )
@@ -387,10 +388,10 @@ async fn execute_market_microstructure(
     let snap = public_ws
         .risk_fresh_snapshot(
             instrument,
-            Utc::now().timestamp_millis().max(0) as u64,
+            Timestamp::now().as_millisecond().max(0) as u64,
             crate::config::QUOTE_MAX_AGE_MS,
             crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
-            Utc::now().to_rfc3339(),
+            Timestamp::now().to_string(),
         )
         .await
         .map_err(|_| "MICROSTRUCTURE_FRESH_BOOK_REQUIRED")?;

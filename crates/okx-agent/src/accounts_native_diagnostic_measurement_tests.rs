@@ -13,7 +13,7 @@ async fn risk_book_native_diagnostic_measurement_first_and_100_warm_reads() {
         .ensure_manual_instance(deadline(), key.clone())
         .await
         .unwrap();
-    let at = chrono::Utc::now().timestamp_millis();
+    let at = jiff::Timestamp::now().as_millisecond();
     let id = "native_diagnostic_measurement_001";
     fixture
         .owner

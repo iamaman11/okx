@@ -24,10 +24,7 @@ edition = "2024"
 rust-version = "1.95"
 license = "MIT"
 
-# cargo-deny 0.20.2 has no native expiry/dependent-scope support. The existing
-# dependency-policy CI validates this single maintenance decision against the
-# actual Cargo graph and fetched advisory, before accepting scanner results.
+# Explicit maintenance exceptions remain empty after the chrono replacement.
+# Any future exception must pass the graph-scoped expiry validation in CI.
 [workspace.metadata.dependency-policy]
-maintenance-exceptions = [
-    { id = "RUSTSEC-2026-0543", package = "chrono", version = "0.4.45", expires = "2026-12-18", owner = "repository maintainer via #512; implementation review by Codex in PR #513", consumers = ["okx-api@0.1.0", "okx-github@0.1.0", "okx-runtime@0.1.0", "okx-agent@0.1.0", "okx-host-control@0.1.0", "okx-research-worker@0.1.0"] },
-]
+maintenance-exceptions = []

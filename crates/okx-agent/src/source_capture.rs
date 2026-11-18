@@ -10,6 +10,7 @@ use okx_execution::{
     StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition, VenueMark,
 };
 use okx_runtime::PrivateWsHandle;
+use jiff::{Span, Timestamp, tz::TimeZone};
 use rust_decimal::Decimal;
 use sha2::Digest;
 use std::{
@@ -133,12 +134,14 @@ fn strategy_cursor_refresh_needed(
 /// A one-day safety margin avoids claiming the ambiguous boundary as proven.
 /// Older campaign history requires an independently verified archival source.
 fn verify_history_retrieval_window(begin: i64, now: i64) -> AgentResult<()> {
-    let current = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now)
-        .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
+    let current = Timestamp::from_millisecond(now)
+        .map_err(|_| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
     let retention_floor = current
-        .checked_sub_months(chrono::Months::new(3))
-        .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?
-        .timestamp_millis()
+        .to_zoned_datetime(TimeZone::UTC)
+        .checked_sub(Span::new().months(3))
+        .map_err(|_| invalid("HISTORY_WINDOW_TIME_INVALID"))?
+        .timestamp()
+        .as_millisecond()
         .checked_add(86_400_000)
         .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
     if begin <= 0 || begin > now {
@@ -326,7 +329,7 @@ pub(crate) async fn capture_account_sources_traced(
     }
     let generation = i64::try_from(initial.connection_generation)
         .map_err(|_| invalid("SOURCE_GENERATION_OVERFLOW"))?;
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = jiff::Timestamp::now().as_millisecond();
     let fx_source = format!("{:x}", sha2::Sha256::digest(serde_json::to_vec(&snapshot)?));
     let mut usd_per_currency = std::collections::BTreeMap::new();
     usd_per_currency.insert("USD".into(), Decimal::ONE);
@@ -791,14 +794,16 @@ mod tests {
     fn campaign_history_cannot_be_inferred_from_expired_okx_fills_or_bills_window() {
         // A calendar boundary, not an arbitrary 90-day threshold, protects
         // E1.1 when data retention differs across months/leap years.
-        let now = chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z")
+        let now = jiff::Timestamp::from_str("2026-10-30T12:00:00Z")
             .unwrap()
-            .timestamp_millis();
-        let now_dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now).unwrap();
+            .as_millisecond();
+        let now_dt = Timestamp::from_millisecond(now).unwrap();
         let three_months_ago = now_dt
-            .checked_sub_months(chrono::Months::new(3))
+            .to_zoned_datetime(TimeZone::UTC)
+            .checked_sub(Span::new().months(3))
             .unwrap()
-            .timestamp_millis();
+            .timestamp()
+            .as_millisecond();
         assert!(verify_history_retrieval_window(now - 86_400_000, now).is_ok());
         assert!(verify_history_retrieval_window(three_months_ago + 86_400_000, now).is_ok());
         assert!(verify_history_retrieval_window(three_months_ago, now).is_err());

@@ -38,7 +38,7 @@ impl LiveCandleSource {
             86400000 => "1Dutc",
             _ => return Err("UNSUPPORTED_TIMEFRAME".into()),
         };
-        let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
         let end = now / timeframe_ms * timeframe_ms;
         let start = end.saturating_sub((limit as u64).saturating_mul(timeframe_ms));
         if end <= start || (end - start) / timeframe_ms > 1_000_000 {
@@ -165,7 +165,7 @@ mod tests {
     }
     #[tokio::test]
     async fn live_source_returns_only_confirmed_closed_rows_and_uses_public_capture() {
-        let end = chrono::Utc::now().timestamp_millis().max(0) as u64 / 60000 * 60000;
+        let end = jiff::Timestamp::now().as_millisecond().max(0) as u64 / 60000 * 60000;
         let (source, transport) = source(serde_json::json!([
             candle(end - 60000, "10", "0"),
             candle(end - 120000, "10", "1")
@@ -187,7 +187,7 @@ mod tests {
     }
     #[tokio::test]
     async fn live_source_rejects_invalid_limits_timeframes_and_duplicate_source_rows() {
-        let end = chrono::Utc::now().timestamp_millis().max(0) as u64 / 60000 * 60000;
+        let end = jiff::Timestamp::now().as_millisecond().max(0) as u64 / 60000 * 60000;
         let (source, transport) = source(serde_json::json!([
             candle(end - 60000, "10", "1"),
             candle(end - 60000, "10", "1")

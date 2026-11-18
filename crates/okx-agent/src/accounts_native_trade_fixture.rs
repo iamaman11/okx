@@ -53,7 +53,7 @@ impl ExecuteMarketBoundary {
             index < self.market_updates_expected.load(Ordering::SeqCst),
             "only explicitly budgeted raw market observations are scripted"
         );
-        let timestamp = chrono::Utc::now().timestamp_millis();
+        let timestamp = jiff::Timestamp::now().as_millisecond();
         let quote = self
             .market_quote
             .lock()
@@ -93,10 +93,10 @@ impl ExecuteMarketBoundary {
                 if public
                     .risk_fresh_snapshot(
                         quote.instrument,
-                        chrono::Utc::now().timestamp_millis() as u64,
+                        jiff::Timestamp::now().as_millisecond() as u64,
                         2000,
                         180000,
-                        chrono::Utc::now().to_rfc3339(),
+                        jiff::Timestamp::now().to_string(),
                     )
                     .await
                     .is_ok()
@@ -240,14 +240,14 @@ pub(super) fn raw_market_with_public_client(
     Arc<RecordedWsConnector>,
 ) {
     let socket = Arc::new(RecordedWsConnector::default());
-    let timestamp = chrono::Utc::now().timestamp_millis();
+    let timestamp = jiff::Timestamp::now().as_millisecond();
     let instrument = json!({"instType":"SWAP","instId":"BTC-USDT-SWAP",
         "instFamily":"BTC-USDT","uly":"BTC-USDT","state":"live","ruleType":"normal",
         "settleCcy":"USDT","tickSz":"0.1","lotSz":"0.01","minSz":"0.01",
         "maxLmtSz":"1000","maxMktSz":"1000","ctType":"linear","ctVal":"0.01",
         "ctValCcy":"BTC","groupId":"4","lever":"20"});
     let reference = okx_observation::ReferenceRegistry::from_public(
-        chrono::Utc::now().to_rfc3339(),
+        jiff::Timestamp::now().to_string(),
         vec![serde_json::from_value(instrument).unwrap()],
     )
     .unwrap();
@@ -478,7 +478,7 @@ pub(super) async fn fixture_for_accounts(labels: &[&str]) -> NativeFixture {
                     "max_notional_usdt":"1000","max_leverage":"5",
                     "max_daily_realized_loss_usdt":"10","max_drawdown_ratio":"0.5",
                     "allowed_instruments":["BTC-USDT-SWAP"]}}]},
-        "issued_at_ms":chrono::Utc::now().timestamp_millis(),"session_generation":1
+        "issued_at_ms":jiff::Timestamp::now().as_millisecond(),"session_generation":1
     }))
     .unwrap();
     let account_policy = authority.state.accounts[0].clone();

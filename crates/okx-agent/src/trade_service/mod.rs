@@ -3,7 +3,7 @@ use crate::{
     accounts::{AccountResources, AccountRuntimeRegistry},
     risk_bridge::NativeRiskClient,
 };
-use chrono::Utc;
+use jiff::Timestamp;
 use okx_execution::{
     CentralReceipt, Decision, IntentPlan, IntentState, NewIntent, StoredIntent, StrategyInstance,
 };
@@ -166,7 +166,7 @@ mod recovery_schedule_tests {
     }
 }
 fn now() -> i64 {
-    Utc::now().timestamp_millis()
+    Timestamp::now().as_millisecond()
 }
 fn digest(v: &impl serde::Serialize) -> Result<String, String> {
     Ok(format!(
@@ -505,11 +505,11 @@ impl TradeService {
                     let fresh = snapshot
                         .as_ref()
                         .and_then(|v| {
-                            chrono::DateTime::parse_from_rfc3339(&v.source_received_at).ok()
+                            jiff::Timestamp::from_str(&v.source_received_at).ok()
                         })
                         .is_some_and(|t| {
                             crate::config::evidence_fresh(
-                                t.timestamp_millis(),
+                                t.as_millisecond(),
                                 now(),
                                 crate::config::ACCOUNT_MAX_AGE_MS,
                             )
@@ -595,11 +595,11 @@ impl TradeService {
                     let fresh = snapshot
                         .as_ref()
                         .and_then(|s| {
-                            chrono::DateTime::parse_from_rfc3339(&s.source_received_at).ok()
+                            jiff::Timestamp::from_str(&s.source_received_at).ok()
                         })
                         .is_some_and(|t| {
                             crate::config::evidence_fresh(
-                                t.timestamp_millis(),
+                                t.as_millisecond(),
                                 now(),
                                 crate::config::ACCOUNT_MAX_AGE_MS,
                             )
@@ -862,11 +862,11 @@ impl TradeService {
                             .map_err(err)?
                     };
                     let exposure_fresh =
-                        chrono::DateTime::parse_from_rfc3339(&exposure.source_received_at)
+                        jiff::Timestamp::from_str(&exposure.source_received_at)
                             .ok()
                             .is_some_and(|t| {
                                 crate::config::evidence_fresh(
-                                    t.timestamp_millis(),
+                                    t.as_millisecond(),
                                     now(),
                                     crate::config::ACCOUNT_MAX_AGE_MS,
                                 )

@@ -34,7 +34,7 @@ async fn prepared() -> (NativeFixture, StoredIntent) {
             Decision {
                 decision_id: "native_unsent_guard_decision".into(),
                 instance_id: None,
-                decision_at: chrono::Utc::now().timestamp_millis(),
+                decision_at: jiff::Timestamp::now().as_millisecond(),
                 input_digest: "b".repeat(64),
                 policy_revision: 1,
                 code_version: "a".repeat(40),
@@ -44,7 +44,7 @@ async fn prepared() -> (NativeFixture, StoredIntent) {
                 idempotency_key: "native_unsent_guard_command".into(),
                 request_hash: "b".repeat(64),
                 client_order_id: "nativeunsentguard001".into(),
-                deadline: chrono::Utc::now().timestamp_millis() + 30_000,
+                deadline: jiff::Timestamp::now().as_millisecond() + 30_000,
                 plan_hash: "d".repeat(64),
                 policy_revision: 1,
                 risk_increase: true,

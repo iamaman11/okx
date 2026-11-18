@@ -8,7 +8,7 @@ use rust_decimal::Decimal;
 async fn risk_book_contract_native_unknown_intent_diagnostic_reads_sql_without_network_or_resend() {
     let mut fixture = fixture().await;
     let (stop, task, _socket, _public) = super::filled_fixture::opened_market(&mut fixture).await;
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));
@@ -163,7 +163,7 @@ async fn risk_book_contract_native_intent_diagnostic_is_account_scoped_and_refus
         .ensure_manual_instance(deadline(), key.clone())
         .await
         .unwrap();
-    let at = chrono::Utc::now().timestamp_millis();
+    let at = jiff::Timestamp::now().as_millisecond();
     let id = "native_diagnostic_prepared_001";
     fixture
         .owner

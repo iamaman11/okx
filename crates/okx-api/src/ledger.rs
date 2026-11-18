@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 use std::time::Instant;
 
+use jiff::{Span, Timestamp, tz::TimeZone};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
@@ -817,12 +819,14 @@ fn verify_campaign_money_window(
     through_ms: i64,
     observed_at_ms: i64,
 ) -> Result<(), OkxError> {
-    let observed = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(observed_at_ms)
-        .ok_or_else(|| OkxError::Config("campaign money observation time invalid".into()))?;
+    let observed = Timestamp::from_millisecond(observed_at_ms)
+        .map_err(|_| OkxError::Config("campaign money observation time invalid".into()))?;
     let floor = observed
-        .checked_sub_months(chrono::Months::new(3))
-        .ok_or_else(|| OkxError::Config("campaign money archive date invalid".into()))?
-        .timestamp_millis()
+        .to_zoned_datetime(TimeZone::UTC)
+        .checked_sub(Span::new().months(3))
+        .map_err(|_| OkxError::Config("campaign money archive date invalid".into()))?
+        .timestamp()
+        .as_millisecond()
         .checked_add(86_400_000)
         .ok_or_else(|| OkxError::Config("campaign money archive date invalid".into()))?;
     if started_at_ms <= 0
@@ -1455,9 +1459,9 @@ mod tests {
 
     #[test]
     fn seven_day_zero_spend_source_never_claims_seven_day_lost_post_proof() {
-        let observed = chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z")
+        let observed = jiff::Timestamp::from_str("2026-10-30T12:00:00Z")
             .unwrap()
-            .timestamp_millis();
+            .as_millisecond();
         let beginning = observed - 7 * 86_400_000;
         // Full authenticated empty finance windows may support later
         // native dollar classification. They are still NOT themselves an
@@ -1618,17 +1622,19 @@ mod tests {
 
     #[test]
     fn money_archive_and_lost_post_history_have_distinct_retention_gates() {
-        let observed = chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z")
+        let observed = jiff::Timestamp::from_str("2026-10-30T12:00:00Z")
             .unwrap()
-            .timestamp_millis();
+            .as_millisecond();
         let from = observed - 7 * 86_400_000;
         assert!(verify_campaign_money_window(from, observed, observed).is_ok());
         assert!(verify_campaign_order_window(from, observed, observed).is_err());
-        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(observed).unwrap();
+        let dt = Timestamp::from_millisecond(observed).unwrap();
         let old = dt
-            .checked_sub_months(chrono::Months::new(3))
+            .to_zoned_datetime(TimeZone::UTC)
+            .checked_sub(Span::new().months(3))
             .unwrap()
-            .timestamp_millis();
+            .timestamp()
+            .as_millisecond();
         assert!(verify_campaign_money_window(old, observed, observed).is_err());
         assert!(verify_campaign_money_window(old + 86_400_000, observed, observed).is_ok());
         assert!(verify_campaign_money_window(from, observed, observed - 1).is_err());

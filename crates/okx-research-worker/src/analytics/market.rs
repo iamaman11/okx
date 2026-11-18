@@ -36,7 +36,7 @@ impl AnalyticsService {
         // K7 source, type and range validation precedes every venue read.
         let query_plan = planner::AnalysisPlan::compile_market(&request)?;
         let window = query_plan.range;
-        let closed_end = chrono::Utc::now().timestamp_millis().max(0) as u64 / request.timeframe_ms
+        let closed_end = jiff::Timestamp::now().as_millisecond().max(0) as u64 / request.timeframe_ms
             * request.timeframe_ms;
         if window.end_ms > closed_end {
             return Err("RANGE_NOT_CLOSED".into());
@@ -78,9 +78,9 @@ impl AnalyticsService {
             .iter()
             .any(|f| matches!(f.as_str(), "spread_bps" | "oi_change"))
         {
-            chrono::Utc::now().timestamp_millis() / 1000
-        } else if request.end_ms > chrono::Utc::now().timestamp_millis().max(0) as u64 {
-            chrono::Utc::now().timestamp_millis() / request.timeframe_ms as i64
+            jiff::Timestamp::now().as_millisecond() / 1000
+        } else if request.end_ms > jiff::Timestamp::now().as_millisecond().max(0) as u64 {
+            jiff::Timestamp::now().as_millisecond() / request.timeframe_ms as i64
         } else {
             0
         };
@@ -321,7 +321,7 @@ impl AnalyticsService {
                     instrument: instrument.clone(),
                     timeframe_ms: ms,
                     start_ms: start,
-                    end_ms: end.min(chrono::Utc::now().timestamp_millis().max(0) as u64 / ms * ms),
+                    end_ms: end.min(jiff::Timestamp::now().as_millisecond().max(0) as u64 / ms * ms),
                     closed_only: true,
                     schema: 1,
                 };

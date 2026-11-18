@@ -83,7 +83,10 @@ fn setup(
     let client =
         OkxPublicClient::with_http_transport(environment, rate.clone(), raw.clone()).unwrap();
     let reference = ReferenceRegistry::from_public(
-        (Utc::now() - chrono::Duration::seconds(10)).to_rfc3339(),
+        Timestamp::now()
+            .checked_sub(jiff::SignedDuration::from_secs(10))
+            .unwrap()
+            .to_string(),
         vec![serde_json::from_value::<PublicInstrument>(row("0.1")).unwrap()],
     )
     .unwrap();
@@ -112,7 +115,7 @@ async fn book(coordinator: &mut PublicWsCoordinator, handle: &PublicWsHandle) {
             Some("snapshot".into()),
             vec![json!({
                 "asks":[["1000","10","0","1"]],"bids":[["999.9","10","0","1"]],
-                "seqId":10,"prevSeqId":-1,"ts":Utc::now().timestamp_millis().to_string()
+                "seqId":10,"prevSeqId":-1,"ts":Timestamp::now().as_millisecond().to_string()
             })],
         )
         .await

@@ -10,7 +10,7 @@ name = "okx-host-control"
 path = "src/main.rs"
 
 [dependencies]
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+jiff = "1.0"
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.4"
 okx-github = { path = "../okx-github" }

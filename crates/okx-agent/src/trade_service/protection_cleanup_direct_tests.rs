@@ -453,7 +453,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     let mut f = native::fixture().await;
     let (market_stop, market_task, _socket, _public) = filled::opened_market(&mut f).await;
     let account = f._account.clone();
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     f.feed
         .expect_public_clock(native::envelope(serde_json::json!([{"ts":at}])));
     native::record_fee(&f.feed, &at);
@@ -483,7 +483,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     assert_eq!(result["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN");
     let entry = result["intent_id"].as_str().unwrap().to_owned();
     let timer_capture = account.recorded_capture_gate.write().await;
-    let opened_at = chrono::Utc::now().timestamp_millis();
+    let opened_at = jiff::Timestamp::now().as_millisecond();
     filled::snapshot(&f.feed, "99.9995", "0.1");
     filled::history(
         &f.feed,
@@ -674,7 +674,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     assert!(sql_none.is_none(), "live order cannot begin cancel SQL");
 
     feed.expect_public_clock(raw(serde_json::json!([{
-        "ts": chrono::Utc::now().timestamp_millis().to_string()
+        "ts": jiff::Timestamp::now().as_millisecond().to_string()
     }])));
     // A signed GET which started before ACK must retain its old bytes
     // even when the actual transport finishes delivering them after ACK.

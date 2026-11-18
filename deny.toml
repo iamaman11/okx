@@ -11,12 +11,9 @@ exceptions = [
   { name = "webpki-roots", version = "=1.0.12", allow = ["CDLA-Permissive-2.0"] },
 ]
 
-# No vulnerability/unsoundness exceptions. One explicitly bounded maintenance
-# decision preserves the currently tested timestamp behavior; see the record.
+# No advisory exceptions: the direct chrono consumers were replaced with jiff.
 [advisories]
-ignore = [
-  { id = "RUSTSEC-2026-0543", reason = "#512: chrono maintenance-only; no patched release; preserve tested UTC/freshness semantics pending migration review. Exact version/consumers and 2026-12-18 expiry are enforced by scripts/check_dependency_policy.py from workspace metadata. See docs/acceptance/512/dependency-baseline.md" },
-]
+ignore = []
 yanked = "deny"
 unused-ignored-advisory = "deny"
 

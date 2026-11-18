@@ -1,7 +1,8 @@
 //! On-demand full derivative reference reads. REST never owns live WS state.
+use std::str::FromStr;
 use std::{sync::atomic::Ordering, time::Instant};
 
-use chrono::{SecondsFormat, Utc};
+use jiff::Timestamp;
 use okx_api::{InstrumentType, PublicDataApi};
 use okx_observation::{InstrumentRulesSnapshot, ReferenceRegistry};
 use tokio::sync::oneshot;
@@ -16,8 +17,8 @@ use super::{
 const REFERENCE_MAX_AGE_MS: i64 = 5_000;
 
 fn fresh(source: &str, now: i64) -> bool {
-    chrono::DateTime::parse_from_rfc3339(source).is_ok_and(|at| {
-        let at = at.timestamp_millis();
+    jiff::Timestamp::from_str(source).is_ok_and(|at| {
+        let at = at.as_millisecond();
         at > 0 && at <= now && now - at <= REFERENCE_MAX_AGE_MS
     })
 }
@@ -46,7 +47,7 @@ impl PublicWsHandle {
             if state.reference_unavailable.is_none() {
                 let rules = rules
                     .ok_or_else(|| PublicRuntimeError::InstrumentNotFound(instrument_id.into()))?;
-                if fresh(&rules.source_received_at, Utc::now().timestamp_millis()) {
+                if fresh(&rules.source_received_at, Timestamp::now().as_millisecond()) {
                     return Ok(rules);
                 }
             }
@@ -85,7 +86,7 @@ impl PublicWsHandle {
             .reference
             .instrument_rules(instrument_id)
             .ok_or_else(|| PublicRuntimeError::InstrumentNotFound(instrument_id.into()))?;
-        if !fresh(&rules.source_received_at, Utc::now().timestamp_millis()) {
+        if !fresh(&rules.source_received_at, Timestamp::now().as_millisecond()) {
             return Err(PublicRuntimeError::ReferenceRefresh(
                 "REFERENCE_REFRESH_SOURCE_STALE",
             ));
@@ -142,7 +143,7 @@ impl PublicWsHandle {
         let api = PublicDataApi::new(client.clone());
         // Earliest request start is conservative for BOTH complete partitions.
         // A single-symbol update cannot renew a registry-global source time.
-        let source_floor = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let source_floor = format!("{:.3}", Timestamp::now());
         let reference = tokio::time::timeout_at(deadline.into(), async {
             let swap = api
                 .instruments(InstrumentType::Swap, None)
@@ -172,7 +173,7 @@ impl PublicWsHandle {
                 "REFERENCE_REFRESH_EMPTY",
             ));
         }
-        if !fresh(&source_floor, Utc::now().timestamp_millis()) {
+        if !fresh(&source_floor, Timestamp::now().as_millisecond()) {
             return Err(PublicRuntimeError::ReferenceRefresh(
                 "REFERENCE_REFRESH_SOURCE_STALE",
             ));

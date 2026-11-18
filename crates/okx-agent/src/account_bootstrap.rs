@@ -1,4 +1,4 @@
-use chrono::{SecondsFormat, Utc};
+use jiff::Timestamp;
 use okx_api::{
     AccountApi, AccountConfig, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate,
     InstrumentType, LeverageInfo, MarginMode, OkxError, OkxRestClient,
@@ -110,7 +110,7 @@ const OBSERVER_CONFIG_MAX_REUSE_AGE: Duration = Duration::from_secs(2);
 
 struct ObservedConfig {
     config: AccountConfig,
-    received_at: chrono::DateTime<Utc>,
+    received_at: Timestamp,
     sampled_at: Instant,
 }
 
@@ -125,7 +125,7 @@ impl ObserverConfigCache {
     async fn read_fresh<F, Fut>(
         &self,
         fetch: F,
-    ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError>
+    ) -> Result<(AccountConfig, Timestamp), OkxError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<AccountConfig, OkxError>>,
@@ -134,7 +134,7 @@ impl ObserverConfigCache {
         *current = None;
         let config = fetch().await?;
         // Receipt and cache age start after authenticated HTTP read completes.
-        let received_at = Utc::now();
+        let received_at = Timestamp::now();
         let sampled_at = Instant::now();
         *current = Some(ObservedConfig {
             config: config.clone(),
@@ -149,7 +149,7 @@ impl ObserverConfigCache {
     async fn read<F, Fut>(
         &self,
         fetch: F,
-    ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError>
+    ) -> Result<(AccountConfig, Timestamp), OkxError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<AccountConfig, OkxError>>,
@@ -163,7 +163,7 @@ impl ObserverConfigCache {
         *current = None;
         let config = fetch().await?;
         // Ordinary read matches post-HELD receipt timing; no fictitiously old proof.
-        let received_at = Utc::now();
+        let received_at = Timestamp::now();
         let sampled_at = Instant::now();
         *current = Some(ObservedConfig {
             config: config.clone(),
@@ -194,14 +194,14 @@ impl AccountBootstrapper {
         }
     }
 
-    async fn observer_config(&self) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError> {
+    async fn observer_config(&self) -> Result<(AccountConfig, Timestamp), OkxError> {
         self.config_cache.read(|| self.api.config()).await
     }
 
     async fn observer_config_until(
         &self,
         until: Instant,
-    ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError> {
+    ) -> Result<(AccountConfig, Timestamp), OkxError> {
         self.config_cache
             .read(|| async {
                 self.api
@@ -214,7 +214,7 @@ impl AccountBootstrapper {
     async fn fresh_observer_config_until(
         &self,
         until: Instant,
-    ) -> Result<(AccountConfig, chrono::DateTime<Utc>), OkxError> {
+    ) -> Result<(AccountConfig, Timestamp), OkxError> {
         // K4: still forces a *new* after-HELD signed config observation.
         // Waiting here admits only a LOCAL no-send private GET in the
         // existing native rate domain. No exchange/POST retry or stale cache.
@@ -284,7 +284,7 @@ impl AccountBootstrapper {
                 .fee_rates_for_family(instrument.instrument_type, family)
                 .await?
         };
-        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let source_received_at = format!("{:.3}", Timestamp::now());
         normalize_fee_schedule(
             &instrument.instrument_id,
             &rules.reference_generation,
@@ -343,7 +343,7 @@ impl AccountBootstrapper {
                 (false, None, Vec::new(), None)
             };
 
-        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let source_received_at = format!("{:.3}", Timestamp::now());
         Ok(TradingCapabilitiesSnapshot::from_input(
             TradingCapabilitiesInput {
                 source_received_at,
@@ -521,7 +521,7 @@ impl AccountBootstrapper {
             self.history.bills_history(),
         )?;
 
-        let source_received_at = config_received_at.to_rfc3339_opts(SecondsFormat::Millis, true);
+        let source_received_at = format!("{config_received_at:.3}");
         Ok(AccountLedgerFacts::from_okx(
             source_received_at,
             snapshot,
@@ -590,12 +590,12 @@ impl AccountBootstrapper {
     async fn snapshot_from_config(
         &self,
         config: AccountConfig,
-        config_received_at: chrono::DateTime<Utc>,
+        config_received_at: Timestamp,
         until: Option<Instant>,
     ) -> Result<AccountSnapshot, AccountBootstrapError> {
         // Use the authenticated config observation time, not a cache-hit time.
         // Balance/positions/orders are read afterward; no falsely fresh source receipt.
-        let source_received_at = config_received_at.to_rfc3339_opts(SecondsFormat::Millis, true);
+        let source_received_at = format!("{config_received_at:.3}");
         let permissions = strict_read_only_permissions(&config.perm)?;
 
         let (balance, positions, pending_orders) = if let Some(until) = until {
@@ -976,7 +976,7 @@ mod tests {
         let (config, received_at) = cache
             .read(|| async move {
                 tokio::task::yield_now().await;
-                *witnessed.lock().expect("fixture lock") = Some(Utc::now());
+                *witnessed.lock().expect("fixture lock") = Some(Timestamp::now());
                 Ok::<_, OkxError>(
                     serde_json::from_value::<AccountConfig>(
                         serde_json::json!({"uid":"observer-1","perm":"read_only"}),
@@ -1050,11 +1050,13 @@ mod tests {
             serde_json::json!({"uid":"terminal-observer","perm":"read_only"}),
         )
         .unwrap();
-        let settlement_frontier = Utc::now();
+        let settlement_frontier = Timestamp::now();
         // Explicit cache-component input: the config is still within its 2s
         // reuse age but its authentic observation precedes settlement. No
         // persisted finance source or wall-clock value is rewritten.
-        let original_time = settlement_frontier - chrono::Duration::milliseconds(100);
+        let original_time = settlement_frontier
+            .checked_sub(jiff::SignedDuration::from_millis(100))
+            .unwrap();
         *cache.current.lock().await = Some(ObservedConfig {
             config: config.clone(),
             received_at: original_time,

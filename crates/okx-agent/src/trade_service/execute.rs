@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use super::census::*;
 use super::*;
 use okx_api::{
@@ -260,9 +261,9 @@ pub(super) fn verify_post_held_selected(
     if witness.completed_after_held_ms < witness.started_after_held_ms {
         return Err("POST_HELD_CAUSAL_TIME_INVALID".into());
     }
-    let received = chrono::DateTime::parse_from_rfc3339(&witness.snapshot.source_received_at)
+    let received = jiff::Timestamp::from_str(&witness.snapshot.source_received_at)
         .map_err(|_| "POST_HELD_SOURCE_TIME_INVALID")?
-        .timestamp_millis();
+        .as_millisecond();
     if received > now_ms
         || !crate::config::evidence_fresh(received, now_ms, crate::config::ACCOUNT_MAX_AGE_MS)
     {
@@ -288,7 +289,7 @@ fn post_held_witness_rejects_identity_generation_mode_and_stale_sources() {
     let snapshot: okx_observation::AccountSnapshot = serde_json::from_value(json!({
         "schema": "okx.account-snapshot/v2",
         "source": "okx_private_rest_bootstrap",
-        "source_received_at": Utc::now().to_rfc3339(),
+        "source_received_at": Timestamp::now().to_string(),
         "account_generation": "test",
         "quality_reason": "test",
         "private_ws_connected": true,
@@ -349,7 +350,10 @@ fn post_held_witness_rejects_identity_generation_mode_and_stale_sources() {
     proof.started_after_held_ms = 4;
     assert_eq!(check(&proof), Err("POST_HELD_CAUSAL_TIME_INVALID".into()));
     proof.started_after_held_ms = 1;
-    proof.snapshot.source_received_at = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+    proof.snapshot.source_received_at = Timestamp::now()
+        .checked_sub(jiff::SignedDuration::from_mins(10))
+        .unwrap()
+        .to_string();
     assert_eq!(
         check(&proof),
         Err("POST_HELD_ACCOUNT_EVIDENCE_STALE".into())
@@ -1033,9 +1037,9 @@ impl TradeService {
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
             }
-            let fee_received_at = chrono::DateTime::parse_from_rfc3339(&fees.source_received_at)
+            let fee_received_at = jiff::Timestamp::from_str(&fees.source_received_at)
                 .map_err(err)?
-                .timestamp_millis();
+                .as_millisecond();
             let entry_receipt = okx_execution::EntryQuoteEvidence {
                 schema: "okx.entry-known-quote/v1".into(),
                 account_key: r.configuration.account_key.wire(),
@@ -1378,7 +1382,7 @@ impl TradeService {
                 now() as u64,
                 crate::config::QUOTE_MAX_AGE_MS,
                 crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
-                Utc::now().to_rfc3339(),
+                Timestamp::now().to_string(),
             )
             .await
             .map_err(err)?;
@@ -2139,9 +2143,9 @@ mod tests {
     fn e1_held_entry_sources_reject_tampering_and_stale_tariffs() {
         use okx_observation::{FeeScheduleInput, FeeScheduleSnapshot};
         let stamp = "2026-10-30T00:00:00Z";
-        let t = chrono::DateTime::parse_from_rfc3339(stamp)
+        let t = jiff::Timestamp::from_str(stamp)
             .unwrap()
-            .timestamp_millis();
+            .as_millisecond();
         let fee = FeeScheduleSnapshot::from_input(FeeScheduleInput {
             instrument_id: "BTC-USDT-SWAP".into(),
             reference_generation: "reference-1".into(),
@@ -2856,9 +2860,9 @@ mod tests {
     #[test]
     fn e2_census_uses_oldest_verified_account_and_financial_source() {
         let received = "2026-10-30T00:00:00Z";
-        let t = chrono::DateTime::parse_from_rfc3339(received)
+        let t = jiff::Timestamp::from_str(received)
             .unwrap()
-            .timestamp_millis();
+            .as_millisecond();
         assert_eq!(
             census_source_floor(received, "uid", "uid", true, t - 120, t + 300),
             Ok(t - 120)

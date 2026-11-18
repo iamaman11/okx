@@ -21,7 +21,7 @@ impl AccountCatalogStore {
     pub fn status(&self) -> HostControlResult<Value> {
         let c = self.load()?;
         Ok(
-            json!({"schema":c.schema,"installation_id":c.installation_id,"accounts":c.accounts,"as_of_ms":chrono::Utc::now().timestamp_millis()}),
+            json!({"schema":c.schema,"installation_id":c.installation_id,"accounts":c.accounts,"as_of_ms":jiff::Timestamp::now().as_millisecond()}),
         )
     }
     pub fn status_summary(&self) -> HostControlResult<Value> {

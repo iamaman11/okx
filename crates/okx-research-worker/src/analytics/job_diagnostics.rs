@@ -132,7 +132,7 @@ impl Projection {
             return;
         };
         snapshot.generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        snapshot.observed_at_ms = chrono::Utc::now().timestamp_millis();
+        snapshot.observed_at_ms = jiff::Timestamp::now().as_millisecond();
         state.entries.retain(|old| old.id != snapshot.id);
         if state.entries.len() == LIMIT {
             state.entries.pop_front();
@@ -199,7 +199,7 @@ impl Projection {
             "state":if snapshot.is_some(){"OBSERVED"}else{"NOT_OBSERVED"},
             "reason_code":if snapshot.is_some(){"JOB_SNAPSHOT"}else{"UNKNOWN_NOT_RETAINED"},
             "quality":"partial","history":"UNKNOWN","job":snapshot,
-            "age_ms":snapshot.map(|s|chrono::Utc::now().timestamp_millis().saturating_sub(s.observed_at_ms).max(0)),
+            "age_ms":snapshot.map(|s|jiff::Timestamp::now().as_millisecond().saturating_sub(s.observed_at_ms).max(0)),
             "retained":state.entries.len(),"retention_limit":LIMIT,"evicted":state.evicted,
             "dropped_events":dropped,"startup_subset_truncated":partial,
             "startup_restore_failed":self.restore_failed.load(Ordering::Relaxed),"read_only":true,
@@ -216,7 +216,7 @@ mod tests {
             .join(format!(
                 "okx-job-diagnostic-{label}-{}-{}.sqlite",
                 std::process::id(),
-                chrono::Utc::now().timestamp_nanos_opt().unwrap()
+                jiff::Timestamp::now().as_nanosecond()
             ))
             .join("catalog.sqlite");
         (Jobs::open(path.clone()).unwrap(), path)

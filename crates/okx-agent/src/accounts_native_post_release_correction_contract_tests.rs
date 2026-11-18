@@ -110,7 +110,7 @@ pub(super) async fn verify_post_release_correction(
 
     // An independently signed order-linked bill arrives AFTER the original
     // release, not as a rewrite of its fill or original terminal witness.
-    let at = chrono::Utc::now().timestamp_millis();
+    let at = jiff::Timestamp::now().as_millisecond();
     assert!(at > original.source_covered_through_ms);
     snapshot(&fixture.feed, "98.999", "0");
     adjustment(&fixture.feed, "native-post-release-fee", at, "-1");
@@ -213,7 +213,7 @@ pub(super) async fn verify_post_release_correction(
     adjustment(
         &fixture.feed,
         "native-post-release-rebate",
-        chrono::Utc::now().timestamp_millis(),
+        jiff::Timestamp::now().as_millisecond(),
         "1",
     );
     crate::source_capture::capture_account_sources_measured(

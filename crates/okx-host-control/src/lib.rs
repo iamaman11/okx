@@ -33,6 +33,9 @@ pub enum HostControlError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("local scheduler time error: {0}")]
+    ScheduleTime(#[from] jiff::Error),
+
     #[error("native secret store error: {0}")]
     SecretStore(String),
 

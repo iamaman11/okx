@@ -1,6 +1,7 @@
 //! Public Add admits exactly owned, protected exposure on the original owner.
 //! Venue bytes independently describe the old position, incremental fill and
 //! both stops; a fresh unmatched position cannot acquire a local lot by Add.
+use std::str::FromStr;
 use super::filled_fixture::*;
 use super::*;
 use rust_decimal::Decimal;
@@ -37,7 +38,7 @@ async fn public_add(external_increment: bool) {
     *fixture.market_boundary.market.lock().unwrap() = None;
     let original = lookup(&fixture, &entry).await;
     let original_stop_client = format!("s{}", &original.client_order_id[..31]);
-    let opened_at = chrono::Utc::now().timestamp_millis();
+    let opened_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.9995", "0.1");
     history(
         &fixture.feed,
@@ -56,7 +57,7 @@ async fn public_add(external_increment: bool) {
         None,
     )
     .await;
-    let settlement_completed_at = chrono::Utc::now().timestamp_millis();
+    let settlement_completed_at = jiff::Timestamp::now().as_millisecond();
     let old_lots = lots(&fixture).await;
     assert_eq!(old_lots.len(), 1);
     assert_owned_lot(&old_lots[0], &entry);
@@ -76,18 +77,18 @@ async fn public_add(external_increment: bool) {
     // and ONE original maintenance refresh. No Status retry or fabricated READY.
     let history_closes_at = settlement_completed_at.checked_add(2_000).unwrap();
     let remaining_ms = history_closes_at
-        .saturating_sub(chrono::Utc::now().timestamp_millis())
+        .saturating_sub(jiff::Timestamp::now().as_millisecond())
         .max(0) as u64;
     if remaining_ms > 0 {
         tokio::time::sleep_until(tokio::time::Instant::now() + Duration::from_millis(remaining_ms))
             .await;
     }
-    assert!(chrono::Utc::now().timestamp_millis() >= history_closes_at);
+    assert!(jiff::Timestamp::now().as_millisecond() >= history_closes_at);
     // This contract also exercises the real stale-reference branch. Await
     // the validity boundary of the independently observed original reference,
     // not an arbitrary delay or a synthetic instruments WS update. Capture
     // money AFTER both cutoffs so this wait cannot age the new NAV evidence.
-    let reference_at = chrono::DateTime::parse_from_rfc3339(
+    let reference_at = jiff::Timestamp::from_str(
         &public
             .instrument_rules(INSTRUMENT)
             .await
@@ -95,10 +96,10 @@ async fn public_add(external_increment: bool) {
             .source_received_at,
     )
     .unwrap()
-    .timestamp_millis();
+    .as_millisecond();
     let reference_expires_at = reference_at.checked_add(5_001).unwrap();
     let reference_remaining_ms = reference_expires_at
-        .saturating_sub(chrono::Utc::now().timestamp_millis())
+        .saturating_sub(jiff::Timestamp::now().as_millisecond())
         .max(0) as u64;
     if reference_remaining_ms > 0 {
         tokio::time::sleep_until(
@@ -106,7 +107,7 @@ async fn public_add(external_increment: bool) {
         )
         .await;
     }
-    assert!(chrono::Utc::now().timestamp_millis() >= reference_expires_at);
+    assert!(jiff::Timestamp::now().as_millisecond() >= reference_expires_at);
     snapshot(&fixture.feed, "99.9995", "0.1");
     history(
         &fixture.feed,
@@ -139,7 +140,7 @@ async fn public_add(external_increment: bool) {
     })
     .min()
     .unwrap();
-    let through = minimum_watermark.min(chrono::Utc::now().timestamp_millis() - 2_000);
+    let through = minimum_watermark.min(jiff::Timestamp::now().as_millisecond() - 2_000);
     assert!(through >= settlement_completed_at);
     fixture
         .owner
@@ -186,7 +187,7 @@ async fn public_add(external_increment: bool) {
 
     let request = add_request();
     assert!(request.valid());
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     // Negative Add stops before the mutation clock read. Positive Add
     // performs one signed Create with its own independent clock observation.
     if !external_increment {
@@ -271,7 +272,7 @@ async fn public_add(external_increment: bool) {
         assert_eq!(added.plan.quantity, Decimal::new(1, 1));
         let add_stop_client = format!("s{}", &added.client_order_id[..31]);
         assert_ne!(add_stop_client, original_stop_client);
-        let added_at = chrono::Utc::now().timestamp_millis();
+        let added_at = jiff::Timestamp::now().as_millisecond();
         // Independent cashflow: each 0.1 * 0.01 BTC * 1000 entry costs
         // 1 USDT notional + 0.0005 fee. Total equity loses only the two fees.
         snapshot(&fixture.feed, "99.999", "0.2");
@@ -431,7 +432,7 @@ impl HttpTransport for AddReferenceHttp {
 }
 
 async fn create_entry(fixture: &NativeFixture) -> String {
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));

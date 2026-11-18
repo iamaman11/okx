@@ -111,7 +111,7 @@ async fn stale_bill_coverage_blocks_settlement_after_inspect() {
 async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
     let mut f = fixture().await;
     let (market_stop, market_task, _socket, public) = opened_market(&mut f).await;
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     f.feed.expect_public_clock(envelope(json!([{"ts":now}])));
     record_fee(&f.feed, &now);
     record_leverage(&f.feed);

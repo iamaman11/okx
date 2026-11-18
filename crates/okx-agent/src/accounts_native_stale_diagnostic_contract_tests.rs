@@ -23,7 +23,7 @@ async fn risk_book_contract_native_stale_post_held_tariff_diagnostic_is_exact_an
         .planning_fee_skip
         .store(2, Ordering::SeqCst);
     *fixture.market_boundary.planning_fee_gate.lock().unwrap() = Some(gate.clone());
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     record_fee(&fixture.feed, &at);
     record_leverage(&fixture.feed);
     record_leverage(&fixture.feed);
@@ -87,7 +87,7 @@ async fn risk_book_contract_native_stale_post_held_tariff_diagnostic_is_exact_an
     // This is the deliberately stale external fact itself, not a fabricated
     // current timestamp, changed SQL row or an elapsed-time sleep.
     let stale_exchange_at =
-        (chrono::Utc::now().timestamp_millis() - crate::config::ACCOUNT_MAX_AGE_MS - 1).to_string();
+        (jiff::Timestamp::now().as_millisecond() - crate::config::ACCOUNT_MAX_AGE_MS - 1).to_string();
     record_fee(&fixture.feed, &stale_exchange_at);
     gate.release.notify_one();
     let rejected = tokio::time::timeout(Duration::from_secs(8), pending)

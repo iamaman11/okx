@@ -220,7 +220,7 @@ async fn risk_book_contract_native_os_kill_after_create_recovers_original_unknow
         rate.clone(),
     );
     assert_eq!(config, catalog.accounts[0]);
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     feed.expect_get(RecordedGet {
         access_key: "fixture-executor-a".into(),
         path: "/api/v5/trade/order".into(),
@@ -333,7 +333,7 @@ async fn risk_book_contract_native_os_kill_pending_fill_projects_once() {
     if std::env::var_os(FLAG).is_some() {
         let mut fixture = fixture().await;
         let (_market_stop, _market_task, _socket, _public) = opened_market(&mut fixture).await;
-        let now = chrono::Utc::now().timestamp_millis().to_string();
+        let now = jiff::Timestamp::now().as_millisecond().to_string();
         fixture
             .feed
             .expect_public_clock(envelope(json!([{"ts":now}])));
@@ -363,7 +363,7 @@ async fn risk_book_contract_native_os_kill_pending_fill_projects_once() {
         assert_eq!(fixture.feed.outbound_posts.lock().unwrap().len(), 1);
         let _gate = fixture._account.recorded_capture_gate.write().await;
         *fixture.market_boundary.market.lock().unwrap() = None;
-        let at = chrono::Utc::now().timestamp_millis();
+        let at = jiff::Timestamp::now().as_millisecond();
         snapshot(&fixture.feed, "99.9995", "0.1");
         history(
             &fixture.feed,

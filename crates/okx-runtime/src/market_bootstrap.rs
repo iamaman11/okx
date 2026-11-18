@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::{SecondsFormat, Utc};
+use jiff::Timestamp;
 use okx_api::{
     InstrumentType, MarketDataApi, OkxPublicClient, PublicDataApi, PublicMarketDataHistory,
 };
@@ -266,7 +266,7 @@ impl MarketBootstrapper {
                 .history_candles_page_captured(instrument_id, bar, after, before, limit)
                 .await?
         };
-        let acquired_at_ms = Utc::now().timestamp_millis().max(1).to_string();
+        let acquired_at_ms = Timestamp::now().as_millisecond().max(1).to_string();
         let rows = normalize_research_candles(captured.rows, limit as usize)?;
         Ok(ResearchCandleCapture {
             raw_body: captured.raw_body,
@@ -286,7 +286,7 @@ impl MarketBootstrapper {
             .api
             .history_trades_page_captured(instrument_id, after, before, limit)
             .await?;
-        let acquired_at_ms = Utc::now().timestamp_millis().max(1).to_string();
+        let acquired_at_ms = Timestamp::now().as_millisecond().max(1).to_string();
         let rows = normalize_research_trades(instrument_id, captured.rows, limit as usize)?;
         Ok(ResearchTradeCapture {
             raw_body: captured.raw_body,
@@ -306,7 +306,7 @@ impl MarketBootstrapper {
             .api
             .funding_rate_history_page_captured(instrument_id, after, before, limit)
             .await?;
-        let acquired_at_ms = Utc::now().timestamp_millis().max(1).to_string();
+        let acquired_at_ms = Timestamp::now().as_millisecond().max(1).to_string();
         let rows = normalize_research_funding(instrument_id, captured.rows, limit as usize)?;
         Ok(ResearchFundingCapture {
             raw_body: captured.raw_body,
@@ -333,7 +333,7 @@ impl MarketBootstrapper {
         Ok(ResearchTierBSourceCapture {
             raw_body: captured.raw_body,
             rows: captured.rows,
-            acquired_at_ms: Utc::now().timestamp_millis().max(1).to_string(),
+            acquired_at_ms: Timestamp::now().as_millisecond().max(1).to_string(),
         })
     }
 
@@ -346,9 +346,9 @@ impl MarketBootstrapper {
             .public_data
             .instrument_captured(instrument_type, instrument_id)
             .await?;
-        let acquired = Utc::now();
-        let acquired_at_ms = acquired.timestamp_millis().max(1).to_string();
-        let received_at = acquired.to_rfc3339_opts(SecondsFormat::Millis, true);
+        let acquired = Timestamp::now();
+        let acquired_at_ms = acquired.as_millisecond().max(1).to_string();
+        let received_at = format!("{acquired:.3}");
         let registry = ReferenceRegistry::from_public(received_at, captured.rows)?;
         let instrument = registry.get(instrument_id).cloned().ok_or_else(|| {
             MarketBootstrapError::ReferenceInstrumentNotFound(instrument_id.to_owned())
@@ -403,7 +403,7 @@ impl MarketBootstrapper {
             None
         };
 
-        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let source_received_at = format!("{:.3}", Timestamp::now());
         Ok(okx_observation::market::market_snapshot_from_bootstrap(
             reference,
             instrument_id,
@@ -449,7 +449,7 @@ impl MarketBootstrapper {
             .api
             .open_interest_history(instrument_id, period, limit)
             .await?;
-        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let source_received_at = format!("{:.3}", Timestamp::now());
         Ok(okx_observation::history::open_interest_history_from_public(
             reference,
             instrument_id,
@@ -474,7 +474,7 @@ impl MarketBootstrapper {
         }
 
         let rows = self.api.trades(instrument_id, limit).await?;
-        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let source_received_at = format!("{:.3}", Timestamp::now());
         Ok(okx_observation::history::market_trades_from_public(
             reference,
             instrument_id,
@@ -501,7 +501,7 @@ impl MarketBootstrapper {
         }
 
         let rows = self.api.funding_rate_history(instrument_id, limit).await?;
-        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let source_received_at = format!("{:.3}", Timestamp::now());
         Ok(okx_observation::history::funding_history_from_public(
             reference,
             instrument_id,
@@ -526,7 +526,7 @@ impl MarketBootstrapper {
         }
 
         let rows = self.api.history_candles(instrument_id, bar, limit).await?;
-        let source_received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let source_received_at = format!("{:.3}", Timestamp::now());
         Ok(okx_observation::history::market_history_from_public(
             reference,
             instrument_id,

@@ -1,5 +1,6 @@
 //! One owner for pre-reserve, post-HELD, protection and terminal-release
 //! cohort census. Source proof is not permission to send an exchange order.
+use std::str::FromStr;
 use super::execute::{
     ManagedProtectionCensusError, PostHeldSelected, classify_managed_protection_census_error,
     native_process_incarnation, position_mismatch_reason, verify_post_held_selected,
@@ -942,9 +943,9 @@ pub(super) fn census_source_floor(
     if observed_uid != expected_uid {
         return Err("COHORT_IDENTITY_MISMATCH".into());
     }
-    let account_as_of = chrono::DateTime::parse_from_rfc3339(account_received_at)
+    let account_as_of = jiff::Timestamp::from_str(account_received_at)
         .map_err(|_| "COHORT_ACCOUNT_SOURCE_TIME_INVALID")?
-        .timestamp_millis();
+        .as_millisecond();
     if account_as_of <= 0
         || account_as_of > observed_at
         || !crate::config::evidence_fresh(

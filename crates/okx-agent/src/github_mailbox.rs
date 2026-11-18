@@ -1,6 +1,7 @@
+use std::str::FromStr;
 use std::{collections::BTreeSet, path::Path, time::Instant};
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use okx_github::{
     GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCommentCursor, IssueCursorStore,
     IssuePollTelemetryStore, IssueResponseSizeTelemetry, OWNER_USER_ID, REPOSITORY_ID,
@@ -284,10 +285,8 @@ fn last_terminal_request_id(comments: &[IssueComment]) -> Option<String> {
 }
 
 fn request_latency_ms(created_at: &str) -> Option<u64> {
-    let created_at = DateTime::parse_from_rfc3339(created_at).ok()?;
-    let latency = Utc::now()
-        .signed_duration_since(created_at)
-        .num_milliseconds();
+    let created_at = Timestamp::from_str(created_at).ok()?;
+    let latency = Timestamp::now().duration_since(created_at).as_millis();
     Some(latency.max(0) as u64)
 }
 

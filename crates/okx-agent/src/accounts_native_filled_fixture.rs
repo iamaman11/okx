@@ -64,10 +64,10 @@ pub(super) async fn opened_market_with_public_client(
             if public
                 .risk_fresh_snapshot(
                     INSTRUMENT,
-                    chrono::Utc::now().timestamp_millis() as u64,
+                    jiff::Timestamp::now().as_millisecond() as u64,
                     2000,
                     180000,
-                    chrono::Utc::now().to_rfc3339(),
+                    jiff::Timestamp::now().to_string(),
                 )
                 .await
                 .is_ok()
@@ -114,7 +114,7 @@ pub(super) fn get(
 /// One independently timestamped balance and position snapshot. Repetition is
 /// explicit at the caller: each item names a real production assessment.
 pub(crate) fn snapshot(feed: &RecordedAccountHttp, equity: &str, quantity: &str) {
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     get(
         feed,
         "fixture-observer-a",
@@ -279,7 +279,7 @@ pub(super) async fn close_market(
     socket: &RecordedWsConnector,
     public: &okx_runtime::PublicWsHandle,
 ) {
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     let mut parsed = public.subscribe_market_updates();
     socket.send_public_frame(
         json!({"arg":{"channel":"tickers","instId":INSTRUMENT},"data":[{
@@ -309,10 +309,10 @@ pub(super) async fn close_market(
             if public
                 .risk_fresh_snapshot(
                     INSTRUMENT,
-                    chrono::Utc::now().timestamp_millis() as u64,
+                    jiff::Timestamp::now().as_millisecond() as u64,
                     2000,
                     180000,
-                    chrono::Utc::now().to_rfc3339(),
+                    jiff::Timestamp::now().to_string(),
                 )
                 .await
                 .is_ok()
@@ -359,7 +359,7 @@ pub(super) fn cleanup(feed: &RecordedAccountHttp, stop_client: &str) {
     }
     feed.expect_causal_algo_inventory(STOP, before, after);
     feed.expect_public_clock(envelope(
-        json!([{"ts":chrono::Utc::now().timestamp_millis().to_string()}]),
+        json!([{"ts":jiff::Timestamp::now().as_millisecond().to_string()}]),
     ));
     feed.expect_post(RecordedPost {
         access_key: "fixture-executor-a".into(),

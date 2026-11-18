@@ -464,7 +464,7 @@ async fn read_derivative_scope(
         .await?;
     Ok((
         (kind, order_type, rows),
-        chrono::Utc::now().timestamp_millis().max(1) as u64,
+        jiff::Timestamp::now().as_millisecond().max(1) as u64,
     ))
 }
 type ReceiptedDerivativeScope = ((String, String, Vec<PendingAlgoOrderDetails>), u64);

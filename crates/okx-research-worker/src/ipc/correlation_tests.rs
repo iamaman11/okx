@@ -63,7 +63,7 @@ async fn failed_backtest_correlates_real_ipc_job_and_safe_trace() {
     let root = std::env::temp_dir().join(format!(
         "okx-ipc-correlation-{}-{}",
         std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        jiff::Timestamp::now().as_nanosecond()
     ));
     let scope = ResearchScope::new("trace-scope".into()).unwrap();
     let session = WorkerSession::new("trace-session".into()).unwrap();

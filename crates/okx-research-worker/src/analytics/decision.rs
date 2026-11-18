@@ -78,7 +78,7 @@ impl AnalyticsService {
                         experiment_artifact: experiment.clone(),
                         previous_decision_artifact: job.decision_artifact.clone(),
                         revision,
-                        created_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+                        created_ms: jiff::Timestamp::now().as_millisecond().max(0) as u64,
                         name: name.clone(),
                         hypothesis: hypothesis.clone(),
                         status,
@@ -553,7 +553,7 @@ mod tests {
             .unwrap();
         let other_id = other["decision_id"].as_str().unwrap();
         service.pin_job(&a, true).unwrap();
-        let future = chrono::Utc::now().timestamp_millis().max(0) as u64 + 8 * 86_400_000;
+        let future = jiff::Timestamp::now().as_millisecond().max(0) as u64 + 8 * 86_400_000;
         assert_eq!(service.apply_retention(future).unwrap(), 1);
         assert!(service.artifacts.read_evidence(other_id).is_err());
         assert!(service.artifacts.read_evidence(&result).is_ok());
@@ -588,7 +588,7 @@ mod tests {
         legacy
             .execute(
                 "INSERT INTO research_jobs VALUES(?1,?1,'legacy','completed',100,?2,NULL,?3,0)",
-                rusqlite::params![job, result, chrono::Utc::now().timestamp_millis()],
+                rusqlite::params![job, result, jiff::Timestamp::now().as_millisecond()],
             )
             .unwrap();
         drop(legacy);

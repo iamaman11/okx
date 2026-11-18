@@ -61,9 +61,9 @@ pub struct SourceCaptureHealth {
 }
 
 fn snapshot_age_at_publish_ms(source_received_at: &str, published_at_ms: i64) -> Option<i64> {
-    let observed_ms = chrono::DateTime::parse_from_rfc3339(source_received_at)
+    let observed_ms = jiff::Timestamp::from_str(source_received_at)
         .ok()?
-        .timestamp_millis();
+        .as_millisecond();
     published_at_ms.checked_sub(observed_ms)
 }
 
@@ -767,7 +767,7 @@ impl AccountResources {
         generation: u64,
         cycle_id: u64,
     ) {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.finance_trace
             .finish(cycle_id, now, elapsed_ms, Some(reason_code.to_owned()));
@@ -797,7 +797,7 @@ impl AccountResources {
         generation: u64,
         cycle_id: u64,
     ) {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let duration_ms = u64::try_from(capture_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let snapshot_age_ms = snapshot_age_at_publish_ms(source_received_at, now);
         self.finance_trace.finish(cycle_id, now, duration_ms, None);
@@ -862,7 +862,7 @@ fn start_sources(
              let capture_started = Instant::now();
              let generation=account.private_ws.status().await.connection_generation;
              let cycle_id=account.next_finance_cycle.fetch_add(1,Ordering::Relaxed)+1;
-             account.finance_trace.begin(cycle_id,chrono::Utc::now().timestamp_millis(),generation);
+             account.finance_trace.begin(cycle_id,jiff::Timestamp::now().as_millisecond(),generation);
              if generation==0 {
                  account.record_source_failure("PRIVATE_WS_NOT_READY", capture_started, generation, cycle_id).await;
                  continue;
@@ -2370,7 +2370,7 @@ pub(crate) mod recorded_support {
                 scopes,
                 held_read: None,
                 inflight_held_reads: 0,
-                source_received_at_ms: chrono::Utc::now().timestamp_millis(),
+                source_received_at_ms: jiff::Timestamp::now().as_millisecond(),
             });
             trace.push(format!(
                 "event=INVENTORY_ARMED uid=account-001 actor={account} cancel_id={cancel_id} scopes=16"
@@ -2433,7 +2433,7 @@ pub(crate) mod recorded_support {
             }
             *installed = Some(StaticAlgoInventory {
                 account: account.to_owned(),
-                source_received_at_ms: chrono::Utc::now().timestamp_millis(),
+                source_received_at_ms: jiff::Timestamp::now().as_millisecond(),
                 scopes,
             });
             drop(installed);
@@ -4104,7 +4104,7 @@ pub(crate) mod recorded_support {
                     self.signed_balance_reads.lock().unwrap().push((
                         key.to_owned(),
                         format!("{:?}", tokio::task::try_id()),
-                        chrono::Utc::now().timestamp_millis(),
+                        jiff::Timestamp::now().as_millisecond(),
                     ));
                 }
                 if request.method() == "POST" {
@@ -4254,7 +4254,7 @@ pub(crate) mod recorded_support {
                             scenario.acked = true;
                             self.causal_algo_trace.lock().unwrap().push(format!(
                                 "event=CANCEL_ACK uid=account-001 actor={key} route={path} cancel_id={observed_id} at_ms={}",
-                                chrono::Utc::now().timestamp_millis()
+                                jiff::Timestamp::now().as_millisecond()
                             ));
                             self.causal_cancel_ack_changed.notify_waiters();
                         }
@@ -4475,7 +4475,7 @@ pub(crate) mod recorded_support {
                         self.delivered_fees.lock().unwrap().push((
                             key.to_owned(),
                             timestamp.into(),
-                            chrono::Utc::now().timestamp_millis(),
+                            jiff::Timestamp::now().as_millisecond(),
                         ));
                     }
                     return Ok(RawHttpResponse {
@@ -4682,7 +4682,7 @@ pub(crate) mod recorded_support {
                         self.delivered_fees.lock().unwrap().push((
                             key.to_owned(),
                             exchange_ts.to_owned(),
-                            chrono::Utc::now().timestamp_millis(),
+                            jiff::Timestamp::now().as_millisecond(),
                         ));
                     }
                     if path == "/api/v5/trade/orders-algo-pending" {
@@ -4711,7 +4711,7 @@ pub(crate) mod recorded_support {
                             serde_json::json!({
                                 "actor":key,
                                 "algo_ids":ids,
-                                "time_ms":chrono::Utc::now().timestamp_millis(),
+                                "time_ms":jiff::Timestamp::now().as_millisecond(),
                             })
                         );
                     }
@@ -4823,7 +4823,7 @@ pub(crate) mod recorded_support {
                 if probe_pending_consumers {
                     self.t10_06_pending_consumers.lock().unwrap().push((
                         format!("{:?}", tokio::task::try_id()),
-                        chrono::Utc::now().timestamp_millis(),
+                        jiff::Timestamp::now().as_millisecond(),
                     ));
                 }
                 let mut observed = self.requests.lock().unwrap();
@@ -6286,7 +6286,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let connector = Arc::new(RecordedWsConnector::default());
-        let stamp = chrono::Utc::now().timestamp_millis();
+        let stamp = jiff::Timestamp::now().as_millisecond();
         let timestamp = stamp.to_string();
         let future = (stamp + 8 * 60 * 60 * 1000).to_string();
         let recordings: Vec<(Value, Option<Value>, Option<&str>)> = vec![
@@ -6379,10 +6379,10 @@ pub(crate) mod tests {
                 if let Ok(snapshot) = market
                     .risk_fresh_snapshot(
                         "BTC-USDT-SWAP",
-                        u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap(),
+                        u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap(),
                         5_000,
                         5_000,
-                        chrono::Utc::now().to_rfc3339(),
+                        jiff::Timestamp::now().to_string(),
                     )
                     .await
                 {
@@ -6398,7 +6398,7 @@ pub(crate) mod tests {
                 let quality = market
                     .risk_quality_snapshot(
                         "BTC-USDT-SWAP",
-                        u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap(),
+                        u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap(),
                         5_000,
                         5_000,
                     )
@@ -6452,7 +6452,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let rules = reference.instrument_rules("BTC-USDT-SWAP").unwrap();
-        let stamp = chrono::Utc::now().timestamp_millis().to_string();
+        let stamp = jiff::Timestamp::now().as_millisecond().to_string();
         let envelope = |data: serde_json::Value| {
             serde_json::to_vec(&json!({"code":"0","msg":"","data":data})).unwrap()
         };
@@ -6588,7 +6588,7 @@ pub(crate) mod tests {
             expected_body: expected,
             raw_response: br#"{"code":"0","msg":"","data":[{"ordId":"123456","clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]}"#.to_vec(),
         });
-        let timestamp = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
+        let timestamp = u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap();
         let timing = MutationTiming::from_exchange_time_ms(timestamp, 2_000).unwrap();
         let mut wrong = request.clone();
         wrong.size = "0.40".into();
@@ -6643,7 +6643,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let api = AccountHistoryApi::new(client);
-        let end = chrono::Utc::now().timestamp_millis();
+        let end = jiff::Timestamp::now().as_millisecond();
         let rows = api
             .fills_history_page("SWAP", end - 60_000, end, None)
             .await
@@ -6801,9 +6801,9 @@ pub(crate) mod tests {
     #[test]
     fn published_age_retains_source_timestamp_even_past_risk_ttl() {
         let source = "2026-10-28T20:00:00.000Z";
-        let observed = chrono::DateTime::parse_from_rfc3339(source)
+        let observed = jiff::Timestamp::from_str(source)
             .unwrap()
-            .timestamp_millis();
+            .as_millisecond();
         assert_eq!(
             snapshot_age_at_publish_ms(source, observed + 4_999),
             Some(4_999)

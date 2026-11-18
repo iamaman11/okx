@@ -58,7 +58,7 @@ impl Fixture {
         authority.state.revision += 1;
         authority.state.accounts[0].policy_revision = authority.state.revision;
         authority.state.accounts[0].explicit_pause = paused;
-        authority.issued_at_ms = chrono::Utc::now().timestamp_millis() as _;
+        authority.issued_at_ms = jiff::Timestamp::now().as_millisecond() as _;
         self.ctx
             .finance
             .trade()

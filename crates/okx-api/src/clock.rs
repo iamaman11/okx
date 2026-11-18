@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use chrono::{SecondsFormat, TimeZone, Utc};
+use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::error::OkxError;
@@ -166,11 +166,9 @@ impl MutationTiming {
 fn timestamp_from_unix_ms(value: u64) -> Result<String, OkxError> {
     let value = i64::try_from(value)
         .map_err(|_| OkxError::Clock("Unix millisecond timestamp exceeds i64".to_owned()))?;
-    let timestamp = Utc
-        .timestamp_millis_opt(value)
-        .single()
-        .ok_or_else(|| OkxError::Clock("invalid Unix millisecond timestamp".to_owned()))?;
-    Ok(timestamp.to_rfc3339_opts(SecondsFormat::Millis, true))
+    let timestamp = Timestamp::from_millisecond(value)
+        .map_err(|_| OkxError::Clock("invalid Unix millisecond timestamp".to_owned()))?;
+    Ok(format!("{timestamp:.3}"))
 }
 
 #[cfg(test)]

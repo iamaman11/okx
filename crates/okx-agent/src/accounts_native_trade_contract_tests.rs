@@ -249,10 +249,10 @@ async fn risk_book_contract_native_public_execute_lost_ack_and_replay_send_once(
             if public
                 .risk_fresh_snapshot(
                     "BTC-USDT-SWAP",
-                    chrono::Utc::now().timestamp_millis() as u64,
+                    jiff::Timestamp::now().as_millisecond() as u64,
                     2_000,
                     180_000,
-                    chrono::Utc::now().to_rfc3339(),
+                    jiff::Timestamp::now().to_string(),
                 )
                 .await
                 .is_ok()
@@ -282,7 +282,7 @@ async fn risk_book_contract_native_public_execute_lost_ack_and_replay_send_once(
         .update_governance(&fixture.authority)
         .await
         .unwrap();
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));

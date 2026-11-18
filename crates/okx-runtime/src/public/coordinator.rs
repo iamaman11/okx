@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{SecondsFormat, Utc};
+use jiff::Timestamp;
 use okx_api::{
     OkxEnvironment, OkxPublicClient, PublicFundingRate, PublicIndexTicker, PublicInstrument,
     PublicMarkPrice, PublicOpenInterest, PublicTicker, RateBudget,
@@ -702,7 +702,7 @@ impl PublicWsCoordinator {
         data: Vec<serde_json::Value>,
     ) -> Result<bool, PublicRuntimeError> {
         let received_at_ms = now_ms()?;
-        let received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let received_at = format!("{:.3}", Timestamp::now());
         let is_market_update = !matches!(&arg.channel, PublicChannel::Instruments);
         let mut state = self.state.write().await;
 

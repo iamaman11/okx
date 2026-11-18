@@ -110,7 +110,7 @@ impl AnalyticsService {
                 budget::MEMORY_TOTAL_MIB as usize,
             )),
         };
-        service.apply_retention(chrono::Utc::now().timestamp_millis().max(0) as u64)?;
+        service.apply_retention(jiff::Timestamp::now().as_millisecond().max(0) as u64)?;
         Ok(service)
     }
     pub async fn begin_drain(&self) -> Result<okx_protocol::research_ipc::DrainStatus, String> {
@@ -167,7 +167,7 @@ impl AnalyticsService {
                     ),
                 }
                 .map_err(str::to_owned)?;
-                let last_closed = chrono::Utc::now().timestamp_millis().max(0) as u64
+                let last_closed = jiff::Timestamp::now().as_millisecond().max(0) as u64
                     / timeframe_ms
                     * timeframe_ms;
                 if validation_range.end_ms > last_closed {

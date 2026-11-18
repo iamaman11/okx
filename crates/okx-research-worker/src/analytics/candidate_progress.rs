@@ -258,7 +258,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "candidate-progress-migration-{}-{}",
             std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+            jiff::Timestamp::now().as_nanosecond()
         ));
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("research-catalog.sqlite");

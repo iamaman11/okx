@@ -71,7 +71,7 @@ async fn campaign_readiness_requires_capture_of_new_source_frontier() {
     // requested frontier. The typed readiness result supplies the pending reason.
     assert_eq!(through - covered, 1);
     tokio::time::timeout(Duration::from_secs(1), async {
-        while chrono::Utc::now().timestamp_millis() <= covered {
+        while jiff::Timestamp::now().as_millisecond() <= covered {
             tokio::task::yield_now().await;
         }
     })

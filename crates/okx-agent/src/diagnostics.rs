@@ -5,8 +5,9 @@ pub(crate) use protection_trace::{
     ProtectionCleanupInvocation, ProtectionOperationTrace, ProtectionTraceEvent,
 };
 
+use std::str::FromStr;
 use crate::{accounts::AccountResources, query::DispatchContext};
-use chrono::Utc;
+use jiff::Timestamp;
 use futures_util::{StreamExt, stream};
 use okx_protocol::trading::{DiagnosticsRequest, DiagnosticsView};
 use serde_json::{Value, json};
@@ -104,7 +105,7 @@ fn report(
     retryable: bool,
     next: &str,
 ) -> Value {
-    json!({"stage":stage,"reason_code":reason,"scope":scope,"blockers":blockers,"retryable":retryable,"next_action":next,"as_of_ms":Utc::now().timestamp_millis(),"quality":if blockers.is_empty(){"complete"}else{"partial"}})
+    json!({"stage":stage,"reason_code":reason,"scope":scope,"blockers":blockers,"retryable":retryable,"next_action":next,"as_of_ms":Timestamp::now().as_millisecond(),"quality":if blockers.is_empty(){"complete"}else{"partial"}})
 }
 fn safe_code(message: &str, fallback: &str) -> String {
     let code = message.split(':').next().unwrap_or("");
@@ -257,7 +258,7 @@ async fn storage_diagnostics(
         }
     }
     let observed = resources.execution.store.diagnostic_storage_snapshot();
-    let now = Utc::now().timestamp_millis();
+    let now = Timestamp::now().as_millisecond();
     let state = resources.private_ws.state();
     let private = state.try_read().ok().map(|s| {
         let status = s.status();
@@ -268,8 +269,8 @@ async fn storage_diagnostics(
     let source = resources.latest_snapshot.try_read().ok().map(|s| {
         let time = s
             .as_ref()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s.source_received_at).ok())
-            .map(|t| t.timestamp_millis());
+            .and_then(|s| jiff::Timestamp::from_str(&s.source_received_at).ok())
+            .map(|t| t.as_millisecond());
         json!({"account_as_of_ms":time,"account_fresh":account_snapshot_fresh_at(time,now)})
     });
     let health = resources
@@ -344,9 +345,9 @@ async fn finance_diagnostics(
         .source_capture_health
         .try_read()
         .ok()
-        .map(|health| health.finance_window.summary(Utc::now().timestamp_millis()));
+        .map(|health| health.finance_window.summary(Timestamp::now().as_millisecond()));
     let mut maintenance = resources.execution.store.maintenance_timing();
-    let now_ms = Utc::now().timestamp_millis();
+    let now_ms = Timestamp::now().as_millisecond();
     let active_cycle = trace.selected.as_ref().or(trace.active.as_ref());
     let overlap_ids: Vec<_> = active_cycle
         .map(|cycle| {
@@ -685,9 +686,9 @@ async fn account_diagnostics(
         .read()
         .await
         .as_ref()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s.source_received_at).ok())
-        .map(|d| d.timestamp_millis());
-    let fresh = account_snapshot_fresh_at(source_as_of, Utc::now().timestamp_millis());
+        .and_then(|s| jiff::Timestamp::from_str(&s.source_received_at).ok())
+        .map(|d| d.as_millisecond());
+    let fresh = account_snapshot_fresh_at(source_as_of, Timestamp::now().as_millisecond());
     let mut blockers = Vec::new();
     if !identity_ready || !fresh {
         blockers.push("WAITING_ACCOUNT_EVIDENCE".into());
@@ -777,7 +778,7 @@ async fn account_diagnostics(
     out["finance_window"] = json!(
         capture_health
             .finance_window
-            .summary(Utc::now().timestamp_millis())
+            .summary(Timestamp::now().as_millisecond())
     );
     out["source_capture"] = json!(&*capture_health);
     drop(capture_health);

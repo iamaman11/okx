@@ -1,8 +1,10 @@
 # Dependency policy — #512 P2
 
-Current candidate: local dependency policy PASS with the single scoped
-maintenance decision below, 2026-11-18. No final #512, installation or
-production-release acceptance is implied by this record.
+The initial #512 candidate passed the dependency policy with one scoped
+maintenance decision on 2026-11-18. The subsequent chrono removal replaces
+its six direct consumers with jiff 1.0 and removes that exception from
+Cargo.toml and deny.toml; whole-workspace replacement CI is still required.
+No final #512, installation or production-release acceptance is implied.
 
 The refreshed RustSec DB is `233155b4025b854c68a4b199c0e32d7fd53291a2`.
 The scanner remains cargo-deny 0.20.2; the verified Windows release archive
@@ -80,7 +82,7 @@ use an injected mock store and local target construction only; they do not read
 or write Windows Credential Manager. Existing service/user names and secret
 encoding are preserved.
 
-## Explicit maintenance decision: RUSTSEC-2026-0543 only
+## Historical maintenance decision: RUSTSEC-2026-0543 (superseded by jiff migration)
 
 - Review date: 2026-11-18. Implementation review: Codex in PR #513. Follow-up
   owner: repository maintainer, tracked in #512 L06. Maintainer acceptance is by
@@ -102,8 +104,11 @@ encoding are preserved.
   expiry/scope fields; workspace metadata is the explicit decision record.
   Before that date, review a bounded migration to a maintained time library or
   remove the exception if upstream circumstances change. No automatic extension.
-- Release permission is separate. A green policy result with this visible
-  maintenance decision is not authorization to merge, deploy or trade.
+- This was the bounded decision for the earlier candidate only. The subsequent
+  migration removes the chrono dependency and this exception; the final lock
+  and scanner report must confirm that no chrono consumer remains.
+- Release permission is separate. A green policy result is not authorization
+  to merge, deploy or trade.
 
 Configuration reference: [cargo-deny advisory expiry and dependent allow list](https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html).
 All security and unsoundness advisories remain blocking; there is no global

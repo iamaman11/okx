@@ -1,5 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use chrono::{SecondsFormat, Utc};
+use jiff::Timestamp;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
@@ -8,7 +8,7 @@ use crate::error::OkxError;
 type HmacSha256 = Hmac<Sha256>;
 
 pub fn timestamp_now() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    format!("{:.3}", Timestamp::now())
 }
 
 pub fn sign(

@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use super::*;
 use okx_api::MarginMode;
 #[cfg(test)]
@@ -287,7 +288,7 @@ impl TradeService {
                     now() as u64,
                     crate::config::QUOTE_MAX_AGE_MS,
                     crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
-                    Utc::now().to_rfc3339(),
+                    Timestamp::now().to_string(),
                 )
                 .await
             {
@@ -329,9 +330,9 @@ impl TradeService {
         // preview. Local/no-send REST admission may wait, but the exact same
         // authenticated fields and freshness checks below remain mandatory.
         let snap = r.observer.snapshot_until(until).await.map_err(err)?;
-        let received = chrono::DateTime::parse_from_rfc3339(&snap.source_received_at)
+        let received = jiff::Timestamp::from_str(&snap.source_received_at)
             .map_err(err)?
-            .timestamp_millis();
+            .as_millisecond();
         if !crate::config::evidence_fresh(received, now(), crate::config::ACCOUNT_MAX_AGE_MS)
             || received > now()
             || snap.account_uid_fingerprint != r.configuration.account_key.verified_uid
@@ -574,7 +575,7 @@ impl TradeService {
                 now() as u64,
                 crate::config::QUOTE_MAX_AGE_MS,
                 crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
-                Utc::now().to_rfc3339(),
+                Timestamp::now().to_string(),
             )
             .await
             .map_err(err)?;
@@ -687,9 +688,9 @@ impl TradeService {
                 snapshot.account_generation.clone(),
                 usdt,
             ))?,
-            observed_at_ms: chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+            observed_at_ms: jiff::Timestamp::from_str(&snapshot.source_received_at)
                 .map_err(err)?
-                .timestamp_millis() as u64,
+                .as_millisecond() as u64,
         })
     }
 }

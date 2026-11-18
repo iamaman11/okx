@@ -20,7 +20,7 @@ fn backup_stopped(root: &Path, key: &AccountKey) -> AgentResult<Value> {
         &key.wire(),
         &installation_id,
     )?;
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = jiff::Timestamp::now().as_millisecond();
     let snapshot_id = format!("account-{now}");
     let target = directory.join("backups").join(format!("{snapshot_id}.db"));
     fs::create_dir_all(
@@ -181,7 +181,7 @@ fn restore_stopped(
             snapshot_id,
             "RESTORE",
             "RECONCILE_REQUIRED",
-            chrono::Utc::now().timestamp_millis(),
+            jiff::Timestamp::now().as_millisecond(),
         )?;
         Ok(())
     })();

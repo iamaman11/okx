@@ -33,7 +33,7 @@ impl Sources {
         queued: bool,
     ) -> Result<Arc<Vec<Bar>>, String> {
         let bar = timeframe(ms)?;
-        let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
         let end = end.min(now / ms * ms);
         if end <= start || (end - start) / ms > 1_000_000 {
             return Err("LIMIT_BARS:1000000".into());

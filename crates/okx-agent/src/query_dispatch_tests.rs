@@ -39,7 +39,7 @@ impl Fixture {
         let root = std::env::temp_dir().join(format!(
             "okx-query-dispatch-{}-{}-{}",
             std::process::id(),
-            Utc::now().timestamp_nanos_opt().unwrap(),
+            Timestamp::now().as_nanosecond(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         initialize_installation(&root, "query-dispatch-installation").unwrap();
@@ -167,7 +167,7 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
         let root = std::env::temp_dir().join(format!(
             "okx-research-finance-boundary-{}-{}-{invalid}",
             std::process::id(),
-            Utc::now().timestamp_nanos_opt().unwrap()
+            Timestamp::now().as_nanosecond()
         ));
         std::fs::create_dir_all(&root).unwrap();
         let finance_file = root.join("finance/finance.sqlite");
@@ -618,7 +618,7 @@ async fn account_summary_checks_account_and_source_at_public_boundary() {
             .await,
         "ACCOUNT_SOURCE_TIME_INVALID",
     );
-    snapshot.source_received_at = Utc::now().to_rfc3339();
+    snapshot.source_received_at = Timestamp::now().to_string();
     *owner.latest_snapshot.write().await = Some(snapshot.clone());
     let response = fixture
         .request(AgentOperation::AccountSummary, Some(&config.alias))

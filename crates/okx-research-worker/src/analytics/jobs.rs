@@ -450,7 +450,7 @@ impl Jobs {
                 false
             }
         } else {
-            let now = chrono::Utc::now().timestamp_millis().max(0);
+            let now = jiff::Timestamp::now().as_millisecond().max(0);
             tx.execute(
                 "INSERT INTO research_jobs(id,request_hash,idempotency_key,state,progress,created_ms,pinned,semantic_hash,producer,origin_invocation)
                  VALUES(?1,?1,?2,'queued',0,?3,0,?4,?5,?6)",
@@ -512,7 +512,7 @@ impl Jobs {
         Ok(())
     }
     pub(super) fn require_decision_result(job: &Job) -> Result<(), String> {
-        let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
         if job.error.as_deref() == Some("RESULT_EXPIRED_BY_7_DAY_RETENTION")
             || job.expires_at_ms.is_some_and(|expiry| expiry <= now)
         {

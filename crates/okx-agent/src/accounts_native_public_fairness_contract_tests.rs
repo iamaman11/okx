@@ -65,7 +65,7 @@ async fn risk_book_contract_native_public_b_status_and_cancel_leave_blocked_a_he
             .store(2, Ordering::SeqCst);
         *fixture.market_boundary.planning_fee_gate.lock().unwrap() = Some(gate.clone());
         let actor = format!("fixture-observer-{label}");
-        let at = chrono::Utc::now().timestamp_millis().to_string();
+        let at = jiff::Timestamp::now().as_millisecond().to_string();
         fee(&fixture.feed, &actor, &at);
         leverage(&fixture.feed, &actor);
         leverage(&fixture.feed, &actor);
@@ -246,7 +246,7 @@ async fn risk_book_contract_native_public_b_executes_and_keeps_reserve_while_a_s
         .planning_fee_skip
         .store(2, Ordering::SeqCst);
     *fixture.market_boundary.planning_fee_gate.lock().unwrap() = Some(gate.clone());
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     fee(&fixture.feed, "fixture-observer-a", &at);
     leverage(&fixture.feed, "fixture-observer-a");
     leverage(&fixture.feed, "fixture-observer-a");
@@ -310,7 +310,7 @@ async fn risk_book_contract_native_public_b_executes_and_keeps_reserve_while_a_s
 
     // Finite B-only tariff/leverage pages cover all three real assessments.
     // Original public snapshots still read A in each whole-cohort census.
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     fee(&fixture.feed, "fixture-observer-b", &at);
     leverage(&fixture.feed, "fixture-observer-b");
     leverage(&fixture.feed, "fixture-observer-b");

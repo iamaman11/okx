@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+jiff = "1.0"
 okx-api = { path = "../okx-api" }
 okx-observation = { path = "../okx-observation" }
 okx-protocol = { path = "../okx-protocol" }

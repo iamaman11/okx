@@ -1,5 +1,6 @@
 //! One source-backed, single-send protective cancellation owner.
 //! Public Status and direct wire regressions enter through this same function.
+use std::str::FromStr;
 use super::reconcile::verify_instrument_is_flat;
 use super::*;
 use crate::account_bootstrap::AccountBootstrapper;
@@ -319,9 +320,9 @@ async fn observe_protection_cleanup_sources(
         .snapshot_after_held_until(deadline())
         .await
         .map_err(err)?;
-    let source_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+    let source_at = jiff::Timestamp::from_str(&snapshot.source_received_at)
         .map_err(|_| "PROTECTION_CLEANUP_POSITION_TIME_INVALID")?
-        .timestamp_millis();
+        .as_millisecond();
     if let Some((trace, facts)) = trace {
         trace.record(
             target.key,

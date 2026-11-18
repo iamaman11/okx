@@ -72,7 +72,7 @@ async fn risk_book_contract_native_public_b_uses_remaining_budget_after_a_settle
         .market_boundary
         .market_updates_expected
         .store(4, Ordering::SeqCst);
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":at}])));
@@ -101,7 +101,7 @@ async fn risk_book_contract_native_public_b_uses_remaining_budget_after_a_settle
     let timer_a = a.recorded_capture_gate.write().await;
     let timer_b = b.recorded_capture_gate.write().await;
     *fixture.market_boundary.market.lock().unwrap() = None;
-    let filled_at = chrono::Utc::now().timestamp_millis();
+    let filled_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.9995", "0.1");
     history(
         &fixture.feed,
@@ -149,12 +149,12 @@ async fn risk_book_contract_native_public_b_uses_remaining_budget_after_a_settle
     assert_eq!(before.consumed_entry_usd, "1.0005");
     assert_eq!(before.reserved_entry_usd, "0");
     assert_eq!(before.remaining_entry_usd, "0.4995");
-    let closes_at = chrono::Utc::now()
-        .timestamp_millis()
+    let closes_at = jiff::Timestamp::now()
+        .as_millisecond()
         .checked_add(2_000)
         .unwrap();
     let remaining = closes_at
-        .saturating_sub(chrono::Utc::now().timestamp_millis())
+        .saturating_sub(jiff::Timestamp::now().as_millisecond())
         .max(0) as u64;
     tokio::time::sleep_until(tokio::time::Instant::now() + Duration::from_millis(remaining)).await;
     snapshot(&fixture.feed, "99.9995", "0.1");
@@ -190,7 +190,7 @@ async fn risk_book_contract_native_public_b_uses_remaining_budget_after_a_settle
                 before.campaign_started_at_ms.unwrap() as i64,
                 source
                     .watermark
-                    .min(chrono::Utc::now().timestamp_millis().saturating_sub(2_000)),
+                    .min(jiff::Timestamp::now().as_millisecond().saturating_sub(2_000)),
             )
             .await
             .unwrap();
@@ -221,7 +221,7 @@ async fn risk_book_contract_native_public_b_uses_remaining_budget_after_a_settle
         .market_boundary
         .market_updates_expected
         .store(7, Ordering::SeqCst);
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     fee(&fixture.feed, "fixture-observer-b", &at);
     leverage(&fixture.feed, "fixture-observer-b");
     leverage(&fixture.feed, "fixture-observer-b");
@@ -418,7 +418,7 @@ async fn risk_book_contract_native_public_cohort_denied_b_does_not_block_held_a_
         .planning_fee_skip
         .store(2, Ordering::SeqCst);
     *fixture.market_boundary.planning_fee_gate.lock().unwrap() = Some(gate.clone());
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     fee(&fixture.feed, "fixture-observer-a", &at); // A plan
     leverage(&fixture.feed, "fixture-observer-a");
     leverage(&fixture.feed, "fixture-observer-a"); // A pre-reserve quote
@@ -476,7 +476,7 @@ async fn risk_book_contract_native_public_cohort_denied_b_does_not_block_held_a_
 
     // B receives exactly its own two assessments. It must independently read
     // BOTH accounts and observe A's durable receipt before the shared-cap decision.
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     fee(&fixture.feed, "fixture-observer-b", &at);
     leverage(&fixture.feed, "fixture-observer-b");
     leverage(&fixture.feed, "fixture-observer-b");
@@ -532,7 +532,7 @@ async fn risk_book_contract_native_public_cohort_denied_b_does_not_block_held_a_
         reads_before_diagnostic
     );
     assert!(fixture.feed.outbound_posts.lock().unwrap().is_empty());
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     fee(&fixture.feed, "fixture-observer-a", &at);
     leverage(&fixture.feed, "fixture-observer-a");
     fixture

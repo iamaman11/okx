@@ -52,7 +52,7 @@ async fn native_entry_preconditions_reject_before_financial_mutation() {
         .ensure_manual_instance(deadline(), key.clone())
         .await
         .unwrap();
-    let at = chrono::Utc::now().timestamp_millis();
+    let at = jiff::Timestamp::now().as_millisecond();
     let revision = fixture.authority.state.revision as i64;
     let intent = fixture
         .owner

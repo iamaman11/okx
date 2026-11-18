@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use super::*;
 use crate::execution_store::ExecutionStore;
 
@@ -184,7 +185,7 @@ impl TradeService {
             .complete_campaign_account_history(
                 backup,
                 started,
-                chrono::Utc::now().timestamp_millis(),
+                jiff::Timestamp::now().as_millisecond(),
             )
             .await
             .map_err(|_| "STORAGE_RECOVERY_ACCOUNT_HISTORY_NOT_PROVEN")?;
@@ -462,9 +463,9 @@ impl TradeService {
         )?;
         let observed = now();
         let account_received =
-            chrono::DateTime::parse_from_rfc3339(&fresh_snapshot.source_received_at)
+            jiff::Timestamp::from_str(&fresh_snapshot.source_received_at)
                 .map_err(|_| "STORAGE_RECOVERY_ACCOUNT_TIME_INVALID")?
-                .timestamp_millis();
+                .as_millisecond();
         recovery_fresh(observed, account_received)?;
         recovery_fresh(
             observed,

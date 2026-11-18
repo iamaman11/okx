@@ -33,7 +33,7 @@ async fn risk_book_contract_native_public_cancel_after_held_replays_and_cold_reo
         .planning_fee_skip
         .store(2, Ordering::SeqCst);
     *fixture.market_boundary.planning_fee_gate.lock().unwrap() = Some(gate.clone());
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     record_fee(&fixture.feed, &at); // original plan
     record_leverage(&fixture.feed);
     record_leverage(&fixture.feed); // original pre-reserve assessment
@@ -223,7 +223,7 @@ async fn risk_book_contract_native_public_cancel_after_held_replays_and_cold_reo
     assert_eq!(active.len(), 1, "reopen cannot prepare another intent");
     assert_eq!(active[0].intent_id, original.intent_id);
     assert!(
-        chrono::Utc::now().timestamp_millis() < restored.deadline,
+        jiff::Timestamp::now().as_millisecond() < restored.deadline,
         "cold readback must occur within the ORIGINAL persisted command lifetime"
     );
     let (_market, public) = okx_runtime::PublicWsCoordinator::new_with_connector(

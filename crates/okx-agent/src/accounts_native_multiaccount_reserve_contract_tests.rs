@@ -1,4 +1,5 @@
 //! Competing scoped reservations on the original fresh Native owner.
+use std::str::FromStr;
 use super::*;
 use rust_decimal::Decimal;
 fn deadline() -> Instant {
@@ -53,10 +54,10 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
     let generation = public
         .risk_fresh_snapshot(
             "BTC-USDT-SWAP",
-            chrono::Utc::now().timestamp_millis() as u64,
+            jiff::Timestamp::now().as_millisecond() as u64,
             2000,
             180000,
-            chrono::Utc::now().to_rfc3339(),
+            jiff::Timestamp::now().to_string(),
         )
         .await
         .unwrap()
@@ -69,7 +70,7 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
             .ensure_manual_instance(deadline(), key.clone())
             .await
             .unwrap();
-        let at = chrono::Utc::now().timestamp_millis();
+        let at = jiff::Timestamp::now().as_millisecond();
         fixture.feed.expect_get(RecordedGet {
             access_key: format!("fixture-observer-{label}"),
             path: "/api/v5/account/trade-fee".into(),
@@ -102,10 +103,10 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
             snapshot.account_generation,
             usdt
         )));
-        let conversion_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+        let conversion_at = jiff::Timestamp::from_str(&snapshot.source_received_at)
             .unwrap()
-            .timestamp_millis();
-        let observed_at = chrono::Utc::now().timestamp_millis();
+            .as_millisecond();
+        let observed_at = jiff::Timestamp::now().as_millisecond();
         let plan = IntentPlan {
             strategy_definition_id: definition.definition_id,
             strategy_definition_version: definition.version,
@@ -178,9 +179,9 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
             total_usd: Decimal::new(10005, 4),
             fee_generation: fees.fee_generation,
             reference_generation: rules.reference_generation.clone(),
-            fee_received_at: chrono::DateTime::parse_from_rfc3339(&fees.source_received_at)
+            fee_received_at: jiff::Timestamp::from_str(&fees.source_received_at)
                 .unwrap()
-                .timestamp_millis(),
+                .as_millisecond(),
             conversion_digest: conversion.clone(),
             conversion_received_at: conversion_at,
             observed_at,
@@ -290,9 +291,9 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
             usdt
         )));
         request.conversion_observed_at_ms =
-            chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+            jiff::Timestamp::from_str(&snapshot.source_received_at)
                 .unwrap()
-                .timestamp_millis();
+                .as_millisecond();
     }
     let mut occupied = BTreeMap::new();
     let mut losses = BTreeMap::new();
@@ -318,7 +319,7 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
     let census = ReportedRiskCensus {
         source_digest: hash(&json!((&sources, &losses))),
         generated_at_ms: okx_execution::account_worker::CensusObservedAtMs::new(
-            chrono::Utc::now().timestamp_millis(),
+            jiff::Timestamp::now().as_millisecond(),
         )
         .unwrap(),
         read_floor_ms: okx_execution::account_worker::CensusReadFloorMs::new(

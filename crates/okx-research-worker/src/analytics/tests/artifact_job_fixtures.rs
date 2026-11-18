@@ -7,7 +7,7 @@ fn unique_fixture_root() -> PathBuf {
     std::env::temp_dir().join(format!(
         "okx-analytics-{}-{}-{}",
         std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap(),
+        jiff::Timestamp::now().as_nanosecond(),
         NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed),
     ))
 }
@@ -506,7 +506,7 @@ fn c17_retention_keeps_shared_pinned_result_and_expires_only_unpinned_job() {
             .unwrap();
     }
     service.pin_job(&second, true).unwrap();
-    let future = chrono::Utc::now().timestamp_millis().max(0) as u64 + 8 * 86_400_000;
+    let future = jiff::Timestamp::now().as_millisecond().max(0) as u64 + 8 * 86_400_000;
     assert_eq!(service.apply_retention(future).unwrap(), 1);
     assert_eq!(
         service
@@ -749,13 +749,13 @@ async fn immutable_result_pages_and_restart_catalog() {
     );
     s.pin_job(&id, true).unwrap();
     assert_eq!(
-        s.apply_retention(chrono::Utc::now().timestamp_millis() as u64 + 8 * 86400000)
+        s.apply_retention(jiff::Timestamp::now().as_millisecond() as u64 + 8 * 86400000)
             .unwrap(),
         0
     );
     s.pin_job(&id, false).unwrap();
     assert_eq!(
-        s.apply_retention(chrono::Utc::now().timestamp_millis() as u64 + 8 * 86400000)
+        s.apply_retention(jiff::Timestamp::now().as_millisecond() as u64 + 8 * 86400000)
             .unwrap(),
         1
     );

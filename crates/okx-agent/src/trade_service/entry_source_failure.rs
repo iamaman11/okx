@@ -1,4 +1,5 @@
 //! Best-effort preservation of the actual first failed post-HELD fee check.
+use std::str::FromStr;
 use crate::{accounts::AccountResources, execution_store::OperationId};
 use okx_execution::{
     StoredIntent,
@@ -21,9 +22,9 @@ pub(super) async fn record(
         ),
         "ENTRY_FEE_SOURCE_STALE" => (
             NativeEntrySourceKind::FeeReceipt,
-            chrono::DateTime::parse_from_rfc3339(&fee.source_received_at)
+            jiff::Timestamp::from_str(&fee.source_received_at)
                 .ok()
-                .map(|v| v.timestamp_millis()),
+                .map(|v| v.as_millisecond()),
         ),
         _ => return,
     };

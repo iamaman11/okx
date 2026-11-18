@@ -22,7 +22,7 @@ async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutabl
         .await
         .unwrap()
         .unwrap();
-    let partial_at = chrono::Utc::now().timestamp_millis();
+    let partial_at = jiff::Timestamp::now().as_millisecond();
     order_cumulative(
         &fixture.feed,
         OPEN_ORDER,
@@ -74,7 +74,7 @@ async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutabl
 
     // The venue publishes a separate, order-linked -1 USDT bill after the
     // first source frontier. It is not another fill or a rewritten old fee.
-    let late_at = chrono::Utc::now().timestamp_millis();
+    let late_at = jiff::Timestamp::now().as_millisecond();
     assert!(late_at > first.source_covered_through_ms);
     snapshot(&fixture.feed, "98.9998", "0.04");
     adjustment(&fixture.feed, "fee-correction-late-debit", late_at, "-1");
@@ -131,7 +131,7 @@ async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutabl
     adjustment(
         &fixture.feed,
         "fee-correction-rebate",
-        chrono::Utc::now().timestamp_millis(),
+        jiff::Timestamp::now().as_millisecond(),
         "1",
     );
     capture(&fixture).await;
@@ -325,7 +325,7 @@ fn adjustment(feed: &RecordedAccountHttp, bill: &str, at: i64, fee: &str) {
 }
 
 async fn create(fixture: &NativeFixture) -> String {
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));

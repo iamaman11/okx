@@ -4,7 +4,7 @@ fn path(label: &str) -> PathBuf {
         .join(format!(
             "okx-research-sqlite-{label}-{}-{}.sqlite",
             std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+            jiff::Timestamp::now().as_nanosecond()
         ))
         .join("catalog.sqlite")
 }

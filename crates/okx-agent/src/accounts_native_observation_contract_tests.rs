@@ -8,7 +8,7 @@ async fn native_order_observation_requires_exact_plan_and_replays_terminal_once(
     let mut fixture = fixture().await;
     let (market_stop, market_task, _socket, _public) = opened_market(&mut fixture).await;
     let account = fixture._account.clone();
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":at}])));
@@ -76,7 +76,7 @@ async fn native_order_observation_requires_exact_plan_and_replays_terminal_once(
     );
     let row = json!({"instId":INSTRUMENT,"ordId":OPEN_ORDER,"clOrdId":original.client_order_id,
         "side":"buy","posSide":"long","state":"filled","sz":"0.1","accFillSz":"0.1",
-        "uTime":chrono::Utc::now().timestamp_millis().to_string()});
+        "uTime":jiff::Timestamp::now().as_millisecond().to_string()});
     let mut wrong = row.clone();
     wrong["sz"] = json!("0.2");
     fixture.feed.expect_get(source("0", json!([wrong])));
@@ -234,7 +234,7 @@ async fn native_incomplete_balance_blocks_source_capture_then_signed_source_reco
         before.cursors.bills.as_ref().unwrap().watermark
     );
     assert_eq!(fixture.feed.outbound_posts.lock().unwrap().len(), posts);
-    while chrono::Utc::now().timestamp_millis()
+    while jiff::Timestamp::now().as_millisecond()
         <= before
             .cursors
             .swap
@@ -276,7 +276,7 @@ async fn native_stop_blocks_open_but_close_recovers_after_malformed_positions() 
     let mut fixture = fixture().await;
     let (market_stop, market_task, socket, public) = opened_market(&mut fixture).await;
     let account = fixture._account.clone();
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));
@@ -319,7 +319,7 @@ async fn native_stop_blocks_open_but_close_recovers_after_malformed_positions() 
 
     // Independent cashflow: 0.1 contracts * 0.01 BTC * 1000 = 1 USDT
     // notional; 0.0005 fee. Margin is not an equity debit.
-    let opened_at = chrono::Utc::now().timestamp_millis();
+    let opened_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.9995", "0.1");
     history(
         &fixture.feed,
@@ -443,7 +443,7 @@ async fn native_stop_blocks_open_but_close_recovers_after_malformed_positions() 
     }
 
     close_market(&socket, &public).await;
-    let negative_clock = chrono::Utc::now().timestamp_millis().to_string();
+    let negative_clock = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":negative_clock}])));
@@ -489,7 +489,7 @@ async fn native_stop_blocks_open_but_close_recovers_after_malformed_positions() 
     assert_eq!(fixture.feed.outbound_posts.lock().unwrap().len(), posts);
     // First market publication advanced the book 12 to 13. The recovery
     // event must advance 13 to 14 and be observed by the actual parser.
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     let mut parsed = public.subscribe_market_updates();
     for frame in [
         json!({"arg":{"channel":"tickers","instId":INSTRUMENT},"data":[{"instType":"SWAP","instId":INSTRUMENT,"last":"1000","lastSz":"1","askPx":"1000","askSz":"10","bidPx":"999.9","bidSz":"10","ts":at}]}),
@@ -505,10 +505,10 @@ async fn native_stop_blocks_open_but_close_recovers_after_malformed_positions() 
             if public
                 .risk_fresh_snapshot(
                     INSTRUMENT,
-                    chrono::Utc::now().timestamp_millis() as u64,
+                    jiff::Timestamp::now().as_millisecond() as u64,
                     2000,
                     180000,
-                    chrono::Utc::now().to_rfc3339(),
+                    jiff::Timestamp::now().to_string(),
                 )
                 .await
                 .is_ok_and(|snapshot| snapshot.order_book.seq_id == Some(14))
@@ -519,7 +519,7 @@ async fn native_stop_blocks_open_but_close_recovers_after_malformed_positions() 
     })
     .await
     .expect("recovered Close market event reaches sequence 14");
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":at}])));

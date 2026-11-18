@@ -108,7 +108,7 @@ async fn risk_book_contract_native_public_strategies_crud_claim_no_trade_share_o
         input_digest: "closed-bars-inputs".into(),
         policy_revision: i64::try_from(fixture.authority.state.revision).unwrap(),
         expected_version: version.clone(),
-        time: chrono::Utc::now().timestamp_millis(),
+        time: jiff::Timestamp::now().as_millisecond(),
     };
     let decision = account
         .execution
@@ -134,7 +134,7 @@ async fn risk_book_contract_native_public_strategies_crud_claim_no_trade_share_o
             INSTANCE.into(),
             claim.decision_key.clone(),
             version.clone(),
-            chrono::Utc::now().timestamp_millis(),
+            jiff::Timestamp::now().as_millisecond(),
         )
         .await
         .unwrap();

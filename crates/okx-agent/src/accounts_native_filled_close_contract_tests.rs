@@ -24,7 +24,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
     let mut fixture = fixture().await;
     let (market_stop, market_task, socket, public) = opened_market(&mut fixture).await;
     let account = fixture._account.clone();
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));
@@ -67,7 +67,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
 
     // Independent cashflow: 0.1 contracts * 0.01 BTC * 1000 = 1 USDT
     // notional; 0.0005 fee. Margin is not an equity debit.
-    let opened_at = chrono::Utc::now().timestamp_millis();
+    let opened_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.9995", "0.1");
     history(
         &fixture.feed,
@@ -193,7 +193,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
     // Close is independently authorized from the actual SQL lot, fresh venue
     // exposure and its own public market observation. ACK loss cannot resend.
     close_market(&socket, &public).await;
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));
@@ -276,7 +276,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
 
     // IOC sell at 999 may execute at the recorded better 1000. PnL is zero;
     // the second independently billed 0.0005 fee leaves equity 99.999.
-    let closed_at = chrono::Utc::now().timestamp_millis();
+    let closed_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.999", "0");
     history(
         &fixture.feed,
@@ -430,7 +430,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
 
     let report_query = okx_execution::FinanceReportQuery {
         from: 0,
-        through: chrono::Utc::now().timestamp_millis(),
+        through: jiff::Timestamp::now().as_millisecond(),
         instances: vec![],
         currencies: vec![],
         view: okx_execution::FinanceReportView::Summary,
