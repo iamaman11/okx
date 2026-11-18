@@ -12,7 +12,36 @@ SHA-256 is `975a22143262fd27476d19ee00c7af67978426e40e1dee94eed6bbade1cf87dc`.
 `advisories/licenses/sources` and the actual-graph maintenance scope guard pass.
 The locked package count is reduced from 349 to 292. Reported vulnerabilities
 were updated, unused unmaintained backends removed; chrono's maintenance notice
-is handled explicitly rather than represented as fixed.
+was initially handled explicitly rather than represented as fixed. The later
+replacement eliminates that residual maintenance exception.
+
+## Chrono removal and replacement verification — 2026-11-18
+
+- Scope: all six direct Rust consumers in API, GitHub, Runtime, Agent,
+  Host Control and Research Worker now use `jiff = "1.0"`. The resolved
+  production lock contains `jiff 1.0.1`, no `chrono`, and no `iana-time-zone`.
+  Workspace maintenance exceptions and cargo-deny advisory ignores are empty.
+- Selection evidence: a temporary *independent workspace* compared the old
+  Chrono output with `jiff 1.0.0` and `time 0.3.44`. Five behavior tests passed
+  on each of Windows and Linux in
+  [GitHub Actions run 44238027644](https://github.com/iamaman11/okx/actions/runs/44238027644):
+  Unix-millisecond boundaries and fixed `.000Z` serialization, offsets and
+  invalid RFC3339 input, three *calendar* months including month ends and leap
+  years, Windows system-local scheduler formatting, and out-of-range rejection.
+  `time` omitted `.000` at exact second boundaries by default; a fixed 90-day
+  subtraction was not interchangeable with calendar months.
+- Production graph verification: the full Linux workspace/all-target compilation
+  of the resolved `jiff 1.0.1` graph passed in
+  [run 44240009808](https://github.com/iamaman11/okx/actions/runs/44240009808).
+  The existing dependency-policy job accepted the exact locked graph without
+  the old advisory exception. The temporary comparison workflow and package
+  were removed before the final PR gate.
+- Unchanged invariants: a fixed millisecond RFC3339 UTC string is retained for
+  OKX signing, finance archive cutoffs still subtract actual UTC calendar months,
+  local autostart timestamps retain their 19-character Windows task format,
+  and elapsed-time deadlines remain on `std::time::Instant`.
+- This is verification of a code candidate, not installation or release
+  authorization. Full Windows CI and human PR review remain separate gates.
 
 Local boundary regression: execution 332 PASS / 2 pre-existing ignored
 composition helpers; CONTROL 56 PASS; protocol 43 PASS / 1 pre-existing ignored
