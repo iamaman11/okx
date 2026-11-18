@@ -16,7 +16,6 @@ use okx_runtime::{LiveWsConnector, PrivateWsCoordinator, PrivateWsHandle, WsConn
 #[cfg(test)]
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
-#[cfg(test)]
 use std::str::FromStr;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
