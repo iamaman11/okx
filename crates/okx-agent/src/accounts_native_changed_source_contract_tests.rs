@@ -281,9 +281,11 @@ async fn risk_book_contract_native_changed_post_held_fee_releases_unsent_and_rep
             account.clone(),
             fixture.campaign.clone(),
             released.campaign_started_at_ms.unwrap() as i64,
-            source
-                .watermark
-                .min(jiff::Timestamp::now().as_millisecond().saturating_sub(2_000)),
+            source.watermark.min(
+                jiff::Timestamp::now()
+                    .as_millisecond()
+                    .saturating_sub(2_000),
+            ),
         )
         .await
         .expect("real maintenance before independent replan");

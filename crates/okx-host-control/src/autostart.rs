@@ -1,5 +1,7 @@
+#[cfg(windows)]
 use std::{fs, path::PathBuf};
 
+#[cfg(windows)]
 use jiff::{Span, ZonedDateTime};
 use serde_json::{Value, json};
 

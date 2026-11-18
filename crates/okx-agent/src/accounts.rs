@@ -6801,9 +6801,7 @@ pub(crate) mod tests {
     #[test]
     fn published_age_retains_source_timestamp_even_past_risk_ttl() {
         let source = "2026-10-28T20:00:00.000Z";
-        let observed = jiff::Timestamp::from_str(source)
-            .unwrap()
-            .as_millisecond();
+        let observed = jiff::Timestamp::from_str(source).unwrap().as_millisecond();
         assert_eq!(
             snapshot_age_at_publish_ms(source, observed + 4_999),
             Some(4_999)

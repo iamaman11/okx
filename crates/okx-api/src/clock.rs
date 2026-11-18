@@ -261,4 +261,11 @@ mod tests {
         assert!(MutationTiming::from_exchange_time_ms(1, 0).is_err());
         assert!(MutationTiming::from_exchange_time_ms(1, MAX_MUTATION_REQUEST_TTL_MS + 1).is_err());
     }
+
+    #[test]
+    fn exchange_wire_timestamp_preserves_zero_millisecond_precision() {
+        assert_eq!(timestamp_from_unix_ms(0).unwrap(), "1970-01-01T00:00:00.000Z");
+        assert_eq!(timestamp_from_unix_ms(1).unwrap(), "1970-01-01T00:00:00.001Z");
+        assert!(timestamp_from_unix_ms(u64::MAX).is_err());
+    }
 }

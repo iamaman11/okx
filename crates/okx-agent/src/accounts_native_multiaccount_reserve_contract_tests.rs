@@ -1,7 +1,7 @@
 //! Competing scoped reservations on the original fresh Native owner.
-use std::str::FromStr;
 use super::*;
 use rust_decimal::Decimal;
+use std::str::FromStr;
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(3)
 }
@@ -290,10 +290,9 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
             snapshot.account_generation,
             usdt
         )));
-        request.conversion_observed_at_ms =
-            jiff::Timestamp::from_str(&snapshot.source_received_at)
-                .unwrap()
-                .as_millisecond();
+        request.conversion_observed_at_ms = jiff::Timestamp::from_str(&snapshot.source_received_at)
+            .unwrap()
+            .as_millisecond();
     }
     let mut occupied = BTreeMap::new();
     let mut losses = BTreeMap::new();

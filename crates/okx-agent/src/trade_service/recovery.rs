@@ -1,6 +1,6 @@
-use std::str::FromStr;
 use super::*;
 use crate::execution_store::ExecutionStore;
+use std::str::FromStr;
 
 // Conservative bound for OKX's short-lived canceled/unfilled order
 // history. An expired archive cannot establish absence of lost POSTs.
@@ -462,10 +462,9 @@ impl TradeService {
             protections,
         )?;
         let observed = now();
-        let account_received =
-            jiff::Timestamp::from_str(&fresh_snapshot.source_received_at)
-                .map_err(|_| "STORAGE_RECOVERY_ACCOUNT_TIME_INVALID")?
-                .as_millisecond();
+        let account_received = jiff::Timestamp::from_str(&fresh_snapshot.source_received_at)
+            .map_err(|_| "STORAGE_RECOVERY_ACCOUNT_TIME_INVALID")?
+            .as_millisecond();
         recovery_fresh(observed, account_received)?;
         recovery_fresh(
             observed,

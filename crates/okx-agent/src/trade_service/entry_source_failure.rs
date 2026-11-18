@@ -1,10 +1,10 @@
 //! Best-effort preservation of the actual first failed post-HELD fee check.
-use std::str::FromStr;
 use crate::{accounts::AccountResources, execution_store::OperationId};
 use okx_execution::{
     StoredIntent,
     account_worker::{NativeEntrySourceFailure, NativeEntrySourceKind},
 };
+use std::str::FromStr;
 use std::time::Instant;
 
 pub(super) async fn record(

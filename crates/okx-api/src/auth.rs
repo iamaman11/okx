@@ -1,6 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use jiff::Timestamp;
 use hmac::{Hmac, Mac};
+use jiff::Timestamp;
 use sha2::Sha256;
 
 use crate::error::OkxError;

@@ -5,12 +5,12 @@ pub(crate) use protection_trace::{
     ProtectionCleanupInvocation, ProtectionOperationTrace, ProtectionTraceEvent,
 };
 
-use std::str::FromStr;
 use crate::{accounts::AccountResources, query::DispatchContext};
-use jiff::Timestamp;
 use futures_util::{StreamExt, stream};
+use jiff::Timestamp;
 use okx_protocol::trading::{DiagnosticsRequest, DiagnosticsView};
 use serde_json::{Value, json};
+use std::str::FromStr;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -345,7 +345,11 @@ async fn finance_diagnostics(
         .source_capture_health
         .try_read()
         .ok()
-        .map(|health| health.finance_window.summary(Timestamp::now().as_millisecond()));
+        .map(|health| {
+            health
+                .finance_window
+                .summary(Timestamp::now().as_millisecond())
+        });
     let mut maintenance = resources.execution.store.maintenance_timing();
     let now_ms = Timestamp::now().as_millisecond();
     let active_cycle = trace.selected.as_ref().or(trace.active.as_ref());

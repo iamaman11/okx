@@ -1,10 +1,10 @@
 //! Public Add admits exactly owned, protected exposure on the original owner.
 //! Venue bytes independently describe the old position, incremental fill and
 //! both stops; a fresh unmatched position cannot acquire a local lot by Add.
-use std::str::FromStr;
 use super::filled_fixture::*;
 use super::*;
 use rust_decimal::Decimal;
+use std::str::FromStr;
 
 const ADD_ORDER: &str = "native-public-add-002";
 const ADD_STOP: &str = "900000003";

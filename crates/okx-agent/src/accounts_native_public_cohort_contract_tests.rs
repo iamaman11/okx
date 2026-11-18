@@ -188,9 +188,11 @@ async fn risk_book_contract_native_public_b_uses_remaining_budget_after_a_settle
                 key,
                 fixture.campaign.clone(),
                 before.campaign_started_at_ms.unwrap() as i64,
-                source
-                    .watermark
-                    .min(jiff::Timestamp::now().as_millisecond().saturating_sub(2_000)),
+                source.watermark.min(
+                    jiff::Timestamp::now()
+                        .as_millisecond()
+                        .saturating_sub(2_000),
+                ),
             )
             .await
             .unwrap();

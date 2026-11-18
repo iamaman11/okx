@@ -1,8 +1,8 @@
-use std::str::FromStr;
 use super::*;
 use okx_api::MarginMode;
 #[cfg(test)]
 use okx_execution::instance_nav_gate;
+use std::str::FromStr;
 
 /// The retry category is assigned only at the source that observed it.
 #[derive(Debug, PartialEq, Eq)]

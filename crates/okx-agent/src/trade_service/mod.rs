@@ -504,9 +504,7 @@ impl TradeService {
                     let snapshot = r.latest_snapshot.read().await.clone();
                     let fresh = snapshot
                         .as_ref()
-                        .and_then(|v| {
-                            jiff::Timestamp::from_str(&v.source_received_at).ok()
-                        })
+                        .and_then(|v| jiff::Timestamp::from_str(&v.source_received_at).ok())
                         .is_some_and(|t| {
                             crate::config::evidence_fresh(
                                 t.as_millisecond(),
@@ -594,9 +592,7 @@ impl TradeService {
                     let snapshot = r.latest_snapshot.read().await.clone();
                     let fresh = snapshot
                         .as_ref()
-                        .and_then(|s| {
-                            jiff::Timestamp::from_str(&s.source_received_at).ok()
-                        })
+                        .and_then(|s| jiff::Timestamp::from_str(&s.source_received_at).ok())
                         .is_some_and(|t| {
                             crate::config::evidence_fresh(
                                 t.as_millisecond(),
@@ -861,18 +857,17 @@ impl TradeService {
                             .await
                             .map_err(err)?
                     };
-                    let exposure_fresh =
-                        jiff::Timestamp::from_str(&exposure.source_received_at)
-                            .ok()
-                            .is_some_and(|t| {
-                                crate::config::evidence_fresh(
-                                    t.as_millisecond(),
-                                    now(),
-                                    crate::config::ACCOUNT_MAX_AGE_MS,
-                                )
-                            })
-                            && exposure.account_uid_fingerprint
-                                == r.configuration.account_key.verified_uid;
+                    let exposure_fresh = jiff::Timestamp::from_str(&exposure.source_received_at)
+                        .ok()
+                        .is_some_and(|t| {
+                            crate::config::evidence_fresh(
+                                t.as_millisecond(),
+                                now(),
+                                crate::config::ACCOUNT_MAX_AGE_MS,
+                            )
+                        })
+                        && exposure.account_uid_fingerprint
+                            == r.configuration.account_key.verified_uid;
                     let visible_positions = plan::visible_nonzero_position_count(
                         exposure.positions.iter().map(|p| p.position.as_str()),
                     )?;

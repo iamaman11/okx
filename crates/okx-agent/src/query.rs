@@ -1,5 +1,4 @@
 //! Product dispatcher; explicit account routing and bounded native responses.
-use std::str::FromStr;
 use crate::{finance_dispatch::FinanceDispatch, research_client::ResearchClient};
 use jiff::Timestamp;
 use okx_protocol::{
@@ -8,6 +7,7 @@ use okx_protocol::{
 };
 use okx_runtime::PublicWsHandle;
 use serde_json::{Value, json};
+use std::str::FromStr;
 #[derive(Clone)]
 pub struct DispatchContext {
     pub finance: FinanceDispatch,

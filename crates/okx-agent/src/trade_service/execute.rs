@@ -1,10 +1,10 @@
-use std::str::FromStr;
 use super::census::*;
 use super::*;
 use okx_api::{
     ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, ApiTriggerPriceType,
     AttachedAlgoOrderRequest, PlaceOrderRequest,
 };
+use std::str::FromStr;
 /// Immutable provenance for checking the fresh post-HELD FX rate against the
 /// exact native account that owns the central reservation.
 // A legacy SQL intent stores its original RAW request hash but not the
@@ -2143,9 +2143,7 @@ mod tests {
     fn e1_held_entry_sources_reject_tampering_and_stale_tariffs() {
         use okx_observation::{FeeScheduleInput, FeeScheduleSnapshot};
         let stamp = "2026-10-30T00:00:00Z";
-        let t = jiff::Timestamp::from_str(stamp)
-            .unwrap()
-            .as_millisecond();
+        let t = jiff::Timestamp::from_str(stamp).unwrap().as_millisecond();
         let fee = FeeScheduleSnapshot::from_input(FeeScheduleInput {
             instrument_id: "BTC-USDT-SWAP".into(),
             reference_generation: "reference-1".into(),

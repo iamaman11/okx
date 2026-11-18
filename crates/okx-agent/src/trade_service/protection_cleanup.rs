@@ -1,6 +1,5 @@
 //! One source-backed, single-send protective cancellation owner.
 //! Public Status and direct wire regressions enter through this same function.
-use std::str::FromStr;
 use super::reconcile::verify_instrument_is_flat;
 use super::*;
 use crate::account_bootstrap::AccountBootstrapper;
@@ -8,6 +7,7 @@ use crate::diagnostics::{
     ProtectionCleanupInvocation, ProtectionOperationTrace, ProtectionTraceEvent,
 };
 use crate::execution_store::ExecutionStore;
+use std::str::FromStr;
 use tokio::sync::Semaphore;
 
 // A signed flat position is NOT permission to remove a stop while the

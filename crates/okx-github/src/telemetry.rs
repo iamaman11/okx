@@ -134,7 +134,10 @@ impl IssuePollTelemetryStore {
 
         let completed_at = Timestamp::from_str(&value.last_poll_completed_at)
             .map_err(GitHubError::TelemetryTimestamp)?;
-        let age = Timestamp::now().duration_since(completed_at).as_millis().max(0) as u64;
+        let age = Timestamp::now()
+            .duration_since(completed_at)
+            .as_millis()
+            .max(0) as u64;
 
         Ok(Some(IssuePollTelemetryStatus {
             schema: value.schema,

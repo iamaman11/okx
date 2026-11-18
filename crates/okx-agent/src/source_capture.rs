@@ -4,13 +4,13 @@ use crate::{
     account_bootstrap::{AccountBootstrapError, AccountBootstrapper},
     execution_runtime::ExecutionRuntime,
 };
+use jiff::{Span, Timestamp, tz::TimeZone};
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
     AccountNavSnapshot, Fill, IngestPage, SourceCursor, StoreError, StoreResult,
     StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition, VenueMark,
 };
 use okx_runtime::PrivateWsHandle;
-use jiff::{Span, Timestamp, tz::TimeZone};
 use rust_decimal::Decimal;
 use sha2::Digest;
 use std::{
@@ -134,8 +134,8 @@ fn strategy_cursor_refresh_needed(
 /// A one-day safety margin avoids claiming the ambiguous boundary as proven.
 /// Older campaign history requires an independently verified archival source.
 fn verify_history_retrieval_window(begin: i64, now: i64) -> AgentResult<()> {
-    let current = Timestamp::from_millisecond(now)
-        .map_err(|_| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
+    let current =
+        Timestamp::from_millisecond(now).map_err(|_| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
     let retention_floor = current
         .to_zoned_datetime(TimeZone::UTC)
         .checked_sub(Span::new().months(3))

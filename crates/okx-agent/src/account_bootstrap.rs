@@ -122,10 +122,7 @@ struct ObserverConfigCache {
 impl ObserverConfigCache {
     /// K4: force a new authenticated config read after the central HELD
     /// response; never satisfy post-HELD causality from the 2s cache.
-    async fn read_fresh<F, Fut>(
-        &self,
-        fetch: F,
-    ) -> Result<(AccountConfig, Timestamp), OkxError>
+    async fn read_fresh<F, Fut>(&self, fetch: F) -> Result<(AccountConfig, Timestamp), OkxError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<AccountConfig, OkxError>>,
@@ -146,10 +143,7 @@ impl ObserverConfigCache {
 
     /// Lock across the one authenticated read: concurrent callers share the same proof.
     /// Failed refreshes discard expired proof; no stale success/fallback is possible.
-    async fn read<F, Fut>(
-        &self,
-        fetch: F,
-    ) -> Result<(AccountConfig, Timestamp), OkxError>
+    async fn read<F, Fut>(&self, fetch: F) -> Result<(AccountConfig, Timestamp), OkxError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<AccountConfig, OkxError>>,

@@ -1,7 +1,7 @@
 //! Exact fee-inclusive linear entry sizing. Pure arithmetic shared by manual, strategy and preview.
-use std::str::FromStr;
 use super::*;
 use rust_decimal::RoundingStrategy;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(super) struct EntryQuote {
@@ -935,9 +935,7 @@ mod tests {
     #[test]
     fn e1_fee_source_must_be_current_exact_and_content_bound() {
         let stamp = "2026-10-30T00:00:00Z";
-        let now_ms = jiff::Timestamp::from_str(stamp)
-            .unwrap()
-            .as_millisecond();
+        let now_ms = jiff::Timestamp::from_str(stamp).unwrap().as_millisecond();
         let input = okx_observation::FeeScheduleInput {
             instrument_id: "BTC-USDT-SWAP".into(),
             reference_generation: "ref_generation".into(),
@@ -1035,9 +1033,7 @@ mod tests {
             instrument: spec,
         };
         let stamp = "2026-10-30T00:00:00Z";
-        let t = jiff::Timestamp::from_str(stamp)
-            .unwrap()
-            .as_millisecond();
+        let t = jiff::Timestamp::from_str(stamp).unwrap().as_millisecond();
         let fees =
             okx_observation::FeeScheduleSnapshot::from_input(okx_observation::FeeScheduleInput {
                 instrument_id: "BTC-USDT-SWAP".into(),
@@ -1395,10 +1391,9 @@ mod tests {
         );
         let observed_late = t + crate::config::ACCOUNT_MAX_AGE_MS + 1;
         let mut current_rules = rules.clone();
-        current_rules.source_received_at =
-            jiff::Timestamp::from_millisecond(observed_late)
-                .unwrap()
-                .to_string();
+        current_rules.source_received_at = jiff::Timestamp::from_millisecond(observed_late)
+            .unwrap()
+            .to_string();
         let current_fx = UsdConversion {
             observed_at_ms: observed_late as u64,
             ..fx.clone()
