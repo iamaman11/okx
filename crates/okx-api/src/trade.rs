@@ -445,7 +445,6 @@ pub struct PendingDerivativeAlgoRiskInventory {
     pub samples: Vec<PendingProtectiveAlgoSample>,
 }
 
-
 /** Account-wide pending OKX algo orders across all documented instrument types.
  * An absent instType parameter is a venue account-wide query; a full page is
  * incomplete because subsequent pages have not been enumerated. */
@@ -487,8 +486,10 @@ fn normalize_account_algo_risk_inventory(
             complete = false;
         }
         for item in rows {
-            if !matches!(item.instrument_type.as_str(), "SPOT" | "MARGIN" | "SWAP" | "FUTURES")
-                || item.order_type != order_type
+            if !matches!(
+                item.instrument_type.as_str(),
+                "SPOT" | "MARGIN" | "SWAP" | "FUTURES"
+            ) || item.order_type != order_type
                 || item.algo_order_id.is_empty()
                 || item.instrument_id.is_empty()
                 || !matches!(item.state.as_str(), "live" | "pause")
@@ -1475,9 +1476,11 @@ mod tests {
         all[0].1 = (0..PROTECTIVE_ALGO_PAGE_LIMIT)
             .map(|i| pending_algo(&format!("spot-{i}"), "conditional", "SPOT"))
             .collect();
-        assert!(!normalize_account_algo_risk_inventory(all.clone())
-            .unwrap()
-            .complete_within_bound);
+        assert!(
+            !normalize_account_algo_risk_inventory(all.clone())
+                .unwrap()
+                .complete_within_bound
+        );
         all[1].1.push(pending_algo("spot-0", "oco", "MARGIN"));
         assert!(normalize_account_algo_risk_inventory(all).is_err());
     }
