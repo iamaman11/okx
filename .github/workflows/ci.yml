@@ -793,13 +793,40 @@ jobs:
             }
           }
           Copy-Item 'Cargo.lock' (Join-Path $dist 'Cargo.lock')
-          $manifest = [ordered]@{
-            schema = 'okx.windows.bundle/v2'
-            repository_id = 1388071566
-            source_head_sha = $sourceHead
-            source_tree = $sourceTree
-            rust_version = (rustc --version).Trim()
-            components = $components
+          # Temporary one-release bridge for an already installed v1 CONTROL.
+          # That executable rejects the v2 "components" field before it can
+          # stage its successor. Keep the marker pinned in the tested source
+          # tree and remove it in a follow-up full v2 release.
+          if (Test-Path -LiteralPath '.github/windows-legacy-control-bridge.txt') {
+            if (Test-Path -LiteralPath '.github/research-release-base.json') {
+              throw 'LEGACY_BRIDGE_CANNOT_COMPOSE_RESEARCH_ORIGINS'
+            }
+            $files = [ordered]@{}
+            foreach ($name in $names[0..2]) {
+              $files[$name] = [ordered]@{
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dist $name)).Hash.ToLowerInvariant()
+              }
+            }
+            # Current v1 readers never install Research; new v1 readers reject
+            # unmanifested Research bytes. The next v2 release restores Worker.
+            Remove-Item -LiteralPath (Join-Path $dist 'okx-research-worker.exe') -Force
+            $manifest = [ordered]@{
+              schema = 'okx.windows.bundle/v1'
+              repository_id = 1388071566
+              source_head_sha = $sourceHead
+              source_tree = $sourceTree
+              rust_version = (rustc --version).Trim()
+              files = $files
+            }
+          } else {
+            $manifest = [ordered]@{
+              schema = 'okx.windows.bundle/v2'
+              repository_id = 1388071566
+              source_head_sha = $sourceHead
+              source_tree = $sourceTree
+              rust_version = (rustc --version).Trim()
+              components = $components
+            }
           }
           $manifest | ConvertTo-Json -Depth 8 |
             Set-Content -LiteralPath (Join-Path $dist 'manifest.json') -Encoding utf8NoBOM
