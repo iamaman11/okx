@@ -152,7 +152,7 @@ fn input() -> AgentResult<Zeroizing<String>> {
 }
 /// Uses only the existing named observer credential. The one-shot executable
 /// never acquires engine.lock, starts AccountRuntimeRegistry, or writes SQL.
-/// Counts are venue GET facts, not proof that local intents or Spot algos are clear.
+/// Counts are venue GET facts, not proof that local intents are clear.
 async fn inspect_venue(root: &Path, account: &str) -> AgentResult<serde_json::Value> {
     let catalog = account_catalog_proto::load(root)?;
     let entry = catalog
@@ -185,12 +185,24 @@ async fn inspect_venue(root: &Path, account: &str) -> AgentResult<serde_json::Va
         .pending_derivative_risk_algos_until(deadline)
         .await
         .map_err(|_| AgentError::FinancialCaptureTask("VENUE_ALGO_INVENTORY_INCOMPLETE".into()))?;
-    let complete = algos.complete_within_bound && algos.scopes_checked == 16;
+    // Additional unaffiliated-asset coverage: omit instType to enumerate all
+    // documented algo types across SPOT/MARGIN/FUTURES/SWAP. This detects
+    // orders capable of creating future exposure outside this Agent's SWAP policy.
+    let account_algos = observer
+        .pending_account_algo_risk_until(deadline)
+        .await
+        .map_err(|_| AgentError::FinancialCaptureTask("VENUE_ACCOUNT_ALGO_INVENTORY_INCOMPLETE".into()))?;
+    let complete_derivative = algos.complete_within_bound && algos.scopes_checked == 16;
+    let complete_account = account_algos.complete_within_bound && account_algos.scopes_checked == 8;
+    let complete = complete_derivative && complete_account;
     let state = if !complete {
         "INCOMPLETE"
-    } else if snapshot.positions.is_empty() && snapshot.pending_orders.is_empty() && algos.rows == 0
+    } else if snapshot.positions.is_empty()
+        && snapshot.pending_orders.is_empty()
+        && algos.rows == 0
+        && account_algos.rows == 0
     {
-        "DERIVATIVE_EXPOSURE_EMPTY"
+        "ACCOUNT_EXPOSURE_EMPTY"
     } else {
         "EXPOSURE_PRESENT"
     };
@@ -199,16 +211,20 @@ async fn inspect_venue(root: &Path, account: &str) -> AgentResult<serde_json::Va
         "installation_id": catalog.installation_id,
         "account": entry.account_key.wire(),
         "state": state,
-        "complete_derivative_algo_inventory": complete,
+        "complete_derivative_algo_inventory": complete_derivative,
+        "complete_account_algo_inventory": complete_account,
         "position_rows": snapshot.positions.len(),
         "pending_order_rows": snapshot.pending_orders.len(),
         "pending_derivative_algo_rows": algos.rows,
         "derivative_algo_scopes_checked": algos.scopes_checked,
+        "pending_account_algo_rows": account_algos.rows,
+        "account_algo_scopes_checked": account_algos.scopes_checked,
+        "account_algo_received_at_ms": account_algos.received_at_ms,
         "snapshot_received_at": snapshot.source_received_at,
         "algo_received_at_ms": algos.received_at_ms,
         "observer_permissions": snapshot.api_key_permissions,
         "authenticated_get_only": true,
-        "spot_algo_inventory": "NOT_EVALUATED",
+        "spot_algo_inventory": "INCLUDED_IN_ACCOUNT_ALGO_CENSUS",
         "local_unknown_intents": "NOT_EVALUATED",
         "safe_to_restart": false
     }))
