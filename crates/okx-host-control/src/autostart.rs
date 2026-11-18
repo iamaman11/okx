@@ -316,7 +316,9 @@ mod tests {
         // Real schtasks /Query /XML omits the default-true Settings/Enabled.
         let exported = "<Settings><StartWhenAvailable>true</StartWhenAvailable></Settings>";
         assert!(task_settings_enabled(exported));
-        assert!(!task_settings_enabled("<Settings><Enabled>false</Enabled></Settings>"));
+        assert!(!task_settings_enabled(
+            "<Settings><Enabled>false</Enabled></Settings>"
+        ));
         assert!(!task_settings_enabled("<Other></Other>"));
     }
 
