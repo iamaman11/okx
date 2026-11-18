@@ -1,0 +1,12 @@
+Temporary Windows v1-to-v2 CONTROL upgrade bridge (2026-11-18).
+
+The installed CONTROL at C:\okx deserializes manifest v1 with deny_unknown_fields
+and rejects the production v2 'components' field before stage_controller_update.
+While this marker is present, full PR CI still tests and builds all four EXEs,
+but packages only Agent, Controller and Launcher with an exact v1 manifest.
+This lets the installed v1 CONTROL verify and stage a new v2-capable controller.
+The Research worker is deliberately not installed from this bridge artifact.
+
+Remove this marker in a separate follow-up PR, after the controller handoff,
+to restore the normal four-component v2 artifact. Never bypass the existing
+CI-artifact identity/hash/tree checks or overwrite C:\okx executables manually.
