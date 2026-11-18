@@ -24,7 +24,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
     let mut fixture = fixture().await;
     let (market_stop, market_task, socket, public) = opened_market(&mut fixture).await;
     let account = fixture._account.clone();
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));
@@ -67,7 +67,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
 
     // Independent cashflow: 0.1 contracts * 0.01 BTC * 1000 = 1 USDT
     // notional; 0.0005 fee. Margin is not an equity debit.
-    let opened_at = chrono::Utc::now().timestamp_millis();
+    let opened_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.9995", "0.1");
     history(
         &fixture.feed,
@@ -193,7 +193,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
     // Close is independently authorized from the actual SQL lot, fresh venue
     // exposure and its own public market observation. ACK loss cannot resend.
     close_market(&socket, &public).await;
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));
@@ -276,7 +276,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
 
     // IOC sell at 999 may execute at the recorded better 1000. PnL is zero;
     // the second independently billed 0.0005 fee leaves equity 99.999.
-    let closed_at = chrono::Utc::now().timestamp_millis();
+    let closed_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.999", "0");
     history(
         &fixture.feed,
@@ -408,26 +408,29 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
         .await
         .unwrap();
     assert_eq!(final_account.active_reservations, 0);
-    let (risk, stops) = fixture
+    // Verify committed economics, not continuing freshness while this test
+    // deliberately holds the periodic source producer stopped.
+    let financial_snapshot = fixture
         .owner
-        .financial_readiness(
+        .account_diagnostic_snapshot(
+            Instant::now() + Duration::from_secs(3),
             account_key.clone(),
             None,
-            Instant::now() + Duration::from_secs(3),
         )
         .await
         .unwrap();
-    assert!(risk.nav_complete);
+    assert_eq!(financial_snapshot.nav_coverage.as_deref(), Some("COMPLETE"));
+    let risk = financial_snapshot.financial;
     assert_eq!(
         risk.daily_loss_usd,
         Decimal::new(1, 3),
         "two signed fees, zero price PnL"
     );
-    assert_eq!(stops, 0);
+    assert_eq!(financial_snapshot.stop_count, 0);
 
     let report_query = okx_execution::FinanceReportQuery {
         from: 0,
-        through: chrono::Utc::now().timestamp_millis(),
+        through: jiff::Timestamp::now().as_millisecond(),
         instances: vec![],
         currencies: vec![],
         view: okx_execution::FinanceReportView::Summary,
@@ -494,9 +497,9 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
         .await
         .unwrap()
         .unwrap();
+    fixture.registry.shutdown().await;
     drop(timer_capture);
     drop(account);
-    fixture.registry.shutdown().await;
     let root = fixture.root.clone();
     let installation = fixture.owner.installation_id().to_owned();
     let campaign = fixture.campaign.clone();

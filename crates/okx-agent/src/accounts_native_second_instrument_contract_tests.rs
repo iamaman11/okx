@@ -29,10 +29,10 @@ async fn risk_book_contract_native_public_second_instrument_spec_precision_and_p
             if public
                 .risk_fresh_snapshot(
                     INSTRUMENT,
-                    chrono::Utc::now().timestamp_millis() as u64,
+                    jiff::Timestamp::now().as_millisecond() as u64,
                     2_000,
                     180_000,
-                    chrono::Utc::now().to_rfc3339(),
+                    jiff::Timestamp::now().to_string(),
                 )
                 .await
                 .is_ok()
@@ -108,7 +108,7 @@ async fn risk_book_contract_native_public_second_instrument_spec_precision_and_p
         .market_boundary
         .publish_market_observation(deadline())
         .await;
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));
@@ -137,10 +137,9 @@ async fn risk_book_contract_native_public_second_instrument_spec_precision_and_p
         .trade(&fixture.config.alias, &positive, Some(&fixture.authority))
         .await
         .expect("public Execute must authorize its actual permitted DOGE spec");
-    assert_eq!(
-        result["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
-        "{result}"
-    );
+    fixture
+        .expect_trade_reason(&result, "EXCHANGE_POST_OUTCOME_UNKNOWN")
+        .await;
     let intent = fixture
         .owner
         .lookup_intent(
@@ -282,7 +281,7 @@ fn fee(feed: &RecordedAccountHttp) {
             ("instFamily".into(), INDEX.into()),
         ],
         raw_response: envelope(json!([{"instType":"SWAP","level":"Lv1",
-            "ts":chrono::Utc::now().timestamp_millis().to_string(),
+            "ts":jiff::Timestamp::now().as_millisecond().to_string(),
             "feeGroup":[{"groupId":"4","maker":"0.0005","taker":"0.0005"}]}])),
     });
 }
@@ -355,14 +354,14 @@ async fn second_market() -> (
     let client =
         okx_api::OkxPublicClient::with_http_transport(environment, rate.clone(), http.clone())
             .unwrap();
-    let source_floor = chrono::Utc::now().to_rfc3339();
+    let source_floor = jiff::Timestamp::now().to_string();
     let rows = okx_api::PublicDataApi::new(client.clone())
         .derivative_instruments()
         .await
         .unwrap();
     let reference = okx_observation::ReferenceRegistry::from_public(source_floor, rows).unwrap();
     let socket = Arc::new(RecordedWsConnector::default());
-    let at = chrono::Utc::now().timestamp_millis();
+    let at = jiff::Timestamp::now().as_millisecond();
     for (argument, data) in [
         (json!({"channel":"instruments","instType":"SWAP"}), None),
         (json!({"channel":"instruments","instType":"FUTURES"}), None),

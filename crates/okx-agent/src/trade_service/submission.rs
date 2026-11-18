@@ -1,50 +1,16 @@
 //! The single durable claim before a possible venue send.
-use super::{AccountStoreHandle, Instant, IntentState, StoredIntent, deadline, err, now};
+use super::{Instant, IntentState, StoredIntent, err, now};
 
-pub(crate) async fn post_once<T, F, Fut>(
-    store: &AccountStoreHandle,
-    intent: &StoredIntent,
-    until: Instant,
-    send: F,
-) -> Result<Option<T>, String>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<T, String>>,
-{
-    if Instant::now() >= until {
-        return Err("COMMAND_EXPIRED".into());
-    }
-    let id = intent.intent_id.clone();
-    let revision = intent.policy_revision;
-    let Some(claim) = store
-        .claim_legacy_send(until, id, intent.plan_hash.clone(), revision)
-        .await
-        .map_err(err)?
-    else {
-        return Ok(None);
-    };
-    send_committed(OutcomeOwner::Legacy(store), intent, claim, until, send).await
-}
-
-enum OutcomeOwner<'a> {
-    Legacy(&'a AccountStoreHandle),
-    Native {
-        owner: &'a okx_execution::account_worker::UnifiedFinanceHandle,
-        account: String,
-    },
+struct OutcomeOwner<'a> {
+    owner: &'a okx_execution::account_worker::UnifiedFinanceHandle,
+    account: String,
 }
 impl OutcomeOwner<'_> {
     async fn record(&self, outcome: okx_execution::IntentOutcome) -> Result<(), String> {
-        match self {
-            Self::Legacy(store) => store
-                .record_intent_outcome(deadline(), outcome)
-                .await
-                .map_err(err),
-            Self::Native { owner, account } => owner
-                .record_intent_outcome(account.clone(), outcome)
-                .await
-                .map_err(err),
-        }
+        self.owner
+            .record_intent_outcome(self.account.clone(), outcome)
+            .await
+            .map_err(err)
     }
 }
 /// Native already owns the durable account claim. Consuming that first-COMMIT
@@ -68,7 +34,7 @@ where
         return Err("POST_CLAIM_IDENTITY_MISMATCH".into());
     }
     send_committed(
-        OutcomeOwner::Native {
+        OutcomeOwner {
             owner,
             account: account.into(),
         },
@@ -140,3 +106,7 @@ where
         }
     }
 }
+
+#[cfg(test)]
+#[path = "submission_native_contract_tests.rs"]
+mod native_contract_tests;

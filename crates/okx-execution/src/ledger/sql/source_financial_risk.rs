@@ -42,7 +42,10 @@ impl AccountStore {
             (
                 dd,
                 time,
-                coverage == "COMPLETE" && instance.is_none() && now >= time && now - time <= 5000,
+                coverage == "COMPLETE"
+                    && instance.is_none()
+                    && now >= time
+                    && now - time <= FINANCIAL_SOURCE_MAX_AGE_MS,
             )
         } else {
             (Decimal::ZERO, 0, false)

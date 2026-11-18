@@ -6,14 +6,11 @@ pub(crate) use protection_trace::{
 };
 
 use crate::{accounts::AccountResources, query::DispatchContext};
-use chrono::Utc;
 use futures_util::{StreamExt, stream};
-use okx_execution::{AccountStore, StoreResult, StoredIntent};
-use okx_protocol::{
-    analytics::ResearchRequest,
-    trading::{DiagnosticsRequest, DiagnosticsView},
-};
+use jiff::Timestamp;
+use okx_protocol::trading::{DiagnosticsRequest, DiagnosticsView};
 use serde_json::{Value, json};
+use std::str::FromStr;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -37,13 +34,15 @@ async fn operation_diagnostics(
         .or(route)
         .ok_or("ACCOUNT_REQUIRED")?;
     let account = ctx
-        .accounts
+        .finance
+        .accounts()?
         .resolve(requested)
         .await
         .ok_or("ACCOUNT_UNAVAILABLE")?;
     if let Some(route) = route {
         let selected = ctx
-            .accounts
+            .finance
+            .accounts()?
             .resolve(route)
             .await
             .ok_or("ACCOUNT_UNAVAILABLE")?;
@@ -52,7 +51,12 @@ async fn operation_diagnostics(
         }
     }
     if reference.starts_with("intent:") {
-        return Ok(native_intent::read(&account, ctx.accounts.installation_id(), reference).await);
+        return Ok(native_intent::read(
+            &account,
+            ctx.finance.accounts()?.installation_id(),
+            reference,
+        )
+        .await);
     }
     if let Some(intent) = reference.strip_prefix("terminal_release:") {
         let state = account.terminal_release_trace.read(intent);
@@ -101,7 +105,7 @@ fn report(
     retryable: bool,
     next: &str,
 ) -> Value {
-    json!({"stage":stage,"reason_code":reason,"scope":scope,"blockers":blockers,"retryable":retryable,"next_action":next,"as_of_ms":Utc::now().timestamp_millis(),"quality":if blockers.is_empty(){"complete"}else{"partial"}})
+    json!({"stage":stage,"reason_code":reason,"scope":scope,"blockers":blockers,"retryable":retryable,"next_action":next,"as_of_ms":Timestamp::now().as_millisecond(),"quality":if blockers.is_empty(){"complete"}else{"partial"}})
 }
 fn safe_code(message: &str, fallback: &str) -> String {
     let code = message.split(':').next().unwrap_or("");
@@ -122,15 +126,6 @@ fn account_snapshot_fresh_at(source_as_of: Option<i64>, observed_now: i64) -> bo
 
 fn storage_failure_code(error: &okx_execution::StoreError) -> String {
     safe_code(&error.to_string(), "ACCOUNT_STORAGE_UNAVAILABLE")
-}
-fn lookup(store: &AccountStore, reference: &str) -> StoreResult<Option<StoredIntent>> {
-    if let Some(i) = store.intent(reference)? {
-        return Ok(Some(i));
-    }
-    if let Some(i) = store.by_client_order_id(reference)? {
-        return Ok(Some(i));
-    }
-    store.by_exchange_order_id(reference)
 }
 fn central_budget_not_evaluated() -> Value {
     json!({
@@ -169,7 +164,7 @@ pub async fn diagnostics(
         if request.account.is_some() || account.is_some() {
             return Err("RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE".into());
         }
-        return Ok(ctx.analytics.diagnostic_job(id));
+        return ctx.research.diagnostic_job(id).await;
     }
     if request.view == Some(DiagnosticsView::Operation) {
         return Ok(operation_diagnostics(ctx, request, account)
@@ -243,22 +238,27 @@ async fn storage_diagnostics(
         .or(route)
         .ok_or("ACCOUNT_REQUIRED")?;
     // Registry locks only: no credential lookup, SQL job or source refresh.
-    let resources =
-        tokio::time::timeout(Duration::from_millis(20), ctx.accounts.resolve(requested))
-            .await
-            .map_err(|_| "ACCOUNT_ROUTING_BUSY")?
-            .ok_or("ACCOUNT_UNAVAILABLE")?;
+    let resources = tokio::time::timeout(
+        Duration::from_millis(20),
+        ctx.finance.accounts()?.resolve(requested),
+    )
+    .await
+    .map_err(|_| "ACCOUNT_ROUTING_BUSY")?
+    .ok_or("ACCOUNT_UNAVAILABLE")?;
     if let Some(route) = route {
-        let selected = tokio::time::timeout(Duration::from_millis(20), ctx.accounts.resolve(route))
-            .await
-            .map_err(|_| "ACCOUNT_ROUTING_BUSY")?
-            .ok_or("ACCOUNT_UNAVAILABLE")?;
+        let selected = tokio::time::timeout(
+            Duration::from_millis(20),
+            ctx.finance.accounts()?.resolve(route),
+        )
+        .await
+        .map_err(|_| "ACCOUNT_ROUTING_BUSY")?
+        .ok_or("ACCOUNT_UNAVAILABLE")?;
         if selected.configuration.account_key != resources.configuration.account_key {
             return Err("ACCOUNT_ROUTE_MISMATCH".into());
         }
     }
     let observed = resources.execution.store.diagnostic_storage_snapshot();
-    let now = Utc::now().timestamp_millis();
+    let now = Timestamp::now().as_millisecond();
     let state = resources.private_ws.state();
     let private = state.try_read().ok().map(|s| {
         let status = s.status();
@@ -269,8 +269,8 @@ async fn storage_diagnostics(
     let source = resources.latest_snapshot.try_read().ok().map(|s| {
         let time = s
             .as_ref()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s.source_received_at).ok())
-            .map(|t| t.timestamp_millis());
+            .and_then(|s| jiff::Timestamp::from_str(&s.source_received_at).ok())
+            .map(|t| t.as_millisecond());
         json!({"account_as_of_ms":time,"account_fresh":account_snapshot_fresh_at(time,now)})
     });
     let health = resources
@@ -290,7 +290,7 @@ async fn storage_diagnostics(
         "private_ws":private.unwrap_or_else(||json!({"state":"NOT_EVALUATED","reason_code":"PRIVATE_STATE_BUSY"})),
         "sources":source.unwrap_or_else(||json!({"state":"NOT_EVALUATED","reason_code":"SOURCE_SNAPSHOT_BUSY"})),
         "source_capture":health.unwrap_or_else(||json!({"state":"NOT_EVALUATED","reason_code":"HEALTH_BUSY"})),
-        "access":ctx.trade.diagnostic_access_now(&resources.configuration.account_key.wire()),
+        "access":ctx.finance.trade()?.diagnostic_access_now(&resources.configuration.account_key.wire()),
         "central_budget":central_budget_not_evaluated(),"next_action":"inspect_snapshot_age_and_refresh_pending"}),
     )
 }
@@ -313,13 +313,15 @@ async fn finance_diagnostics(
         .or(route)
         .ok_or("ACCOUNT_REQUIRED")?;
     let resources = ctx
-        .accounts
+        .finance
+        .accounts()?
         .resolve(requested)
         .await
         .ok_or("ACCOUNT_UNAVAILABLE")?;
     if let Some(route) = route {
         let routed = ctx
-            .accounts
+            .finance
+            .accounts()?
             .resolve(route)
             .await
             .ok_or("ACCOUNT_UNAVAILABLE")?;
@@ -343,9 +345,13 @@ async fn finance_diagnostics(
         .source_capture_health
         .try_read()
         .ok()
-        .map(|health| health.finance_window.summary(Utc::now().timestamp_millis()));
+        .map(|health| {
+            health
+                .finance_window
+                .summary(Timestamp::now().as_millisecond())
+        });
     let mut maintenance = resources.execution.store.maintenance_timing();
-    let now_ms = Utc::now().timestamp_millis();
+    let now_ms = Timestamp::now().as_millisecond();
     let active_cycle = trace.selected.as_ref().or(trace.active.as_ref());
     let overlap_ids: Vec<_> = active_cycle
         .map(|cycle| {
@@ -417,12 +423,14 @@ async fn diagnostics_inner(
     let explicit = request.account.as_deref().or(account);
     if let (Some(body), Some(route)) = (request.account.as_deref(), account) {
         let a = ctx
-            .accounts
+            .finance
+            .accounts()?
             .resolve(body)
             .await
             .ok_or("ACCOUNT_UNAVAILABLE")?;
         let b = ctx
-            .accounts
+            .finance
+            .accounts()?
             .resolve(route)
             .await
             .ok_or("ACCOUNT_UNAVAILABLE")?;
@@ -433,58 +441,16 @@ async fn diagnostics_inner(
     if let Some(reference) = &request.reference
         && reference.len() == 64
         && reference.bytes().all(|b| b.is_ascii_hexdigit())
-        && let Ok(job) = ctx
-            .analytics
-            .research(ResearchRequest::Status {
-                job_id: reference.clone(),
-            })
-            .await
+        && let Ok(job) = ctx.research.diagnostic_job(reference).await
     {
-        let state = job["state"].as_str().unwrap_or("unknown");
-        let failure = job["error"].as_str();
-        let (reason, retry, next) = match state {
-            "completed" => ("JOB_COMPLETED", false, "read the bounded result page"),
-            "queued" | "running" => (
-                "JOB_RUNNING",
-                true,
-                "poll research.status or cancel the job",
-            ),
-            "cancelled" => (
-                "JOB_CANCELLED",
-                false,
-                "submit a new request only if desired",
-            ),
-            "interrupted" => (
-                "JOB_INTERRUPTED",
-                false,
-                "submit a new request with a new idempotency key",
-            ),
-            _ => (
-                "RESEARCH_FAILED",
-                false,
-                "correct the reported source gap or parameters",
-            ),
-        };
-        let reason = failure
-            .map(|e| safe_code(e, reason))
-            .unwrap_or(reason.into());
-        let mut out = report(
-            "research",
-            &reason,
-            &format!("job:{reference}"),
-            if matches!(state, "failed" | "interrupted") {
-                vec![reason.clone()]
-            } else {
-                vec![]
-            },
-            retry,
-            next,
-        );
-        out["job"] = json!({"job_id":job["id"],"state":job["state"],"progress":job["progress"],"artifact":job["artifact"],"created_ms":job["created_ms"],"result_pinned":job["pinned"]});
-        return Ok(out);
+        // The worker owns the bounded diagnostic projection. Do not reinterpret
+        // it as a fresh SQL status or turn an unknown projection into failure.
+        if job["job"].is_object() {
+            return Ok(job);
+        }
     }
     if let Some(key) = explicit {
-        let Some(resources) = ctx.accounts.resolve(key).await else {
+        let Some(resources) = ctx.finance.accounts()?.resolve(key).await else {
             return Ok(report(
                 "account",
                 "ACCOUNT_UNAVAILABLE",
@@ -496,7 +462,7 @@ async fn diagnostics_inner(
         };
         return account_diagnostics(ctx, resources, request.reference.clone()).await;
     }
-    let configurations = ctx.accounts.list().await;
+    let configurations = ctx.finance.accounts()?.list().await;
     let total = configurations.len();
     if let Some(reference) = &request.reference {
         if total > 8 {
@@ -512,20 +478,25 @@ async fn diagnostics_inner(
         let mut found = Vec::new();
         let mut incomplete = Vec::new();
         let reference = reference.clone();
+        let accounts = ctx.finance.accounts()?;
         let matches = stream::iter(configurations.into_iter().map(|config| {
             let reference = reference.clone();
             async move {
                 let key = config.account_key.wire();
-                let Some(r) = ctx.accounts.resolve(&key).await else {
+                let Some(r) = accounts.resolve(&key).await else {
                     return (key, None, Some(String::from("ACCOUNT_UNAVAILABLE")));
                 };
                 let query = reference.clone();
+                let lookup = match crate::execution_store::IntentLookup::new(
+                    okx_execution::TradeIntentLookup::Reference(query),
+                ) {
+                    Ok(lookup) => lookup,
+                    Err(_) => return (key, None, Some(String::from("INVALID_INTENT_REFERENCE"))),
+                };
                 match r
                     .execution
                     .store
-                    .call(Instant::now() + Duration::from_secs(3), move |s| {
-                        lookup(s, &query)
-                    })
+                    .lookup_intent(Instant::now() + Duration::from_secs(3), lookup)
                     .await
                 {
                     Ok(Some(_)) => (key, Some(r), None),
@@ -582,13 +553,13 @@ async fn diagnostics_inner(
     let mut rows = Vec::new();
     for c in configurations.into_iter().take(8) {
         let key = c.account_key.wire();
-        let ready = match ctx.accounts.resolve(&key).await {
+        let ready = match ctx.finance.accounts()?.resolve(&key).await {
             Some(a) => Some(a.source_identity_ready().await),
             None => None,
         };
         rows.push(json!({"account":key,"alias":c.alias,"source_identity_ready":ready}));
     }
-    let failures = ctx.accounts.failures().await;
+    let failures = ctx.finance.accounts()?.failures().await;
     let mut out = report(
         "engine",
         "OBSERVED",
@@ -621,10 +592,79 @@ async fn account_diagnostics(
 ) -> Result<Value, String> {
     let key = resources.configuration.account_key.wire();
     let lookup_reference = reference.clone();
-    let facts=resources.execution.store.call(Instant::now()+Duration::from_secs(3),move|s|{
-  let intent=lookup_reference.as_deref().map(|r|lookup(s,r)).transpose()?.flatten();let policy=s.policy()?;let stops=s.stops()?;let(version,source_id)=s.sqlite_runtime()?;let(db,wal)=s.storage_bytes()?;let mut coverage=Vec::new();for(source,partition)in[("account_snapshot","account"),("fills","SPOT"),("fills","SWAP"),("fills","FUTURES"),("bills","account")]{let c=s.cursor(source,partition)?;coverage.push(json!({"source":source,"partition":partition,"state":if c.is_some(){"observed"}else{"not_evaluated"},"watermark":c.as_ref().map(|c|c.watermark),"generation":c.as_ref().map(|c|c.generation),"gaps":c.as_ref().map(|c|c.coverage_gaps.chars().take(256).collect::<String>())}));}
-  Ok((intent,json!({"policy":{"revision":policy.0,"explicit_pause":policy.1,"campaign_id":policy.2,"campaign_limit_usd":policy.3.to_string(),"campaign_loss_usd":policy.4.to_string()},"stop_count":stops.len(),"stops":stops.iter().take(10).map(|(id,scope,reason,time)|json!({"id":id,"scope":scope,"reason_code":safe_code(reason,"ACCOUNT_STOP"),"latched_at_ms":time})).collect::<Vec<_>>(),"sqlite_version":version,"sqlite_source_id":source_id,"database_bytes":db,"wal_bytes":wal,"maintenance_error":s.storage_health().map(|e|safe_code(e,"STORAGE_MAINTENANCE_ERROR")),"source_coverage":coverage})))
- }).await;
+    let (owner, account) = resources.execution.store.scope();
+    let until = Instant::now() + Duration::from_millis(250);
+    let facts = tokio::time::timeout_at(until.into(), owner
+            .account_diagnostic_snapshot(
+                until,
+                account.to_owned(),
+                lookup_reference.clone(),
+            ))
+            .await
+            .unwrap_or(Err(okx_execution::StoreError::Invalid("UNIFIED_FINANCE_DIAGNOSTIC_TIMEOUT")))
+            .map(|facts| {
+                let intent = facts.intent;
+                let policy = &facts.policy;
+                let coverage = facts
+                    .source_coverage
+                    .iter()
+                    .map(|(source, partition, cursor)| {
+                        json!({
+                            "source": source,
+                            "partition": partition,
+                            "state": if cursor.is_some() { "observed" } else { "not_evaluated" },
+                            "watermark": cursor.as_ref().map(|c| c.watermark),
+                            "generation": cursor.as_ref().map(|c| c.generation),
+                            "gaps": cursor.as_ref().map(|c| c.coverage_gaps.chars().take(256).collect::<String>()),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let stops = facts
+                    .stops
+                    .iter()
+                    .map(|stop| {
+                        json!({
+                            "id": stop.id,
+                            "scope": stop.scope,
+                            "reason_code": safe_code(&stop.reason, "ACCOUNT_STOP"),
+                            "latched_at_ms": stop.latched_at_ms,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    intent,
+                    json!({
+                        "policy": {
+                            "revision": policy.revision,
+                            "explicit_pause": policy.paused,
+                            "campaign_id": policy.campaign_id,
+                            "campaign_limit_usd": policy.campaign_limit.to_string(),
+                            "campaign_loss_usd": policy.campaign_loss.to_string(),
+                        },
+                        "stop_count": facts.stop_count,
+                        "stops": stops,
+                        "sqlite_version": facts.sqlite_version,
+                        "sqlite_source_id": facts.sqlite_source_id,
+                        "database_bytes": null,
+                        "wal_bytes": null,
+                        "storage_size_reason": "NATIVE_FILE_BYTES_NOT_EVALUATED",
+                        "maintenance_error": null,
+                        "source_coverage": coverage,
+                        "financial_projection": {
+                            "owner":"execution.unified_finance",
+                            "quality":"CURRENT_READ_ONLY_SNAPSHOT_NOT_HISTORICAL_CAUSE",
+                            "checked_at_ms":facts.observed_at_ms,
+                            "nav_complete":facts.financial.nav_complete,
+                            "coverage":facts.nav_coverage,
+                            "source_as_of_ms":facts.financial.source_as_of,
+                            "source_age_ms":facts.observed_at_ms.checked_sub(facts.financial.source_as_of)
+                                .filter(|age| *age >= 0 && facts.financial.source_as_of > 0),
+                            "required_max_age_ms":okx_execution::FINANCIAL_SOURCE_MAX_AGE_MS,
+                            "send_permission":"NOT_GRANTED",
+                        },
+                    }),
+                )
+            });
     let (intent, facts) = match facts {
         Ok(f) => f,
         Err(error) => {
@@ -650,9 +690,9 @@ async fn account_diagnostics(
         .read()
         .await
         .as_ref()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s.source_received_at).ok())
-        .map(|d| d.timestamp_millis());
-    let fresh = account_snapshot_fresh_at(source_as_of, Utc::now().timestamp_millis());
+        .and_then(|s| jiff::Timestamp::from_str(&s.source_received_at).ok())
+        .map(|d| d.as_millisecond());
+    let fresh = account_snapshot_fresh_at(source_as_of, Timestamp::now().as_millisecond());
     let mut blockers = Vec::new();
     if !identity_ready || !fresh {
         blockers.push("WAITING_ACCOUNT_EVIDENCE".into());
@@ -662,6 +702,9 @@ async fn account_diagnostics(
     }
     if facts["stop_count"].as_u64().unwrap_or(0) > 0 {
         blockers.push("ACCOUNT_STOP".into());
+    }
+    if facts["financial_projection"]["nav_complete"] == false {
+        blockers.push("FINANCIAL_SOURCE_INCOMPLETE".into());
     }
     if !facts["maintenance_error"].is_null() {
         blockers.push("STORAGE_MAINTENANCE_ERROR".into());
@@ -739,14 +782,14 @@ async fn account_diagnostics(
     out["finance_window"] = json!(
         capture_health
             .finance_window
-            .summary(Utc::now().timestamp_millis())
+            .summary(Timestamp::now().as_millisecond())
     );
     out["source_capture"] = json!(&*capture_health);
     drop(capture_health);
     out["storage"] = facts;
     // Existing diagnostics surface; no new transport, DB owner or persistent journal.
     out["storage"]["account_sql_timing"] = json!(resources.execution.store.sql_timing());
-    out["access"] = ctx.trade.diagnostic_access(&key).await;
+    out["access"] = ctx.finance.trade()?.diagnostic_access(&key).await;
     out["intent"]=intent.as_ref().map(|i|json!({"intent_id":i.intent_id,"client_order_id":i.client_order_id,"exchange_order_id":i.exchange_order_id,"state":i.state.as_str(),"instrument":i.instrument_id,"risk_increase":i.risk_increase,"policy_revision":i.policy_revision,"revision":i.revision,"deadline_ms":i.deadline,"incident":i.incident.as_ref().map(|e|safe_code(e,"INTENT_INCIDENT"))})).unwrap_or(Value::Null);
     Ok(out)
 }
@@ -755,8 +798,8 @@ mod tests {
     use super::*;
     use crate::{
         accounts,
-        analytics::AnalyticsService,
         query::{self, DispatchContext},
+        research_test_support::client as research_test_client,
         trade_service::TradeService,
     };
     use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
@@ -767,8 +810,8 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn public_operation_diagnostic_survives_busy_owners_and_unknown_history() {
-        use std::time::{Duration, Instant};
+    async fn public_operation_diagnostic_survives_busy_sources_and_unknown_history() {
+        use std::time::Duration;
 
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce).unwrap();
@@ -777,12 +820,26 @@ mod tests {
             u128::from_le_bytes(nonce)
         ));
         accounts::initialize_installation(&root, "installation-operation-diagnostic-test").unwrap();
+        let initial_owner = okx_execution::account_worker::UnifiedFinanceHandle::initialize_new(
+            root.clone(),
+            okx_execution::NewFinanceInstallation {
+                installation_id: "installation-operation-diagnostic-test".into(),
+                initialize_request_id: "initialize_operation_diagnostic_001".into(),
+                source_tree: "a".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+        let mut initial_closed = initial_owner.termination_signal();
+        drop(initial_owner);
+        tokio::time::timeout(Duration::from_secs(3), initial_closed.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
         let budget = RateBudget::new();
-        let registry = Arc::new(
-            accounts::AccountRuntimeRegistry::open(&root, budget.clone())
-                .await
-                .unwrap(),
-        );
+        let (registry, owner) =
+            accounts::tests::open_native_test_registry(&root, budget.clone()).await;
+        let registry = Arc::new(registry);
         let feed_a = Arc::new(accounts::recorded_support::RecordedAccountHttp::default());
         let feed_b = Arc::new(accounts::recorded_support::RecordedAccountHttp::default());
         let (config_a, clients_a) =
@@ -853,18 +910,18 @@ mod tests {
             budget,
             Arc::new(accounts::recorded_support::OfflineSocket),
         );
-        let analytics = AnalyticsService::new(root.join("analytics"), market.clone()).unwrap();
-        let (risk_tx, mut risk_rx) = tokio::sync::mpsc::channel(4);
+        let analytics = research_test_client(root.join("analytics"), market.clone()).unwrap();
         let trade = Arc::new(TradeService::new(
             registry.clone(),
             public_ws.clone(),
-            crate::risk_bridge::NativeRiskClient::new(risk_tx),
+            crate::risk_bridge::NativeRiskClient::local(
+                crate::native_finance_risk::NativeFinanceRisk::from_owner(owner.clone()),
+            ),
         ));
         let ctx = DispatchContext {
-            accounts: registry.clone(),
-            analytics,
+            research: analytics,
             public_ws,
-            trade,
+            finance: crate::finance_dispatch::FinanceDispatch::ready(registry.clone(), trade),
             market,
         };
         let make_request = |request_id: &str, body_account: &str, reference: &str| AgentRequest {
@@ -882,21 +939,8 @@ mod tests {
             },
         };
 
-        // Hold the actual SQL owner and source locks. Operation diagnostics
-        // must read its bounded local projection without queuing on either.
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let store = account.execution.store.clone();
-        let blocked_sql = tokio::spawn(async move {
-            store
-                .call(Instant::now() + Duration::from_secs(5), move |_| {
-                    let _ = entered_tx.send(());
-                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                    Ok(())
-                })
-                .await
-        });
-        entered_rx.await.unwrap();
+        // Public projection must not queue on SQL or source locks. The real
+        // busy FIFO deadline is covered by the unified owner diagnostic test.
         let _source_snapshot = account.latest_snapshot.write().await;
         let _source_health = account.source_capture_health.write().await;
         let sql_before = account.execution.store.sql_timing().observed_jobs;
@@ -1008,40 +1052,61 @@ mod tests {
             feed_b.denied_routes.lock().unwrap().clone(),
             http_b_before.2
         );
-        assert!(matches!(
-            risk_rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
         drop(_source_health);
         drop(_source_snapshot);
-        let _ = release_tx.send(());
-        blocked_sql.await.unwrap().unwrap();
-        account
-            .execution
-            .store
-            .call(Instant::now() + Duration::from_secs(5), |_| Ok(()))
-            .await
-            .unwrap();
-        // The blocked owner job and this FIFO fence account for the only two
-        // accepted SQL jobs after the baseline. Any diagnostics SQL enqueue
-        // ahead of the fence changes this count.
         assert_eq!(
             account.execution.store.sql_timing().observed_jobs,
-            sql_before + 2
+            sql_before
         );
-        let mut terminated_a = account.execution.store.termination_signal();
-        let mut terminated_b = account_b.execution.store.termination_signal();
+        let account_request = AgentRequest {
+            schema: okx_protocol::AGENT_REQUEST_SCHEMA_V1.into(),
+            request_id: "account-financial-explain-001".into(),
+            account: Some("fixture-a".into()),
+            operation: AgentOperation::Diagnostics {
+                request: DiagnosticsRequest {
+                    account: Some("fixture-a".into()),
+                    reference: None,
+                    view: None,
+                    cycle_id: None,
+                    limit: None,
+                },
+            },
+        };
+        account_request.validate().unwrap();
+        let explained = query::dispatch(&ctx, &account_request)
+            .await
+            .result
+            .unwrap();
+        let financial = &explained["storage"]["financial_projection"];
+        assert_eq!(financial["owner"], "execution.unified_finance");
+        assert!(financial["nav_complete"].is_boolean());
+        assert!(financial["checked_at_ms"].as_i64().unwrap() > 0);
+        assert_eq!(
+            financial["required_max_age_ms"],
+            okx_execution::FINANCIAL_SOURCE_MAX_AGE_MS
+        );
+        assert_eq!(financial["send_permission"], "NOT_GRANTED");
+        assert_eq!(
+            explained["storage"]["source_coverage"]
+                .as_array()
+                .unwrap()
+                .len(),
+            7
+        );
+        assert_eq!(feed_a.requests.lock().unwrap().clone(), http_a_before.0);
+        assert_eq!(
+            feed_a.outbound_posts.lock().unwrap().clone(),
+            http_a_before.1
+        );
+        let mut terminated = owner.termination_signal();
         registry.shutdown().await;
         drop(account_b);
         drop(account);
         drop(ctx);
         drop(registry);
         drop(_public);
-        tokio::time::timeout(Duration::from_secs(5), terminated_a.wait_for(|done| *done))
-            .await
-            .unwrap()
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), terminated_b.wait_for(|done| *done))
+        drop(owner);
+        tokio::time::timeout(Duration::from_secs(5), terminated.wait_for(|done| *done))
             .await
             .unwrap()
             .unwrap();

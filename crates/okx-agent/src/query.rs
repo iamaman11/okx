@@ -1,21 +1,18 @@
 //! Product dispatcher; explicit account routing and bounded native responses.
-use crate::{
-    accounts::AccountRuntimeRegistry, analytics::AnalyticsService, trade_service::TradeService,
-};
-use chrono::Utc;
+use crate::{finance_dispatch::FinanceDispatch, research_client::ResearchClient};
+use jiff::Timestamp;
 use okx_protocol::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest, AgentResponse,
     AgentResponseStatus, DataQuality, account_governance::CentralGovernanceSnapshot,
 };
 use okx_runtime::PublicWsHandle;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::str::FromStr;
 #[derive(Clone)]
 pub struct DispatchContext {
-    pub accounts: Arc<AccountRuntimeRegistry>,
-    pub analytics: AnalyticsService,
+    pub finance: FinanceDispatch,
+    pub research: ResearchClient,
     pub public_ws: PublicWsHandle,
-    pub trade: Arc<TradeService>,
     pub market: crate::market_bootstrap::MarketBootstrapper,
 }
 #[cfg(test)]
@@ -30,7 +27,7 @@ pub async fn dispatch_with_governance(
     g: Option<&CentralGovernanceSnapshot>,
 ) -> AgentResponse {
     let result = match r.validate() {
-        Ok(()) => execute(ctx, r, g).await,
+        Ok(()) => crate::research_client::with_invocation(&r.request_id, execute(ctx, r, g)).await,
         Err(_) => Err("INVALID_COMMAND".into()),
     };
     response(&r.request_id, result)
@@ -89,7 +86,7 @@ pub fn response(id: &str, result: Result<Value, String>) -> AgentResponse {
     let (status, data, failure) = match result {
         Ok(v) => (AgentResponseStatus::Completed, Some(v), None),
         Err(code) => {
-            let retryable = crate::analytics::is_retryable_market_source_defer(&code);
+            let retryable = okx_protocol::research_ipc::is_retryable_source_defer(&code);
             let public_code = if retryable {
                 "MARKET_SOURCE_RETRYABLE".to_owned()
             } else {
@@ -110,7 +107,7 @@ pub fn response(id: &str, result: Result<Value, String>) -> AgentResponse {
         schema: AGENT_RESPONSE_SCHEMA_V1.into(),
         request_id: id.into(),
         status,
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: Timestamp::now().to_string(),
         quality,
         result_schema: Some("okx.product/v1".into()),
         result: data,
@@ -135,16 +132,17 @@ async fn execute(
             request_digest,
         } => {
             let c = ctx
-                .accounts
+                .finance
+                .accounts()?
                 .connect(credential_ref, alias, operation_id, request_digest)
                 .await
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(c).map_err(|_| "SERIALIZATION_FAILED".into())
         }
         AgentOperation::Market { request } => {
-            execute_market(&ctx.public_ws, &ctx.analytics, request).await
+            execute_market(&ctx.public_ws, &ctx.research, request).await
         }
-        AgentOperation::MarketCapabilities => Ok(ctx.analytics.market_capabilities()),
+        AgentOperation::MarketCapabilities => ctx.research.capabilities().await,
         AgentOperation::MarketMicrostructure {
             instrument,
             size_contracts,
@@ -152,40 +150,46 @@ async fn execute(
             execute_market_microstructure(&ctx.public_ws, instrument, size_contracts.as_deref())
                 .await
         }
-        AgentOperation::Research { request } => ctx.analytics.research(request.clone()).await,
+        AgentOperation::Research { request } => ctx.research.research(request.clone()).await,
         AgentOperation::Trade { request } => {
-            ctx.trade
+            ctx.finance
+                .trade()?
                 .trade_with_invocation(
                     account.unwrap_or_default(),
                     request,
                     g,
-                    match request {
-                        okx_protocol::trading::TradeRequest::Status { .. } => {
-                            Some(crate::diagnostics::ProtectionCleanupInvocation {
-                                request_id: &r.request_id,
-                                origin: "agent_request.trade.status",
-                            })
-                        }
-                        _ => None,
-                    },
+                    Some(crate::trade_service::TradeInvocation {
+                        request_id: &r.request_id,
+                        origin: if matches!(
+                            request,
+                            okx_protocol::trading::TradeRequest::Status { .. }
+                        ) {
+                            "agent_request.trade.status"
+                        } else {
+                            "agent_request.trade"
+                        },
+                    }),
                 )
                 .await
         }
         AgentOperation::Strategies { request } => {
-            ctx.trade
+            ctx.finance
+                .trade()?
                 .strategies(account.unwrap_or_default(), request, g)
                 .await
         }
         AgentOperation::PortfolioScenario { request } => crate::portfolio::scenario(request),
         AgentOperation::Portfolio { request } => {
-            crate::portfolio::portfolio(&ctx.accounts, request, &ctx.trade).await
+            crate::portfolio::portfolio(ctx.finance.accounts()?, request, ctx.finance.trade()?)
+                .await
         }
         AgentOperation::Diagnostics { request } => {
             crate::diagnostics::diagnostics(ctx, request, account).await
         }
         AgentOperation::AccountSummary => {
             let a = ctx
-                .accounts
+                .finance
+                .accounts()?
                 .resolve(account.unwrap_or_default())
                 .await
                 .ok_or("ACCOUNT_UNAVAILABLE")?;
@@ -195,10 +199,10 @@ async fn execute(
                 .await
                 .clone()
                 .ok_or("WAITING_ACCOUNT_EVIDENCE")?;
-            let observed = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+            let observed = jiff::Timestamp::from_str(&snapshot.source_received_at)
                 .map_err(|_| "ACCOUNT_SOURCE_TIME_INVALID")?
-                .timestamp_millis();
-            let now = Utc::now().timestamp_millis();
+                .as_millisecond();
+            let now = Timestamp::now().as_millisecond();
             if !crate::config::evidence_fresh(observed, now, crate::config::ACCOUNT_MAX_AGE_MS) {
                 return Err("WAITING_ACCOUNT_EVIDENCE".into());
             }
@@ -211,6 +215,12 @@ async fn execute(
             settle_currency,
             instrument_type,
         } => {
+            ctx.public_ws
+                .ensure_reference_available(
+                    std::time::Instant::now() + std::time::Duration::from_secs(5),
+                )
+                .await
+                .map_err(|_| "REFERENCE_SOURCE_UNAVAILABLE")?;
             let refs = ctx.public_ws.reference_snapshot().await;
             Ok(find_instruments_response(
                 &refs,
@@ -221,6 +231,12 @@ async fn execute(
         }
         AgentOperation::MarketOverview { instrument } => {
             ctx.public_ws
+                .ensure_reference_available(
+                    std::time::Instant::now() + std::time::Duration::from_secs(5),
+                )
+                .await
+                .map_err(|_| "REFERENCE_SOURCE_UNAVAILABLE")?;
+            ctx.public_ws
                 .demand_instrument(instrument)
                 .await
                 .map_err(|_| "MARKET_CAPACITY")?;
@@ -228,10 +244,10 @@ async fn execute(
                 .public_ws
                 .risk_fresh_snapshot(
                     instrument,
-                    Utc::now().timestamp_millis() as u64,
+                    Timestamp::now().as_millisecond() as u64,
                     crate::config::QUOTE_MAX_AGE_MS,
                     crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
-                    Utc::now().to_rfc3339(),
+                    Timestamp::now().to_string(),
                 )
                 .await;
             match snapshot {
@@ -243,7 +259,7 @@ async fn execute(
                         .public_ws
                         .risk_quality_snapshot(
                             instrument,
-                            Utc::now().timestamp_millis().max(0) as u64,
+                            Timestamp::now().as_millisecond().max(0) as u64,
                             crate::config::QUOTE_MAX_AGE_MS,
                             crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
                         )
@@ -272,22 +288,28 @@ async fn execute(
             }
         }
         AgentOperation::MailboxTelemetry => Ok(
-            json!({"contract":"okx.product/v1","installation_id":ctx.accounts.installation_id()}),
+            json!({"contract":"okx.product/v1","installation_id":ctx.finance.accounts()?.installation_id()}),
         ),
     }
 }
 
 /// Resolve an optional bounded instrument universe, then delegate market work
-/// to AnalyticsService. Kept outside the command dispatcher so routing stays
+/// to the isolated Research Worker. Kept outside the command dispatcher so routing stays
 /// visible and this market-specific boundary can be reviewed independently.
 async fn execute_market(
     public_ws: &PublicWsHandle,
-    analytics: &AnalyticsService,
+    research: &ResearchClient,
     request: &okx_protocol::analytics::MarketRequest,
 ) -> Result<Value, String> {
     let mut universe_page = None;
     let mut resolved_instruments = None;
     if let Some(universe) = &request.universe {
+        public_ws
+            .ensure_reference_available(
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .await
+            .map_err(|_| "REFERENCE_SOURCE_UNAVAILABLE")?;
         let reference = public_ws.reference_snapshot().await;
         if universe
             .reference_generation
@@ -347,7 +369,7 @@ async fn execute_market(
         }));
         resolved_instruments = Some(names);
     }
-    analytics
+    research
         .market(request.clone(), universe_page, resolved_instruments)
         .await
 }
@@ -366,10 +388,10 @@ async fn execute_market_microstructure(
     let snap = public_ws
         .risk_fresh_snapshot(
             instrument,
-            Utc::now().timestamp_millis().max(0) as u64,
+            Timestamp::now().as_millisecond().max(0) as u64,
             crate::config::QUOTE_MAX_AGE_MS,
             crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
-            Utc::now().to_rfc3339(),
+            Timestamp::now().to_string(),
         )
         .await
         .map_err(|_| "MICROSTRUCTURE_FRESH_BOOK_REQUIRED")?;

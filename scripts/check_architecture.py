@@ -12,17 +12,18 @@ ALLOWED = {
     "okx-api": {"okx-kernel"},
     "okx-ws": {"okx-api"},
     "okx-observation": {"okx-api", "okx-kernel"},
-    "okx-runtime": {"okx-api", "okx-observation", "okx-ws"},
+    "okx-runtime": {"okx-api", "okx-observation", "okx-protocol", "okx-ws"},
     "okx-kernel": set(),
     "okx-analysis": {"okx-kernel"},
     "okx-research": {"okx-analysis"},
     "okx-execution": {"okx-api", "okx-analysis", "okx-kernel", "okx-observation"},
-    "okx-protocol": set(),
+    "okx-protocol": {"okx-kernel"},
     "okx-github": set(),
     "okx-cli": {"okx-api"},
     "okx-host-launcher": set(),
     "okx-host-control": {"okx-github", "okx-host-launcher", "okx-protocol"},
     "okx-bridge-mcp": {"okx-github", "okx-protocol"},
+    "okx-research-worker": {"okx-analysis", "okx-kernel", "okx-protocol", "okx-research"},
     "okx-agent": {
         "okx-analysis",
         "okx-api",
@@ -30,11 +31,13 @@ ALLOWED = {
         "okx-github",
         "okx-observation",
         "okx-protocol",
-        "okx-research",
         "okx-runtime",
     },
 }
 
+
+# Additional test-only edges; these never authorize normal/build dependencies.
+ALLOWED_DEV = {"okx-research-worker": {"okx-api", "okx-runtime"}}
 
 # Scoped supplemental source guard: the Cargo DAG cannot see std::fs/network/
 # wall-clock use. This does not replace Rust visibility/compile-fail checks.
@@ -63,7 +66,7 @@ def load_risk_sources() -> dict[str, str]:
         for path in folder.glob("*.rs")
     }
 
-def validate(graph: dict[str, set[str]]) -> list[str]:
+def validate(graph: dict[str, set[str]], dev_graph: dict[str, set[str]] | None = None) -> list[str]:
     errors: list[str] = []
     expected = set(ALLOWED)
     actual = set(graph)
@@ -76,10 +79,14 @@ def validate(graph: dict[str, set[str]]) -> list[str]:
     for crate in sorted(expected & actual):
         for dep in sorted(graph[crate] - ALLOWED[crate]):
             errors.append(f"forbidden local dependency: {crate} -> {dep}")
+    if dev_graph is not None:
+        for crate in sorted(expected & set(dev_graph)):
+            for dep in sorted(dev_graph[crate] - ALLOWED[crate] - ALLOWED_DEV.get(crate, set())):
+                errors.append(f"forbidden test dependency: {crate} -> {dep}")
     return errors
 
 
-def load_graph() -> dict[str, set[str]]:
+def load_graph() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     raw = subprocess.check_output(
         ["cargo", "metadata", "--no-deps", "--locked", "--format-version", "1"],
         text=True,
@@ -93,14 +100,17 @@ def load_graph() -> dict[str, set[str]]:
     }
     workspace_names = {package["name"] for package in packages.values()}
 
-    return {
-        package["name"]: {
-            dependency["name"]
-            for dependency in package["dependencies"]
-            if dependency["name"] in workspace_names
+    def edges(dev: bool) -> dict[str, set[str]]:
+        return {
+            package["name"]: {
+                dependency["name"] for dependency in package["dependencies"]
+                if dependency["name"] in workspace_names
+                and (dependency["kind"] == "dev") == dev
+            }
+            for package in packages.values()
         }
-        for package in packages.values()
-    }
+    return edges(False), edges(True)
+
 
 
 # K10 pure crates must be free of network/storage/runtime dependencies through
@@ -144,6 +154,34 @@ def pure_dependency_violations(
     return errors
 
 
+BOUNDARY_FORBIDDEN = {
+    "okx-agent": {"okx-research", "okx-research-worker"},
+    "okx-research-worker": {"okx-agent", "okx-execution", "okx-api", "okx-runtime", "okx-host-control", "okx-bridge-mcp"},
+}
+
+def production_boundary_violations(graph: dict[str, set[str]], names: dict[str, str]) -> list[str]:
+    """Check transitive normal edges by package ID, never test dependencies."""
+    from collections import deque
+    errors = []
+    for target, forbidden in BOUNDARY_FORBIDDEN.items():
+        roots = [node for node in graph if names.get(node) == target]
+        if not roots:
+            errors.append(f"boundary missing crate: {target}")
+            continue
+        visited = set(roots)
+        queue = deque((root, [root]) for root in roots)
+        while queue:
+            node, path = queue.popleft()
+            for dep in sorted(graph.get(node, ())):
+                next_path = path + [dep]
+                if names.get(dep) in forbidden:
+                    errors.append("forbidden production boundary: " + " -> ".join(names.get(n, n) for n in next_path))
+                if dep not in visited:
+                    visited.add(dep)
+                    queue.append((dep, next_path))
+    return errors
+
+
 def load_complete_workspace_graph() -> tuple[dict[str, set[str]], dict[str, str]]:
     # Exact package IDs keep different versions/features distinct. Only normal
     # dependencies enter the shipped graph; build tools and test-only helpers
@@ -173,7 +211,7 @@ def self_test() -> int:
 
     # Removing an old dependency reduces coupling and is always permitted.
     simplified = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
-    simplified["okx-agent"].remove("okx-research")
+    simplified["okx-agent"].remove("okx-analysis")
     if validate(simplified):
         print("self-test failed: a removed dependency was rejected", file=sys.stderr)
         return 1
@@ -188,6 +226,38 @@ def self_test() -> int:
     research_escape["okx-research"].add("okx-execution")
     if "forbidden local dependency: okx-research -> okx-execution" not in validate(research_escape):
         print("self-test failed: research gained write capability", file=sys.stderr)
+        return 1
+
+    dev = {name: set() for name in ALLOWED}
+    dev["okx-research-worker"].update({"okx-api", "okx-runtime"})
+    if validate(accepted, dev):
+        print("self-test failed: worker fixture dependencies rejected", file=sys.stderr)
+        return 1
+    for dep in ("okx-api", "okx-runtime", "okx-agent", "okx-execution", "okx-host-control"):
+        dirty = {name: set(deps) for name, deps in accepted.items()}
+        dirty["okx-research-worker"].add(dep)
+        if not validate(dirty, dev):
+            print(f"self-test failed: worker normal edge {dep} accepted", file=sys.stderr)
+            return 1
+    for dep in ("okx-research", "okx-research-worker"):
+        dirty = {name: set(deps) for name, deps in accepted.items()}
+        dirty["okx-agent"].add(dep)
+        if not validate(dirty):
+            print(f"self-test failed: agent edge {dep} accepted", file=sys.stderr)
+            return 1
+    transitive = {"worker": {"helper"}, "helper": {"api"}, "api": set(), "agent": set()}
+    transitive_names = {"worker": "okx-research-worker", "helper": "helper", "api": "okx-api", "agent": "okx-agent"}
+    if not production_boundary_violations(transitive, transitive_names):
+        print("self-test failed: transitive worker API leak passed", file=sys.stderr)
+        return 1
+    transitive["worker"] = set()
+    if production_boundary_violations(transitive, transitive_names):
+        print("self-test failed: clean production graph rejected", file=sys.stderr)
+        return 1
+    transitive["agent"] = {"helper"}
+    transitive_names["api"] = "okx-research"
+    if not production_boundary_violations(transitive, transitive_names):
+        print("self-test failed: transitive Agent research leak passed", file=sys.stderr)
         return 1
 
     pure_source = {"money.rs": "use std::fmt;\nfn one() {}"}
@@ -257,10 +327,12 @@ def main() -> int:
         print("K10_TRANSITIVE_PURITY=PASS")
         return 0
 
-    errors = validate(load_graph())
+    normal, dev = load_graph()
+    errors = validate(normal, dev)
     errors.extend(pure_risk_source_violations(load_risk_sources()))
     graph, names = load_complete_workspace_graph()
     errors.extend(pure_dependency_violations(graph, K10_ENFORCED_PURE, names))
+    errors.extend(production_boundary_violations(graph, names))
     if errors:
         for error in errors:
             print(error, file=sys.stderr)

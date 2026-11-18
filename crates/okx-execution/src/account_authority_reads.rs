@@ -1,7 +1,5 @@
 //! Account policy and reservation observations, not financial or venue grants.
 use super::*;
-use crate::AccountStoreHandle;
-use std::time::Instant;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountPolicySnapshot {
     pub revision: i64,
@@ -127,19 +125,5 @@ impl AccountStore {
         })
         .transpose()
         .map(Option::flatten)
-    }
-}
-impl AccountStoreHandle {
-    pub async fn account_policy(&self, deadline: Instant) -> StoreResult<AccountPolicySnapshot> {
-        self.call(deadline, |s| s.account_policy()).await
-    }
-    pub async fn reservation_receipt(
-        &self,
-        deadline: Instant,
-        intent: String,
-        view: CentralReceiptView,
-    ) -> StoreResult<Option<CentralReceipt>> {
-        self.call(deadline, move |s| s.reservation_receipt(&intent, view))
-            .await
     }
 }

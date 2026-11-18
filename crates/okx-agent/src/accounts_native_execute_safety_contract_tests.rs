@@ -4,7 +4,7 @@ use super::filled_fixture::opened_market;
 use super::*;
 
 fn expect_create(fixture: &NativeFixture, envelope_code: &str, ack: Value) {
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts": now}])));

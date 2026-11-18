@@ -1,6 +1,7 @@
 //! Competing scoped reservations on the original fresh Native owner.
 use super::*;
 use rust_decimal::Decimal;
+use std::str::FromStr;
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(3)
 }
@@ -53,10 +54,10 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
     let generation = public
         .risk_fresh_snapshot(
             "BTC-USDT-SWAP",
-            chrono::Utc::now().timestamp_millis() as u64,
+            jiff::Timestamp::now().as_millisecond() as u64,
             2000,
             180000,
-            chrono::Utc::now().to_rfc3339(),
+            jiff::Timestamp::now().to_string(),
         )
         .await
         .unwrap()
@@ -69,7 +70,7 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
             .ensure_manual_instance(deadline(), key.clone())
             .await
             .unwrap();
-        let at = chrono::Utc::now().timestamp_millis();
+        let at = jiff::Timestamp::now().as_millisecond();
         fixture.feed.expect_get(RecordedGet {
             access_key: format!("fixture-observer-{label}"),
             path: "/api/v5/account/trade-fee".into(),
@@ -102,10 +103,10 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
             snapshot.account_generation,
             usdt
         )));
-        let conversion_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+        let conversion_at = jiff::Timestamp::from_str(&snapshot.source_received_at)
             .unwrap()
-            .timestamp_millis();
-        let observed_at = chrono::Utc::now().timestamp_millis();
+            .as_millisecond();
+        let observed_at = jiff::Timestamp::now().as_millisecond();
         let plan = IntentPlan {
             strategy_definition_id: definition.definition_id,
             strategy_definition_version: definition.version,
@@ -178,9 +179,9 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
             total_usd: Decimal::new(10005, 4),
             fee_generation: fees.fee_generation,
             reference_generation: rules.reference_generation.clone(),
-            fee_received_at: chrono::DateTime::parse_from_rfc3339(&fees.source_received_at)
+            fee_received_at: jiff::Timestamp::from_str(&fees.source_received_at)
                 .unwrap()
-                .timestamp_millis(),
+                .as_millisecond(),
             conversion_digest: conversion.clone(),
             conversion_received_at: conversion_at,
             observed_at,
@@ -216,17 +217,19 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
         let request = NativeReserveRequest {
             venue: "okx".into(),
             uid: account.configuration.account_key.verified_uid.clone(),
-            run_id: "continuous_engine".into(),
-            intent_id: intent_id.clone(),
+            run_id: okx_execution::account_worker::AdmissionRunId::new("continuous_engine".into())
+                .unwrap(),
+            intent_id: okx_execution::account_worker::AdmissionIntentId::new(intent_id.clone())
+                .unwrap(),
             strategy_id: "manual".into(),
             instrument_id: "BTC-USDT-SWAP".into(),
             plan_sha256: plan_hash,
             entry_proof_digest: entry_proof,
             conversion_digest: conversion,
             conversion_rate: "1".into(),
-            loss_usdt: "0.1".into(),
-            loss_usd: "0.1".into(),
-            entry_upper_usd: "1.0005".into(),
+            loss_usdt: okx_execution::risk::UsdtLoss::parse("0.1").unwrap(),
+            loss_usd: okx_execution::risk::UsdLoss::parse("0.1").unwrap(),
+            entry_upper_usd: okx_execution::risk::UsdEntryUpper::parse("1.0005").unwrap(),
             native_incarnation: hash(&json!((
                 fixture.owner.installation_id(),
                 std::process::id()
@@ -287,10 +290,9 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
             snapshot.account_generation,
             usdt
         )));
-        request.conversion_observed_at_ms =
-            chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
-                .unwrap()
-                .timestamp_millis();
+        request.conversion_observed_at_ms = jiff::Timestamp::from_str(&snapshot.source_received_at)
+            .unwrap()
+            .as_millisecond();
     }
     let mut occupied = BTreeMap::new();
     let mut losses = BTreeMap::new();
@@ -315,12 +317,18 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
     }
     let census = ReportedRiskCensus {
         source_digest: hash(&json!((&sources, &losses))),
-        generated_at_ms: chrono::Utc::now().timestamp_millis(),
-        read_floor_ms: sources
-            .iter()
-            .map(|(_, risk)| risk.source_as_of)
-            .min()
-            .unwrap(),
+        generated_at_ms: okx_execution::account_worker::CensusObservedAtMs::new(
+            jiff::Timestamp::now().as_millisecond(),
+        )
+        .unwrap(),
+        read_floor_ms: okx_execution::account_worker::CensusReadFloorMs::new(
+            sources
+                .iter()
+                .map(|(_, risk)| risk.source_as_of)
+                .min()
+                .unwrap(),
+        )
+        .unwrap(),
         occupied,
         cumulative_loss_usd: losses,
     };
@@ -350,7 +358,7 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
     let winner_key = format!("okx:real:{}", requests[winner].uid);
     let loser_key = format!("okx:real:{}", requests[loser].uid);
     assert_eq!(receipt.account_key, winner_key);
-    assert_eq!(receipt.intent_id, requests[winner].intent_id);
+    assert_eq!(receipt.intent_id, requests[winner].intent_id.as_str());
     assert_eq!(receipt.plan_hash, requests[winner].plan_sha256);
     assert_eq!(receipt.requested_loss_usd, Decimal::new(1, 1));
     assert_eq!(
@@ -374,7 +382,7 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
             .owner
             .reservation_receipt(
                 loser_key.clone(),
-                requests[loser].intent_id.clone(),
+                requests[loser].intent_id.as_str().to_owned(),
                 CentralReceiptView::Retained,
                 deadline()
             )

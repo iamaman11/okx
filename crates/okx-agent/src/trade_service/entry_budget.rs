@@ -1,6 +1,7 @@
 //! Exact fee-inclusive linear entry sizing. Pure arithmetic shared by manual, strategy and preview.
 use super::*;
 use rust_decimal::RoundingStrategy;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(super) struct EntryQuote {
@@ -617,9 +618,9 @@ pub(super) fn verified_entry_fee_rate(
     {
         return Err("ENTRY_FEE_SOURCE_SCOPE_MISMATCH".into());
     }
-    let source_time = chrono::DateTime::parse_from_rfc3339(&fee.source_received_at)
+    let source_time = jiff::Timestamp::from_str(&fee.source_received_at)
         .map_err(|_| "ENTRY_FEE_SOURCE_TIME_INVALID")?
-        .timestamp_millis();
+        .as_millisecond();
     if source_time <= 0
         || source_time > observed_at_ms
         || !crate::config::evidence_fresh(
@@ -679,9 +680,9 @@ pub(super) fn verified_known_entry_quote(
     observed_at_ms: i64,
 ) -> Result<(EntryQuote, Decimal), String> {
     plan::verify_entry_rules_match(rules, instrument, plan)?;
-    let reference_time = chrono::DateTime::parse_from_rfc3339(&rules.source_received_at)
+    let reference_time = jiff::Timestamp::from_str(&rules.source_received_at)
         .map_err(|_| "ENTRY_REFERENCE_SOURCE_TIME_INVALID")?
-        .timestamp_millis();
+        .as_millisecond();
     if reference_time <= 0
         || reference_time > observed_at_ms
         || !crate::config::evidence_fresh(
@@ -934,9 +935,7 @@ mod tests {
     #[test]
     fn e1_fee_source_must_be_current_exact_and_content_bound() {
         let stamp = "2026-10-30T00:00:00Z";
-        let now_ms = chrono::DateTime::parse_from_rfc3339(stamp)
-            .unwrap()
-            .timestamp_millis();
+        let now_ms = jiff::Timestamp::from_str(stamp).unwrap().as_millisecond();
         let input = okx_observation::FeeScheduleInput {
             instrument_id: "BTC-USDT-SWAP".into(),
             reference_generation: "ref_generation".into(),
@@ -1034,9 +1033,7 @@ mod tests {
             instrument: spec,
         };
         let stamp = "2026-10-30T00:00:00Z";
-        let t = chrono::DateTime::parse_from_rfc3339(stamp)
-            .unwrap()
-            .timestamp_millis();
+        let t = jiff::Timestamp::from_str(stamp).unwrap().as_millisecond();
         let fees =
             okx_observation::FeeScheduleSnapshot::from_input(okx_observation::FeeScheduleInput {
                 instrument_id: "BTC-USDT-SWAP".into(),
@@ -1069,10 +1066,10 @@ mod tests {
         assert_eq!(known.total_usdt, dec("10.005021").unwrap());
         // Exercise the same production source classifier as live preview/execute.
         // No public MCP-provided Verified evidence or test-only RiskBook grant.
-        let at = chrono::Utc::now();
+        let at = jiff::Timestamp::now();
         let mut live_fees = fees.clone();
-        live_fees.source_received_at = at.to_rfc3339();
-        live_fees.exchange_timestamp_ms = at.timestamp_millis().to_string();
+        live_fees.source_received_at = at.to_string();
+        live_fees.exchange_timestamp_ms = at.as_millisecond().to_string();
         let config: okx_api::AccountConfig = serde_json::from_value(serde_json::json!({
             "acctLv":"2", "posMode":"long_short_mode", "uid":"real-fixture-uid",
             "type":"0", "autoLoan":false
@@ -1081,7 +1078,7 @@ mod tests {
         let snap: okx_observation::AccountSnapshot = serde_json::from_value(serde_json::json!({
             "schema":"okx.account-snapshot/v1",
             "source":"fixture-authenticated-account",
-            "source_received_at":at.to_rfc3339(),
+            "source_received_at":at.to_string(),
             "account_generation":"authenticated-generation",
             "quality_reason":"test-native-source",
             "private_ws_connected":true,
@@ -1130,11 +1127,11 @@ mod tests {
         // ticker-specific quote helper, accepts two authenticated linear
         // models with different ctVal, lot, minimum and tick metadata.
         let mut first_rules = rules.clone();
-        first_rules.source_received_at = at.to_rfc3339();
+        first_rules.source_received_at = at.to_string();
         let current_fx = UsdConversion {
             usd_per_usdt: "1".into(),
             source_digest: "a".repeat(64),
-            observed_at_ms: at.timestamp_millis() as u64,
+            observed_at_ms: at.as_millisecond() as u64,
         };
         let uid = snap.account_uid_fingerprint.clone();
         let (first_cost, _) = assess_order(
@@ -1149,7 +1146,7 @@ mod tests {
                 conversion: &current_fx,
                 leverage: d("2"),
                 verified_uid: &uid,
-                observed_at_ms: at.timestamp_millis(),
+                observed_at_ms: at.as_millisecond(),
             },
         )
         .unwrap();
@@ -1166,8 +1163,8 @@ mod tests {
             okx_observation::FeeScheduleSnapshot::from_input(okx_observation::FeeScheduleInput {
                 instrument_id: "LTC-USDT-SWAP".into(),
                 reference_generation: "reference-1".into(),
-                source_received_at: at.to_rfc3339(),
-                exchange_timestamp_ms: at.timestamp_millis().to_string(),
+                source_received_at: at.to_string(),
+                exchange_timestamp_ms: at.as_millisecond().to_string(),
                 level: "Lv1".into(),
                 maker_rate: "-0.0002".into(),
                 taker_rate: "0.0005".into(),
@@ -1192,7 +1189,7 @@ mod tests {
                 conversion: &current_fx,
                 leverage: d("2"),
                 verified_uid: &uid,
-                observed_at_ms: at.timestamp_millis(),
+                observed_at_ms: at.as_millisecond(),
             },
         )
         .unwrap();
@@ -1215,7 +1212,7 @@ mod tests {
                     conversion: &current_fx,
                     leverage: d("2"),
                     verified_uid: &uid,
-                    observed_at_ms: at.timestamp_millis(),
+                    observed_at_ms: at.as_millisecond(),
                 },
             )
             .is_err(),
@@ -1394,10 +1391,9 @@ mod tests {
         );
         let observed_late = t + crate::config::ACCOUNT_MAX_AGE_MS + 1;
         let mut current_rules = rules.clone();
-        current_rules.source_received_at =
-            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(observed_late)
-                .unwrap()
-                .to_rfc3339();
+        current_rules.source_received_at = jiff::Timestamp::from_millisecond(observed_late)
+            .unwrap()
+            .to_string();
         let current_fx = UsdConversion {
             observed_at_ms: observed_late as u64,
             ..fx.clone()

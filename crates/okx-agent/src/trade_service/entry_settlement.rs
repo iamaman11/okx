@@ -1,4 +1,4 @@
-//! Cumulative entry settlement: one coordinator over existing SQL and Worker owners.
+//! Cumulative entry settlement through the installation's sole financial owner.
 //! Terminal release remains independent in terminal_release::release_terminal.
 use super::{
     CentralGovernanceSnapshot, NativeRiskClient, StoredIntent, build_risk_command, err, exact,
@@ -25,70 +25,59 @@ pub(super) enum EntrySettlementOutcome {
     RevisionAcknowledged,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(super) enum SettlementFailureKind {
     AwaitingEvidence,
     Conflict,
+    Unavailable,
     Failed,
 }
 
-/// Preserve the original public reason string while exposing the violated
-/// owner boundary to direct tests. Unknown errors are failures, never no-ops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(super) enum EntrySettlementStage {
+    SourceCoverage,
+    RiskResponse,
+    RiskCas,
+    Identity,
+    VenueVerification,
+    Settlement,
+}
+
+/// The owner captures the boundary and decision when the failure occurs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct EntrySettlementError {
-    pub(super) stage: &'static str,
+    pub(super) stage: EntrySettlementStage,
     pub(super) kind: SettlementFailureKind,
     pub(super) intent_id: String,
     pub(super) intent_revision: i64,
     pub(super) reason_code: String,
 }
-impl EntrySettlementError {
-    fn from_reason(reason_code: String, intent_id: &str, intent_revision: i64) -> Self {
-        let reason = reason_code.as_str();
-        let stage = match reason {
-            "PARTIAL_ENTRY_FILLS_UNCOVERED"
-            | "PARTIAL_ENTRY_BILLS_UNCOVERED"
-            | "PARTIAL_ENTRY_SOURCE_PAGES_INCOMPLETE"
-            | "PARTIAL_ENTRY_FINANCIAL_COVERAGE_PENDING" => "source_coverage",
-            "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY"
-            | "RISK_TRANSPORT_LOST_DO_NOT_REPLAY"
-            | "RISK_TRANSPORT_UNAVAILABLE"
-            | "RISK_RESPONSE_IDENTITY_MISMATCH" => "risk_response",
-            "PARTIAL_ENTRY_SETTLEMENT_CAS_BUSY"
-            | "LATE_ENTRY_SETTLEMENT_CAS_BUSY"
-            | "PARTIAL_ENTRY_RISK_SEQUENCE_MISSING"
-            | "LATE_ENTRY_RISK_SEQUENCE_MISSING" => "risk_cas",
-            "ORDER_READBACK_IDENTITY_MISMATCH"
-            | "PARTIAL_ENTRY_ORDER_IDENTITY_MISMATCH"
-            | "PARTIAL_ENTRY_SOURCE_IDENTITY_MISMATCH"
-            | "TERMINAL_ENTRY_REPLAY_IDENTITY_MISMATCH" => "identity",
-            "PARTIAL_ENTRY_ORDER_READBACK_UNAVAILABLE"
-            | "PARTIAL_ENTRY_ORDER_STATE_UNVERIFIED"
-            | "PARTIAL_ENTRY_ZERO_FILL_SOURCE_UNPROVEN" => "venue_verification",
-            _ => "settlement",
-        };
-        let kind = match reason {
-            "PARTIAL_ENTRY_FILLS_UNCOVERED"
-            | "PARTIAL_ENTRY_BILLS_UNCOVERED"
-            | "PARTIAL_ENTRY_SOURCE_PAGES_INCOMPLETE"
-            | "PARTIAL_ENTRY_FINANCIAL_COVERAGE_PENDING"
-            | "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY"
-            | "RISK_TRANSPORT_LOST_DO_NOT_REPLAY"
-            | "PARTIAL_ENTRY_SETTLEMENT_CAS_BUSY"
-            | "LATE_ENTRY_SETTLEMENT_CAS_BUSY" => SettlementFailureKind::AwaitingEvidence,
-            "ORDER_READBACK_IDENTITY_MISMATCH"
-            | "PARTIAL_ENTRY_ORDER_IDENTITY_MISMATCH"
-            | "PARTIAL_ENTRY_SOURCE_IDENTITY_MISMATCH"
-            | "TERMINAL_ENTRY_REPLAY_IDENTITY_MISMATCH" => SettlementFailureKind::Conflict,
-            _ => SettlementFailureKind::Failed,
-        };
-        Self {
-            stage,
-            kind,
-            intent_id: intent_id.to_owned(),
-            intent_revision,
-            reason_code,
+
+fn store_failure_kind(error: &okx_execution::StoreError) -> SettlementFailureKind {
+    match error {
+        okx_execution::StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY") => {
+            SettlementFailureKind::AwaitingEvidence
         }
+        okx_execution::StoreError::Sql(_) | okx_execution::StoreError::Io(_) => {
+            SettlementFailureKind::Unavailable
+        }
+        okx_execution::StoreError::Invalid(_) => SettlementFailureKind::Failed,
+    }
+}
+
+fn risk_failure_kind(reason: &str) -> SettlementFailureKind {
+    match reason {
+        "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY"
+        | "RISK_TRANSPORT_LOST_DO_NOT_REPLAY"
+        | "UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY" => {
+            SettlementFailureKind::AwaitingEvidence
+        }
+        "NATIVE_RISK_INSPECT_SOURCE_UNAVAILABLE"
+        | "NATIVE_RISK_SETTLEMENT_OWNER_UNAVAILABLE"
+        | "FINANCE_CAMPAIGN_IDENTITY_UNAVAILABLE" => SettlementFailureKind::Unavailable,
+        _ => SettlementFailureKind::Failed,
     }
 }
 
@@ -105,9 +94,7 @@ pub(super) async fn settle_incremental_entry(
     governance: &RwLock<Option<CentralGovernanceSnapshot>>,
     sql_deadline: fn() -> Instant,
 ) -> Result<EntrySettlementOutcome, EntrySettlementError> {
-    settle_inner(account, i, order, store, risk, governance, sql_deadline)
-        .await
-        .map_err(|reason| EntrySettlementError::from_reason(reason, &i.intent_id, i.revision))
+    settle_inner(account, i, order, store, risk, governance, sql_deadline).await
 }
 
 async fn settle_inner(
@@ -118,48 +105,111 @@ async fn settle_inner(
     risk: &NativeRiskClient,
     governance: &RwLock<Option<CentralGovernanceSnapshot>>,
     sql_deadline: fn() -> Instant,
-) -> Result<EntrySettlementOutcome, String> {
+) -> Result<EntrySettlementOutcome, EntrySettlementError> {
+    use EntrySettlementStage as Stage;
+    use SettlementFailureKind as Kind;
+    let failure = |stage, kind, reason_code: String| EntrySettlementError {
+        stage,
+        kind,
+        intent_id: i.intent_id.clone(),
+        intent_revision: i.revision,
+        reason_code,
+    };
+    let store_failure = |error: okx_execution::StoreError| {
+        let kind = store_failure_kind(&error);
+        failure(Stage::Settlement, kind, err(error))
+    };
+    // This transport boundary exposes exact static outcomes. An unrecognized
+    // outcome remains a failure and cannot be mistaken for a successful replay.
+    let risk_failure = |reason: &str| {
+        let kind = risk_failure_kind(reason);
+        failure(Stage::RiskResponse, kind, reason.to_owned())
+    };
     if account.environment != okx_protocol::accounts::Environment::Real || !i.risk_increase {
         return Ok(EntrySettlementOutcome::NotApplicable);
     }
-    let venue = order.ok_or("PARTIAL_ENTRY_ORDER_READBACK_UNAVAILABLE")?;
+    let venue = order.ok_or_else(|| {
+        failure(
+            Stage::VenueVerification,
+            Kind::Failed,
+            "PARTIAL_ENTRY_ORDER_READBACK_UNAVAILABLE".into(),
+        )
+    })?;
     if !matches!(
         venue.state.as_str(),
         "partially_filled" | "filled" | "canceled" | "mmp_canceled"
     ) {
-        return Err("PARTIAL_ENTRY_ORDER_STATE_UNVERIFIED".into());
+        return Err(failure(
+            Stage::VenueVerification,
+            Kind::Failed,
+            "PARTIAL_ENTRY_ORDER_STATE_UNVERIFIED".into(),
+        ));
     }
-    let filled = verified_order_readback(i, venue)?;
+    let filled = verified_order_readback(i, venue).map_err(|reason| {
+        let kind = if reason == "ORDER_READBACK_IDENTITY_MISMATCH" {
+            Kind::Conflict
+        } else {
+            Kind::Failed
+        };
+        failure(Stage::Identity, kind, reason)
+    })?;
     if filled <= Decimal::ZERO {
-        return Err("PARTIAL_ENTRY_ZERO_FILL_SOURCE_UNPROVEN".into());
+        return Err(failure(
+            Stage::VenueVerification,
+            Kind::Failed,
+            "PARTIAL_ENTRY_ZERO_FILL_SOURCE_UNPROVEN".into(),
+        ));
     }
-    let state = governance
-        .read()
-        .await
-        .clone()
-        .ok_or("AUTHORITY_UNAVAILABLE")?;
+    let state = governance.read().await.clone().ok_or_else(|| {
+        failure(
+            Stage::Settlement,
+            Kind::Failed,
+            "AUTHORITY_UNAVAILABLE".into(),
+        )
+    })?;
     let id = i.intent_id.clone();
     let receipt = store
         .central_receipt(sql_deadline(), id)
         .await
-        .map_err(err)?;
+        .map_err(store_failure)?;
     let fill_cursor = store
         .cursor(sql_deadline(), "fills".into(), "SWAP".into())
         .await
-        .map_err(err)?;
+        .map_err(store_failure)?;
     let bill_cursor = store
         .cursor(sql_deadline(), "bills".into(), "account".into())
         .await
-        .map_err(err)?;
-    let receipt = receipt.ok_or("PARTIAL_ENTRY_RESERVATION_UNVERIFIED")?;
+        .map_err(store_failure)?;
+    let receipt = receipt.ok_or_else(|| {
+        failure(
+            Stage::Settlement,
+            Kind::Failed,
+            "PARTIAL_ENTRY_RESERVATION_UNVERIFIED".into(),
+        )
+    })?;
     if receipt.reservation_key.starts_with("local:") || receipt.plan_hash != i.plan_hash {
-        return Err("PARTIAL_ENTRY_RESERVATION_INVALID".into());
+        return Err(failure(
+            Stage::Settlement,
+            Kind::Failed,
+            "PARTIAL_ENTRY_RESERVATION_INVALID".into(),
+        ));
     }
     if i.exchange_order_id.as_deref() != Some(venue.order_id.as_str()) {
-        return Err("PARTIAL_ENTRY_ORDER_IDENTITY_MISMATCH".into());
+        return Err(failure(
+            Stage::Identity,
+            Kind::Conflict,
+            "PARTIAL_ENTRY_ORDER_IDENTITY_MISMATCH".into(),
+        ));
     }
-    let venue_at =
-        terminal_order_update_time(Some(venue))?.ok_or("PARTIAL_ENTRY_UPDATE_TIME_MISSING")?;
+    let venue_at = terminal_order_update_time(Some(venue))
+        .map_err(|reason| failure(Stage::VenueVerification, Kind::Failed, reason))?
+        .ok_or_else(|| {
+            failure(
+                Stage::Settlement,
+                Kind::Failed,
+                "PARTIAL_ENTRY_UPDATE_TIME_MISSING".into(),
+            )
+        })?;
     // Inspect before any native money mutation. Existing central RELEASE
     // remains terminal even when a late fee requires a new debit.
     let inspection = risk
@@ -172,9 +222,21 @@ async fn settle_inner(
             },
         ))
         .await
-        .map_err(str::to_owned)?;
-    let fills = fill_cursor.ok_or("PARTIAL_ENTRY_FILLS_UNCOVERED")?;
-    let bills = bill_cursor.ok_or("PARTIAL_ENTRY_BILLS_UNCOVERED")?;
+        .map_err(risk_failure)?;
+    let fills = fill_cursor.ok_or_else(|| {
+        failure(
+            Stage::SourceCoverage,
+            Kind::AwaitingEvidence,
+            "PARTIAL_ENTRY_FILLS_UNCOVERED".into(),
+        )
+    })?;
+    let bills = bill_cursor.ok_or_else(|| {
+        failure(
+            Stage::SourceCoverage,
+            Kind::AwaitingEvidence,
+            "PARTIAL_ENTRY_BILLS_UNCOVERED".into(),
+        )
+    })?;
     if !fills.cursor.is_empty()
         || !bills.cursor.is_empty()
         || !fills.coverage_gaps.is_empty()
@@ -182,43 +244,66 @@ async fn settle_inner(
         || fills.generation <= 0
         || bills.generation <= 0
     {
-        return Err("PARTIAL_ENTRY_SOURCE_PAGES_INCOMPLETE".into());
+        return Err(failure(
+            Stage::SourceCoverage,
+            Kind::AwaitingEvidence,
+            "PARTIAL_ENTRY_SOURCE_PAGES_INCOMPLETE".into(),
+        ));
     }
     let through = fills.watermark.min(bills.watermark);
     if through < venue_at {
-        return Err("PARTIAL_ENTRY_FINANCIAL_COVERAGE_PENDING".into());
+        return Err(failure(
+            Stage::SourceCoverage,
+            Kind::AwaitingEvidence,
+            "PARTIAL_ENTRY_FINANCIAL_COVERAGE_PENDING".into(),
+        ));
     }
     if inspection.reservation_state == Some(RiskReservationState::Released) {
         let id = i.intent_id.clone();
         let late = store
             .entry_late_pending(sql_deadline(), id)
             .await
-            .map_err(err)?;
+            .map_err(store_failure)?;
         if !late {
             let existing_id = format!("entry-settlement:{}", i.intent_id);
             let recorded = store
-                .operation(sql_deadline(), existing_id)
+                .operation(
+                    sql_deadline(),
+                    crate::execution_store::OperationId::new(existing_id).map_err(store_failure)?,
+                )
                 .await
-                .map_err(err)?;
+                .map_err(store_failure)?;
             return if recorded.is_some_and(|w| w.kind == "ENTRY_SETTLEMENT_PROVEN") {
                 Ok(EntrySettlementOutcome::AlreadyConfirmed)
             } else {
-                Err("RELEASED_ENTRY_TERMINAL_SOURCE_MISSING".into())
+                Err(failure(
+                    Stage::Settlement,
+                    Kind::Failed,
+                    "RELEASED_ENTRY_TERMINAL_SOURCE_MISSING".into(),
+                ))
             };
         }
         if !i.state.terminal() {
-            return Err("LATE_ENTRY_ORDER_NOT_TERMINAL".into());
+            return Err(failure(
+                Stage::Settlement,
+                Kind::Failed,
+                "LATE_ENTRY_ORDER_NOT_TERMINAL".into(),
+            ));
         }
         let id = i.intent_id.clone();
         let late_proof = store
             .bind_late_entry_settlement(sql_deadline(), id, venue_at, filled, through)
             .await
-            .map_err(err)?;
+            .map_err(store_failure)?;
         if late_proof.schema != "okx.entry-late-settlement/v1"
             || late_proof.reservation_key != receipt.reservation_key
             || late_proof.venue_order_id != venue.order_id
         {
-            return Err("LATE_ENTRY_ACCOUNT_PROOF_MISSING".into());
+            return Err(failure(
+                Stage::Settlement,
+                Kind::Failed,
+                "LATE_ENTRY_ACCOUNT_PROOF_MISSING".into(),
+            ));
         }
         for _ in 0..3 {
             let checked = risk
@@ -231,13 +316,21 @@ async fn settle_inner(
                     },
                 ))
                 .await
-                .map_err(str::to_owned)?;
+                .map_err(risk_failure)?;
             if checked.reservation_state != Some(RiskReservationState::Released) {
-                return Err("LATE_ENTRY_RESERVATION_CHANGED".into());
+                return Err(failure(
+                    Stage::Settlement,
+                    Kind::Failed,
+                    "LATE_ENTRY_RESERVATION_CHANGED".into(),
+                ));
             }
-            let sequence = checked
-                .risk_book_sequence
-                .ok_or("LATE_ENTRY_RISK_SEQUENCE_MISSING")?;
+            let sequence = checked.risk_book_sequence.ok_or_else(|| {
+                failure(
+                    Stage::RiskCas,
+                    Kind::Failed,
+                    "LATE_ENTRY_RISK_SEQUENCE_MISSING".into(),
+                )
+            })?;
             let done = risk
                 .request(build_risk_command(
                     &state,
@@ -255,12 +348,12 @@ async fn settle_inner(
                     },
                 ))
                 .await
-                .map_err(str::to_owned)?;
+                .map_err(risk_failure)?;
             if done.status == RiskDecisionStatus::Updated {
                 store
                     .acknowledge_late_entry_settlement(sql_deadline(), late_proof)
                     .await
-                    .map_err(err)?;
+                    .map_err(store_failure)?;
                 return Ok(EntrySettlementOutcome::LateRevisionAcknowledged);
             }
             if !matches!(
@@ -269,38 +362,54 @@ async fn settle_inner(
                     "STALE_SESSION_OR_BOOK_SEQUENCE" | "ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN"
                 )
             ) {
-                return Err(done.reason.unwrap_or("LATE_ENTRY_SETTLEMENT_DENIED".into()));
+                return Err(failure(
+                    Stage::RiskResponse,
+                    Kind::Failed,
+                    done.reason.unwrap_or("LATE_ENTRY_SETTLEMENT_DENIED".into()),
+                ));
             }
         }
-        return Err("LATE_ENTRY_SETTLEMENT_CAS_BUSY".into());
+        return Err(failure(
+            Stage::RiskCas,
+            Kind::AwaitingEvidence,
+            "LATE_ENTRY_SETTLEMENT_CAS_BUSY".into(),
+        ));
     }
     // A terminal settlement may already have been bound during an earlier
     // Status which could not RELEASE because another terminal reservation
     // was still pending. Re-verify that same immutable terminal source
     // witness; never attempt a PARTIAL settlement against its receipt
     // (a different schema/revision) or silently accept changed fills/fees.
-    // The normal release_terminal path below still owns Worker SETTLE_ENTRY
-    // and central RELEASE; this read-only replay grants no new capacity.
+    // The normal release_terminal path owns terminal SETTLE_ENTRY and RELEASE;
+    // this read-only replay grants no new capacity.
     if i.state.terminal() {
         let id = i.intent_id.clone();
         let existing = if store
-            .operation(sql_deadline(), format!("entry-settlement:{id}"))
+            .operation(
+                sql_deadline(),
+                crate::execution_store::OperationId::new(format!("entry-settlement:{id}"))
+                    .map_err(store_failure)?,
+            )
             .await
-            .map_err(err)?
+            .map_err(store_failure)?
             .is_some()
         {
             if store
                 .entry_late_pending(sql_deadline(), id.clone())
                 .await
-                .map_err(err)?
+                .map_err(store_failure)?
             {
-                return Err("TERMINAL_ENTRY_LATE_BILL_PENDING".into());
+                return Err(failure(
+                    Stage::Settlement,
+                    Kind::Failed,
+                    "TERMINAL_ENTRY_LATE_BILL_PENDING".into(),
+                ));
             }
             Some(
                 store
                     .bind_terminal_entry_settlement(sql_deadline(), id, venue_at, filled, through)
                     .await
-                    .map_err(err)?,
+                    .map_err(store_failure)?,
             )
         } else {
             None
@@ -310,7 +419,11 @@ async fn settle_inner(
                 || proof.venue_order_id != venue.order_id
                 || proof.venue_filled_quantity != filled
             {
-                return Err("TERMINAL_ENTRY_REPLAY_IDENTITY_MISMATCH".into());
+                return Err(failure(
+                    Stage::Identity,
+                    Kind::Conflict,
+                    "TERMINAL_ENTRY_REPLAY_IDENTITY_MISMATCH".into(),
+                ));
             }
             return Ok(EntrySettlementOutcome::TerminalReplayConfirmed);
         }
@@ -319,12 +432,16 @@ async fn settle_inner(
     let proof = store
         .bind_partial_entry_settlement(sql_deadline(), partial_id, venue_at, filled, through)
         .await
-        .map_err(err)?;
+        .map_err(store_failure)?;
     if proof.reservation_key != receipt.reservation_key
         || proof.plan_hash != i.plan_hash
         || proof.venue_order_id != venue.order_id
     {
-        return Err("PARTIAL_ENTRY_SOURCE_IDENTITY_MISMATCH".into());
+        return Err(failure(
+            Stage::Identity,
+            Kind::Conflict,
+            "PARTIAL_ENTRY_SOURCE_IDENTITY_MISMATCH".into(),
+        ));
     }
     for _ in 0..3 {
         let observed = risk
@@ -337,13 +454,21 @@ async fn settle_inner(
                 },
             ))
             .await
-            .map_err(str::to_owned)?;
+            .map_err(risk_failure)?;
         if observed.reservation_state == Some(RiskReservationState::Released) {
-            return Err("LATE_ENTRY_SETTLEMENT_AFTER_RELEASE_REQUIRES_RECONCILIATION".into());
+            return Err(failure(
+                Stage::Settlement,
+                Kind::Failed,
+                "LATE_ENTRY_SETTLEMENT_AFTER_RELEASE_REQUIRES_RECONCILIATION".into(),
+            ));
         }
-        let sequence = observed
-            .risk_book_sequence
-            .ok_or("PARTIAL_ENTRY_RISK_SEQUENCE_MISSING")?;
+        let sequence = observed.risk_book_sequence.ok_or_else(|| {
+            failure(
+                Stage::RiskCas,
+                Kind::Failed,
+                "PARTIAL_ENTRY_RISK_SEQUENCE_MISSING".into(),
+            )
+        })?;
         let result = risk
             .request(build_risk_command(
                 &state,
@@ -361,73 +486,33 @@ async fn settle_inner(
                 },
             ))
             .await
-            .map_err(str::to_owned)?;
+            .map_err(risk_failure)?;
         if result.status == RiskDecisionStatus::Updated {
             let committed = proof.clone();
             store
                 .acknowledge_partial_entry_settlement(sql_deadline(), committed)
                 .await
-                .map_err(err)?;
+                .map_err(store_failure)?;
             return Ok(EntrySettlementOutcome::RevisionAcknowledged);
         }
         if !matches!(
             result.reason.as_deref(),
             Some("STALE_SESSION_OR_BOOK_SEQUENCE" | "ENTRY_SETTLEMENT_SOURCE_OR_STATE_UNPROVEN")
         ) {
-            return Err(result
-                .reason
-                .unwrap_or("PARTIAL_ENTRY_SETTLEMENT_DENIED".into()));
+            return Err(failure(
+                Stage::RiskResponse,
+                Kind::Failed,
+                result
+                    .reason
+                    .unwrap_or("PARTIAL_ENTRY_SETTLEMENT_DENIED".into()),
+            ));
         }
     }
-    Err("PARTIAL_ENTRY_SETTLEMENT_CAS_BUSY".into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn r04_r05_failure_metadata_preserves_reason_codes() {
-        for (reason, stage, kind) in [
-            (
-                "PARTIAL_ENTRY_FILLS_UNCOVERED",
-                "source_coverage",
-                SettlementFailureKind::AwaitingEvidence,
-            ),
-            (
-                "PARTIAL_ENTRY_FINANCIAL_COVERAGE_PENDING",
-                "source_coverage",
-                SettlementFailureKind::AwaitingEvidence,
-            ),
-            (
-                "PARTIAL_ENTRY_ORDER_IDENTITY_MISMATCH",
-                "identity",
-                SettlementFailureKind::Conflict,
-            ),
-            (
-                "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY",
-                "risk_response",
-                SettlementFailureKind::AwaitingEvidence,
-            ),
-            (
-                "LATE_ENTRY_SETTLEMENT_CAS_BUSY",
-                "risk_cas",
-                SettlementFailureKind::AwaitingEvidence,
-            ),
-            (
-                "SQL_FAILURE_UNKNOWN",
-                "settlement",
-                SettlementFailureKind::Failed,
-            ),
-        ] {
-            let result = EntrySettlementError::from_reason(reason.into(), "fixture_intent", 7);
-            assert_eq!(result.stage, stage);
-            assert_eq!(result.kind, kind);
-            assert_eq!(result.intent_id, "fixture_intent");
-            assert_eq!(result.intent_revision, 7);
-            assert_eq!(result.reason_code, reason);
-        }
-    }
+    Err(failure(
+        Stage::RiskCas,
+        Kind::AwaitingEvidence,
+        "PARTIAL_ENTRY_SETTLEMENT_CAS_BUSY".into(),
+    ))
 }
 
 #[cfg(test)]

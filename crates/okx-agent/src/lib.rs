@@ -1,7 +1,7 @@
 pub mod account_bootstrap;
 pub(crate) mod account_opening;
 pub mod accounts;
-pub mod analytics;
+mod admission_failure;
 pub mod cloudflare_auth;
 pub mod cloudflare_transport;
 pub mod config;
@@ -9,7 +9,9 @@ pub mod diagnostics;
 pub mod execution_preflight;
 pub mod execution_runtime;
 pub mod execution_store;
+pub mod finance_dispatch;
 pub mod finance_inspection;
+pub mod finance_startup;
 pub(crate) mod finance_trace;
 pub(crate) mod finance_window;
 pub mod github_auth;
@@ -22,9 +24,16 @@ pub mod once;
 mod portfolio;
 pub mod query;
 pub mod reference_bootstrap;
+pub mod research_client;
+#[cfg(test)]
+mod research_dispatch_tests;
+#[cfg(test)]
+mod research_test_support;
 pub mod source_capture;
 pub mod storage_commands;
 pub mod trade_service;
+#[cfg(windows)]
+mod windows_credentials;
 
 mod native_finance_admission;
 mod native_finance_opening;

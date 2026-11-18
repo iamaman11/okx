@@ -33,6 +33,9 @@ pub enum HostControlError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("local scheduler time error: {0}")]
+    ScheduleTime(#[from] jiff::Error),
+
     #[error("native secret store error: {0}")]
     SecretStore(String),
 
@@ -158,6 +161,7 @@ impl HostControlError {
             Self::Json(_) => "JSON_ERROR",
             Self::Launcher(error) => controller_update::launcher_error_code(error),
             Self::Io(_) => "IO_ERROR",
+            Self::ScheduleTime(_) => "SCHEDULE_TIME_INVALID",
             Self::AccountCatalogInvalid => "ACCOUNT_CATALOG_INVALID",
             Self::AccountCatalogConflict => "ACCOUNT_CATALOG_CONFLICT",
             Self::AccountCatalogFull => "ACCOUNT_CATALOG_FULL",

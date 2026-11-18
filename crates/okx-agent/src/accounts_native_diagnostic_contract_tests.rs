@@ -8,7 +8,7 @@ use rust_decimal::Decimal;
 async fn risk_book_contract_native_unknown_intent_diagnostic_reads_sql_without_network_or_resend() {
     let mut fixture = fixture().await;
     let (stop, task, _socket, _public) = super::filled_fixture::opened_market(&mut fixture).await;
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));
@@ -76,6 +76,14 @@ async fn risk_book_contract_native_unknown_intent_diagnostic_reads_sql_without_n
     );
     let result = read(&account, fixture.owner.installation_id(), &reference).await;
     assert_eq!(result["state"], "UNKNOWN", "{result}");
+    assert_eq!(result["stage"], "UNKNOWN");
+    assert_eq!(result["reference"], reference);
+    assert_eq!(result["send_state"], "POTENTIAL_SEND_COMMITTED");
+    assert!(result["begin_post_at_ms"].as_i64().is_some());
+    assert_eq!(
+        result["next_action"],
+        "request_explicit_status_for_original_identity_do_not_resend"
+    );
     assert_eq!(
         result["reason_code"],
         "AUTHORITATIVE_ORDER_READBACK_REQUIRED"
@@ -93,6 +101,10 @@ async fn risk_book_contract_native_unknown_intent_diagnostic_reads_sql_without_n
     assert!(result["source_as_of"]["watermark_ms"].as_i64().unwrap() > 0);
     assert!(result["source_as_of"]["generation"].as_i64().unwrap() > 0);
     assert_eq!(result["source_as_of"]["current_validity"], "NOT_EVALUATED");
+    assert_eq!(
+        result["source_as_of"]["quality"],
+        "durable_historical_source_not_current_health"
+    );
     assert_eq!(
         result["missing_evidence"],
         json!(["AUTHORITATIVE_VENUE_ORDER_READBACK"])
@@ -151,7 +163,7 @@ async fn risk_book_contract_native_intent_diagnostic_is_account_scoped_and_refus
         .ensure_manual_instance(deadline(), key.clone())
         .await
         .unwrap();
-    let at = chrono::Utc::now().timestamp_millis();
+    let at = jiff::Timestamp::now().as_millisecond();
     let id = "native_diagnostic_prepared_001";
     fixture
         .owner
@@ -202,11 +214,15 @@ async fn risk_book_contract_native_intent_diagnostic_is_account_scoped_and_refus
     let other = read(&b, fixture.owner.installation_id(), &reference).await;
     assert_eq!(other["state"], "NOT_FOUND", "{other}");
     assert_eq!(other["reason_code"], "INTENT_NOT_FOUND_IN_ACCOUNT_SQL");
+    assert_eq!(other["stage"], "INTENT_LOOKUP");
+    assert_eq!(other["reference"], reference);
     assert!(other.get("intent").is_none());
     assert_eq!(other["send_permission"], "NOT_GRANTED");
     let foreign = read(&a, "installation_foreign", &reference).await;
     assert_eq!(foreign["state"], "NOT_EVALUATED");
     assert_eq!(foreign["reason_code"], "ACCOUNT_IDENTITY_MISMATCH");
+    assert_eq!(foreign["stage"], "SCOPE_CHECK");
+    assert!(foreign.get("intent").is_none());
     let invalid = read(&a, fixture.owner.installation_id(), "intent:").await;
     assert_eq!(invalid["reason_code"], "INVALID_INTENT_REFERENCE");
     assert_eq!(fixture.feed.requests.lock().unwrap().as_slice(), requests);
@@ -217,3 +233,6 @@ async fn risk_book_contract_native_intent_diagnostic_is_account_scoped_and_refus
     drop(b);
     fixture.finish().await;
 }
+
+#[path = "accounts_native_diagnostic_measurement_tests.rs"]
+mod measurement;

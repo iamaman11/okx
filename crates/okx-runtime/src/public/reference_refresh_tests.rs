@@ -13,6 +13,16 @@ use std::{
     time::Duration,
 };
 
+struct PendingConnector(Mutex<Option<tokio::sync::oneshot::Sender<()>>>);
+impl okx_ws::WsConnector for PendingConnector {
+    fn connect(&self, _url: String) -> okx_ws::WsConnect<'_> {
+        if let Some(entered) = self.0.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        Box::pin(std::future::pending())
+    }
+}
+
 struct RawReference {
     pages: Mutex<VecDeque<(&'static str, Vec<u8>)>>,
     reads: AtomicUsize,
@@ -73,7 +83,10 @@ fn setup(
     let client =
         OkxPublicClient::with_http_transport(environment, rate.clone(), raw.clone()).unwrap();
     let reference = ReferenceRegistry::from_public(
-        (Utc::now() - chrono::Duration::seconds(10)).to_rfc3339(),
+        Timestamp::now()
+            .checked_sub(jiff::SignedDuration::from_secs(10))
+            .unwrap()
+            .to_string(),
         vec![serde_json::from_value::<PublicInstrument>(row("0.1")).unwrap()],
     )
     .unwrap();
@@ -102,7 +115,7 @@ async fn book(coordinator: &mut PublicWsCoordinator, handle: &PublicWsHandle) {
             Some("snapshot".into()),
             vec![json!({
                 "asks":[["1000","10","0","1"]],"bids":[["999.9","10","0","1"]],
-                "seqId":10,"prevSeqId":-1,"ts":Utc::now().timestamp_millis().to_string()
+                "seqId":10,"prevSeqId":-1,"ts":Timestamp::now().as_millisecond().to_string()
             })],
         )
         .await
@@ -224,4 +237,135 @@ async fn risk_book_contract_reference_failed_partition_or_deadline_preserves_ori
     assert_eq!(old.generation(), current.generation());
     assert_eq!(old.source_received_at(), current.source_received_at());
     assert!(coordinator.commands.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn uninitialized_owner_stays_unavailable_offline_then_recovers_through_refresh() {
+    let raw = Arc::new(RawReference {
+        pages: Mutex::new(VecDeque::new()),
+        reads: AtomicUsize::new(0),
+    });
+    let environment = OkxEnvironment::new(okx_api::Region::Global, false);
+    let rate = RateBudget::new();
+    let client =
+        OkxPublicClient::with_http_transport(environment, rate.clone(), raw.clone()).unwrap();
+    let (entered, connected) = tokio::sync::oneshot::channel();
+    let (coordinator, handle) = PublicWsCoordinator::new_uninitialized_with_connector(
+        environment,
+        rate,
+        Arc::new(PendingConnector(Mutex::new(Some(entered)))),
+        client,
+    );
+    let (shutdown, receiver) = tokio::sync::watch::channel(false);
+    let running = tokio::spawn(coordinator.run(receiver));
+    tokio::time::timeout_at(deadline().into(), connected)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(handle.reference_available().await.is_err());
+    assert!(handle.instrument_rules("BTC-USDT-SWAP").await.is_none());
+    assert!(
+        handle
+            .ensure_fresh_instrument_rules("BTC-USDT-SWAP", deadline())
+            .await
+            .is_err()
+    );
+    assert!(handle.reference_available().await.is_err());
+    assert!(
+        handle
+            .fresh_snapshot("BTC-USDT-SWAP", 0, 5_000, "now")
+            .await
+            .is_err()
+    );
+    raw.pages.lock().unwrap().extend([
+        ("SWAP", envelope(json!([]))),
+        ("FUTURES", envelope(json!([]))),
+    ]);
+    assert!(matches!(
+        handle.ensure_reference_available(deadline()).await,
+        Err(PublicRuntimeError::ReferenceRefresh(
+            "REFERENCE_REFRESH_EMPTY"
+        ))
+    ));
+    assert!(handle.reference_available().await.is_err());
+
+    raw.pages.lock().unwrap().extend([
+        ("SWAP", envelope(json!([row("0.1")]))),
+        ("FUTURES", envelope(json!([]))),
+    ]);
+    let result = handle.ensure_reference_available(deadline()).await;
+    assert!(result.is_ok());
+    assert!(handle.reference_available().await.is_ok());
+    assert!(
+        handle
+            .ensure_fresh_instrument_rules("BTC-USDT-SWAP", deadline())
+            .await
+            .is_ok()
+    );
+    assert!(
+        handle
+            .ensure_fresh_instrument_rules("MISSING-USDT-SWAP", deadline())
+            .await
+            .is_err()
+    );
+    shutdown.send(true).unwrap();
+    running.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn available_stale_reference_does_not_require_http_for_reduction() {
+    let (_coordinator, handle, raw) = setup("0.1", envelope(json!([])));
+    // The fixture is ten seconds old and would require a new-risk refresh.
+    // Initial availability for a reduction must stay local even during outage.
+    raw.pages.lock().unwrap().clear();
+    handle.ensure_reference_available(deadline()).await.unwrap();
+    assert_eq!(raw.reads.load(Ordering::SeqCst), 0);
+    assert!(handle.instrument_rules("BTC-USDT-SWAP").await.is_some());
+}
+
+#[tokio::test]
+async fn first_instrument_request_acquires_initial_reference_without_prior_query() {
+    let raw = Arc::new(RawReference {
+        pages: Mutex::new(
+            [
+                ("SWAP", envelope(json!([row("0.1")]))),
+                ("FUTURES", envelope(json!([]))),
+            ]
+            .into(),
+        ),
+        reads: AtomicUsize::new(0),
+    });
+    let environment = OkxEnvironment::new(okx_api::Region::Global, false);
+    let rate = RateBudget::new();
+    let client = OkxPublicClient::with_http_transport(environment, rate.clone(), raw).unwrap();
+    let (entered, connected) = tokio::sync::oneshot::channel();
+    let (coordinator, handle) = PublicWsCoordinator::new_uninitialized_with_connector(
+        environment,
+        rate,
+        Arc::new(PendingConnector(Mutex::new(Some(entered)))),
+        client,
+    );
+    let (shutdown, receiver) = tokio::sync::watch::channel(false);
+    let running = tokio::spawn(coordinator.run(receiver));
+    tokio::time::timeout_at(deadline().into(), connected)
+        .await
+        .unwrap()
+        .unwrap();
+    let rules = handle
+        .ensure_fresh_instrument_rules("BTC-USDT-SWAP", deadline())
+        .await
+        .unwrap();
+    assert_eq!(rules.instrument.instrument_id, "BTC-USDT-SWAP");
+    assert_eq!(
+        rules.reference_generation,
+        handle.reference_snapshot().await.generation().as_str()
+    );
+    assert!(
+        handle
+            .ensure_fresh_instrument_rules("MISSING-USDT-SWAP", deadline())
+            .await
+            .is_err()
+    );
+    shutdown.send(true).unwrap();
+    running.await.unwrap().unwrap();
 }

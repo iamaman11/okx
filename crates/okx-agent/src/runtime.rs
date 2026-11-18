@@ -5,7 +5,6 @@ use crate::{
     cloudflare_transport::{CloudflareTransportConfig, run_cloudflare_transport},
     github_mailbox::{GitHubMailboxClient, MailboxQueryRuntimeContext},
     query::DispatchContext,
-    risk_bridge::OutboundRiskCommand,
 };
 use okx_protocol::{
     NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX, NATIVE_CHILD_CONTROL_SCHEMA_V1,
@@ -21,7 +20,6 @@ pub struct EngineContext {
     pub dispatch: DispatchContext,
     pub public: PublicWsCoordinator,
     pub transport: Option<CloudflareTransportConfig>,
-    pub risk: mpsc::Receiver<OutboundRiskCommand>,
     pub mailbox: Option<GitHubMailboxClient>,
     pub private_key: zeroize::Zeroizing<[u8; 32]>,
     pub key_id: String,
@@ -59,12 +57,22 @@ pub async fn run_engine(ctx: EngineContext) -> AgentResult<()> {
         tokio::select! {_=tokio::signal::ctrl_c()=>None,request=control.recv(),if native_child_control_stdio=>request}
     })
     .await
+    .map(|_| ())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineDrainOutcome {
+    Drained,
+    RecoveryRequired,
 }
 
 /// The shipped Engine task composition and drain, with only its external
 /// shutdown signal supplied by the caller. Tests can exercise this exact body
 /// without a process-wide Ctrl-C or an inherited Windows stdin handle.
-pub(crate) async fn run_engine_until<F>(ctx: EngineContext, until: F) -> AgentResult<()>
+pub(crate) async fn run_engine_until<F>(
+    ctx: EngineContext,
+    until: F,
+) -> AgentResult<EngineDrainOutcome>
 where
     F: std::future::Future<Output = Option<NativeChildRequest>>,
 {
@@ -72,7 +80,6 @@ where
         dispatch,
         public,
         transport,
-        risk,
         mailbox,
         private_key,
         key_id,
@@ -81,14 +88,13 @@ where
     } = ctx;
     let (tx, shutdown) = watch::channel(false);
     let mut tasks = tokio::task::JoinSet::new();
-    let trade = dispatch.trade.clone();
-    let signal = shutdown.clone();
-    tasks.spawn(async move {
-        trade.run(signal).await;
-    });
-    let d = dispatch.clone();
-    let mut recovery_shutdown = shutdown.clone();
-    tasks.spawn(async move{let mut interval=tokio::time::interval(Duration::from_secs(30));loop{tokio::select!{_=recovery_shutdown.changed()=>break,_=interval.tick()=>d.accounts.recover_unavailable().await}}});
+    if let Ok(trade) = dispatch.finance.trade() {
+        let trade = trade.clone();
+        let signal = shutdown.clone();
+        tasks.spawn(async move {
+            trade.run(signal).await;
+        });
+    }
     let signal = shutdown.clone();
     tasks.spawn(async move {
         let _ = public.run(signal).await;
@@ -97,7 +103,8 @@ where
         let signal = shutdown.clone();
         let d = dispatch.clone();
         tasks.spawn(async move {
-            let _ = run_cloudflare_transport(&config, d, risk, signal).await;
+            let result = run_cloudflare_transport(&config, d, signal).await;
+            let _ = result;
         });
     }
     if let Some(mailbox) = mailbox {
@@ -109,19 +116,24 @@ where
     let _ = tx.send(true);
     let drained = tokio::time::timeout(Duration::from_secs(9), async {
         while tasks.join_next().await.is_some() {}
-        dispatch.accounts.shutdown().await;
+        // Financial drain starts immediately even if the separate worker is unresponsive.
+        tokio::join!(dispatch.finance.shutdown(), dispatch.research.shutdown());
     })
     .await
     .is_ok();
     tasks.abort_all();
+    let outcome = if drained {
+        EngineDrainOutcome::Drained
+    } else {
+        EngineDrainOutcome::RecoveryRequired
+    };
     if let Some(request) = request {
         let reply = NativeChildReply {
             schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.into(),
             request_id: request.request_id,
-            outcome: if drained {
-                "DRAINED"
-            } else {
-                "RECOVERY_REQUIRED"
+            outcome: match outcome {
+                EngineDrainOutcome::Drained => "DRAINED",
+                EngineDrainOutcome::RecoveryRequired => "RECOVERY_REQUIRED",
             }
             .into(),
         };
@@ -131,5 +143,5 @@ where
             serde_json::to_string(&reply)?
         );
     }
-    Ok(())
+    Ok(outcome)
 }

@@ -1,472 +1,154 @@
-//! One bounded native requester over the existing authenticated WS ownership chain.
-//! Timeout is UNKNOWN. Never retry a risk mutation or an exchange POST.
-use okx_protocol::risk_authority::{
-    RiskCommand, RiskCommandAction, RiskDecisionStatus, RiskResult,
-};
-use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+//! One local financial authority; Cloudflare is authenticated delivery only.
+//! A stopped owner supports inspection and never grants write permission.
+use crate::admission_failure::{AdmissionFailure, AdmissionStage};
+use crate::native_finance_risk::{NativeFinanceRisk, NativePolicyObservation};
+use okx_execution::account_worker::UnifiedFinanceHandle;
+use okx_protocol::account_governance::CentralGovernanceSnapshot;
+use okx_protocol::risk_authority::{RiskCommand, RiskResult};
 
-pub struct OutboundRiskCommand {
-    pub command: RiskCommand,
-    pub return_to: oneshot::Sender<RiskResult>,
-}
+/// No constructor can route financial commands to a remote worker.
+/// ```compile_fail,E0599
+/// let _ = okx_agent::risk_bridge::NativeRiskClient::new;
+/// ```
 #[derive(Clone)]
 pub struct NativeRiskClient {
-    route: RiskRoute,
+    backend: NativeFinanceRisk,
+    mode: FinanceMode,
+}
+#[derive(Clone, Copy)]
+enum FinanceMode {
+    Active,
+    Stopped,
 }
 
-#[derive(Clone)]
-enum RiskRoute {
-    Cloudflare(mpsc::Sender<OutboundRiskCommand>),
-    Local(crate::native_finance_risk::NativeFinanceRisk),
-    /// Installed finance snapshot, real Engine route, ZERO private SQL/POST
-    /// producers and ZERO financial COMMIT permission.
-    LocalStopped(crate::native_finance_risk::NativeFinanceRisk),
-}
 impl NativeRiskClient {
-    pub(crate) fn is_native_finance(&self) -> bool {
-        !matches!(&self.route, RiskRoute::Cloudflare(_))
+    pub(crate) fn finance_owner(&self) -> UnifiedFinanceHandle {
+        self.backend.owner.clone()
     }
-
-    pub(crate) fn native_finance_owner(
-        &self,
-    ) -> Option<okx_execution::account_worker::UnifiedFinanceHandle> {
-        match &self.route {
-            RiskRoute::Cloudflare(_) => None,
-            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
-                Some(backend.owner.clone())
-            }
+    pub fn local(backend: NativeFinanceRisk) -> Self {
+        Self {
+            backend,
+            mode: FinanceMode::Active,
         }
     }
-
+    pub fn local_stopped(backend: NativeFinanceRisk) -> Self {
+        Self {
+            backend,
+            mode: FinanceMode::Stopped,
+        }
+    }
     pub(crate) async fn reserve_produced(
         &self,
         packet: crate::trade_service::ProducedReserve,
-    ) -> Result<(RiskResult, Option<okx_execution::CentralReceipt>), &'static str> {
-        match &self.route {
-            RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED"),
-            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
-                backend.resolved().await?.reserve_produced(packet).await
-            }
-        }
+    ) -> Result<crate::native_finance_admission::ReserveAdmission, AdmissionFailure> {
+        self.backend
+            .resolved()
+            .await
+            .map_err(|code| AdmissionFailure::local(AdmissionStage::ReserveResolve, code))?
+            .reserve_produced(packet)
+            .await
     }
-
     pub(crate) async fn post_produced(
         &self,
         packet: crate::trade_service::ProducedPost,
-    ) -> Result<(RiskResult, Option<okx_execution::CommittedVenueSend>), &'static str> {
-        match &self.route {
-            RiskRoute::Cloudflare(_) => Err("NATIVE_FINANCE_ROUTE_REQUIRED"),
-            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
-                backend.resolved().await?.post_produced(packet).await
-            }
-        }
+    ) -> Result<crate::native_finance_admission::PostAdmission, AdmissionFailure> {
+        self.backend
+            .resolved()
+            .await
+            .map_err(|code| AdmissionFailure::local(AdmissionStage::PostResolve, code))?
+            .post_produced(packet)
+            .await
     }
-
     pub(crate) async fn install_produced_opening(
         &self,
         packet: crate::trade_service::ProducedOpening,
     ) -> Result<RiskResult, &'static str> {
-        match &self.route {
-            RiskRoute::Cloudflare(_) => self.request(packet.into_parts().0).await,
-            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
-                backend
-                    .resolved()
-                    .await?
-                    .install_produced_opening(packet)
-                    .await
-            }
-        }
+        self.backend
+            .resolved()
+            .await?
+            .install_produced_opening(packet)
+            .await
     }
-    pub fn new(tx: mpsc::Sender<OutboundRiskCommand>) -> Self {
-        Self {
-            route: RiskRoute::Cloudflare(tx),
-        }
-    }
-    /// Dedicated single-writer native route. No shadow Cloudflare risk call
-    /// or independent SQL owner; installation mode selection is exclusive.
-    pub fn local(backend: crate::native_finance_risk::NativeFinanceRisk) -> Self {
-        Self {
-            route: RiskRoute::Local(backend),
-        }
-    }
-    pub fn local_stopped(backend: crate::native_finance_risk::NativeFinanceRisk) -> Self {
-        Self {
-            route: RiskRoute::LocalStopped(backend),
-        }
-    }
-
-    /// Transport policy observation precedes account connection on a new
-    /// installation; it is distinct from strict financial policy application.
-    pub async fn observe_native_governance(
+    /// Observing host policy and granting a financial operation are distinct.
+    pub async fn observe_required_governance(
         &self,
-        snapshot: &okx_protocol::account_governance::CentralGovernanceSnapshot,
-    ) -> Result<Option<crate::native_finance_risk::NativePolicyObservation>, String> {
-        match &self.route {
-            RiskRoute::Cloudflare(_) => Ok(None),
-            RiskRoute::Local(backend) => backend.observe_governance(snapshot).await.map(Some),
-            RiskRoute::LocalStopped(backend) => {
-                backend.verify_stopped_observation(snapshot).await?;
-                Ok(Some(
-                    crate::native_finance_risk::NativePolicyObservation::Applied,
-                ))
+        snapshot: &CentralGovernanceSnapshot,
+    ) -> Result<NativePolicyObservation, String> {
+        match self.mode {
+            FinanceMode::Active => self.backend.observe_governance(snapshot).await,
+            FinanceMode::Stopped => {
+                self.backend.verify_stopped_observation(snapshot).await?;
+                Ok(NativePolicyObservation::Applied)
             }
         }
     }
-
-    /// The native route applies the FULL signed governance roster in its
-    /// single SQL COMMIT; it must never fall back to legacy per-account SQL
-    /// if the native gate rejects. False selects the still-unswitched
-    /// legacy installation only.
-    pub async fn apply_native_governance(
+    pub async fn apply_required_governance(
         &self,
-        snapshot: &okx_protocol::account_governance::CentralGovernanceSnapshot,
-    ) -> Result<bool, String> {
-        match &self.route {
-            RiskRoute::Cloudflare(_) => Ok(false),
-            RiskRoute::Local(backend) => {
-                backend.apply_governance(snapshot).await?;
-                Ok(true)
-            }
-            RiskRoute::LocalStopped(backend) => {
-                // Only compare an authenticated policy to original imported
-                // SQL; do NOT write it or promote the sealed import to LIVE.
-                backend.verify_stopped_observation(snapshot).await?;
-                Ok(true)
-            }
+        snapshot: &CentralGovernanceSnapshot,
+    ) -> Result<(), String> {
+        match self.mode {
+            FinanceMode::Active => self.backend.apply_governance(snapshot).await,
+            FinanceMode::Stopped => self.backend.verify_stopped_observation(snapshot).await,
         }
     }
-
     pub async fn request(&self, command: RiskCommand) -> Result<RiskResult, &'static str> {
         if !command.valid() {
             return Err("INVALID_RISK_COMMAND");
         }
-        let tx = match &self.route {
-            RiskRoute::Local(backend) | RiskRoute::LocalStopped(backend) => {
-                return backend.resolved().await?.request(command).await;
-            }
-            RiskRoute::Cloudflare(sender) => sender,
-        };
-        let id = command.command_id.clone();
-        let (reply, rx) = oneshot::channel();
-        tx.try_send(OutboundRiskCommand {
-            command,
-            return_to: reply,
-        })
-        .map_err(|_| "RISK_TRANSPORT_UNAVAILABLE")?;
-        let response = tokio::time::timeout(Duration::from_secs(5), rx)
-            .await
-            .map_err(|_| "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY")?
-            .map_err(|_| "RISK_TRANSPORT_LOST_DO_NOT_REPLAY")?;
-        if !response.valid() || response.command_id != id {
-            return Err("RISK_RESPONSE_IDENTITY_MISMATCH");
-        }
-        Ok(response)
-    }
-    /// Two-phase native admission using the same authenticated WS owner.
-    /// The supplier MUST make a fresh source read after receiving HELD;
-    /// it may not reuse the reserve-time census.
-    ///
-    /// Returns an authorization receipt, not a venue order acknowledgement.
-    /// The executor must durably enter its single-POST mutation state and
-    /// must never retry on UNKNOWN after receiving this receipt.
-    pub async fn reserve_then_fence<F, Fut>(
-        &self,
-        reserve: RiskCommand,
-        fresh_post_command: F,
-    ) -> Result<RiskResult, &'static str>
-    where
-        F: FnOnce(&RiskResult) -> Fut,
-        Fut: std::future::Future<Output = Result<RiskCommand, &'static str>>,
-    {
-        let (plan, revision, reserve_at_ms, reserve_digest, reserve_read_floor) =
-            match &reserve.action {
-                RiskCommandAction::Reserve {
-                    plan_sha256,
-                    policy_revision,
-                    census,
-                    ..
-                } => (
-                    plan_sha256.clone(),
-                    *policy_revision,
-                    census.generated_at_ms,
-                    census.source_digest.clone(),
-                    census.source_read_floor_ms,
-                ),
-                _ => return Err("RISK_RESERVE_COMMAND_REQUIRED"),
-            };
-        let held = self.request(reserve).await?;
-        if held.status != RiskDecisionStatus::Held
-            || held.policy_revision != Some(revision)
-            || held.reservation_key.as_deref().is_none_or(str::is_empty)
-        {
-            return Err("RISK_RESERVATION_NOT_HELD");
-        }
-        let post = fresh_post_command(&held).await?;
-        let correct = matches!(
-            &post.action,
-            RiskCommandAction::BeginPost {
-                reservation_key,
-                plan_sha256,
-                policy_revision,
-                expected_risk_book_sequence,
-                census,
-                ..
-            } if Some(reservation_key.as_str()) == held.reservation_key.as_deref()
-                && plan_sha256 == &plan
-                && *policy_revision == revision
-                && Some(*expected_risk_book_sequence) == held.risk_book_sequence
-                && census.generated_at_ms > reserve_at_ms
-                && census.source_read_floor_ms > reserve_read_floor
-                && census.source_digest != reserve_digest
-        );
-        if !correct {
-            return Err("POST_FENCE_IDENTITY_OR_SOURCE_NOT_FRESH");
-        }
-        let authorized = self.request(post).await?;
-        if authorized.status != RiskDecisionStatus::PostAuthorized
-            || authorized.reservation_key != held.reservation_key
-            || authorized.policy_revision != held.policy_revision
-            || authorized.risk_book_sequence <= held.risk_book_sequence
-        {
-            return Err("POST_FENCE_NOT_AUTHORIZED");
-        }
-        Ok(authorized)
+        self.backend.resolved().await?.request(command).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_protocol::risk_authority::{
-        NativeRiskCensus, RISK_COMMAND_SCHEMA_V1, RISK_RESULT_SCHEMA_V1, RiskAccountOccupancy,
-        RiskCommandAction, RiskDecisionStatus,
-    };
-    fn census() -> NativeRiskCensus {
-        let uid = "a".repeat(64);
-        NativeRiskCensus {
-            account_keys: vec![format!("okx:real:{uid}")],
-            occupied: vec![RiskAccountOccupancy {
-                account_key: format!("okx:real:{uid}"),
-                occupied_usdt: "0".to_owned(),
-                cumulative_loss_usd: "0".into(),
-            }],
-            generated_at_ms: 1_000,
-            source_digest: "c".repeat(64),
-            content_digest: "f".repeat(64),
-            source_read_floor_ms: 1_000,
-            complete: true,
-            native_account_evidence_complete: true,
-            native_order_evidence_complete: true,
-            native_ledger_evidence_complete: true,
-        }
-    }
-    fn reserve() -> RiskCommand {
-        RiskCommand {
-            schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
-            command_id: "risk_reserve_0001".to_owned(),
-            installation_id: "installation-test".into(),
-            action: RiskCommandAction::Reserve {
-                venue: "okx".to_owned(),
-                account_uid: "a".repeat(64),
-                run_id: "run_accepted_001".to_owned(),
-                intent_id: "intent_accepted_001".to_owned(),
-                strategy_id: "alpha_strategy".to_owned(),
-                instrument_id: "BTC-USDT-SWAP".to_owned(),
-                plan_sha256: "b".repeat(64),
-                requested_loss_usdt: "1".to_owned(),
-                requested_loss_usd: "1.001".into(),
-                entry_upper_usd: Some("2".into()),
-                entry_proof_digest: Some("d".repeat(64)),
-                usd_conversion: okx_protocol::risk_authority::UsdConversion {
-                    usd_per_usdt: "1.001".into(),
-                    source_digest: "f".repeat(64),
-                    observed_at_ms: 1000,
-                },
-                policy_revision: 1,
-                census: census(),
-            },
-        }
-    }
-    fn reply(command_id: String, status: RiskDecisionStatus, seq: u64) -> RiskResult {
-        RiskResult {
-            schema: RISK_RESULT_SCHEMA_V1.to_owned(),
-            command_id,
-            status,
-            reason: None,
-            reservation_key: Some("reservation_identity".to_owned()),
-            risk_book_sequence: Some(seq),
-            policy_revision: Some(1),
-            existing_modelled_loss_usdt: if status == RiskDecisionStatus::PostAuthorized {
-                Some("0".to_owned())
-            } else {
-                None
-            },
-            reservation_state: None,
-            budget: None,
-            account_budget: None,
-        }
-    }
-    fn post(held: &RiskResult) -> RiskCommand {
-        let mut fresh = census();
-        fresh.generated_at_ms = 1_001;
-        fresh.source_read_floor_ms = 1_001;
-        fresh.source_digest = "e".repeat(64);
-        RiskCommand {
-            schema: RISK_COMMAND_SCHEMA_V1.to_owned(),
-            command_id: "risk_post_000001".to_owned(),
-            installation_id: "installation-test".into(),
-            action: RiskCommandAction::BeginPost {
-                reservation_key: held.reservation_key.clone().unwrap(),
-                plan_sha256: "b".repeat(64),
-                policy_revision: 1,
-                expected_risk_book_sequence: held.risk_book_sequence.unwrap(),
-                source_proof_sha256: "d".repeat(64),
-                causal_proof: okx_protocol::risk_authority::CausalPostProof {
-                    reserve_anchor: held.reservation_key.clone().unwrap(),
-                    native_incarnation: "a".repeat(32),
-                    elapsed_to_proof_ms: 25,
-                    account_reads: vec![okx_protocol::risk_authority::PostAccountReadProof {
-                        account_key: format!("okx:real:{}", "a".repeat(64)),
-                        private_generation: 1,
-                        source_read_id: "b".repeat(64),
-                        content_digest: "f".repeat(64),
-                        started_after_held_ms: 2,
-                        completed_after_held_ms: 15,
-                    }],
-                },
-                census: fresh,
-            },
-        }
-    }
-    #[tokio::test]
-    async fn fresh_two_phase_receipt_fences_one_post() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let client = NativeRiskClient::new(tx);
-        let server = tokio::spawn(async move {
-            let r1 = rx.recv().await.unwrap();
-            let _ = r1
-                .return_to
-                .send(reply(r1.command.command_id, RiskDecisionStatus::Held, 1));
-            let r2 = rx.recv().await.unwrap();
-            assert!(matches!(
-                r2.command.action,
-                RiskCommandAction::BeginPost { .. }
-            ));
-            let _ = r2.return_to.send(reply(
-                r2.command.command_id,
-                RiskDecisionStatus::PostAuthorized,
-                2,
-            ));
-        });
-        let accepted = client
-            .reserve_then_fence(reserve(), |held| {
-                let next = post(held);
-                async move { Ok(next) }
-            })
-            .await
-            .unwrap();
-        assert_eq!(accepted.status, RiskDecisionStatus::PostAuthorized);
-        server.await.unwrap();
-    }
-    #[tokio::test]
-    async fn denied_reservation_never_sends_post() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let client = NativeRiskClient::new(tx);
-        let server = tokio::spawn(async move {
-            let req = rx.recv().await.unwrap();
-            let _ =
-                req.return_to
-                    .send(reply(req.command.command_id, RiskDecisionStatus::Denied, 1));
-            assert!(rx.try_recv().is_err());
-        });
-        let result = client
-            .reserve_then_fence(reserve(), |held| {
-                let p = post(held);
-                async move { Ok(p) }
-            })
-            .await;
-        assert!(matches!(result, Err("RISK_RESERVATION_NOT_HELD")));
-        server.await.unwrap();
-    }
-    #[tokio::test]
-    async fn reserve_time_census_cannot_enter_begin_post() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let client = NativeRiskClient::new(tx);
-        let server = tokio::spawn(async move {
-            let req = rx.recv().await.unwrap();
-            let _ = req
-                .return_to
-                .send(reply(req.command.command_id, RiskDecisionStatus::Held, 1));
-            assert!(rx.try_recv().is_err());
-        });
-        let result = client
-            .reserve_then_fence(reserve(), |held| {
-                let mut p = post(held);
-                if let RiskCommandAction::BeginPost { census, .. } = &mut p.action {
-                    census.generated_at_ms = 1_000;
-                    census.source_digest = "c".repeat(64);
-                }
-                async move { Ok(p) }
-            })
-            .await;
-        assert!(matches!(
-            result,
-            Err("POST_FENCE_IDENTITY_OR_SOURCE_NOT_FRESH")
-        ));
-        server.await.unwrap();
-    }
-    #[tokio::test]
-    async fn later_envelope_timestamp_without_all_account_re_read_cannot_post() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let client = NativeRiskClient::new(tx);
-        let server = tokio::spawn(async move {
-            let r = rx.recv().await.unwrap();
-            let _ = r
-                .return_to
-                .send(reply(r.command.command_id, RiskDecisionStatus::Held, 1));
-            assert!(rx.try_recv().is_err());
-        });
-        let result = client
-            .reserve_then_fence(reserve(), |held| {
-                let mut p = post(held);
-                if let RiskCommandAction::BeginPost { census, .. } = &mut p.action {
-                    census.source_read_floor_ms = 1_000;
-                }
-                async move { Ok(p) }
-            })
-            .await;
-        assert!(matches!(
-            result,
-            Err("POST_FENCE_IDENTITY_OR_SOURCE_NOT_FRESH")
-        ));
-        server.await.unwrap();
-    }
+    use okx_protocol::risk_authority::{RISK_COMMAND_SCHEMA_V1, RiskCommandAction};
 
     #[tokio::test]
-    async fn changed_plan_cannot_turn_held_into_post() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let client = NativeRiskClient::new(tx);
-        let server = tokio::spawn(async move {
-            let req = rx.recv().await.unwrap();
-            let _ = req
-                .return_to
-                .send(reply(req.command.command_id, RiskDecisionStatus::Held, 1));
-            assert!(rx.try_recv().is_err());
-        });
+    async fn invalid_command_never_enters_the_financial_owner() {
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "okx-local-risk-{:032x}",
+            u128::from_le_bytes(nonce)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let owner = UnifiedFinanceHandle::initialize_new(
+            root.clone(),
+            okx_execution::NewFinanceInstallation {
+                installation_id: "installation-local-risk".into(),
+                initialize_request_id: "initialize_local_risk_001".into(),
+                source_tree: "a".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+        let client = NativeRiskClient::local(NativeFinanceRisk::from_owner(owner.clone()));
+        assert_eq!(
+            client.finance_owner().installation_id(),
+            owner.installation_id()
+        );
+        let jobs = owner.sql_timing().observed_jobs;
         let result = client
-            .reserve_then_fence(reserve(), |held| {
-                let mut p = post(held);
-                if let RiskCommandAction::BeginPost { plan_sha256, .. } = &mut p.action {
-                    *plan_sha256 = "f".repeat(64);
-                }
-                async move { Ok(p) }
+            .request(RiskCommand {
+                schema: RISK_COMMAND_SCHEMA_V1.into(),
+                command_id: String::new(),
+                installation_id: owner.installation_id().into(),
+                action: RiskCommandAction::Summary {},
             })
             .await;
-        assert!(matches!(
-            result,
-            Err("POST_FENCE_IDENTITY_OR_SOURCE_NOT_FRESH")
-        ));
-        server.await.unwrap();
+        assert_eq!(result.err(), Some("INVALID_RISK_COMMAND"));
+        assert_eq!(owner.sql_timing().observed_jobs, jobs);
+        let mut terminated = owner.termination_signal();
+        drop(client);
+        drop(owner);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            terminated.wait_for(|v| *v),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1,6 +1,8 @@
+#[cfg(windows)]
 use std::{fs, path::PathBuf};
 
-use chrono::{Duration as ChronoDuration, Local};
+#[cfg(windows)]
+use jiff::{Span, ZonedDateTime};
 use serde_json::{Value, json};
 
 use crate::{HostControlError, HostControlResult, background_process::hidden_command};
@@ -28,8 +30,10 @@ fn install_action(
     #[cfg(windows)]
     {
         let account = current_account()?;
-        let start_boundary = (Local::now() + ChronoDuration::seconds(10))
-            .format("%Y-%m-%dT%H:%M:%S")
+        let start_boundary = ZonedDateTime::now()
+            .checked_add(Span::new().seconds(10))
+            .map_err(HostControlError::ScheduleTime)?
+            .strftime("%Y-%m-%dT%H:%M:%S")
             .to_string();
         let xml = task_xml(
             &account,

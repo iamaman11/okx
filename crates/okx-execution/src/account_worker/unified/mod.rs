@@ -8,7 +8,11 @@ mod owner;
 #[cfg(test)]
 mod owner_account_source_scope_tests;
 #[cfg(test)]
+mod owner_admission_crash_tests;
+#[cfg(test)]
 mod owner_diagnostic_busy_tests;
+#[cfg(test)]
+mod owner_entry_diagnostic_tests;
 #[cfg(test)]
 mod owner_finance_snapshot_tests;
 #[cfg(test)]
@@ -30,7 +34,9 @@ mod owner_workload_tests;
 pub(crate) use opening_ingress::install_reported_opening_sql;
 pub use opening_ingress::{ReportedOpeningCensus, ReportedOpeningReceipt};
 mod account_initialization;
+mod admission_identity;
 mod admission_lifecycle;
+pub use admission_identity::{AdmissionIntentId, AdmissionReservationKey, AdmissionRunId};
 mod authority_reads;
 mod campaign_initialization;
 mod campaign_readiness;
@@ -39,6 +45,8 @@ pub use campaign_initialization::{
     NativeCampaignStrategyPolicy,
 };
 mod census_reads;
+mod census_time;
+pub use census_time::{CensusObservedAtMs, CensusReadFloorMs};
 mod finance_authority;
 mod financial_admission;
 mod native_admission;
@@ -48,7 +56,10 @@ mod order_observation;
 pub(crate) use native_admission::{
     bind_census as test_bind_native_census, reserve_reported_sql as test_reserve_reported_sql,
 };
-pub use operation_diagnostics::NativeIntentDiagnosticSnapshot;
+pub use operation_diagnostics::{
+    NativeAccountDiagnosticSnapshot, NativeBudgetDenial, NativeEntrySourceFailure,
+    NativeEntrySourceKind, NativeIntentDiagnosticSnapshot, NativeRiskStopDiagnostic,
+};
 mod entry_settlement;
 mod posting_recovery;
 mod storage_recovery;

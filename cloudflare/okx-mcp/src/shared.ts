@@ -47,6 +47,9 @@ export interface SocketAttachment {
   generation: number;
   hello: boolean;
   installationId?: string;
+  sessionMode?: "finance" | "research_only";
+  /** Namespace asserted by the bearer-authenticated host, not key attestation. */
+  hostScope?: string;
   agentPid?: number;
   agentBinarySha256?: string;
   agentIncarnation?: string;

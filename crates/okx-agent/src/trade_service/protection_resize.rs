@@ -27,31 +27,22 @@ impl TradeService {
         }
         let plan_hash = reduction.plan_hash.clone();
         let account_key = r.configuration.account_key.wire();
-        let (opening, old_stop, key, prior, verified) =
-            if let Some((owner, account)) = r.execution.store.native_scope() {
-                owner
-                    .protection_resize_source(
-                        deadline(),
-                        account.into(),
-                        reduction.intent_id.clone(),
-                        venue.order_id.clone(),
-                        venue_filled,
-                        update,
-                        position_qty,
-                    )
-                    .await
-                    .map_err(err)?
-            } else {
-                let id = reduction.intent_id.clone();
-                let order = venue.order_id.clone();
-                r.execution
-                    .store
-                    .call(deadline(), move |s| {
-                        s.protection_resize_source(&id, &order, venue_filled, update, position_qty)
-                    })
-                    .await
-                    .map_err(err)?
-            };
+        let (opening, old_stop, key, prior, verified) = {
+            let (owner, account) = r.execution.store.scope();
+
+            owner
+                .protection_resize_source(
+                    deadline(),
+                    account.into(),
+                    reduction.intent_id.clone(),
+                    venue.order_id.clone(),
+                    venue_filled,
+                    update,
+                    position_qty,
+                )
+                .await
+                .map_err(err)?
+        };
         let hash = digest(&(
             "protection-shrink/v1",
             &account_key,
@@ -129,7 +120,9 @@ impl TradeService {
                 source_digest: digest(&live)?,
             };
             let verification = format!("{key}:verified");
-            if let Some((owner, account)) = r.execution.store.native_scope() {
+            {
+                let (owner, account) = r.execution.store.scope();
+
                 owner
                     .confirm_protection_resize(
                         deadline(),
@@ -138,22 +131,6 @@ impl TradeService {
                         verification,
                         hash,
                     )
-                    .await
-                    .map_err(err)?;
-            } else {
-                r.execution
-                    .store
-                    .call(deadline(), move |s| {
-                        s.verify_protection(&new_protection)?;
-                        s.operation_receipt(
-                            &verification,
-                            &hash,
-                            "protection_shrink_verified",
-                            "VERIFIED",
-                            now(),
-                        )?;
-                        Ok(())
-                    })
                     .await
                     .map_err(err)?;
             }
@@ -201,7 +178,7 @@ impl TradeService {
             .store
             .begin_operation(
                 deadline(),
-                operation_key,
+                crate::execution_store::OperationId::new(operation_key).map_err(err)?,
                 operation_hash,
                 "protection_shrink".into(),
             )
@@ -215,11 +192,7 @@ impl TradeService {
             .trade
             .amend_algo_order_after_admission(&request, &timing, &rate)
             .await
-            .map_err(|_source| {
-                #[cfg(test)]
-                eprintln!("PROTECTION_SHRINK_SOURCE_SEND_FAILED_V1:{_source}");
-                "PROTECTION_SHRINK_OUTCOME_UNKNOWN_NO_RESUBMIT"
-            })?;
+            .map_err(|_source| "PROTECTION_SHRINK_OUTCOME_UNKNOWN_NO_RESUBMIT")?;
         if !ack.top_level_success()
             || ack.data.len() != 1
             || ack.data[0].status_code != "0"
@@ -232,7 +205,7 @@ impl TradeService {
             .store
             .operation_receipt(
                 deadline(),
-                key,
+                crate::execution_store::OperationId::new(key).map_err(err)?,
                 hash,
                 "protection_shrink".into(),
                 "ACK_SOURCE_PENDING".into(),

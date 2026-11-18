@@ -4,11 +4,11 @@ use crate::{
     account_bootstrap::{AccountBootstrapError, AccountBootstrapper},
     execution_runtime::ExecutionRuntime,
 };
+use jiff::{Span, Timestamp, tz::TimeZone};
 use okx_api::{AccountBill, FillHistory};
 use okx_execution::{
-    AccountNavSnapshot, AccountSqlStatementStat, Fill, IngestPage, SourceCursor, StoreError,
-    StoreResult, StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition, VenueMark,
-    build_account_nav_page,
+    AccountNavSnapshot, Fill, IngestPage, SourceCursor, StoreError, StoreResult,
+    StrategyValuationEvidence, UsdConversionEvidence, ValuationPosition, VenueMark,
 };
 use okx_runtime::PrivateWsHandle;
 use rust_decimal::Decimal;
@@ -113,76 +113,6 @@ fn phase_elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-// Fixed vocabulary: a slow or failed operation identifies its owning phase
-// without storing any finance facts, arbitrary SQL text or secret labels.
-#[derive(Clone, Copy)]
-enum NavPhase {
-    FillProjection,
-    FundingAttribution,
-    StopResolution,
-    CashFlows,
-    AccountNavBuild,
-    AccountNavCommit,
-    Capital,
-    StrategyValuation,
-    CursorRead,
-    CursorCommit,
-}
-impl NavPhase {
-    fn code(self) -> &'static str {
-        match self {
-            Self::FillProjection => "fill_projection",
-            Self::FundingAttribution => "funding_attribution",
-            Self::StopResolution => "stop_resolution",
-            Self::CashFlows => "cash_flows",
-            Self::AccountNavBuild => "account_nav_build",
-            Self::AccountNavCommit => "account_nav_commit",
-            Self::Capital => "capital",
-            Self::StrategyValuation => "strategy_valuation",
-            Self::CursorRead => "cursor_read",
-            Self::CursorCommit => "cursor_commit",
-        }
-    }
-}
-fn record_statement(
-    trace: &Option<(Arc<crate::finance_trace::FinanceTrace>, u64)>,
-    stat: AccountSqlStatementStat,
-) {
-    if let Some((store, id)) = trace {
-        store.statement_finished(*id, stat);
-    }
-}
-
-fn measured_nav_phase<T>(
-    trace: &Option<(Arc<crate::finance_trace::FinanceTrace>, u64)>,
-    phase: NavPhase,
-    operation: impl FnOnce() -> StoreResult<T>,
-) -> StoreResult<T> {
-    if let Some((store, id)) = trace {
-        store.phase_started(*id, phase.code());
-    }
-    let started = Instant::now();
-    let result = operation();
-    if let Some((store, id)) = trace {
-        store.phase_finished(
-            *id,
-            phase.code(),
-            u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-            result.is_ok(),
-        );
-    }
-    let elapsed_ms = phase_elapsed_ms(started);
-    if elapsed_ms >= 250 || result.is_err() {
-        eprintln!(
-            "OKX_NAV_PHASE_V1 phase={} elapsed_ms={} outcome={}",
-            phase.code(),
-            elapsed_ms,
-            if result.is_ok() { "ok" } else { "error" }
-        );
-    }
-    result
-}
-
 // With no allocated strategy capital, a prior gap-free cursor for the same
 // source generation already proves NOT_APPLICABLE. Rewriting its watermark
 // every NAV cycle forces an unnecessary second synchronous SQLite commit.
@@ -204,12 +134,14 @@ fn strategy_cursor_refresh_needed(
 /// A one-day safety margin avoids claiming the ambiguous boundary as proven.
 /// Older campaign history requires an independently verified archival source.
 fn verify_history_retrieval_window(begin: i64, now: i64) -> AgentResult<()> {
-    let current = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now)
-        .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
+    let current =
+        Timestamp::from_millisecond(now).map_err(|_| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
     let retention_floor = current
-        .checked_sub_months(chrono::Months::new(3))
-        .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?
-        .timestamp_millis()
+        .to_zoned_datetime(TimeZone::UTC)
+        .checked_sub(Span::new().months(3))
+        .map_err(|_| invalid("HISTORY_WINDOW_TIME_INVALID"))?
+        .timestamp()
+        .as_millisecond()
         .checked_add(86_400_000)
         .ok_or_else(|| invalid("HISTORY_WINDOW_TIME_INVALID"))?;
     if begin <= 0 || begin > now {
@@ -397,7 +329,7 @@ pub(crate) async fn capture_account_sources_traced(
     }
     let generation = i64::try_from(initial.connection_generation)
         .map_err(|_| invalid("SOURCE_GENERATION_OVERFLOW"))?;
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = jiff::Timestamp::now().as_millisecond();
     let fx_source = format!("{:x}", sha2::Sha256::digest(serde_json::to_vec(&snapshot)?));
     let mut usd_per_currency = std::collections::BTreeMap::new();
     usd_per_currency.insert("USD".into(), Decimal::ONE);
@@ -561,174 +493,27 @@ pub(crate) async fn capture_account_sources_traced(
     let source = snapshot.source_received_at.clone();
     let version = format!("{generation}:{}", snapshot.account_generation);
     let nav_started = Instant::now();
-    let nav_trace = trace.clone();
-    let owner_trace = trace;
-    let nav_sql_timing = if let Some((owner, account)) = execution.store.native_scope() {
-        native_nav::reconcile(
-            owner,
-            account,
-            AccountNavSnapshot {
-                as_of: now,
-                generation,
-                source_version: version,
-                source_ref: source,
-                equity_usd: usd_equity,
-                balances: balances
-                    .into_iter()
-                    .map(|balance| Ok((balance.currency, d(&balance.equity)?)))
-                    .collect::<StoreResult<Vec<_>>>()?,
-                complete,
-            },
-            valuation_positions,
-            fx,
-            &nav_trace,
-        )
-        .await?;
-        None
-    } else {
-        let ((), timing) = execution
-            .store
-            .call_with_timing_observed(
-                deadline(),
-                move |s| {
-                    if complete {
-                        measured_nav_phase(&nav_trace, NavPhase::FillProjection, || {
-                            s.project_pending_fills_observed(1000, |stat| {
-                                record_statement(&nav_trace, stat);
-                            })
-                        })?;
-                        measured_nav_phase(&nav_trace, NavPhase::FundingAttribution, || {
-                            s.attribute_pending_funding(&fx, 100)
-                        })?;
-                        measured_nav_phase(&nav_trace, NavPhase::StopResolution, || {
-                            s.resolve_stop("usd-conversion-unavailable", &fx.source_digest)
-                        })?;
-                    }
-                    let flows = measured_nav_phase(&nav_trace, NavPhase::CashFlows, || {
-                        s.cash_flow_totals_observed(|stat| record_statement(&nav_trace, stat))
-                    })?;
-                    let page = measured_nav_phase(&nav_trace, NavPhase::AccountNavBuild, || {
-                        let input = AccountNavSnapshot {
-                            as_of: now,
-                            generation,
-                            source_version: version.clone(),
-                            source_ref: source.clone(),
-                            equity_usd: usd_equity,
-                            balances: balances
-                                .into_iter()
-                                .map(|balance| Ok((balance.currency, d(&balance.equity)?)))
-                                .collect::<StoreResult<Vec<_>>>()?,
-                            complete,
-                        };
-                        build_account_nav_page(
-                            &input,
-                            &flows,
-                            s.opening_equity_usd()?,
-                            s.usd_component_total("EXTERNAL_FLOW_USD")?,
-                        )
-                    })?;
-                    measured_nav_phase(&nav_trace, NavPhase::AccountNavCommit, || {
-                        s.ingest_page_observed(&page, |timing| {
-                            if let Some((store, id)) = nav_trace.as_ref() {
-                                store.transaction_finished(
-                                    *id,
-                                    timing.begin_us,
-                                    timing.body_us,
-                                    timing.commit_us,
-                                    timing.commit_succeeded,
-                                );
-                            }
-                        })
-                    })?;
-                    // One AccountStore, one canonical NAV owner. Strategy failures
-                    // are recorded in the existing coverage cursor; manual trading
-                    // does not inherit a missing standalone strategy NAV.
-                    let strategy_cursor = SourceCursor {
-                        source: "strategy_valuation".into(),
-                        stream_partition: "account".into(),
-                        cursor: String::new(),
-                        watermark: now,
-                        generation,
-                        coverage_gaps: String::new(),
-                    };
-                    let mut strategy_cursor_committed = false;
-                    let mut no_strategy_capital = false;
-                    let strategy_result = if !complete {
-                        Err(StoreError::Invalid("FINANCIAL_BACKFILL_PENDING"))
-                    } else {
-                        match measured_nav_phase(&nav_trace, NavPhase::Capital, || {
-                            s.capital_state(now)
-                        }) {
-                            Ok(capital) if capital.strategy_principal_usd.is_empty() => {
-                                no_strategy_capital = true;
-                                Ok(())
-                            }
-                            Ok(_) => valuation_positions.and_then(|venue_positions| {
-                                measured_nav_phase(
-                                    &nav_trace,
-                                    NavPhase::StrategyValuation,
-                                    || {
-                                        s.commit_reconciled_strategy_nav_with_cursor(
-                                            &StrategyValuationEvidence {
-                                                account_key: s.meta().account_key.clone(),
-                                                account_nav_source: source.clone(),
-                                                as_of: now,
-                                                conversion: fx.clone(),
-                                                venue_positions,
-                                            },
-                                            &strategy_cursor,
-                                        )
-                                    },
-                                )?;
-                                strategy_cursor_committed = true;
-                                Ok(())
-                            }),
-                            Err(e) => Err(e),
-                        }
-                    };
-                    let gap = match strategy_result {
-                        Ok(()) => String::new(),
-                        Err(StoreError::Invalid(reason)) => reason.into(),
-                        Err(e) => return Err(e),
-                    };
-                    // On success strategy NAV and its cursor are already atomic.
-                    // On incomplete evidence record only the actual coverage gap.
-                    if !strategy_cursor_committed {
-                        let previous = if no_strategy_capital && gap.is_empty() {
-                            measured_nav_phase(&nav_trace, NavPhase::CursorRead, || {
-                                s.cursor("strategy_valuation", "account")
-                            })?
-                        } else {
-                            None
-                        };
-                        if strategy_cursor_refresh_needed(
-                            no_strategy_capital,
-                            &gap,
-                            previous.as_ref(),
-                            generation,
-                        ) {
-                            measured_nav_phase(&nav_trace, NavPhase::CursorCommit, || {
-                                s.ingest_page(&IngestPage {
-                                    cursor: Some(SourceCursor {
-                                        coverage_gaps: gap,
-                                        ..strategy_cursor
-                                    }),
-                                    ..Default::default()
-                                })
-                            })?;
-                        }
-                    }
-                    Ok(())
-                },
-                move |timing, _ok| {
-                    if let Some((store, id)) = owner_trace.as_ref() {
-                        store.owner_finished(*id, timing.queue_wait_ms, timing.sql_owner_ms);
-                    }
-                },
-            )
-            .await?;
-        Some(timing)
-    };
+    let (owner, account) = execution.store.scope();
+    native_nav::reconcile(
+        owner,
+        account,
+        AccountNavSnapshot {
+            as_of: now,
+            generation,
+            source_version: version,
+            source_ref: source,
+            equity_usd: usd_equity,
+            balances: balances
+                .into_iter()
+                .map(|balance| Ok((balance.currency, d(&balance.equity)?)))
+                .collect::<StoreResult<Vec<_>>>()?,
+            complete,
+        },
+        valuation_positions,
+        fx,
+        &trace,
+    )
+    .await?;
     let nav_reconciliation_ms = phase_elapsed_ms(nav_started);
     if !complete {
         return Err(invalid("FINANCIAL_BACKFILL_PENDING"));
@@ -739,8 +524,8 @@ pub(crate) async fn capture_account_sources_traced(
             observer_and_cursors_ms,
             history_and_ingest_ms,
             nav_reconciliation_ms,
-            nav_sql_queue_wait_ms: nav_sql_timing.as_ref().map(|timing| timing.queue_wait_ms),
-            nav_sql_owner_ms: nav_sql_timing.as_ref().map(|timing| timing.sql_owner_ms),
+            nav_sql_queue_wait_ms: None,
+            nav_sql_owner_ms: None,
         },
     })
 }
@@ -1009,14 +794,16 @@ mod tests {
     fn campaign_history_cannot_be_inferred_from_expired_okx_fills_or_bills_window() {
         // A calendar boundary, not an arbitrary 90-day threshold, protects
         // E1.1 when data retention differs across months/leap years.
-        let now = chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z")
+        let now = jiff::Timestamp::from_str("2026-10-30T12:00:00Z")
             .unwrap()
-            .timestamp_millis();
-        let now_dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now).unwrap();
+            .as_millisecond();
+        let now_dt = Timestamp::from_millisecond(now).unwrap();
         let three_months_ago = now_dt
-            .checked_sub_months(chrono::Months::new(3))
+            .to_zoned_datetime(TimeZone::UTC)
+            .checked_sub(Span::new().months(3))
             .unwrap()
-            .timestamp_millis();
+            .timestamp()
+            .as_millisecond();
         assert!(verify_history_retrieval_window(now - 86_400_000, now).is_ok());
         assert!(verify_history_retrieval_window(three_months_ago + 86_400_000, now).is_ok());
         assert!(verify_history_retrieval_window(three_months_ago, now).is_err());

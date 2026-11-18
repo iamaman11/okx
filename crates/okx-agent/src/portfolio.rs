@@ -1,7 +1,7 @@
 //! Bounded portfolio projections with a stable cross-account page cursor.
 use crate::accounts::AccountRuntimeRegistry;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::Utc;
+use jiff::Timestamp;
 use okx_protocol::trading::{PortfolioAction, PortfolioRequest};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -248,7 +248,7 @@ pub async fn portfolio(
             None
         };
         Ok(
-            json!({"rows":output,"next_cursor":next,"central_budget":central_budget.as_ref().ok(),"central_budget_error":central_budget.as_ref().err(),"as_of_ms":Utc::now().timestamp_millis()}),
+            json!({"rows":output,"next_cursor":next,"central_budget":central_budget.as_ref().ok(),"central_budget_error":central_budget.as_ref().err(),"as_of_ms":Timestamp::now().as_millisecond()}),
         )
     } else {
         let mut all=totals.into_iter().map(|((environment,currency,component),amount)|json!({"kind":"component","environment":environment,"currency":currency,"component":component,"amount":amount.normalize().to_string()})).collect::<Vec<_>>();
@@ -320,7 +320,7 @@ pub async fn portfolio(
             next.is_none(),
         );
         Ok(
-            json!({"rows":output,"next_cursor":next,"pagination_complete":next.is_none(),"central_budget":central_budget.as_ref().ok(),"central_budget_error":central_budget.as_ref().err(),"account_count":readiness.len(),"quality":if complete{"complete"}else{"partial"},"diagnostics":summary_diagnostics(readiness, &navigation, central_budget.as_ref().err()),"as_of_ms":Utc::now().timestamp_millis()}),
+            json!({"rows":output,"next_cursor":next,"pagination_complete":next.is_none(),"central_budget":central_budget.as_ref().ok(),"central_budget_error":central_budget.as_ref().err(),"account_count":readiness.len(),"quality":if complete{"complete"}else{"partial"},"diagnostics":summary_diagnostics(readiness, &navigation, central_budget.as_ref().err()),"as_of_ms":Timestamp::now().as_millisecond()}),
         )
     }
 }

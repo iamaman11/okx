@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// The sole T09/T10 acceptance entrypoint. A missing scenario is a failure,
+// Historical T09/T10 artifact parser. Execution is retired after Native cutover.
+// A missing scenario is a failure,
 // never a skip or a copied component-test PASS. Cases invoke production owners
 // with recorded raw HTTP/WS inputs and must return independently checked facts.
 import { createHash } from "node:crypto";
@@ -439,6 +440,7 @@ if (cli.list) {
   }, null, 2) + "\n");
   process.exit(0);
 }
+throw Error("RETIRED_REMOTE_FINANCE_HARNESS: run the Native Rust property collector; no historical scenario was executed");
 const dir = resolve(cli.artifacts);
 if (basename(dir) === "." || dir === root) throw Error("ARTIFACTS_MUST_BE_SEPARATE_DIRECTORY");
 await mkdir(dir, { recursive: true });

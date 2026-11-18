@@ -1,4 +1,4 @@
-//! Account-local native adapters. AccountStoreHandle is the sole SQL owner;
+//! Account-local native adapters. UnifiedFinanceHandle is the sole SQL owner;
 //! this object owns no parallel ledger, access grant or financial epoch.
 use crate::AgentResult;
 use crate::execution_store::ExecutionStore;

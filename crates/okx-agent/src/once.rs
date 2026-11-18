@@ -1,5 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use chrono::{SecondsFormat, Utc};
+use jiff::Timestamp;
 use okx_github::MAX_COMMENT_BODY_BYTES;
 use okx_protocol::{
     AGENT_REQUEST_SCHEMA_V1, AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest,
@@ -351,7 +351,7 @@ pub async fn process_once_now_with_size_telemetry(
 ) -> AgentResult<(MailboxEnvelope, ResponseSizeTelemetry)> {
     let mut nonce = [0_u8; 12];
     getrandom::fill(&mut nonce).map_err(|error| AgentError::Random(error.to_string()))?;
-    let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let generated_at = format!("{:.3}", Timestamp::now());
 
     process_once_with_size_telemetry(
         envelope,

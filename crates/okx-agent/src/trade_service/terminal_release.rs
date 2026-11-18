@@ -1,12 +1,11 @@
 //! Terminal reservation settlement and release for a reconciled intent.
+
 use super::reconcile::{verified_order_readback, verified_terminal_order_update_time};
-use super::{AccountResources, StoredIntent, TradeService, deadline, digest, err, exact};
+use super::{AccountResources, StoredIntent, TradeService, deadline, err, exact};
 use crate::execution_store::ExecutionStore;
 use okx_execution::{CentralReceipt, IntentState, SourceCursor};
-use okx_protocol::risk_authority::{
-    RiskCommandAction, RiskDecisionStatus, RiskReservationState, RiskResolution,
-    TerminalRiskLedgerProof,
-};
+use okx_protocol::risk_authority::{RiskCommandAction, RiskDecisionStatus, RiskReservationState};
+
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -199,7 +198,9 @@ impl TradeService {
                 observe(stage, reservation_key.as_deref(), "running", None, &facts);
                 let id = i.intent_id.clone();
                 let order_id = venue.order_id.clone();
-                if let Some((owner, account)) = r.execution.store.native_scope() {
+                {
+                    let (owner, account) = r.execution.store.scope();
+
                     owner
                         .acknowledge_local_terminal_close(
                             deadline(),
@@ -209,19 +210,6 @@ impl TradeService {
                             filled,
                             venue_updated_at,
                         )
-                        .await
-                        .map_err(err)?;
-                } else {
-                    r.execution
-                        .store
-                        .call(deadline(), move |s| {
-                            s.acknowledge_local_terminal_close(
-                                &id,
-                                &order_id,
-                                filled,
-                                venue_updated_at,
-                            )
-                        })
                         .await
                         .map_err(err)?;
                 }
@@ -285,7 +273,9 @@ impl TradeService {
                 }
                 stage = TerminalReleaseStage::SqlAcknowledgement;
                 observe(stage, reservation_key.as_deref(), "running", None, &facts);
-                if let Some((owner, account)) = r.execution.store.native_scope() {
+                {
+                    let (owner, account) = r.execution.store.scope();
+
                     owner
                         .verify_terminal_release_ack(
                             deadline(),
@@ -298,36 +288,19 @@ impl TradeService {
                         .map_err(err)?;
                     return Ok(());
                 }
-                let k = receipt.reservation_key.clone();
-                let e = digest(&observed)?;
-                r.execution
-                    .store
-                    .call(deadline(), move |s| s.acknowledge_central_release(&k, &e))
-                    .await
-                    .map_err(err)?;
-                return Ok(());
             }
             stage = TerminalReleaseStage::BillCoverage;
             observe(stage, reservation_key.as_deref(), "running", None, &facts);
-            let (through, loss) = if let Some((owner, account)) = r.execution.store.native_scope() {
+            let (through, loss) = {
+                let (owner, account) = r.execution.store.scope();
+
                 owner
                     .terminal_financial_snapshot(deadline(), account.to_owned())
                     .await
                     .map_err(err)?
-            } else {
-                r.execution
-                    .store
-                    .call(deadline(), |s| {
-                        Ok((
-                            s.cursor("bills", "account")?.ok_or(
-                                okx_execution::StoreError::Invalid("BILLS_COVERAGE_MISSING"),
-                            )?,
-                            s.policy()?.4,
-                        ))
-                    })
-                    .await
-                    .map_err(err)?
             };
+
+            let _ = loss;
             facts.bills = Some((&through).into());
             if !source_covers_terminal(&through, venue_updated_at) {
                 return Err("FINANCIAL_COVERAGE_INCOMPLETE".into());
@@ -429,7 +402,9 @@ impl TradeService {
                 .await?;
             stage = TerminalReleaseStage::Release;
             observe(stage, reservation_key.as_deref(), "running", None, &facts);
-            if let Some((owner, account)) = r.execution.store.native_scope() {
+            {
+                let (owner, account) = r.execution.store.scope();
+
                 if self.governance.read().await.as_ref().is_none_or(|latest| {
                     latest.session_generation != state.session_generation
                         || latest.state.installation_id != state.state.installation_id
@@ -453,58 +428,8 @@ impl TradeService {
                 // The original joint Resolve writes AccountStore release ACK
                 // in this same COMMIT. No separate account acknowledgement.
                 stage = TerminalReleaseStage::SqlAcknowledgement;
-                return Ok(());
+                Ok(())
             }
-            let proof = TerminalRiskLedgerProof {
-                account_uid: r.configuration.account_key.verified_uid.clone(),
-                run_id: "continuous_engine".into(),
-                intent_id: i.intent_id.clone(),
-                state: match i.state {
-                    IntentState::Rejected => "REJECTED",
-                    IntentState::Cancelled => "CANCELED",
-                    _ => "FILLED",
-                }
-                .into(),
-                record_digest: digest(&(i, order, loss, through))?,
-                cumulative_loss_usd: exact(loss),
-                remaining_exposure_usdt: "0".into(),
-                // The previous SETTLE_ENTRY committed the entire observed
-                // amount. Terminal RELEASE must not create another revision or
-                // claim a new debit; Worker compares these exact immutable
-                // SQL-backed fields to the existing settled RiskBook entry.
-                cumulative_entry_usd: Some(exact(settlement.cumulative_entry_usd)),
-                entry_settlement_revision: Some(settlement.settlement_revision),
-                entry_settlement_digest: Some(settlement.source_digest.clone()),
-            };
-            let command = self.risk_command(
-                &state,
-                format!("release_{}", &i.client_order_id),
-                RiskCommandAction::Resolve {
-                    reservation_key: receipt.reservation_key.clone(),
-                    plan_sha256: i.plan_hash.clone(),
-                    expected_risk_book_sequence: settlement_sequence,
-                    next_state: RiskResolution::Released,
-                    source_proof_sha256: digest(&proof)?,
-                    terminal_census: Some(census),
-                    terminal_ledger: Some(proof),
-                },
-            );
-            let reservation = receipt.reservation_key.clone();
-            let result = self.risk.request(command).await.map_err(str::to_owned)?;
-            if result.status != RiskDecisionStatus::Updated {
-                return Err(result.reason.unwrap_or("CENTRAL_RELEASE_DENIED".into()));
-            }
-            stage = TerminalReleaseStage::SqlAcknowledgement;
-            observe(stage, reservation_key.as_deref(), "running", None, &facts);
-            let e = digest(&result)?;
-            r.execution
-                .store
-                .call(deadline(), move |s| {
-                    s.acknowledge_central_release(&reservation, &e)
-                })
-                .await
-                .map_err(err)?;
-            Ok(())
         }
         .await;
         observe(

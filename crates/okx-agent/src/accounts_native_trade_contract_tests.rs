@@ -18,7 +18,7 @@ use std::sync::{
 use std::time::Duration;
 
 #[path = "accounts_native_trade_fixture.rs"]
-mod fixture;
+pub(crate) mod fixture;
 use fixture::*;
 
 #[path = "accounts_native_filled_close_contract_tests.rs"]
@@ -249,10 +249,10 @@ async fn risk_book_contract_native_public_execute_lost_ack_and_replay_send_once(
             if public
                 .risk_fresh_snapshot(
                     "BTC-USDT-SWAP",
-                    chrono::Utc::now().timestamp_millis() as u64,
+                    jiff::Timestamp::now().as_millisecond() as u64,
                     2_000,
                     180_000,
-                    chrono::Utc::now().to_rfc3339(),
+                    jiff::Timestamp::now().to_string(),
                 )
                 .await
                 .is_ok()
@@ -282,7 +282,7 @@ async fn risk_book_contract_native_public_execute_lost_ack_and_replay_send_once(
         .update_governance(&fixture.authority)
         .await
         .unwrap();
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));
@@ -336,6 +336,33 @@ async fn risk_book_contract_native_public_execute_lost_ack_and_replay_send_once(
                 execute_started.elapsed().as_millis(),
             )
         });
+    fixture
+        .expect_trade_reason(&first, "EXCHANGE_POST_OUTCOME_UNKNOWN")
+        .await;
+    // Native financial evidence: one canonical semantic hash survives a lost
+    // exchange ACK on the original installation writer, not a retired fixture.
+    let account_key = fixture.config.account_key.wire();
+    let idempotency = match &request {
+        TradeRequest::Execute {
+            idempotency_key, ..
+        } => idempotency_key.clone(),
+        _ => unreachable!("Native public Create fixture must be Execute"),
+    };
+    use sha2::Digest as _;
+    let semantic = request.canonical_semantic_json(&account_key).unwrap();
+    let expected_hash = format!("{:x}", sha2::Sha256::digest(semantic.as_bytes()));
+    let stored = fixture
+        .owner
+        .lookup_intent(
+            account_key,
+            okx_execution::TradeIntentLookup::IdempotencyKey(idempotency),
+            Instant::now() + Duration::from_secs(3),
+        )
+        .await
+        .unwrap()
+        .expect("Native finance owner retains the original semantic request");
+    assert_eq!(stored.intent_id, first["intent_id"].as_str().unwrap());
+    assert_eq!(stored.request_hash, expected_hash);
     assert_eq!(first["status"], "unknown", "{first}");
     assert_eq!(
         first["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
@@ -345,9 +372,23 @@ async fn risk_book_contract_native_public_execute_lost_ack_and_replay_send_once(
     assert!(fixture.feed.lost_create_ack_was_consumed());
     assert_eq!(fixture.feed.outbound_posts.lock().unwrap().len(), 1);
     let reference = first["intent_id"].as_str().unwrap().to_owned();
+    // The retry is semantically identical, but its decimal spelling differs.
+    // It must resolve the original durable intent, not claim another Create.
+    let mut retry = request.clone();
+    if let TradeRequest::Execute {
+        sizing, protection, ..
+    } = &mut retry
+    {
+        *sizing = okx_protocol::trading::Sizing::Contracts {
+            contracts: "0.1000".into(),
+        };
+        *protection = Some(okx_protocol::trading::Protection::Price {
+            stop_price: "900.000".into(),
+        });
+    }
     let replay = fixture
         .trade
-        .trade(&fixture.config.alias, &request, Some(&fixture.authority))
+        .trade(&fixture.config.alias, &retry, Some(&fixture.authority))
         .await
         .expect("same-key replay must reconcile original Native intent");
     assert_eq!(replay["data"]["intent"]["intent_id"], reference, "{replay}");
@@ -412,7 +453,7 @@ mod native_crash;
 mod native_partial_entry;
 
 #[path = "accounts_native_filled_fixture.rs"]
-mod filled_fixture;
+pub(crate) mod filled_fixture;
 
 #[path = "accounts_native_execute_safety_contract_tests.rs"]
 mod native_execute_safety;
@@ -464,3 +505,11 @@ mod native_stale_diagnostic;
 
 #[path = "accounts_native_engine_contract_tests.rs"]
 mod native_engine;
+#[path = "accounts_native_engine_research_contract_tests.rs"]
+mod native_engine_research;
+
+#[path = "accounts_native_source_diagnostic_contract_tests.rs"]
+mod native_source_diagnostic;
+
+#[path = "accounts_native_observation_contract_tests.rs"]
+mod native_observation;

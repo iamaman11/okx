@@ -1,0 +1,17 @@
+'use strict';
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const {createProvenance} = require('./published-release-origin.cjs');
+const bytes=Buffer.from('accepted original archive');
+const input={repository_id:1388071566,source_head_sha:'a'.repeat(40),source_tree:'b'.repeat(40),merged_main_sha:'c'.repeat(40),run_id:12,artifact_id:34,artifact_sha256:crypto.createHash('sha256').update(bytes).digest('hex')};
+const names=['okx-agent.exe','okx-host-control.exe','okx-host-launcher.exe','okx-research-worker.exe'];
+const components=Object.fromEntries(names.map(name=>[name,{sha256:'d'.repeat(64),size:42,source_head_sha:input.source_head_sha,source_tree:input.source_tree,run_id:0,artifact_id:0,protocol_version:1,storage_version:1}]));
+const manifest={schema:'okx.windows.bundle/v2',repository_id:input.repository_id,source_head_sha:input.source_head_sha,source_tree:input.source_tree,components};
+const record=createProvenance(input,manifest,bytes);
+assert.equal(record.archive_sha256,input.artifact_sha256);
+assert.equal(record.components[names[0]].artifact_id,34);
+assert.throws(()=>createProvenance(input,manifest,Buffer.from('changed')));
+assert.throws(()=>createProvenance({...input,source_tree:'e'.repeat(40)},manifest,bytes));
+const bad=structuredClone(manifest); bad.components[names[0]].artifact_id=7;
+assert.throws(()=>createProvenance(input,bad,bytes));
+console.log('published origin metadata negative controls passed');

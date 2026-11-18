@@ -7,6 +7,7 @@ use crate::diagnostics::{
     ProtectionCleanupInvocation, ProtectionOperationTrace, ProtectionTraceEvent,
 };
 use crate::execution_store::ExecutionStore;
+use std::str::FromStr;
 use tokio::sync::Semaphore;
 
 // A signed flat position is NOT permission to remove a stop while the
@@ -122,51 +123,31 @@ async fn protection_cleanup_step(
 ) -> Result<ProtectionCleanupStep, String> {
     let key = key.to_owned();
     let hash = hash.to_owned();
-    if let Some((owner, account)) = store.native_scope() {
-        if owner
-            .begin_operation(
-                deadline(),
-                account.into(),
-                key.clone(),
-                hash.clone(),
-                "protection_cleanup".into(),
-            )
-            .await
-            .map_err(err)?
-        {
-            return Ok(ProtectionCleanupStep::SendOnce);
-        }
-        let old = owner
-            .operation(deadline(), account.into(), key)
-            .await
-            .map_err(err)?
-            .ok_or("PROTECTION_CLEANUP_BEGIN_MISSING")?;
-        return match old.result_ref.as_str() {
-            "POSTING" => Ok(ProtectionCleanupStep::Inspect),
-            "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
-            _ => Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into()),
-        };
-    }
-    store
-        .call(deadline(), move |s| {
-            if s.begin_operation(&key, &hash, "protection_cleanup", now())? {
-                return Ok(ProtectionCleanupStep::SendOnce);
-            }
-            let old = s
-                .operation(&key)?
-                .ok_or(okx_execution::StoreError::Invalid(
-                    "PROTECTION_CLEANUP_BEGIN_MISSING",
-                ))?;
-            match old.result_ref.as_str() {
-                "POSTING" => Ok(ProtectionCleanupStep::Inspect),
-                "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
-                _ => Err(okx_execution::StoreError::Invalid(
-                    "PROTECTION_CLEANUP_RECEIPT_CONFLICT",
-                )),
-            }
-        })
+    let (owner, account) = store.scope();
+
+    if owner
+        .begin_operation(
+            deadline(),
+            account.into(),
+            key.clone(),
+            hash.clone(),
+            "protection_cleanup".into(),
+        )
         .await
-        .map_err(err)
+        .map_err(err)?
+    {
+        return Ok(ProtectionCleanupStep::SendOnce);
+    }
+    let old = owner
+        .operation(deadline(), account.into(), key)
+        .await
+        .map_err(err)?
+        .ok_or("PROTECTION_CLEANUP_BEGIN_MISSING")?;
+    match old.result_ref.as_str() {
+        "POSTING" => Ok(ProtectionCleanupStep::Inspect),
+        "VERIFIED_CANCELED" => Ok(ProtectionCleanupStep::Confirmed),
+        _ => Err("PROTECTION_CLEANUP_RECEIPT_CONFLICT".into()),
+    }
 }
 
 // The exact same authenticated cancellation and ACK verdict are exercised
@@ -277,30 +258,17 @@ async fn commit_cleanup_confirmation(
     store: &ExecutionStore,
     proof: VerifiedCleanup,
 ) -> Result<(), String> {
-    if let Some((owner, account)) = store.native_scope() {
-        owner
-            .operation_receipt(
-                deadline(),
-                account.into(),
-                proof.operation_key,
-                proof.request_hash,
-                "protection_cleanup".into(),
-                "VERIFIED_CANCELED".into(),
-            )
-            .await
-            .map_err(err)?;
-        return Ok(());
-    }
-    store
-        .call(deadline(), move |s| {
-            s.operation_receipt(
-                &proof.operation_key,
-                &proof.request_hash,
-                "protection_cleanup",
-                "VERIFIED_CANCELED",
-                now(),
-            )
-        })
+    let (owner, account) = store.scope();
+
+    owner
+        .operation_receipt(
+            deadline(),
+            account.into(),
+            proof.operation_key,
+            proof.request_hash,
+            "protection_cleanup".into(),
+            "VERIFIED_CANCELED".into(),
+        )
         .await
         .map_err(err)?;
     Ok(())
@@ -310,17 +278,12 @@ async fn cleanup_operation(
     store: &ExecutionStore,
     key: String,
 ) -> Result<Option<okx_execution::OperationReceipt>, String> {
-    if let Some((owner, account)) = store.native_scope() {
-        owner
-            .operation(deadline(), account.into(), key)
-            .await
-            .map_err(err)
-    } else {
-        store
-            .call(deadline(), move |s| s.operation(&key))
-            .await
-            .map_err(err)
-    }
+    let (owner, account) = store.scope();
+
+    owner
+        .operation(deadline(), account.into(), key)
+        .await
+        .map_err(err)
 }
 
 async fn protection_cleanup_readback(
@@ -357,9 +320,9 @@ async fn observe_protection_cleanup_sources(
         .snapshot_after_held_until(deadline())
         .await
         .map_err(err)?;
-    let source_at = chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+    let source_at = jiff::Timestamp::from_str(&snapshot.source_received_at)
         .map_err(|_| "PROTECTION_CLEANUP_POSITION_TIME_INVALID")?
-        .timestamp_millis();
+        .as_millisecond();
     if let Some((trace, facts)) = trace {
         trace.record(
             target.key,
@@ -439,14 +402,11 @@ pub(super) async fn cleanup_flat_protection(
         .try_acquire()
         .map_err(|_| "ACCOUNT_MUTATION_BUSY")?;
     let id = facts.intent_id.to_owned();
-    let saved = if let Some((owner, account)) = deps.store.native_scope() {
+    let saved = {
+        let (owner, account) = deps.store.scope();
+
         owner
             .protection(deadline(), account.into(), id)
-            .await
-            .map_err(err)?
-    } else {
-        deps.store
-            .call(deadline(), move |s| s.protection(&id))
             .await
             .map_err(err)?
     };

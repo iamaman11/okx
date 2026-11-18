@@ -1,24 +1,83 @@
-//! Exclusive runtime composition. Native never exposes a legacy account writer.
+//! Account-scoped access to the installation's sole financial SQL owner.
 use okx_execution::account_worker::{
-    AccountMaintenanceTimingV1, AccountSqlJobTiming, AccountSqlTimingV1, AccountStorageReadback,
-    UnifiedFinanceHandle,
+    AccountMaintenanceTimingV1, AccountSqlTimingV1, AccountStorageReadback, UnifiedFinanceHandle,
 };
-use okx_execution::{AccountStore, AccountStoreHandle, StoreError, StoreResult};
+use okx_execution::{StoreError, StoreResult};
+use okx_protocol::accounts::AccountKey;
 use std::time::Instant;
 
+/// Canonical wire identity with its protocol shape checked. This does not
+/// establish affiliation with the finance owner; the owner checks that.
 #[derive(Clone)]
-pub enum ExecutionStore {
-    Legacy(AccountStoreHandle),
-    Native {
-        owner: UnifiedFinanceHandle,
-        account: String,
-    },
+struct AccountScope {
+    wire: String,
 }
-impl From<AccountStoreHandle> for ExecutionStore {
-    fn from(value: AccountStoreHandle) -> Self {
-        Self::Legacy(value)
+
+impl AccountScope {
+    fn new(key: AccountKey) -> StoreResult<Self> {
+        if !key.valid() {
+            return Err(StoreError::Invalid("NATIVE_ACCOUNT_SCOPE_REQUIRED"));
+        }
+        Ok(Self { wire: key.wire() })
     }
 }
+
+/// The lookup variant selects the identity column; this checks only that the
+/// requested wire value is present, not that an intent belongs to an account.
+pub struct IntentLookup(okx_execution::TradeIntentLookup);
+
+impl IntentLookup {
+    pub fn new(lookup: okx_execution::TradeIntentLookup) -> StoreResult<Self> {
+        use okx_execution::TradeIntentLookup::*;
+        let value = match &lookup {
+            IntentId(value)
+            | IdempotencyKey(value)
+            | ClientOrderId(value)
+            | ExchangeOrderId(value)
+            | Reference(value) => value,
+        };
+        if value.is_empty() {
+            return Err(StoreError::Invalid("INTENT_LOOKUP_REQUIRED"));
+        }
+        Ok(Self(lookup))
+    }
+}
+
+#[derive(Clone)]
+pub struct OperationId(String);
+
+impl OperationId {
+    pub fn new(value: String) -> StoreResult<Self> {
+        if value.is_empty() {
+            return Err(StoreError::Invalid("OPERATION_ID_REQUIRED"));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Shipping code cannot construct the old per-account financial writer.
+///
+/// ```compile_fail,E0599
+/// use okx_agent::execution_store::ExecutionStore;
+/// fn forbidden() -> ExecutionStore {
+///     ExecutionStore::Legacy(todo!())
+/// }
+/// ```
+///
+/// External callers cannot create an unchecked account-scoped store:
+/// ```compile_fail,E0624
+/// use okx_agent::execution_store::ExecutionStore;
+/// fn unchecked(owner: okx_execution::account_worker::UnifiedFinanceHandle,
+///              key: okx_protocol::accounts::AccountKey) {
+///     let _ = ExecutionStore::native(owner, key);
+/// }
+/// ```
+#[derive(Clone)]
+pub struct ExecutionStore {
+    owner: UnifiedFinanceHandle,
+    account: AccountScope,
+}
+
 impl ExecutionStore {
     pub async fn strategy_status(
         &self,
@@ -26,87 +85,30 @@ impl ExecutionStore {
         instance: String,
         time: i64,
     ) -> StoreResult<serde_json::Value> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| sql.strategy_status(&instance, time))
-                    .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .strategy_status(deadline, account.clone(), instance, time)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .strategy_status(deadline, account.wire.clone(), instance, time)
+            .await
     }
     pub async fn mutate_strategy_instance(
         &self,
         deadline: Instant,
         command: okx_execution::account_worker::StrategyMutationCommand,
     ) -> StoreResult<okx_execution::OperationReceipt> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    let mut command = command;
-                    if matches!(command.action.as_str(), "start" | "stop")
-                        && sql.operation(&command.operation_id)?.is_none()
-                    {
-                        command.instance = sql
-                            .instance(&command.instance.instance_id)?
-                            .ok_or(StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"))?;
-                        command.expected_revision = Some(command.instance.policy_revision);
-                        command.instance.policy_revision = command
-                            .instance
-                            .policy_revision
-                            .checked_add(1)
-                            .ok_or(StoreError::Invalid("INSTANCE_REVISION_OVERFLOW"))?;
-                    }
-                    sql.mutate_instance(
-                        &command.operation_id,
-                        &command.request_hash,
-                        &command.action,
-                        &command.instance,
-                        command.expected_revision,
-                        command.time,
-                    )
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .mutate_strategy_instance(deadline, account.clone(), command)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .mutate_strategy_instance(deadline, account.wire.clone(), command)
+            .await
     }
     pub async fn claim_strategy_decision(
         &self,
         deadline: Instant,
         command: okx_execution::account_worker::StrategyDecisionClaimCommand,
     ) -> StoreResult<Option<String>> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    if sql.strategy_definition(&command.instance_id)?.version
-                        != command.expected_version
-                    {
-                        return Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"));
-                    }
-                    sql.claim_strategy_decision_with_id(
-                        &command.instance_id,
-                        &command.decision_key,
-                        &command.input_digest,
-                        command.policy_revision,
-                        command.time,
-                    )
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .claim_strategy_decision(deadline, account.clone(), command)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .claim_strategy_decision(deadline, account.wire.clone(), command)
+            .await
     }
     pub async fn finish_strategy_no_trade(
         &self,
@@ -116,54 +118,27 @@ impl ExecutionStore {
         expected_version: String,
         time: i64,
     ) -> StoreResult<()> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    if sql.strategy_definition(&instance)?.version != expected_version {
-                        return Err(StoreError::Invalid("STRATEGY_VERSION_CHANGED"));
-                    }
-                    sql.finish_strategy_no_trade(&instance, &key, time)
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .finish_strategy_no_trade(
-                        deadline,
-                        account.clone(),
-                        instance,
-                        key,
-                        expected_version,
-                        time,
-                    )
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .finish_strategy_no_trade(
+                deadline,
+                account.wire.clone(),
+                instance,
+                key,
+                expected_version,
+                time,
+            )
+            .await
     }
     pub async fn financial_readiness(
         &self,
         deadline: Instant,
         instance: Option<String>,
     ) -> StoreResult<(okx_execution::FinancialRisk, usize)> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    Ok((
-                        sql.financial_risk(
-                            chrono::Utc::now().timestamp_millis(),
-                            instance.as_deref(),
-                        )?,
-                        sql.stops()?.len(),
-                    ))
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .financial_readiness(account.clone(), instance, deadline)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .financial_readiness(account.wire.clone(), instance, deadline)
+            .await
     }
 
     pub async fn reconcilable_intents_page(
@@ -172,50 +147,27 @@ impl ExecutionStore {
         limit: usize,
         offset: usize,
     ) -> StoreResult<Vec<okx_execution::StoredIntent>> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.reconcilable_intents_page(limit, offset)
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .reconcilable_intents_page(account.clone(), limit, offset, deadline)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .reconcilable_intents_page(account.wire.clone(), limit, offset, deadline)
+            .await
     }
 
     pub async fn entry_late_pending(&self, deadline: Instant, id: String) -> StoreResult<bool> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| sql.entry_late_pending(&id))
-                    .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .entry_late_pending(deadline, account.clone(), id)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .entry_late_pending(deadline, account.wire.clone(), id)
+            .await
     }
     pub async fn partial_entry_ack_pending(
         &self,
         deadline: Instant,
         id: String,
     ) -> StoreResult<bool> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| sql.partial_entry_ack_pending(&id))
-                    .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .partial_entry_ack_pending(deadline, account.clone(), id)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .partial_entry_ack_pending(deadline, account.wire.clone(), id)
+            .await
     }
     pub async fn bind_partial_entry_settlement(
         &self,
@@ -225,26 +177,10 @@ impl ExecutionStore {
         filled: rust_decimal::Decimal,
         covered: i64,
     ) -> StoreResult<okx_execution::EntrySettlementEvidence> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.bind_partial_entry_settlement(&id, at, filled, covered)
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .bind_partial_entry_settlement(
-                        deadline,
-                        account.clone(),
-                        id,
-                        at,
-                        filled,
-                        covered,
-                    )
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .bind_partial_entry_settlement(deadline, account.wire.clone(), id, at, filled, covered)
+            .await
     }
     pub async fn bind_terminal_entry_settlement(
         &self,
@@ -254,26 +190,10 @@ impl ExecutionStore {
         filled: rust_decimal::Decimal,
         covered: i64,
     ) -> StoreResult<okx_execution::EntrySettlementEvidence> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.bind_terminal_entry_settlement(&id, at, filled, covered)
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .bind_terminal_entry_settlement(
-                        deadline,
-                        account.clone(),
-                        id,
-                        at,
-                        filled,
-                        covered,
-                    )
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .bind_terminal_entry_settlement(deadline, account.wire.clone(), id, at, filled, covered)
+            .await
     }
     pub async fn bind_late_entry_settlement(
         &self,
@@ -283,57 +203,30 @@ impl ExecutionStore {
         filled: rust_decimal::Decimal,
         covered: i64,
     ) -> StoreResult<okx_execution::EntrySettlementEvidence> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.bind_late_entry_settlement(&id, at, filled, covered)
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .bind_late_entry_settlement(deadline, account.clone(), id, at, filled, covered)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .bind_late_entry_settlement(deadline, account.wire.clone(), id, at, filled, covered)
+            .await
     }
     pub async fn acknowledge_partial_entry_settlement(
         &self,
         deadline: Instant,
         proof: okx_execution::EntrySettlementEvidence,
     ) -> StoreResult<()> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.acknowledge_partial_entry_settlement(&proof)
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .acknowledge_partial_entry_settlement(deadline, account.clone(), proof)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .acknowledge_partial_entry_settlement(deadline, account.wire.clone(), proof)
+            .await
     }
     pub async fn acknowledge_late_entry_settlement(
         &self,
         deadline: Instant,
         proof: okx_execution::EntrySettlementEvidence,
     ) -> StoreResult<()> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.acknowledge_late_entry_settlement(&proof)
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .acknowledge_late_entry_settlement(deadline, account.clone(), proof)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .acknowledge_late_entry_settlement(deadline, account.wire.clone(), proof)
+            .await
     }
     pub async fn intent_fill_cost_evidence(
         &self,
@@ -341,19 +234,10 @@ impl ExecutionStore {
         id: String,
         through: i64,
     ) -> StoreResult<okx_execution::IntentFillCostEvidence> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.intent_fill_cost_evidence(&id, through)
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .intent_fill_cost_evidence(deadline, account.clone(), id, through)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .intent_fill_cost_evidence(deadline, account.wire.clone(), id, through)
+            .await
     }
     pub async fn intent_fee_bill_evidence(
         &self,
@@ -361,118 +245,86 @@ impl ExecutionStore {
         id: String,
         through: i64,
     ) -> StoreResult<okx_execution::IntentFeeBillEvidence> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.intent_fee_bill_evidence(&id, through)
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .intent_fee_bill_evidence(deadline, account.clone(), id, through)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .intent_fee_bill_evidence(deadline, account.wire.clone(), id, through)
+            .await
     }
     pub async fn central_receipt(
         &self,
         deadline: Instant,
         intent: String,
     ) -> StoreResult<Option<okx_execution::CentralReceipt>> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| sql.central_receipt(&intent))
-                    .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .reservation_receipt(
-                        account.clone(),
-                        intent,
-                        okx_execution::CentralReceiptView::Retained,
-                        deadline,
-                    )
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .reservation_receipt(
+                account.wire.clone(),
+                intent,
+                okx_execution::CentralReceiptView::Retained,
+                deadline,
+            )
+            .await
     }
     pub async fn cursor(
         &self,
-        deadline: Instant,
+        _deadline: Instant,
         source: String,
         partition: String,
     ) -> StoreResult<Option<okx_execution::SourceCursor>> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| sql.cursor(&source, &partition))
-                    .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .source_cursor(account.clone(), source, partition)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .source_cursor(account.wire.clone(), source, partition)
+            .await
     }
+    /// Look up an operation using an operation ID, not an intent lookup.
+    ///
+    /// ```
+    /// use okx_agent::execution_store::{ExecutionStore, IntentLookup, OperationId};
+    /// use std::time::Instant;
+    /// async fn lookup(store: &ExecutionStore, deadline: Instant, id: OperationId) {
+    ///     let _ = store.operation(deadline, id).await;
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail,E0308
+    /// use okx_agent::execution_store::{ExecutionStore, IntentLookup, OperationId};
+    /// use std::time::Instant;
+    /// async fn lookup(store: &ExecutionStore, deadline: Instant, id: IntentLookup) {
+    ///     let _ = store.operation(deadline, id).await;
+    /// }
+    /// ```
     pub async fn operation(
         &self,
         deadline: Instant,
-        id: String,
+        id: OperationId,
     ) -> StoreResult<Option<okx_execution::OperationReceipt>> {
-        match self {
-            Self::Legacy(s) => s.call(deadline, move |sql| sql.operation(&id)).await,
-            Self::Native { owner, account } => owner.operation(deadline, account.clone(), id).await,
-        }
+        let Self { owner, account } = self;
+        owner.operation(deadline, account.wire.clone(), id.0).await
     }
     pub async fn begin_operation(
         &self,
         deadline: Instant,
-        id: String,
+        id: OperationId,
         hash: String,
         kind: String,
     ) -> StoreResult<bool> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.begin_operation(&id, &hash, &kind, chrono::Utc::now().timestamp_millis())
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .begin_operation(deadline, account.clone(), id, hash, kind)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .begin_operation(deadline, account.wire.clone(), id.0, hash, kind)
+            .await
     }
     pub async fn operation_receipt(
         &self,
         deadline: Instant,
-        id: String,
+        id: OperationId,
         hash: String,
         kind: String,
         result: String,
     ) -> StoreResult<okx_execution::OperationReceipt> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.operation_receipt(
-                        &id,
-                        &hash,
-                        &kind,
-                        &result,
-                        chrono::Utc::now().timestamp_millis(),
-                    )
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .operation_receipt(deadline, account.clone(), id, hash, kind, result)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .operation_receipt(deadline, account.wire.clone(), id.0, hash, kind, result)
+            .await
     }
     pub async fn effective_protected_quantity(
         &self,
@@ -480,36 +332,20 @@ impl ExecutionStore {
         intent: String,
         filled: rust_decimal::Decimal,
     ) -> StoreResult<Option<rust_decimal::Decimal>> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.effective_protected_quantity(&intent, filled)
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .effective_protected_quantity(deadline, account.clone(), intent, filled)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .effective_protected_quantity(deadline, account.wire.clone(), intent, filled)
+            .await
     }
     pub async fn verify_protection(
         &self,
         deadline: Instant,
         receipt: okx_execution::ProtectionReceipt,
     ) -> StoreResult<()> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| sql.verify_protection(&receipt))
-                    .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .verify_protection(deadline, account.clone(), receipt)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .verify_protection(deadline, account.wire.clone(), receipt)
+            .await
     }
     pub async fn protection_incident(
         &self,
@@ -517,19 +353,10 @@ impl ExecutionStore {
         intent: String,
         reason: String,
     ) -> StoreResult<()> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.protection_incident(&intent, &reason, chrono::Utc::now().timestamp_millis())
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .protection_incident(deadline, account.clone(), intent, reason)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .protection_incident(deadline, account.wire.clone(), intent, reason)
+            .await
     }
     pub async fn resolve_protection_incident_after_flat(
         &self,
@@ -537,135 +364,102 @@ impl ExecutionStore {
         intent: String,
         digest: String,
     ) -> StoreResult<bool> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.resolve_protection_incident_after_flat(
-                        &intent,
-                        &digest,
-                        chrono::Utc::now().timestamp_millis(),
-                    )
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .resolve_protection_incident_after_flat(
-                        deadline,
-                        account.clone(),
-                        intent,
-                        digest,
-                    )
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .resolve_protection_incident_after_flat(deadline, account.wire.clone(), intent, digest)
+            .await
     }
     pub async fn protection(
         &self,
         deadline: Instant,
         intent: String,
     ) -> StoreResult<Option<okx_execution::ProtectionReceipt>> {
-        match self {
-            Self::Legacy(s) => s.call(deadline, move |sql| sql.protection(&intent)).await,
-            Self::Native { owner, account } => {
-                owner.protection(deadline, account.clone(), intent).await
-            }
-        }
-    }
-    pub fn native(owner: UnifiedFinanceHandle, account: String) -> StoreResult<Self> {
-        if account.is_empty() {
-            return Err(StoreError::Invalid("NATIVE_ACCOUNT_SCOPE_REQUIRED"));
-        }
-        Ok(Self::Native { owner, account })
-    }
-    pub fn legacy(&self) -> StoreResult<&AccountStoreHandle> {
-        match self {
-            Self::Legacy(store) => Ok(store),
-            Self::Native { .. } => Err(StoreError::Invalid(
-                "NATIVE_LEGACY_ACCOUNT_WRITER_FORBIDDEN",
-            )),
-        }
-    }
-    pub(crate) fn native_scope(&self) -> Option<(&UnifiedFinanceHandle, &str)> {
-        match self {
-            Self::Native { owner, account } => Some((owner, account)),
-            Self::Legacy(_) => None,
-        }
-    }
-    // Compatibility for unported legacy operations. This method NEVER gives
-    // Native callers a Connection or AccountStore, nor opens another writer.
-    pub async fn call<T, F>(&self, deadline: Instant, operation: F) -> StoreResult<T>
-    where
-        T: Send + 'static,
-        F: FnOnce(&mut AccountStore) -> StoreResult<T> + Send + 'static,
-    {
-        self.legacy()?.call(deadline, operation).await
-    }
-    pub async fn call_with_timing_observed<T, F, O>(
-        &self,
-        deadline: Instant,
-        operation: F,
-        observed: O,
-    ) -> StoreResult<(T, AccountSqlJobTiming)>
-    where
-        T: Send + 'static,
-        F: FnOnce(&mut AccountStore) -> StoreResult<T> + Send + 'static,
-        O: FnOnce(AccountSqlJobTiming, bool) + Send + 'static,
-    {
-        self.legacy()?
-            .call_with_timing_observed(deadline, operation, observed)
+        let Self { owner, account } = self;
+        owner
+            .protection(deadline, account.wire.clone(), intent)
             .await
     }
+    pub(crate) fn native(owner: UnifiedFinanceHandle, account: AccountKey) -> StoreResult<Self> {
+        Ok(Self {
+            owner,
+            account: AccountScope::new(account)?,
+        })
+    }
+
+    /// Require the existing financial owner and its original account scope.
+    /// A missing owner is not permission to use the retired per-account writer.
+    pub(crate) fn scope(&self) -> (&UnifiedFinanceHandle, &str) {
+        (&self.owner, &self.account.wire)
+    }
+
+    /// Durable cursor seed comes from the same account-scoped finance queue.
+    pub async fn source_generation_base(&self, deadline: Instant) -> StoreResult<u64> {
+        let Self { owner, account } = self;
+        let _ = deadline;
+        owner.source_generation_base(account.wire.clone()).await
+    }
+
+    /// Durable read-only traces for both supported diagnostic projections.
+    /// This is one owner operation, not a general SQL callback.
+    pub async fn durable_operation_diagnostics(
+        &self,
+        deadline: Instant,
+        cleanup_limit: usize,
+        terminal_limit: usize,
+    ) -> StoreResult<(
+        Vec<okx_execution::ProtectionCleanupOperationReceipt>,
+        Vec<okx_execution::TerminalReleaseDiagnosticReceipt>,
+    )> {
+        let Self { owner, account } = self;
+        owner
+            .durable_operation_diagnostics(
+                deadline,
+                account.wire.clone(),
+                cleanup_limit,
+                terminal_limit,
+            )
+            .await
+    }
+
     pub fn termination_signal(&self) -> tokio::sync::watch::Receiver<bool> {
-        match self {
-            Self::Legacy(s) => s.termination_signal(),
-            Self::Native { owner, .. } => owner.termination_signal(),
-        }
+        let Self { owner, .. } = self;
+        owner.termination_signal()
     }
     pub fn diagnostic_storage_snapshot(&self) -> AccountStorageReadback {
-        match self {
-            Self::Legacy(s) => s.diagnostic_storage_snapshot(),
-            Self::Native { owner, .. } => AccountStorageReadback {
-                schema: "okx.account-storage-observation/v1",
-                state: "NOT_EVALUATED",
-                snapshot: None,
-                last_attempt_ms: None,
-                reason_code: Some("NATIVE_STORAGE_PROJECTION_NOT_AVAILABLE".into()),
-                refresh_pending: false,
-                refresh_attempts: 0,
-                publication_skipped: 0,
-                owner_terminated: *owner.termination_signal().borrow(),
-            },
+        let Self { owner, .. } = self;
+        AccountStorageReadback {
+            schema: "okx.account-storage-observation/v1",
+            state: "NOT_EVALUATED",
+            snapshot: None,
+            last_attempt_ms: None,
+            reason_code: Some("NATIVE_STORAGE_PROJECTION_NOT_AVAILABLE".into()),
+            refresh_pending: false,
+            refresh_attempts: 0,
+            publication_skipped: 0,
+            owner_terminated: *owner.termination_signal().borrow(),
         }
     }
     pub fn maintenance_timing(&self) -> AccountMaintenanceTimingV1 {
-        match self {
-            Self::Legacy(s) => s.maintenance_timing(),
-            Self::Native { .. } => AccountMaintenanceTimingV1 {
-                schema: "okx.account-maintenance/v1",
-                state: "NOT_EVALUATED",
-                events: Vec::new(),
-                evicted: 0,
-            },
+        AccountMaintenanceTimingV1 {
+            schema: "okx.account-maintenance/v1",
+            state: "NOT_EVALUATED",
+            events: Vec::new(),
+            evicted: 0,
         }
     }
     pub fn sql_timing(&self) -> AccountSqlTimingV1 {
-        match self {
-            Self::Legacy(s) => s.sql_timing(),
-            Self::Native { owner, .. } => owner.sql_timing(),
-        }
+        let Self { owner, .. } = self;
+        owner.sql_timing()
     }
     pub async fn lookup_intent(
         &self,
         deadline: Instant,
-        lookup: okx_execution::TradeIntentLookup,
+        lookup: IntentLookup,
     ) -> StoreResult<Option<okx_execution::StoredIntent>> {
-        match self {
-            Self::Legacy(s) => s.lookup_intent(deadline, lookup).await,
-            Self::Native { owner, account } => {
-                owner.lookup_intent(account.clone(), lookup, deadline).await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .lookup_intent(account.wire.clone(), lookup.0, deadline)
+            .await
     }
     pub async fn bind_entry_evidence(
         &self,
@@ -673,23 +467,10 @@ impl ExecutionStore {
         quote: okx_execution::EntryQuoteEvidence,
         admission: Option<okx_execution::EntryAdmissionEvidence>,
     ) -> StoreResult<()> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.bind_entry_quote(&quote)?;
-                    if let Some(proof) = admission {
-                        sql.bind_entry_admission(&proof)?;
-                    }
-                    Ok(())
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .bind_entry_evidence(deadline, account.clone(), quote, admission)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .bind_entry_evidence(deadline, account.wire.clone(), quote, admission)
+            .await
     }
     pub async fn mark_reserve_attempt(
         &self,
@@ -697,180 +478,316 @@ impl ExecutionStore {
         intent: String,
         key: String,
     ) -> StoreResult<()> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.mark_reserve_attempt(&intent, &key, chrono::Utc::now().timestamp_millis())
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .mark_reserve_attempt(deadline, account.clone(), intent, key)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .mark_reserve_attempt(deadline, account.wire.clone(), intent, key)
+            .await
     }
+    /// The original account-scoped order observation is committed by the sole
+    /// finance owner. Callers never select an SQL backend.
+    pub async fn record_order_readback(
+        &self,
+        deadline: Instant,
+        intent: String,
+        order_id: String,
+        state: okx_execution::IntentState,
+        filled: rust_decimal::Decimal,
+    ) -> StoreResult<()> {
+        let Self { owner, account } = self;
+        owner
+            .record_order_readback(
+                deadline,
+                account.wire.clone(),
+                intent,
+                order_id,
+                state,
+                filled,
+            )
+            .await
+    }
+
+    /// Read the original quote and admission together from one scoped owner.
+    pub async fn entry_cost_evidence(
+        &self,
+        deadline: Instant,
+        intent: String,
+    ) -> StoreResult<(
+        Option<okx_execution::EntryQuoteEvidence>,
+        Option<okx_execution::EntryAdmissionEvidence>,
+    )> {
+        let Self { owner, account } = self;
+        owner
+            .entry_cost_evidence(deadline, account.wire.clone(), intent)
+            .await
+    }
+
+    pub async fn declined_reserve(&self, deadline: Instant, intent: String) -> StoreResult<bool> {
+        let Self { owner, account } = self;
+        owner
+            .declined_reserve(deadline, account.wire.clone(), intent)
+            .await
+    }
+
+    pub async fn unsent_release_receipt(
+        &self,
+        deadline: Instant,
+        intent: String,
+    ) -> StoreResult<Option<okx_execution::UnsentSqlReceipt>> {
+        let Self { owner, account } = self;
+        owner
+            .unsent_release_receipt(deadline, account.wire.clone(), intent)
+            .await
+    }
+
+    pub async fn recovery_snapshot(
+        &self,
+        deadline: Instant,
+    ) -> StoreResult<okx_execution::RecoverySnapshot> {
+        let Self { owner, account } = self;
+        owner
+            .recovery_snapshot(deadline, account.wire.clone())
+            .await
+    }
+
+    pub async fn ingest_source_page(
+        &self,
+        deadline: Instant,
+        page: okx_execution::IngestPage,
+    ) -> StoreResult<()> {
+        let Self { owner, account } = self;
+        let _ = deadline;
+        owner.ingest_source_page(account.wire.clone(), page).await
+    }
+
+    pub async fn recovery_position_owner(
+        &self,
+        deadline: Instant,
+        intent: String,
+    ) -> StoreResult<(
+        Option<okx_execution::ProtectionReceipt>,
+        Option<okx_execution::StoredIntent>,
+    )> {
+        let Self { owner, account } = self;
+        owner
+            .recovery_position_owner(deadline, account.wire.clone(), intent)
+            .await
+    }
+
+    /// Observe the original campaign source boundary through the existing
+    /// account scope; never expose the owner's SQL connection to Execute.
+    pub async fn verify_campaign_entry_readiness(
+        &self,
+        deadline: Instant,
+        campaign: String,
+        from: i64,
+        through: i64,
+    ) -> StoreResult<()> {
+        let Self { owner, account } = self;
+        owner
+            .verify_campaign_entry_readiness(
+                deadline,
+                account.wire.clone(),
+                campaign,
+                from,
+                through,
+            )
+            .await
+    }
+
+    /// Source refresh commits on the one finance writer before any opening.
+    pub async fn refresh_campaign_entry_readiness(
+        &self,
+        deadline: Instant,
+        campaign: String,
+        from: i64,
+        through: i64,
+    ) -> StoreResult<()> {
+        let Self { owner, account } = self;
+        owner
+            .refresh_campaign_entry_readiness(
+                deadline,
+                account.wire.clone(),
+                campaign,
+                from,
+                through,
+            )
+            .await
+    }
+
+    /// The sealed historical spend and source digest are scoped facts,
+    /// never a trading grant or a second copy of the financial ledger.
+    pub async fn seal_captured_campaign_baseline(
+        &self,
+        deadline: Instant,
+        campaign: String,
+        from: i64,
+        through: i64,
+    ) -> StoreResult<(rust_decimal::Decimal, String)> {
+        let Self { owner, account } = self;
+        owner
+            .seal_captured_campaign_baseline(
+                deadline,
+                account.wire.clone(),
+                campaign,
+                from,
+                through,
+            )
+            .await
+    }
+
     pub async fn reject_unsent(
         &self,
         deadline: Instant,
         intent: String,
         reason: String,
     ) -> StoreResult<bool> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| {
-                    sql.reject_unsent(&intent, &reason, chrono::Utc::now().timestamp_millis())
-                })
-                .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .reject_unsent(deadline, account.clone(), intent, reason)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .reject_unsent(deadline, account.wire.clone(), intent, reason)
+            .await
     }
     pub async fn unsent_before_reserve(
         &self,
         deadline: Instant,
         intent: String,
     ) -> StoreResult<bool> {
-        match self {
-            Self::Legacy(s) => {
-                s.call(deadline, move |sql| sql.unsent_before_reserve(&intent))
-                    .await
-            }
-            Self::Native { owner, account } => {
-                owner
-                    .unsent_before_reserve(deadline, account.clone(), intent)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .unsent_before_reserve(deadline, account.wire.clone(), intent)
+            .await
     }
     pub async fn reserve_source(
         &self,
         deadline: Instant,
         intent: String,
     ) -> StoreResult<okx_execution::AccountReserveSource> {
-        match self {
-            Self::Legacy(s) => s.reserve_source(deadline, intent).await,
-            Self::Native { owner, account } => {
-                owner
-                    .reserve_source(account.clone(), intent, deadline)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .reserve_source(account.wire.clone(), intent, deadline)
+            .await
     }
     pub async fn strategy_instances(
         &self,
         deadline: Instant,
     ) -> StoreResult<Vec<okx_execution::StrategyInstance>> {
-        match self {
-            Self::Legacy(s) => s.call(deadline, |sql| sql.instances()).await,
-            Self::Native { owner, account } => {
-                owner.strategy_instances(deadline, account.clone()).await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .strategy_instances(deadline, account.wire.clone())
+            .await
     }
     pub async fn active_lots(
         &self,
         deadline: Instant,
         instrument: String,
     ) -> StoreResult<Vec<okx_execution::StoredLot>> {
-        match self {
-            Self::Legacy(s) => s.active_lots(deadline, instrument).await,
-            Self::Native { owner, account } => {
-                owner
-                    .active_lots(account.clone(), instrument, deadline)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .active_lots(account.wire.clone(), instrument, deadline)
+            .await
     }
     pub async fn account_policy(
         &self,
         deadline: Instant,
     ) -> StoreResult<okx_execution::AccountPolicySnapshot> {
-        match self {
-            Self::Legacy(s) => s.account_policy(deadline).await,
-            Self::Native { owner, account } => {
-                owner.account_policy(account.clone(), deadline).await
-            }
-        }
+        let Self { owner, account } = self;
+        owner.account_policy(account.wire.clone(), deadline).await
     }
     pub async fn record_intent_outcome(
         &self,
-        deadline: Instant,
+        _deadline: Instant,
         outcome: okx_execution::IntentOutcome,
     ) -> StoreResult<()> {
-        match self {
-            Self::Legacy(s) => s.record_intent_outcome(deadline, outcome).await,
-            Self::Native { owner, account } => {
-                owner.record_intent_outcome(account.clone(), outcome).await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .record_intent_outcome(account.wire.clone(), outcome)
+            .await
     }
     pub async fn source_capture_state(
         &self,
         deadline: Instant,
     ) -> StoreResult<okx_execution::AccountSourceState> {
-        match self {
-            Self::Legacy(s) => s.source_capture_state(deadline).await,
-            Self::Native { owner, account } => {
-                owner.source_capture_state(account.clone(), deadline).await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .source_capture_state(account.wire.clone(), deadline)
+            .await
     }
     pub async fn finance_report(
         &self,
         deadline: Instant,
         query: okx_execution::FinanceReportQuery,
     ) -> StoreResult<okx_execution::FinanceReportSnapshot> {
-        match self {
-            Self::Legacy(s) => s.finance_report(deadline, query).await,
-            Self::Native { owner, account } => {
-                owner.finance_report(account.clone(), query, deadline).await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .finance_report(account.wire.clone(), query, deadline)
+            .await
     }
     pub async fn assign_capital(
         &self,
-        deadline: Instant,
+        _deadline: Instant,
         command: okx_execution::CapitalAssignmentCommand,
     ) -> StoreResult<okx_execution::CapitalAssignmentResult> {
-        match self {
-            Self::Legacy(s) => s.assign_capital(deadline, command).await,
-            Self::Native { owner, account } => owner.assign_capital(account.clone(), command).await,
-        }
+        let Self { owner, account } = self;
+        owner.assign_capital(account.wire.clone(), command).await
     }
     pub async fn ingest_captured_bills(
         &self,
-        deadline: Instant,
+        _deadline: Instant,
         input: okx_execution::CapturedBillPage,
         conversion: okx_execution::UsdConversionEvidence,
     ) -> StoreResult<()> {
-        match self {
-            Self::Legacy(s) => s.ingest_captured_bills(deadline, input, conversion).await,
-            Self::Native { owner, account } => {
-                owner
-                    .ingest_captured_bills(account.clone(), input, conversion)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .ingest_captured_bills(account.wire.clone(), input, conversion)
+            .await
     }
     pub async fn ingest_captured_fills(
         &self,
-        deadline: Instant,
+        _deadline: Instant,
         input: okx_execution::CapturedFillPage,
         conversion: okx_execution::UsdConversionEvidence,
     ) -> StoreResult<()> {
-        match self {
-            Self::Legacy(s) => s.ingest_captured_fills(deadline, input, conversion).await,
-            Self::Native { owner, account } => {
-                owner
-                    .ingest_captured_fills(account.clone(), input, conversion)
-                    .await
-            }
-        }
+        let Self { owner, account } = self;
+        owner
+            .ingest_captured_fills(account.wire.clone(), input, conversion)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use okx_protocol::accounts::Environment;
+
+    #[test]
+    fn account_scope_checks_protocol_shape_and_keeps_canonical_wire() {
+        let mut key = AccountKey {
+            venue: "okx".into(),
+            environment: Environment::Demo,
+            verified_uid: "a".repeat(64),
+        };
+        assert_eq!(AccountScope::new(key.clone()).unwrap().wire, key.wire());
+        key.verified_uid = "not-a-verified-uid".into();
+        assert!(AccountScope::new(key).is_err());
+    }
+
+    #[test]
+    fn identity_inputs_reject_empty_and_accept_present_values() {
+        use okx_execution::TradeIntentLookup;
+        assert!(IntentLookup::new(TradeIntentLookup::IntentId(String::new())).is_err());
+        assert!(IntentLookup::new(TradeIntentLookup::IntentId("intent-1".into())).is_ok());
+        assert!(OperationId::new(String::new()).is_err());
+        assert!(OperationId::new("operation-1".into()).is_ok());
+    }
+
+    // Compile-time positive control for the actual store boundary.
+    #[allow(dead_code)]
+    async fn typed_store_calls(store: &ExecutionStore, deadline: Instant) -> StoreResult<()> {
+        let intent = IntentLookup::new(okx_execution::TradeIntentLookup::IntentId(
+            "intent-1".into(),
+        ))?;
+        let operation = OperationId::new("operation-1".into())?;
+        let _ = store.lookup_intent(deadline, intent).await?;
+        let _ = store.operation(deadline, operation).await?;
+        Ok(())
     }
 }

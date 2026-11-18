@@ -63,6 +63,38 @@ async fn close(owner: UnifiedFinanceHandle) {
     assert!(*terminated.borrow());
 }
 
+/// Original failed-job diagnostic property, now exercised on the real
+/// finance.sqlite writer. No test-only per-account SQL owner is involved.
+#[tokio::test]
+async fn risk_book_contract_fresh_owner_failed_job_counts_and_preserves_installation() {
+    let (root, owner) = fresh().await;
+    let receipt = owner.installation_receipt(deadline()).await.unwrap();
+    let before = owner.sql_timing().observed_jobs;
+    let result = owner
+        .submit::<()>(|_| Err(StoreError::Invalid("INJECTED_UNIFIED_SQL_FAILURE")))
+        .await;
+    assert!(matches!(
+        result,
+        Err(StoreError::Invalid("INJECTED_UNIFIED_SQL_FAILURE"))
+    ));
+    let after = owner.sql_timing();
+    assert_eq!(after.observed_jobs, before + 1);
+    assert!(after.last_sql_owner_ms < 5_000);
+    assert_eq!(
+        owner.installation_receipt(deadline()).await.unwrap(),
+        receipt
+    );
+    close(owner).await;
+    let reopened = UnifiedFinanceHandle::open_native(root, receipt.installation_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.installation_receipt(deadline()).await.unwrap(),
+        receipt
+    );
+    close(reopened).await;
+}
+
 #[tokio::test]
 async fn risk_book_contract_fresh_owner_queue_bounded_128_fifo_and_shutdown() {
     let (root, owner) = fresh().await;

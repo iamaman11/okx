@@ -20,6 +20,10 @@ use crate::{
     root_migration,
 };
 
+mod research_component;
+pub use research_component::deploy_research;
+use research_component::{parse_bundle_compatible, parse_persisted_manifest};
+
 const BUNDLE_SCHEMA_V1: &str = "okx.windows.bundle/v1";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_AGENT_BYTES: u64 = 128 * 1024 * 1024;
@@ -275,7 +279,7 @@ async fn verified_bundle(
     }
 
     let zip_bytes = github.download_artifact_zip(artifact_id).await?;
-    let bundle = parse_bundle(&zip_bytes)?;
+    let bundle = parse_bundle_compatible(&zip_bytes)?;
 
     if bundle.manifest.schema != BUNDLE_SCHEMA_V1
         || bundle.manifest.repository_id != REPOSITORY_ID
@@ -333,7 +337,7 @@ fn preflight_verified_manifest(manifest: &BundleManifest) -> HostControlResult<(
                     "accepted release manifest is not a plain file",
                 ));
             }
-            let old: BundleManifest = serde_json::from_slice(&fs::read(path)?)?;
+            let old = parse_persisted_manifest(&fs::read(path)?)?;
             if old != *manifest {
                 return Err(HostControlError::ArtifactVerification(
                     "accepted release manifest conflicts with existing installation",
@@ -362,7 +366,7 @@ fn persist_verified_manifest(manifest: &BundleManifest) -> HostControlResult<()>
                     "accepted release manifest is not a plain file",
                 ));
             }
-            let old: BundleManifest = serde_json::from_slice(&fs::read(path)?)?;
+            let old = parse_persisted_manifest(&fs::read(path)?)?;
             if old != *manifest {
                 return Err(HostControlError::ArtifactVerification(
                     "accepted release manifest conflicts with existing installation",
@@ -394,11 +398,15 @@ fn declared_hash<'a>(
 }
 
 fn parse_bundle(zip_bytes: &[u8]) -> HostControlResult<VerifiedBundle> {
-    let reader = Cursor::new(zip_bytes);
-    let mut archive = ZipArchive::new(reader)?;
+    let mut archive = validated_archive(zip_bytes)?;
 
     let manifest_bytes = read_entry(&mut archive, "manifest.json", MAX_MANIFEST_BYTES)?;
     let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)?;
+    if archive.by_name("okx-research-worker.exe").is_ok() {
+        return Err(HostControlError::ArtifactVerification(
+            "v1 bundle cannot carry Research worker",
+        ));
+    }
     let agent_bytes = read_entry(&mut archive, "okx-agent.exe", MAX_AGENT_BYTES)?;
     let controller_bytes = read_entry(&mut archive, "okx-host-control.exe", MAX_CONTROLLER_BYTES)?;
     let launcher_bytes =
@@ -412,20 +420,46 @@ fn parse_bundle(zip_bytes: &[u8]) -> HostControlResult<VerifiedBundle> {
     })
 }
 
+// Reject ambiguous directory/local-header views before selecting any entry.
+fn validated_archive(bytes: &[u8]) -> HostControlResult<ZipArchive<Cursor<&[u8]>>> {
+    let mut archive = ZipArchive::new(Cursor::new(bytes))?;
+    archive.validate_header_consistency()?;
+    Ok(archive)
+}
+
+fn read_bounded(
+    mut entry: impl Read,
+    declared_size: u64,
+    max_bytes: u64,
+) -> HostControlResult<Vec<u8>> {
+    if declared_size > max_bytes {
+        return Err(HostControlError::ArtifactVerification(
+            "bundle entry exceeds size limit",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(declared_size as usize);
+    entry.by_ref().take(max_bytes + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(HostControlError::ArtifactVerification(
+            "bundle entry exceeds size limit",
+        ));
+    }
+    if bytes.len() as u64 != declared_size {
+        return Err(HostControlError::ArtifactVerification(
+            "bundle entry size differs from header",
+        ));
+    }
+    Ok(bytes)
+}
+
 fn read_entry(
     archive: &mut ZipArchive<Cursor<&[u8]>>,
     name: &str,
     max_bytes: u64,
 ) -> HostControlResult<Vec<u8>> {
-    let mut entry = archive.by_name(name)?;
-    if entry.size() > max_bytes {
-        return Err(HostControlError::ArtifactVerification(
-            "bundle entry exceeds size limit",
-        ));
-    }
-    let mut bytes = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    let entry = archive.by_name(name)?;
+    let size = entry.size();
+    read_bounded(entry, size, max_bytes)
 }
 
 fn read_optional_entry(
@@ -433,19 +467,13 @@ fn read_optional_entry(
     name: &str,
     max_bytes: u64,
 ) -> HostControlResult<Option<Vec<u8>>> {
-    let mut entry = match archive.by_name(name) {
+    let entry = match archive.by_name(name) {
         Ok(entry) => entry,
         Err(ZipError::FileNotFound) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    if entry.size() > max_bytes {
-        return Err(HostControlError::ArtifactVerification(
-            "bundle entry exceeds size limit",
-        ));
-    }
-    let mut bytes = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut bytes)?;
-    Ok(Some(bytes))
+    let size = entry.size();
+    read_bounded(entry, size, max_bytes).map(Some)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -456,6 +484,118 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn archive(entries: &[(&str, &[u8])], method: zip::CompressionMethod) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default().compression_method(method);
+        for (name, bytes) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn valid_v1_stored_and_deflated_and_optional_launcher() {
+        let manifest = BundleManifest {
+            schema: BUNDLE_SCHEMA_V1.into(),
+            repository_id: REPOSITORY_ID,
+            source_head_sha: "a".repeat(40),
+            source_tree: "b".repeat(40),
+            rust_version: "rustc test".into(),
+            files: BTreeMap::new(),
+        };
+        let json = serde_json::to_vec(&manifest).unwrap();
+        for method in [
+            zip::CompressionMethod::Stored,
+            zip::CompressionMethod::Deflated,
+        ] {
+            let bytes = archive(
+                &[
+                    ("manifest.json", &json),
+                    ("okx-agent.exe", b"agent"),
+                    ("okx-host-control.exe", b"control"),
+                ],
+                method,
+            );
+            let bundle = parse_bundle_compatible(&bytes).unwrap();
+            assert_eq!(bundle.agent_bytes, b"agent");
+            assert_eq!(bundle.controller_bytes, b"control");
+            assert!(bundle.launcher_bytes.is_none());
+        }
+    }
+
+    #[test]
+    fn rejects_inconsistent_duplicate_and_truncated_archive() {
+        let original = archive(
+            &[("manifest.json", b"one"), ("manifest.jsox", b"two")],
+            zip::CompressionMethod::Stored,
+        );
+        let mut mismatch = original.clone();
+        // Change only the first local header name; central name stays intact.
+        let local = mismatch
+            .windows(13)
+            .position(|v| v == b"manifest.json")
+            .unwrap();
+        mismatch[local + 12] = b'x';
+        assert!(validated_archive(&mismatch).is_err());
+        let mut duplicate = original.clone();
+        // Rename second entry in both headers to create duplicate central names.
+        let positions: Vec<_> = duplicate
+            .windows(13)
+            .enumerate()
+            .filter_map(|(i, v)| (v == b"manifest.jsox").then_some(i))
+            .collect();
+        assert_eq!(positions.len(), 2);
+        for pos in positions {
+            duplicate[pos + 12] = b'n';
+        }
+        assert!(validated_archive(&duplicate).is_err());
+        assert!(validated_archive(&original[..original.len() - 8]).is_err());
+        let mut corrupt = original.clone();
+        let payload = corrupt.windows(3).position(|v| v == b"one").unwrap();
+        corrupt[payload] ^= 1;
+        let mut archive = validated_archive(&corrupt).unwrap();
+        assert!(read_entry(&mut archive, "manifest.json", 32).is_err());
+    }
+
+    #[test]
+    fn accepts_stream_data_descriptor_and_zip64_entry() {
+        let mut stream = zip::ZipWriter::new_stream(Vec::new());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        stream.start_file("entry", options).unwrap();
+        stream.write_all(b"streamed").unwrap();
+        let bytes = stream.finish().unwrap().into_inner();
+        // General purpose bit 3 marks a data descriptor in the local header.
+        assert_ne!(u16::from_le_bytes([bytes[6], bytes[7]]) & 8, 0);
+        let mut archive = validated_archive(&bytes).unwrap();
+        assert_eq!(read_entry(&mut archive, "entry", 64).unwrap(), b"streamed");
+
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .large_file(true);
+        writer.start_file("entry", options).unwrap();
+        writer.write_all(b"zip64").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        // The local size fields signal that ZIP64 extra metadata is present.
+        assert_eq!(&bytes[18..22], &u32::MAX.to_le_bytes());
+        let mut archive = validated_archive(&bytes).unwrap();
+        assert_eq!(read_entry(&mut archive, "entry", 64).unwrap(), b"zip64");
+    }
+
+    #[test]
+    fn rejects_declared_and_actual_size_above_limit() {
+        let bytes = archive(&[("entry", b"12345")], zip::CompressionMethod::Deflated);
+        let mut archive = validated_archive(&bytes).unwrap();
+        assert!(read_entry(&mut archive, "entry", 4).is_err());
+        // Independently exercise the streaming bound if a reader yields more
+        // than its advertised size, without relying on ZIP parser behavior.
+        assert!(read_bounded(Cursor::new(b"12345"), 1, 4).is_err());
+        assert!(read_bounded(Cursor::new(b"123"), 1, 4).is_err());
+        assert!(read_bounded(Cursor::new(b"123"), 4, 4).is_err());
+    }
 
     #[test]
     fn sha256_is_lowercase_hex() {

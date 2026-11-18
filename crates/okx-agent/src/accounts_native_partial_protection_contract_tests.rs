@@ -13,7 +13,7 @@ async fn risk_book_contract_native_safety_cancel_unavailable_ack_is_not_reposted
     *fixture.market_boundary.market.lock().unwrap() = None;
     let original = intent(&fixture, &entry).await;
     let stop_client = format!("s{}", &original.client_order_id[..31]);
-    let at = chrono::Utc::now().timestamp_millis();
+    let at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.9998", "0.04");
     history_amount(
         &fixture.feed,
@@ -41,7 +41,7 @@ async fn risk_book_contract_native_safety_cancel_unavailable_ack_is_not_reposted
         // Each explicit safety assessment obtains its own real clock evidence
         // before the durable claim; the second claim must still refuse POST.
         fixture.feed.expect_public_clock(envelope(
-            json!([{"ts":chrono::Utc::now().timestamp_millis().to_string()}]),
+            json!([{"ts":jiff::Timestamp::now().as_millisecond().to_string()}]),
         ));
         order_cumulative(
             &fixture.feed,
@@ -97,7 +97,11 @@ async fn risk_book_contract_native_safety_cancel_unavailable_ack_is_not_reposted
             .store
             .operation(
                 Instant::now() + Duration::from_secs(3),
-                format!("safety_cancel_{}", original.client_order_id),
+                crate::execution_store::OperationId::new(format!(
+                    "safety_cancel_{}",
+                    original.client_order_id
+                ))
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -129,7 +133,7 @@ async fn risk_book_contract_native_partial_stop_and_late_fill_keep_durable_failu
     *fixture.market_boundary.market.lock().unwrap() = None;
     let original = intent(&fixture, &entry).await;
     let stop_client = format!("s{}", &original.client_order_id[..31]);
-    let partial_at = chrono::Utc::now().timestamp_millis();
+    let partial_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.9998", "0.04");
     history_amount(
         &fixture.feed,
@@ -181,7 +185,7 @@ async fn risk_book_contract_native_partial_stop_and_late_fill_keep_durable_failu
     // A real failed stop creates a durable incident. The emergency readback
     // discovers a late fill before finance has ingested its additional 0.06.
     // Venue 0.1 versus SQL 0.04 cannot authorize a guessed safety Close.
-    let late_at = chrono::Utc::now().timestamp_millis();
+    let late_at = jiff::Timestamp::now().as_millisecond();
     order_cumulative(
         &fixture.feed,
         OPEN_ORDER,
@@ -323,7 +327,7 @@ async fn risk_book_contract_native_partial_reduce_stop_resize_needs_signed_readb
     *fixture.market_boundary.market.lock().unwrap() = None;
     let original = intent(&fixture, &entry).await;
     let stop_client = format!("s{}", &original.client_order_id[..31]);
-    let opened_at = chrono::Utc::now().timestamp_millis();
+    let opened_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.9995", "0.1");
     history(
         &fixture.feed,
@@ -343,7 +347,7 @@ async fn risk_book_contract_native_partial_reduce_stop_resize_needs_signed_readb
 
     close_market(&socket, &public).await;
     fixture.feed.expect_public_clock(envelope(json!([{
-        "ts":chrono::Utc::now().timestamp_millis().to_string()}])));
+        "ts":jiff::Timestamp::now().as_millisecond().to_string()}])));
     snapshot(&fixture.feed, "99.9995", "0.1"); // reduction plan
     snapshot(&fixture.feed, "99.9995", "0.1"); // final signed position
     fixture.feed.expect_post(RecordedPost {
@@ -374,7 +378,7 @@ async fn risk_book_contract_native_partial_reduce_stop_resize_needs_signed_readb
     );
     let reduction = sent["intent_id"].as_str().unwrap();
     let reducing = intent(&fixture, reduction).await;
-    let reduced_at = chrono::Utc::now().timestamp_millis();
+    let reduced_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.9993", "0.06");
     history_amount(
         &fixture.feed,
@@ -387,7 +391,7 @@ async fn risk_book_contract_native_partial_reduce_stop_resize_needs_signed_readb
     status_finance(&fixture.feed, "99.9993", "0.06");
     live_stop(&fixture.feed, &stop_client, "0.1", "live");
     fixture.feed.expect_public_clock(envelope(json!([{
-        "ts":chrono::Utc::now().timestamp_millis().to_string()}])));
+        "ts":jiff::Timestamp::now().as_millisecond().to_string()}])));
     fixture.feed.expect_post(RecordedPost {
         access_key: "fixture-executor-a".into(),
         path: "/api/v5/trade/amend-algos".into(),
@@ -509,7 +513,7 @@ async fn risk_book_contract_native_partial_reduce_stop_resize_needs_signed_readb
 }
 
 async fn create_entry(fixture: &NativeFixture) -> String {
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));

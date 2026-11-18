@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, future::Future, path::PathBuf, time::Duration};
 
-use chrono::{SecondsFormat, Utc};
+use jiff::Timestamp;
 use okx_github::{
     GitHubBackoff, GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCursorStore,
     MAX_COMMENT_BODY_BYTES, OWNER_USER_ID,
@@ -361,6 +361,20 @@ async fn process_control_batch(
             (Err(error), ProcessTransition::None)
         } else {
             match &operation {
+                HostControlOperation::DeployResearch {
+                    run_id,
+                    artifact_id,
+                    expected_source_tree,
+                } => (
+                    crate::artifact::deploy_research(
+                        github,
+                        *run_id,
+                        *artifact_id,
+                        expected_source_tree,
+                    )
+                    .await,
+                    ProcessTransition::None,
+                ),
                 HostControlOperation::DeployAgent {
                     run_id,
                     artifact_id,
@@ -461,7 +475,7 @@ async fn process_control_batch(
             request_id: request.request_id.clone(),
             operation,
             status,
-            observed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            observed_at: format!("{:.3}", Timestamp::now()),
             details,
             failure,
         })?;

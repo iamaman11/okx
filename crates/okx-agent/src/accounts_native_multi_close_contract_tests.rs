@@ -24,7 +24,7 @@ async fn risk_book_contract_native_two_closes_use_remaining_lot_and_retire_parti
         .unwrap()
         .unwrap();
     let stop_client = format!("s{}", &original.client_order_id[..31]);
-    let opened_at = chrono::Utc::now().timestamp_millis();
+    let opened_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.9995", "0.1");
     history(
         &fixture.feed,
@@ -59,7 +59,7 @@ async fn risk_book_contract_native_two_closes_use_remaining_lot_and_retire_parti
         "99.9995",
     )
     .await;
-    let first_at = chrono::Utc::now().timestamp_millis();
+    let first_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.9993", "0.06");
     history_amount(
         &fixture.feed,
@@ -107,7 +107,7 @@ async fn risk_book_contract_native_two_closes_use_remaining_lot_and_retire_parti
         "99.9993",
     )
     .await;
-    let second_at = chrono::Utc::now().timestamp_millis();
+    let second_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.999", "0");
     history_amount(
         &fixture.feed,
@@ -227,7 +227,7 @@ async fn send_close(
     equity: &str,
 ) -> String {
     fixture.feed.expect_public_clock(envelope(json!([{
-        "ts":chrono::Utc::now().timestamp_millis().to_string()}])));
+        "ts":jiff::Timestamp::now().as_millisecond().to_string()}])));
     snapshot(&fixture.feed, equity, position); // close plan
     snapshot(&fixture.feed, equity, position); // final signed position
     fixture.feed.expect_post(RecordedPost {
@@ -333,7 +333,7 @@ async fn refresh_second_close_market(
     socket: &RecordedWsConnector,
     public: &okx_runtime::PublicWsHandle,
 ) {
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     let mut parsed = public.subscribe_market_updates();
     for frame in [
         json!({"arg":{"channel":"tickers","instId":INSTRUMENT},"data":[{
@@ -355,10 +355,10 @@ async fn refresh_second_close_market(
             if public
                 .risk_fresh_snapshot(
                     INSTRUMENT,
-                    chrono::Utc::now().timestamp_millis() as u64,
+                    jiff::Timestamp::now().as_millisecond() as u64,
                     2000,
                     180000,
-                    chrono::Utc::now().to_rfc3339(),
+                    jiff::Timestamp::now().to_string(),
                 )
                 .await
                 .is_ok()
@@ -372,7 +372,7 @@ async fn refresh_second_close_market(
 }
 
 async fn create_entry(fixture: &NativeFixture) -> String {
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));

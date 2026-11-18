@@ -90,9 +90,9 @@ pub(crate) async fn capture_opening(
                 ))
             })
             .collect::<AgentResult<Vec<_>>>()?;
-        let observed_at = chrono::DateTime::parse_from_rfc3339(&last.source_received_at)
+        let observed_at = jiff::Timestamp::from_str(&last.source_received_at)
             .map_err(|_| invalid())?
-            .timestamp_millis();
+            .as_millisecond();
         let source_ref = format!("{:x}", Sha256::digest(serde_json::to_vec(&last)?));
         break OpeningSnapshot {
             opening_equity_usd: Decimal::from_str(&last.balance.total_equity_usd)

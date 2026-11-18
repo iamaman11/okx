@@ -115,7 +115,10 @@ impl TradeService {
             if let Some(old) = r
                 .execution
                 .store
-                .operation(deadline(), operation.clone())
+                .operation(
+                    deadline(),
+                    crate::execution_store::OperationId::new(operation.clone())?,
+                )
                 .await?
             {
                 if old.request_hash != request_hash {
@@ -300,23 +303,13 @@ impl TradeService {
                                 // Only test-local attribution. The 10-second
                                 // maintenance drain and production shutdown
                                 // behavior are intentionally unchanged.
-                                #[cfg(test)]
-                                let shutdown_started = Instant::now();
-                                #[cfg(test)]
-                                if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
-                                    eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=WAIT_ACTIVE_TURN");
-                                }
+
+
                                 let drained = tokio::time::timeout(
                                     Duration::from_secs(10), &mut turn
                                 ).await;
-                                #[cfg(test)]
-                                if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
-                                    eprintln!(
-                                        "T10_01_OWNER_SHUTDOWN_V1:phase=DRAIN_RETURNED completed={} elapsed_ms={}",
-                                        drained.is_ok(),shutdown_started.elapsed().as_millis()
-                                    );
-                                }
-                                #[cfg(not(test))]
+
+
                                 let _ = drained;
                                 break;
                             }
@@ -344,9 +337,8 @@ impl TradeService {
                 let result = tokio::time::timeout(Duration::from_secs(4), async {
                     // After authenticated account connection, the original
                     // retained policy may now have a complete SQL roster.
-                    if self.risk.is_native_finance() {
-                        self.risk.apply_native_governance(&authority).await?;
-                    }
+
+                    self.risk.apply_required_governance(&authority).await?;
                     self.install_captured_empty_campaign_opening(&authority, until)
                         .await
                 })
@@ -373,18 +365,12 @@ impl TradeService {
         use futures_util::{StreamExt, stream};
         stream::iter(self.accounts.list().await)
             .for_each_concurrent(4, |config| async move {
-                #[cfg(test)]
-                if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
-                    eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=ACCOUNT_START alias={}",config.alias);
-                }
+
                 let Some(r) = self.accounts.resolve(&config.alias).await else {
                     return;
                 };
                 let _ = self.reconcile_restored(&r).await;
-                #[cfg(test)]
-                if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
-                    eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=RESTORE_DONE alias={}",config.alias);
-                }
+
                 let reconcile = async {
                     let account = config.account_key.wire();
                     let mut offset = self.recovery_schedule.lock().await.page(&account);
@@ -422,15 +408,9 @@ impl TradeService {
                                         if !scheduled {
                                             return;
                                         }
-                                        #[cfg(test)]
-                                        if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
-                                            eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=STATUS_START");
-                                        }
+
                                         let result = self.status_intent(r, &intent.intent_id, None).await;
-                                        #[cfg(test)]
-                                        if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
-                                            eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=STATUS_DONE ok={}",result.is_ok());
-                                        }
+
                                         let settled = result.as_ref().is_ok_and(|value| {
                                             value["data"]["central_release"]["state"] == "verified"
                                                 || value["data"]["central_release"]["state"]
@@ -489,10 +469,7 @@ impl TradeService {
                     }
                 };
                 tokio::join!(reconcile, decisions);
-                #[cfg(test)]
-                if std::env::var("OKX_T10_01_MAINT_SHUTDOWN_PROBE").as_deref()==Ok("1") {
-                    eprintln!("T10_01_OWNER_SHUTDOWN_V1:phase=ACCOUNT_DONE alias={}",config.alias);
-                }
+
             })
             .await;
     }
@@ -501,8 +478,8 @@ impl TradeService {
         r: &Arc<AccountResources>,
         instance: &StrategyInstance,
     ) -> Result<(), String> {
-        let analytics = self
-            .analytics
+        let live_source = self
+            .live_source
             .read()
             .await
             .clone()
@@ -515,7 +492,7 @@ impl TradeService {
         let (fast, slow) = (config.parameters.fast, config.parameters.slow);
         let timeframe = config.timeframe_ms;
         for instrument in &config.instruments {
-            let bars = analytics
+            let bars = live_source
                 .load_closed_closes(instrument, timeframe, (slow * 4).clamp(100, 10000))
                 .await?;
             let last = bars.last().ok_or("STRATEGY_HISTORY_UNAVAILABLE")?.0;

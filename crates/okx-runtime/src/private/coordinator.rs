@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use chrono::Utc;
+use jiff::Timestamp;
 use okx_api::{BalanceSnapshot, Credentials, OkxEnvironment, PendingOrder, Position, RateBudget};
 use okx_ws::{
     LiveWsConnector, PrivateChannel, PrivateInboundMessage, PrivateSubscription,
@@ -243,7 +243,7 @@ impl PrivateWsCoordinator {
         business: &mut PrivateWsConnection,
         shutdown: &mut watch::Receiver<bool>,
     ) -> Result<GenerationOutcome, PrivateRuntimeError> {
-        let timestamp = Utc::now().timestamp().max(0).to_string();
+        let timestamp = Timestamp::now().as_second().max(0).to_string();
         let login = self.credentials.websocket_login_material(&timestamp)?;
         connection.login(&login).await?;
         business.login(&login).await?;
@@ -540,7 +540,7 @@ async fn backoff_until(deadline: Instant, shutdown: &mut watch::Receiver<bool>) 
 }
 
 fn now_ms() -> u64 {
-    Utc::now().timestamp_millis().max(0) as u64
+    Timestamp::now().as_millisecond().max(0) as u64
 }
 
 impl From<PrivateWsError> for PrivateRuntimeError {

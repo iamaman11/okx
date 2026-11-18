@@ -2,9 +2,9 @@
 //! No send claim is manufactured here. Real owner activation remains mandatory.
 use super::*;
 use crate::account_worker::{
-    NativeReserveDecision, NativeReserveRequest, ReportedRiskCensus, UnifiedFinanceWrite,
-    UnifiedFinanceWriteReceipt, apply_original_unified_finance_transaction,
-    test_bind_native_census, test_reserve_reported_sql,
+    CensusObservedAtMs, CensusReadFloorMs, NativeReserveDecision, NativeReserveRequest,
+    ReportedRiskCensus, UnifiedFinanceWrite, UnifiedFinanceWriteReceipt,
+    apply_original_unified_finance_transaction, test_bind_native_census, test_reserve_reported_sql,
 };
 use std::collections::BTreeMap;
 const NOW: i64 = 10;
@@ -18,8 +18,8 @@ fn amount(v: &str) -> okx_kernel::risk::money::RiskAmount {
 fn census(at: i64) -> ReportedRiskCensus {
     ReportedRiskCensus {
         source_digest: "d".repeat(64),
-        generated_at_ms: at,
-        read_floor_ms: at - 1,
+        generated_at_ms: CensusObservedAtMs::new(at).unwrap(),
+        read_floor_ms: CensusReadFloorMs::new(at - 1).unwrap(),
         occupied: BTreeMap::from([(account(), "0".into())]),
         cumulative_loss_usd: BTreeMap::from([(account(), "0".into())]),
     }
@@ -93,17 +93,17 @@ fn fixture() -> (Connection, NativeReserveRequest) {
     let request = NativeReserveRequest {
         venue: "okx".into(),
         uid: "a".repeat(64),
-        run_id: "run_000001".into(),
-        intent_id: "intent_0001".into(),
+        run_id: crate::account_worker::AdmissionRunId::new("run_000001".into()).unwrap(),
+        intent_id: crate::account_worker::AdmissionIntentId::new("intent_0001".into()).unwrap(),
         strategy_id: "manual".into(),
         instrument_id: "BTC-USDT-SWAP".into(),
         plan_sha256: "e".repeat(64),
         entry_proof_digest: "f".repeat(64),
         conversion_digest: "b".repeat(64),
         conversion_rate: "1".into(),
-        loss_usdt: "5".into(),
-        loss_usd: "5".into(),
-        entry_upper_usd: "100.05".into(),
+        loss_usdt: crate::risk::UsdtLoss::parse("5").unwrap(),
+        loss_usd: crate::risk::UsdLoss::parse("5").unwrap(),
+        entry_upper_usd: crate::risk::UsdEntryUpper::parse("100.05").unwrap(),
         native_incarnation: "f".repeat(32),
         conversion_observed_at_ms: NOW - 1,
         policy_revision: 1,
@@ -114,8 +114,8 @@ fn fixture() -> (Connection, NativeReserveRequest) {
 #[test]
 fn risk_book_contract_native_reported_reserve_rejects_understatement_before_any_write() {
     let (mut db, mut request) = fixture();
-    request.loss_usdt = "1".into();
-    request.loss_usd = "1".into();
+    request.loss_usdt = crate::risk::UsdtLoss::parse("1").unwrap();
+    request.loss_usd = crate::risk::UsdLoss::parse("1").unwrap();
     let tx = db.transaction().unwrap();
     let changes = tx.total_changes();
     assert!(matches!(

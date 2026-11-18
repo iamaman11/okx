@@ -10,6 +10,7 @@ const DETAIL_MAX: usize = 128;
 const PHASE_MAX: usize = 10;
 const SOURCE_PHASE_MAX: usize = 2;
 const ERROR_CODE_MAX: usize = 64;
+#[cfg(test)]
 const STATEMENT_MAX: usize = 32;
 const ACCOUNT_TRACE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 
@@ -237,6 +238,7 @@ impl FinanceTrace {
         });
     }
     /// Aggregate fixed statement IDs only; never store SQL text or parameters.
+    #[cfg(test)]
     pub fn statement_finished(&self, id: u64, stat: okx_execution::AccountSqlStatementStat) {
         self.state(|s| {
             if let Some(c) = s.active.as_mut().filter(|c| c.id == id) {
@@ -273,6 +275,7 @@ impl FinanceTrace {
     }
 
     /// The commit observation is published without joining another SQL job.
+    #[cfg(test)]
     pub fn transaction_finished(
         &self,
         id: u64,
@@ -292,6 +295,7 @@ impl FinanceTrace {
             }
         });
     }
+    #[cfg(test)]
     pub fn owner_finished(&self, id: u64, queue_ms: u64, owner_ms: u64) {
         self.state(|s| {
             if let Some(c) = s.active.as_mut().filter(|c| c.id == id) {
@@ -391,7 +395,10 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn public_finance_diagnostic_does_not_queue_behind_sql_or_trace() {
-        use crate::{accounts, analytics::AnalyticsService, query, trade_service::TradeService};
+        use crate::{
+            accounts, query, research_test_support::client as research_test_client,
+            trade_service::TradeService,
+        };
         use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
         use okx_protocol::{
             AgentOperation, AgentRequest, DataQuality,
@@ -405,11 +412,25 @@ mod tests {
             std::env::temp_dir().join(format!("okx-explain-{:032x}", u128::from_le_bytes(nonce)));
         accounts::initialize_installation(&root, "installation-diagnostic-test").unwrap();
         let budget = RateBudget::new();
-        let registry = Arc::new(
-            accounts::AccountRuntimeRegistry::open(&root, budget.clone())
-                .await
-                .unwrap(),
-        );
+        let initial_owner = okx_execution::account_worker::UnifiedFinanceHandle::initialize_new(
+            root.clone(),
+            okx_execution::NewFinanceInstallation {
+                installation_id: "installation-diagnostic-test".into(),
+                initialize_request_id: "initialize_finance_diagnostic_001".into(),
+                source_tree: "a".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+        let mut initial_closed = initial_owner.termination_signal();
+        drop(initial_owner);
+        tokio::time::timeout(Duration::from_secs(5), initial_closed.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
+        let (registry, finance_owner) =
+            accounts::tests::open_native_test_registry(&root, budget.clone()).await;
+        let registry = Arc::new(registry);
         let feed = Arc::new(accounts::recorded_support::RecordedAccountHttp::default());
         let (config, clients) =
             accounts::recorded_support::prepared("a", feed.clone(), budget.clone());
@@ -427,18 +448,18 @@ mod tests {
                 .unwrap();
         let (_public, public_ws) =
             okx_runtime::PublicWsCoordinator::new_with_rate_budget(env, reference, budget);
-        let analytics = AnalyticsService::new(root.join("analytics"), market.clone()).unwrap();
-        let (risk_tx, mut risk_rx) = tokio::sync::mpsc::channel(4);
+        let analytics = research_test_client(root.join("analytics"), market.clone()).unwrap();
         let trade = Arc::new(TradeService::new(
             registry.clone(),
             public_ws.clone(),
-            crate::risk_bridge::NativeRiskClient::new(risk_tx),
+            crate::risk_bridge::NativeRiskClient::local(
+                crate::native_finance_risk::NativeFinanceRisk::from_owner(finance_owner.clone()),
+            ),
         ));
         let ctx = query::DispatchContext {
-            accounts: registry.clone(),
-            analytics,
+            research: analytics,
             public_ws,
-            trade,
+            finance: crate::finance_dispatch::FinanceDispatch::ready(registry.clone(), trade),
             market,
         };
         resources.finance_trace.begin(99, 100, 1);
@@ -473,46 +494,12 @@ mod tests {
             ..request.clone()
         };
         storage_request.validate().unwrap();
-        resources
-            .execution
-            .store
-            .call(Instant::now() + Duration::from_secs(3), |store| {
-                store.apply_authority_policy(
-                    1,
-                    true,
-                    "diagnostic-test-campaign",
-                    rust_decimal::Decimal::from(10),
-                )
-            })
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while resources
-                .execution
-                .store
-                .diagnostic_storage_snapshot()
-                .snapshot
-                .as_ref()
-                .is_none_or(|s| s.policy.revision != 1)
-            {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let store = resources.execution.store.clone();
-        let blocked_sql = tokio::spawn(async move {
-            store
-                .call(Instant::now() + Duration::from_secs(5), move |_| {
-                    let _ = entered_tx.send(());
-                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                    Ok(())
-                })
-                .await
-        });
-        entered_rx.await.unwrap();
+        // Native has no retired per-account storage publication. This view
+        // must report unavailable metadata rather than invent observed policy.
+        // Actual occupied Native FIFO timeout and durable reopen are covered by
+        // account_worker::unified::owner_diagnostic_busy_tests::
+        // risk_book_contract_native_diagnostic_busy_deadline_preserves_identity_across_reopen.
+        // This test exercises trace/source contention without occupying SQL.
         let (held_tx, held_rx) = tokio::sync::oneshot::channel();
         let (unlock_tx, unlock_rx) = std::sync::mpsc::channel();
         let holder_resources = resources.clone();
@@ -522,7 +509,7 @@ mod tests {
             unlock_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         });
         held_rx.await.unwrap();
-        let sql_before = resources.execution.store.sql_timing().observed_jobs;
+        let sql_before = finance_owner.sql_timing().observed_jobs;
         let http_before = feed.requests.lock().unwrap().len();
         let busy =
             tokio::time::timeout(Duration::from_millis(100), query::dispatch(&ctx, &request))
@@ -533,8 +520,8 @@ mod tests {
         assert_eq!(busy["state"], "NOT_EVALUATED");
         assert_eq!(busy["trace"]["reason_code"], "FINANCE_TRACE_BUSY");
         assert_eq!(busy["trace"]["selected_not_found"], false);
-        // A useful storage image survives an occupied SQL owner. Source locks
-        // are held too: the reader reports those gaps rather than waiting.
+        // Source locks cannot turn unavailable storage into an observed image,
+        // or make the read-only diagnostic wait behind the source producer.
         let source_lock = resources.latest_snapshot.write().await;
         let health_lock = resources.source_capture_health.write().await;
         let mut samples_ns = Vec::with_capacity(1000);
@@ -544,11 +531,15 @@ mod tests {
             let serialized = serde_json::to_vec(&response).unwrap();
             samples_ns.push(started.elapsed().as_nanos());
             let value = response.result.unwrap();
-            assert_eq!(value["state"], "OBSERVED");
+            assert_eq!(value["state"], "NOT_EVALUATED");
+            assert_eq!(value["storage"]["state"], "NOT_EVALUATED");
+            assert!(value["storage"]["snapshot"].is_null());
             assert_eq!(
-                value["storage"]["snapshot"]["policy"]["campaign_limit_usd"],
-                "10"
+                value["storage"]["reason_code"],
+                "NATIVE_STORAGE_PROJECTION_NOT_AVAILABLE"
             );
+            assert_eq!(value["history"], "UNKNOWN");
+            assert_eq!(value["read_only"], true);
             assert_eq!(value["sources"]["reason_code"], "SOURCE_SNAPSHOT_BUSY");
             assert_eq!(value["source_capture"]["reason_code"], "HEALTH_BUSY");
             assert!(!serialized.is_empty());
@@ -558,7 +549,7 @@ mod tests {
         println!(
             "STORAGE_PUBLIC_DIAGNOSTIC_BENCHMARK={}",
             serde_json::json!({
-                "scope":"native_dispatch_with_blocked_sql_and_source_locks", "samples_ns":samples_ns,
+                "scope":"native_dispatch_with_trace_and_source_locks_unavailable_storage", "samples_ns":samples_ns,
                 "p95_ns":sorted[949], "build":if cfg!(debug_assertions){"debug"}else{"release"},
                 "external_calls":0,"sql_jobs":0,"not_a_full_k9_measurement":true
             })
@@ -566,22 +557,21 @@ mod tests {
         assert!(sorted[949] <= 100_000_000);
         drop(health_lock);
         drop(source_lock);
-        assert_eq!(
-            resources.execution.store.sql_timing().observed_jobs,
-            sql_before
-        );
+        assert_eq!(finance_owner.sql_timing().observed_jobs, sql_before);
         assert_eq!(feed.requests.lock().unwrap().len(), http_before);
-        assert!(risk_rx.try_recv().is_err());
+        assert!(feed.outbound_posts.lock().unwrap().is_empty());
         unlock_tx.send(()).unwrap();
         holder.join().unwrap();
         let restored = query::dispatch(&ctx, &request).await.result.unwrap();
         assert_eq!(restored["trace"]["selected"]["id"], 99);
-        release_tx.send(()).unwrap();
-        blocked_sql.await.unwrap().unwrap();
-        let mut termination = resources.execution.store.termination_signal();
+        assert_eq!(finance_owner.sql_timing().observed_jobs, sql_before);
+        assert_eq!(feed.requests.lock().unwrap().len(), http_before);
+        assert!(feed.outbound_posts.lock().unwrap().is_empty());
+        let mut termination = finance_owner.termination_signal();
         drop(resources);
         drop(ctx);
         drop(registry);
+        drop(finance_owner);
         drop(_public);
         tokio::time::timeout(Duration::from_secs(5), termination.wait_for(|done| *done))
             .await

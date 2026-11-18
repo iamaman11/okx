@@ -69,31 +69,56 @@ jobs:
           extract="$RUNNER_TEMP/recovery-bundle"
           mkdir -p "$extract"
           gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/${{ steps.resolve.outputs.artifact_id }}/zip" > "$bundle"
+          bundle_sha256="$(sha256sum "$bundle" | awk '{print $1}')"
+          test "sha256:$bundle_sha256" = "${{ steps.resolve.outputs.artifact_digest }}"
           unzip -q "$bundle" -d "$extract"
 
           manifest="$extract/manifest.json"
           test -f "$manifest"
           jq -e --arg head "${{ steps.resolve.outputs.head_sha }}" \
             --arg tree "${{ steps.resolve.outputs.source_tree }}" \
-            '.schema == "okx.windows.bundle/v1" and .repository_id == 1388071566 and .source_head_sha == $head and .source_tree == $tree' \
+            '(.schema == "okx.windows.bundle/v1" or .schema == "okx.windows.bundle/v2") and .repository_id == 1388071566 and .source_head_sha == $head and .source_tree == $tree' \
             "$manifest" >/dev/null
-
-          for file in okx-agent.exe okx-host-control.exe okx-host-launcher.exe; do
+          schema="$(jq -r '.schema' "$manifest")"
+          files=(okx-agent.exe okx-host-control.exe okx-host-launcher.exe)
+          if [[ "$schema" == okx.windows.bundle/v2 ]]; then
+            files+=(okx-research-worker.exe)
+            jq -e '(.components | length) == 4 and (.rust_version | type == "string" and length > 0)' "$manifest" >/dev/null
+          else
+            test ! -e "$extract/okx-research-worker.exe"
+          fi
+          for file in "${files[@]}"; do
             test -f "$extract/$file"
-            expected="$(jq -r --arg file "$file" '.files[$file].sha256' "$manifest")"
+            if [[ "$schema" == okx.windows.bundle/v2 ]]; then
+              jq -e --arg file "$file" --arg head "${{ steps.resolve.outputs.head_sha }}" --arg tree "${{ steps.resolve.outputs.source_tree }}" \
+                '.components[$file] | .source_head_sha == $head and .source_tree == $tree and .run_id == 0 and .artifact_id == 0 and .protocol_version == 1 and .storage_version == 1' "$manifest" >/dev/null
+              expected="$(jq -r --arg file "$file" '.components[$file].sha256' "$manifest")"
+              test "$(stat -c %s "$extract/$file")" = "$(jq -r --arg file "$file" '.components[$file].size' "$manifest")"
+            else
+              expected="$(jq -r --arg file "$file" '.files[$file].sha256' "$manifest")"
+            fi
             actual="$(sha256sum "$extract/$file" | awk '{print $1}')"
             test -n "$expected"
             test "$actual" = "$expected"
           done
 
           test -f "$extract/Cargo.lock"
-          bundle_sha256="$(sha256sum "$bundle" | awk '{print $1}')"
+          origin_input="$RUNNER_TEMP/published-origin-input.json"
+          origin="$RUNNER_TEMP/published-origin.json"
+          jq -n --arg head "${{ steps.resolve.outputs.head_sha }}" --arg tree "${{ steps.resolve.outputs.source_tree }}" \
+            --arg merge "$GITHUB_SHA" --argjson run "${{ steps.resolve.outputs.run_id }}" \
+            --argjson artifact "${{ steps.resolve.outputs.artifact_id }}" --arg digest "$bundle_sha256" \
+            '{repository_id:1388071566,source_head_sha:$head,source_tree:$tree,merged_main_sha:$merge,run_id:$run,artifact_id:$artifact,artifact_sha256:$digest}' > "$origin_input"
+          node scripts/test-published-release-origin.cjs
+          node scripts/published-release-origin.cjs "$origin_input" "$manifest" "$bundle" "$origin"
           checksums="$RUNNER_TEMP/SHA256SUMS.txt"
           {
             printf '%s  %s\n' "$bundle_sha256" "$(basename "$bundle")"
-            (cd "$extract" && sha256sum okx-agent.exe okx-host-control.exe okx-host-launcher.exe Cargo.lock manifest.json)
+            (cd "$extract" && sha256sum "${files[@]}" Cargo.lock manifest.json)
+            (cd "$RUNNER_TEMP" && sha256sum published-origin.json)
           } > "$checksums"
 
+          echo "origin=$origin" >> "$GITHUB_OUTPUT"
           echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
           echo "checksums=$checksums" >> "$GITHUB_OUTPUT"
           echo "bundle_sha256=$bundle_sha256" >> "$GITHUB_OUTPUT"
@@ -129,6 +154,7 @@ jobs:
           gh release create "$tag" \
             "${{ steps.verify.outputs.bundle }}" \
             "${{ steps.verify.outputs.checksums }}" \
+            "${{ steps.verify.outputs.origin }}" \
             --target "$GITHUB_SHA" \
             --title "OKX production recovery $short_sha" \
             --notes-file "$notes"

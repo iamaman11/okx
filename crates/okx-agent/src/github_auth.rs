@@ -12,7 +12,7 @@ pub fn store_native_github_token(token: &str) -> AgentResult<()> {
 
     #[cfg(windows)]
     {
-        let entry = keyring::Entry::new(
+        let entry = crate::windows_credentials::entry(
             WINDOWS_GITHUB_CREDENTIAL_SERVICE,
             WINDOWS_GITHUB_CREDENTIAL_ACCOUNT,
         )
@@ -35,7 +35,7 @@ pub fn store_native_github_token(token: &str) -> AgentResult<()> {
 pub fn load_native_github_token() -> AgentResult<Zeroizing<String>> {
     #[cfg(windows)]
     {
-        let entry = keyring::Entry::new(
+        let entry = crate::windows_credentials::entry(
             WINDOWS_GITHUB_CREDENTIAL_SERVICE,
             WINDOWS_GITHUB_CREDENTIAL_ACCOUNT,
         )

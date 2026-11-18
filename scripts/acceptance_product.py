@@ -5,10 +5,13 @@ ROOT=pathlib.Path(__file__).resolve().parents[1]
 REQUIRED={
     "CLEAN-01":{"clean_initialization_deletes_only_old_financial_keys","accounts::tests::initialize_without_any_legacy_files","accounts::tests::legacy_stop_claims_and_epochs_are_never_read","account_store::tests::corrupt_or_missing_db_never_reinitialized"},
     "ACCESS-01":{"accounts::tests::access_survives_restart","access_restart_and_account_registration"},
-    "EXEC-01":{"trade_service::execute::tests::duplicate_execute_one_post","trade_service::execute::tests::lost_response_after_post_returns_unknown","trade_service::execute::tests::restart_posting_reconciles_without_resubmit"},
-    "RISK-01":{"risk_concurrent_accounts_campaign_limit"},
+    "EXEC-01":{"accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict","accounts::native_trade_contracts::risk_book_contract_native_public_execute_lost_ack_and_replay_send_once","accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_after_create_recovers_original_unknown"},
+    # Current installation SQL owner: competing scoped reservations plus the
+    # public cohort denial/send fence. Retired Worker risk output proves neither.
+    "RISK-01":{"accounts::native_trade_contracts::native_multiaccount_reserve::risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_entry_cap",
+               "accounts::native_trade_contracts::native_public_cohort::risk_book_contract_native_public_cohort_denied_b_does_not_block_held_a_post"},
     "FIN-01":{"account_store::tests::fee_fill_bill_counted_once","account_store::tests::sql_ingest_retry_exactly_once","finance::attribution::tests::funding_allocation_sums_to_account","finance::nav::tests::deposit_is_not_profit"},
-    "MULTI-01":{"trade_service::execute::tests::two_accounts_two_instances","finance::attribution::tests::two_instances_same_instrument_lot_attribution"},
+    "MULTI-01":{"accounts::native_connect_contracts::risk_book_contract_native_connect_two_accounts_and_reopen_one_original_sqlite","accounts::native_trade_contracts::native_multiaccount::risk_book_contract_native_two_accounts_share_budget_and_isolate_public_capital_receipts","finance::attribution::tests::two_instances_same_instrument_lot_attribution"},
     "ANALYTICS-01":{"strategy_registry::tests::ema_cross_next_bar_no_lookahead","operators::tests::correlation_timestamp_alignment","strategy_registry::tests::test_partition_not_used_for_selection"},
     "OPS-01":{"analytics::jobs::tests::restart_marks_job_interrupted","analytics::executor::tests::cancel_releases_queue_capacity","account_store::tests::disk_full_before_post"},
     "F01":{"account_governance_lower_campaign_limit_monotonic"},
@@ -53,14 +56,17 @@ FAKE_VENUE_ACTIONS={
 # Per-action Rust business owner; no green unrelated test may certify a route.
 # Unmapped fake mutations remain blocked until an actual native test exists.
 FAKE_NATIVE_OWNERS={
-    "strategies.create":frozenset({"account_store::tests::strategy_create_sql_persists_receipt_replay_and_rejects_conflicts"}),
-    "strategies.update":frozenset({"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop"}),
-    "strategies.start":frozenset({"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop"}),
-    "strategies.stop":frozenset({"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop"}),
-    "trade.execute":frozenset({"trade_service::execute::tests::duplicate_execute_one_post",
-                                  "trade_service::execute::tests::lost_response_after_post_returns_unknown"}),
-    "trade.cancel":frozenset({"account_store::tests::duplicate_cancel_never_posts_twice"}),
-    "trade.close":frozenset({"trade_service::execute::tests::close_under_stop"}),
+    "strategies.create":frozenset({"accounts::native_trade_contracts::native_strategies::risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner"}),
+    "strategies.update":frozenset({"accounts::native_trade_contracts::native_strategies::risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner"}),
+    "strategies.start":frozenset({"accounts::native_trade_contracts::native_strategies::risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner"}),
+    "strategies.stop":frozenset({"accounts::native_trade_contracts::native_strategies::risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner"}),
+    "trade.execute":frozenset({"accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict",
+                                  "accounts::native_trade_contracts::risk_book_contract_native_public_execute_lost_ack_and_replay_send_once"}),
+    # Current unsent Cancel witnesses return REJECTED/USER_CANCELLED_UNSENT,
+    # not the CANCELLED venue readback this capability requires. Stay unproven.
+    "trade.cancel":frozenset(),
+    "trade.close":frozenset({"accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_filled_close_settlement_release_and_cold_reopen",
+                             "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_stop_after_fill_blocks_open_but_closes_and_releases"}),
 }
 FAKE_WORKER_ROUTE_TEST="mcp_fake_venue_mutation_routes"
 # Schema-only negative proofs are allowed exclusively for no-argument read-only
@@ -480,10 +486,46 @@ def self_test():
             name="market_data::tests::ticker_preserves_exchange_decimal_text_exactly"
             self.assertFalse(any(name in names for names in REQUIRED.values()))
 
+        def test_current_risk_requires_both_exact_owner_and_public_witnesses(self):
+            self.assertEqual(REQUIRED["RISK-01"],{
+                "accounts::native_trade_contracts::native_multiaccount_reserve::risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_entry_cap",
+                "accounts::native_trade_contracts::native_public_cohort::risk_book_contract_native_public_cohort_denied_b_does_not_block_held_a_post"})
+            for log in ("risk_concurrent_accounts_campaign_limit PASS\n",
+                        "test result: ok. 61 passed; 0 failed; 0 ignored;\n",
+                        "\n".join(REQUIRED["RISK-01"])):
+                passed={name for name,status in executed_tests(log) if status=="ok"}
+                self.assertFalse(REQUIRED["RISK-01"].issubset(passed))
+            one=next(iter(REQUIRED["RISK-01"]))
+            passed={name for name,status in executed_tests("test "+one+" ... ok\n") if status=="ok"}
+            self.assertFalse(REQUIRED["RISK-01"].issubset(passed))
+
+        def test_legacy_financial_action_names_never_authorize_fake_mutations(self):
+            retired={
+                "strategies.create":"account_store::tests::strategy_create_sql_persists_receipt_replay_and_rejects_conflicts",
+                "strategies.update":"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop",
+                "strategies.start":"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop",
+                "strategies.stop":"account_store::tests::immutable_strategy_versions_bind_old_intent_and_cas_start_stop",
+                "trade.cancel":"account_store::tests::duplicate_cancel_never_posts_twice",
+                "trade.close":"trade_service::execute::tests::close_under_stop"}
+            for route,name in retired.items():
+                proof={"transport":"fake_venue_fixture","venue":"fake",
+                       "real_exchange_post_count":0,"native_test_name":name,
+                       "worker_test_name":FAKE_WORKER_ROUTE_TEST}
+                self.assertFalse(admissible_transport(route,proof,{name,FAKE_WORKER_ROUTE_TEST}),route)
+            self.assertEqual(FAKE_NATIVE_OWNERS["trade.cancel"],frozenset())
+            for route,names in FAKE_NATIVE_OWNERS.items():
+                for name in names:
+                    proof={"transport":"fake_venue_fixture","venue":"fake",
+                           "real_exchange_post_count":0,"native_test_name":name,
+                           "worker_test_name":FAKE_WORKER_ROUTE_TEST}
+                    self.assertFalse(admissible_transport(route,proof,{FAKE_WORKER_ROUTE_TEST}),route)
+                    self.assertFalse(admissible_transport(route,proof,{name}),route)
+                    self.assertTrue(admissible_transport(route,proof,{name,FAKE_WORKER_ROUTE_TEST}),route)
+
         def test_fake_venue_fixture_requires_native_and_worker_proof(self):
             case={"transport":"fake_venue_fixture","venue":"fake",
                   "real_exchange_post_count":0,
-                  "native_test_name":"trade_service::execute::tests::duplicate_execute_one_post",
+                  "native_test_name":"accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict",
                   "worker_test_name":FAKE_WORKER_ROUTE_TEST}
             native,worker=case["native_test_name"],case["worker_test_name"]
             self.assertFalse(admissible_transport("trade.execute",case,set()))

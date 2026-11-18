@@ -1,3 +1,4 @@
+use std::str::FromStr;
 pub mod telemetry;
 
 pub use telemetry::{
@@ -14,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat};
+use jiff::{SignedDuration, Timestamp};
 use reqwest::{Client, RequestBuilder, Response, header::HeaderMap};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -217,7 +218,7 @@ received_bytes={received_bytes} content_length={content_length:?}"
     TelemetryStateMismatch,
 
     #[error("GitHub issue poll telemetry timestamp is invalid: {0}")]
-    TelemetryTimestamp(chrono::ParseError),
+    TelemetryTimestamp(jiff::Error),
 
     #[error("GitHub issue poll telemetry I/O error: {0}")]
     TelemetryIo(String),
@@ -1181,10 +1182,11 @@ fn unix_now_seconds() -> u64 {
 }
 
 fn cursor_overlap_since(cursor: &IssueCommentCursor) -> Result<String, GitHubError> {
-    let timestamp = DateTime::parse_from_rfc3339(&cursor.created_at)
+    let timestamp = Timestamp::from_str(&cursor.created_at)
         .map_err(|_| GitHubError::CursorStateMismatch)?
-        - ChronoDuration::seconds(1);
-    Ok(timestamp.to_rfc3339_opts(SecondsFormat::Secs, true))
+        .checked_sub(SignedDuration::from_secs(1))
+        .map_err(|_| GitHubError::CursorStateMismatch)?;
+    Ok(format!("{timestamp:.0}"))
 }
 
 fn can_arm_comment_validator(page: u32, fresh_is_empty: bool, etag_present: bool) -> bool {

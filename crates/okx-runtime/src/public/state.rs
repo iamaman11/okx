@@ -48,6 +48,7 @@ pub struct PublicQualitySnapshot {
 #[derive(Debug)]
 pub struct PublicRuntimeState {
     pub(super) reference: ReferenceRegistry,
+    pub(super) reference_unavailable: Option<String>,
     pub(super) markets: BTreeMap<String, MarketStreamState>,
     pub(super) connection_state: PublicConnectionState,
     pub(super) generation: u64,
@@ -60,6 +61,7 @@ impl PublicRuntimeState {
     pub fn new(reference: ReferenceRegistry) -> Self {
         Self {
             reference,
+            reference_unavailable: None,
             markets: BTreeMap::new(),
             connection_state: PublicConnectionState::Disconnected,
             generation: 0,

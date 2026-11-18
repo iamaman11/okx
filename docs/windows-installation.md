@@ -17,10 +17,34 @@ checkout must never contain the product's control or financial data.
 ## GitHub is the distribution authority
 
 The source owner is `iamaman11/okx`, pinned repository ID `1388071566`.
-`.github/workflows/ci.yml` builds all three EXEs in one Windows bundle and records
+`.github/workflows/ci.yml` builds all four EXEs (`okx-agent`, `okx-host-control`,
+`okx-host-launcher`, `okx-research-worker`) in one Windows bundle and records
 their SHA-256, exact source HEAD/tree and Rust version in `manifest.json`.
 The existing CONTROL operations deploy Agent, stage/activate controller and
 upgrade Launcher from an explicitly identified GitHub run/artifact.
+
+### Research-only component update
+
+`HostControlOperation::DeployResearch` takes `run_id`, `artifact_id`, and
+`expected_source_tree`. CONTROL fetches the accepted GitHub archive and verifies
+its v2 composition, component bytes and origins, source tree, and compatibility.
+It checks the reused Agent and Controller against their installed provenance and
+executable hashes, and checks Launcher bytes. A verified Worker is staged in a
+content-addressed location and `installed-research.json` records the candidate.
+The running Agent's `ResearchClient` separately drains the old child and activates
+the verified candidate; installation and active worker are distinct states. A
+failed validation does not authorize activation or a financial Engine restart.
+Use the existing authenticated CONTROL operation, not an unverified local EXE.
+
+This describes the implemented path, not installed acceptance. #512 r15 checks
+the separate Worker build and existing verification/staging/handoff contracts.
+The first release requires full CI, merge and the existing accepted manifest;
+later Research-only releases reuse that verified, merged base. The successful
+first full-build CI on `dacab8c5` does not itself exercise the separate
+`research-only-windows` branch, which requires an explicitly selected accepted
+base. Actual host installation, process/PID continuity and physical/live acceptance
+remain under #449. An expired or missing origin artifact is rejected; there is
+no additional credential-backed archive cache or recovery installer.
 
 Production installation/update must retain all of these checks:
 

@@ -2,8 +2,9 @@
 //! are component fixtures passed through original typed owner commands; this
 //! does not claim public Execute/REST/census producer coverage or a venue ACK.
 use super::{
-    NativePostDecision, NativePostRequest, NativeReserveDecision, NativeReserveRequest,
-    ReportedOpeningCensus, ReportedRiskCensus, UnifiedFinanceHandle,
+    CensusObservedAtMs, CensusReadFloorMs, NativePostDecision, NativePostRequest,
+    NativeReserveDecision, NativeReserveRequest, ReportedOpeningCensus, ReportedRiskCensus,
+    UnifiedFinanceHandle,
     owner_financial_reply_tests::{INSTALLATION, account, campaign, fresh},
 };
 use crate::{
@@ -41,8 +42,8 @@ fn reservation() -> String {
 fn census(at: i64) -> ReportedRiskCensus {
     ReportedRiskCensus {
         source_digest: "d".repeat(64),
-        generated_at_ms: at,
-        read_floor_ms: at,
+        generated_at_ms: CensusObservedAtMs::new(at).unwrap(),
+        read_floor_ms: CensusReadFloorMs::new(at).unwrap(),
         occupied: BTreeMap::from([(account(), "0".into())]),
         cumulative_loss_usd: BTreeMap::from([(account(), "0".into())]),
     }
@@ -52,7 +53,7 @@ fn reserve_census(request: &NativeReserveRequest) -> ReportedRiskCensus {
     // The typed conversion was captured before the later persisted NAV;
     // keep this actual fixture source floor on replay instead of claiming a
     // newer financial observation merely because the envelope is newer.
-    reported.read_floor_ms = request.conversion_observed_at_ms;
+    reported.read_floor_ms = CensusReadFloorMs::new(request.conversion_observed_at_ms).unwrap();
     reported
 }
 async fn ingest_empty_history(owner: &UnifiedFinanceHandle, at: i64) {
@@ -106,7 +107,19 @@ async fn nav(owner: &UnifiedFinanceHandle, at: i64) {
         .unwrap();
 }
 
-async fn setup() -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
+pub(super) async fn setup() -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
+    setup_inner(true, false).await
+}
+
+pub(super) async fn setup_before_reserve_attempt()
+-> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
+    setup_inner(false, false).await
+}
+
+async fn setup_inner(
+    mark_attempt: bool,
+    deny_order_limit: bool,
+) -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
     let (root, owner) = fresh().await;
     let started = owner
         .campaign_summary(campaign())
@@ -164,8 +177,8 @@ async fn setup() -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
             opening,
             ReportedOpeningCensus {
                 source_digest: reported.source_digest,
-                generated_at_ms: reported.generated_at_ms,
-                read_floor_ms: reported.read_floor_ms,
+                generated_at_ms: reported.generated_at_ms.raw_millis(),
+                read_floor_ms: reported.read_floor_ms.raw_millis(),
                 occupied: reported.occupied,
                 cumulative_loss_usd: reported.cumulative_loss_usd,
             },
@@ -207,7 +220,11 @@ async fn setup() -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
                     limit_price: Decimal::from(1000),
                     stop_price: Some(Decimal::from(900)),
                     strategy_instance: "manual".into(),
-                    planned_loss_usd: Decimal::new(1, 1),
+                    planned_loss_usd: if deny_order_limit {
+                        Decimal::from(3)
+                    } else {
+                        Decimal::new(1, 1)
+                    },
                     source_generation: 1,
                 },
                 intent_id: INTENT.into(),
@@ -281,25 +298,28 @@ async fn setup() -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
         .bind_entry_evidence(deadline(), account(), quote, Some(admission))
         .await
         .unwrap();
-    owner
-        .mark_reserve_attempt(deadline(), account(), INTENT.into(), reservation())
-        .await
-        .unwrap();
+    if mark_attempt {
+        owner
+            .mark_reserve_attempt(deadline(), account(), INTENT.into(), reservation())
+            .await
+            .unwrap();
+    }
     nav(&owner, now()).await;
     let request = NativeReserveRequest {
         venue: "okx".into(),
         uid: "a".repeat(64),
-        run_id: "reply_run".into(),
-        intent_id: INTENT.into(),
+        run_id: crate::account_worker::AdmissionRunId::new("reply_run".into()).unwrap(),
+        intent_id: crate::account_worker::AdmissionIntentId::new(INTENT.into()).unwrap(),
         strategy_id: "manual".into(),
         instrument_id: "BTC-USDT-SWAP".into(),
         plan_sha256: stored.plan_hash,
         entry_proof_digest: "f".repeat(64),
         conversion_digest: "b".repeat(64),
         conversion_rate: "1".into(),
-        loss_usdt: "0.1".into(),
-        loss_usd: "0.1".into(),
-        entry_upper_usd: "1.0005".into(),
+        loss_usdt: crate::risk::UsdtLoss::parse(if deny_order_limit { "3" } else { "0.1" })
+            .unwrap(),
+        loss_usd: crate::risk::UsdLoss::parse(if deny_order_limit { "3" } else { "0.1" }).unwrap(),
+        entry_upper_usd: crate::risk::UsdEntryUpper::parse("1.0005").unwrap(),
         native_incarnation: "f".repeat(32),
         conversion_observed_at_ms: at,
         policy_revision: 1,
@@ -443,7 +463,8 @@ async fn post(owner: &UnifiedFinanceHandle, sequence: u64, held_at: Instant) -> 
     nav(owner, at).await;
     let completed = held_at.elapsed().as_millis() as u64;
     NativePostRequest {
-        reservation_key: reservation(),
+        reservation_key: crate::account_worker::AdmissionReservationKey::new(reservation())
+            .unwrap(),
         plan_sha256: "e".repeat(64),
         source_proof_digest: "b".repeat(64),
         policy_revision: 1,
@@ -481,7 +502,7 @@ async fn close(owner: UnifiedFinanceHandle) {
     }
     assert!(*stopped.borrow());
 }
-async fn cleanup(root: PathBuf, owner: UnifiedFinanceHandle) {
+pub(super) async fn cleanup(root: PathBuf, owner: UnifiedFinanceHandle) {
     close(owner).await;
     assert_eq!(
         root.parent().unwrap().canonicalize().unwrap(),
@@ -496,6 +517,99 @@ async fn cleanup(root: PathBuf, owner: UnifiedFinanceHandle) {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+#[tokio::test]
+async fn risk_book_contract_first_denial_survives_replay_reopen_and_rejects_corruption() {
+    let (root, owner, request) = setup_inner(true, true).await;
+    let before = serde_json::to_value(owner.campaign_summary(campaign()).await.unwrap()).unwrap();
+    let NativeReserveDecision::Denied { reason } = owner
+        .reserve_reported(campaign(), request.clone(), reserve_census(&request))
+        .await
+        .unwrap()
+    else {
+        panic!("order loss above policy must be denied")
+    };
+    assert_eq!(reason, "ORDER_OR_STRATEGY_RISK_LIMIT");
+    let inspect = owner
+        .inspect_intent_operation(deadline(), account(), INTENT.into())
+        .await
+        .unwrap();
+    assert!(inspect.reservation.is_none());
+    assert!(inspect.begin_post_at_ms.is_none());
+    let first = inspect.budget_denial.unwrap();
+    assert_eq!(first.account_key, account());
+    assert_eq!(first.campaign_id, campaign());
+    assert_eq!(first.reason, reason);
+    assert_eq!(first.requested_entry_usd, "1.0005");
+    assert_eq!(first.requested_loss_usd, "3");
+    assert_eq!(first.remaining_entry_usd, before["remaining_entry_usd"]);
+    assert_eq!(first.remaining_loss_usd, before["remaining_loss_usd"]);
+    let expected = serde_json::to_value(&first).unwrap();
+    // Re-submit the original command with a new envelope; it must not rewrite
+    // the first decision's observations or pretend they describe today's book.
+    let mut repeated_census = reserve_census(&request);
+    repeated_census.source_digest = "c".repeat(64);
+    assert!(matches!(
+        owner
+            .reserve_reported(campaign(), request.clone(), repeated_census)
+            .await
+            .unwrap(),
+        NativeReserveDecision::Denied { .. }
+    ));
+    let repeated = owner
+        .inspect_intent_operation(deadline(), account(), INTENT.into())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(repeated.budget_denial.unwrap()).unwrap(),
+        expected
+    );
+    let after = serde_json::to_value(owner.campaign_summary(campaign()).await.unwrap()).unwrap();
+    for field in [
+        "reserved_entry_usd",
+        "global_reserved_usdt",
+        "remaining_entry_usd",
+        "remaining_loss_usd",
+    ] {
+        assert_eq!(after[field], before[field], "denial changed {field}");
+    }
+    close(owner).await;
+    let owner = UnifiedFinanceHandle::open_native(root.clone(), INSTALLATION.into())
+        .await
+        .unwrap();
+    let reopened = owner
+        .inspect_intent_operation(deadline(), account(), INTENT.into())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(reopened.budget_denial.unwrap()).unwrap(),
+        expected
+    );
+    assert!(
+        owner
+            .inspect_intent_operation(
+                deadline(),
+                format!("okx:real:{}", "b".repeat(64)),
+                INTENT.into()
+            )
+            .await
+            .is_err()
+    );
+    // Corrupt only this isolated test database through its sole owner: a broken
+    // evidence record must be reported as unreadable, never mixed with facts.
+    owner.submit(|db| {
+        db.execute("UPDATE operation_receipts SET result_ref='{}' WHERE installation_id=?1 AND account_key=?2 AND operation_id=?3",
+            rusqlite::params![INSTALLATION, account(), format!("reserve-denied:{INTENT}")])?;
+        Ok(())
+    }).await.unwrap();
+    assert!(matches!(
+        owner
+            .inspect_intent_operation(deadline(), account(), INTENT.into())
+            .await,
+        Err(StoreError::Invalid("NATIVE_DENIAL_EVIDENCE_INVALID"))
+    ));
+    cleanup(root, owner).await;
+}
+
 async fn assert_no_second_send(
     owner: &UnifiedFinanceHandle,
     request: NativePostRequest,

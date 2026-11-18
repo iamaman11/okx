@@ -1,7 +1,5 @@
 //! Typed identity and lot reads, shared by both storage layouts.
 use super::*;
-use crate::AccountStoreHandle;
-use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub enum TradeIntentLookup {
@@ -40,25 +38,5 @@ impl AccountStore {
                 .or(find("exchange_order_id", key)?)
                 .or(find("idempotency_key", key)?)),
         }
-    }
-}
-
-impl AccountStoreHandle {
-    pub async fn lookup_intent(
-        &self,
-        deadline: Instant,
-        lookup: TradeIntentLookup,
-    ) -> StoreResult<Option<StoredIntent>> {
-        self.call(deadline, move |store| store.lookup_trade_intent(&lookup))
-            .await
-    }
-
-    pub async fn active_lots(
-        &self,
-        deadline: Instant,
-        instrument: String,
-    ) -> StoreResult<Vec<StoredLot>> {
-        self.call(deadline, move |store| store.active_lots(&instrument))
-            .await
     }
 }

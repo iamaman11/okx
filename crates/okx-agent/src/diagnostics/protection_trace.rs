@@ -1,5 +1,5 @@
 //! Volatile, non-authoritative trace for the protection-cleanup operation.
-use chrono::Utc;
+use jiff::Timestamp;
 use okx_execution::ProtectionCleanupOperationReceipt;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -257,7 +257,7 @@ impl ProtectionOperationTrace {
             first_observed_blocker: None,
             missing_evidence: Some("SIGNED_TERMINAL_ORDER_AND_FLAT_POSITION"),
             next_action: "trade.status",
-            recorded_at_ms: Utc::now().timestamp_millis(),
+            recorded_at_ms: Timestamp::now().as_millisecond(),
         });
         if let Some(caller) = invocation {
             if entry.first_observed_invocation.is_none() {
@@ -381,7 +381,7 @@ impl ProtectionOperationTrace {
                 entry.next_action = "inspect_separate_risk_release";
             }
         }
-        entry.recorded_at_ms = Utc::now().timestamp_millis();
+        entry.recorded_at_ms = Timestamp::now().as_millisecond();
     }
 
     pub(crate) fn read(&self, reference: &str) -> Result<Value, &'static str> {
@@ -404,7 +404,7 @@ impl ProtectionOperationTrace {
                     "state": "OBSERVED",
                     "snapshot": entry,
                     "current_boundary": entry.first_unproven_boundary,
-                    "snapshot_age_ms": Utc::now().timestamp_millis().saturating_sub(entry.recorded_at_ms),
+                    "snapshot_age_ms": Timestamp::now().as_millisecond().saturating_sub(entry.recorded_at_ms),
                     "quality": "partial",
                     "trace_health": health,
                     "risk_release": "NOT_EVALUATED",
@@ -504,7 +504,7 @@ fn record_first_blocker(
             reason_code: safe_code(reason, "PROTECTION_CLEANUP_UNPROVEN"),
             boundary,
             missing_evidence: missing,
-            observed_at_ms: Utc::now().timestamp_millis(),
+            observed_at_ms: Timestamp::now().as_millisecond(),
         });
     }
 }

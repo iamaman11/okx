@@ -126,6 +126,42 @@ const STALE_DIAGNOSTIC: Witness = Witness {
     package: "okx-agent",
     test: "accounts::native_trade_contracts::native_stale_diagnostic::risk_book_contract_native_stale_post_held_tariff_diagnostic_is_exact_and_read_only",
 };
+const SOURCE_REOPEN: Witness = Witness {
+    package: "okx-execution",
+    test: "account_worker::unified::owner_entry_diagnostic_tests::risk_book_contract_entry_diagnostic_reopens_original_sources_without_financial_effect",
+};
+const MONEY_SCALE_PROPERTY: Witness = Witness {
+    package: "okx-kernel",
+    test: "risk::money::money_property_tests::risk_amount_canonical_round_trip_and_scale_equivalence",
+};
+const MONEY_RANGE_PROPERTY: Witness = Witness {
+    package: "okx-kernel",
+    test: "risk::money::money_property_tests::risk_amount_rejects_out_of_range_and_leading_zero",
+};
+const SIZING_PROPERTY: Witness = Witness {
+    package: "okx-execution",
+    test: "risk::native_sizing::native_sizing_property_tests::native_reserved_loss_covers_plan_with_minimal_nine_place_quantum",
+};
+const IDENTITY_PROPERTY: Witness = Witness {
+    package: "okx-protocol",
+    test: "trading::trading_property_tests::trade_semantic_identity_preserves_scale_and_field_order",
+};
+const TYPED_PLAN_RETRY: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::plan::tests::planning_retry_categories_preserve_codes_and_reject_unrelated_text",
+};
+const TYPED_ADMISSION_FAILURE: Witness = Witness {
+    package: "okx-agent",
+    test: "admission_failure::tests::store_failure_preserves_typed_cause_and_safe_wire_code",
+};
+const TYPED_SETTLEMENT_UNKNOWN: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::entry_settlement::direct_tests::native_committed_reply_unknown_is_awaiting_evidence_at_both_boundaries",
+};
+const LOGICAL_READ_DEADLINE: Witness = Witness {
+    package: "okx-agent",
+    test: "diagnostics::native_intent::tests::logical_diagnostic_deadline_waits_until_boundary_without_real_sleep",
+};
 const SOURCE_FEE: Witness = Witness {
     package: "okx-agent",
     test: "trade_service::entry_budget::tests::e1_fee_source_must_be_current_exact_and_content_bound",
@@ -286,6 +322,10 @@ const DIAGNOSTIC_SCOPE: Witness = Witness {
     package: "okx-agent",
     test: "accounts::native_trade_contracts::native_diagnostics::risk_book_contract_native_intent_diagnostic_is_account_scoped_and_refuses_foreign_installation",
 };
+const DENIAL_REOPEN: Witness = Witness {
+    package: "okx-execution",
+    test: "account_worker::unified::owner_reserve_reply_tests::risk_book_contract_first_denial_survives_replay_reopen_and_rejects_corruption",
+};
 const DIAGNOSTIC_BUSY_COMPONENT: Witness = Witness {
     package: "okx-agent",
     test: "diagnostics::protection_trace::tests::contention_is_counted_and_readback_marks_a_gap",
@@ -367,6 +407,52 @@ const COVERAGE_SYMBOLS: Witness = Witness {
     test: "native_acceptance_coverage::coverage_verifier_requires_each_symbol_for_a_property_and_valid_manifest_context",
 };
 
+// Current Rust-side delivery/source/send properties after retiring the remote financial actor.
+const RUST_SESSION_DATA: Witness = Witness {
+    package: "okx-agent",
+    test: "cloudflare_transport::session_tests::native_session_public_data_is_acked_and_dispatched",
+};
+const RUST_SESSION_SCOPE: Witness = Witness {
+    package: "okx-agent",
+    test: "cloudflare_transport::session_tests::native_session_rejects_foreign_session_and_generation",
+};
+const RUST_SESSION_RETIRED_FINANCE: Witness = Witness {
+    package: "okx-agent",
+    test: "cloudflare_transport::session_tests::native_session_rejects_bound_retired_financial_result",
+};
+const RUST_SESSION_POLICY: Witness = Witness {
+    package: "okx-agent",
+    test: "cloudflare_transport::session_tests::native_session_applies_valid_policy_and_rejects_foreign_installation",
+};
+const ORDER_READBACK: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_observation::native_order_observation_requires_exact_plan_and_replays_terminal_once",
+};
+const FINITE_PENDING_SOURCE: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_observation::pending_orders_signed_empty_page_is_finite_and_never_inferred",
+};
+const INCOMPLETE_BALANCE: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_observation::native_incomplete_balance_blocks_source_capture_then_signed_source_recovers",
+};
+const STOP_POSITION_RECOVERY: Witness = Witness {
+    package: "okx-agent",
+    test: "accounts::native_trade_contracts::native_observation::native_stop_blocks_open_but_close_recovers_after_malformed_positions",
+};
+const PERSISTED_EXPIRY: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::submission::native_contract_tests::persisted_expired_command_cannot_acquire_a_later_send_claim",
+};
+const CLAIM_EXPIRY: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::submission::native_contract_tests::expired_committed_claim_never_invokes_sender_or_creates_an_unknown_outcome",
+};
+const GATEWAY_EXPIRY: Witness = Witness {
+    package: "okx-agent",
+    test: "trade_service::submission::native_contract_tests::deadline_expires_after_commit_before_gateway_send_preserves_durable_no_send",
+};
+
 pub const CONTRACTS: &[Contract] = &[
     Contract {
         id: "RB02.real_reference_refresh_and_coherent_spec_generation",
@@ -390,7 +476,7 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB01.strict_campaign_policy",
-        witnesses: &[POLICY, POLICY_REFUSAL],
+        witnesses: &[POLICY, POLICY_REFUSAL, INCOMPLETE_BALANCE],
         missing: None,
     },
     Contract {
@@ -415,7 +501,13 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB02.checked_decimal_syntax_range_and_rounding",
-        witnesses: &[DECIMAL, ARITHMETIC],
+        witnesses: &[
+            DECIMAL,
+            ARITHMETIC,
+            MONEY_SCALE_PROPERTY,
+            MONEY_RANGE_PROPERTY,
+            SIZING_PROPERTY,
+        ],
         missing: None,
     },
     Contract {
@@ -430,7 +522,7 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB03.concurrent_public_shared_entry_cap",
-        witnesses: &[SHARED_CAP_PUBLIC, SHARED_CAP_OWNER],
+        witnesses: &[SHARED_CAP_PUBLIC, SHARED_CAP_OWNER, FINITE_PENDING_SOURCE],
         missing: None,
     },
     Contract {
@@ -464,7 +556,7 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB04.canonical_semantic_identity",
-        witnesses: &[SEMANTIC_HASH, SEMANTIC_DECIMAL],
+        witnesses: &[SEMANTIC_HASH, SEMANTIC_DECIMAL, IDENTITY_PROPERTY],
         missing: None,
     },
     Contract {
@@ -479,12 +571,18 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB05.committed_begin_post_reply_loss_and_single_claim",
-        witnesses: &[POST_REPLY],
+        witnesses: &[POST_REPLY, PERSISTED_EXPIRY, CLAIM_EXPIRY, GATEWAY_EXPIRY],
         missing: None,
     },
     Contract {
         id: "RB05.bound_rejection_versus_unknown_venue_outcome",
-        witnesses: &[BOUND_REJECTION, FAILED_ENVELOPE, FOREIGN_ACK, LOST_ACK],
+        witnesses: &[
+            BOUND_REJECTION,
+            FAILED_ENVELOPE,
+            FOREIGN_ACK,
+            LOST_ACK,
+            ORDER_READBACK,
+        ],
         missing: None,
     },
     Contract {
@@ -523,6 +621,7 @@ pub const CONTRACTS: &[Contract] = &[
             CANCEL_ACK_LOSS,
             EMERGENCY_REMEDIATION,
             TERMINAL_CONFIG_FRONTIER,
+            STOP_POSITION_RECOVERY,
         ],
         missing: None,
     },
@@ -590,7 +689,15 @@ pub const CONTRACTS: &[Contract] = &[
         // kill schedule is RETIRED, not proved by dispose(). Actual workerd
         // retains auth/session/delivery and refuses former money commands.
         // Native real SQLite OS-kill tests retain the financial guarantee.
-        witnesses: &[RETAINED_TRANSPORT, CAPITAL_CRASH, VENUE_CRASH],
+        witnesses: &[
+            RETAINED_TRANSPORT,
+            CAPITAL_CRASH,
+            VENUE_CRASH,
+            RUST_SESSION_DATA,
+            RUST_SESSION_SCOPE,
+            RUST_SESSION_RETIRED_FINANCE,
+            RUST_SESSION_POLICY,
+        ],
         missing: None,
     },
     Contract {
@@ -633,6 +740,7 @@ pub const CONTRACTS: &[Contract] = &[
             HELD_RECOVERY,
             DIAGNOSTIC_BUSY_COMPONENT,
             DIAGNOSTIC_EVICTION_COMPONENT,
+            LOGICAL_READ_DEADLINE,
         ],
         missing: None,
     },
@@ -697,19 +805,26 @@ pub const CONTRACTS: &[Contract] = &[
     },
     Contract {
         id: "RB14.direct_budget_denied_diagnostic_drill",
-        witnesses: &[SHARED_CAP_PUBLIC],
-        // Actual read-only diagnostic asserts owner, refusal, no receipt/send
-        // and no extra HTTP while the other account remains held.
+        witnesses: &[SHARED_CAP_PUBLIC, SEQUENTIAL_B, DENIAL_REOPEN],
+        // Public refusal exposes the original requested/remaining amounts.
+        // Replay/reopen retains the first observation; corrupt evidence fails
+        // explicitly, and no diagnostic read grants a reserve or venue send.
         missing: None,
     },
     Contract {
         id: "RB14.direct_stale_source_diagnostic_drill",
-        witnesses: &[STALE_DIAGNOSTIC],
+        witnesses: &[STALE_DIAGNOSTIC, SOURCE_REOPEN, TYPED_PLAN_RETRY],
         missing: None,
     },
     Contract {
         id: "RB14.direct_commit_reply_lost_diagnostic_drill",
-        witnesses: &[RESERVE_REPLY, POST_REPLY, DIAGNOSTIC],
+        witnesses: &[
+            RESERVE_REPLY,
+            POST_REPLY,
+            DIAGNOSTIC,
+            TYPED_ADMISSION_FAILURE,
+            TYPED_SETTLEMENT_UNKNOWN,
+        ],
         // The actual lost-COMMIT-reply tests now invoke the SAME coherent
         // inspection operation used by the public projection, before/after
         // reopen. Public projection separately proves zero HTTP/POST.

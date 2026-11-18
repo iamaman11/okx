@@ -1,8 +1,11 @@
 //! Public routing tests: real owners, with delivery replaced only at HTTP/WS.
 use super::*;
 use crate::accounts::{initialize_installation, recorded_support};
+use crate::research_test_support::client as research_test_client;
+use crate::trade_service::TradeService;
 use okx_api::{HttpSend, HttpTransport, OkxEnvironment, RateBudget};
 use okx_protocol::{AGENT_REQUEST_SCHEMA_V1, InstrumentTypeFilter};
+use std::sync::Arc;
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicUsize, Ordering},
@@ -28,7 +31,7 @@ struct Fixture {
     // Keep the actual command receiver alive without starting a network task.
     _coordinator: okx_runtime::PublicWsCoordinator,
     network: Arc<ForbiddenNetwork>,
-    risk: tokio::sync::mpsc::Receiver<crate::risk_bridge::OutboundRiskCommand>,
+    finance_owner: okx_execution::account_worker::UnifiedFinanceHandle,
 }
 impl Fixture {
     async fn new(reference: okx_observation::ReferenceRegistry) -> Self {
@@ -36,15 +39,32 @@ impl Fixture {
         let root = std::env::temp_dir().join(format!(
             "okx-query-dispatch-{}-{}-{}",
             std::process::id(),
-            Utc::now().timestamp_nanos_opt().unwrap(),
+            Timestamp::now().as_nanosecond(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         initialize_installation(&root, "query-dispatch-installation").unwrap();
-        let accounts = Arc::new(
-            AccountRuntimeRegistry::open(&root, RateBudget::new())
-                .await
-                .unwrap(),
-        );
+        let initial_owner = okx_execution::account_worker::UnifiedFinanceHandle::initialize_new(
+            root.clone(),
+            okx_execution::NewFinanceInstallation {
+                installation_id: "query-dispatch-installation".into(),
+                initialize_request_id: "initialize_readonly_dispatch_001".into(),
+                source_tree: "a".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+        let mut initial_closed = initial_owner.termination_signal();
+        drop(initial_owner);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            initial_closed.wait_for(|v| *v),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (accounts, finance_owner) =
+            crate::accounts::tests::open_native_test_registry(&root, RateBudget::new()).await;
+        let accounts = Arc::new(accounts);
         let environment = OkxEnvironment::new(okx_api::Region::Global, false);
         let network = Arc::new(ForbiddenNetwork::default());
         let market = crate::market_bootstrap::MarketBootstrapper::new(
@@ -55,35 +75,36 @@ impl Fixture {
             )
             .unwrap(),
         );
-        let analytics = AnalyticsService::new(root.join("research"), market.clone()).unwrap();
+        let analytics = research_test_client(root.join("research"), market.clone()).unwrap();
         let (coordinator, public_ws) = okx_runtime::PublicWsCoordinator::new_with_connector(
             environment,
             reference,
             RateBudget::new(),
             Arc::new(recorded_support::OfflineSocket),
         );
-        let (tx, risk) = tokio::sync::mpsc::channel(4);
         let trade = Arc::new(TradeService::new(
             accounts.clone(),
             public_ws.clone(),
-            crate::risk_bridge::NativeRiskClient::new(tx),
+            crate::risk_bridge::NativeRiskClient::local(
+                crate::native_finance_risk::NativeFinanceRisk::from_owner(finance_owner.clone()),
+            ),
         ));
         Self {
             root,
             context: DispatchContext {
-                accounts,
-                analytics,
+                research: analytics,
                 public_ws,
-                trade,
+                finance: crate::finance_dispatch::FinanceDispatch::ready(accounts, trade),
                 market,
             },
             _coordinator: coordinator,
             network,
-            risk,
+            finance_owner,
         }
     }
     async fn request(&self, operation: AgentOperation, account: Option<&str>) -> AgentResponse {
-        dispatch(
+        let finance_jobs_before = self.finance_owner.sql_timing().observed_jobs;
+        let response = dispatch(
             &self.context,
             &AgentRequest {
                 schema: AGENT_REQUEST_SCHEMA_V1.into(),
@@ -92,21 +113,37 @@ impl Fixture {
                 operation,
             },
         )
-        .await
+        .await;
+        assert_eq!(
+            self.finance_owner.sql_timing().observed_jobs,
+            finance_jobs_before,
+            "read-only public dispatch cannot enqueue financial work"
+        );
+        response
     }
-    async fn finish(mut self) {
+    async fn finish(self) {
+        self.context.research.shutdown().await;
         assert_eq!(
             self.network.0.load(Ordering::Relaxed),
             0,
             "read-only fixture must not fetch external data"
         );
         assert!(
-            self.risk.try_recv().is_err(),
-            "read-only query must not request a risk mutation"
+            self.finance_owner
+                .configured_campaign(Instant::now() + std::time::Duration::from_secs(3),)
+                .await
+                .unwrap()
+                .is_none(),
+            "read-only dispatch cannot install financial policy"
         );
-        self.context.accounts.shutdown().await;
+        self.context.finance.accounts().unwrap().shutdown().await;
         let root = self.root.clone();
+        let mut closed = self.finance_owner.termination_signal();
         drop(self);
+        tokio::time::timeout(std::time::Duration::from_secs(5), closed.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 }
@@ -118,6 +155,139 @@ fn rejection(response: AgentResponse, code: &str) {
     assert_eq!(response.quality, DataQuality::NotReady);
     assert!(response.result.is_none());
     assert_eq!(response.failure.unwrap().code, code);
+}
+
+#[tokio::test]
+async fn research_without_finance_uses_real_worker_and_cannot_create_financial_authority() {
+    use okx_protocol::{
+        analytics::ResearchRequest,
+        trading::{DiagnosticsRequest, DiagnosticsView, TradeRequest},
+    };
+    for invalid in [false, true] {
+        let root = std::env::temp_dir().join(format!(
+            "okx-research-finance-boundary-{}-{}-{invalid}",
+            std::process::id(),
+            Timestamp::now().as_nanosecond()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let finance_file = root.join("finance/finance.sqlite");
+        if invalid {
+            initialize_installation(&root, "research-boundary-installation").unwrap();
+            std::fs::create_dir(root.join("finance")).unwrap();
+            std::fs::write(
+                &finance_file,
+                b"invalid financial input must stay unchanged",
+            )
+            .unwrap();
+        }
+        let before = invalid.then(|| std::fs::read(&finance_file).unwrap());
+        let catalog = root.join("account-catalog.pb");
+        let catalog_before = invalid.then(|| std::fs::read(&catalog).unwrap());
+        let env = OkxEnvironment::new(okx_api::Region::Global, false);
+        let network = Arc::new(ForbiddenNetwork::default());
+        let client =
+            okx_api::OkxPublicClient::with_http_transport(env, RateBudget::new(), network.clone())
+                .unwrap();
+        let market = crate::market_bootstrap::MarketBootstrapper::new(client.clone());
+        let (_coordinator, public_ws) =
+            okx_runtime::PublicWsCoordinator::new_uninitialized(env, RateBudget::new(), client);
+        let finance = crate::finance_startup::select(&root, RateBudget::new(), false, None)
+            .await
+            .finish(public_ws.clone(), market.clone())
+            .await;
+        let context = DispatchContext {
+            finance,
+            research: research_test_client(root.join("research"), market.clone()).unwrap(),
+            public_ws,
+            market,
+        };
+        let request = |operation, account: Option<&str>| AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.into(),
+            request_id: "research-only-host-001".into(),
+            account: account.map(str::to_owned),
+            operation,
+        };
+        let response = dispatch(
+            &context,
+            &request(
+                AgentOperation::Research {
+                    request: ResearchRequest::Capabilities {},
+                },
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            AgentResponseStatus::Completed,
+            "{response:?}"
+        );
+        let denied = dispatch(
+            &context,
+            &request(
+                AgentOperation::Trade {
+                    request: TradeRequest::Status {
+                        reference: "missing-intent".into(),
+                    },
+                },
+                Some("test-account"),
+            ),
+        )
+        .await;
+        rejection(
+            denied,
+            if invalid {
+                "FINANCE_FILE_FORMAT_UNKNOWN"
+            } else {
+                "FINANCE_INSTALLATION_NOT_INITIALIZED"
+            },
+        );
+        let diagnostic = DiagnosticsRequest {
+            view: Some(DiagnosticsView::Research),
+            reference: Some("a".repeat(64)),
+            account: None,
+            cycle_id: None,
+            limit: None,
+        };
+        let response = dispatch(
+            &context,
+            &request(
+                AgentOperation::Diagnostics {
+                    request: diagnostic.clone(),
+                },
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(response.status, AgentResponseStatus::Completed);
+        assert_eq!(
+            response.result.unwrap()["reason_code"],
+            "UNKNOWN_NOT_RETAINED"
+        );
+        let denied = dispatch(
+            &context,
+            &request(
+                AgentOperation::Diagnostics {
+                    request: diagnostic,
+                },
+                Some("test-account"),
+            ),
+        )
+        .await;
+        rejection(denied, "RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE");
+        assert_eq!(network.0.load(Ordering::Relaxed), 0);
+        context.research.shutdown().await;
+        if let Some(bytes) = before {
+            assert_eq!(std::fs::read(&finance_file).unwrap(), bytes);
+            assert_eq!(std::fs::read(&catalog).unwrap(), catalog_before.unwrap());
+        } else {
+            assert!(!root.join("finance").exists());
+            assert!(!catalog.exists());
+        }
+        assert!(!root.join("installation.json").exists());
+        drop(context);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[tokio::test]
@@ -147,6 +317,191 @@ async fn capabilities_and_mailbox_use_public_dispatch_without_external_effects()
         mailbox.result.unwrap(),
         json!({"contract":"okx.product/v1","installation_id":"query-dispatch-installation"})
     );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero_financial_effects()
+{
+    use crate::research_client::{ResearchClient, ResearchClientConfig};
+    use okx_protocol::{
+        analytics::{ResearchDecisionStatus, ResearchRequest},
+        research_ipc::ResearchScope,
+        trading::{DiagnosticsRequest, DiagnosticsView},
+    };
+    let mut fixture = Fixture::new(empty_reference()).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executable = std::env::var_os("OKX_RESEARCH_WORKER_TEST_EXE")
+        .map(PathBuf::from)
+        .expect("real worker executable must be built before process contracts");
+    use sha2::{Digest, Sha256};
+    let expected_worker_sha256 =
+        format!("{:x}", Sha256::digest(std::fs::read(&executable).unwrap()));
+    let research_root = fixture.root.join("public-research");
+    fixture.context.research = ResearchClient::new(
+        ResearchClientConfig {
+            executable,
+            root: research_root.clone(),
+            scope: ResearchScope::new("query-dispatch-installation".into()).unwrap(),
+        },
+        crate::research_dispatch_tests::candle_source(calls.clone()),
+    );
+    let mut request = crate::research_dispatch_tests::grid("public-dispatch-progress");
+    // A decision is scoped to one experiment, so use one instrument at this boundary.
+    if let ResearchRequest::Grid { instruments, .. } = &mut request {
+        instruments.truncate(1);
+    }
+    let queued = fixture
+        .request(
+            AgentOperation::Research {
+                request: request.clone(),
+            },
+            None,
+        )
+        .await;
+    assert_eq!(queued.status, AgentResponseStatus::Completed, "{queued:?}");
+    let id = queued.result.unwrap()["id"].as_str().unwrap().to_owned();
+    let complete = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let response = fixture
+                .request(
+                    AgentOperation::Research {
+                        request: ResearchRequest::Status { job_id: id.clone() },
+                    },
+                    None,
+                )
+                .await;
+            assert_eq!(
+                response.status,
+                AgentResponseStatus::Completed,
+                "{response:?}"
+            );
+            let job = response.result.unwrap();
+            match job["state"].as_str() {
+                Some("completed") => break job,
+                Some("failed" | "cancelled" | "interrupted") => {
+                    panic!("research did not complete: {job}")
+                }
+                _ => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await
+    .expect("bounded public research completion");
+    assert_eq!(complete["origin_invocation"], "query-dispatch-request-001");
+    assert_eq!(
+        complete["producer"]["binary_sha256"],
+        expected_worker_sha256
+    );
+    assert_eq!(complete["candidate_progress"]["completed_candidates"], 64);
+    assert_eq!(complete["candidate_progress"]["total_work_units"], 193);
+    let result = fixture
+        .request(
+            AgentOperation::Research {
+                request: ResearchRequest::Result {
+                    job_id: id.clone(),
+                    cursor: None,
+                    limit: 1,
+                    view: okx_protocol::analytics::ResearchResultView::Summary,
+                },
+            },
+            None,
+        )
+        .await;
+    assert_eq!(result.status, AgentResponseStatus::Completed, "{result:?}");
+    let result = result.result.unwrap();
+    assert_eq!(result["metadata"]["job_id"], id);
+    assert_eq!(
+        result["metadata"]["producer"]["binary_sha256"],
+        expected_worker_sha256
+    );
+    let result_id = complete["artifact"].as_str().unwrap().to_owned();
+    let record = ResearchRequest::RecordDecision {
+        job_id: id.clone(),
+        result_id,
+        expected_decision_id: None,
+        name: "Independent hypothesis".into(),
+        hypothesis: "Test a parameter grid".into(),
+        status: ResearchDecisionStatus::Deferred,
+        reason: "Await review".into(),
+    };
+    let recorded = fixture
+        .request(
+            AgentOperation::Research {
+                request: record.clone(),
+            },
+            None,
+        )
+        .await;
+    assert_eq!(
+        recorded.status,
+        AgentResponseStatus::Completed,
+        "{recorded:?}"
+    );
+    let decision = recorded.result.unwrap();
+    assert_eq!(decision["trading_authority"], false);
+    assert_eq!(
+        fixture
+            .request(AgentOperation::Research { request: record }, None)
+            .await
+            .result
+            .unwrap(),
+        decision
+    );
+    let calls_before = calls.load(Ordering::Relaxed);
+    let catalog =
+        rusqlite::Connection::open(research_root.join("research-catalog.sqlite")).unwrap();
+    catalog.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let changes_before = catalog.total_changes();
+    let request = DiagnosticsRequest {
+        reference: Some(id.clone()),
+        account: None,
+        view: Some(DiagnosticsView::Research),
+        cycle_id: None,
+        limit: None,
+    };
+    let observed = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        fixture.request(
+            AgentOperation::Diagnostics {
+                request: request.clone(),
+            },
+            None,
+        ),
+    )
+    .await
+    .expect("read-only diagnostic waited for catalog writer");
+    assert_eq!(
+        observed.status,
+        AgentResponseStatus::Completed,
+        "{observed:?}"
+    );
+    assert_eq!(observed.result.unwrap()["job"]["state"], "completed");
+    assert_eq!(catalog.total_changes(), changes_before);
+    let refused = fixture
+        .request(
+            AgentOperation::Diagnostics { request },
+            Some("another-account"),
+        )
+        .await;
+    rejection(refused, "RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE");
+    catalog.execute_batch("ROLLBACK").unwrap();
+    drop(catalog);
+    assert_eq!(calls.load(Ordering::Relaxed), calls_before);
+    fixture.context.research.shutdown().await;
+    let mut replay_request = crate::research_dispatch_tests::grid("public-dispatch-progress");
+    if let ResearchRequest::Grid { instruments, .. } = &mut replay_request {
+        instruments.truncate(1);
+    }
+    let replay = fixture
+        .request(
+            AgentOperation::Research {
+                request: replay_request,
+            },
+            None,
+        )
+        .await;
+    assert_eq!(replay.result.unwrap()["id"], id);
     fixture.finish().await;
 }
 
@@ -205,7 +560,7 @@ async fn instrument_search_routes_type_filter_before_public_limit() {
 
 #[tokio::test]
 async fn account_summary_checks_account_and_source_at_public_boundary() {
-    let mut fixture = Fixture::new(empty_reference()).await;
+    let fixture = Fixture::new(empty_reference()).await;
     rejection(
         fixture.request(AgentOperation::AccountSummary, None).await,
         "EXPLICIT_ACCOUNT_REQUIRED",
@@ -220,16 +575,20 @@ async fn account_summary_checks_account_and_source_at_public_boundary() {
     let (config, clients) = recorded_support::prepared("a", feed, RateBudget::new());
     fixture
         .context
-        .accounts
+        .finance
+        .accounts()
+        .unwrap()
         .connect_prepared(config.clone(), clients)
         .await
         .unwrap();
     // Freeze the source producer before varying its published input. This tests
     // the public consumer, not the exchange observer's separate freshness proof.
-    fixture.context.accounts.shutdown().await;
+    fixture.context.finance.accounts().unwrap().shutdown().await;
     let owner = fixture
         .context
-        .accounts
+        .finance
+        .accounts()
+        .unwrap()
         .resolve(&config.account_key.wire())
         .await
         .unwrap();
@@ -259,7 +618,7 @@ async fn account_summary_checks_account_and_source_at_public_boundary() {
             .await,
         "ACCOUNT_SOURCE_TIME_INVALID",
     );
-    snapshot.source_received_at = Utc::now().to_rfc3339();
+    snapshot.source_received_at = Timestamp::now().to_string();
     *owner.latest_snapshot.write().await = Some(snapshot.clone());
     let response = fixture
         .request(AgentOperation::AccountSummary, Some(&config.alias))
@@ -273,9 +632,16 @@ async fn account_summary_checks_account_and_source_at_public_boundary() {
         json!(original.balance.total_equity_usd)
     );
     assert_eq!(fixture.network.0.load(Ordering::Relaxed), 0);
-    assert!(fixture.risk.try_recv().is_err());
+    assert!(
+        fixture
+            .finance_owner
+            .configured_campaign(Instant::now() + std::time::Duration::from_secs(3),)
+            .await
+            .unwrap()
+            .is_none()
+    );
     drop(owner);
-    fixture.context.accounts.shutdown().await;
+    fixture.context.finance.accounts().unwrap().shutdown().await;
     let root = fixture.root.clone();
     drop(fixture);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -351,26 +717,8 @@ fn two_position_scenario() -> okx_protocol::trading::PortfolioScenarioRequest {
     }
 }
 
-// Compare existing files and their bytes as well as absence of new artifacts.
-fn fixture_artifacts(root: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
-    fn collect(root: &std::path::Path, dir: &std::path::Path, rows: &mut Vec<(PathBuf, Vec<u8>)>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                collect(root, &path, rows);
-            } else {
-                rows.push((
-                    path.strip_prefix(root).unwrap().to_owned(),
-                    std::fs::read(&path).unwrap(),
-                ));
-            }
-        }
-    }
-    let mut rows = Vec::new();
-    collect(root, root, &mut rows);
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    rows
-}
+// SQLite coordination bytes are not a durable financial-state fingerprint.
+use crate::accounts::tests::read_only_fixture_files as fixture_artifacts;
 
 #[tokio::test]
 async fn portfolio_scenario_public_dispatch_returns_independent_virtual_risk_values() {

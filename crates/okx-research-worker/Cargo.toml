@@ -1,0 +1,30 @@
+[package]
+name = "okx-research-worker"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.22"
+sha2 = "0.10"
+jiff = "1.0"
+futures-util = { version = "0.3", features = ["sink"] }
+bytes = "1"
+getrandom = "0.4"
+okx-analysis = { path = "../okx-analysis" }
+okx-kernel = { path = "../okx-kernel" }
+okx-protocol = { path = "../okx-protocol" }
+okx-research = { path = "../okx-research" }
+rusqlite = { version = "=0.41.0", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-std", "io-util", "process"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry"] }
+
+[dev-dependencies]
+okx-api = { path = "../okx-api" }
+okx-runtime = { path = "../okx-runtime" }
+reqwest = { version = "0.12", default-features = false }

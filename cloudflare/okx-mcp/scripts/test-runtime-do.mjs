@@ -333,6 +333,7 @@ function fixtureOpening(campaignStartedAt, asOf, accountKeys) {
 }
 let first, second, nativeCrashHost, nativeCrashWitness;
 async function runRuntimeFixture(){
+  throw Error("RETIRED_REMOTE_FINANCE_HARNESS: use test-native-finance-retirement-do.mjs and the Native Rust property collector");
 let nativeProcess = null;
 let nativeClose = null;
 let nativeSettled = false;

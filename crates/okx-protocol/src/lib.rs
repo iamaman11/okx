@@ -5,6 +5,7 @@ pub mod analytics;
 pub mod crypto;
 pub mod host_state_proto;
 pub mod numeric;
+pub mod research_ipc;
 pub mod risk_authority;
 pub mod trading;
 
@@ -380,6 +381,18 @@ pub enum DirectTransportFrame {
         agent_binary_sha256: String,
         agent_incarnation: String,
     },
+    /// Bearer-authenticated public/research namespace; scope is a claim, not key attestation.
+    HelloResearch {
+        schema: String,
+        runtime_id: String,
+        connection_id: String,
+        host_scope: String,
+        contract: String,
+        runtime_profile: DirectRuntimeProfile,
+        agent_pid: u32,
+        agent_binary_sha256: String,
+        agent_incarnation: String,
+    },
     HelloAck {
         schema: String,
         session_id: String,
@@ -494,6 +507,36 @@ impl DirectTransportFrame {
                 {
                     return Err(ProtocolError::InvalidDirectTransportToken);
                 }
+                validate_direct_token(runtime_id, 1, 64)?;
+                validate_direct_token(connection_id, 16, 128)
+            }
+            Self::HelloResearch {
+                schema,
+                runtime_id,
+                connection_id,
+                host_scope,
+                contract,
+                runtime_profile: _,
+                agent_pid,
+                agent_binary_sha256,
+                agent_incarnation,
+            } => {
+                validate_direct_schema(schema)?;
+                if *agent_pid == 0
+                    || contract != accounts::PRODUCT_CONTRACT
+                    || host_scope.len() != 64
+                    || !host_scope
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    || agent_incarnation.len() != 36
+                    || !agent_incarnation.starts_with("ctl_")
+                    || !agent_incarnation[4..]
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                {
+                    return Err(ProtocolError::InvalidDirectTransportToken);
+                }
+                validate_sha256(agent_binary_sha256)?;
                 validate_direct_token(runtime_id, 1, 64)?;
                 validate_direct_token(connection_id, 16, 128)
             }
@@ -614,6 +657,7 @@ impl DirectTransportFrame {
     pub fn schema(&self) -> &str {
         match self {
             Self::Hello { schema, .. }
+            | Self::HelloResearch { schema, .. }
             | Self::HelloAck { schema, .. }
             | Self::Ping { schema, .. }
             | Self::Pong { schema, .. }
@@ -676,6 +720,11 @@ pub enum HostControlOperation {
     Sync,
     BuildAgent,
     DeployAgent {
+        run_id: u64,
+        artifact_id: u64,
+        expected_source_tree: String,
+    },
+    DeployResearch {
         run_id: u64,
         artifact_id: u64,
         expected_source_tree: String,
@@ -786,6 +835,11 @@ impl HostControlOperation {
                 }
             }
             Self::DeployAgent {
+                run_id,
+                artifact_id,
+                expected_source_tree,
+            }
+            | Self::DeployResearch {
                 run_id,
                 artifact_id,
                 expected_source_tree,

@@ -1,5 +1,6 @@
 use super::*;
 use crate::execution_store::ExecutionStore;
+use std::str::FromStr;
 
 // Conservative bound for OKX's short-lived canceled/unfilled order
 // history. An expired archive cannot establish absence of lost POSTs.
@@ -95,6 +96,7 @@ fn recovery_generation(expected: u64, actual: u64, ready: bool) -> Result<(), St
     }
     Ok(())
 }
+#[cfg(test)]
 fn commit_recovery(
     store: &mut okx_execution::AccountStore,
     local: &okx_execution::RecoverySnapshot,
@@ -183,7 +185,7 @@ impl TradeService {
             .complete_campaign_account_history(
                 backup,
                 started,
-                chrono::Utc::now().timestamp_millis(),
+                jiff::Timestamp::now().as_millisecond(),
             )
             .await
             .map_err(|_| "STORAGE_RECOVERY_ACCOUNT_HISTORY_NOT_PROVEN")?;
@@ -198,7 +200,10 @@ impl TradeService {
                 .store
                 .lookup_intent(
                     deadline(),
-                    okx_execution::TradeIntentLookup::ClientOrderId(client),
+                    crate::execution_store::IntentLookup::new(
+                        okx_execution::TradeIntentLookup::ClientOrderId(client),
+                    )
+                    .map_err(err)?,
                 )
                 .await
                 .map_err(err)?
@@ -324,7 +329,10 @@ impl TradeService {
                 .store
                 .lookup_intent(
                     deadline(),
-                    okx_execution::TradeIntentLookup::ClientOrderId(client),
+                    crate::execution_store::IntentLookup::new(
+                        okx_execution::TradeIntentLookup::ClientOrderId(client),
+                    )
+                    .map_err(err)?,
                 )
                 .await
                 .map_err(err)?
@@ -364,7 +372,13 @@ impl TradeService {
             let intent = r
                 .execution
                 .store
-                .lookup_intent(deadline(), okx_execution::TradeIntentLookup::IntentId(id))
+                .lookup_intent(
+                    deadline(),
+                    crate::execution_store::IntentLookup::new(
+                        okx_execution::TradeIntentLookup::IntentId(id),
+                    )
+                    .map_err(err)?,
+                )
                 .await
                 .map_err(err)?
                 .ok_or("STORAGE_RECOVERY_INTENT_MISSING")?;
@@ -448,10 +462,9 @@ impl TradeService {
             protections,
         )?;
         let observed = now();
-        let account_received =
-            chrono::DateTime::parse_from_rfc3339(&fresh_snapshot.source_received_at)
-                .map_err(|_| "STORAGE_RECOVERY_ACCOUNT_TIME_INVALID")?
-                .timestamp_millis();
+        let account_received = jiff::Timestamp::from_str(&fresh_snapshot.source_received_at)
+            .map_err(|_| "STORAGE_RECOVERY_ACCOUNT_TIME_INVALID")?
+            .as_millisecond();
         recovery_fresh(observed, account_received)?;
         recovery_fresh(
             observed,
@@ -517,7 +530,9 @@ impl TradeService {
         let evidence = digest(
             &json!({"central":central,"storage_gate_only":true,"post_requires_fresh_all_account_reserve":true,"local_cumulative_loss_usd":exact(local.cumulative_loss_usd)}),
         )?;
-        if let Some((owner, account)) = r.execution.store.native_scope() {
+        {
+            let (owner, account) = r.execution.store.scope();
+
             return owner
                 .commit_storage_recovery(
                     deadline(),
@@ -537,53 +552,24 @@ impl TradeService {
                 .await
                 .map_err(err);
         }
-        r.execution
-            .store
-            .call(deadline(), move |s| {
-                if s.cursor("account_snapshot", "account")?
-                    .is_none_or(|c| c.generation != generation as i64)
-                {
-                    return Err(okx_execution::StoreError::Invalid(
-                        "STORAGE_RECOVERY_GENERATION_CHANGED",
-                    ));
-                }
-                commit_recovery(s, &local, &central, proof_floor, &exchange, &evidence)
-            })
-            .await
-            .map_err(err)
+        // The historical standalone SQL store is not a production recovery
+        // backend. A missing Native owner cannot clear a recovery gate.
     }
 }
 
 async fn recovery_snapshot(
     store: &ExecutionStore,
 ) -> Result<okx_execution::RecoverySnapshot, String> {
-    if let Some((owner, account)) = store.native_scope() {
-        owner
-            .recovery_snapshot(deadline(), account.to_owned())
-            .await
-            .map_err(err)
-    } else {
-        store
-            .call(deadline(), |s| s.recovery_snapshot(now()))
-            .await
-            .map_err(err)
-    }
+    store.recovery_snapshot(deadline()).await.map_err(err)
 }
 async fn recovery_ingest(
     store: &ExecutionStore,
     page: okx_execution::IngestPage,
 ) -> Result<(), String> {
-    if let Some((owner, account)) = store.native_scope() {
-        owner
-            .ingest_source_page(account.to_owned(), page)
-            .await
-            .map_err(err)
-    } else {
-        store
-            .call(deadline(), move |s| s.ingest_page(&page))
-            .await
-            .map_err(err)
-    }
+    store
+        .ingest_source_page(deadline(), page)
+        .await
+        .map_err(err)
 }
 async fn recovery_position_owner(
     store: &ExecutionStore,
@@ -595,19 +581,10 @@ async fn recovery_position_owner(
     ),
     String,
 > {
-    if let Some((owner, account)) = store.native_scope() {
-        owner
-            .recovery_position_owner(deadline(), account.to_owned(), id)
-            .await
-            .map_err(err)
-    } else {
-        store
-            .call(deadline(), move |s| {
-                Ok((s.protection(&id)?, s.intent(&id)?))
-            })
-            .await
-            .map_err(err)
-    }
+    store
+        .recovery_position_owner(deadline(), id)
+        .await
+        .map_err(err)
 }
 
 #[cfg(test)]

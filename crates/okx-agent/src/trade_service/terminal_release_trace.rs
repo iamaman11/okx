@@ -1,7 +1,7 @@
 //! Bounded, volatile observations of the existing terminal-release owner.
 //! Nothing in this projection grants risk, reconstructs an ACK, or reads SQL.
 use super::terminal_release::TerminalReleaseStage;
-use chrono::Utc;
+use jiff::Timestamp;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -130,7 +130,7 @@ impl TerminalReleaseTrace {
                     outcome: "restored_durable",
                     reason_code: None,
                     first_observed_blocker: None,
-                    observed_at_ms: Utc::now().timestamp_millis(),
+                    observed_at_ms: Timestamp::now().as_millisecond(),
                     invocation: None,
                     facts: ReleaseFacts {
                         durable_receipt_state: Some(receipt.receipt_state),
@@ -211,7 +211,7 @@ impl TerminalReleaseTrace {
                 self.evicted.fetch_add(1, Ordering::Relaxed);
             }
         }
-        let now = Utc::now().timestamp_millis();
+        let now = Timestamp::now().as_millisecond();
         let reason = reason.map(|s| {
             let code = s.split(':').next().unwrap_or("");
             if !code.is_empty()
@@ -296,7 +296,7 @@ impl TerminalReleaseTrace {
             health["durable_state"] = json!("OBSERVED_AT_STARTUP_NOT_CURRENT_READ");
         }
         json!({"state":"OBSERVED","snapshot":row,"trace_health":health,
-            "age_ms":Utc::now().timestamp_millis().saturating_sub(row.observed_at_ms).max(0),
+            "age_ms":Timestamp::now().as_millisecond().saturating_sub(row.observed_at_ms).max(0),
             "quality":"partial","next_action":match row.outcome {
                 "running"=>"wait_for_owner_or_inspect_missing_source",
                 "blocked"=>"obtain_required_evidence_then_trade.status",

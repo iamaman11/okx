@@ -23,7 +23,7 @@ async fn risk_book_contract_native_changed_post_held_fee_releases_unsent_and_rep
         .planning_fee_skip
         .store(2, Ordering::SeqCst);
     *fixture.market_boundary.planning_fee_gate.lock().unwrap() = Some(gate.clone());
-    let initial_at = chrono::Utc::now().timestamp_millis().to_string();
+    let initial_at = jiff::Timestamp::now().as_millisecond().to_string();
     record_fee(&fixture.feed, &initial_at); // actual plan fee
     record_leverage(&fixture.feed); // actual plan leverage
     record_leverage(&fixture.feed); // independently signed pre-reserve leverage
@@ -112,7 +112,7 @@ async fn risk_book_contract_native_changed_post_held_fee_releases_unsent_and_rep
 
     // A new source event is delivered only after we observed the real durable
     // reservation. No timestamps, plan, NAV, policy or stored quote are edited.
-    let changed_at = chrono::Utc::now().timestamp_millis();
+    let changed_at = jiff::Timestamp::now().as_millisecond();
     assert!(changed_at >= quote.fee_exchange_at);
     fixture.feed.expect_get(RecordedGet {
         access_key: "fixture-observer-a".into(),
@@ -281,9 +281,11 @@ async fn risk_book_contract_native_changed_post_held_fee_releases_unsent_and_rep
             account.clone(),
             fixture.campaign.clone(),
             released.campaign_started_at_ms.unwrap() as i64,
-            source
-                .watermark
-                .min(chrono::Utc::now().timestamp_millis().saturating_sub(2_000)),
+            source.watermark.min(
+                jiff::Timestamp::now()
+                    .as_millisecond()
+                    .saturating_sub(2_000),
+            ),
         )
         .await
         .expect("real maintenance before independent replan");
@@ -305,7 +307,7 @@ async fn risk_book_contract_native_changed_post_held_fee_releases_unsent_and_rep
     super::filled_fixture::snapshot(&fixture.feed, "100", "0"); // pre-reserve census
     super::filled_fixture::snapshot(&fixture.feed, "100", "0"); // conversion
     super::filled_fixture::snapshot(&fixture.feed, "100", "0"); // post-HELD
-    let at = chrono::Utc::now().timestamp_millis().to_string();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":at}])));

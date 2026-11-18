@@ -2,59 +2,47 @@
 //! Inputs are independent inventory/position observations, not success flags.
 //! These tests exercise the exact durable decision called by TradeService.
 use super::*;
+use crate::accounts::native_trade_contracts::fixture::{self as native, NativeFixture};
 use okx_api::{PendingDerivativeAlgoRiskInventory, PendingProtectiveAlgoSample};
-use okx_execution::{AccountMeta, OpeningSnapshot};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-static SERIAL: AtomicUsize = AtomicUsize::new(0);
 const INST: &str = "BTC-USDT-SWAP";
 const ALGO: &str = "owned-protection-001";
-const UID: &str = "verified-account-a";
 
 struct Fixture {
     store: ExecutionStore,
-    db: std::path::PathBuf,
-    account_key: String,
+    native: NativeFixture,
 }
 async fn fixture() -> Fixture {
-    let n = SERIAL.fetch_add(1, Ordering::SeqCst);
-    let root =
-        std::env::temp_dir().join(format!("okx-pc-500-{}-{}-{}", std::process::id(), now(), n));
-    std::fs::create_dir_all(&root).unwrap();
-    let db = root.join("account.db");
-    let account_key = "okx:real:verified-account-a".to_owned();
-    // The same immutable opening observation must initialize metadata and
-    // the balance snapshot. Computing now() twice can cross a millisecond
-    // boundary under parallel Windows tests and fail the real SQL evidence
-    // identity check before this protection test begins.
-    let opening_at = now() - 10_000;
-    let store = AccountStoreHandle::initialize_flat(
-        db.clone(),
-        AccountMeta {
-            account_key: account_key.clone(),
-            installation_id: "installation_test".into(),
-            initialized_at: opening_at,
-            opening_source: "opening_observation".into(),
-            initialize_operation_id: format!("pc_initialize_{n}"),
-            release_id: "a".repeat(40),
-        },
-        OpeningSnapshot {
-            source_ref: "opening_observation".into(),
-            observed_at: opening_at,
-            opening_equity_usd: Decimal::from(100),
-            positions: 0,
-            orders: 0,
-            conditional_orders: 0,
-            liabilities: Decimal::ZERO,
-            balances: vec![("USD".into(), Decimal::from(100))],
-        },
-    )
+    let native = native::fixture().await;
+    let (shutdown, stopped) = tokio::sync::watch::channel(false);
+    let service = native.trade.clone();
+    let task = tokio::spawn(async move { service.run(stopped).await });
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            if native
+                .owner
+                .campaign_summary(native.campaign.clone())
+                .await
+                .unwrap()
+                .opening
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
     .await
-    .unwrap();
-    Fixture {
-        store: store.into(),
-        db,
-        account_key,
+    .expect("production maintenance establishes the campaign opening");
+    shutdown.send(true).unwrap();
+    task.await.unwrap();
+    let store = native._account.execution.store.clone();
+    Fixture { store, native }
+}
+impl Fixture {
+    async fn finish(self) {
+        let Self { store, native } = self;
+        drop(store);
+        native.finish().await;
     }
 }
 fn inventory(
@@ -87,9 +75,11 @@ fn positions(qty: &str) -> Vec<(String, String)> {
     vec![(INST.into(), qty.into())]
 }
 async fn operation(store: &ExecutionStore, key: &str) -> okx_execution::OperationReceipt {
-    let key = key.to_owned();
     store
-        .call(deadline(), move |s| s.operation(&key))
+        .operation(
+            deadline(),
+            crate::execution_store::OperationId::new(key.to_owned()).unwrap(),
+        )
         .await
         .unwrap()
         .unwrap()
@@ -104,6 +94,8 @@ async fn readback(
     qty: &str,
 ) -> Result<(), String> {
     let positions = positions(qty);
+    let (_, account) = store.scope();
+    let expected_uid = account.rsplit(':').next().unwrap();
     protection_cleanup_readback(
         store,
         ProtectionCleanupIdentity {
@@ -111,7 +103,7 @@ async fn readback(
             hash,
             instrument_id: INST,
             algo_id: ALGO,
-            expected_uid: UID,
+            expected_uid,
         },
         ProtectionCleanupObservation {
             inventory,
@@ -140,7 +132,7 @@ async fn pc_01_first_send_complete_readback_and_replay_are_idempotent() {
         "pc-01",
         "hash-01",
         &signed,
-        UID,
+        &f.native.config.account_key.verified_uid,
         begin.committed_at + 1000,
         "0",
     )
@@ -156,6 +148,7 @@ async fn pc_01_first_send_complete_readback_and_replay_are_idempotent() {
             .unwrap(),
         ProtectionCleanupStep::Confirmed
     );
+    f.finish().await;
 }
 
 #[tokio::test]
@@ -181,7 +174,7 @@ async fn pc_02_lost_ack_requires_signed_proof_without_second_send() {
             "pc-02",
             "hash-02",
             &still_live,
-            UID,
+            &f.native.config.account_key.verified_uid,
             begun.committed_at + 1000,
             "0"
         )
@@ -196,7 +189,7 @@ async fn pc_02_lost_ack_requires_signed_proof_without_second_send() {
         "pc-02",
         "hash-02",
         &gone,
-        UID,
+        &f.native.config.account_key.verified_uid,
         begun.committed_at + 2000,
         "0",
     )
@@ -208,6 +201,7 @@ async fn pc_02_lost_ack_requires_signed_proof_without_second_send() {
             .unwrap(),
         ProtectionCleanupStep::Confirmed
     );
+    f.finish().await;
 }
 
 #[tokio::test]
@@ -227,7 +221,7 @@ async fn pc_03_incomplete_and_stale_observations_leave_sql_posting() {
             "pc-03",
             "hash-03",
             &incomplete,
-            UID,
+            &f.native.config.account_key.verified_uid,
             begun.committed_at + 1000,
             "0"
         )
@@ -242,7 +236,7 @@ async fn pc_03_incomplete_and_stale_observations_leave_sql_posting() {
             "pc-03",
             "hash-03",
             &stale,
-            UID,
+            &f.native.config.account_key.verified_uid,
             begun.committed_at + 1000,
             "0"
         )
@@ -251,6 +245,7 @@ async fn pc_03_incomplete_and_stale_observations_leave_sql_posting() {
         "PROTECTION_CANCEL_READBACK_STALE"
     );
     assert_eq!(operation(&f.store, "pc-03").await.result_ref, "POSTING");
+    f.finish().await;
 }
 
 #[tokio::test]
@@ -289,7 +284,7 @@ async fn pc_04_foreign_identity_wrong_algo_scope_and_late_exposure_fail_closed()
             "pc-04",
             "hash-04",
             &foreign_algo,
-            UID,
+            &f.native.config.account_key.verified_uid,
             begun.committed_at + 1000,
             "0"
         )
@@ -303,7 +298,7 @@ async fn pc_04_foreign_identity_wrong_algo_scope_and_late_exposure_fail_closed()
             "pc-04",
             "hash-04",
             &signed,
-            UID,
+            &f.native.config.account_key.verified_uid,
             begun.committed_at + 1000,
             "1"
         )
@@ -311,6 +306,7 @@ async fn pc_04_foreign_identity_wrong_algo_scope_and_late_exposure_fail_closed()
         .is_err()
     );
     assert_eq!(operation(&f.store, "pc-04").await.result_ref, "POSTING");
+    f.finish().await;
 }
 
 #[tokio::test]
@@ -323,23 +319,27 @@ async fn pc_05_restart_recovers_the_same_sql_begin_without_new_send() {
         ProtectionCleanupStep::SendOnce
     );
     let begin = operation(&f.store, "pc-05").await;
-    let db = f.db.clone();
-    let account_key = f.account_key.clone();
-    let mut terminated = f.store.termination_signal();
+    let root = f.native.root.clone();
+    let installation = f.native.owner.installation_id().to_owned();
+    let account_key = f.native.config.account_key.clone();
+    let verified_uid = f.native.config.account_key.verified_uid.clone();
+    f.native.registry.shutdown().await;
+    let mut terminated = f.native.owner.termination_signal();
     drop(f);
-    // Do not race a second account owner against the first SQL writer.
-    // The worker signals termination only AFTER closing SQLite and releasing
-    // its exclusive writer lease; restart must wait for that real boundary.
-    tokio::time::timeout(std::time::Duration::from_secs(5), terminated.changed())
-        .await
-        .expect("PC-05 previous SQL writer did not terminate")
-        .expect("PC-05 SQL termination witness dropped");
-    assert!(*terminated.borrow(), "PC-05 SQL owner still alive");
-    let reopened: ExecutionStore =
-        AccountStoreHandle::open_existing(db, account_key, "installation_test".into())
-            .await
-            .unwrap()
-            .into();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        terminated.wait_for(|v| *v),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let owner = okx_execution::account_worker::UnifiedFinanceHandle::open_native(
+        root.clone(),
+        installation,
+    )
+    .await
+    .unwrap();
+    let reopened = ExecutionStore::native(owner, account_key).unwrap();
     assert_eq!(
         protection_cleanup_step(&reopened, "pc-05", "hash-05")
             .await
@@ -352,7 +352,7 @@ async fn pc_05_restart_recovers_the_same_sql_begin_without_new_send() {
         "pc-05",
         "hash-05",
         &inventory,
-        UID,
+        &verified_uid,
         begin.committed_at + 1000,
         "0",
     )
@@ -368,6 +368,17 @@ async fn pc_05_restart_recovers_the_same_sql_begin_without_new_send() {
             .unwrap(),
         ProtectionCleanupStep::Confirmed
     );
+    let (owner, _) = reopened.scope();
+    let mut terminated = owner.termination_signal();
+    drop(reopened);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        terminated.wait_for(|v| *v),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
@@ -398,7 +409,7 @@ async fn pc_06_two_callers_share_one_begin_and_old_read_never_confirms() {
             "pc-06",
             "hash-06",
             &previously_started,
-            UID,
+            &f.native.config.account_key.verified_uid,
             begin.committed_at + 1000,
             "0"
         )
@@ -413,7 +424,7 @@ async fn pc_06_two_callers_share_one_begin_and_old_read_never_confirms() {
         "pc-06",
         "hash-06",
         &later,
-        UID,
+        &f.native.config.account_key.verified_uid,
         begin.committed_at + 2000,
         "0",
     )
@@ -423,21 +434,100 @@ async fn pc_06_two_callers_share_one_begin_and_old_read_never_confirms() {
         operation(&f.store, "pc-06").await.result_ref,
         "VERIFIED_CANCELED"
     );
+    f.finish().await;
 }
 
 #[tokio::test]
 async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     use crate::account_bootstrap::AccountBootstrapper;
+    use crate::accounts::native_trade_contracts::filled_fixture as filled;
     use crate::accounts::recorded_support::{RecordedAccountHttp, RecordedGet, RecordedPost};
     use okx_api::{
         Credentials, HttpTransport, OkxEnvironment, OkxRestClient, RateBudget, Region, TradeApi,
     };
-    use okx_execution::{Decision, IntentPlan, NewIntent};
+    use okx_protocol::trading::TradeRequest;
     use std::sync::Arc;
 
     const WIRE_ALGO: &str = "900000002";
     const WIRE_UID: &str = "account-001";
-    let f = fixture().await;
+    let mut f = native::fixture().await;
+    let (market_stop, market_task, _socket, _public) = filled::opened_market(&mut f).await;
+    let account = f._account.clone();
+    let at = jiff::Timestamp::now().as_millisecond().to_string();
+    f.feed
+        .expect_public_clock(native::envelope(serde_json::json!([{"ts":at}])));
+    native::record_fee(&f.feed, &at);
+    native::record_leverage(&f.feed);
+    native::record_leverage(&f.feed);
+    native::record_fee(&f.feed, &at);
+    native::record_fee(&f.feed, &at);
+    native::record_leverage(&f.feed);
+    f.feed.expect_post(RecordedPost {
+        access_key: "fixture-executor-a".into(), path: "/api/v5/trade/order".into(),
+        expected_body: serde_json::json!({"instId":INST,"tdMode":"cross","clOrdId":"__REQUEST_CL_ORD_ID__",
+            "side":"buy","posSide":"long","ordType":"limit","sz":"0.1","px":"1000",
+            "attachAlgoOrds":[{"attachAlgoClOrdId":"__REQUEST_ATTACH_ALGO_ID__","tpTriggerPxType":"mark",
+                "slTriggerPx":"900","slTriggerPxType":"mark","slOrdPx":"-1"}]}),
+        raw_response: native::envelope(serde_json::json!([{"ordId":filled::OPEN_ORDER,"clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}]))
+    });
+    f.feed.arm_lost_next_create_ack();
+    let mut request = native::execute();
+    if let TradeRequest::Execute { expires_in_ms, .. } = &mut request {
+        *expires_in_ms = 10_000;
+    }
+    let result = f
+        .trade
+        .trade(&f.config.alias, &request, Some(&f.authority))
+        .await
+        .unwrap();
+    assert_eq!(result["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN");
+    let entry = result["intent_id"].as_str().unwrap().to_owned();
+    let timer_capture = account.recorded_capture_gate.write().await;
+    let opened_at = jiff::Timestamp::now().as_millisecond();
+    filled::snapshot(&f.feed, "99.9995", "0.1");
+    filled::history(
+        &f.feed,
+        Some((filled::OPEN_ORDER, "native-open-fill", "buy", opened_at)),
+    );
+    filled::capture(&f).await;
+    let stored = f
+        .owner
+        .lookup_intent(
+            f.config.account_key.wire(),
+            okx_execution::TradeIntentLookup::Reference(entry.clone()),
+            deadline(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let stop_client = format!("s{}", &stored.client_order_id[..31]);
+    filled::order(&f.feed, filled::OPEN_ORDER, "buy", opened_at);
+    filled::protection(&f.feed, &stop_client);
+    filled::snapshot(&f.feed, "99.9995", "0.1");
+    filled::snapshot(&f.feed, "99.9995", "0.1");
+    filled::history(&f.feed, None);
+    let status = f
+        .trade
+        .trade(
+            &f.config.alias,
+            &TradeRequest::Status { reference: entry },
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(status["data"]["intent"]["state"], "FILLED");
+    assert!(
+        f.owner
+            .protection(
+                deadline(),
+                f.config.account_key.wire(),
+                stored.intent_id.clone()
+            )
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let store = account.execution.store.clone();
     let feed = Arc::new(RecordedAccountHttp::default());
     let raw = |data: serde_json::Value| {
         serde_json::to_vec(&serde_json::json!({
@@ -526,77 +616,11 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     .unwrap();
     let trade = TradeApi::new(executor.clone());
     let expected_uid = okx_api::account_uid_fingerprint(WIRE_UID);
-    // Persist the actual intent and attached protection before cleanup.
-    // A test-provided receipt cannot substitute for SQL ownership.
-    let definition = f
-        .store
-        .call(deadline(), |s| {
-            s.apply_authority_policy(1, false, "pc07", Decimal::from(20))?;
-            s.ensure_manual_instance(now())
-        })
-        .await
-        .unwrap();
-    let plan = IntentPlan {
-        strategy_definition_id: definition.definition_id,
-        strategy_definition_version: definition.version,
-        strategy_parameters_digest: definition.parameters_digest,
-        operation: "open".into(),
-        side: "buy".into(),
-        position_side: "long".into(),
-        quantity: Decimal::new(3, 1),
-        limit_price: Decimal::from(1000),
-        stop_price: Some(Decimal::from(900)),
-        strategy_instance: "manual".into(),
-        planned_loss_usd: Decimal::from(1),
-        source_generation: 1,
-        private_source_generation: 1,
-        contract_value: Decimal::ONE,
-        inverse: false,
-        settlement_currency: "USDT".into(),
-    };
-    let decision = Decision {
-        decision_id: "pc07-decision".into(),
-        instance_id: None,
-        decision_at: now() - 100,
-        input_digest: "a".repeat(64),
-        policy_revision: 1,
-        code_version: "pc07".into(),
-    };
-    let candidate = NewIntent {
-        plan,
-        intent_id: "pc07-owned-intent".into(),
-        idempotency_key: "pc07-command".into(),
-        request_hash: "a".repeat(64),
-        client_order_id: "12345678901234567890123456789012".into(),
-        deadline: now() + 30_000,
-        plan_hash: "b".repeat(64),
-        policy_revision: 1,
-        risk_increase: true,
-        instrument_id: INST.into(),
-    };
-    let stored = f
-        .store
-        .call(deadline(), move |s| {
-            let intent = s.prepare(&decision, &candidate)?;
-            s.verify_protection(&okx_execution::ProtectionReceipt {
-                intent_id: intent.intent_id.clone(),
-                algo_id: WIRE_ALGO.into(),
-                side: "sell".into(),
-                quantity: Decimal::new(3, 1),
-                trigger_price: Decimal::from(900),
-                trigger_basis: "mark".into(),
-                verified_at: now(),
-                source_digest: "pc07-signed-algo-source".into(),
-            })?;
-            Ok(intent)
-        })
-        .await
-        .unwrap();
-
+    assert_eq!(expected_uid, f.config.account_key.verified_uid);
     let capacity = tokio::sync::Semaphore::new(1);
     let trace = crate::diagnostics::ProtectionOperationTrace::default();
     let dependencies = CleanupDependencies {
-        store: &f.store,
+        store: &store,
         observer: &observer,
         trade: &trade,
         clock: &executor,
@@ -626,7 +650,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     };
     cleanup_flat_protection(
         CleanupDependencies {
-            store: &f.store,
+            store: &store,
             observer: &observer,
             trade: &trade,
             clock: &executor,
@@ -640,18 +664,17 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     .unwrap();
     assert!(feed.outbound_posts.lock().unwrap().is_empty());
     let sql_key = format!("cleanup_{}", stored.client_order_id);
-    let sql_none = f
-        .store
-        .call(deadline(), {
-            let sql_key = sql_key.clone();
-            move |s| s.operation(&sql_key)
-        })
+    let sql_none = store
+        .operation(
+            deadline(),
+            crate::execution_store::OperationId::new(sql_key.clone()).unwrap(),
+        )
         .await
         .unwrap();
     assert!(sql_none.is_none(), "live order cannot begin cancel SQL");
 
     feed.expect_public_clock(raw(serde_json::json!([{
-        "ts": chrono::Utc::now().timestamp_millis().to_string()
+        "ts": jiff::Timestamp::now().as_millisecond().to_string()
     }])));
     // A signed GET which started before ACK must retain its old bytes
     // even when the actual transport finishes delivering them after ACK.
@@ -679,7 +702,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
         cleanup_flat_protection(dependencies, order),
         cleanup_flat_protection(
             CleanupDependencies {
-                store: &f.store,
+                store: &store,
                 observer: &observer,
                 trade: &trade,
                 clock: &executor,
@@ -715,7 +738,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     assert_eq!(old_bytes["data"][0]["algoId"], WIRE_ALGO);
 
     assert_eq!(
-        operation(&f.store, &sql_key).await.result_ref,
+        operation(&store, &sql_key).await.result_ref,
         "VERIFIED_CANCELED"
     );
     let explanation = trace.read(&sql_key).unwrap();
@@ -736,7 +759,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     }));
     cleanup_flat_protection(
         CleanupDependencies {
-            store: &f.store,
+            store: &store,
             observer: &observer,
             trade: &trade,
             clock: &executor,
@@ -748,12 +771,14 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     )
     .await
     .unwrap();
-    let sends = feed.outbound_posts.lock().unwrap();
-    assert_eq!(sends.len(), 1, "repeated public cleanup cannot repost");
-    assert_eq!(sends[0].0, "fixture-executor-a");
-    assert_eq!(sends[0].1, "/api/v5/trade/cancel-algos");
-    assert_eq!(sends[0].2[0]["algoId"], WIRE_ALGO);
-    assert!(feed.denied_routes.lock().unwrap().is_empty());
+    {
+        let sends = feed.outbound_posts.lock().unwrap();
+        assert_eq!(sends.len(), 1, "repeated public cleanup cannot repost");
+        assert_eq!(sends[0].0, "fixture-executor-a");
+        assert_eq!(sends[0].1, "/api/v5/trade/cancel-algos");
+        assert_eq!(sends[0].2[0]["algoId"], WIRE_ALGO);
+        assert!(feed.denied_routes.lock().unwrap().is_empty());
+    }
     let explanation = trace.read(&sql_key).unwrap();
     assert!(explanation["snapshot"]["parent_invocation"].is_null());
     assert_eq!(
@@ -764,4 +789,10 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
         explanation["snapshot"]["last_observed_origin"],
         "agent_request.trade.status"
     );
+    drop(timer_capture);
+    drop(account);
+    drop(store);
+    market_stop.send(true).unwrap();
+    market_task.await.unwrap();
+    f.finish().await;
 }

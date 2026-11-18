@@ -1,5 +1,76 @@
 use super::*;
 use okx_api::MarginMode;
+#[cfg(test)]
+use okx_execution::instance_nav_gate;
+use std::str::FromStr;
+
+/// The retry category is assigned only at the source that observed it.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PlanningError {
+    Source(PlanningSourceFailure),
+    Other(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PlanningSourceFailure {
+    AccountGenerationUnverified,
+    AccountEvidenceExpired,
+    FinancialIncompleteOrStale,
+    PrivateGenerationChanged,
+    PublicGenerationChanged,
+}
+
+impl PlanningError {
+    pub(super) fn retryable_source(&self) -> bool {
+        matches!(self, Self::Source(_))
+    }
+
+    pub(super) fn into_reason(self) -> String {
+        match self {
+            Self::Other(reason) => reason,
+            Self::Source(source) => match source {
+                PlanningSourceFailure::AccountGenerationUnverified => {
+                    "ACCOUNT_SOURCE_GENERATION_UNVERIFIED"
+                }
+                PlanningSourceFailure::AccountEvidenceExpired => {
+                    "ACCOUNT_EVIDENCE_EXPIRED_DURING_PLAN"
+                }
+                PlanningSourceFailure::FinancialIncompleteOrStale => {
+                    "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE"
+                }
+                PlanningSourceFailure::PrivateGenerationChanged => {
+                    "PRIVATE_SOURCE_GENERATION_CHANGED"
+                }
+                PlanningSourceFailure::PublicGenerationChanged => {
+                    "PUBLIC_SOURCE_GENERATION_CHANGED"
+                }
+            }
+            .to_owned(),
+        }
+    }
+}
+
+impl From<String> for PlanningError {
+    fn from(reason: String) -> Self {
+        Self::Other(reason)
+    }
+}
+
+impl From<&str> for PlanningError {
+    fn from(reason: &str) -> Self {
+        Self::Other(reason.to_owned())
+    }
+}
+
+// The financial owner exposes this source failure as a typed store error.
+fn financial_admission_error(error: okx_execution::StoreError) -> PlanningError {
+    match error {
+        okx_execution::StoreError::Invalid("FINANCIAL_SOURCE_INCOMPLETE_OR_STALE") => {
+            PlanningError::Source(PlanningSourceFailure::FinancialIncompleteOrStale)
+        }
+        other => PlanningError::Other(err(other)),
+    }
+}
 
 /// Select the actual venue price before calculating stop, size or reserving risk.
 ///
@@ -145,9 +216,6 @@ pub(super) fn requires_independent_strategy_nav(instance: &str) -> bool {
     instance != "manual"
 }
 
-#[cfg(test)]
-use okx_execution::instance_nav_gate;
-
 /// Read-only position count from the actual account snapshot. Malformed sizes must
 /// not be interpreted as a flat account; algos and unknown intents are separate.
 pub(super) fn visible_nonzero_position_count<'a>(
@@ -174,7 +242,7 @@ impl TradeService {
         protection: Option<&Protection>,
         until: Instant,
         record_risk_state: bool,
-    ) -> Result<IntentPlan, String> {
+    ) -> Result<IntentPlan, PlanningError> {
         let increase = matches!(
             operation,
             TradeOperation::Open | TradeOperation::Add | TradeOperation::Replace
@@ -196,6 +264,12 @@ impl TradeService {
                     .map_err(err)?,
             )
         } else {
+            // A restarted owner has no reference yet. Acquire it once for
+            // reductions, without refreshing an already available stale source.
+            self.public_ws
+                .ensure_reference_available(until)
+                .await
+                .map_err(err)?;
             None
         };
         // Subscribe before the first predicate read: an observation arriving
@@ -214,7 +288,7 @@ impl TradeService {
                     now() as u64,
                     crate::config::QUOTE_MAX_AGE_MS,
                     crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
-                    Utc::now().to_rfc3339(),
+                    Timestamp::now().to_string(),
                 )
                 .await
             {
@@ -247,16 +321,18 @@ impl TradeService {
             return Err("INSTRUMENT_RULES_OR_GENERATION_UNSUPPORTED".into());
         }
         if increase && !r.source_identity_ready().await {
-            return Err("ACCOUNT_SOURCE_GENERATION_UNVERIFIED".into());
+            return Err(PlanningError::Source(
+                PlanningSourceFailure::AccountGenerationUnverified,
+            ));
         }
         let private_generation = r.private_ws.status().await.connection_generation;
         // One caller-owned read deadline for BOTH admission and read-only
         // preview. Local/no-send REST admission may wait, but the exact same
         // authenticated fields and freshness checks below remain mandatory.
         let snap = r.observer.snapshot_until(until).await.map_err(err)?;
-        let received = chrono::DateTime::parse_from_rfc3339(&snap.source_received_at)
+        let received = jiff::Timestamp::from_str(&snap.source_received_at)
             .map_err(err)?
-            .timestamp_millis();
+            .as_millisecond();
         if !crate::config::evidence_fresh(received, now(), crate::config::ACCOUNT_MAX_AGE_MS)
             || received > now()
             || snap.account_uid_fingerprint != r.configuration.account_key.verified_uid
@@ -488,7 +564,9 @@ impl TradeService {
             }
         }
         if increase && r.private_ws.status().await.connection_generation != private_generation {
-            return Err("PRIVATE_SOURCE_GENERATION_CHANGED".into());
+            return Err(PlanningError::Source(
+                PlanningSourceFailure::PrivateGenerationChanged,
+            ));
         }
         let fresh = self
             .public_ws
@@ -497,41 +575,31 @@ impl TradeService {
                 now() as u64,
                 crate::config::QUOTE_MAX_AGE_MS,
                 crate::config::DERIVATIVE_CONTEXT_MAX_AGE_MS,
-                Utc::now().to_rfc3339(),
+                Timestamp::now().to_string(),
             )
             .await
             .map_err(err)?;
         if fresh.generation != market.generation
             || fresh.market.reference_generation != rules.reference_generation
         {
-            return Err("PUBLIC_SOURCE_GENERATION_CHANGED".into());
+            return Err(PlanningError::Source(
+                PlanningSourceFailure::PublicGenerationChanged,
+            ));
         }
         if !crate::config::evidence_fresh(received, now(), crate::config::ACCOUNT_MAX_AGE_MS) {
-            return Err("ACCOUNT_EVIDENCE_EXPIRED_DURING_PLAN".into());
+            return Err(PlanningError::Source(
+                PlanningSourceFailure::AccountEvidenceExpired,
+            ));
         }
         if Instant::now() >= until {
             return Err("COMMAND_EXPIRED".into());
         }
         let binding_id = instance_id.clone();
-        let definition = if let Some((owner, account)) = r.execution.store.native_scope() {
+        let definition = {
+            let (owner, account) = r.execution.store.scope();
+
             owner
                 .plan_definition(until, account.to_owned(), binding_id, record_risk_state)
-                .await
-                .map_err(err)?
-        } else {
-            r.execution
-                .store
-                .call(until, move |s| {
-                    if binding_id == "manual" {
-                        if record_risk_state {
-                            s.ensure_manual_instance(now())
-                        } else {
-                            s.manual_definition_preview()
-                        }
-                    } else {
-                        s.strategy_definition(&binding_id)
-                    }
-                })
                 .await
                 .map_err(err)?
         };
@@ -562,7 +630,7 @@ impl TradeService {
         snapshot: &okx_observation::AccountSnapshot,
         candidate: Decimal,
         record_risk_state: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), PlanningError> {
         let rate = dec(&Self::usd_conversion(snapshot)?.usd_per_usdt)?;
         let daily = dec(control
             .limits
@@ -582,22 +650,16 @@ impl TradeService {
             strategy_instance: instance.to_owned(),
             record_risk_state,
         };
-        let decision = if let Some((owner, account)) = r.execution.store.native_scope() {
+        let decision = {
+            let (owner, account) = r.execution.store.scope();
+
             owner
                 .check_financial_admission(deadline(), account.to_owned(), request)
                 .await
-                .map_err(err)?
-        } else {
-            r.execution
-                .store
-                .call(deadline(), move |s| {
-                    s.check_financial_admission(&request, now())
-                })
-                .await
-                .map_err(err)?
+                .map_err(financial_admission_error)?
         };
         if let Some(reason) = decision {
-            return Err(reason);
+            return Err(reason.into());
         }
         Ok(())
     }
@@ -626,15 +688,61 @@ impl TradeService {
                 snapshot.account_generation.clone(),
                 usdt,
             ))?,
-            observed_at_ms: chrono::DateTime::parse_from_rfc3339(&snapshot.source_received_at)
+            observed_at_ms: jiff::Timestamp::from_str(&snapshot.source_received_at)
                 .map_err(err)?
-                .timestamp_millis() as u64,
+                .as_millisecond() as u64,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn planning_retry_categories_preserve_codes_and_reject_unrelated_text() {
+        use super::{PlanningError, PlanningSourceFailure as Source, financial_admission_error};
+        let causes = [
+            (
+                Source::AccountGenerationUnverified,
+                "ACCOUNT_SOURCE_GENERATION_UNVERIFIED",
+            ),
+            (
+                Source::AccountEvidenceExpired,
+                "ACCOUNT_EVIDENCE_EXPIRED_DURING_PLAN",
+            ),
+            (
+                Source::FinancialIncompleteOrStale,
+                "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE",
+            ),
+            (
+                Source::PrivateGenerationChanged,
+                "PRIVATE_SOURCE_GENERATION_CHANGED",
+            ),
+            (
+                Source::PublicGenerationChanged,
+                "PUBLIC_SOURCE_GENERATION_CHANGED",
+            ),
+        ];
+        for (cause, code) in causes {
+            let error = PlanningError::Source(cause);
+            assert!(error.retryable_source());
+            assert_eq!(error.into_reason(), code);
+            for unrelated in [code.to_owned(), format!("unrelated: {code}")] {
+                let error = PlanningError::from(unrelated.clone());
+                assert!(!error.retryable_source());
+                assert_eq!(error.into_reason(), unrelated);
+            }
+        }
+        let error = financial_admission_error(okx_execution::StoreError::Invalid(
+            "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE",
+        ));
+        assert!(error.retryable_source());
+        assert_eq!(error.into_reason(), "FINANCIAL_SOURCE_INCOMPLETE_OR_STALE");
+        let reason = "unrelated: FINANCIAL_SOURCE_INCOMPLETE_OR_STALE";
+        let error = financial_admission_error(okx_execution::StoreError::Invalid(reason));
+        assert!(!error.retryable_source());
+        assert_eq!(error.into_reason(), reason);
+    }
+
     #[test]
     fn exposure_count_never_guesses_flat_on_malformed_size() {
         assert_eq!(

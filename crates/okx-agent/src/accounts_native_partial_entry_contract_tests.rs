@@ -11,7 +11,7 @@ async fn risk_book_contract_native_partial_sources_missing_bill_then_terminal_st
     let mut fixture = fixture().await;
     let (market_stop, market_task, _socket, _public) = opened_market(&mut fixture).await;
     let account = fixture._account.clone();
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));
@@ -73,7 +73,7 @@ async fn risk_book_contract_native_partial_sources_missing_bill_then_terminal_st
 
     // Recover the lost ACK through the production readback before history
     // capture. The real venue ID now attributes both fill and eventual bill.
-    let partial_at = chrono::Utc::now().timestamp_millis();
+    let partial_at = jiff::Timestamp::now().as_millisecond();
     order_cumulative(
         &fixture.feed,
         OPEN_ORDER,
@@ -195,7 +195,7 @@ async fn risk_book_contract_native_partial_sources_missing_bill_then_terminal_st
 
     // A distinct second event supplies only the incremental 0.06 contracts
     // and its own 0.0003 bill. Total entry spend is exactly 1.0005 USD.
-    let final_at = chrono::Utc::now().timestamp_millis();
+    let final_at = jiff::Timestamp::now().as_millisecond();
     snapshot(&fixture.feed, "99.9995", "0.1");
     history_amount(
         &fixture.feed,

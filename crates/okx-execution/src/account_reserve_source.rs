@@ -36,13 +36,3 @@ impl AccountStore {
         })
     }
 }
-impl crate::AccountStoreHandle {
-    pub async fn reserve_source(
-        &self,
-        deadline: std::time::Instant,
-        intent: String,
-    ) -> StoreResult<AccountReserveSource> {
-        self.call(deadline, move |s| s.reserve_source(&intent))
-            .await
-    }
-}

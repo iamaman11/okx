@@ -1,0 +1,2 @@
+# Retain third-party notice bytes, including upstream line endings/spacing.
+docs/acceptance/512/licenses/*.txt -text -whitespace

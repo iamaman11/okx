@@ -1,0 +1,25 @@
+# Baseline permissive licenses; a new license requires explicit review.
+[licenses]
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "ISC", "Unicode-3.0", "Zlib", "BSL-1.0"]
+# Reviewed exact-package grants; texts and obligations are retained in
+# docs/acceptance/512/licenses and dependency-baseline.md.
+exceptions = [
+  { name = "curve25519-dalek", version = "=5.0.0", allow = ["BSD-3-Clause"] },
+  { name = "subtle", version = "=2.6.1", allow = ["BSD-3-Clause"] },
+  { name = "x25519-dalek", version = "=3.0.0", allow = ["BSD-3-Clause"] },
+  { name = "webpki-roots", version = "=0.26.11", allow = ["CDLA-Permissive-2.0"] },
+  { name = "webpki-roots", version = "=1.0.12", allow = ["CDLA-Permissive-2.0"] },
+]
+
+# No advisory exceptions: the direct chrono consumers were replaced with jiff.
+[advisories]
+ignore = []
+yanked = "deny"
+unused-ignored-advisory = "deny"
+
+# Only crates.io sources are accepted without explicit review.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

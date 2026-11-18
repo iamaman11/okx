@@ -1,8 +1,6 @@
 //! Campaign risk rules on the installation owner's existing transaction.
-//! Production has no campaign database or separate worker. The historical
-//! standalone writer is compiled only for original component test fixtures.
-#[cfg(test)]
-mod owner;
+//! Production has no campaign database or separate worker. Component tests
+//! exercise SQL rules directly; concurrency belongs to UnifiedFinanceHandle.
 mod store;
 pub(crate) fn read_unified_campaign_opening(
     tx: &rusqlite::Transaction<'_>,
@@ -85,22 +83,12 @@ fn original_finance_error(error: &store::RiskStoreError) -> &'static str {
         E::PolicyConflict => "POLICY_SNAPSHOT_NOT_AUTHORITATIVE",
         E::CensusUnproven => "COMPLETE_ACCOUNT_CENSUS_UNPROVEN",
         E::EntrySqlUnproven => "DURABLE_ENTRY_SQL_PROOF_MISSING",
-        #[cfg(test)]
-        E::EntrySqlUnavailable => "ENTRY_SQL_PROOF_UNAVAILABLE",
         E::UnsentSqlUnproven => "DURABLE_UNSENT_SQL_PROOF_MISSING",
-        #[cfg(test)]
-        E::UnsentSqlUnavailable => "UNSENT_SQL_PROOF_UNAVAILABLE",
         E::LossRegression => "CUMULATIVE_LOSS_SOURCE_REGRESSION",
         E::IdempotencyConflict => "IDEMPOTENCY_CONFLICT",
         E::AlreadyResolved => "INTENT_ALREADY_POSTED_OR_RESOLVED",
         #[cfg(test)]
         E::WriterBusy => "RISK_WRITER_ALREADY_RUNNING",
-        #[cfg(test)]
-        E::QueueFull => "RISK_OWNER_QUEUE_FULL",
-        #[cfg(test)]
-        E::WorkerStopped => "RISK_OWNER_STOPPED",
-        #[cfg(test)]
-        E::OutcomeUnknown => "RISK_OUTCOME_UNKNOWN_DO_NOT_REPLAY",
         #[cfg(test)]
         E::IdentityMismatch => "RISK_BOOK_IDENTITY_MISMATCH",
         #[cfg(test)]

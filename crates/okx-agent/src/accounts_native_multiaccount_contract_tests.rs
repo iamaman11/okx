@@ -80,7 +80,7 @@ async fn risk_book_contract_native_two_accounts_share_budget_and_isolate_public_
         Some(fixture.campaign.clone())
     );
     for account in [&a, &b] {
-        let (owner, scope) = account.execution.store.native_scope().unwrap();
+        let (owner, scope) = account.execution.store.scope();
         assert_eq!(owner.installation_id(), fixture.owner.installation_id());
         assert_eq!(scope, account.configuration.account_key.wire());
         let policy = owner
@@ -170,7 +170,7 @@ async fn risk_book_contract_native_two_accounts_share_budget_and_isolate_public_
     let assigned_b = assigned_b.expect("public capital assignment B");
     assert_eq!(assigned_a["data"]["capital_coverage"], "COMPLETE");
     assert_eq!(assigned_b["data"]["capital_coverage"], "COMPLETE");
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = jiff::Timestamp::now().as_millisecond();
     let capital_a = fixture
         .owner
         .capital_state(key_a.clone(), now, deadline())
@@ -262,7 +262,7 @@ async fn risk_book_contract_native_two_accounts_share_budget_and_isolate_public_
         .owner
         .capital_state(
             key_b.clone(),
-            chrono::Utc::now().timestamp_millis(),
+            jiff::Timestamp::now().as_millisecond(),
             deadline(),
         )
         .await

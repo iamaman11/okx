@@ -134,11 +134,13 @@ async fn risk_book_contract_native_restored_snapshot_blocks_public_execute_until
             restored.config.account_key.wire(),
             restored.campaign.clone(),
             original_budget.campaign_started_at_ms.unwrap() as i64,
-            chrono::Utc::now().timestamp_millis().saturating_sub(2_000),
+            jiff::Timestamp::now()
+                .as_millisecond()
+                .saturating_sub(2_000),
         )
         .await
         .expect("original captured campaign readiness, not storage recovery");
-    let now = chrono::Utc::now().timestamp_millis().to_string();
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
     restored
         .feed
         .expect_public_clock(envelope(json!([{"ts":now}])));

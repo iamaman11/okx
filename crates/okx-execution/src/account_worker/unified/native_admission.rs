@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone)]
 pub struct ReportedRiskCensus {
     pub source_digest: String,
-    pub generated_at_ms: i64,
-    pub read_floor_ms: i64,
+    pub generated_at_ms: CensusObservedAtMs,
+    pub read_floor_ms: CensusReadFloorMs,
     pub occupied: BTreeMap<String, String>,
     pub cumulative_loss_usd: BTreeMap<String, String>,
 }
@@ -19,24 +19,24 @@ pub struct ReportedRiskCensus {
 pub struct NativeReserveRequest {
     pub venue: String,
     pub uid: String,
-    pub run_id: String,
-    pub intent_id: String,
+    pub run_id: AdmissionRunId,
+    pub intent_id: AdmissionIntentId,
     pub strategy_id: String,
     pub instrument_id: String,
     pub plan_sha256: String,
     pub entry_proof_digest: String,
     pub conversion_digest: String,
     pub conversion_rate: String,
-    pub loss_usdt: String,
-    pub loss_usd: String,
-    pub entry_upper_usd: String,
+    pub loss_usdt: crate::risk::UsdtLoss,
+    pub loss_usd: crate::risk::UsdLoss,
+    pub entry_upper_usd: crate::risk::UsdEntryUpper,
     pub native_incarnation: String,
     pub conversion_observed_at_ms: i64,
     pub policy_revision: u64,
 }
 #[derive(Debug, Clone)]
 pub struct NativePostRequest {
-    pub reservation_key: String,
+    pub reservation_key: AdmissionReservationKey,
     pub plan_sha256: String,
     pub source_proof_digest: String,
     pub policy_revision: u64,
@@ -77,8 +77,9 @@ fn verify_reserved_loss(
     loss_usdt: &str,
     loss_usd: &str,
 ) -> StoreResult<()> {
-    let (expected_usdt, expected_usd) = crate::risk::native_reserved_loss(planned_loss_usd, rate)?;
-    if amount(loss_usdt)? != amount(&expected_usdt)? || amount(loss_usd)? != amount(&expected_usd)?
+    let expected = crate::risk::native_reserved_loss(planned_loss_usd, rate)?;
+    if amount(loss_usdt)? != amount(&expected.usdt.checked_canonical()?)?
+        || amount(loss_usd)? != amount(&expected.usd.checked_canonical()?)?
     {
         return Err(StoreError::Invalid("NATIVE_RESERVE_ORIGINAL_LOSS_MISMATCH"));
     }
@@ -91,11 +92,13 @@ pub(crate) fn bind_census(
     reported: &ReportedRiskCensus,
     now: i64,
 ) -> StoreResult<crate::risk::VerifiedCensus> {
-    if reported.generated_at_ms <= 0
-        || reported.generated_at_ms > now
-        || now - reported.generated_at_ms > 5000
-        || reported.read_floor_ms <= 0
-        || reported.read_floor_ms > reported.generated_at_ms
+    let generated_at_ms = reported.generated_at_ms.raw_millis();
+    let read_floor_ms = reported.read_floor_ms.raw_millis();
+    if generated_at_ms <= 0
+        || generated_at_ms > now
+        || now - generated_at_ms > 5000
+        || read_floor_ms <= 0
+        || read_floor_ms > generated_at_ms
         || reported.source_digest.len() != 64
         || !reported
             .source_digest
@@ -127,7 +130,7 @@ pub(crate) fn bind_census(
             ));
         }
         let financial = AccountStore::financial_risk_sql(tx, scope, now, None)?;
-        if !financial.nav_complete || financial.source_as_of < reported.read_floor_ms {
+        if !financial.nav_complete || financial.source_as_of < read_floor_ms {
             return Err(StoreError::Invalid(
                 "NATIVE_ADMISSION_FINANCIAL_SOURCE_INCOMPLETE",
             ));
@@ -158,8 +161,8 @@ pub(crate) fn bind_census(
             .filter(|g| *g > 0)
             .ok_or(StoreError::Invalid("NATIVE_ADMISSION_GENERATION_INVALID"))?,
         source_digest: reported.source_digest.clone(),
-        generated_at_ms: reported.generated_at_ms,
-        read_floor_ms: reported.read_floor_ms,
+        generated_at_ms,
+        read_floor_ms,
         occupied: parse(&reported.occupied)?,
         cumulative_loss_usd: parse(&reported.cumulative_loss_usd)?,
     })
@@ -173,14 +176,17 @@ pub(crate) fn reserve_reported_sql(
     now: i64,
 ) -> StoreResult<NativeReserveDecision> {
     let account = format!("{}:real:{}", request.venue, request.uid);
-    let source =
-        AccountStore::reserve_source_sql(tx, Some((installation, &account)), &request.intent_id)?;
+    let source = AccountStore::reserve_source_sql(
+        tx,
+        Some((installation, &account)),
+        request.intent_id.as_str(),
+    )?;
     if source.intent.plan_hash != request.plan_sha256
         || source.intent.plan.strategy_instance != request.strategy_id
         || source.intent.instrument_id != request.instrument_id
         || source.intent.policy_revision as u64 != request.policy_revision
         || amount(&source.admission.entry_upper_usd.to_string())?
-            != amount(&request.entry_upper_usd)?
+            != *request.entry_upper_usd.amount()
         || source.admission.entry_proof_digest != request.entry_proof_digest
         || amount(&source.admission.admission_usd_per_usdt.to_string())?
             != amount(&request.conversion_rate)?
@@ -192,15 +198,19 @@ pub(crate) fn reserve_reported_sql(
     verify_reserved_loss(
         source.intent.plan.planned_loss_usd,
         source.admission.admission_usd_per_usdt,
-        &request.loss_usdt,
-        &request.loss_usd,
+        &request.loss_usdt.checked_canonical()?,
+        &request.loss_usd.checked_canonical()?,
     )?;
     let census = bind_census(tx, installation, campaign, &reported, now)?;
+    let denial_intent = request.intent_id.as_str().to_owned();
+    let denial_plan = request.plan_sha256.clone();
+    let denial_entry = request.entry_upper_usd.checked_canonical()?;
+    let denial_loss = request.loss_usd.checked_canonical()?;
     let input = crate::risk::ReserveInput {
         venue: request.venue,
         uid: request.uid,
-        run_id: request.run_id,
-        intent_id: request.intent_id,
+        run_id: request.run_id.into_string(),
+        intent_id: request.intent_id.into_string(),
         strategy_id: request.strategy_id,
         instrument_id: request.instrument_id,
         plan_sha256: request.plan_sha256,
@@ -210,9 +220,9 @@ pub(crate) fn reserve_reported_sql(
         conversion_rate: amount(&request.conversion_rate)?,
         native_incarnation: request.native_incarnation,
         proposal: RiskProposal {
-            loss_usdt: amount(&request.loss_usdt)?,
-            loss_usd: amount(&request.loss_usd)?,
-            entry_upper_usd: amount(&request.entry_upper_usd)?,
+            loss_usdt: request.loss_usdt.amount().clone(),
+            loss_usd: request.loss_usd.amount().clone(),
+            entry_upper_usd: request.entry_upper_usd.amount().clone(),
         },
         policy_revision: request.policy_revision,
         now_ms: now,
@@ -236,6 +246,60 @@ pub(crate) fn reserve_reported_sql(
             policy_revision: request.policy_revision,
         }),
         UnifiedFinanceWriteReceipt::Risk(crate::risk::UnifiedRiskDecision::Denied { reason }) => {
+            let scope = Some((installation, account.as_str()));
+            let operation_id = format!("reserve-denied:{denial_intent}");
+            if let Some(prior) = AccountStore::operation_sql(tx, scope, &operation_id)? {
+                let fact = super::operation_diagnostics::decode_budget_denial(
+                    &prior,
+                    installation,
+                    &account,
+                    &denial_intent,
+                    &denial_plan,
+                )?;
+                if fact.campaign_id != campaign
+                    || fact.policy_revision != request.policy_revision
+                    || amount(&fact.requested_entry_usd)? != amount(&denial_entry)?
+                    || amount(&fact.requested_loss_usd)? != amount(&denial_loss)?
+                {
+                    return Err(StoreError::Invalid("NATIVE_DENIAL_EVIDENCE_INVALID"));
+                }
+            } else {
+                let summary =
+                    crate::risk::read_unified_campaign_summary(tx, installation, campaign)
+                        .map_err(StoreError::Invalid)?;
+                let fact = super::operation_diagnostics::NativeBudgetDenial {
+                    installation_id: installation.into(),
+                    account_key: account.clone(),
+                    campaign_id: campaign.into(),
+                    intent_id: denial_intent,
+                    plan_hash: denial_plan.clone(),
+                    policy_revision: summary.policy_revision,
+                    book_sequence: summary.book_sequence,
+                    reason: reason.clone(),
+                    requested_entry_usd: denial_entry,
+                    requested_loss_usd: denial_loss,
+                    remaining_entry_usd: summary.remaining_entry_usd,
+                    remaining_loss_usd: summary.remaining_loss_usd,
+                    census_source_digest: reported.source_digest,
+                    census_as_of_ms: reported.generated_at_ms.raw_millis(),
+                    census_read_floor_ms: reported.read_floor_ms.raw_millis(),
+                    observed_at_ms: now,
+                };
+                let encoded = serde_json::to_string(&fact)
+                    .map_err(|_| StoreError::Invalid("NATIVE_DENIAL_EVIDENCE_INVALID"))?;
+                if encoded.len() > 4096 {
+                    return Err(StoreError::Invalid("NATIVE_DENIAL_EVIDENCE_INVALID"));
+                }
+                AccountStore::operation_receipt_sql(
+                    tx,
+                    scope,
+                    &operation_id,
+                    &denial_plan,
+                    "RESERVE_DENIED",
+                    &encoded,
+                    now,
+                )?;
+            }
             Ok(NativeReserveDecision::Denied { reason })
         }
         _ => Err(StoreError::Invalid("NATIVE_RESERVE_RECEIPT_UNEXPECTED")),
@@ -296,7 +360,7 @@ pub(super) fn begin_post_reported_on_connection(
     let now = super::opening_ingress::owner_now_ms()?;
     let census = bind_census(&tx, &installation, &campaign, &request.census, now)?;
     let input = crate::risk::PostFenceInput {
-        reservation_key: request.reservation_key.clone(),
+        reservation_key: request.reservation_key.as_str().to_owned(),
         plan_sha256: request.plan_sha256.clone(),
         policy_revision: request.policy_revision,
         expected_sequence: request.expected_sequence,
@@ -326,7 +390,7 @@ pub(super) fn begin_post_reported_on_connection(
                 rusqlite::params![
                     installation,
                     campaign,
-                    request.reservation_key,
+                    request.reservation_key.as_str(),
                     request.plan_sha256
                 ],
                 |r| Ok((r.get(0)?, r.get(1)?)),
@@ -373,7 +437,9 @@ mod sizing_tests {
 
     #[test]
     fn non_parity_fx_requires_same_exact_native_product() {
-        let (usdt, usd) = crate::risk::native_reserved_loss(dec("1"), dec("1.123456789")).unwrap();
+        let expected = crate::risk::native_reserved_loss(dec("1"), dec("1.123456789")).unwrap();
+        let usdt = expected.usdt.checked_canonical().unwrap();
+        let usd = expected.usd.checked_canonical().unwrap();
         assert!(verify_reserved_loss(dec("1"), dec("1.123456789"), &usdt, &usd).is_ok());
         assert!(verify_reserved_loss(dec("1"), dec("1.123456789"), &usdt, "1.000000001").is_err());
         assert!(verify_reserved_loss(dec("1"), dec("1.123456789"), "0.1", "0.1123456789").is_err());
@@ -427,8 +493,8 @@ mod census_tests {
     fn reported() -> ReportedRiskCensus {
         ReportedRiskCensus {
             source_digest: "a".repeat(64),
-            generated_at_ms: NOW,
-            read_floor_ms: NOW - 1,
+            generated_at_ms: CensusObservedAtMs::new(NOW).unwrap(),
+            read_floor_ms: CensusReadFloorMs::new(NOW - 1).unwrap(),
             occupied: BTreeMap::from([(ACCOUNT.into(), "0".into())]),
             cumulative_loss_usd: BTreeMap::from([(ACCOUNT.into(), "2.5".into())]),
         }
