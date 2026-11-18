@@ -628,8 +628,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # These remain complete regressions, not substitutes for the exact current
-      # property map above. Independent CPU-heavy research fixtures must not age
+      # Complete coverage is the union of the verified property run and the
+      # remaining regressions, all on this exact checkout. Independent CPU-heavy research fixtures must not age
       # a separate financial fixture's real-time sources. Concurrency INSIDE
       # the 100-caller, fairness and two-heavy-job tests is not reduced.
       - name: Build research worker for process contracts
@@ -642,8 +642,31 @@ jobs:
         shell: pwsh
         run: |
           $env:OKX_RESEARCH_WORKER_TEST_EXE = (Resolve-Path 'target/debug/okx-research-worker.exe').Path
-          cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution -- --skip research_dispatch_tests:: --skip accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect --test-threads 2
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $covered = @()
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+            $proof = Get-Content -Raw "$env:RUNNER_TEMP\native-finance-full.json" | ConvertFrom-Json
+            $head = (git rev-parse HEAD).Trim()
+            $tree = (git rev-parse 'HEAD^{tree}').Trim()
+            if ($proof.overall -cne 'FULL_PASS' -or $proof.git_clean -ne $true -or $proof.head -cne $head -or $proof.tree -cne $tree) { throw 'CURRENT_FINANCIAL_PROOF_REQUIRED' }
+            $manifestJson = & cargo run --locked -p okx-agent --example native_finance_acceptance -- --list
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $manifest = $manifestJson | ConvertFrom-Json
+            if (@($proof.contracts).Count -ne @($manifest.contracts).Count -or @($proof.contracts | Where-Object status -ne 'PASS').Count -ne 0) { throw 'COMPLETE_FINANCIAL_CONTRACTS_REQUIRED' }
+            $expected = @($manifest.contracts.witnesses | Where-Object package -ne 'repository' | ForEach-Object { "$($_.package)`t$($_.test)" } | Sort-Object -Unique)
+            $covered = @($proof.observed_witnesses | Where-Object package -ne 'repository')
+            $actual = @($covered | ForEach-Object {
+              if ($_.status -cne 'ok') { throw 'UNVERIFIED_FINANCIAL_WITNESS' }
+              "$($_.package)`t$($_.test)"
+            } | Sort-Object -Unique)
+            if ($actual.Count -eq 0 -or $actual.Count -ne $covered.Count -or @(Compare-Object $expected $actual).Count -ne 0) { throw 'FINANCIAL_WITNESS_SET_MISMATCH' }
+          }
+          foreach ($package in @('okx-agent','okx-host-control','okx-host-launcher','okx-execution')) {
+            $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--test-threads','2')
+            foreach ($witness in @($covered | Where-Object package -eq $package)) { $testArgs += @('--skip',$witness.test) }
+            Write-Host "Remaining regression: $package; exact property witnesses already verified: $(@($covered | Where-Object package -eq $package).Count)"
+            cargo test --locked -p $package -- @testArgs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       # Keep the process tree exclusive to this one heavy test so resource
       # observations cannot include unrelated financial regression fixtures.

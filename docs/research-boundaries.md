@@ -111,8 +111,11 @@ separately. Measured resources do not by themselves establish a resource budget.
 In the full CI, Linux runs the Worker library, real IPC children and doctests
 in the dedicated Research step; the portable workspace step excludes that
 package. Windows runs the Worker library once, except for the K9 workload which
-runs once in its dedicated evidence step. Financial property acceptance and
-the broader Native regression remain separate mandatory checks. Compare local
+runs once in its dedicated evidence step. The Native regression excludes only
+exact property witnesses already verified by a FULL_PASS from this same clean
+SHA/tree and the current Rust manifest. Missing or mismatched proof blocks the
+exclusion. Without a property run, no property witnesses are excluded. Financial
+property acceptance and all remaining regressions are mandatory. Compare local
 and CI timings for the same command and include its build time; a financial
 execution time is not the duration of a complete Windows job.
 
