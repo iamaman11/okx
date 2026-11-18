@@ -2,7 +2,8 @@ use jiff::Timestamp;
 use okx_api::{
     AccountApi, AccountConfig, AccountHistoryApi, AccountPositionRiskSnapshot, AssetApi, FeeRate,
     InstrumentType, LeverageInfo, MarginMode, OkxError, OkxRestClient,
-    PendingDerivativeAlgoRiskInventory, PendingProtectiveAlgoInventory, PositionBuilderRequest,
+    PendingAccountAlgoRiskInventory, PendingDerivativeAlgoRiskInventory,
+    PendingProtectiveAlgoInventory, PositionBuilderRequest,
     PositionBuilderSnapshot, TradeApi,
 };
 use okx_observation::{
@@ -481,6 +482,27 @@ impl AccountBootstrapper {
         tokio::time::timeout_at(
             until.into(),
             self.trade.pending_derivative_risk_algos_until(until),
+        )
+        .await
+        .map_err(|_| AccountLedgerBootstrapError::SourceDeadline)?
+        .map_err(AccountLedgerBootstrapError::from)
+    }
+
+    /// Account-wide pending algo inventory using the same strict read-only
+    /// observer key and the caller's original finite deadline.
+    pub async fn pending_account_algo_risk_until(
+        &self,
+        until: Instant,
+    ) -> Result<PendingAccountAlgoRiskInventory, AccountLedgerBootstrapError> {
+        if Instant::now() >= until {
+            return Err(AccountLedgerBootstrapError::SourceDeadline);
+        }
+        let (config, _) = self.observer_config_until(until).await?;
+        strict_read_only_permissions(&config.perm)
+            .map_err(|_| AccountLedgerBootstrapError::PermissionRejected)?;
+        tokio::time::timeout_at(
+            until.into(),
+            self.trade.pending_account_algo_risk_until(until),
         )
         .await
         .map_err(|_| AccountLedgerBootstrapError::SourceDeadline)?
