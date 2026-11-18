@@ -108,12 +108,11 @@ pub fn ensure_run_allowed() -> HostControlResult<()> {
 }
 
 fn task_settings_enabled(xml: &str) -> bool {
+    // Task Scheduler omits Settings/Enabled from its XML export when the
+    // task is enabled (the schema default). An explicit false is disabling.
     xml.split_once("<Settings>")
         .and_then(|(_, settings)| settings.split_once("</Settings>"))
-        .is_some_and(|(settings, _)| {
-            settings.contains("<Enabled>true</Enabled>")
-                && !settings.contains("<Enabled>false</Enabled>")
-        })
+        .is_some_and(|(settings, _)| !settings.contains("<Enabled>false</Enabled>"))
 }
 
 fn ensure_expected_policy(command: &str) -> HostControlResult<()> {
@@ -310,6 +309,15 @@ mod tests {
         assert!(xml.contains("<Interval>PT1M</Interval>"));
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
         assert!(!xml.contains("<RestartOnFailure>"));
+    }
+
+    #[test]
+    fn scheduler_export_omits_enabled_when_true() {
+        // Real schtasks /Query /XML omits the default-true Settings/Enabled.
+        let exported = "<Settings><StartWhenAvailable>true</StartWhenAvailable></Settings>";
+        assert!(task_settings_enabled(exported));
+        assert!(!task_settings_enabled("<Settings><Enabled>false</Enabled></Settings>"));
+        assert!(!task_settings_enabled("<Other></Other>"));
     }
 
     #[test]
