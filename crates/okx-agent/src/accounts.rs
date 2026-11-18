@@ -849,7 +849,11 @@ fn start_sources(
              // an independently proven admission boundary. The real source
              // capture remains unchanged and stays enabled on release.
              #[cfg(test)]
-             let _recorded_capture_lease=account.recorded_capture_gate.read().await;
+             let _recorded_capture_lease=tokio::select! {
+                 biased;
+                 _ = shutdown.changed() => break,
+                 lease = account.recorded_capture_gate.read() => lease,
+             };
              // A test-held lease may be released after shutdown was signaled.
              // Do not start a new source turn while draining that paused task.
              #[cfg(test)]

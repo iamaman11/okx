@@ -238,6 +238,11 @@ async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutabl
         .await
         .unwrap()
         .unwrap();
+    // Stop the timer while its event transcript is still protected. Releasing
+    // first can start an unplanned capture that retains the original owner.
+    tokio::time::timeout(Duration::from_secs(3), fixture.registry.shutdown())
+        .await
+        .expect("source shutdown must not wait for the test-held capture gate");
     drop(timer_capture);
     drop(account);
     fixture.finish().await;

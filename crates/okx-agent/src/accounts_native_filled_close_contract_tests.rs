@@ -408,22 +408,25 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
         .await
         .unwrap();
     assert_eq!(final_account.active_reservations, 0);
-    let (risk, stops) = fixture
+    // Verify committed economics, not continuing freshness while this test
+    // deliberately holds the periodic source producer stopped.
+    let financial_snapshot = fixture
         .owner
-        .financial_readiness(
+        .account_diagnostic_snapshot(
+            Instant::now() + Duration::from_secs(3),
             account_key.clone(),
             None,
-            Instant::now() + Duration::from_secs(3),
         )
         .await
         .unwrap();
-    assert!(risk.nav_complete);
+    assert_eq!(financial_snapshot.nav_coverage.as_deref(), Some("COMPLETE"));
+    let risk = financial_snapshot.financial;
     assert_eq!(
         risk.daily_loss_usd,
         Decimal::new(1, 3),
         "two signed fees, zero price PnL"
     );
-    assert_eq!(stops, 0);
+    assert_eq!(financial_snapshot.stop_count, 0);
 
     let report_query = okx_execution::FinanceReportQuery {
         from: 0,
@@ -494,9 +497,9 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
         .await
         .unwrap()
         .unwrap();
+    fixture.registry.shutdown().await;
     drop(timer_capture);
     drop(account);
-    fixture.registry.shutdown().await;
     let root = fixture.root.clone();
     let installation = fixture.owner.installation_id().to_owned();
     let campaign = fixture.campaign.clone();

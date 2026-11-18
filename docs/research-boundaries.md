@@ -83,6 +83,11 @@ failure. Its property report distinguishes PASS, observed FAIL, NOT_PROVEN,
 NOT_RUN and MISSING; the overall gate still fails on any incomplete execution.
 Concurrent fixture tests report an early Execute reply immediately rather than
 waiting for a phase the operation can no longer reach.
+Finite fill/Close transcripts pause their timer producer only while explicitly
+delivering history. Shutdown cancels a producer waiting for that test-only gate
+before the gate is released. Final economic assertions inspect stored COMPLETE
+coverage and ledger amounts; they do not assume a paused source stays fresh.
+Admission freshness remains independently enforced and negatively tested.
 
 ## Direct checks after building
 
