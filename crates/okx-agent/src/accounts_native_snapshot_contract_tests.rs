@@ -150,14 +150,15 @@ async fn risk_book_contract_native_restored_snapshot_blocks_public_execute_until
     record_fee(&restored.feed, &now);
     record_fee(&restored.feed, &now);
     record_leverage(&restored.feed);
-    // Restoring the SQL owner can take longer than the live price TTL under
-    // Windows CI. Deliver an explicitly budgeted, timestamped raw venue quote
-    // at this boundary so a stale initial market frame cannot mask the
-    // storage-recovery rejection this contract is exercising.
+    // Restoring the SQL owner and the original entry admission can outlast
+    // the two-second live quote TTL under Windows CI. Script a finite tape of
+    // fresh, timestamped raw venue observations while Execute is pending;
+    // production still parses every frame and enforces its unchanged TTL.
+    // Two inventory-triggered observations also share this explicit budget.
     restored
         .market_boundary
         .market_updates_expected
-        .store(3, std::sync::atomic::Ordering::SeqCst);
+        .store(32, std::sync::atomic::Ordering::SeqCst);
     restored
         .market_boundary
         .publish_market_observation(Instant::now() + Duration::from_secs(3))
@@ -166,10 +167,24 @@ async fn risk_book_contract_native_restored_snapshot_blocks_public_execute_until
     if let TradeRequest::Execute { expires_in_ms, .. } = &mut request {
         *expires_in_ms = 10_000;
     }
-    let result = restored
+    let mut venue_quotes = tokio::time::interval(Duration::from_millis(450));
+    venue_quotes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut extra_quotes = 0;
+    let execution = restored
         .trade
-        .trade(&restored.config.alias, &request, Some(&restored.authority))
-        .await;
+        .trade(&restored.config.alias, &request, Some(&restored.authority));
+    tokio::pin!(execution);
+    let result = loop {
+        tokio::select! {
+            answer = &mut execution => break answer,
+            _ = venue_quotes.tick(), if extra_quotes < 24 => {
+                extra_quotes += 1;
+                restored.market_boundary
+                    .publish_market_observation(Instant::now() + Duration::from_secs(3))
+                    .await;
+            }
+        }
+    };
     let reason = match result {
         Err(reason) => reason,
         Ok(value) => value["reason_code"]
