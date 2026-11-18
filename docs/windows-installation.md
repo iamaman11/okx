@@ -133,6 +133,33 @@ remotely. Perform one bounded local bootstrap, not another permanent service.
    read-only account and research workflows. CI or /health alone is not
    installed/physical acceptance.
 
+### One-time isolated Cloudflare governance for clean native v2
+
+The new native v2 Windows installation uses a new empty account catalog and
+one native financial SQLite owner. The Cloudflare Worker routes both runtime
+WSS and MCP governance to the distinct named Durable Object
+`primary-clean-v2`; the prior `primary` object is **preserved**, neither reset
+nor copied. Deploying a Worker to that empty new object leaves tools fail-closed
+until a new governance installation is explicitly initialized.
+
+For the first v2 deployment only, dispatch `cloudflare-mcp-deploy.yml` on
+`main` with `initialize_clean_v2=true`, the exact installation ID read back
+from Windows CONTROL, and `accepted_bundle_sha256` from the verified GitHub
+Windows artifact. The protected GitHub environment provides the existing owner
+secret; never paste it into dispatch inputs or logs. The workflow first checks
+those inputs, builds and deploys exact-main Worker configuration, waits for its
+source-tree health evidence, then performs a single owner-authenticated
+zero-account initialization and strict readback. A changed body cannot reuse
+the idempotency operation; an already initialized or inconsistent DO refuses
+replacement. For later deployments, leave `initialize_clean_v2=false` and
+require the existing read-only owner inspection to pass.
+
+This cutover is **not** account enrollment, a financial state migration,
+authorization to trade, or proof of a fresh WSS session. A clean initial
+governance configuration has zero linked accounts, and old real account access
+stays confined to the preserved legacy DO. Validate the new native installation
+ID, fresh transport, read-only account list and research workflows separately.
+
 These scripts do not authorize exchange POST, reset RiskBook, clear old
 campaign spending, or prove REAL readiness. There is no destructive fallback
 for unknown or inconsistent host state.
