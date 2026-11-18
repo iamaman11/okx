@@ -22,14 +22,16 @@ fn fixture(source: SourceHandler) -> (PathBuf, ResearchClient) {
             .expect("set OKX_RESEARCH_WORKER_TEST_EXE to the built research worker"),
     );
     assert!(executable.is_file(), "worker test executable is missing");
+    // Wall-clock resolution is not a uniqueness guarantee for parallel tests.
+    // Each child must own a distinct root; the production writer lock stays on.
+    let mut nonce = [0u8; 16];
+    getrandom::fill(&mut nonce).unwrap();
     let root = std::env::temp_dir().join(format!(
-        "okx-research-client-test-{}-{}",
+        "okx-research-client-test-{}-{:032x}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        u128::from_le_bytes(nonce)
     ));
+    std::fs::create_dir(&root).expect("research fixture requires a NEW unique root");
     let client = ResearchClient::new(
         ResearchClientConfig {
             executable,
