@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use okx_agent::{
     AgentError, AgentResult,
+    account_bootstrap::AccountBootstrapper,
     cloudflare_auth::{load_native_cloudflare_token, store_native_cloudflare_token},
     cloudflare_transport::CloudflareTransportConfig,
     config::{AgentConfig, default_root},
@@ -10,18 +11,22 @@ use okx_agent::{
         default_key_id, initialize_native_identity, load_native_identity, load_native_private_key,
     },
     market_bootstrap::MarketBootstrapper,
+    okx_credentials::load_native_account_credentials,
     query::DispatchContext,
     research_client::ResearchClient,
     runtime::{EngineContext, run_engine},
 };
-use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
-use okx_protocol::{DirectRuntimeProfile, MailboxEnvelope};
+use okx_api::{OkxEnvironment, OkxPublicClient, OkxRestClient, RateBudget, Region};
+use okx_protocol::{
+    DirectRuntimeProfile, MailboxEnvelope, account_catalog_proto, accounts::Environment,
+};
 use okx_runtime::PublicWsCoordinator;
 use std::{
     fs::OpenOptions,
     io::{self, Read},
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
+    time::{Duration, Instant},
 };
 use zeroize::{Zeroize, Zeroizing};
 #[derive(Parser)]
@@ -71,6 +76,11 @@ enum Command {
         expected_release: String,
         #[arg(long)]
         operation_id: String,
+    },
+    /// One-shot authenticated REST census; does not open the Engine or finance SQL.
+    InspectVenue {
+        #[arg(long)]
+        account: String,
     },
     BackupAccount {
         #[arg(long)]
@@ -140,6 +150,69 @@ fn input() -> AgentResult<Zeroizing<String>> {
     }
     Ok(text)
 }
+/// Uses only the existing named observer credential. The one-shot executable
+/// never acquires engine.lock, starts AccountRuntimeRegistry, or writes SQL.
+/// Counts are venue GET facts, not proof that local intents or Spot algos are clear.
+async fn inspect_venue(root: &Path, account: &str) -> AgentResult<serde_json::Value> {
+    let catalog = account_catalog_proto::load(root)?;
+    let entry = catalog
+        .accounts
+        .iter()
+        .find(|entry| entry.alias == account || entry.account_key.wire() == account)
+        .ok_or_else(|| AgentError::FinancialCaptureTask("VENUE_ACCOUNT_UNAVAILABLE".into()))?;
+    let credentials = load_native_account_credentials(&entry.credential_ref)?;
+    let expected_demo = entry.account_key.environment == Environment::Demo;
+    if credentials.environment.demo != expected_demo {
+        return Err(AgentError::FinancialCaptureTask(
+            "VENUE_ENVIRONMENT_MISMATCH".into(),
+        ));
+    }
+    let client = OkxRestClient::new(credentials.environment, credentials.observer)?;
+    let observer = AccountBootstrapper::new(client);
+    let deadline = Instant::now() + Duration::from_secs(45);
+    // snapshot_until validates that the credential is strictly read-only and
+    // fetches authenticated account/positions/ordinary-orders from the venue.
+    let snapshot = observer
+        .snapshot_until(deadline)
+        .await
+        .map_err(|_| AgentError::FinancialCaptureTask("VENUE_SNAPSHOT_INCOMPLETE".into()))?;
+    if snapshot.account_uid_fingerprint != entry.account_key.verified_uid {
+        return Err(AgentError::FinancialCaptureTask(
+            "VENUE_IDENTITY_MISMATCH".into(),
+        ));
+    }
+    let algos = observer
+        .pending_derivative_risk_algos_until(deadline)
+        .await
+        .map_err(|_| AgentError::FinancialCaptureTask("VENUE_ALGO_INVENTORY_INCOMPLETE".into()))?;
+    let complete = algos.complete_within_bound && algos.scopes_checked == 16;
+    let state = if !complete {
+        "INCOMPLETE"
+    } else if snapshot.positions.is_empty() && snapshot.pending_orders.is_empty() && algos.rows == 0 {
+        "DERIVATIVE_EXPOSURE_EMPTY"
+    } else {
+        "EXPOSURE_PRESENT"
+    };
+    Ok(serde_json::json!({
+        "schema": "okx.venue-opening-inventory/v1",
+        "installation_id": catalog.installation_id,
+        "account": entry.account_key.wire(),
+        "state": state,
+        "complete_derivative_algo_inventory": complete,
+        "position_rows": snapshot.positions.len(),
+        "pending_order_rows": snapshot.pending_orders.len(),
+        "pending_derivative_algo_rows": algos.rows,
+        "derivative_algo_scopes_checked": algos.scopes_checked,
+        "snapshot_received_at": snapshot.source_received_at,
+        "algo_received_at_ms": algos.received_at_ms,
+        "observer_permissions": snapshot.api_key_permissions,
+        "authenticated_get_only": true,
+        "spot_algo_inventory": "NOT_EVALUATED",
+        "local_unknown_intents": "NOT_EVALUATED",
+        "safe_to_restart": false
+    }))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Process entrypoint only. stdout remains reserved for command responses.
@@ -240,6 +313,10 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 plan_sha256,
             };
             let result = okx_agent::finance_inspection::inspect(&config.root, request).await?;
+            println!("{}", serde_json::to_string(&result)?);
+        }
+        Command::InspectVenue { account } => {
+            let result = inspect_venue(&config.root, &account).await?;
             println!("{}", serde_json::to_string(&result)?);
         }
         Command::BackupFinance {} => {
@@ -601,5 +678,27 @@ mod native_finance_startup_tests {
             .join("account.sqlite");
         assert!(!legacy_account_sql.exists());
         std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod venue_inspection_cli_contract_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_readonly_venue_command_is_parseable() {
+        let cli = Cli::try_parse_from([
+            "okx-agent",
+            "--root",
+            "fixture-runtime",
+            "inspect-venue",
+            "--account",
+            "real_acceptance",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::InspectVenue { account } if account == "real_acceptance"
+        ));
     }
 }
