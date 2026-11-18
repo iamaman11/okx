@@ -150,6 +150,18 @@ async fn risk_book_contract_native_restored_snapshot_blocks_public_execute_until
     record_fee(&restored.feed, &now);
     record_fee(&restored.feed, &now);
     record_leverage(&restored.feed);
+    // Restoring the SQL owner can take longer than the live price TTL under
+    // Windows CI. Deliver an explicitly budgeted, timestamped raw venue quote
+    // at this boundary so a stale initial market frame cannot mask the
+    // storage-recovery rejection this contract is exercising.
+    restored
+        .market_boundary
+        .market_updates_expected
+        .store(3, std::sync::atomic::Ordering::SeqCst);
+    restored
+        .market_boundary
+        .publish_market_observation(Instant::now() + Duration::from_secs(3))
+        .await;
     let mut request = execute();
     if let TradeRequest::Execute { expires_in_ms, .. } = &mut request {
         *expires_in_ms = 10_000;
