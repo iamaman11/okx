@@ -5,6 +5,19 @@ name: Cloudflare MCP Deploy
 # ReleaseSet operation only after the native runtime is accepted.
 on:
   workflow_dispatch:
+    inputs:
+      initialize_clean_v2:
+        description: 'One-time owner initialization of the isolated clean-v2 Durable Object'
+        type: boolean
+        default: false
+      installation_id:
+        description: 'Verified native Windows v2 installation ID (only for first initialization)'
+        type: string
+        required: false
+      accepted_bundle_sha256:
+        description: 'SHA256 of the accepted Windows GitHub bundle (only for first initialization)'
+        type: string
+        required: false
 
 concurrency:
   group: cloudflare-mcp-production
@@ -32,6 +45,21 @@ jobs:
           set -euo pipefail
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN missing"; exit 20; }
 
+      - name: One-time v2 installation input preflight
+        shell: bash
+        env:
+          INITIALIZE_V2: ${{ inputs.initialize_clean_v2 }}
+          INSTALLATION_ID: ${{ inputs.installation_id }}
+          BUNDLE_SHA256: ${{ inputs.accepted_bundle_sha256 }}
+          OKX_MCP_OWNER_SECRET: ${{ secrets.OKX_MCP_OWNER_SECRET }}
+        run: |
+          set -euo pipefail
+          if [[ "$INITIALIZE_V2" == "true" ]]; then
+            [[ "$INSTALLATION_ID" =~ ^[A-Za-z][A-Za-z0-9_-]{7,63}$ ]] || { echo 'invalid native installation identity'; exit 23; }
+            [[ "$BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'accepted GitHub bundle fingerprint required'; exit 24; }
+            test -n "$OKX_MCP_OWNER_SECRET" || { echo 'MCP owner secret missing'; exit 25; }
+          fi
+
       - name: Install locked package surface
         run: npm ci --ignore-scripts --no-audit --no-fund
 
@@ -51,10 +79,49 @@ jobs:
           trap 'rm -f wrangler.release.jsonc' EXIT
           npx wrangler deploy --config wrangler.release.jsonc
 
+      - name: Initialize isolated clean-v2 governance once
+        if: ${{ inputs.initialize_clean_v2 }}
+        shell: bash
+        env:
+          INSTALLATION_ID: ${{ inputs.installation_id }}
+          BUNDLE_SHA256: ${{ inputs.accepted_bundle_sha256 }}
+          OKX_MCP_OWNER_SECRET: ${{ secrets.OKX_MCP_OWNER_SECRET }}
+        run: |
+          set -euo pipefail
+          expected_tree="$(git rev-parse 'HEAD^{tree}')"
+          # Wait for the actual published Worker before calling the owner API.
+          ready=false
+          for attempt in 1 2 3 4 5 6 7 8; do
+            health="$(curl -fsS https://okx-cloudflare-mcp.okx-794.workers.dev/health || true)"
+            if jq -e --arg tree "$expected_tree" '.status == "ok" and .release_source_tree == $tree' >/dev/null 2>&1 <<< "$health"; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          [[ "$ready" == "true" ]] || { echo 'Worker source provenance not yet current'; exit 27; }
+          campaign_hash="$(printf 'okx-clean-v2:%s' "$INSTALLATION_ID" | sha256sum | cut -d' ' -f1)"
+          payload="$(jq -cn \
+            --arg installation "$INSTALLATION_ID" \
+            --arg sha "$BUNDLE_SHA256" \
+            --arg campaign "sha256:$campaign_hash" \
+            '{contract:"okx.direct-transport.frame/v2",release_sha256:$sha,operation_id:("clean_v2_init_"+$installation),configuration:{schema:"okx.governance/v3",revision:0,installation_id:$installation,campaign_id:$campaign,campaign_loss_limit_usd:"10",campaign_entry_limit_usd:"10",max_total_modelled_loss_usdt:"5",accounts:[]}}')"
+          response="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $OKX_MCP_OWNER_SECRET" \
+            -H 'Content-Type: application/json' \
+            --data-binary "$payload" \
+            https://okx-cloudflare-mcp.okx-794.workers.dev/installation/initialize)"
+          jq -e --arg installation "$INSTALLATION_ID" \
+            '.status == "CONFIGURED" and .installation_id == $installation and .revision == 0 and (.accounts | length) == 0' \
+            >/dev/null <<< "$response"
+          echo 'ISOLATED_V2_OWNER_INIT=PASS'
+
       - name: Owner-only read-only installation inspection
         shell: bash
         env:
           OKX_MCP_OWNER_SECRET: ${{ secrets.OKX_MCP_OWNER_SECRET }}
+          INITIALIZE_V2: ${{ inputs.initialize_clean_v2 }}
+          INSTALLATION_ID: ${{ inputs.installation_id }}
         run: |
           set -euo pipefail
           test -n "$OKX_MCP_OWNER_SECRET" || { echo "MCP owner secret missing"; exit 25; }
@@ -74,10 +141,11 @@ jobs:
             fi
             inspected="$(curl -fsS -H "Authorization: Bearer $OKX_MCP_OWNER_SECRET" \
               https://okx-cloudflare-mcp.okx-794.workers.dev/installation/inspect || true)"
-            if jq -e '
+            if jq -e --arg installation "$INSTALLATION_ID" --arg init "$INITIALIZE_V2" '
               .schema == "okx.installation-inspection/v1" and
               .state == "BOUND" and
               (.installation_id | type) == "string" and
+              (if $init == "true" then .installation_id == $installation and .accounts_total == 0 and .revision == 0 else true end) and
               (.accounts_total | type) == "number" and
               (.revision | type) == "number" and
               .release_present == true and
@@ -85,7 +153,8 @@ jobs:
               (.account_access | length) == .accounts_total and
               (.real_accounts_enabled | type) == "number" and
               (.all_new_real_risk_paused | type) == "boolean" and
-              (.risk.unresolved_entries | type) == "number" and
+                .finance_authority == "native" and
+                (has("risk") | not) and
               (.account_access | all(.[]; 
                 (.id | type) == "string" and
                 (.enabled | type) == "boolean" and
