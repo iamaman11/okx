@@ -7,7 +7,8 @@ struct Loaded {
     bars: Result<Arc<Vec<Bar>>, String>,
     ticker: Option<Result<okx_protocol::research_ipc::ResearchTicker, String>>,
     funding: Option<Result<Vec<(u64, f64)>, String>>,
-    oi: Option<Result<Vec<f64>, String>>,
+    // Keep OI event timestamps; endpoint values alone cannot prove coverage.
+    oi: Option<Result<Vec<(u64, f64)>, String>>,
     excluded: Option<usize>,
 }
 
@@ -388,19 +389,14 @@ impl AnalyticsService {
                                     if !v.is_finite() {
                                         return Err("NONFINITE_OI".into());
                                     }
-                                    rows.insert(t, v);
+                                    if rows.insert(t, v).is_some() {
+                                        return Err("OI_DUPLICATE_TIMESTAMP".into());
+                                    }
                                 }
                             }
-                            if rows
-                                .first_key_value()
-                                .is_none_or(|(t, _)| *t > start.saturating_add(ms))
-                                || rows
-                                    .last_key_value()
-                                    .is_none_or(|(t, _)| t.saturating_add(ms) < end)
-                            {
-                                return Err("OI_RANGE_INCOMPLETE".into());
-                            }
-                            Ok(rows.into_values().collect())
+                            // Preserve all time keys for the strict per-bar
+                            // coverage check in compute_row_checked.
+                            Ok(rows.into_iter().collect())
                         }
                         .await,
                     )
@@ -588,6 +584,23 @@ fn compute_row_checked(
             gaps.push("CANDLE_INTERIOR_GAP".into());
         }
     }
+    let oi_coverage = row.oi.as_ref().and_then(|source| source.as_ref().ok()).and_then(|points| {
+        okx_analysis::time_series::ClosedRange::strict(
+            request.start_ms, request.end_ms, request.timeframe_ms,
+        ).ok().map(|range| range.coverage(points.iter().map(|(time, _)| *time)))
+    });
+    if request.fields.iter().any(|field| field == "oi_change") {
+        if let Some(Err(_)) = &row.oi {
+            gaps.push("OI_SOURCE_UNAVAILABLE".into());
+        } else if oi_coverage.as_ref().is_none_or(|coverage| !coverage.complete) {
+            gaps.push("OI_RANGE_INCOMPLETE_OR_GAPPED".into());
+        }
+    }
+    if request.fields.iter().any(|field| field == "spread_bps") {
+        // ResearchTicker has bid/ask but no observation/publication timestamp.
+        // A current quote must never masquerade as historical interval data.
+        gaps.push("SPREAD_CURRENT_SNAPSHOT_NOT_HISTORICAL".into());
+    }
     let mut metrics = serde_json::Map::new();
     let mut units = serde_json::Map::new();
     for field in &request.fields {
@@ -625,9 +638,10 @@ fn compute_row_checked(
                 .oi
                 .as_ref()
                 .and_then(|r| r.as_ref().ok())
+                .filter(|_| oi_coverage.as_ref().is_some_and(|coverage| coverage.complete))
                 .and_then(|r| r.first().zip(r.last()))
-                .filter(|(a, _)| **a > 0.0)
-                .map(|(a, b)| b / a - 1.0),
+                .filter(|(a, _)| a.1 > 0.0)
+                .map(|(a, b)| b.1 / a.1 - 1.0),
             Operator::PositionSize => {
                 let aux = [
                     param("budget", f64::NAN),
@@ -704,9 +718,14 @@ fn compute_row_checked(
             units.insert(id, json!(unit_name));
         }
     }
-    Ok(
-        json!({"instrument":row.instrument,"metrics":metrics,"units":units,"parameters":{"ema_period":request.parameters.get("ema_period").unwrap_or(&14.0),"atr_period":request.parameters.get("atr_period").unwrap_or(&14.0),"rsi_period":request.parameters.get("rsi_period").unwrap_or(&14.0)},"source_start_ms":bars.first().map(|b|b.time),"source_end_ms":bars.last().map(|b|b.time),"unclosed_candles_excluded":row.excluded,"candle_coverage":candle_coverage,"quality":if gaps.is_empty(){"complete"}else{"partial"},"gaps":gaps}),
-    )
+    let mut result = json!({"instrument":row.instrument,"metrics":metrics,"units":units,"parameters":{"ema_period":request.parameters.get("ema_period").unwrap_or(&14.0),"atr_period":request.parameters.get("atr_period").unwrap_or(&14.0),"rsi_period":request.parameters.get("rsi_period").unwrap_or(&14.0)},"source_start_ms":bars.first().map(|b|b.time),"source_end_ms":bars.last().map(|b|b.time),"unclosed_candles_excluded":row.excluded,"candle_coverage":candle_coverage,"quality":if gaps.is_empty(){"complete"}else{"partial"},"gaps":gaps});
+    if request.fields.iter().any(|field| field == "oi_change") {
+        result["oi_coverage"] = json!(oi_coverage);
+    }
+    if request.fields.iter().any(|field| field == "spread_bps") {
+        result["metric_time_basis"] = json!({"spread_bps":"current_snapshot_unaligned"});
+    }
+    Ok(result)
 }
 
 /// Closed-bar log returns indexed by the *later* candle. Missing, duplicate,
@@ -888,6 +907,49 @@ mod tests {
         let unaligned = pairwise_matrix(&shifted, 60_000, 31 * 60_000);
         assert_eq!(unaligned["sample_counts"][0][1], 29);
         assert!(unaligned["values"][0][1].is_null());
+    }
+    #[test]
+    fn t06_oi_interior_gap_is_exposed_and_never_accepted_as_endpoint_only() {
+        let mut query = request(vec!["oi_change"]);
+        query.timeframe_ms = 300_000;
+        query.end_ms = 1_500_000;
+        let mut source = row();
+        source.bars = Ok(Arc::new(Vec::new()));
+        source.oi = Some(Ok(vec![
+            (0, 10.0), (300_000, 12.0), (900_000, 16.0), (1_200_000, 18.0),
+        ]));
+        let partial = compute_row(source, &query, None).unwrap();
+        assert_eq!(partial["quality"], "partial");
+        assert_eq!(partial["metrics"]["oi_change"], Value::Null);
+        assert_eq!(partial["oi_coverage"]["expected_bars"], 5);
+        assert_eq!(partial["oi_coverage"]["observed_unique_bars"], 4);
+        assert_eq!(partial["oi_coverage"]["first_missing_ms"], 600_000);
+        assert!(partial["gaps"].as_array().unwrap().contains(
+            &json!("OI_RANGE_INCOMPLETE_OR_GAPPED")));
+
+        let mut full_source = row();
+        full_source.bars = Ok(Arc::new(Vec::new()));
+        full_source.oi = Some(Ok(vec![
+            (0, 10.0), (300_000, 12.0), (600_000, 14.0),
+            (900_000, 16.0), (1_200_000, 18.0),
+        ]));
+        let full = compute_row(full_source, &query, None).unwrap();
+        assert_eq!(full["quality"], "complete");
+        assert_eq!(full["oi_coverage"]["complete"], true);
+        assert!((full["metrics"]["oi_change"].as_f64().unwrap() - 0.8).abs() < 1e-12);
+    }
+    #[test]
+    fn t06_current_ticker_is_not_marked_as_historical_spread() {
+        let mut source = row();
+        source.ticker = Some(Ok(okx_protocol::research_ipc::ResearchTicker {
+            bid_price: "100".into(), ask_price: "101".into(),
+        }));
+        let response = compute_row(source, &request(vec!["spread_bps"]), None).unwrap();
+        assert!(response["metrics"]["spread_bps"].is_number());
+        assert_eq!(response["metric_time_basis"]["spread_bps"], "current_snapshot_unaligned");
+        assert_eq!(response["quality"], "partial");
+        assert!(response["gaps"].as_array().unwrap().contains(
+            &json!("SPREAD_CURRENT_SNAPSHOT_NOT_HISTORICAL")));
     }
     #[test]
     fn interior_gap_never_imputed() {
