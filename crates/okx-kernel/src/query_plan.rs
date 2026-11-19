@@ -98,11 +98,20 @@ impl CheckedComposition {
                 return Err(format!("{path}:DEPTH_LIMIT"));
             }
             let output_unit = match step.op {
-                SeriesOp::ReturnsSeries if step.period.is_none() && input_unit == Unit::Price => {
-                    Unit::Ratio
-                }
                 SeriesOp::ReturnsSeries => {
-                    return Err(format!("{path}:EXPECTED_PRICE_SERIES_NO_PERIOD"));
+                    if input_unit != Unit::Price {
+                        let actual = match input_unit {
+                            Unit::Ratio => "ratio",
+                            _ => "unsupported",
+                        };
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=price:actual={actual}"
+                        ));
+                    }
+                    if step.period.is_some() {
+                        return Err(format!("{path}.period:UNEXPECTED"));
+                    }
+                    Unit::Ratio
                 }
                 SeriesOp::RollingMean if matches!(step.period, Some(1..=1000)) => input_unit,
                 SeriesOp::RollingMean => return Err(format!("{path}.period:INVALID")),
@@ -479,10 +488,21 @@ mod tests {
         let mut wrong_type = spec.clone();
         wrong_type.steps[2].op = SeriesOp::ReturnsSeries;
         wrong_type.steps[2].period = None;
-        assert!(
-            CheckedComposition::compile(wrong_type, 20)
-                .unwrap_err()
-                .contains("EXPECTED_PRICE_SERIES")
+        assert_eq!(
+            CheckedComposition::compile(wrong_type, 20).unwrap_err(),
+            "composition.steps[2].input:UNIT_MISMATCH:expected=price:actual=ratio"
+        );
+        let mut unexpected_period = spec.clone();
+        unexpected_period.steps[0].period = Some(2);
+        assert_eq!(
+            CheckedComposition::compile(unexpected_period, 20).unwrap_err(),
+            "composition.steps[0].period:UNEXPECTED"
+        );
+        let mut invalid_window = spec.clone();
+        invalid_window.steps[1].period = Some(0);
+        assert_eq!(
+            CheckedComposition::compile(invalid_window, 20).unwrap_err(),
+            "composition.steps[1].period:INVALID"
         );
         let mut wrong_version = spec.clone();
         wrong_version.version = "v2".into();
@@ -495,6 +515,51 @@ mod tests {
                 .unwrap_err()
                 .contains("CELLS_LIMIT")
         );
+    }
+    #[test]
+    fn t10_composition_checks_cells_steps_and_depth_at_the_boundary() {
+        let parallel_steps = |count: usize| CompositionRequest {
+            version: COMPOSITION_VERSION.into(),
+            steps: (0..count)
+                .map(|i| SeriesStep {
+                    id: format!("w{i}"),
+                    op: SeriesOp::RollingMean,
+                    input: "close".into(),
+                    period: Some(1),
+                })
+                .collect(),
+            result_steps: vec!["w0".into()],
+        };
+        let eight = parallel_steps(8);
+        assert_eq!(
+            CheckedComposition::compile(eight.clone(), 1_000_000)
+                .unwrap()
+                .estimated_cells,
+            8_000_000
+        );
+        assert_eq!(
+            CheckedComposition::compile(eight, 1_000_001).unwrap_err(),
+            "composition:CELLS_LIMIT"
+        );
+        assert_eq!(
+            CheckedComposition::compile(parallel_steps(33), 1).unwrap_err(),
+            "composition.steps:COUNT_LIMIT"
+        );
+        assert_eq!(
+            CheckedComposition::compile(parallel_steps(8), u64::MAX).unwrap_err(),
+            "composition:CELLS_OVERFLOW"
+        );
+
+        let mut chained = parallel_steps(9);
+        for i in 1..9 {
+            chained.steps[i].input = format!("w{}", i - 1);
+        }
+        assert_eq!(
+            CheckedComposition::compile(chained.clone(), 1).unwrap_err(),
+            "composition.steps[8]:DEPTH_LIMIT"
+        );
+        chained.steps.pop();
+        assert!(CheckedComposition::compile(chained, 1).is_ok());
     }
     #[test]
     fn t04_missing_observations_and_warmup_are_not_converted_to_zero() {
