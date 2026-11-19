@@ -32,6 +32,15 @@ try {
     "../../contracts/trade-semantic-golden.json"),"utf8"));
   const risk=await import(pathToFileURL(join(output,"decimal.js")));
   const semantic=await import(pathToFileURL(join(output,"execution_tools.js")));
+  // T01: fail CI if public MCP and Rust operator lists drift.
+  const rustRegistry=readFileSync(resolve("../../crates/okx-kernel/src/operators.rs"),"utf8");
+  const registryBlock=rustRegistry.match(/pub const SUPPORTED_OPERATORS:[\s\S]*?=\s*&\[([\s\S]*?)\];/);
+  assert.ok(registryBlock,"Rust public operator registry exists");
+  const rustNames=[...registryBlock[1].matchAll(/Operator::([A-Za-z]+)/g)]
+    .map(([,name])=>name.replace(/[A-Z]/g,letter=>"_"+letter.toLowerCase()).slice(1));
+  assert.deepEqual([...semantic.MARKET_OPERATORS],rustNames,
+    "T01 public MCP operator IDs match the Rust registry order and names");
+  console.log("T01 Rust/MCP operator catalog parity PASS",rustNames.length);
   for(const [input,expected] of fixture.numeric.positive){
     const result=risk.normalizeDecimal(input);
     assert.equal(result.canonical,expected,"S2 positive canonical "+input);

@@ -259,7 +259,8 @@ pub struct QueryPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composition: Option<CheckedComposition>,
 }
-fn input(name: &str) -> Result<Input, String> {
+/// One source/type mapping for plan compilation and public capability discovery.
+pub fn input(name: &str) -> Result<Input, String> {
     let (source, unit) = match name {
         "close" | "high" | "low" | "peer_close" => (Source::Candles, Unit::Price),
         "volume" => (Source::Candles, Unit::Quantity),

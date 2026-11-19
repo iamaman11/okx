@@ -273,7 +273,16 @@ impl AnalyticsService {
             .iter()
             .map(|&operator| {
                 let info = okx_analysis::operators::registry(operator);
-                json!({"name":operator,"unit":info.unit,"inputs":info.inputs})
+                let typed_inputs = info
+                    .inputs
+                    .iter()
+                    .map(|name| {
+                        okx_analysis::query_plan::input(name).expect("registered operator input")
+                    })
+                    .collect::<Vec<_>>();
+                json!({"name":operator,"version":1,"status":"code_supported",
+                    "output_shape":"scalar","unit":info.unit,"inputs":info.inputs,
+                    "typed_inputs":typed_inputs})
             })
             .collect::<Vec<_>>();
         json!({"schema":"okx.market.capabilities/v1",

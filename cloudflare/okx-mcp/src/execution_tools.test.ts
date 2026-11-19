@@ -1,4 +1,4 @@
-import {ACTION_SCHEMAS,PUBLIC_TOOLS,validTool,matches} from './execution_tools.js';
+import {ACTION_SCHEMAS,PUBLIC_TOOLS,MARKET_OPERATORS,validTool,matches} from './execution_tools.js';
 const fail=(v:boolean,n:string)=>{if(!v)throw Error(n);};
 fail(validTool('diagnostics',{action:'explain',view:'research',reference:'a'.repeat(64)}),'research diagnostics uses existing strict tool');
 fail(!validTool('diagnostics',{action:'explain',view:'unknown',reference:'a'.repeat(64)}),'unknown diagnostic view is rejected');
@@ -16,7 +16,17 @@ const {instruments:unused,...withoutList}=marketScreen;
 fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP'}}),'market universe is a strict schema');
 fail(!validTool('market',{...withoutList,fields:[],universe:{instrument_type:'SWAP'}}),'empty market fields rejected before native dispatch');
 fail(!validTool('market',{...marketScreen,fields:[]}), 'explicit market screen requires at least one operator');
-const operatorNames=['returns','log_returns','realized_volatility','downside_volatility','max_drawdown','pearson_correlation','ema','rolling_mean','atr','rsi','spread_bps','volume_change','oi_change','funding_sum','position_size','cost_estimate'];
+const operatorNames=[...MARKET_OPERATORS];
+fail(operatorNames.length===16&&new Set(operatorNames).size===16,'T01 unique sixteen public operators');
+for(const id of operatorNames){
+ fail(validTool('market',{...marketScreen,fields:[id]}),`T01 accepted known operator ${id}`);
+ fail(!validTool('market',{...marketScreen,fields:[id+'_unknown']}),`T01 rejected unknown operator ${id}`);
+}
+fail(!validTool('market',{...marketScreen,fields:['unknown_operator']}),'T01 rejects an arbitrary public operator');
+fail(!validTool('market',{...marketScreen,filters:[{field:'unknown_operator'}]}),'T01 rejects unknown filter operator');
+fail(!validTool('market',{...marketScreen,sort:{field:'unknown_operator'}}),'T01 rejects unknown sort operator');
+const publicMarket=(PUBLIC_TOOLS.find((tool:any)=>tool.name==='market') as any).inputSchema;
+fail(JSON.stringify(publicMarket.$defs?.o?.enum)===JSON.stringify(operatorNames),'T01 tools/list enum matches runtime validator');
 fail(validTool('market',{...marketScreen,fields:operatorNames.slice(0,14)}),'T01 fourteen known operators pass public boundary');
 fail(!validTool('market',{...marketScreen,fields:operatorNames.slice(0,15)}),'T01 fifteen operators rejected by public boundary');
 fail(!validTool('market',{...marketScreen,fields:operatorNames}),'T01 sixteen operators rejected by public boundary');

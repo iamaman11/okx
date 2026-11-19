@@ -4,9 +4,44 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
     let (root, service) = super::artifact_job_fixtures::service();
     let capabilities = service.market_capabilities();
     let operators = capabilities["operators"].as_array().unwrap();
+    assert_eq!(operators.len(), 16);
     assert_eq!(
         operators.len(),
         okx_analysis::operators::SUPPORTED_OPERATORS.len()
+    );
+    let expected = okx_analysis::operators::SUPPORTED_OPERATORS
+        .iter()
+        .map(|operator| serde_json::to_value(operator).unwrap())
+        .collect::<Vec<_>>();
+    let names = operators
+        .iter()
+        .map(|operator| operator["name"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(names, expected);
+    assert_eq!(
+        names
+            .iter()
+            .map(|name| name.as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        16
+    );
+    for operator in operators {
+        assert_eq!(operator["version"], 1);
+        assert_eq!(operator["status"], "code_supported");
+        assert_eq!(operator["output_shape"], "scalar");
+        assert_eq!(
+            operator["typed_inputs"].as_array().unwrap().len(),
+            operator["inputs"].as_array().unwrap().len()
+        );
+    }
+    let position = operators
+        .iter()
+        .find(|operator| operator["name"] == "position_size")
+        .unwrap();
+    assert_eq!(
+        position["typed_inputs"][0],
+        json!({"name":"budget","source":"request","unit":"quote_currency"})
     );
     assert!(
         operators
