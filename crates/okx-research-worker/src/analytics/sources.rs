@@ -373,6 +373,13 @@ mod extension_tests {
             .contains(&json!("CANDLE_INTERIOR_GAP")));
         assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
+        // A market query legitimately records one completed read-only job and
+        // immutable evidence. A rejected backtest must add neither.
+        let jobs_before_rejected_replay = service.jobs.snapshot().len();
+        let evidence_before_rejected_replay =
+            std::fs::read_dir(service.artifacts.evidence_dir()).unwrap().count();
+        assert!(jobs_before_rejected_replay > 0);
+        assert!(evidence_before_rejected_replay > 0);
 
         wire["action"] = json!("backtest");
         wire["idempotency_key"] = json!("c20-unconfirmed-gap");
@@ -384,8 +391,11 @@ mod extension_tests {
                 .unwrap_err(),
             "CANDLE_INTERIOR_GAP"
         );
-        assert!(service.jobs.snapshot().is_empty());
-        assert!(!service.artifacts.evidence_dir().exists());
+        assert_eq!(service.jobs.snapshot().len(), jobs_before_rejected_replay);
+        assert_eq!(
+            std::fs::read_dir(service.artifacts.evidence_dir()).unwrap().count(),
+            evidence_before_rejected_replay
+        );
         assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
         drop(service);
