@@ -23,6 +23,23 @@ pub fn timeframe(ms: u64) -> Result<&'static str, String> {
         _ => Err("UNSUPPORTED_TIMEFRAME".into()),
     }
 }
+
+// OKX funding history distinguishes a predicted fundingRate from the
+// realizedRate actually charged at settlement. Substituting the forecast
+// would silently change the meaning of a historical funding_sum.
+fn realized_funding_rate(value: Option<&str>) -> Result<f64, String> {
+    let raw = value
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("FUNDING_REALIZED_RATE_UNAVAILABLE")?;
+    let rate = raw
+        .parse::<f64>()
+        .map_err(|_| "FUNDING_REALIZED_RATE_INVALID")?;
+    if !rate.is_finite() {
+        return Err("FUNDING_REALIZED_RATE_INVALID".into());
+    }
+    Ok(rate)
+}
+
 impl Sources {
     pub async fn candles(
         &self,
@@ -144,15 +161,7 @@ impl Sources {
                     .map_err(|e| e.to_string())?;
                 oldest = oldest.min(time);
                 if time >= start && time < end {
-                    let rate = row
-                        .realized_rate
-                        .as_deref()
-                        .unwrap_or(&row.funding_rate)
-                        .parse::<f64>()
-                        .map_err(|e| e.to_string())?;
-                    if !rate.is_finite() {
-                        return Err("INVALID_FUNDING".into());
-                    }
+                    let rate = realized_funding_rate(row.realized_rate.as_deref())?;
                     out.insert(time, rate);
                 }
             }
@@ -178,6 +187,87 @@ mod extension_tests {
     };
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn t06_historical_funding_never_falls_back_to_predicted_rate() {
+        assert_eq!(
+            realized_funding_rate(None).unwrap_err(),
+            "FUNDING_REALIZED_RATE_UNAVAILABLE"
+        );
+        assert_eq!(
+            realized_funding_rate(Some("")).unwrap_err(),
+            "FUNDING_REALIZED_RATE_UNAVAILABLE"
+        );
+        assert_eq!(
+            realized_funding_rate(Some("NaN")).unwrap_err(),
+            "FUNDING_REALIZED_RATE_INVALID"
+        );
+        assert_eq!(
+            realized_funding_rate(Some("not-a-rate")).unwrap_err(),
+            "FUNDING_REALIZED_RATE_INVALID"
+        );
+        assert!((realized_funding_rate(Some("0.00012")).unwrap() - 0.00012).abs() < 1e-15);
+    }
+
+    struct RecordedFunding {
+        calls: AtomicUsize,
+        body: Vec<u8>,
+    }
+
+    impl HttpTransport for RecordedFunding {
+        fn send(&self, request: okx_api::HttpRequest, _: std::time::Instant) -> HttpSend<'_> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(request.method(), reqwest::Method::GET);
+            assert_eq!(request.url().path(), "/api/v5/public/funding-rate-history");
+            assert_eq!(
+                request.url().query_pairs().collect::<Vec<_>>(),
+                vec![
+                    ("instId".into(), "BTC-USDT-SWAP".into()),
+                    ("after".into(), "30000".into()),
+                    ("limit".into(), "100".into()),
+                ]
+            );
+            Box::pin(async {
+                Ok(RawHttpResponse {
+                    status: okx_api::HttpStatusCode::OK,
+                    headers: Default::default(),
+                    body: self.body.clone(),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn t06_realized_funding_guard_is_enforced_through_public_source() {
+        for (realized, expected) in [("0.02", Some(0.02)), ("", None)] {
+            let transport = Arc::new(RecordedFunding {
+                calls: AtomicUsize::new(0),
+                body: serde_json::to_vec(&json!({"code":"0","msg":"","data":[{
+                    "instId":"BTC-USDT-SWAP","fundingTime":"20000",
+                    "fundingRate":"0.09","realizedRate":realized
+                }]}))
+                .unwrap(),
+            });
+            let (root, mut service) = super::super::artifact_job_fixtures::service();
+            service.sources.bootstrap = MarketBootstrapper::new(
+                okx_api::OkxPublicClient::with_http_transport(
+                    okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
+                    okx_api::RateBudget::new(),
+                    transport.clone(),
+                )
+                .unwrap(),
+            )
+            .into();
+            let actual = service.sources.funding("BTC-USDT-SWAP", 20_000, 30_000).await;
+            match expected {
+                Some(rate) => assert_eq!(actual.unwrap(), vec![(20_000, rate)]),
+                None => assert_eq!(actual.unwrap_err(), "FUNDING_REALIZED_RATE_UNAVAILABLE"),
+            }
+            assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+            drop(service);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
 
     struct RecordedCandles {
         calls: AtomicUsize,

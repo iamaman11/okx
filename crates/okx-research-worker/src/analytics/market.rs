@@ -30,7 +30,7 @@ fn market_source_rate_deferred(loaded: &[Loaded]) -> bool {
 // historical market jobs keep their existing cache entries.
 fn market_job_schema(fields: &[String]) -> &'static str {
     if fields.iter().any(|field| field == "funding_sum") {
-        "market/448.3.funding-publication-v1"
+        "market/448.4.funding-realized-only-v1"
     } else {
         "market/448.2"
     }
@@ -646,6 +646,10 @@ fn compute_row_checked(
         // the retrospective sum while refusing to certify it as causal input.
         match &row.funding {
             Some(Ok(_)) => gaps.push("FUNDING_PUBLICATION_TIME_UNVERIFIED".into()),
+            Some(Err(reason)) if reason.starts_with("FUNDING_REALIZED_RATE_") => {
+                gaps.push(reason.clone());
+                gaps.push("FUNDING_SOURCE_UNAVAILABLE".into());
+            }
             Some(Err(_)) | None => gaps.push("FUNDING_SOURCE_UNAVAILABLE".into()),
         }
     }
@@ -798,6 +802,7 @@ fn compute_row_checked(
                     "observed_events": events.len(),
                     "first_event_ms": events.first().map(|(time, _)| time),
                     "last_event_ms": events.last().map(|(time, _)| time),
+                    "rate_basis": "realized_settlement_rate",
                     "publication_time_verified": false,
                     "expected_events": null
                 })
@@ -921,6 +926,17 @@ mod tests {
         ))
         .unwrap();
         assert_ne!(old, new);
+
+        // #525 used this domain. Its old completed funding artifacts may
+        // include a forecast fallback and cannot be reused after this change.
+        let previous = okx_research::canonical_sha256(&(
+            "market/448.3.funding-publication-v1",
+            &funding,
+            &Option::<Value>::None,
+            0_i64,
+        ))
+        .unwrap();
+        assert_ne!(previous, new);
 
         // Non-funding research retains its original deterministic job key.
         let legacy_returns = okx_research::canonical_sha256(&(
@@ -1122,6 +1138,10 @@ mod tests {
         assert_eq!(response["funding_observations"]["observed_events"], 2);
         assert_eq!(response["funding_observations"]["first_event_ms"], 60_000);
         assert_eq!(response["funding_observations"]["last_event_ms"], 120_000);
+        assert_eq!(
+            response["funding_observations"]["rate_basis"],
+            "realized_settlement_rate"
+        );
         assert_eq!(response["funding_observations"]["publication_time_verified"], false);
         assert!(response["funding_observations"]["expected_events"].is_null());
         assert!(response["gaps"]
@@ -1168,6 +1188,22 @@ mod tests {
             .unwrap()
             .contains(&json!("FUNDING_SOURCE_UNAVAILABLE")));
         assert_eq!(response["quality"], "partial");
+    }
+    #[test]
+    fn t06_missing_realized_rate_blocks_historical_sum_with_specific_reason() {
+        let mut source = row();
+        source.funding = Some(Err("FUNDING_REALIZED_RATE_UNAVAILABLE".into()));
+        let response = compute_row(source, &request(vec!["funding_sum"]), None).unwrap();
+        assert!(response["metrics"]["funding_sum"].is_null());
+        assert!(response["funding_observations"].is_null());
+        assert_eq!(response["quality"], "partial");
+        assert_eq!(response["gaps"][0], "FUNDING_REALIZED_RATE_UNAVAILABLE");
+        assert!(
+            response["gaps"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("FUNDING_SOURCE_UNAVAILABLE"))
+        );
     }
     #[test]
     fn source_specific_metrics_do_not_hide_candle_coverage_in_mixed_requests() {
