@@ -32,13 +32,16 @@ const research={...mutation,...range,instruments:{...array(text(64),8),minItems:
 const instance={instance_id:text(64)};
 const number=(minimum=0,maximum=Number.MAX_SAFE_INTEGER)=>({type:'number',minimum,maximum});
 export const MARKET_OPERATORS=["returns","log_returns","realized_volatility","downside_volatility","max_drawdown","pearson_correlation","ema","rolling_mean","atr","rsi","spread_bps","volume_change","oi_change","funding_sum","position_size","cost_estimate"] as const;
-const operatorId=choice(...MARKET_OPERATORS);
+// The evolving operator catalog is exposed on demand by market.capabilities.
+const MARKET_OPERATOR_SET:ReadonlySet<string>=new Set(MARKET_OPERATORS);
+const knownMarketOperator=(value:unknown):boolean=>
+ typeof value==='string'&&MARKET_OPERATOR_SET.has(value);
 const marketParameters=object({ema_period:integer(1,1000),atr_period:integer(1,1000),rsi_period:integer(1,1000),budget:number(0.000000001),price:number(0.000000001),stop_distance:number(0.000000001,0.999999999),notional:number(),fee_bps:number(0,10000),slippage_bps:number(0,10000)},[]);
 const stepId={type:'string',pattern:'^[a-z0-9_]{1,32}$'};
 const compositionStep=object({id:stepId,op:choice('returns_series','rolling_mean'),input:stepId,period:integer(1,1000)},['id','op','input']);
 const composition=object({version:choice('okx.market.composition/v1'),steps:{type:'array',items:compositionStep,minItems:1,maxItems:32},result_steps:{type:'array',items:stepId,minItems:1,maxItems:14}});
 const universe=object({instrument_type:choice('SPOT','SWAP','FUTURES'),settle_currency:text(16),after_instrument:text(64),reference_generation:text(128),limit:integer(1,100),rank_globally:{type:'boolean'}},['instrument_type']);
-const screenCompare=action('screen',{...range,universe,fields:{...array(operatorId,14),minItems:1},composition,parameters:marketParameters,filters:array(object({field:operatorId,min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:operatorId,descending:{type:'boolean'}}),limit:integer(1,50),cursor:text(512)},['fields','timeframe_ms','start_ms','end_ms','limit']);
+const screenCompare=action('screen',{...range,universe,fields:{...array(text(64),14),minItems:1},composition,parameters:marketParameters,filters:array(object({field:text(64),min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:text(64),descending:{type:'boolean'}}),limit:integer(1,50),cursor:text(512)},['fields','timeframe_ms','start_ms','end_ms','limit']);
 screenCompare.properties.action=choice('screen','compare');
 screenCompare.allOf=[{oneOf:[{required:['instruments']},{required:['universe']}]},
  {if:{properties:{action:{const:'compare'}}},then:{required:['instruments']}}];
@@ -65,9 +68,9 @@ ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['
 // The MCP tool is the permission/approval boundary. Do not mix preview
 // with real order submission under a single model-callable descriptor.
 const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
- accounts:{description:'Accounts.',readOnlyHint:false,destructiveHint:true},
- strategies:{description:'Strategies/trading.',readOnlyHint:false,destructiveHint:true},
- market:{description:'Market.',readOnlyHint:true,destructiveHint:false},
+ accounts:{description:'Accounts and limits.',readOnlyHint:false,destructiveHint:true},
+ strategies:{description:'Strategies; may trade.',readOnlyHint:false,destructiveHint:true},
+ market:{description:'Market data. Use action=capabilities to discover operators.',readOnlyHint:true,destructiveHint:false},
  research:{description:'Research.',readOnlyHint:false,destructiveHint:true},
  portfolio:{description:'Portfolio.',readOnlyHint:true,destructiveHint:false},
  diagnostics:{description:'Diagnostics.',readOnlyHint:true,destructiveHint:false},
@@ -75,11 +78,11 @@ const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destruct
 const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  preview:{description:'Preview; no order.',readOnlyHint:true,destructiveHint:false},
  execute:{description:'Submit a real order; financial loss possible. Requires approval, account limits and STOP.',readOnlyHint:false,destructiveHint:true},
- status:{description:'Status.',readOnlyHint:true,destructiveHint:false},
- cancel:{description:'Cancel order.',readOnlyHint:false,destructiveHint:true},
- close:{description:'Close real order.',readOnlyHint:false,destructiveHint:true},
- capabilities:{description:'Permissions.',readOnlyHint:true,destructiveHint:false},
- preflight:{description:'Readiness only.',readOnlyHint:true,destructiveHint:false},
+ status:{description:'Trade status.',readOnlyHint:true,destructiveHint:false},
+ cancel:{description:'Cancel venue order.',readOnlyHint:false,destructiveHint:true},
+ close:{description:'Close via real exchange order.',readOnlyHint:false,destructiveHint:true},
+ capabilities:{description:'Trade permissions.',readOnlyHint:true,destructiveHint:false},
+ preflight:{description:'Readiness; no order.',readOnlyHint:true,destructiveHint:false},
 };
 const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
  readOnlyHint:meta.readOnlyHint,destructiveHint:meta.destructiveHint,openWorldHint:false
@@ -87,7 +90,7 @@ const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
 // Factor identical bounded scalar schemas only; internal validation keeps every
 // expanded constraint. Standard JSON Schema references preserve tools/list bounds.
 function publicSchema(schema:Schema):Schema {
-const definitions:Record<string,Schema>={d:money,t:text(),s:text(64),a:artifactId,j:decisionJob,k:token,i:integer(),n:integer(1),p:integer(1,50),r:researchStrategies,x:stepId,o:operatorId};
+const definitions:Record<string,Schema>={d:money,t:text(),s:text(64),a:artifactId,j:decisionJob,k:token,i:integer(),n:integer(1),p:integer(1,50),r:researchStrategies,x:stepId};
  const counts:Record<string,number>={};
  const key=(node:any):string|undefined=>Object.keys(definitions).find(k=>JSON.stringify(node)===JSON.stringify(definitions[k]));
  const count=(node:any):void=>{
@@ -160,7 +163,15 @@ export function matches(s:Schema,v:unknown):boolean {
  if(s.type==='integer'||s.type==='number')return typeof v==='number'&&Number.isFinite(v)&&(s.type!=='integer'||Number.isSafeInteger(v))&&v>=(s.minimum??-Infinity)&&v<=(s.maximum??Infinity);
  if(s.type==='boolean')return typeof v==='boolean';return true;
 }
-export function validTool(name:string,args:unknown):boolean {if(name==='research'&&isObject(args)&&args.action==='record_decision'){for(const [field,max]of [['name',128],['hypothesis',4096],['reason',2048]]as const){const value=args[field];if(typeof value!=='string'||!value.trim()||new TextEncoder().encode(value).byteLength>max)return false;}if(new TextEncoder().encode(JSON.stringify([args.name,args.hypothesis,args.reason])).byteLength>6144)return false;}if(name==='market'&&isObject(args)&&isObject(args.composition)){if(args.action!=='screen'||!Array.isArray(args.fields)||!Array.isArray(args.composition.result_steps)||args.fields.length+args.composition.result_steps.length>14)return false;if(Array.isArray(args.composition.steps)&&args.composition.steps.some((s:unknown)=>!isObject(s)||(s.op==='rolling_mean'?!Number.isInteger(s.period):'period'in s)))return false;}if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);}
+function validMarketOperatorRefs(args:Record<string,unknown>):boolean {
+ if(args.action!=='screen'&&args.action!=='compare')return true;
+ if(!Array.isArray(args.fields)||!args.fields.every(knownMarketOperator))return false;
+ if(Array.isArray(args.filters)&&args.filters.some((filter:unknown)=>
+    !isObject(filter)||!knownMarketOperator(filter.field)))return false;
+ if(isObject(args.sort)&&!knownMarketOperator(args.sort.field))return false;
+ return true;
+}
+export function validTool(name:string,args:unknown):boolean {if(name==='market'&&isObject(args)&&!validMarketOperatorRefs(args))return false;if(name==='research'&&isObject(args)&&args.action==='record_decision'){for(const [field,max]of [['name',128],['hypothesis',4096],['reason',2048]]as const){const value=args[field];if(typeof value!=='string'||!value.trim()||new TextEncoder().encode(value).byteLength>max)return false;}if(new TextEncoder().encode(JSON.stringify([args.name,args.hypothesis,args.reason])).byteLength>6144)return false;}if(name==='market'&&isObject(args)&&isObject(args.composition)){if(args.action!=='screen'||!Array.isArray(args.fields)||!Array.isArray(args.composition.result_steps)||args.fields.length+args.composition.result_steps.length>14)return false;if(Array.isArray(args.composition.steps)&&args.composition.steps.some((s:unknown)=>!isObject(s)||(s.op==='rolling_mean'?!Number.isInteger(s.period):'period'in s)))return false;}if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);}
 export function isExecutionMutation(type:unknown,action?:unknown):boolean{return type==='connect_account'||(type==='trade'&&action!=='preview'&&action!=='status')||(type==='strategies'&&!['list','status'].includes(String(action)))||(type==='research'&&['backtest','grid','cancel','record_decision'].includes(String(action)));}
 export function executionProfilePermitsOperation(profile:unknown,_type:unknown):boolean{return profile==='engine';}
 
