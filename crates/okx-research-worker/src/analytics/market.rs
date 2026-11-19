@@ -533,7 +533,7 @@ fn compute_row(
         .clone()
         .map(|c| {
             let count = (request.end_ms - request.start_ms) / request.timeframe_ms;
-            okx_analysis::query_plan::CheckedComposition::compile(c, count)
+            okx_analysis::query_plan::CheckedComposition::compile(*c, count)
         })
         .transpose()?;
     compute_row_checked(row, request, peer, checked.as_ref())
@@ -887,7 +887,7 @@ mod tests {
         let mut request = request(vec!["returns"]);
         request.start_ms = 0;
         request.end_ms = 180_000;
-        request.composition = Some(okx_analysis::query_plan::CompositionRequest {
+        request.composition = Some(Box::new(okx_analysis::query_plan::CompositionRequest {
             version: okx_analysis::query_plan::COMPOSITION_VERSION.into(),
             steps: vec![
                 okx_analysis::query_plan::SeriesStep {
@@ -904,7 +904,7 @@ mod tests {
                 },
             ],
             result_steps: vec!["w1".into()],
-        });
+        }));
         let mut fixture = row();
         fixture.bars = Ok(Arc::new(vec![
             Bar {

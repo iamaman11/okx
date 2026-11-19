@@ -202,6 +202,40 @@ jobs:
           echo "BUILD_REQUIRED=${{ steps.classify.outputs.build_required }}"
           echo "REASON=${{ steps.classify.outputs.reason }}"
 
+  # #518: fast bounded feedback for the typed market-composition slice.
+  # Draft iterations never trigger the Windows release matrix.  Ready for
+  # review still requires the complete, unchanged protected Native gates.
+  draft-518-composition:
+    name: draft-518-composition
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.pull_request.head.ref == 'feat/518-typed-market-composition' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+      - name: Format and typed IPC/market Clippy
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked -p okx-kernel -p okx-protocol -p okx-research-worker --all-targets -- -D warnings
+      - name: Kernel, protocol and research regression
+        run: |
+          cargo test --locked -p okx-kernel -p okx-protocol --lib
+          cargo test --locked -p okx-research-worker --lib
+      - name: MCP contract, typecheck and fixture regression
+        working-directory: cloudflare/okx-mcp
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          git diff --exit-code -- contracts/tools.schema.json contracts/action-fixtures.json
+
   # #512: one bounded compiler/test cycle while its PR is Draft. This job
   # verifies real production and test configurations; it is NOT full acceptance.
   draft-512-rust:

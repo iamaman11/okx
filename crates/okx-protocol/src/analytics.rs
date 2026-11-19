@@ -33,7 +33,7 @@ pub struct MarketRequest {
     pub sort: Option<MarketSort>,
     /// Optional v1 typed composition; legacy fields retain their scalar meaning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub composition: Option<CompositionRequest>,
+    pub composition: Option<Box<CompositionRequest>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

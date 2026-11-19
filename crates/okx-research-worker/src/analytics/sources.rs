@@ -430,7 +430,7 @@ mod extension_tests {
                     parameters: Default::default(),
                     filters: vec![],
                     sort: None,
-                    composition: Some(okx_analysis::query_plan::CompositionRequest {
+                    composition: Some(Box::new(okx_analysis::query_plan::CompositionRequest {
                         version: okx_analysis::query_plan::COMPOSITION_VERSION.into(),
                         steps: vec![
                             okx_analysis::query_plan::SeriesStep {
@@ -447,7 +447,7 @@ mod extension_tests {
                             },
                         ],
                         result_steps: vec!["w1".into()],
-                    }),
+                    })),
                     limit: 20,
                     cursor: None,
                 },

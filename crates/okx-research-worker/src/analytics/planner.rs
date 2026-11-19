@@ -66,7 +66,7 @@ impl AnalysisPlan {
             filters,
             ranking,
         )?
-        .with_composition(request.composition.clone())
+        .with_composition(request.composition.clone().map(|c| *c))
     }
     pub fn build(fields: &[String], start: u64, end: u64) -> Result<Self, String> {
         if start >= end {
