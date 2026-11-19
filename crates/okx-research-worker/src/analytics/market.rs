@@ -451,7 +451,7 @@ impl AnalyticsService {
                     if loaded.len() > 8 {
                         return Err("CORRELATION_MATRIX_LIMIT:8".into());
                     }
-                    Some(pairwise_matrix(&loaded, request.timeframe_ms))
+                    Some(pairwise_matrix(&loaded, request.timeframe_ms, request.end_ms))
                 } else {
                     None
                 };
@@ -614,7 +614,9 @@ fn compute_row_checked(
             Operator::PearsonCorrelation => peer.and_then(|peer| {
                 let a = log_returns(&bars, request.timeframe_ms)?;
                 let b = log_returns(peer, request.timeframe_ms)?;
-                okx_analysis::operators::correlation(&a, &b)
+                let (pairs, _) =
+                    okx_analysis::time_series::align_exact_at(&a, &b, request.end_ms).ok()?;
+                okx_analysis::operators::correlation_pairs(&pairs)
             }),
             Operator::VolumeChange => {
                 scalar(op, close, &high, &low, &volume, 14, request.timeframe_ms)?
@@ -709,7 +711,10 @@ fn compute_row_checked(
 
 /// Closed-bar log returns indexed by the *later* candle. Missing, duplicate,
 /// out-of-order, nonpositive and nonfinite prices invalidate the series.
-fn log_returns(bars: &[Bar], timeframe_ms: u64) -> Option<Vec<(u64, f64)>> {
+fn log_returns(
+    bars: &[Bar],
+    timeframe_ms: u64,
+) -> Option<Vec<okx_analysis::time_series::TimedValue>> {
     if bars.len() < 2 || timeframe_ms == 0 {
         return None;
     }
@@ -723,26 +728,16 @@ fn log_returns(bars: &[Bar], timeframe_ms: u64) -> Option<Vec<(u64, f64)>> {
         {
             return None;
         }
-        out.push((pair[1].time, (pair[1].close / pair[0].close).ln()));
+        out.push(okx_analysis::time_series::TimedValue {
+            time_ms: pair[1].time,
+            // Candle time is its OPEN; its return is not known until CLOSE.
+            available_at_ms: pair[1].time.checked_add(timeframe_ms)?,
+            value: (pair[1].close / pair[0].close).ln(),
+        });
     }
     Some(out)
 }
-fn aligned_samples(left: &[(u64, f64)], right: &[(u64, f64)]) -> usize {
-    let (mut a, mut b, mut count) = (0, 0, 0);
-    while a < left.len() && b < right.len() {
-        match left[a].0.cmp(&right[b].0) {
-            std::cmp::Ordering::Less => a += 1,
-            std::cmp::Ordering::Greater => b += 1,
-            std::cmp::Ordering::Equal => {
-                count += 1;
-                a += 1;
-                b += 1;
-            }
-        }
-    }
-    count
-}
-fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64) -> Value {
+fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64, end_ms: u64) -> Value {
     let series = loaded
         .iter()
         .map(|row| {
@@ -760,10 +755,14 @@ fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64) -> Value {
         let mut samples = Vec::with_capacity(series.len());
         for right in &series {
             let (correlation, n) = match (left, right) {
-                (Some(a), Some(b)) => (
-                    okx_analysis::operators::correlation(a, b),
-                    aligned_samples(a, b),
-                ),
+                (Some(a), Some(b)) => match okx_analysis::time_series::align_exact_at(a, b, end_ms)
+                {
+                    Ok((pairs, counts)) => (
+                        okx_analysis::operators::correlation_pairs(&pairs),
+                        counts.matched,
+                    ),
+                    Err(_) => (None, 0),
+                },
                 _ => (None, 0),
             };
             if correlation.is_none() {
@@ -775,9 +774,21 @@ fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64) -> Value {
         values.push(row);
         counts.push(samples);
     }
+    let usable_samples = series
+        .iter()
+        .map(|samples| {
+            samples.as_ref().and_then(|s| {
+                okx_analysis::time_series::align_exact_at(s, s, end_ms)
+                    .ok()
+                    .map(|(_, counts)| counts.left_usable)
+            })
+        })
+        .collect::<Vec<_>>();
     json!({"basis":"aligned_closed_bar_log_returns","instruments":loaded.iter()
         .map(|r|r.instrument.clone()).collect::<Vec<_>>(),"values":values,
-        "sample_counts":counts,"quality":if complete{"complete"}else{"partial"}})
+        "sample_counts":counts,"usable_samples":usable_samples,
+        "availability_rule":"candle_close_boundary","decision_cutoff_ms":end_ms,
+        "quality":if complete{"complete"}else{"partial"}})
 }
 
 #[cfg(test)]
@@ -827,7 +838,7 @@ mod tests {
                 excluded: None,
             });
         }
-        let m = pairwise_matrix(&series, 60000);
+        let m = pairwise_matrix(&series, 60000, 6_000_000);
         assert_eq!(m["basis"], "aligned_closed_bar_log_returns");
         assert_eq!(m["instruments"].as_array().unwrap().len(), 3);
         assert_eq!(m["sample_counts"][1][2], 99);
@@ -835,6 +846,48 @@ mod tests {
         assert_eq!(m["values"][1][2], m["values"][2][1]);
         assert!(m["values"][0][0].as_f64().unwrap() > 0.99);
         assert!(m["values"][0][2].as_f64().unwrap() < 0.0);
+    }
+    #[test]
+    fn t06_pearson_needs_thirty_known_aligned_pairs_not_future_or_shifted_data() {
+        let mut rows = Vec::new();
+        for (instrument, factor) in [("BTC-USDT", 1.0), ("ETH-USDT", 2.0)] {
+            let mut price = 100.0;
+            let bars = (0..31)
+                .map(|i| {
+                    if i > 0 {
+                        price *= (((i % 7) as f64 - 3.0) * 0.002 * factor).exp();
+                    }
+                    Bar {
+                        time: i * 60_000, open: price, high: price,
+                        low: price, close: price, volume: 1.0, funding_rate: None,
+                    }
+                })
+                .collect();
+            rows.push(Loaded {
+                instrument: instrument.into(), bars: Ok(Arc::new(bars)),
+                ticker: None, funding: None, oi: None, excluded: None,
+            });
+        }
+        let full = pairwise_matrix(&rows, 60_000, 31 * 60_000);
+        assert_eq!(full["sample_counts"][0][1], 30);
+        assert_eq!(full["usable_samples"], json!([30, 30]));
+        assert!((full["values"][0][1].as_f64().unwrap() - 1.0).abs() < 1e-9);
+
+        // Last bar was observed in the recorded fixture but cannot be used
+        // before its close. No post-decision look-ahead is permitted.
+        let early = pairwise_matrix(&rows, 60_000, 30 * 60_000);
+        assert_eq!(early["sample_counts"][0][1], 29);
+        assert_eq!(early["usable_samples"], json!([29, 29]));
+        assert!(early["values"][0][1].is_null());
+
+        // Equal array lengths cannot substitute for equal timestamps.
+        let mut shifted = rows;
+        for bar in Arc::make_mut(shifted[1].bars.as_mut().unwrap()).iter_mut() {
+            bar.time += 60_000;
+        }
+        let unaligned = pairwise_matrix(&shifted, 60_000, 31 * 60_000);
+        assert_eq!(unaligned["sample_counts"][0][1], 29);
+        assert!(unaligned["values"][0][1].is_null());
     }
     #[test]
     fn interior_gap_never_imputed() {
