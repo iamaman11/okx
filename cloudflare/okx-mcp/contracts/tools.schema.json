@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "accounts",
-      "description": "Accounts and limits.",
+      "description": "Accounts.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -258,7 +258,7 @@
     },
     {
       "name": "strategies",
-      "description": "Strategies; may trade.",
+      "description": "Strategies/trading.",
       "inputSchema": {
         "oneOf": [
           {
@@ -527,7 +527,7 @@
     },
     {
       "name": "market",
-      "description": "Market data.",
+      "description": "Market.",
       "inputSchema": {
         "oneOf": [
           {
@@ -598,7 +598,7 @@
               "fields": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/s"
+                  "$ref": "#/$defs/o"
                 },
                 "maxItems": 14,
                 "uniqueItems": true,
@@ -719,7 +719,7 @@
                   "type": "object",
                   "properties": {
                     "field": {
-                      "$ref": "#/$defs/s"
+                      "$ref": "#/$defs/o"
                     },
                     "min": {
                       "type": "number",
@@ -744,7 +744,7 @@
                 "type": "object",
                 "properties": {
                   "field": {
-                    "$ref": "#/$defs/s"
+                    "$ref": "#/$defs/o"
                   },
                   "descending": {
                     "type": "boolean"
@@ -894,6 +894,26 @@
           "x": {
             "type": "string",
             "pattern": "^[a-z0-9_]{1,32}$"
+          },
+          "o": {
+            "enum": [
+              "returns",
+              "log_returns",
+              "realized_volatility",
+              "downside_volatility",
+              "max_drawdown",
+              "pearson_correlation",
+              "ema",
+              "rolling_mean",
+              "atr",
+              "rsi",
+              "spread_bps",
+              "volume_change",
+              "oi_change",
+              "funding_sum",
+              "position_size",
+              "cost_estimate"
+            ]
           }
         }
       },
@@ -2080,7 +2100,7 @@
     },
     {
       "name": "trade.status",
-      "description": "Trade status.",
+      "description": "Status.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2112,7 +2132,7 @@
     },
     {
       "name": "trade.cancel",
-      "description": "Cancel venue order.",
+      "description": "Cancel order.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2151,7 +2171,7 @@
     },
     {
       "name": "trade.close",
-      "description": "Close via real exchange order.",
+      "description": "Close real order.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2196,7 +2216,7 @@
     },
     {
       "name": "trade.capabilities",
-      "description": "Trade permissions.",
+      "description": "Permissions.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2219,7 +2239,7 @@
     },
     {
       "name": "trade.preflight",
-      "description": "Readiness; no order.",
+      "description": "Readiness only.",
       "inputSchema": {
         "type": "object",
         "properties": {
