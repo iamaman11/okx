@@ -305,9 +305,13 @@ impl AnalyticsService {
             "composition":{"version":okx_analysis::query_plan::COMPOSITION_VERSION,
                 "available_for":"screen","input_sources":["close"],
                 "operations":[{"op":"returns_series","input_unit":"price","output_unit":"ratio"},
-                    {"op":"rolling_mean","input_unit":"price_or_ratio","output_unit":"same_as_input","period_min":1,"period_max":1000}],
+                    {"op":"rolling_mean","input_unit":"price_or_ratio","output_unit":"same_as_input","period_min":1,"period_max":1000},
+                    {"op":"lag","input_unit":"causal_series","output_unit":"same_as_input","period_min":1,"period_max":1000},
+                    {"op":"greater_than","input_unit":"price_or_ratio","output_unit":"boolean","requires":"finite_threshold"},
+                    {"op":"rising_edge","input_unit":"boolean","output_unit":"event","trigger":"false_to_true"},
+                    {"op":"forward_return_label","input_unit":"price","output_unit":"outcome_ratio","requires":"prior_event_step_in_when","period_min":1,"period_max":1000,"causal_feature":false}],
                 "limits":{"max_steps":32,"max_depth":8,"max_result_steps":14,"max_cells":8000000},
-                "result_projection":"last_closed_observation"},
+                "result_projection":"last_closed_observation","outcome_policy":"unconfirmed_without_future_bars_never_a_signal"},
             "limits":{"max_explicit_instruments":100,"max_page_rows":50,
                 "max_correlation_instruments":8,"max_candles_total":1000000},
             "universe":{"modes":["explicit_instruments","venue_reference_registry"],
@@ -769,12 +773,26 @@ fn compute_row_checked(
         for (id, (value, unit)) in composition.evaluate(close) {
             let value = if incomplete_candles { None } else { value };
             if value.is_none() {
-                gaps.push(format!("MISSING_INPUT_OR_MINIMUM_SAMPLES:{id}"));
+                gaps.push(if unit == okx_analysis::query_plan::Unit::OutcomeRatio {
+                    format!("OUTCOME_UNCONFIRMED:{id}")
+                } else {
+                    format!("MISSING_INPUT_OR_MINIMUM_SAMPLES:{id}")
+                });
             }
-            metrics.insert(id.clone(), value.map_or(Value::Null, |v| json!(v)));
+            let metric = match unit {
+                okx_analysis::query_plan::Unit::Boolean
+                | okx_analysis::query_plan::Unit::Event => {
+                    value.map_or(Value::Null, |v| json!(v == 1.0))
+                }
+                _ => value.map_or(Value::Null, |v| json!(v)),
+            };
+            metrics.insert(id.clone(), metric);
             let unit_name = match unit {
                 okx_analysis::query_plan::Unit::Price => "price",
                 okx_analysis::query_plan::Unit::Ratio => "ratio",
+                okx_analysis::query_plan::Unit::Boolean => "boolean",
+                okx_analysis::query_plan::Unit::Event => "event",
+                okx_analysis::query_plan::Unit::OutcomeRatio => "outcome_ratio",
                 _ => return Err("composition:UNEXPECTED_UNIT".into()),
             };
             units.insert(id, json!(unit_name));
@@ -1281,12 +1299,16 @@ mod tests {
                     op: okx_analysis::query_plan::SeriesOp::ReturnsSeries,
                     input: "close".into(),
                     period: None,
+                    threshold: None,
+                    when: None,
                 },
                 okx_analysis::query_plan::SeriesStep {
                     id: "w1".into(),
                     op: okx_analysis::query_plan::SeriesOp::RollingMean,
                     input: "r1".into(),
                     period: Some(2),
+                    threshold: None,
+                    when: None,
                 },
             ],
             result_steps: vec!["w1".into()],
@@ -1340,6 +1362,41 @@ mod tests {
         .unwrap();
         assert_eq!(partial["metrics"]["w1"], Value::Null);
         assert_eq!(partial["quality"], "partial");
+    }
+    #[test]
+    fn t07_event_graph_exposes_boolean_metrics_but_not_unconfirmed_future_outcomes() {
+        let mut query = request(vec!["returns"]);
+        query.start_ms = 0;
+        query.end_ms = 300_000;
+        query.composition = Some(Box::new(serde_json::from_value(json!({
+            "version":"okx.market.composition/v1",
+            "steps":[
+                {"id":"r1","op":"returns_series","input":"close"},
+                {"id":"above","op":"greater_than","input":"r1","threshold":0.0},
+                {"id":"entry","op":"rising_edge","input":"above"},
+                {"id":"previous","op":"lag","input":"close","period":1},
+                {"id":"label","op":"forward_return_label","input":"close","period":2,"when":"entry"}
+            ],
+            "result_steps":["above","entry","previous","label"]
+        })).unwrap()));
+        let mut fixture = row();
+        fixture.bars = Ok(Arc::new([100.0, 90.0, 95.0, 99.0, 120.0].iter().enumerate()
+            .map(|(i, &close)| Bar {
+                time: i as u64 * 60_000,
+                open: close, high: close, low: close, close,
+                volume: 1.0, funding_rate: None,
+            }).collect()));
+        let checked = planner::AnalysisPlan::compile_market(&query).unwrap();
+        let result = compute_row_checked(fixture, &query, None, checked.composition.as_ref(), true).unwrap();
+        assert_eq!(result["metrics"]["above"], true);
+        assert_eq!(result["units"]["above"], "boolean");
+        assert_eq!(result["metrics"]["entry"], false);
+        assert_eq!(result["units"]["entry"], "event");
+        assert_eq!(result["metrics"]["previous"], 99.0);
+        assert_eq!(result["metrics"]["label"], Value::Null);
+        assert_eq!(result["units"]["label"], "outcome_ratio");
+        assert!(result["gaps"].as_array().unwrap().iter().any(|gap| gap.as_str() == Some("OUTCOME_UNCONFIRMED:label")));
+        assert_eq!(result["quality"], "partial");
     }
     #[test]
     fn new_downside_operator_uses_existing_market_plan_and_projection() {

@@ -527,7 +527,7 @@
     },
     {
       "name": "market",
-      "description": "Market data. Use action=capabilities to discover operators.",
+      "description": "Market data; see capabilities.",
       "inputSchema": {
         "oneOf": [
           {
@@ -623,7 +623,11 @@
                         "op": {
                           "enum": [
                             "returns_series",
-                            "rolling_mean"
+                            "rolling_mean",
+                            "lag",
+                            "greater_than",
+                            "rising_edge",
+                            "forward_return_label"
                           ]
                         },
                         "input": {
@@ -633,6 +637,12 @@
                           "type": "integer",
                           "minimum": 1,
                           "maximum": 1000
+                        },
+                        "threshold": {
+                          "type": "number"
+                        },
+                        "when": {
+                          "$ref": "#/$defs/x"
                         }
                       },
                       "required": [
@@ -1878,7 +1888,7 @@
     },
     {
       "name": "trade.execute",
-      "description": "Submit a real order; financial loss possible. Requires approval, account limits and STOP.",
+      "description": "Submit real order; loss possible. Requires approval, limits and STOP.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2150,7 +2160,7 @@
     },
     {
       "name": "trade.close",
-      "description": "Close via real exchange order.",
+      "description": "Submit real close order.",
       "inputSchema": {
         "type": "object",
         "properties": {

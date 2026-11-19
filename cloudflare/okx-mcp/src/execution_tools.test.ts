@@ -45,6 +45,29 @@ fail(!validTool('market',{...marketScreen,action:'compare',composition:composed}
 fail(!validTool('market',{...marketScreen,composition:{...composed,version:'unknown'}}), 'composition version rejected');
 fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'rolling_mean',input:'close'}]}}), 'window must specify period');
 fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'returns_series',input:'close',period:2}]}}), 'returns does not accept window period');
+const causalSteps=[
+ {id:'returns',op:'returns_series',input:'close'},
+ {id:'positive',op:'greater_than',input:'returns',threshold:0},
+ {id:'event',op:'rising_edge',input:'positive'},
+ {id:'prior',op:'lag',input:'close',period:1},
+ {id:'outcome',op:'forward_return_label',input:'close',period:2,when:'event'},
+];
+const causalGraph={...composed,steps:causalSteps,result_steps:['positive','event','prior','outcome']};
+fail(validTool('market',{...marketScreen,composition:causalGraph}), 'bounded event and future label graph passes strict public schema');
+for(const invalid of [
+ {...causalSteps[1],threshold:undefined},
+ {...causalSteps[1],threshold:Infinity},
+ {...causalSteps[2],period:1},
+ {...causalSteps[3],period:0},
+ {...causalSteps[4],when:undefined},
+ {...causalSteps[4],threshold:0},
+]){
+ const altered=[...causalSteps];
+ const pos=causalSteps.findIndex(s=>s.id===invalid.id);
+ altered[pos]=invalid as any;
+ fail(!validTool('market',{...marketScreen,composition:{...causalGraph,steps:altered}}),
+  `causal graph rejects unexpected or invalid parameter ${invalid.id}`);
+}
 fail(!validTool('market',{...marketScreen,fields:Array.from({length:14},(_,i)=>`field_${i}`),composition:composed}), 'combined projection count bounded');
 fail(!validTool('market',{...marketScreen,universe:{instrument_type:'SWAP'}}),'ambiguous universe rejected');
 fail(!validTool('market',{...withoutList,action:'compare',universe:{instrument_type:'SWAP'}}),'compare requires explicit instruments');
