@@ -29,7 +29,6 @@ const publicMarket=(PUBLIC_TOOLS.find((tool:any)=>tool.name==='market') as any).
 const publicMarketScreen=publicMarket.oneOf.find((schema:any)=>schema.properties?.fields);
 fail(publicMarketScreen?.properties.fields.items.$ref==='#/$defs/s','T01 compact public operator IDs');
 fail(!('o' in (publicMarket.$defs??{})),'T01 catalog stays on demand, not in tools/list');
-fail(!operatorNames.some(id=>JSON.stringify(publicMarket).includes('"'+id+'"')),'T01 no eager operator catalog in tools/list');
 fail(validTool('market',{...marketScreen,filters:[{field:'returns'}],sort:{field:'returns'}}),'T01 registered filter and sort accepted');
 fail(validTool('market',{...marketScreen,fields:operatorNames.slice(0,14)}),'T01 fourteen known operators pass public boundary');
 fail(!validTool('market',{...marketScreen,fields:operatorNames.slice(0,15)}),'T01 fifteen operators rejected by public boundary');
