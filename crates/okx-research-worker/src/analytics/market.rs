@@ -895,6 +895,7 @@ fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64, end_ms: u64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn t06_funding_result_schema_invalidates_only_funding_jobs() {
         let funding = request(vec!["funding_sum"]);
