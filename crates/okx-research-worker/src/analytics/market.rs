@@ -627,7 +627,18 @@ fn compute_row_checked(
             gaps.push("OI_RANGE_INCOMPLETE_OR_GAPPED".into());
         }
     }
-    if request.fields.iter().any(|field| field == "spread_bps") {
+    let funding_requested = request.fields.iter().any(|field| field == "funding_sum");
+    if funding_requested {
+        // Funding history exposes event time and an eventual realized rate,
+        // but not the moment that value became publicly available. Preserve
+        // the retrospective sum while refusing to certify it as causal input.
+        match &row.funding {
+            Some(Ok(_)) => gaps.push("FUNDING_PUBLICATION_TIME_UNVERIFIED".into()),
+            Some(Err(_)) | None => gaps.push("FUNDING_SOURCE_UNAVAILABLE".into()),
+        }
+    }
+    let spread_requested = request.fields.iter().any(|field| field == "spread_bps");
+    if spread_requested {
         // ResearchTicker has bid/ask but no observation/publication timestamp.
         // A current quote must never masquerade as historical interval data.
         gaps.push("SPREAD_CURRENT_SNAPSHOT_NOT_HISTORICAL".into());
@@ -757,8 +768,32 @@ fn compute_row_checked(
     if request.fields.iter().any(|field| field == "oi_change") {
         result["oi_coverage"] = json!(oi_coverage);
     }
-    if request.fields.iter().any(|field| field == "spread_bps") {
-        result["metric_time_basis"] = json!({"spread_bps":"current_snapshot_unaligned"});
+    let mut metric_time_basis = serde_json::Map::new();
+    if spread_requested {
+        metric_time_basis.insert("spread_bps".into(), json!("current_snapshot_unaligned"));
+    }
+    if funding_requested {
+        metric_time_basis.insert(
+            "funding_sum".into(),
+            json!("funding_event_time_publication_unverified"),
+        );
+        result["funding_observations"] = row
+            .funding
+            .as_ref()
+            .and_then(|source| source.as_ref().ok())
+            .map(|events| {
+                json!({
+                    "observed_events": events.len(),
+                    "first_event_ms": events.first().map(|(time, _)| time),
+                    "last_event_ms": events.last().map(|(time, _)| time),
+                    "publication_time_verified": false,
+                    "expected_events": null
+                })
+            })
+            .unwrap_or(Value::Null);
+    }
+    if !metric_time_basis.is_empty() {
+        result["metric_time_basis"] = Value::Object(metric_time_basis);
     }
     Ok(result)
 }
@@ -1015,6 +1050,68 @@ mod tests {
                 .unwrap()
                 .contains(&json!("SPREAD_CURRENT_SNAPSHOT_NOT_HISTORICAL"))
         );
+    }
+    #[test]
+    fn t06_funding_event_time_does_not_prove_publication_time() {
+        let mut source = row();
+        source.funding = Some(Ok(vec![(60_000, 0.01), (120_000, -0.002)]));
+        let response = compute_row(source, &request(vec!["funding_sum"]), None).unwrap();
+        assert!((response["metrics"]["funding_sum"].as_f64().unwrap() - 0.008).abs() < 1e-12);
+        assert!(response["candle_coverage"].is_null());
+        assert_eq!(response["quality"], "partial");
+        assert_eq!(
+            response["metric_time_basis"]["funding_sum"],
+            "funding_event_time_publication_unverified"
+        );
+        assert_eq!(response["funding_observations"]["observed_events"], 2);
+        assert_eq!(response["funding_observations"]["first_event_ms"], 60_000);
+        assert_eq!(response["funding_observations"]["last_event_ms"], 120_000);
+        assert_eq!(response["funding_observations"]["publication_time_verified"], false);
+        assert!(response["funding_observations"]["expected_events"].is_null());
+        assert!(response["gaps"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("FUNDING_PUBLICATION_TIME_UNVERIFIED")));
+    }
+    #[test]
+    fn t06_mixed_funding_ticker_and_candles_keep_distinct_time_evidence() {
+        let mut source = row();
+        source.funding = Some(Ok(vec![(60_000, 0.001)]));
+        source.ticker = Some(Ok(okx_protocol::research_ipc::ResearchTicker {
+            bid_price: "100".into(),
+            ask_price: "101".into(),
+        }));
+        let response = compute_row(
+            source,
+            &request(vec!["returns", "funding_sum", "spread_bps"]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(response["candle_coverage"]["complete"], true);
+        assert!(response["metrics"]["returns"].is_number());
+        assert_eq!(response["metrics"]["funding_sum"], json!(0.001));
+        assert_eq!(
+            response["metric_time_basis"]["funding_sum"],
+            "funding_event_time_publication_unverified"
+        );
+        assert_eq!(
+            response["metric_time_basis"]["spread_bps"],
+            "current_snapshot_unaligned"
+        );
+        assert_eq!(response["quality"], "partial");
+    }
+    #[test]
+    fn t06_missing_funding_source_has_explicit_first_failure() {
+        let mut source = row();
+        source.funding = Some(Err("SOURCE_TIMEOUT".into()));
+        let response = compute_row(source, &request(vec!["funding_sum"]), None).unwrap();
+        assert!(response["metrics"]["funding_sum"].is_null());
+        assert!(response["funding_observations"].is_null());
+        assert!(response["gaps"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("FUNDING_SOURCE_UNAVAILABLE")));
+        assert_eq!(response["quality"], "partial");
     }
     #[test]
     fn source_specific_metrics_do_not_hide_candle_coverage_in_mixed_requests() {
