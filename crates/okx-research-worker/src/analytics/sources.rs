@@ -367,17 +367,20 @@ mod extension_tests {
         assert_eq!(first["metrics"]["returns"], serde_json::Value::Null);
         assert_eq!(first["metrics"]["w1"], serde_json::Value::Null);
         assert_eq!(first["units"]["w1"], "ratio");
-        assert!(first["gaps"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("CANDLE_INTERIOR_GAP")));
+        assert!(
+            first["gaps"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("CANDLE_INTERIOR_GAP"))
+        );
         assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
         // A market query legitimately records one completed read-only job and
         // immutable evidence. A rejected backtest must add neither.
         let jobs_before_rejected_replay = service.jobs.snapshot().len();
-        let evidence_before_rejected_replay =
-            std::fs::read_dir(service.artifacts.evidence_dir()).unwrap().count();
+        let evidence_before_rejected_replay = std::fs::read_dir(service.artifacts.evidence_dir())
+            .unwrap()
+            .count();
         assert!(jobs_before_rejected_replay > 0);
         assert!(evidence_before_rejected_replay > 0);
 
@@ -393,7 +396,9 @@ mod extension_tests {
         );
         assert_eq!(service.jobs.snapshot().len(), jobs_before_rejected_replay);
         assert_eq!(
-            std::fs::read_dir(service.artifacts.evidence_dir()).unwrap().count(),
+            std::fs::read_dir(service.artifacts.evidence_dir())
+                .unwrap()
+                .count(),
             evidence_before_rejected_replay
         );
         assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
@@ -501,7 +506,10 @@ mod extension_tests {
         assert_eq!(market["rows"][0]["units"]["w1"], "ratio");
         assert_eq!(market["rows"][0]["quality"], "complete");
         assert_eq!(market["rows"][0]["candle_coverage"]["expected_bars"], 20);
-        assert_eq!(market["rows"][0]["candle_coverage"]["observed_unique_bars"], 20);
+        assert_eq!(
+            market["rows"][0]["candle_coverage"]["observed_unique_bars"],
+            20
+        );
         assert_eq!(market["rows"][0]["candle_coverage"]["missing_bars"], 0);
         assert_eq!(market["rows"][0]["unclosed_candles_excluded"], 1);
         // T13: composition must disclose its candle dependency even when
@@ -516,9 +524,15 @@ mod extension_tests {
             ],"result_steps":["w1"]}
         }))
         .unwrap();
-        let with_candles = service.market(composition_only_source, None, None).await.unwrap();
+        let with_candles = service
+            .market(composition_only_source, None, None)
+            .await
+            .unwrap();
         assert_eq!(with_candles["sources"], json!(["candles", "request"]));
-        assert_eq!(with_candles["sources"], with_candles["query_plan"]["sources"]);
+        assert_eq!(
+            with_candles["sources"],
+            with_candles["query_plan"]["sources"]
+        );
         assert_eq!(with_candles["rows"][0]["units"]["w1"], "ratio");
         assert!(with_candles["rows"][0]["metrics"]["w1"].is_number());
         let mut request = ResearchRequest::Backtest {
