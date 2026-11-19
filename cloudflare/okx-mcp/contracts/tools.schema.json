@@ -751,8 +751,7 @@
                   }
                 },
                 "required": [
-                  "field",
-                  "descending"
+                  "field"
                 ],
                 "additionalProperties": false
               },

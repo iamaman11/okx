@@ -30,6 +30,9 @@ const publicMarketScreen=publicMarket.oneOf.find((schema:any)=>schema.properties
 fail(publicMarketScreen?.properties.fields.items.$ref==='#/$defs/s','T01 compact public operator IDs');
 fail(!('o' in (publicMarket.$defs??{})),'T01 catalog stays on demand, not in tools/list');
 fail(validTool('market',{...marketScreen,filters:[{field:'returns',min:0,max:1}],sort:{field:'returns',descending:false}}),'T01 registered filter and sort accepted');
+fail(validTool('market',{...marketScreen,filters:[{field:'returns'}],sort:{field:'returns'}}),'T01 optional filter bounds and default sort direction match Native');
+fail(!validTool('market',{...marketScreen,filters:[{field:'unknown_operator'}]}),'T01 unbounded unknown filter ID rejected');
+fail(!validTool('market',{...marketScreen,sort:{field:'unknown_operator'}}),'T01 default-direction unknown sort ID rejected');
 fail(validTool('market',{...marketScreen,fields:operatorNames.slice(0,14)}),'T01 fourteen known operators pass public boundary');
 fail(!validTool('market',{...marketScreen,fields:operatorNames.slice(0,15)}),'T01 fifteen operators rejected by public boundary');
 fail(!validTool('market',{...marketScreen,fields:operatorNames}),'T01 sixteen operators rejected by public boundary');

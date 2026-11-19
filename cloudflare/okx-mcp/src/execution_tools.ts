@@ -41,7 +41,7 @@ const stepId={type:'string',pattern:'^[a-z0-9_]{1,32}$'};
 const compositionStep=object({id:stepId,op:choice('returns_series','rolling_mean'),input:stepId,period:integer(1,1000)},['id','op','input']);
 const composition=object({version:choice('okx.market.composition/v1'),steps:{type:'array',items:compositionStep,minItems:1,maxItems:32},result_steps:{type:'array',items:stepId,minItems:1,maxItems:14}});
 const universe=object({instrument_type:choice('SPOT','SWAP','FUTURES'),settle_currency:text(16),after_instrument:text(64),reference_generation:text(128),limit:integer(1,100),rank_globally:{type:'boolean'}},['instrument_type']);
-const screenCompare=action('screen',{...range,universe,fields:{...array(text(64),14),minItems:1},composition,parameters:marketParameters,filters:array(object({field:text(64),min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:text(64),descending:{type:'boolean'}}),limit:integer(1,50),cursor:text(512)},['fields','timeframe_ms','start_ms','end_ms','limit']);
+const screenCompare=action('screen',{...range,universe,fields:{...array(text(64),14),minItems:1},composition,parameters:marketParameters,filters:array(object({field:text(64),min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:text(64),descending:{type:'boolean'}},['field']),limit:integer(1,50),cursor:text(512)},['fields','timeframe_ms','start_ms','end_ms','limit']);
 screenCompare.properties.action=choice('screen','compare');
 screenCompare.allOf=[{oneOf:[{required:['instruments']},{required:['universe']}]},
  {if:{properties:{action:{const:'compare'}}},then:{required:['instruments']}}];

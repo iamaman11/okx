@@ -559,6 +559,21 @@ mod batch_tests {
         );
     }
     #[test]
+    fn market_sort_defaults_and_optional_filter_bounds_match_public_mcp() {
+        let wire = serde_json::json!({
+            "action":"screen","instruments":["BTC-USDT-SWAP"],
+            "fields":["returns"],"timeframe_ms":60000,
+            "start_ms":60000,"end_ms":180000,"limit":10,
+            "filters":[{"field":"returns"}],
+            "sort":{"field":"returns"}
+        });
+        let request: MarketRequest = serde_json::from_value(wire).unwrap();
+        assert!(request.valid());
+        assert_eq!(request.filters[0].min, None);
+        assert_eq!(request.filters[0].max, None);
+        assert!(!request.sort.unwrap().descending);
+    }
+    #[test]
     fn research_capabilities_strict_read_only_wire() {
         let r: ResearchRequest = serde_json::from_str(r#"{"action":"capabilities"}"#).unwrap();
         assert!(matches!(r, ResearchRequest::Capabilities {}));
