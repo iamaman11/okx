@@ -469,6 +469,7 @@ impl AnalyticsService {
                         &request,
                         peer.as_deref(),
                         plan.composition.as_ref(),
+                        need_candles,
                     )?);
                 }
                 if global_rank {
@@ -546,19 +547,29 @@ fn compute_row(
             okx_analysis::query_plan::CheckedComposition::compile(*c, count)
         })
         .transpose()?;
-    compute_row_checked(row, request, peer, checked.as_ref())
+    let needs_candles = checked.is_some()
+        || planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?
+            .sources
+            .contains("candles");
+    compute_row_checked(row, request, peer, checked.as_ref(), needs_candles)
 }
 fn compute_row_checked(
     row: Loaded,
     request: &MarketRequest,
     peer: Option<&Vec<Bar>>,
     composition: Option<&okx_analysis::query_plan::CheckedComposition>,
+    needs_candles: bool,
 ) -> Result<Value, String> {
     let mut gaps = Vec::new();
+    // A source-specific metric does not imply that candle observations exist.
+    // Preserve candle coverage for mixed queries and composed price series,
+    // but report N/A (null) when the typed plan excludes candle sources.
     let bars = match row.bars {
         Ok(b) => b,
         Err(e) => {
-            gaps.push(e);
+            if needs_candles {
+                gaps.push(e);
+            }
             Arc::new(Vec::new())
         }
     };
@@ -568,16 +579,21 @@ fn compute_row_checked(
     let high = bars.iter().map(|b| b.high).collect::<Vec<_>>();
     let low = bars.iter().map(|b| b.low).collect::<Vec<_>>();
     let volume = bars.iter().map(|b| b.volume).collect::<Vec<_>>();
-    let candle_coverage = okx_analysis::time_series::ClosedRange::strict(
-        request.start_ms,
-        request.end_ms,
-        request.timeframe_ms,
-    )
-    .ok()
-    .map(|range| range.coverage(bars.iter().map(|bar| bar.time)));
-    let incomplete_candles = candle_coverage
-        .as_ref()
-        .is_none_or(|coverage| !coverage.complete);
+    let candle_coverage = needs_candles
+        .then(|| {
+            okx_analysis::time_series::ClosedRange::strict(
+                request.start_ms,
+                request.end_ms,
+                request.timeframe_ms,
+            )
+            .ok()
+            .map(|range| range.coverage(bars.iter().map(|bar| bar.time)))
+        })
+        .flatten();
+    let incomplete_candles = needs_candles
+        && candle_coverage
+            .as_ref()
+            .is_none_or(|coverage| !coverage.complete);
     if !bars.is_empty() && incomplete_candles {
         gaps.push("CANDLE_RANGE_INCOMPLETE_OR_GAPPED".into());
         // Preserve the precise public reason alongside the new typed evidence.
@@ -952,6 +968,7 @@ mod tests {
         let partial = compute_row(source, &query, None).unwrap();
         assert_eq!(partial["quality"], "partial");
         assert_eq!(partial["metrics"]["oi_change"], Value::Null);
+        assert!(partial["candle_coverage"].is_null());
         assert_eq!(partial["oi_coverage"]["expected_bars"], 5);
         assert_eq!(partial["oi_coverage"]["observed_unique_bars"], 4);
         assert_eq!(partial["oi_coverage"]["first_missing_ms"], 600_000);
@@ -973,6 +990,7 @@ mod tests {
         ]));
         let full = compute_row(full_source, &query, None).unwrap();
         assert_eq!(full["quality"], "complete");
+        assert!(full["candle_coverage"].is_null());
         assert_eq!(full["oi_coverage"]["complete"], true);
         assert!((full["metrics"]["oi_change"].as_f64().unwrap() - 0.8).abs() < 1e-12);
     }
@@ -989,6 +1007,7 @@ mod tests {
             response["metric_time_basis"]["spread_bps"],
             "current_snapshot_unaligned"
         );
+        assert!(response["candle_coverage"].is_null());
         assert_eq!(response["quality"], "partial");
         assert!(
             response["gaps"]
@@ -996,6 +1015,13 @@ mod tests {
                 .unwrap()
                 .contains(&json!("SPREAD_CURRENT_SNAPSHOT_NOT_HISTORICAL"))
         );
+    }
+    #[test]
+    fn source_specific_metrics_do_not_hide_candle_coverage_in_mixed_requests() {
+        let response = compute_row(row(), &request(vec!["returns", "oi_change"]), None).unwrap();
+        assert_eq!(response["candle_coverage"]["complete"], true);
+        assert!(response["oi_coverage"].is_null());
+        assert_eq!(response["quality"], "partial");
     }
     #[test]
     fn interior_gap_never_imputed() {
@@ -1107,10 +1133,10 @@ mod tests {
             },
         ]));
         let checked = planner::AnalysisPlan::compile_market(&request).unwrap();
+        let composition = checked.composition.as_ref();
         let mut partial_fixture = row();
         partial_fixture.bars = fixture.bars.clone();
-        let output =
-            compute_row_checked(fixture, &request, None, checked.composition.as_ref()).unwrap();
+        let output = compute_row_checked(fixture, &request, None, composition, true).unwrap();
         assert!((output["metrics"]["returns"].as_f64().unwrap() + 0.01).abs() < 1e-12);
         assert!(output["metrics"]["w1"].as_f64().unwrap().abs() < 1e-12);
         assert_eq!(output["units"]["w1"], "ratio");
@@ -1119,7 +1145,8 @@ mod tests {
             partial_fixture,
             &request,
             None,
-            checked.composition.as_ref(),
+            composition,
+            true,
         )
         .unwrap();
         assert_eq!(partial["metrics"]["w1"], Value::Null);
