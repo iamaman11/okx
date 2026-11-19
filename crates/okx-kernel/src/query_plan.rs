@@ -808,6 +808,35 @@ mod tests {
     }
 
     #[test]
+    fn t06_every_causal_projection_is_prefix_invariant_for_each_closed_index() {
+        let graph = CheckedComposition::compile(causal_event_graph(), 7).unwrap();
+        let closes = [100.0, 90.0, 95.0, 99.0, 120.0, 110.0, 108.0];
+        for at in 0..closes.len() {
+            let full = graph.evaluate_at(&closes, at);
+            let prefix = graph.evaluate_at(&closes[..=at], at);
+            let mut changed_future = closes;
+            for later in &mut changed_future[at + 1..] {
+                *later = 55.0;
+            }
+            let changed = graph.evaluate_at(&changed_future, at);
+            for feature in ["return", "positive", "entry", "previous"] {
+                assert_eq!(full[feature], prefix[feature], "prefix mismatch: {feature} at {at}");
+                assert_eq!(full[feature], changed[feature], "future leak: {feature} at {at}");
+            }
+        }
+    }
+
+    #[test]
+    fn t05_original_composition_wire_omits_new_optional_graph_fields() {
+        let old = two_step_composition();
+        let encoded = serde_json::to_value(&old).unwrap();
+        assert_eq!(encoded["steps"][0]["op"], "returns_series");
+        assert!(encoded["steps"][0].get("threshold").is_none());
+        assert!(encoded["steps"][0].get("when").is_none());
+        assert_eq!(serde_json::from_value::<CompositionRequest>(encoded).unwrap(), old);
+    }
+
+    #[test]
     fn t07_outcome_cannot_be_a_feature_or_event_condition() {
         let spec = causal_event_graph();
         let mut leakage = spec.clone();
