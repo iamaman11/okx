@@ -258,7 +258,10 @@ mod extension_tests {
                 .unwrap(),
             )
             .into();
-            let actual = service.sources.funding("BTC-USDT-SWAP", 20_000, 30_000).await;
+            let actual = service
+                .sources
+                .funding("BTC-USDT-SWAP", 20_000, 30_000)
+                .await;
             match expected {
                 Some(rate) => assert_eq!(actual.unwrap(), vec![(20_000, rate)]),
                 None => assert_eq!(actual.unwrap_err(), "FUNDING_REALIZED_RATE_UNAVAILABLE"),

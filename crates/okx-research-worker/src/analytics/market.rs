@@ -780,8 +780,7 @@ fn compute_row_checked(
                 });
             }
             let metric = match unit {
-                okx_analysis::query_plan::Unit::Boolean
-                | okx_analysis::query_plan::Unit::Event => {
+                okx_analysis::query_plan::Unit::Boolean | okx_analysis::query_plan::Unit::Event => {
                     value.map_or(Value::Null, |v| json!(v == 1.0))
                 }
                 _ => value.map_or(Value::Null, |v| json!(v)),
@@ -924,7 +923,10 @@ mod tests {
         let funding = request(vec!["funding_sum"]);
         let mixed = request(vec!["returns", "funding_sum", "spread_bps"]);
         let returns = request(vec!["returns"]);
-        assert_eq!(market_job_schema(&funding.fields), market_job_schema(&mixed.fields));
+        assert_eq!(
+            market_job_schema(&funding.fields),
+            market_job_schema(&mixed.fields)
+        );
         assert_eq!(market_job_schema(&returns.fields), "market/448.2");
 
         // Reproduce the exact persisted pre-T06 key for a closed historical
@@ -1160,12 +1162,17 @@ mod tests {
             response["funding_observations"]["rate_basis"],
             "realized_settlement_rate"
         );
-        assert_eq!(response["funding_observations"]["publication_time_verified"], false);
+        assert_eq!(
+            response["funding_observations"]["publication_time_verified"],
+            false
+        );
         assert!(response["funding_observations"]["expected_events"].is_null());
-        assert!(response["gaps"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("FUNDING_PUBLICATION_TIME_UNVERIFIED")));
+        assert!(
+            response["gaps"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("FUNDING_PUBLICATION_TIME_UNVERIFIED"))
+        );
     }
     #[test]
     fn t06_mixed_funding_ticker_and_candles_keep_distinct_time_evidence() {
@@ -1201,10 +1208,12 @@ mod tests {
         let response = compute_row(source, &request(vec!["funding_sum"]), None).unwrap();
         assert!(response["metrics"]["funding_sum"].is_null());
         assert!(response["funding_observations"].is_null());
-        assert!(response["gaps"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("FUNDING_SOURCE_UNAVAILABLE")));
+        assert!(
+            response["gaps"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("FUNDING_SOURCE_UNAVAILABLE"))
+        );
         assert_eq!(response["quality"], "partial");
     }
     #[test]
@@ -1352,14 +1361,8 @@ mod tests {
         assert!(output["metrics"]["w1"].as_f64().unwrap().abs() < 1e-12);
         assert_eq!(output["units"]["w1"], "ratio");
         Arc::make_mut(partial_fixture.bars.as_mut().unwrap()).remove(1);
-        let partial = compute_row_checked(
-            partial_fixture,
-            &request,
-            None,
-            composition,
-            true,
-        )
-        .unwrap();
+        let partial =
+            compute_row_checked(partial_fixture, &request, None, composition, true).unwrap();
         assert_eq!(partial["metrics"]["w1"], Value::Null);
         assert_eq!(partial["quality"], "partial");
     }
@@ -1380,14 +1383,24 @@ mod tests {
             "result_steps":["above","entry","previous","label"]
         })).unwrap()));
         let mut fixture = row();
-        fixture.bars = Ok(Arc::new([100.0, 90.0, 95.0, 99.0, 120.0].iter().enumerate()
-            .map(|(i, &close)| Bar {
-                time: i as u64 * 60_000,
-                open: close, high: close, low: close, close,
-                volume: 1.0, funding_rate: None,
-            }).collect()));
+        fixture.bars = Ok(Arc::new(
+            [100.0, 90.0, 95.0, 99.0, 120.0]
+                .iter()
+                .enumerate()
+                .map(|(i, &close)| Bar {
+                    time: i as u64 * 60_000,
+                    open: close,
+                    high: close,
+                    low: close,
+                    close,
+                    volume: 1.0,
+                    funding_rate: None,
+                })
+                .collect(),
+        ));
         let checked = planner::AnalysisPlan::compile_market(&query).unwrap();
-        let result = compute_row_checked(fixture, &query, None, checked.composition.as_ref(), true).unwrap();
+        let result =
+            compute_row_checked(fixture, &query, None, checked.composition.as_ref(), true).unwrap();
         assert_eq!(result["metrics"]["above"], true);
         assert_eq!(result["units"]["above"], "boolean");
         assert_eq!(result["metrics"]["entry"], false);
@@ -1395,7 +1408,13 @@ mod tests {
         assert_eq!(result["metrics"]["previous"], 99.0);
         assert_eq!(result["metrics"]["label"], Value::Null);
         assert_eq!(result["units"]["label"], "outcome_ratio");
-        assert!(result["gaps"].as_array().unwrap().iter().any(|gap| gap.as_str() == Some("OUTCOME_UNCONFIRMED:label")));
+        assert!(
+            result["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|gap| gap.as_str() == Some("OUTCOME_UNCONFIRMED:label"))
+        );
         assert_eq!(result["quality"], "partial");
     }
     #[test]

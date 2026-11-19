@@ -141,10 +141,10 @@ impl CheckedComposition {
                     Unit::Ratio
                 }
                 SeriesOp::RollingMean | SeriesOp::Lag => {
-                    if !matches!(input_unit, Unit::Price | Unit::Ratio)
-                        && !(step.op == SeriesOp::Lag
-                            && matches!(input_unit, Unit::Boolean | Unit::Event))
-                    {
+                    let numeric = matches!(input_unit, Unit::Price | Unit::Ratio);
+                    let lagged_discrete = step.op == SeriesOp::Lag
+                        && matches!(input_unit, Unit::Boolean | Unit::Event);
+                    if !(numeric || lagged_discrete) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=causal_series:actual={}",
                             composition_unit_name(input_unit)
@@ -276,8 +276,8 @@ impl CheckedComposition {
                 SeriesOp::Lag => {
                     let period = checked.step.period.expect("validated lag") as usize;
                     let mut result = vec![None; input.len()];
-                    for i in period..input.len() {
-                        result[i] = input[i - period];
+                    if period < input.len() {
+                        result[period..].copy_from_slice(&input[..input.len() - period]);
                     }
                     result
                 }
@@ -747,21 +747,26 @@ mod tests {
     }
 
     fn causal_event_graph() -> CompositionRequest {
-        let step = |id: &str, op, input: &str, period, threshold, when: Option<&str>| {
-            SeriesStep {
-                id: id.into(),
-                op,
-                input: input.into(),
-                period,
-                threshold,
-                when: when.map(str::to_owned),
-            }
+        let step = |id: &str, op, input: &str, period, threshold, when: Option<&str>| SeriesStep {
+            id: id.into(),
+            op,
+            input: input.into(),
+            period,
+            threshold,
+            when: when.map(str::to_owned),
         };
         CompositionRequest {
             version: COMPOSITION_VERSION.into(),
             steps: vec![
                 step("return", SeriesOp::ReturnsSeries, "close", None, None, None),
-                step("positive", SeriesOp::GreaterThan, "return", None, Some(0.0), None),
+                step(
+                    "positive",
+                    SeriesOp::GreaterThan,
+                    "return",
+                    None,
+                    Some(0.0),
+                    None,
+                ),
                 step("entry", SeriesOp::RisingEdge, "positive", None, None, None),
                 step("previous", SeriesOp::Lag, "close", Some(1), None, None),
                 step(
@@ -820,8 +825,14 @@ mod tests {
             }
             let changed = graph.evaluate_at(&changed_future, at);
             for feature in ["return", "positive", "entry", "previous"] {
-                assert_eq!(full[feature], prefix[feature], "prefix mismatch: {feature} at {at}");
-                assert_eq!(full[feature], changed[feature], "future leak: {feature} at {at}");
+                assert_eq!(
+                    full[feature], prefix[feature],
+                    "prefix mismatch: {feature} at {at}"
+                );
+                assert_eq!(
+                    full[feature], changed[feature],
+                    "future leak: {feature} at {at}"
+                );
             }
         }
     }
@@ -833,7 +844,10 @@ mod tests {
         assert_eq!(encoded["steps"][0]["op"], "returns_series");
         assert!(encoded["steps"][0].get("threshold").is_none());
         assert!(encoded["steps"][0].get("when").is_none());
-        assert_eq!(serde_json::from_value::<CompositionRequest>(encoded).unwrap(), old);
+        assert_eq!(
+            serde_json::from_value::<CompositionRequest>(encoded).unwrap(),
+            old
+        );
     }
 
     #[test]
