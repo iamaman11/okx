@@ -143,7 +143,8 @@ impl CheckedComposition {
                     let mut result = vec![None; input.len()];
                     for i in 1..input.len() {
                         if let (Some(a), Some(b)) = (input[i - 1], input[i])
-                            && a > 0.0 && b > 0.0
+                            && a > 0.0
+                            && b > 0.0
                         {
                             let value = b / a - 1.0;
                             result[i] = value.is_finite().then_some(value);
