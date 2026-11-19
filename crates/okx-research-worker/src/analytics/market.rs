@@ -1133,10 +1133,10 @@ mod tests {
             },
         ]));
         let checked = planner::AnalysisPlan::compile_market(&request).unwrap();
+        let composition = checked.composition.as_ref();
         let mut partial_fixture = row();
         partial_fixture.bars = fixture.bars.clone();
-        let output =
-            compute_row_checked(fixture, &request, None, checked.composition.as_ref()).unwrap();
+        let output = compute_row_checked(fixture, &request, None, composition, true).unwrap();
         assert!((output["metrics"]["returns"].as_f64().unwrap() + 0.01).abs() < 1e-12);
         assert!(output["metrics"]["w1"].as_f64().unwrap().abs() < 1e-12);
         assert_eq!(output["units"]["w1"], "ratio");
@@ -1145,7 +1145,8 @@ mod tests {
             partial_fixture,
             &request,
             None,
-            checked.composition.as_ref(),
+            composition,
+            true,
         )
         .unwrap();
         assert_eq!(partial["metrics"]["w1"], Value::Null);
