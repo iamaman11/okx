@@ -14,6 +14,14 @@ impl AnalysisPlan {
     /// Compiles every executable market request to the pure typed operator
     /// plan before source allocation or the first venue request.
     pub fn compile_market(request: &MarketRequest) -> Result<QueryPlan, String> {
+        if request.composition.as_ref().is_some_and(|composition| {
+            composition
+                .result_steps
+                .iter()
+                .any(|id| request.fields.contains(id))
+        }) {
+            return Err("composition.result_steps:COLLIDES_WITH_LEGACY_FIELD".into());
+        }
         let parse = |name: &str| {
             serde_json::from_value::<Operator>(serde_json::Value::String(name.into()))
                 .map_err(|_| format!("operators:UNKNOWN_FIELD:{name}"))
@@ -57,7 +65,8 @@ impl AnalysisPlan {
             request.parameters.clone(),
             filters,
             ranking,
-        )
+        )?
+        .with_composition(request.composition.clone().map(|c| *c))
     }
     pub fn build(fields: &[String], start: u64, end: u64) -> Result<Self, String> {
         if start >= end {

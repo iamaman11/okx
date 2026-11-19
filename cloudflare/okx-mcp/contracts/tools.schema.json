@@ -38,15 +38,15 @@
             "type": "object",
             "properties": {
               "max_modelled_loss_usdt": {
-                "$ref": "#/$defs/positiveDecimal"
+                "$ref": "#/$defs/d"
               },
               "max_order_loss_usdt": {
-                "$ref": "#/$defs/positiveDecimal"
+                "$ref": "#/$defs/d"
               },
               "max_notional_usdt": {
                 "anyOf": [
                   {
-                    "$ref": "#/$defs/positiveDecimal"
+                    "$ref": "#/$defs/d"
                   },
                   {
                     "type": "null"
@@ -56,7 +56,7 @@
               "max_leverage": {
                 "anyOf": [
                   {
-                    "$ref": "#/$defs/positiveDecimal"
+                    "$ref": "#/$defs/d"
                   },
                   {
                     "type": "null"
@@ -66,7 +66,7 @@
               "max_daily_realized_loss_usdt": {
                 "anyOf": [
                   {
-                    "$ref": "#/$defs/positiveDecimal"
+                    "$ref": "#/$defs/d"
                   },
                   {
                     "type": "null"
@@ -94,7 +94,7 @@
                 "uniqueItems": true
               },
               "max_entry_usd": {
-                "$ref": "#/$defs/positiveDecimal"
+                "$ref": "#/$defs/d"
               }
             },
             "required": [
@@ -233,7 +233,7 @@
           }
         ],
         "$defs": {
-          "positiveDecimal": {
+          "d": {
             "type": "string",
             "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
             "maxLength": 29
@@ -354,7 +354,7 @@
                 "maximum": 9007199254740991
               },
               "budget_usd": {
-                "$ref": "#/$defs/positiveDecimal"
+                "$ref": "#/$defs/d"
               }
             },
             "required": [
@@ -412,7 +412,7 @@
                 "additionalProperties": false
               },
               "budget_usd": {
-                "$ref": "#/$defs/positiveDecimal"
+                "$ref": "#/$defs/d"
               }
             },
             "required": [
@@ -475,7 +475,7 @@
                 ]
               },
               "amount_usd": {
-                "$ref": "#/$defs/positiveDecimal"
+                "$ref": "#/$defs/d"
               },
               "expected_authority_revision": {
                 "type": "integer",
@@ -496,7 +496,7 @@
           }
         ],
         "$defs": {
-          "positiveDecimal": {
+          "d": {
             "type": "string",
             "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
             "maxLength": 29
@@ -527,7 +527,7 @@
     },
     {
       "name": "market",
-      "description": "Market data.",
+      "description": "Market data. Use action=capabilities to discover operators.",
       "inputSchema": {
         "oneOf": [
           {
@@ -600,9 +600,66 @@
                 "items": {
                   "$ref": "#/$defs/s"
                 },
-                "maxItems": 32,
+                "maxItems": 14,
                 "uniqueItems": true,
                 "minItems": 1
+              },
+              "composition": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "enum": [
+                      "okx.market.composition/v1"
+                    ]
+                  },
+                  "steps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "$ref": "#/$defs/x"
+                        },
+                        "op": {
+                          "enum": [
+                            "returns_series",
+                            "rolling_mean"
+                          ]
+                        },
+                        "input": {
+                          "$ref": "#/$defs/x"
+                        },
+                        "period": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 1000
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "op",
+                        "input"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1,
+                    "maxItems": 32
+                  },
+                  "result_steps": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/x"
+                    },
+                    "minItems": 1,
+                    "maxItems": 14
+                  }
+                },
+                "required": [
+                  "version",
+                  "steps",
+                  "result_steps"
+                ],
+                "additionalProperties": false
               },
               "parameters": {
                 "type": "object",
@@ -694,8 +751,7 @@
                   }
                 },
                 "required": [
-                  "field",
-                  "descending"
+                  "field"
                 ],
                 "additionalProperties": false
               },
@@ -833,6 +889,10 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 9007199254740991
+          },
+          "x": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]{1,32}$"
           }
         }
       },
@@ -1430,7 +1490,7 @@
                 "const": "scenario"
               },
               "equity_usd": {
-                "$ref": "#/$defs/positiveDecimal"
+                "$ref": "#/$defs/d"
               },
               "positions": {
                 "type": "array",
@@ -1449,10 +1509,10 @@
                       ]
                     },
                     "notional_usd": {
-                      "$ref": "#/$defs/positiveDecimal"
+                      "$ref": "#/$defs/d"
                     },
                     "margin_usd": {
-                      "$ref": "#/$defs/positiveDecimal"
+                      "$ref": "#/$defs/d"
                     },
                     "price_shock_bps": {
                       "type": "integer",
@@ -1526,7 +1586,7 @@
           }
         ],
         "$defs": {
-          "positiveDecimal": {
+          "d": {
             "type": "string",
             "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
             "maxLength": 29
@@ -1664,7 +1724,7 @@
                 "type": "object",
                 "properties": {
                   "contracts": {
-                    "$ref": "#/$defs/positiveDecimal"
+                    "$ref": "#/$defs/d"
                   }
                 },
                 "required": [
@@ -1676,7 +1736,7 @@
                 "type": "object",
                 "properties": {
                   "max_loss_usd": {
-                    "$ref": "#/$defs/positiveDecimal"
+                    "$ref": "#/$defs/d"
                   }
                 },
                 "required": [
@@ -1688,7 +1748,7 @@
                 "type": "object",
                 "properties": {
                   "entry_budget_usd": {
-                    "$ref": "#/$defs/positiveDecimal"
+                    "$ref": "#/$defs/d"
                   }
                 },
                 "required": [
@@ -1711,13 +1771,13 @@
                 ]
               },
               "limit_price": {
-                "$ref": "#/$defs/positiveDecimal"
+                "$ref": "#/$defs/d"
               },
               "reference": {
                 "$ref": "#/$defs/t"
               },
               "max_entry_usd": {
-                "$ref": "#/$defs/positiveDecimal"
+                "$ref": "#/$defs/d"
               },
               "max_slippage_bps": {
                 "type": "integer",
@@ -1737,7 +1797,7 @@
                 "type": "object",
                 "properties": {
                   "stop_price": {
-                    "$ref": "#/$defs/positiveDecimal"
+                    "$ref": "#/$defs/d"
                   }
                 },
                 "required": [
@@ -1793,7 +1853,7 @@
           }
         ],
         "$defs": {
-          "positiveDecimal": {
+          "d": {
             "type": "string",
             "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
             "maxLength": 29
@@ -1858,7 +1918,7 @@
                 "type": "object",
                 "properties": {
                   "contracts": {
-                    "$ref": "#/$defs/positiveDecimal"
+                    "$ref": "#/$defs/d"
                   }
                 },
                 "required": [
@@ -1870,7 +1930,7 @@
                 "type": "object",
                 "properties": {
                   "max_loss_usd": {
-                    "$ref": "#/$defs/positiveDecimal"
+                    "$ref": "#/$defs/d"
                   }
                 },
                 "required": [
@@ -1882,7 +1942,7 @@
                 "type": "object",
                 "properties": {
                   "entry_budget_usd": {
-                    "$ref": "#/$defs/positiveDecimal"
+                    "$ref": "#/$defs/d"
                   }
                 },
                 "required": [
@@ -1905,13 +1965,13 @@
                 ]
               },
               "limit_price": {
-                "$ref": "#/$defs/positiveDecimal"
+                "$ref": "#/$defs/d"
               },
               "reference": {
                 "$ref": "#/$defs/t"
               },
               "max_entry_usd": {
-                "$ref": "#/$defs/positiveDecimal"
+                "$ref": "#/$defs/d"
               },
               "max_slippage_bps": {
                 "type": "integer",
@@ -1931,7 +1991,7 @@
                 "type": "object",
                 "properties": {
                   "stop_price": {
-                    "$ref": "#/$defs/positiveDecimal"
+                    "$ref": "#/$defs/d"
                   }
                 },
                 "required": [
@@ -1994,7 +2054,7 @@
           }
         ],
         "$defs": {
-          "positiveDecimal": {
+          "d": {
             "type": "string",
             "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
             "maxLength": 29

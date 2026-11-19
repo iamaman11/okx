@@ -1,4 +1,5 @@
 //! Public compact analytics contract. No transport or financial logic.
+use okx_kernel::query_plan::CompositionRequest;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +31,9 @@ pub struct MarketRequest {
     pub filters: Vec<MarketFilter>,
     #[serde(default)]
     pub sort: Option<MarketSort>,
+    /// Optional v1 typed composition; legacy fields retain their scalar meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition: Option<Box<CompositionRequest>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -240,6 +244,14 @@ impl MarketRequest {
             && valid_range(self.timeframe_ms, self.start_ms, self.end_ms)
             && !self.fields.is_empty()
             && self.fields.len() <= 14
+            && self.composition.as_ref().is_none_or(|composition| {
+                matches!(self.action, MarketAction::Screen)
+                    && self
+                        .fields
+                        .len()
+                        .saturating_add(composition.result_steps.len())
+                        <= 14
+            })
             && self.fields.iter().all(|f| {
                 !f.is_empty()
                     && f.len() <= 64
@@ -545,6 +557,21 @@ mod batch_tests {
                 .unwrap()
                 .valid()
         );
+    }
+    #[test]
+    fn market_sort_defaults_and_optional_filter_bounds_match_public_mcp() {
+        let wire = serde_json::json!({
+            "action":"screen","instruments":["BTC-USDT-SWAP"],
+            "fields":["returns"],"timeframe_ms":60000,
+            "start_ms":60000,"end_ms":180000,"limit":10,
+            "filters":[{"field":"returns"}],
+            "sort":{"field":"returns"}
+        });
+        let request: MarketRequest = serde_json::from_value(wire).unwrap();
+        assert!(request.valid());
+        assert_eq!(request.filters[0].min, None);
+        assert_eq!(request.filters[0].max, None);
+        assert!(!request.sort.unwrap().descending);
     }
     #[test]
     fn research_capabilities_strict_read_only_wire() {

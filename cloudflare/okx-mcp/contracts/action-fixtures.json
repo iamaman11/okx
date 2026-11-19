@@ -477,7 +477,7 @@
       "start_ms": 1,
       "end_ms": 100001,
       "fields": [
-        "fixture"
+        "returns"
       ],
       "limit": 1,
       "instruments": [
@@ -491,7 +491,7 @@
         "start_ms": 1,
         "end_ms": 100001,
         "fields": [
-          "fixture"
+          "returns"
         ],
         "limit": 1,
         "instruments": [
@@ -504,7 +504,7 @@
         "start_ms": 1,
         "end_ms": 100001,
         "fields": [
-          "fixture"
+          "returns"
         ],
         "limit": 1,
         "instruments": [
@@ -517,7 +517,7 @@
         "start_ms": 1,
         "end_ms": 100001,
         "fields": [
-          "fixture"
+          "returns"
         ],
         "limit": 1,
         "instruments": [

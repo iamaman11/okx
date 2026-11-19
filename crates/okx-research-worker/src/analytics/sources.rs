@@ -345,6 +345,45 @@ mod extension_tests {
                 .iter()
                 .all(|bar| bar.time != 600000 && bar.close != 999.)
         );
+        // T04: the same recorded HTTP gap must remain visible in the public
+        // market composition, never silently turning a missing bar into zero.
+        let screen: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT"],"fields":["returns"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":1200000,"limit":20,
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"r1","op":"returns_series","input":"close"},
+                {"id":"w1","op":"rolling_mean","input":"r1","period":2}
+            ],"result_steps":["w1"]}
+        }))
+        .unwrap();
+        let screen_response = service.market(screen, None, None).await.unwrap();
+        let first = &screen_response["rows"][0];
+        assert_eq!(first["quality"], "partial");
+        assert_eq!(first["candle_coverage"]["expected_bars"], 20);
+        assert_eq!(first["candle_coverage"]["observed_unique_bars"], 19);
+        assert_eq!(first["candle_coverage"]["missing_bars"], 1);
+        assert_eq!(first["candle_coverage"]["first_missing_ms"], 600000);
+        assert_eq!(first["unclosed_candles_excluded"], 1);
+        assert_eq!(first["metrics"]["returns"], serde_json::Value::Null);
+        assert_eq!(first["metrics"]["w1"], serde_json::Value::Null);
+        assert_eq!(first["units"]["w1"], "ratio");
+        assert!(
+            first["gaps"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("CANDLE_INTERIOR_GAP"))
+        );
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
+        // A market query legitimately records one completed read-only job and
+        // immutable evidence. A rejected backtest must add neither.
+        let jobs_before_rejected_replay = service.jobs.snapshot().len();
+        let evidence_before_rejected_replay = std::fs::read_dir(service.artifacts.evidence_dir())
+            .unwrap()
+            .count();
+        assert!(jobs_before_rejected_replay > 0);
+        assert!(evidence_before_rejected_replay > 0);
+
         wire["action"] = json!("backtest");
         wire["idempotency_key"] = json!("c20-unconfirmed-gap");
         wire.as_object_mut().unwrap().remove("range_mode");
@@ -355,8 +394,13 @@ mod extension_tests {
                 .unwrap_err(),
             "CANDLE_INTERIOR_GAP"
         );
-        assert!(service.jobs.snapshot().is_empty());
-        assert!(!service.artifacts.evidence_dir().exists());
+        assert_eq!(service.jobs.snapshot().len(), jobs_before_rejected_replay);
+        assert_eq!(
+            std::fs::read_dir(service.artifacts.evidence_dir())
+                .unwrap()
+                .count(),
+            evidence_before_rejected_replay
+        );
         assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
         drop(service);
@@ -430,6 +474,24 @@ mod extension_tests {
                     parameters: Default::default(),
                     filters: vec![],
                     sort: None,
+                    composition: Some(Box::new(okx_analysis::query_plan::CompositionRequest {
+                        version: okx_analysis::query_plan::COMPOSITION_VERSION.into(),
+                        steps: vec![
+                            okx_analysis::query_plan::SeriesStep {
+                                id: "r1".into(),
+                                op: okx_analysis::query_plan::SeriesOp::ReturnsSeries,
+                                input: "close".into(),
+                                period: None,
+                            },
+                            okx_analysis::query_plan::SeriesStep {
+                                id: "w1".into(),
+                                op: okx_analysis::query_plan::SeriesOp::RollingMean,
+                                input: "r1".into(),
+                                period: Some(2),
+                            },
+                        ],
+                        result_steps: vec!["w1".into()],
+                    })),
                     limit: 20,
                     cursor: None,
                 },
@@ -440,6 +502,39 @@ mod extension_tests {
             .unwrap();
         assert_eq!(market["rows"][0]["metrics"]["rolling_mean"], 13.5);
         assert_eq!(market["rows"][0]["units"]["rolling_mean"], "price");
+        assert!(market["rows"][0]["metrics"]["w1"].is_number());
+        assert_eq!(market["rows"][0]["units"]["w1"], "ratio");
+        assert_eq!(market["rows"][0]["quality"], "complete");
+        assert_eq!(market["rows"][0]["candle_coverage"]["expected_bars"], 20);
+        assert_eq!(
+            market["rows"][0]["candle_coverage"]["observed_unique_bars"],
+            20
+        );
+        assert_eq!(market["rows"][0]["candle_coverage"]["missing_bars"], 0);
+        assert_eq!(market["rows"][0]["unclosed_candles_excluded"], 1);
+        // T13: composition must disclose its candle dependency even when
+        // the only legacy projection depends solely on request parameters.
+        let composition_only_source: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT"],"fields":["position_size"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":1200000,"limit":20,
+            "parameters":{"budget":100,"price":10,"stop_distance":0.1},
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"r1","op":"returns_series","input":"close"},
+                {"id":"w1","op":"rolling_mean","input":"r1","period":2}
+            ],"result_steps":["w1"]}
+        }))
+        .unwrap();
+        let with_candles = service
+            .market(composition_only_source, None, None)
+            .await
+            .unwrap();
+        assert_eq!(with_candles["sources"], json!(["candles", "request"]));
+        assert_eq!(
+            with_candles["sources"],
+            with_candles["query_plan"]["sources"]
+        );
+        assert_eq!(with_candles["rows"][0]["units"]["w1"], "ratio");
+        assert!(with_candles["rows"][0]["metrics"]["w1"].is_number());
         let mut request = ResearchRequest::Backtest {
             idempotency_key: "c20-registered-composition".into(),
             instruments: vec!["BTC-USDT".into()],

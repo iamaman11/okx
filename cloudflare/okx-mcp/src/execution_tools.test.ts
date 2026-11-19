@@ -1,10 +1,10 @@
-import {ACTION_SCHEMAS,PUBLIC_TOOLS,validTool,matches} from './execution_tools.js';
+import {ACTION_SCHEMAS,PUBLIC_TOOLS,MARKET_OPERATORS,validTool,matches} from './execution_tools.js';
 const fail=(v:boolean,n:string)=>{if(!v)throw Error(n);};
 fail(validTool('diagnostics',{action:'explain',view:'research',reference:'a'.repeat(64)}),'research diagnostics uses existing strict tool');
 fail(!validTool('diagnostics',{action:'explain',view:'unknown',reference:'a'.repeat(64)}),'unknown diagnostic view is rejected');
 function sample(s:any):any{if('const'in s)return s.const;if(s.enum)return s.enum[0];if(s.oneOf)return sample(s.oneOf[0]);if(s.anyOf)return sample(s.anyOf[0]);if(s.type==='object')return Object.fromEntries(Object.entries(s.properties).filter(([k])=>s.required.includes(k)).map(([k,x])=>[k,sample(x)]));if(s.type==='array')return [sample(s.items)];if(s.type==='string'&&s.pattern==='^sha256:[0-9a-f]{64}$')return 'sha256:'+'a'.repeat(64);if(s.type==='string'&&s.pattern==='^[0-9a-f]{64}$')return 'a'.repeat(64);if(s.type==='string')return (s.pattern && s.maxLength===29 && new RegExp(s.pattern).test('1'))?'1':(s.pattern?.includes('0-9]{1,9}')||s.pattern?.includes('\\d{1,9}'))?'1':s.minLength===8?'command_0001':'fixture';if(s.type==='integer'||s.type==='number')return s.minimum??1;if(s.type==='boolean')return true;return null;}
 export const payloadFixtures:{tool:string;action:string;positive:any;negative:any[]}[]=[];
-for(const [tool,schemas]of Object.entries(ACTION_SCHEMAS))for(const schema of schemas){const good=sample(schema);if('start_ms'in good)good.end_ms=good.start_ms+100000;if(tool==='market'&&good.action==='screen')good.instruments=['BTC-USDT-SWAP'];if(tool==='research'&&good.action==='backtest')good.parameters={fast:9,slow:21};if(tool==='portfolio'&&good.action==='scenario')good.correlations=[];if(tool==='trade'&&['execute','preview'].includes(good.action))good.protection={stop_distance_bps:50};if(tool==='diagnostics'&&good.action==='explain')good.reference='intent_fixture';if(good.order)good.order.type='fok';fail(validTool(tool,good),`positive ${tool}.${good.action}`);const badExtra={...good,raw_rpc:'forbidden'},badRequired={...good};delete badRequired.action;const badType={...good,action:12};for(const bad of [badExtra,badRequired,badType])fail(!validTool(tool,bad),`negative ${tool}.${good.action}`);payloadFixtures.push({tool,action:good.action,positive:good,negative:[badExtra,badRequired,badType]});}
+for(const [tool,schemas]of Object.entries(ACTION_SCHEMAS))for(const schema of schemas){const good=sample(schema);if('start_ms'in good)good.end_ms=good.start_ms+100000;if(tool==='market'&&good.action==='screen'){good.instruments=['BTC-USDT-SWAP'];good.fields=[MARKET_OPERATORS[0]];}if(tool==='research'&&good.action==='backtest')good.parameters={fast:9,slow:21};if(tool==='portfolio'&&good.action==='scenario')good.correlations=[];if(tool==='trade'&&['execute','preview'].includes(good.action))good.protection={stop_distance_bps:50};if(tool==='diagnostics'&&good.action==='explain')good.reference='intent_fixture';if(good.order)good.order.type='fok';fail(validTool(tool,good),`positive ${tool}.${good.action}`);const badExtra={...good,raw_rpc:'forbidden'},badRequired={...good};delete badRequired.action;const badType={...good,action:12};for(const bad of [badExtra,badRequired,badType])fail(!validTool(tool,bad),`negative ${tool}.${good.action}`);payloadFixtures.push({tool,action:good.action,positive:good,negative:[badExtra,badRequired,badType]});}
 const screen=payloadFixtures.find(x=>x.tool==='market'&&x.action==='screen')!.positive;
 fail(validTool('market',{...screen,action:'compare'}),'shared strict screen/compare schema');
 fail(!validTool('market',{...screen,action:'compare',raw_rpc:'forbidden'}),'compare rejects unknown fields');
@@ -16,6 +16,36 @@ const {instruments:unused,...withoutList}=marketScreen;
 fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP'}}),'market universe is a strict schema');
 fail(!validTool('market',{...withoutList,fields:[],universe:{instrument_type:'SWAP'}}),'empty market fields rejected before native dispatch');
 fail(!validTool('market',{...marketScreen,fields:[]}), 'explicit market screen requires at least one operator');
+const operatorNames=[...MARKET_OPERATORS];
+fail(operatorNames.length===16&&new Set(operatorNames).size===16,'T01 unique sixteen public operators');
+for(const id of operatorNames){
+ fail(validTool('market',{...marketScreen,fields:[id]}),`T01 accepted known operator ${id}`);
+ fail(!validTool('market',{...marketScreen,fields:[id+'_unknown']}),`T01 rejected unknown operator ${id}`);
+}
+fail(!validTool('market',{...marketScreen,fields:['unknown_operator']}),'T01 rejects an arbitrary public operator');
+fail(!validTool('market',{...marketScreen,filters:[{field:'unknown_operator',min:0,max:1}]}),'T01 rejects unknown filter operator');
+fail(!validTool('market',{...marketScreen,sort:{field:'unknown_operator',descending:false}}),'T01 rejects unknown sort operator');
+const publicMarket=(PUBLIC_TOOLS.find((tool:any)=>tool.name==='market') as any).inputSchema;
+const publicMarketScreen=publicMarket.oneOf.find((schema:any)=>schema.properties?.fields);
+fail(publicMarketScreen?.properties.fields.items.$ref==='#/$defs/s','T01 compact public operator IDs');
+fail(!('o' in (publicMarket.$defs??{})),'T01 catalog stays on demand, not in tools/list');
+fail(validTool('market',{...marketScreen,filters:[{field:'returns',min:0,max:1}],sort:{field:'returns',descending:false}}),'T01 registered filter and sort accepted');
+fail(validTool('market',{...marketScreen,filters:[{field:'returns'}],sort:{field:'returns'}}),'T01 optional filter bounds and default sort direction match Native');
+fail(!validTool('market',{...marketScreen,filters:[{field:'unknown_operator'}]}),'T01 unbounded unknown filter ID rejected');
+fail(!validTool('market',{...marketScreen,sort:{field:'unknown_operator'}}),'T01 default-direction unknown sort ID rejected');
+fail(validTool('market',{...marketScreen,fields:operatorNames.slice(0,14)}),'T01 fourteen known operators pass public boundary');
+fail(!validTool('market',{...marketScreen,fields:operatorNames.slice(0,15)}),'T01 fifteen operators rejected by public boundary');
+fail(!validTool('market',{...marketScreen,fields:operatorNames}),'T01 sixteen operators rejected by public boundary');
+const composed={version:'okx.market.composition/v1',steps:[
+ {id:'r1',op:'returns_series',input:'close'},
+ {id:'w1',op:'rolling_mean',input:'r1',period:2},
+],result_steps:['w1']};
+fail(validTool('market',{...marketScreen,composition:composed}), 'versioned market composition accepted');
+fail(!validTool('market',{...marketScreen,action:'compare',composition:composed}), 'composition limited to screen');
+fail(!validTool('market',{...marketScreen,composition:{...composed,version:'unknown'}}), 'composition version rejected');
+fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'rolling_mean',input:'close'}]}}), 'window must specify period');
+fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'returns_series',input:'close',period:2}]}}), 'returns does not accept window period');
+fail(!validTool('market',{...marketScreen,fields:Array.from({length:14},(_,i)=>`field_${i}`),composition:composed}), 'combined projection count bounded');
 fail(!validTool('market',{...marketScreen,universe:{instrument_type:'SWAP'}}),'ambiguous universe rejected');
 fail(!validTool('market',{...withoutList,action:'compare',universe:{instrument_type:'SWAP'}}),'compare requires explicit instruments');
 fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP',reference_generation:'generation-a',after_instrument:'BTC-USDT-SWAP'}}),'generation-fenced native market universe wire');
@@ -83,7 +113,7 @@ for(const invalid of [
  {...capitalAction,expected_authority_revision:0},
 ])fail(!validTool('strategies',invalid),'P0.2 invalid capital assignment passed schema');
 const strategiesTool=PUBLIC_TOOLS.find((t:any)=>t.name==='strategies') as any;
-fail(!!strategiesTool?.inputSchema?.$defs?.positiveDecimal,'P0.2 shared public decimal schema missing');
+fail(!!strategiesTool?.inputSchema?.$defs?.d,'P0.2 shared public decimal schema missing');
 console.log('strategy_capital_schema_strict_and_tools_factored PASS');
 
 const decisionFixture=payloadFixtures.find(x=>x.tool==='research'&&x.action==='record_decision')!;

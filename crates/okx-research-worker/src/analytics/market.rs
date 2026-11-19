@@ -232,9 +232,9 @@ impl AnalyticsService {
         {
             return Err("MARKET_LIMIT:BOUNDED_INSTRUMENTS_AND_ROWS".into());
         }
-        let plan = planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?;
+        let plan = planner::AnalysisPlan::compile_market(&request)?;
         let (rows, correlation_matrix) = self
-            .market_rows(&request, cancel.clone(), global_rank)
+            .market_rows(&request, cancel.clone(), global_rank, plan.clone())
             .await?;
         let store = self.artifacts.clone();
         let producer = self.producer.clone();
@@ -273,13 +273,28 @@ impl AnalyticsService {
             .iter()
             .map(|&operator| {
                 let info = okx_analysis::operators::registry(operator);
-                json!({"name":operator,"unit":info.unit,"inputs":info.inputs})
+                let typed_inputs = info
+                    .inputs
+                    .iter()
+                    .map(|name| {
+                        okx_analysis::query_plan::input(name).expect("registered operator input")
+                    })
+                    .collect::<Vec<_>>();
+                json!({"name":operator,"version":1,"status":"code_supported",
+                    "output_shape":"scalar","unit":info.unit,"inputs":info.inputs,
+                    "typed_inputs":typed_inputs})
             })
             .collect::<Vec<_>>();
         json!({"schema":"okx.market.capabilities/v1",
             "actions":["screen","compare","instruments","snapshot","microstructure","capabilities"],
             "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
             "operators":operators,
+            "composition":{"version":okx_analysis::query_plan::COMPOSITION_VERSION,
+                "available_for":"screen","input_sources":["close"],
+                "operations":[{"op":"returns_series","input_unit":"price","output_unit":"ratio"},
+                    {"op":"rolling_mean","input_unit":"price_or_ratio","output_unit":"same_as_input","period_min":1,"period_max":1000}],
+                "limits":{"max_steps":32,"max_depth":8,"max_result_steps":14,"max_cells":8000000},
+                "result_projection":"last_closed_observation"},
             "limits":{"max_explicit_instruments":100,"max_page_rows":50,
                 "max_correlation_instruments":8,"max_candles_total":1000000},
             "universe":{"modes":["explicit_instruments","venue_reference_registry"],
@@ -296,14 +311,24 @@ impl AnalyticsService {
         request: &MarketRequest,
         cancel: Arc<super::executor::Cancel>,
         global_rank: bool,
+        plan: okx_analysis::query_plan::QueryPlan,
     ) -> Result<(Vec<Value>, Option<Value>), String> {
-        let plan = planner::AnalysisPlan::compile_market(request)?;
         let need_candles = plan
             .sources
             .contains(&okx_analysis::query_plan::Source::Candles);
         let count = (request.end_ms - request.start_ms) / request.timeframe_ms;
-        if need_candles && count.saturating_mul(request.instruments.len() as u64) > 1_000_000 {
+        let total_bars = count
+            .checked_mul(request.instruments.len() as u64)
+            .ok_or("LIMIT_TOTAL_BARS:OVERFLOW")?;
+        if need_candles && total_bars > 1_000_000 {
             return Err("LIMIT_TOTAL_BARS:1000000".into());
+        }
+        if plan.composition.as_ref().is_some_and(|composition| {
+            total_bars
+                .checked_mul(composition.steps.len() as u64)
+                .is_none_or(|cells| cells > 8_000_000)
+        }) {
+            return Err("composition:CELLS_LIMIT".into());
         }
         let loading = stream::iter(request.instruments.iter().cloned().map(|instrument| {
             let sources = self.sources.clone();
@@ -439,7 +464,12 @@ impl AnalyticsService {
                     if cancel.load(Ordering::Acquire) {
                         return Err("CANCELLED".into());
                     }
-                    rows.push(compute_row(row, &request, peer.as_deref())?);
+                    rows.push(compute_row_checked(
+                        row,
+                        &request,
+                        peer.as_deref(),
+                        plan.composition.as_ref(),
+                    )?);
                 }
                 if global_rank {
                     // Never drop deficient candidates via a metric filter and
@@ -502,10 +532,27 @@ fn sort_market_rows(
     }
     Ok(())
 }
+#[cfg(test)]
 fn compute_row(
     row: Loaded,
     request: &MarketRequest,
     peer: Option<&Vec<Bar>>,
+) -> Result<Value, String> {
+    let checked = request
+        .composition
+        .clone()
+        .map(|c| {
+            let count = (request.end_ms - request.start_ms) / request.timeframe_ms;
+            okx_analysis::query_plan::CheckedComposition::compile(*c, count)
+        })
+        .transpose()?;
+    compute_row_checked(row, request, peer, checked.as_ref())
+}
+fn compute_row_checked(
+    row: Loaded,
+    request: &MarketRequest,
+    peer: Option<&Vec<Bar>>,
+    composition: Option<&okx_analysis::query_plan::CheckedComposition>,
 ) -> Result<Value, String> {
     let mut gaps = Vec::new();
     let bars = match row.bars {
@@ -639,6 +686,21 @@ fn compute_row(
         }
         metrics.insert(field.clone(), value.map_or(Value::Null, |v| json!(v)));
         units.insert(field.clone(), json!(registry(op).unit));
+    }
+    if let Some(composition) = composition {
+        for (id, (value, unit)) in composition.evaluate(close) {
+            let value = if incomplete_candles { None } else { value };
+            if value.is_none() {
+                gaps.push(format!("MISSING_INPUT_OR_MINIMUM_SAMPLES:{id}"));
+            }
+            metrics.insert(id.clone(), value.map_or(Value::Null, |v| json!(v)));
+            let unit_name = match unit {
+                okx_analysis::query_plan::Unit::Price => "price",
+                okx_analysis::query_plan::Unit::Ratio => "ratio",
+                _ => return Err("composition:UNEXPECTED_UNIT".into()),
+            };
+            units.insert(id, json!(unit_name));
+        }
     }
     Ok(
         json!({"instrument":row.instrument,"metrics":metrics,"units":units,"parameters":{"ema_period":request.parameters.get("ema_period").unwrap_or(&14.0),"atr_period":request.parameters.get("atr_period").unwrap_or(&14.0),"rsi_period":request.parameters.get("rsi_period").unwrap_or(&14.0)},"source_start_ms":bars.first().map(|b|b.time),"source_end_ms":bars.last().map(|b|b.time),"unclosed_candles_excluded":row.excluded,"candle_coverage":candle_coverage,"quality":if gaps.is_empty(){"complete"}else{"partial"},"gaps":gaps}),
@@ -829,6 +891,78 @@ mod tests {
         let output = compute_row(missing, &query, None).unwrap();
         assert_eq!(output["quality"], "partial");
         assert!(output["metrics"]["rolling_mean"].is_null());
+    }
+    #[test]
+    fn t05_composition_reuses_closed_candles_and_projects_a_distinct_ratio() {
+        let mut request = request(vec!["returns"]);
+        request.start_ms = 0;
+        request.end_ms = 180_000;
+        request.composition = Some(Box::new(okx_analysis::query_plan::CompositionRequest {
+            version: okx_analysis::query_plan::COMPOSITION_VERSION.into(),
+            steps: vec![
+                okx_analysis::query_plan::SeriesStep {
+                    id: "r1".into(),
+                    op: okx_analysis::query_plan::SeriesOp::ReturnsSeries,
+                    input: "close".into(),
+                    period: None,
+                },
+                okx_analysis::query_plan::SeriesStep {
+                    id: "w1".into(),
+                    op: okx_analysis::query_plan::SeriesOp::RollingMean,
+                    input: "r1".into(),
+                    period: Some(2),
+                },
+            ],
+            result_steps: vec!["w1".into()],
+        }));
+        let mut fixture = row();
+        fixture.bars = Ok(Arc::new(vec![
+            Bar {
+                time: 0,
+                open: 100.0,
+                high: 100.0,
+                low: 100.0,
+                close: 100.0,
+                volume: 1.0,
+                funding_rate: None,
+            },
+            Bar {
+                time: 60_000,
+                open: 110.0,
+                high: 110.0,
+                low: 110.0,
+                close: 110.0,
+                volume: 1.0,
+                funding_rate: None,
+            },
+            Bar {
+                time: 120_000,
+                open: 99.0,
+                high: 99.0,
+                low: 99.0,
+                close: 99.0,
+                volume: 1.0,
+                funding_rate: None,
+            },
+        ]));
+        let checked = planner::AnalysisPlan::compile_market(&request).unwrap();
+        let mut partial_fixture = row();
+        partial_fixture.bars = fixture.bars.clone();
+        let output =
+            compute_row_checked(fixture, &request, None, checked.composition.as_ref()).unwrap();
+        assert!((output["metrics"]["returns"].as_f64().unwrap() + 0.01).abs() < 1e-12);
+        assert!(output["metrics"]["w1"].as_f64().unwrap().abs() < 1e-12);
+        assert_eq!(output["units"]["w1"], "ratio");
+        Arc::make_mut(partial_fixture.bars.as_mut().unwrap()).remove(1);
+        let partial = compute_row_checked(
+            partial_fixture,
+            &request,
+            None,
+            checked.composition.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(partial["metrics"]["w1"], Value::Null);
+        assert_eq!(partial["quality"], "partial");
     }
     #[test]
     fn new_downside_operator_uses_existing_market_plan_and_projection() {
