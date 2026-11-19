@@ -600,7 +600,7 @@
                 "items": {
                   "$ref": "#/$defs/s"
                 },
-                "maxItems": 32,
+                "maxItems": 14,
                 "uniqueItems": true,
                 "minItems": 1
               },

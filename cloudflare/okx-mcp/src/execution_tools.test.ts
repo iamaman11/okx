@@ -16,6 +16,10 @@ const {instruments:unused,...withoutList}=marketScreen;
 fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP'}}),'market universe is a strict schema');
 fail(!validTool('market',{...withoutList,fields:[],universe:{instrument_type:'SWAP'}}),'empty market fields rejected before native dispatch');
 fail(!validTool('market',{...marketScreen,fields:[]}), 'explicit market screen requires at least one operator');
+const operatorNames=['returns','log_returns','realized_volatility','downside_volatility','max_drawdown','pearson_correlation','ema','rolling_mean','atr','rsi','spread_bps','volume_change','oi_change','funding_sum','position_size','cost_estimate'];
+fail(validTool('market',{...marketScreen,fields:operatorNames.slice(0,14)}),'T01 fourteen known operators pass public boundary');
+fail(!validTool('market',{...marketScreen,fields:operatorNames.slice(0,15)}),'T01 fifteen operators rejected by public boundary');
+fail(!validTool('market',{...marketScreen,fields:operatorNames}),'T01 sixteen operators rejected by public boundary');
 const composed={version:'okx.market.composition/v1',steps:[
  {id:'r1',op:'returns_series',input:'close'},
  {id:'w1',op:'rolling_mean',input:'r1',period:2},
