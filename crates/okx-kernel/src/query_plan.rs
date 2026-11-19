@@ -241,7 +241,7 @@ mod tests {
     }
     #[test]
     fn k7_invalid_operator_bounds_or_parameter_fail_closed() {
-        // P0 comparable kernel edit 2: unchanged negative-control semantics.
+        // P0 comparable kernel edit 3: unchanged negative-control semantics.
         let (universe, range, ops) = fixture();
         let params = BTreeMap::from([("unrecognized_parameter".to_string(), 1.0)]);
         assert_eq!(
