@@ -308,12 +308,16 @@ impl AnalyticsService {
             .sources
             .contains(&okx_analysis::query_plan::Source::Candles);
         let count = (request.end_ms - request.start_ms) / request.timeframe_ms;
-        let total_bars = count.checked_mul(request.instruments.len() as u64).ok_or("LIMIT_TOTAL_BARS:OVERFLOW")?;
+        let total_bars = count
+            .checked_mul(request.instruments.len() as u64)
+            .ok_or("LIMIT_TOTAL_BARS:OVERFLOW")?;
         if need_candles && total_bars > 1_000_000 {
             return Err("LIMIT_TOTAL_BARS:1000000".into());
         }
         if plan.composition.as_ref().is_some_and(|composition| {
-            total_bars.checked_mul(composition.steps.len() as u64).is_none_or(|cells| cells > 8_000_000)
+            total_bars
+                .checked_mul(composition.steps.len() as u64)
+                .is_none_or(|cells| cells > 8_000_000)
         }) {
             return Err("composition:CELLS_LIMIT".into());
         }
@@ -451,7 +455,12 @@ impl AnalyticsService {
                     if cancel.load(Ordering::Acquire) {
                         return Err("CANCELLED".into());
                     }
-                    rows.push(compute_row_checked(row, &request, peer.as_deref(), plan.composition.as_ref())?);
+                    rows.push(compute_row_checked(
+                        row,
+                        &request,
+                        peer.as_deref(),
+                        plan.composition.as_ref(),
+                    )?);
                 }
                 if global_rank {
                     // Never drop deficient candidates via a metric filter and
@@ -519,10 +528,14 @@ fn compute_row(
     request: &MarketRequest,
     peer: Option<&Vec<Bar>>,
 ) -> Result<Value, String> {
-    let checked = request.composition.clone().map(|c| {
-        let count = (request.end_ms - request.start_ms) / request.timeframe_ms;
-        okx_analysis::query_plan::CheckedComposition::compile(c, count)
-    }).transpose()?;
+    let checked = request
+        .composition
+        .clone()
+        .map(|c| {
+            let count = (request.end_ms - request.start_ms) / request.timeframe_ms;
+            okx_analysis::query_plan::CheckedComposition::compile(c, count)
+        })
+        .transpose()?;
     compute_row_checked(row, request, peer, checked.as_ref())
 }
 fn compute_row_checked(
@@ -878,31 +891,66 @@ mod tests {
             version: okx_analysis::query_plan::COMPOSITION_VERSION.into(),
             steps: vec![
                 okx_analysis::query_plan::SeriesStep {
-                    id: "r1".into(), op: okx_analysis::query_plan::SeriesOp::ReturnsSeries,
-                    input: "close".into(), period: None,
+                    id: "r1".into(),
+                    op: okx_analysis::query_plan::SeriesOp::ReturnsSeries,
+                    input: "close".into(),
+                    period: None,
                 },
                 okx_analysis::query_plan::SeriesStep {
-                    id: "w1".into(), op: okx_analysis::query_plan::SeriesOp::RollingMean,
-                    input: "r1".into(), period: Some(2),
+                    id: "w1".into(),
+                    op: okx_analysis::query_plan::SeriesOp::RollingMean,
+                    input: "r1".into(),
+                    period: Some(2),
                 },
             ],
             result_steps: vec!["w1".into()],
         });
         let mut fixture = row();
         fixture.bars = Ok(Arc::new(vec![
-            Bar { time: 0, open: 100.0, high: 100.0, low: 100.0, close: 100.0, volume: 1.0, funding_rate: None },
-            Bar { time: 60_000, open: 110.0, high: 110.0, low: 110.0, close: 110.0, volume: 1.0, funding_rate: None },
-            Bar { time: 120_000, open: 99.0, high: 99.0, low: 99.0, close: 99.0, volume: 1.0, funding_rate: None },
+            Bar {
+                time: 0,
+                open: 100.0,
+                high: 100.0,
+                low: 100.0,
+                close: 100.0,
+                volume: 1.0,
+                funding_rate: None,
+            },
+            Bar {
+                time: 60_000,
+                open: 110.0,
+                high: 110.0,
+                low: 110.0,
+                close: 110.0,
+                volume: 1.0,
+                funding_rate: None,
+            },
+            Bar {
+                time: 120_000,
+                open: 99.0,
+                high: 99.0,
+                low: 99.0,
+                close: 99.0,
+                volume: 1.0,
+                funding_rate: None,
+            },
         ]));
         let checked = planner::AnalysisPlan::compile_market(&request).unwrap();
         let mut partial_fixture = row();
         partial_fixture.bars = fixture.bars.clone();
-        let output = compute_row_checked(fixture, &request, None, checked.composition.as_ref()).unwrap();
+        let output =
+            compute_row_checked(fixture, &request, None, checked.composition.as_ref()).unwrap();
         assert!((output["metrics"]["returns"].as_f64().unwrap() + 0.01).abs() < 1e-12);
         assert!(output["metrics"]["w1"].as_f64().unwrap().abs() < 1e-12);
         assert_eq!(output["units"]["w1"], "ratio");
         Arc::make_mut(partial_fixture.bars.as_mut().unwrap()).remove(1);
-        let partial = compute_row_checked(partial_fixture, &request, None, checked.composition.as_ref()).unwrap();
+        let partial = compute_row_checked(
+            partial_fixture,
+            &request,
+            None,
+            checked.composition.as_ref(),
+        )
+        .unwrap();
         assert_eq!(partial["metrics"]["w1"], Value::Null);
         assert_eq!(partial["quality"], "partial");
     }

@@ -434,12 +434,16 @@ mod extension_tests {
                         version: okx_analysis::query_plan::COMPOSITION_VERSION.into(),
                         steps: vec![
                             okx_analysis::query_plan::SeriesStep {
-                                id: "r1".into(), op: okx_analysis::query_plan::SeriesOp::ReturnsSeries,
-                                input: "close".into(), period: None,
+                                id: "r1".into(),
+                                op: okx_analysis::query_plan::SeriesOp::ReturnsSeries,
+                                input: "close".into(),
+                                period: None,
                             },
                             okx_analysis::query_plan::SeriesStep {
-                                id: "w1".into(), op: okx_analysis::query_plan::SeriesOp::RollingMean,
-                                input: "r1".into(), period: Some(2),
+                                id: "w1".into(),
+                                op: okx_analysis::query_plan::SeriesOp::RollingMean,
+                                input: "r1".into(),
+                                period: Some(2),
                             },
                         ],
                         result_steps: vec!["w1".into()],
