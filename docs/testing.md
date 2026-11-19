@@ -1,3 +1,11 @@
+## Draft feedback for analysis and Research (#518)
+
+Run `python3 scripts/check_p0.py --plan` from a checkout to list the scopes selected since the merge base with `origin/main`, including local edits and new files. Run `python3 scripts/check_p0.py` to execute them with the pinned Rust toolchain, Python 3.10+ and npm for MCP changes. Use `--base REF` for another base or `--expanded` for a cross-cutting semantic change. Keep the Cargo target directory between edits. The summary names the actual tests passed, elapsed Cargo/test time and rebuilt workspace targets.
+
+For an invalid plan, start with `cargo test --locked -p okx-kernel --lib query_plan::tests::k7_invalid_operator_bounds_or_parameter_fail_closed -- --exact`. For a missing candle, use `cargo test --locked -p okx-kernel --lib time_series::tests::c13_missing_internal_candle_not_healed_by_duplicate_or_unclosed -- --exact`. The selected kernel route also exercises the consuming worker. A mandatory test which is missing or ignored fails feedback.
+
+On a Draft PR the same selector runs on Linux as `draft-feedback`. A change to shared configuration, the workflow or an unknown/deleted path expands the Linux checks. The editable loop does not start the Windows release matrix. Ready-for-review, protected checks, verified Research-only releases and exact-tree main reuse remain integration decisions; a successful Draft by itself cannot authorize reuse. Compare cache state, queue and job wall time separately.
+
 ## #512 current navigation and evidence status (r15)
 
 The current F01–F12 handler/owner/effect/test map is [operation-map.md](acceptance/512/operation-map.md); [research-boundaries.md](research-boundaries.md) describes the Worker and finance boundary. The sections below are historical checkpoints, including the former S0 map; their source identities, measurements and statements about then-unfinished code remain evidence of those cuts only.
