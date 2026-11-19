@@ -345,6 +345,35 @@ mod extension_tests {
                 .iter()
                 .all(|bar| bar.time != 600000 && bar.close != 999.)
         );
+        // T04: the same recorded HTTP gap must remain visible in the public
+        // market composition, never silently turning a missing bar into zero.
+        let screen: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT"],"fields":["returns"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":1200000,"limit":20,
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"r1","op":"returns_series","input":"close"},
+                {"id":"w1","op":"rolling_mean","input":"r1","period":2}
+            ],"result_steps":["w1"]}
+        }))
+        .unwrap();
+        let screen_response = service.market(screen, None, None).await.unwrap();
+        let first = &screen_response["rows"][0];
+        assert_eq!(first["quality"], "partial");
+        assert_eq!(first["candle_coverage"]["expected_bars"], 20);
+        assert_eq!(first["candle_coverage"]["observed_unique_bars"], 19);
+        assert_eq!(first["candle_coverage"]["missing_bars"], 1);
+        assert_eq!(first["candle_coverage"]["first_missing_ms"], 600000);
+        assert_eq!(first["unclosed_candles_excluded"], 1);
+        assert_eq!(first["metrics"]["returns"], serde_json::Value::Null);
+        assert_eq!(first["metrics"]["w1"], serde_json::Value::Null);
+        assert_eq!(first["units"]["w1"], "ratio");
+        assert!(first["gaps"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("CANDLE_INTERIOR_GAP")));
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
+
         wire["action"] = json!("backtest");
         wire["idempotency_key"] = json!("c20-unconfirmed-gap");
         wire.as_object_mut().unwrap().remove("range_mode");
@@ -460,6 +489,11 @@ mod extension_tests {
         assert_eq!(market["rows"][0]["units"]["rolling_mean"], "price");
         assert!(market["rows"][0]["metrics"]["w1"].is_number());
         assert_eq!(market["rows"][0]["units"]["w1"], "ratio");
+        assert_eq!(market["rows"][0]["quality"], "complete");
+        assert_eq!(market["rows"][0]["candle_coverage"]["expected_bars"], 20);
+        assert_eq!(market["rows"][0]["candle_coverage"]["observed_unique_bars"], 20);
+        assert_eq!(market["rows"][0]["candle_coverage"]["missing_bars"], 0);
+        assert_eq!(market["rows"][0]["unclosed_candles_excluded"], 1);
         let mut request = ResearchRequest::Backtest {
             idempotency_key: "c20-registered-composition".into(),
             instruments: vec!["BTC-USDT".into()],
