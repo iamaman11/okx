@@ -7,6 +7,153 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const QUERY_PLAN_VERSION: &str = "okx.query-plan/448.1";
+pub const COMPOSITION_VERSION: &str = "okx.market.composition/v1";
+
+/// A bounded sequence of typed series operations, evaluated by the existing
+/// market worker. No general-purpose expressions, I/O or financial effects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompositionRequest {
+    pub version: String,
+    pub steps: Vec<SeriesStep>,
+    pub result_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeriesStep {
+    pub id: String,
+    pub op: SeriesOp,
+    /// "close" is the only source in v1; every other name is a prior step ID.
+    pub input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeriesOp {
+    ReturnsSeries,
+    RollingMean,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckedSeriesStep {
+    pub step: SeriesStep,
+    pub unit: Unit,
+    pub depth: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckedComposition {
+    pub version: String,
+    pub steps: Vec<CheckedSeriesStep>,
+    pub result_steps: Vec<String>,
+    pub estimated_cells: u64,
+}
+
+impl CheckedComposition {
+    pub fn compile(request: CompositionRequest, total_bars: u64) -> Result<Self, String> {
+        if request.version != COMPOSITION_VERSION {
+            return Err("composition.version:UNSUPPORTED".into());
+        }
+        if request.steps.is_empty() || request.steps.len() > 32 {
+            return Err("composition.steps:COUNT_LIMIT".into());
+        }
+        if request.result_steps.is_empty() || request.result_steps.len() > 14 {
+            return Err("composition.result_steps:COUNT_LIMIT".into());
+        }
+        let cells = total_bars
+            .checked_mul(request.steps.len() as u64)
+            .ok_or("composition:CELLS_OVERFLOW")?;
+        if cells > 8_000_000 {
+            return Err("composition:CELLS_LIMIT".into());
+        }
+        let mut known = BTreeMap::<String, (Unit, u8)>::new();
+        let mut steps = Vec::with_capacity(request.steps.len());
+        for (idx, step) in request.steps.into_iter().enumerate() {
+            let path = format!("composition.steps[{idx}]");
+            if step.id.is_empty()
+                || step.id.len() > 32
+                || !step.id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            {
+                return Err(format!("{path}.id:INVALID"));
+            }
+            if step.id == "close" || known.contains_key(&step.id) {
+                return Err(format!("{path}.id:DUPLICATE"));
+            }
+            let (input_unit, parent_depth) = if step.input == "close" {
+                (Unit::Price, 0)
+            } else {
+                known.get(&step.input).copied().ok_or_else(||
+                    format!("{path}.input:UNKNOWN_OR_FORWARD_STEP:{}", step.input))?
+            };
+            let depth = parent_depth + 1;
+            if depth > 8 {
+                return Err(format!("{path}:DEPTH_LIMIT"));
+            }
+            let output_unit = match step.op {
+                SeriesOp::ReturnsSeries if step.period.is_none() && input_unit == Unit::Price => Unit::Ratio,
+                SeriesOp::ReturnsSeries => return Err(format!("{path}:EXPECTED_PRICE_SERIES_NO_PERIOD")),
+                SeriesOp::RollingMean if matches!(step.period, Some(1..=1000)) => input_unit,
+                SeriesOp::RollingMean => return Err(format!("{path}.period:INVALID")),
+            };
+            known.insert(step.id.clone(), (output_unit, depth));
+            steps.push(CheckedSeriesStep { step, unit: output_unit, depth });
+        }
+        let mut unique_outputs = BTreeSet::new();
+        for (idx, id) in request.result_steps.iter().enumerate() {
+            if !known.contains_key(id) || !unique_outputs.insert(id) {
+                return Err(format!("composition.result_steps[{idx}]:INVALID_REFERENCE"));
+            }
+        }
+        Ok(Self { version: request.version, steps, result_steps: request.result_steps, estimated_cells: cells })
+    }
+
+    /// Returns only bounded scalar projections; intermediate series stay inside
+    /// the existing worker and can be reused by multiple downstream steps.
+    pub fn evaluate(&self, close: &[f64]) -> BTreeMap<String, (Option<f64>, Unit)> {
+        let mut values = BTreeMap::<String, Vec<Option<f64>>>::new();
+        for checked in &self.steps {
+            let input = if checked.step.input == "close" {
+                close.iter().map(|v| v.is_finite().then_some(*v)).collect()
+            } else {
+                values[&checked.step.input].clone()
+            };
+            let output = match checked.step.op {
+                SeriesOp::ReturnsSeries => {
+                    let mut result = vec![None; input.len()];
+                    for i in 1..input.len() {
+                        if let (Some(a), Some(b)) = (input[i - 1], input[i]) {
+                            if a > 0.0 && b > 0.0 {
+                                let value = b / a - 1.0;
+                                result[i] = value.is_finite().then_some(value);
+                            }
+                        }
+                    }
+                    result
+                }
+                SeriesOp::RollingMean => {
+                    let period = checked.step.period.unwrap_or(1) as usize;
+                    let mut result = vec![None; input.len()];
+                    for i in (period - 1)..input.len() {
+                        let window = &input[i + 1 - period..=i];
+                        if window.iter().all(Option::is_some) {
+                            let mean = window.iter().flatten().sum::<f64>() / period as f64;
+                            result[i] = mean.is_finite().then_some(mean);
+                        }
+                    }
+                    result
+                }
+            };
+            values.insert(checked.step.id.clone(), output);
+        }
+        self.result_steps.iter().map(|id| {
+            let checked = self.steps.iter().find(|s| &s.step.id == id).expect("checked projection");
+            (id.clone(), (values[id].last().copied().flatten(), checked.unit))
+        }).collect()
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
@@ -71,6 +218,8 @@ pub struct QueryPlan {
     pub parameters: BTreeMap<String, f64>,
     pub assumptions: Vec<String>,
     pub resource_budget_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition: Option<CheckedComposition>,
 }
 fn input(name: &str) -> Result<Input, String> {
     let (source, unit) = match name {
@@ -204,13 +353,75 @@ impl QueryPlan {
             ranking,
             assumptions: vec!["closed_bars_half_open_utc".into(), "no_forward_fill".into()],
             resource_budget_ref: "research/default".into(),
+            composition: None,
         })
+    }
+
+    pub fn with_composition(mut self, request: Option<CompositionRequest>) -> Result<Self, String> {
+        if let Some(request) = request {
+            self.composition = Some(CheckedComposition::compile(request, self.range.expected_bars)?);
+            if !self.sources.contains(&Source::Candles) {
+                self.sources.push(Source::Candles);
+                self.sources.sort();
+            }
+        }
+        Ok(self)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn two_step_composition() -> CompositionRequest {
+        CompositionRequest {
+            version: COMPOSITION_VERSION.into(),
+            steps: vec![
+                SeriesStep { id: "r1".into(), op: SeriesOp::ReturnsSeries, input: "close".into(), period: None },
+                SeriesStep { id: "w1".into(), op: SeriesOp::RollingMean, input: "r1".into(), period: Some(2) },
+            ],
+            result_steps: vec!["w1".into()],
+        }
+    }
+    #[test]
+    fn t05_returns_series_can_feed_a_ratio_window_without_changing_scalar_returns() {
+        let checked = CheckedComposition::compile(two_step_composition(), 3).unwrap();
+        assert_eq!(checked.steps[0].unit, Unit::Ratio);
+        assert_eq!(checked.steps[1].unit, Unit::Ratio);
+        assert_eq!(checked.estimated_cells, 6);
+        let result = checked.evaluate(&[100.0, 110.0, 99.0]);
+        assert!(result["w1"].0.unwrap().abs() < 1e-12);
+        assert_eq!(result["w1"].1, Unit::Ratio);
+        assert!((crate::operators::scalar(Operator::Returns, &[100.0,110.0,99.0], &[], &[], &[], 14, 60_000).unwrap().unwrap() + 0.01).abs() < 1e-12);
+    }
+    #[test]
+    fn t03_checked_composition_allows_branching_and_repeated_ops_but_rejects_bad_refs() {
+        let mut spec = two_step_composition();
+        spec.steps.push(SeriesStep { id: "w2".into(), op: SeriesOp::RollingMean, input: "r1".into(), period: Some(3) });
+        spec.result_steps.push("w2".into());
+        let checked = CheckedComposition::compile(spec.clone(), 20).unwrap();
+        assert_eq!(checked.steps.len(), 3);
+        let mut duplicate = spec.clone();
+        duplicate.steps[2].id = "w1".into();
+        assert!(CheckedComposition::compile(duplicate, 20).unwrap_err().contains("DUPLICATE"));
+        let mut forward = spec.clone();
+        forward.steps[0].input = "w2".into();
+        assert!(CheckedComposition::compile(forward, 20).unwrap_err().contains("UNKNOWN_OR_FORWARD_STEP"));
+        let mut wrong_type = spec.clone();
+        wrong_type.steps[2].op = SeriesOp::ReturnsSeries;
+        wrong_type.steps[2].period = None;
+        assert!(CheckedComposition::compile(wrong_type, 20).unwrap_err().contains("EXPECTED_PRICE_SERIES"));
+        let mut wrong_version = spec.clone();
+        wrong_version.version = "v2".into();
+        assert_eq!(CheckedComposition::compile(wrong_version, 20).unwrap_err(), "composition.version:UNSUPPORTED");
+        assert!(CheckedComposition::compile(spec, 3_000_000).unwrap_err().contains("CELLS_LIMIT"));
+    }
+    #[test]
+    fn t04_missing_observations_and_warmup_are_not_converted_to_zero() {
+        let checked = CheckedComposition::compile(two_step_composition(), 3).unwrap();
+        assert_eq!(checked.evaluate(&[100.0, f64::NAN, 99.0])["w1"].0, None);
+        assert_eq!(checked.evaluate(&[100.0, 110.0])["w1"].0, None);
+        assert!(checked.evaluate(&[100.0, 110.0, 99.0])["w1"].0.unwrap().abs() < 1e-12);
+    }
     fn fixture() -> (Vec<String>, ClosedRange, Vec<Operator>) {
         (
             vec!["BTC-USDT-SWAP".into()],

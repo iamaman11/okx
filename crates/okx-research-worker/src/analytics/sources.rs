@@ -430,6 +430,20 @@ mod extension_tests {
                     parameters: Default::default(),
                     filters: vec![],
                     sort: None,
+                    composition: Some(okx_analysis::query_plan::CompositionRequest {
+                        version: okx_analysis::query_plan::COMPOSITION_VERSION.into(),
+                        steps: vec![
+                            okx_analysis::query_plan::SeriesStep {
+                                id: "r1".into(), op: okx_analysis::query_plan::SeriesOp::ReturnsSeries,
+                                input: "close".into(), period: None,
+                            },
+                            okx_analysis::query_plan::SeriesStep {
+                                id: "w1".into(), op: okx_analysis::query_plan::SeriesOp::RollingMean,
+                                input: "r1".into(), period: Some(2),
+                            },
+                        ],
+                        result_steps: vec!["w1".into()],
+                    }),
                     limit: 20,
                     cursor: None,
                 },
@@ -440,6 +454,8 @@ mod extension_tests {
             .unwrap();
         assert_eq!(market["rows"][0]["metrics"]["rolling_mean"], 13.5);
         assert_eq!(market["rows"][0]["units"]["rolling_mean"], "price");
+        assert!(market["rows"][0]["metrics"]["w1"].is_number());
+        assert_eq!(market["rows"][0]["units"]["w1"], "ratio");
         let mut request = ResearchRequest::Backtest {
             idempotency_key: "c20-registered-composition".into(),
             instruments: vec!["BTC-USDT".into()],

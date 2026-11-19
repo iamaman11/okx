@@ -32,8 +32,11 @@ const research={...mutation,...range,instruments:{...array(text(64),8),minItems:
 const instance={instance_id:text(64)};
 const number=(minimum=0,maximum=Number.MAX_SAFE_INTEGER)=>({type:'number',minimum,maximum});
 const marketParameters=object({ema_period:integer(1,1000),atr_period:integer(1,1000),rsi_period:integer(1,1000),budget:number(0.000000001),price:number(0.000000001),stop_distance:number(0.000000001,0.999999999),notional:number(),fee_bps:number(0,10000),slippage_bps:number(0,10000)},[]);
+const stepId={type:'string',pattern:'^[a-z0-9_]{1,32}$'};
+const compositionStep=object({id:stepId,op:choice('returns_series','rolling_mean'),input:stepId,period:integer(1,1000)},['id','op','input']);
+const composition=object({version:choice('okx.market.composition/v1'),steps:{type:'array',items:compositionStep,minItems:1,maxItems:32},result_steps:{type:'array',items:stepId,minItems:1,maxItems:14}});
 const universe=object({instrument_type:choice('SPOT','SWAP','FUTURES'),settle_currency:text(16),after_instrument:text(64),reference_generation:text(128),limit:integer(1,100),rank_globally:{type:'boolean'}},['instrument_type']);
-const screenCompare=action('screen',{...range,universe,fields:{...array(text(64)),minItems:1},parameters:marketParameters,filters:array(object({field:text(64),min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:text(64),descending:{type:'boolean'}}),limit:integer(1,50),cursor:text(512)},['fields','timeframe_ms','start_ms','end_ms','limit']);
+const screenCompare=action('screen',{...range,universe,fields:{...array(text(64)),minItems:1},composition,parameters:marketParameters,filters:array(object({field:text(64),min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:text(64),descending:{type:'boolean'}}),limit:integer(1,50),cursor:text(512)},['fields','timeframe_ms','start_ms','end_ms','limit']);
 screenCompare.properties.action=choice('screen','compare');
 screenCompare.allOf=[{oneOf:[{required:['instruments']},{required:['universe']}]},
  {if:{properties:{action:{const:'compare'}}},then:{required:['instruments']}}];
@@ -82,7 +85,7 @@ const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
 // Factor identical bounded scalar schemas only; internal validation keeps every
 // expanded constraint. Standard JSON Schema references preserve tools/list bounds.
 function publicSchema(schema:Schema):Schema {
- const definitions:Record<string,Schema>={positiveDecimal:money,t:text(),s:text(64),a:artifactId,j:decisionJob,k:token,i:integer(),n:integer(1),p:integer(1,50),r:researchStrategies};
+const definitions:Record<string,Schema>={d:money,t:text(),s:text(64),a:artifactId,j:decisionJob,k:token,i:integer(),n:integer(1),p:integer(1,50),r:researchStrategies,x:stepId};
  const counts:Record<string,number>={};
  const key=(node:any):string|undefined=>Object.keys(definitions).find(k=>JSON.stringify(node)===JSON.stringify(definitions[k]));
  const count=(node:any):void=>{
@@ -155,7 +158,7 @@ export function matches(s:Schema,v:unknown):boolean {
  if(s.type==='integer'||s.type==='number')return typeof v==='number'&&Number.isFinite(v)&&(s.type!=='integer'||Number.isSafeInteger(v))&&v>=(s.minimum??-Infinity)&&v<=(s.maximum??Infinity);
  if(s.type==='boolean')return typeof v==='boolean';return true;
 }
-export function validTool(name:string,args:unknown):boolean {if(name==='research'&&isObject(args)&&args.action==='record_decision'){for(const [field,max]of [['name',128],['hypothesis',4096],['reason',2048]]as const){const value=args[field];if(typeof value!=='string'||!value.trim()||new TextEncoder().encode(value).byteLength>max)return false;}if(new TextEncoder().encode(JSON.stringify([args.name,args.hypothesis,args.reason])).byteLength>6144)return false;}if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);}
+export function validTool(name:string,args:unknown):boolean {if(name==='research'&&isObject(args)&&args.action==='record_decision'){for(const [field,max]of [['name',128],['hypothesis',4096],['reason',2048]]as const){const value=args[field];if(typeof value!=='string'||!value.trim()||new TextEncoder().encode(value).byteLength>max)return false;}if(new TextEncoder().encode(JSON.stringify([args.name,args.hypothesis,args.reason])).byteLength>6144)return false;}if(name==='market'&&isObject(args)&&isObject(args.composition)){if(args.action!=='screen'||!Array.isArray(args.fields)||!Array.isArray(args.composition.result_steps)||args.fields.length+args.composition.result_steps.length>14)return false;if(Array.isArray(args.composition.steps)&&args.composition.steps.some((s:unknown)=>!isObject(s)||(s.op==='rolling_mean'?!Number.isInteger(s.period):'period'in s)))return false;}if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);}
 export function isExecutionMutation(type:unknown,action?:unknown):boolean{return type==='connect_account'||(type==='trade'&&action!=='preview'&&action!=='status')||(type==='strategies'&&!['list','status'].includes(String(action)))||(type==='research'&&['backtest','grid','cancel','record_decision'].includes(String(action)));}
 export function executionProfilePermitsOperation(profile:unknown,_type:unknown):boolean{return profile==='engine';}
 

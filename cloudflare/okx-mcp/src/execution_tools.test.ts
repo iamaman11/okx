@@ -16,6 +16,16 @@ const {instruments:unused,...withoutList}=marketScreen;
 fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP'}}),'market universe is a strict schema');
 fail(!validTool('market',{...withoutList,fields:[],universe:{instrument_type:'SWAP'}}),'empty market fields rejected before native dispatch');
 fail(!validTool('market',{...marketScreen,fields:[]}), 'explicit market screen requires at least one operator');
+const composed={version:'okx.market.composition/v1',steps:[
+ {id:'r1',op:'returns_series',input:'close'},
+ {id:'w1',op:'rolling_mean',input:'r1',period:2},
+],result_steps:['w1']};
+fail(validTool('market',{...marketScreen,composition:composed}), 'versioned market composition accepted');
+fail(!validTool('market',{...marketScreen,action:'compare',composition:composed}), 'composition limited to screen');
+fail(!validTool('market',{...marketScreen,composition:{...composed,version:'unknown'}}), 'composition version rejected');
+fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'rolling_mean',input:'close'}]}}), 'window must specify period');
+fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'returns_series',input:'close',period:2}]}}), 'returns does not accept window period');
+fail(!validTool('market',{...marketScreen,fields:Array.from({length:14},(_,i)=>`field_${i}`),composition:composed}), 'combined projection count bounded');
 fail(!validTool('market',{...marketScreen,universe:{instrument_type:'SWAP'}}),'ambiguous universe rejected');
 fail(!validTool('market',{...withoutList,action:'compare',universe:{instrument_type:'SWAP'}}),'compare requires explicit instruments');
 fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP',reference_generation:'generation-a',after_instrument:'BTC-USDT-SWAP'}}),'generation-fenced native market universe wire');
@@ -83,7 +93,7 @@ for(const invalid of [
  {...capitalAction,expected_authority_revision:0},
 ])fail(!validTool('strategies',invalid),'P0.2 invalid capital assignment passed schema');
 const strategiesTool=PUBLIC_TOOLS.find((t:any)=>t.name==='strategies') as any;
-fail(!!strategiesTool?.inputSchema?.$defs?.positiveDecimal,'P0.2 shared public decimal schema missing');
+fail(!!strategiesTool?.inputSchema?.$defs?.d,'P0.2 shared public decimal schema missing');
 console.log('strategy_capital_schema_strict_and_tools_factored PASS');
 
 const decisionFixture=payloadFixtures.find(x=>x.tool==='research'&&x.action==='record_decision')!;

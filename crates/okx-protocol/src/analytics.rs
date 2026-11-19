@@ -1,5 +1,6 @@
 //! Public compact analytics contract. No transport or financial logic.
 use serde::{Deserialize, Serialize};
+use okx_kernel::query_plan::CompositionRequest;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RangeMode {
@@ -30,6 +31,9 @@ pub struct MarketRequest {
     pub filters: Vec<MarketFilter>,
     #[serde(default)]
     pub sort: Option<MarketSort>,
+    /// Optional v1 typed composition; legacy fields retain their scalar meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition: Option<CompositionRequest>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -240,6 +244,10 @@ impl MarketRequest {
             && valid_range(self.timeframe_ms, self.start_ms, self.end_ms)
             && !self.fields.is_empty()
             && self.fields.len() <= 14
+            && self.composition.as_ref().is_none_or(|composition| {
+                matches!(self.action, MarketAction::Screen)
+                    && self.fields.len().saturating_add(composition.result_steps.len()) <= 14
+            })
             && self.fields.iter().all(|f| {
                 !f.is_empty()
                     && f.len() <= 64
