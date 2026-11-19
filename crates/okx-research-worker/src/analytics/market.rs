@@ -232,9 +232,9 @@ impl AnalyticsService {
         {
             return Err("MARKET_LIMIT:BOUNDED_INSTRUMENTS_AND_ROWS".into());
         }
-        let plan = planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?;
+        let plan = planner::AnalysisPlan::compile_market(&request)?;
         let (rows, correlation_matrix) = self
-            .market_rows(&request, cancel.clone(), global_rank)
+            .market_rows(&request, cancel.clone(), global_rank, plan.clone())
             .await?;
         let store = self.artifacts.clone();
         let producer = self.producer.clone();
@@ -302,8 +302,8 @@ impl AnalyticsService {
         request: &MarketRequest,
         cancel: Arc<super::executor::Cancel>,
         global_rank: bool,
+        plan: okx_analysis::query_plan::QueryPlan,
     ) -> Result<(Vec<Value>, Option<Value>), String> {
-        let plan = planner::AnalysisPlan::compile_market(request)?;
         let need_candles = plan
             .sources
             .contains(&okx_analysis::query_plan::Source::Candles);

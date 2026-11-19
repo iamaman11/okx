@@ -504,6 +504,23 @@ mod extension_tests {
         assert_eq!(market["rows"][0]["candle_coverage"]["observed_unique_bars"], 20);
         assert_eq!(market["rows"][0]["candle_coverage"]["missing_bars"], 0);
         assert_eq!(market["rows"][0]["unclosed_candles_excluded"], 1);
+        // T13: composition must disclose its candle dependency even when
+        // the only legacy projection depends solely on request parameters.
+        let composition_only_source: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT"],"fields":["position_size"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":1200000,"limit":20,
+            "parameters":{"budget":100,"price":10,"stop_distance":0.1},
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"r1","op":"returns_series","input":"close"},
+                {"id":"w1","op":"rolling_mean","input":"r1","period":2}
+            ],"result_steps":["w1"]}
+        }))
+        .unwrap();
+        let with_candles = service.market(composition_only_source, None, None).await.unwrap();
+        assert_eq!(with_candles["sources"], json!(["candles", "request"]));
+        assert_eq!(with_candles["sources"], with_candles["query_plan"]["sources"]);
+        assert_eq!(with_candles["rows"][0]["units"]["w1"], "ratio");
+        assert!(with_candles["rows"][0]["metrics"]["w1"].is_number());
         let mut request = ResearchRequest::Backtest {
             idempotency_key: "c20-registered-composition".into(),
             instruments: vec!["BTC-USDT".into()],
