@@ -523,6 +523,7 @@ fn sort_market_rows(
     }
     Ok(())
 }
+#[cfg(test)]
 fn compute_row(
     row: Loaded,
     request: &MarketRequest,
