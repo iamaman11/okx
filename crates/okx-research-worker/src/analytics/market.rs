@@ -7,7 +7,8 @@ struct Loaded {
     bars: Result<Arc<Vec<Bar>>, String>,
     ticker: Option<Result<okx_protocol::research_ipc::ResearchTicker, String>>,
     funding: Option<Result<Vec<(u64, f64)>, String>>,
-    oi: Option<Result<Vec<f64>, String>>,
+    // Keep OI event timestamps; endpoint values alone cannot prove coverage.
+    oi: Option<Result<Vec<(u64, f64)>, String>>,
     excluded: Option<usize>,
 }
 
@@ -388,19 +389,14 @@ impl AnalyticsService {
                                     if !v.is_finite() {
                                         return Err("NONFINITE_OI".into());
                                     }
-                                    rows.insert(t, v);
+                                    if rows.insert(t, v).is_some() {
+                                        return Err("OI_DUPLICATE_TIMESTAMP".into());
+                                    }
                                 }
                             }
-                            if rows
-                                .first_key_value()
-                                .is_none_or(|(t, _)| *t > start.saturating_add(ms))
-                                || rows
-                                    .last_key_value()
-                                    .is_none_or(|(t, _)| t.saturating_add(ms) < end)
-                            {
-                                return Err("OI_RANGE_INCOMPLETE".into());
-                            }
-                            Ok(rows.into_values().collect())
+                            // Preserve all time keys for the strict per-bar
+                            // coverage check in compute_row_checked.
+                            Ok(rows.into_iter().collect())
                         }
                         .await,
                     )
@@ -451,7 +447,11 @@ impl AnalyticsService {
                     if loaded.len() > 8 {
                         return Err("CORRELATION_MATRIX_LIMIT:8".into());
                     }
-                    Some(pairwise_matrix(&loaded, request.timeframe_ms))
+                    Some(pairwise_matrix(
+                        &loaded,
+                        request.timeframe_ms,
+                        request.end_ms,
+                    ))
                 } else {
                     None
                 };
@@ -588,6 +588,34 @@ fn compute_row_checked(
             gaps.push("CANDLE_INTERIOR_GAP".into());
         }
     }
+    let oi_coverage = row
+        .oi
+        .as_ref()
+        .and_then(|source| source.as_ref().ok())
+        .and_then(|points| {
+            okx_analysis::time_series::ClosedRange::strict(
+                request.start_ms,
+                request.end_ms,
+                request.timeframe_ms,
+            )
+            .ok()
+            .map(|range| range.coverage(points.iter().map(|(time, _)| *time)))
+        });
+    if request.fields.iter().any(|field| field == "oi_change") {
+        if let Some(Err(_)) = &row.oi {
+            gaps.push("OI_SOURCE_UNAVAILABLE".into());
+        } else if oi_coverage
+            .as_ref()
+            .is_none_or(|coverage| !coverage.complete)
+        {
+            gaps.push("OI_RANGE_INCOMPLETE_OR_GAPPED".into());
+        }
+    }
+    if request.fields.iter().any(|field| field == "spread_bps") {
+        // ResearchTicker has bid/ask but no observation/publication timestamp.
+        // A current quote must never masquerade as historical interval data.
+        gaps.push("SPREAD_CURRENT_SNAPSHOT_NOT_HISTORICAL".into());
+    }
     let mut metrics = serde_json::Map::new();
     let mut units = serde_json::Map::new();
     for field in &request.fields {
@@ -614,7 +642,9 @@ fn compute_row_checked(
             Operator::PearsonCorrelation => peer.and_then(|peer| {
                 let a = log_returns(&bars, request.timeframe_ms)?;
                 let b = log_returns(peer, request.timeframe_ms)?;
-                okx_analysis::operators::correlation(&a, &b)
+                let (pairs, _) =
+                    okx_analysis::time_series::align_exact_at(&a, &b, request.end_ms).ok()?;
+                okx_analysis::operators::correlation_pairs(&pairs)
             }),
             Operator::VolumeChange => {
                 scalar(op, close, &high, &low, &volume, 14, request.timeframe_ms)?
@@ -623,9 +653,14 @@ fn compute_row_checked(
                 .oi
                 .as_ref()
                 .and_then(|r| r.as_ref().ok())
+                .filter(|_| {
+                    oi_coverage
+                        .as_ref()
+                        .is_some_and(|coverage| coverage.complete)
+                })
                 .and_then(|r| r.first().zip(r.last()))
-                .filter(|(a, _)| **a > 0.0)
-                .map(|(a, b)| b / a - 1.0),
+                .filter(|(a, _)| a.1 > 0.0)
+                .map(|(a, b)| b.1 / a.1 - 1.0),
             Operator::PositionSize => {
                 let aux = [
                     param("budget", f64::NAN),
@@ -702,14 +737,22 @@ fn compute_row_checked(
             units.insert(id, json!(unit_name));
         }
     }
-    Ok(
-        json!({"instrument":row.instrument,"metrics":metrics,"units":units,"parameters":{"ema_period":request.parameters.get("ema_period").unwrap_or(&14.0),"atr_period":request.parameters.get("atr_period").unwrap_or(&14.0),"rsi_period":request.parameters.get("rsi_period").unwrap_or(&14.0)},"source_start_ms":bars.first().map(|b|b.time),"source_end_ms":bars.last().map(|b|b.time),"unclosed_candles_excluded":row.excluded,"candle_coverage":candle_coverage,"quality":if gaps.is_empty(){"complete"}else{"partial"},"gaps":gaps}),
-    )
+    let mut result = json!({"instrument":row.instrument,"metrics":metrics,"units":units,"parameters":{"ema_period":request.parameters.get("ema_period").unwrap_or(&14.0),"atr_period":request.parameters.get("atr_period").unwrap_or(&14.0),"rsi_period":request.parameters.get("rsi_period").unwrap_or(&14.0)},"source_start_ms":bars.first().map(|b|b.time),"source_end_ms":bars.last().map(|b|b.time),"unclosed_candles_excluded":row.excluded,"candle_coverage":candle_coverage,"quality":if gaps.is_empty(){"complete"}else{"partial"},"gaps":gaps});
+    if request.fields.iter().any(|field| field == "oi_change") {
+        result["oi_coverage"] = json!(oi_coverage);
+    }
+    if request.fields.iter().any(|field| field == "spread_bps") {
+        result["metric_time_basis"] = json!({"spread_bps":"current_snapshot_unaligned"});
+    }
+    Ok(result)
 }
 
 /// Closed-bar log returns indexed by the *later* candle. Missing, duplicate,
 /// out-of-order, nonpositive and nonfinite prices invalidate the series.
-fn log_returns(bars: &[Bar], timeframe_ms: u64) -> Option<Vec<(u64, f64)>> {
+fn log_returns(
+    bars: &[Bar],
+    timeframe_ms: u64,
+) -> Option<Vec<okx_analysis::time_series::TimedValue>> {
     if bars.len() < 2 || timeframe_ms == 0 {
         return None;
     }
@@ -723,26 +766,16 @@ fn log_returns(bars: &[Bar], timeframe_ms: u64) -> Option<Vec<(u64, f64)>> {
         {
             return None;
         }
-        out.push((pair[1].time, (pair[1].close / pair[0].close).ln()));
+        out.push(okx_analysis::time_series::TimedValue {
+            time_ms: pair[1].time,
+            // Candle time is its OPEN; its return is not known until CLOSE.
+            available_at_ms: pair[1].time.checked_add(timeframe_ms)?,
+            value: (pair[1].close / pair[0].close).ln(),
+        });
     }
     Some(out)
 }
-fn aligned_samples(left: &[(u64, f64)], right: &[(u64, f64)]) -> usize {
-    let (mut a, mut b, mut count) = (0, 0, 0);
-    while a < left.len() && b < right.len() {
-        match left[a].0.cmp(&right[b].0) {
-            std::cmp::Ordering::Less => a += 1,
-            std::cmp::Ordering::Greater => b += 1,
-            std::cmp::Ordering::Equal => {
-                count += 1;
-                a += 1;
-                b += 1;
-            }
-        }
-    }
-    count
-}
-fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64) -> Value {
+fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64, end_ms: u64) -> Value {
     let series = loaded
         .iter()
         .map(|row| {
@@ -760,10 +793,14 @@ fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64) -> Value {
         let mut samples = Vec::with_capacity(series.len());
         for right in &series {
             let (correlation, n) = match (left, right) {
-                (Some(a), Some(b)) => (
-                    okx_analysis::operators::correlation(a, b),
-                    aligned_samples(a, b),
-                ),
+                (Some(a), Some(b)) => match okx_analysis::time_series::align_exact_at(a, b, end_ms)
+                {
+                    Ok((pairs, counts)) => (
+                        okx_analysis::operators::correlation_pairs(&pairs),
+                        counts.matched,
+                    ),
+                    Err(_) => (None, 0),
+                },
                 _ => (None, 0),
             };
             if correlation.is_none() {
@@ -775,9 +812,21 @@ fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64) -> Value {
         values.push(row);
         counts.push(samples);
     }
+    let usable_samples = series
+        .iter()
+        .map(|samples| {
+            samples.as_ref().and_then(|s| {
+                okx_analysis::time_series::align_exact_at(s, s, end_ms)
+                    .ok()
+                    .map(|(_, counts)| counts.left_usable)
+            })
+        })
+        .collect::<Vec<_>>();
     json!({"basis":"aligned_closed_bar_log_returns","instruments":loaded.iter()
         .map(|r|r.instrument.clone()).collect::<Vec<_>>(),"values":values,
-        "sample_counts":counts,"quality":if complete{"complete"}else{"partial"}})
+        "sample_counts":counts,"usable_samples":usable_samples,
+        "availability_rule":"candle_close_boundary","decision_cutoff_ms":end_ms,
+        "quality":if complete{"complete"}else{"partial"}})
 }
 
 #[cfg(test)]
@@ -827,7 +876,7 @@ mod tests {
                 excluded: None,
             });
         }
-        let m = pairwise_matrix(&series, 60000);
+        let m = pairwise_matrix(&series, 60000, 6_000_000);
         assert_eq!(m["basis"], "aligned_closed_bar_log_returns");
         assert_eq!(m["instruments"].as_array().unwrap().len(), 3);
         assert_eq!(m["sample_counts"][1][2], 99);
@@ -835,6 +884,118 @@ mod tests {
         assert_eq!(m["values"][1][2], m["values"][2][1]);
         assert!(m["values"][0][0].as_f64().unwrap() > 0.99);
         assert!(m["values"][0][2].as_f64().unwrap() < 0.0);
+    }
+    #[test]
+    fn t06_pearson_needs_thirty_known_aligned_pairs_not_future_or_shifted_data() {
+        let mut rows = Vec::new();
+        for (instrument, factor) in [("BTC-USDT", 1.0), ("ETH-USDT", 2.0)] {
+            let mut price = 100.0;
+            let bars = (0..31)
+                .map(|i| {
+                    if i > 0 {
+                        price *= (((i % 7) as f64 - 3.0) * 0.002 * factor).exp();
+                    }
+                    Bar {
+                        time: i * 60_000,
+                        open: price,
+                        high: price,
+                        low: price,
+                        close: price,
+                        volume: 1.0,
+                        funding_rate: None,
+                    }
+                })
+                .collect();
+            rows.push(Loaded {
+                instrument: instrument.into(),
+                bars: Ok(Arc::new(bars)),
+                ticker: None,
+                funding: None,
+                oi: None,
+                excluded: None,
+            });
+        }
+        let full = pairwise_matrix(&rows, 60_000, 31 * 60_000);
+        assert_eq!(full["sample_counts"][0][1], 30);
+        assert_eq!(full["usable_samples"], json!([30, 30]));
+        assert!((full["values"][0][1].as_f64().unwrap() - 1.0).abs() < 1e-9);
+
+        // Last bar was observed in the recorded fixture but cannot be used
+        // before its close. No post-decision look-ahead is permitted.
+        let early = pairwise_matrix(&rows, 60_000, 30 * 60_000);
+        assert_eq!(early["sample_counts"][0][1], 29);
+        assert_eq!(early["usable_samples"], json!([29, 29]));
+        assert!(early["values"][0][1].is_null());
+
+        // Equal array lengths cannot substitute for equal timestamps.
+        let mut shifted = rows;
+        for bar in Arc::make_mut(shifted[1].bars.as_mut().unwrap()).iter_mut() {
+            bar.time += 60_000;
+        }
+        let unaligned = pairwise_matrix(&shifted, 60_000, 31 * 60_000);
+        assert_eq!(unaligned["sample_counts"][0][1], 29);
+        assert!(unaligned["values"][0][1].is_null());
+    }
+    #[test]
+    fn t06_oi_interior_gap_is_exposed_and_never_accepted_as_endpoint_only() {
+        let mut query = request(vec!["oi_change"]);
+        query.timeframe_ms = 300_000;
+        query.end_ms = 1_500_000;
+        let mut source = row();
+        source.bars = Ok(Arc::new(Vec::new()));
+        source.oi = Some(Ok(vec![
+            (0, 10.0),
+            (300_000, 12.0),
+            (900_000, 16.0),
+            (1_200_000, 18.0),
+        ]));
+        let partial = compute_row(source, &query, None).unwrap();
+        assert_eq!(partial["quality"], "partial");
+        assert_eq!(partial["metrics"]["oi_change"], Value::Null);
+        assert_eq!(partial["oi_coverage"]["expected_bars"], 5);
+        assert_eq!(partial["oi_coverage"]["observed_unique_bars"], 4);
+        assert_eq!(partial["oi_coverage"]["first_missing_ms"], 600_000);
+        assert!(
+            partial["gaps"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("OI_RANGE_INCOMPLETE_OR_GAPPED"))
+        );
+
+        let mut full_source = row();
+        full_source.bars = Ok(Arc::new(Vec::new()));
+        full_source.oi = Some(Ok(vec![
+            (0, 10.0),
+            (300_000, 12.0),
+            (600_000, 14.0),
+            (900_000, 16.0),
+            (1_200_000, 18.0),
+        ]));
+        let full = compute_row(full_source, &query, None).unwrap();
+        assert_eq!(full["quality"], "complete");
+        assert_eq!(full["oi_coverage"]["complete"], true);
+        assert!((full["metrics"]["oi_change"].as_f64().unwrap() - 0.8).abs() < 1e-12);
+    }
+    #[test]
+    fn t06_current_ticker_is_not_marked_as_historical_spread() {
+        let mut source = row();
+        source.ticker = Some(Ok(okx_protocol::research_ipc::ResearchTicker {
+            bid_price: "100".into(),
+            ask_price: "101".into(),
+        }));
+        let response = compute_row(source, &request(vec!["spread_bps"]), None).unwrap();
+        assert!(response["metrics"]["spread_bps"].is_number());
+        assert_eq!(
+            response["metric_time_basis"]["spread_bps"],
+            "current_snapshot_unaligned"
+        );
+        assert_eq!(response["quality"], "partial");
+        assert!(
+            response["gaps"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("SPREAD_CURRENT_SNAPSHOT_NOT_HISTORICAL"))
+        );
     }
     #[test]
     fn interior_gap_never_imputed() {

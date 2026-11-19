@@ -122,9 +122,150 @@ pub struct BarCoverage {
     pub complete: bool,
 }
 
+/// A source observation with distinct event and availability times. An
+/// observation cannot influence a decision made before `available_at_ms`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimedValue {
+    pub time_ms: u64,
+    pub available_at_ms: u64,
+    pub value: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AlignmentCounts {
+    pub left_total: usize,
+    pub right_total: usize,
+    pub left_usable: usize,
+    pub right_usable: usize,
+    pub left_unavailable: usize,
+    pub right_unavailable: usize,
+    pub left_nonfinite: usize,
+    pub right_nonfinite: usize,
+    pub matched: usize,
+}
+
+/// Finite values paired by the same event timestamp.
+pub type AlignedValuePairs = Vec<(f64, f64)>;
+
+/// A bounded alignment result with its explicit coverage evidence.
+pub type AlignedValueResult = Result<(AlignedValuePairs, AlignmentCounts), &'static str>;
+
+/// Exact inner join of ordered, unique event timestamps, with no as-of
+/// forward-fill or look-ahead. The caller supplies a proven availability time
+/// for each observation; unknown publication times must not be guessed here.
+pub fn align_exact_at(
+    left: &[TimedValue],
+    right: &[TimedValue],
+    decision_ms: u64,
+) -> AlignedValueResult {
+    fn eligible(
+        samples: &[TimedValue],
+        decision_ms: u64,
+    ) -> Result<(Vec<&TimedValue>, usize, usize), &'static str> {
+        let mut available = Vec::with_capacity(samples.len());
+        let (mut unavailable, mut nonfinite) = (0, 0);
+        let mut previous = None;
+        for sample in samples {
+            if previous.is_some_and(|time| time >= sample.time_ms) {
+                return Err("ALIGNMENT_DUPLICATE_OR_UNORDERED_TIME");
+            }
+            if sample.available_at_ms < sample.time_ms {
+                return Err("ALIGNMENT_INVALID_AVAILABILITY");
+            }
+            previous = Some(sample.time_ms);
+            if sample.time_ms >= decision_ms || sample.available_at_ms > decision_ms {
+                unavailable += 1;
+            } else if !sample.value.is_finite() {
+                nonfinite += 1;
+            } else {
+                available.push(sample);
+            }
+        }
+        Ok((available, unavailable, nonfinite))
+    }
+    let (a, left_unavailable, left_nonfinite) = eligible(left, decision_ms)?;
+    let (b, right_unavailable, right_nonfinite) = eligible(right, decision_ms)?;
+    let mut pairs = Vec::with_capacity(a.len().min(b.len()));
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].time_ms.cmp(&b[j].time_ms) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                pairs.push((a[i].value, b[j].value));
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    let matched = pairs.len();
+    Ok((
+        pairs,
+        AlignmentCounts {
+            left_total: left.len(),
+            right_total: right.len(),
+            left_usable: a.len(),
+            right_usable: b.len(),
+            left_unavailable,
+            right_unavailable,
+            left_nonfinite,
+            right_nonfinite,
+            matched,
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t06_exact_alignment_respects_availability_and_rejects_ambiguous_time() {
+        let left = [
+            TimedValue {
+                time_ms: 0,
+                available_at_ms: 60,
+                value: 1.0,
+            },
+            TimedValue {
+                time_ms: 60,
+                available_at_ms: 120,
+                value: 2.0,
+            },
+        ];
+        let right = [
+            TimedValue {
+                time_ms: 0,
+                available_at_ms: 60,
+                value: 2.0,
+            },
+            TimedValue {
+                time_ms: 60,
+                available_at_ms: 180,
+                value: 4.0,
+            },
+        ];
+        let (pairs, counts) = align_exact_at(&left, &right, 120).unwrap();
+        assert_eq!(pairs, vec![(1.0, 2.0)]);
+        assert_eq!(counts.left_usable, 2);
+        assert_eq!(counts.right_usable, 1);
+        assert_eq!(counts.right_unavailable, 1);
+        assert_eq!(counts.matched, 1);
+        assert_eq!(align_exact_at(&left, &right, 180).unwrap().0.len(), 2);
+        let duplicate = [right[0], right[0]];
+        assert_eq!(
+            align_exact_at(&left, &duplicate, 180).unwrap_err(),
+            "ALIGNMENT_DUPLICATE_OR_UNORDERED_TIME"
+        );
+        let impossible = [TimedValue {
+            available_at_ms: 0,
+            ..left[1]
+        }];
+        assert_eq!(
+            align_exact_at(&impossible, &right, 180).unwrap_err(),
+            "ALIGNMENT_INVALID_AVAILABILITY"
+        );
+    }
 
     #[test]
     fn k7_v03_relative_seven_days_hourly_has_exact_168_closed_bars() {

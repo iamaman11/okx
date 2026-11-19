@@ -151,7 +151,12 @@ pub fn correlation(left: &[(u64, f64)], right: &[(u64, f64)]) -> Option<f64> {
             }
         }
     }
-    if pairs.len() < 30 {
+    correlation_pairs(&pairs)
+}
+/// Pearson over already timestamp-aligned finite pairs. The minimum sample
+/// count and numerical estimator are identical to legacy correlation.
+pub fn correlation_pairs(pairs: &[(f64, f64)]) -> Option<f64> {
+    if pairs.len() < 30 || pairs.iter().any(|(a, b)| !a.is_finite() || !b.is_finite()) {
         return None;
     }
     let n = pairs.len() as f64;
