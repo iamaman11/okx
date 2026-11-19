@@ -24,6 +24,18 @@ fn market_source_rate_deferred(loaded: &[Loaded]) -> bool {
     })
 }
 
+// Completed market jobs survive Worker releases. A changed result contract must
+// use a new job namespace, or the old immutable evidence is replayed instead
+// of being recalculated. Limit the T06 bump to funding consumers so unrelated
+// historical market jobs keep their existing cache entries.
+fn market_job_schema(fields: &[String]) -> &'static str {
+    if fields.iter().any(|field| field == "funding_sum") {
+        "market/448.3.funding-publication-v1"
+    } else {
+        "market/448.2"
+    }
+}
+
 impl AnalyticsService {
     pub async fn market(
         &self,
@@ -87,7 +99,7 @@ impl AnalyticsService {
             0
         };
         let hash = okx_research::canonical_sha256(&(
-            "market/448.2",
+            market_job_schema(&hash_request.fields),
             &hash_request,
             &universe_page,
             bucket,
@@ -883,6 +895,50 @@ fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64, end_ms: u64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t06_funding_result_schema_invalidates_only_funding_jobs() {
+        let funding = request(vec!["funding_sum"]);
+        let mixed = request(vec!["returns", "funding_sum", "spread_bps"]);
+        let returns = request(vec!["returns"]);
+        assert_eq!(market_job_schema(&funding.fields), market_job_schema(&mixed.fields));
+        assert_eq!(market_job_schema(&returns.fields), "market/448.2");
+
+        // Reproduce the exact persisted pre-T06 key for a closed historical
+        // query. The new key must not replay that completed stale artifact.
+        let old = okx_research::canonical_sha256(&(
+            "market/448.2",
+            &funding,
+            &Option::<Value>::None,
+            0_i64,
+        ))
+        .unwrap();
+        let new = okx_research::canonical_sha256(&(
+            market_job_schema(&funding.fields),
+            &funding,
+            &Option::<Value>::None,
+            0_i64,
+        ))
+        .unwrap();
+        assert_ne!(old, new);
+
+        // Non-funding research retains its original deterministic job key.
+        let legacy_returns = okx_research::canonical_sha256(&(
+            "market/448.2",
+            &returns,
+            &Option::<Value>::None,
+            0_i64,
+        ))
+        .unwrap();
+        let current_returns = okx_research::canonical_sha256(&(
+            market_job_schema(&returns.fields),
+            &returns,
+            &Option::<Value>::None,
+            0_i64,
+        ))
+        .unwrap();
+        assert_eq!(legacy_returns, current_returns);
+    }
 
     #[test]
     fn transient_market_source_defer_is_not_cacheable() {
