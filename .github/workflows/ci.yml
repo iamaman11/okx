@@ -175,7 +175,20 @@ jobs:
             exit 0
           fi
 
-          successful_pr_ci="$(gh api             --method GET             -H "Accept: application/vnd.github+json"             "/repos/$GITHUB_REPOSITORY/actions/runs"             -f head_sha="$head_sha"             -f event="pull_request"             -f status="completed"             -f per_page=100             --jq '[.workflow_runs[] | select(.name == "CI" and .conclusion == "success")] | length')"
+          # A successful Draft run can share this SHA. Only a completed Ready
+          # run has successful Linux and Windows aggregate jobs in the same attempt.
+          successful_pr_ci=0
+          candidates="$(gh api --paginate --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" \
+            -f head_sha="$head_sha" -f event=pull_request -f status=completed -f per_page=100 \
+            --jq '.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .conclusion == "success") | [.id, .run_attempt] | @tsv')"
+          while read -r run attempt; do
+            [[ -n "$run" ]] || continue
+            jobs="$(gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/actions/runs/$run/attempts/$attempt/jobs?per_page=100")"
+            if jq -e '[.[].jobs[] | select(.conclusion == "success") | .name] | index("linux-core") != null and index("windows-native") != null' <<<"$jobs" >/dev/null; then
+              successful_pr_ci=1
+              break
+            fi
+          done <<<"$candidates"
 
           merge_tree="$(gh api \
             -H "Accept: application/vnd.github+json" \
@@ -202,39 +215,43 @@ jobs:
           echo "BUILD_REQUIRED=${{ steps.classify.outputs.build_required }}"
           echo "REASON=${{ steps.classify.outputs.reason }}"
 
-  # #518: fast bounded feedback for the typed market-composition slice.
-  # Draft iterations never trigger the Windows release matrix.  Ready for
-  # review still requires the complete, unchanged protected Native gates.
-  draft-518-composition:
-    name: draft-518-composition
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.pull_request.head.ref == 'feat/518-typed-market-composition' }}
+  draft-feedback:
+    name: draft-feedback
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    timeout-minutes: 20
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select checks from the complete PR diff
+        id: scope
+        run: |
+          python3 -B scripts/test_check_p0.py
+          python3 scripts/check_p0.py --base "$BASE_SHA" --plan
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        if: steps.scope.outputs.code == 'true'
         with:
           toolchain: 1.95.0
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        if: steps.scope.outputs.code == 'true'
+        id: cache
         with:
-          cache-on-failure: true
-      - name: Format and typed IPC/market Clippy
+          shared-key: draft-feedback
+          cache-workspace-crates: true
+      - name: Run selected owner and consumer checks
+        if: steps.scope.outputs.code == 'true'
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
         run: |
-          cargo fmt --all -- --check
-          cargo clippy --locked -p okx-kernel -p okx-protocol -p okx-research-worker --all-targets -- -D warnings
-      - name: Kernel, protocol and research regression
-        run: |
-          cargo test --locked -p okx-kernel -p okx-protocol --lib
-          cargo test --locked -p okx-research-worker --lib
-      - name: MCP contract, typecheck and fixture regression
-        working-directory: cloudflare/okx-mcp
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm run check
-          git diff --exit-code -- contracts/tools.schema.json contracts/action-fixtures.json
+          echo "Cargo cache exact hit: $CACHE_HIT" >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/check_p0.py --base "$BASE_SHA"
 
   # #512: one bounded compiler/test cycle while its PR is Draft. This job
   # verifies real production and test configurations; it is NOT full acceptance.
@@ -439,6 +456,9 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Draft feedback selector and missing-test controls
+        run: python3 -B scripts/test_check_p0.py
 
       - name: Architecture checker self-test
         run: python3 scripts/check_architecture.py --self-test
