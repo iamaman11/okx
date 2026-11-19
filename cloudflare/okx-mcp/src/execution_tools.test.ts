@@ -23,13 +23,13 @@ for(const id of operatorNames){
  fail(!validTool('market',{...marketScreen,fields:[id+'_unknown']}),`T01 rejected unknown operator ${id}`);
 }
 fail(!validTool('market',{...marketScreen,fields:['unknown_operator']}),'T01 rejects an arbitrary public operator');
-fail(!validTool('market',{...marketScreen,filters:[{field:'unknown_operator'}]}),'T01 rejects unknown filter operator');
-fail(!validTool('market',{...marketScreen,sort:{field:'unknown_operator'}}),'T01 rejects unknown sort operator');
+fail(!validTool('market',{...marketScreen,filters:[{field:'unknown_operator',min:0,max:1}]}),'T01 rejects unknown filter operator');
+fail(!validTool('market',{...marketScreen,sort:{field:'unknown_operator',descending:false}}),'T01 rejects unknown sort operator');
 const publicMarket=(PUBLIC_TOOLS.find((tool:any)=>tool.name==='market') as any).inputSchema;
 const publicMarketScreen=publicMarket.oneOf.find((schema:any)=>schema.properties?.fields);
 fail(publicMarketScreen?.properties.fields.items.$ref==='#/$defs/s','T01 compact public operator IDs');
 fail(!('o' in (publicMarket.$defs??{})),'T01 catalog stays on demand, not in tools/list');
-fail(validTool('market',{...marketScreen,filters:[{field:'returns'}],sort:{field:'returns'}}),'T01 registered filter and sort accepted');
+fail(validTool('market',{...marketScreen,filters:[{field:'returns',min:0,max:1}],sort:{field:'returns',descending:false}}),'T01 registered filter and sort accepted');
 fail(validTool('market',{...marketScreen,fields:operatorNames.slice(0,14)}),'T01 fourteen known operators pass public boundary');
 fail(!validTool('market',{...marketScreen,fields:operatorNames.slice(0,15)}),'T01 fifteen operators rejected by public boundary');
 fail(!validTool('market',{...marketScreen,fields:operatorNames}),'T01 sixteen operators rejected by public boundary');
