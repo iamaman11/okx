@@ -144,6 +144,12 @@ pub struct AlignmentCounts {
     pub matched: usize,
 }
 
+/// Finite values paired by the same event timestamp.
+pub type AlignedValuePairs = Vec<(f64, f64)>;
+
+/// A bounded alignment result with its explicit coverage evidence.
+pub type AlignedValueResult = Result<(AlignedValuePairs, AlignmentCounts), &'static str>;
+
 /// Exact inner join of ordered, unique event timestamps, with no as-of
 /// forward-fill or look-ahead. The caller supplies a proven availability time
 /// for each observation; unknown publication times must not be guessed here.
@@ -151,7 +157,7 @@ pub fn align_exact_at(
     left: &[TimedValue],
     right: &[TimedValue],
     decision_ms: u64,
-) -> Result<(Vec<(f64, f64)>, AlignmentCounts), &'static str> {
+) -> AlignedValueResult {
     fn eligible(
         samples: &[TimedValue],
         decision_ms: u64,
