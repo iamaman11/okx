@@ -469,6 +469,7 @@ impl AnalyticsService {
                         &request,
                         peer.as_deref(),
                         plan.composition.as_ref(),
+                        need_candles,
                     )?);
                 }
                 if global_rank {
@@ -546,25 +547,23 @@ fn compute_row(
             okx_analysis::query_plan::CheckedComposition::compile(*c, count)
         })
         .transpose()?;
-    compute_row_checked(row, request, peer, checked.as_ref())
+    let needs_candles = checked.is_some()
+        || planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?
+            .sources
+            .contains("candles");
+    compute_row_checked(row, request, peer, checked.as_ref(), needs_candles)
 }
 fn compute_row_checked(
     row: Loaded,
     request: &MarketRequest,
     peer: Option<&Vec<Bar>>,
     composition: Option<&okx_analysis::query_plan::CheckedComposition>,
+    needs_candles: bool,
 ) -> Result<Value, String> {
     let mut gaps = Vec::new();
     // A source-specific metric does not imply that candle observations exist.
     // Preserve candle coverage for mixed queries and composed price series,
-    // but report N/A (null) for OI, funding, ticker and request-only metrics.
-    let needs_candles = composition.is_some()
-        || request.fields.iter().any(|field| {
-            !matches!(
-                field.as_str(),
-                "spread_bps" | "funding_sum" | "oi_change" | "position_size" | "cost_estimate"
-            )
-        });
+    // but report N/A (null) when the typed plan excludes candle sources.
     let bars = match row.bars {
         Ok(b) => b,
         Err(e) => {
