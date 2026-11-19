@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(plan.range.expected_bars, 20);
     }
     #[test]
-    fn k7_temporarily_unselected_negative_control() {
+    fn k7_invalid_operator_bounds_or_parameter_fail_closed() {
         let (universe, range, ops) = fixture();
         let params = BTreeMap::from([("unrecognized_parameter".to_string(), 1.0)]);
         assert_eq!(
