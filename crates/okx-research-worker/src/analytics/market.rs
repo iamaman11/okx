@@ -447,7 +447,11 @@ impl AnalyticsService {
                     if loaded.len() > 8 {
                         return Err("CORRELATION_MATRIX_LIMIT:8".into());
                     }
-                    Some(pairwise_matrix(&loaded, request.timeframe_ms, request.end_ms))
+                    Some(pairwise_matrix(
+                        &loaded,
+                        request.timeframe_ms,
+                        request.end_ms,
+                    ))
                 } else {
                     None
                 };
@@ -584,15 +588,26 @@ fn compute_row_checked(
             gaps.push("CANDLE_INTERIOR_GAP".into());
         }
     }
-    let oi_coverage = row.oi.as_ref().and_then(|source| source.as_ref().ok()).and_then(|points| {
-        okx_analysis::time_series::ClosedRange::strict(
-            request.start_ms, request.end_ms, request.timeframe_ms,
-        ).ok().map(|range| range.coverage(points.iter().map(|(time, _)| *time)))
-    });
+    let oi_coverage = row
+        .oi
+        .as_ref()
+        .and_then(|source| source.as_ref().ok())
+        .and_then(|points| {
+            okx_analysis::time_series::ClosedRange::strict(
+                request.start_ms,
+                request.end_ms,
+                request.timeframe_ms,
+            )
+            .ok()
+            .map(|range| range.coverage(points.iter().map(|(time, _)| *time)))
+        });
     if request.fields.iter().any(|field| field == "oi_change") {
         if let Some(Err(_)) = &row.oi {
             gaps.push("OI_SOURCE_UNAVAILABLE".into());
-        } else if oi_coverage.as_ref().is_none_or(|coverage| !coverage.complete) {
+        } else if oi_coverage
+            .as_ref()
+            .is_none_or(|coverage| !coverage.complete)
+        {
             gaps.push("OI_RANGE_INCOMPLETE_OR_GAPPED".into());
         }
     }
@@ -638,7 +653,11 @@ fn compute_row_checked(
                 .oi
                 .as_ref()
                 .and_then(|r| r.as_ref().ok())
-                .filter(|_| oi_coverage.as_ref().is_some_and(|coverage| coverage.complete))
+                .filter(|_| {
+                    oi_coverage
+                        .as_ref()
+                        .is_some_and(|coverage| coverage.complete)
+                })
                 .and_then(|r| r.first().zip(r.last()))
                 .filter(|(a, _)| a.1 > 0.0)
                 .map(|(a, b)| b.1 / a.1 - 1.0),
@@ -877,14 +896,23 @@ mod tests {
                         price *= (((i % 7) as f64 - 3.0) * 0.002 * factor).exp();
                     }
                     Bar {
-                        time: i * 60_000, open: price, high: price,
-                        low: price, close: price, volume: 1.0, funding_rate: None,
+                        time: i * 60_000,
+                        open: price,
+                        high: price,
+                        low: price,
+                        close: price,
+                        volume: 1.0,
+                        funding_rate: None,
                     }
                 })
                 .collect();
             rows.push(Loaded {
-                instrument: instrument.into(), bars: Ok(Arc::new(bars)),
-                ticker: None, funding: None, oi: None, excluded: None,
+                instrument: instrument.into(),
+                bars: Ok(Arc::new(bars)),
+                ticker: None,
+                funding: None,
+                oi: None,
+                excluded: None,
             });
         }
         let full = pairwise_matrix(&rows, 60_000, 31 * 60_000);
@@ -916,7 +944,10 @@ mod tests {
         let mut source = row();
         source.bars = Ok(Arc::new(Vec::new()));
         source.oi = Some(Ok(vec![
-            (0, 10.0), (300_000, 12.0), (900_000, 16.0), (1_200_000, 18.0),
+            (0, 10.0),
+            (300_000, 12.0),
+            (900_000, 16.0),
+            (1_200_000, 18.0),
         ]));
         let partial = compute_row(source, &query, None).unwrap();
         assert_eq!(partial["quality"], "partial");
@@ -924,14 +955,21 @@ mod tests {
         assert_eq!(partial["oi_coverage"]["expected_bars"], 5);
         assert_eq!(partial["oi_coverage"]["observed_unique_bars"], 4);
         assert_eq!(partial["oi_coverage"]["first_missing_ms"], 600_000);
-        assert!(partial["gaps"].as_array().unwrap().contains(
-            &json!("OI_RANGE_INCOMPLETE_OR_GAPPED")));
+        assert!(
+            partial["gaps"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("OI_RANGE_INCOMPLETE_OR_GAPPED"))
+        );
 
         let mut full_source = row();
         full_source.bars = Ok(Arc::new(Vec::new()));
         full_source.oi = Some(Ok(vec![
-            (0, 10.0), (300_000, 12.0), (600_000, 14.0),
-            (900_000, 16.0), (1_200_000, 18.0),
+            (0, 10.0),
+            (300_000, 12.0),
+            (600_000, 14.0),
+            (900_000, 16.0),
+            (1_200_000, 18.0),
         ]));
         let full = compute_row(full_source, &query, None).unwrap();
         assert_eq!(full["quality"], "complete");
@@ -942,14 +980,22 @@ mod tests {
     fn t06_current_ticker_is_not_marked_as_historical_spread() {
         let mut source = row();
         source.ticker = Some(Ok(okx_protocol::research_ipc::ResearchTicker {
-            bid_price: "100".into(), ask_price: "101".into(),
+            bid_price: "100".into(),
+            ask_price: "101".into(),
         }));
         let response = compute_row(source, &request(vec!["spread_bps"]), None).unwrap();
         assert!(response["metrics"]["spread_bps"].is_number());
-        assert_eq!(response["metric_time_basis"]["spread_bps"], "current_snapshot_unaligned");
+        assert_eq!(
+            response["metric_time_basis"]["spread_bps"],
+            "current_snapshot_unaligned"
+        );
         assert_eq!(response["quality"], "partial");
-        assert!(response["gaps"].as_array().unwrap().contains(
-            &json!("SPREAD_CURRENT_SNAPSHOT_NOT_HISTORICAL")));
+        assert!(
+            response["gaps"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("SPREAD_CURRENT_SNAPSHOT_NOT_HISTORICAL"))
+        );
     }
     #[test]
     fn interior_gap_never_imputed() {
