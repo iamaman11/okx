@@ -58,7 +58,7 @@ fn market_request_schema(
     funding_composition: bool,
 ) -> &'static str {
     if has_composition || oi_composition || funding_composition {
-        "market/518.5.normalized-source-evidence-v1"
+        "market/518.6.source-null-origin-evidence-v1"
     } else {
         market_job_schema(fields)
     }
@@ -1312,18 +1312,24 @@ fn compute_row_planned(
             if missing_candles {
                 issues.push(json!({
                     "source":"candles","reason":"CANDLE_RANGE_INCOMPLETE_OR_GAPPED",
-                    "first_missing_ms":candle_coverage.as_ref().and_then(|c|c.first_missing_ms)
+                    "first_missing_ms":candle_coverage.as_ref().and_then(|c|c.first_missing_ms),
+                    "origin_step":null_causes.get(&id).map(|c|c.origin_step.as_str()),
+                    "causal_null_reason":null_causes.get(&id).map(|c|c.reason)
                 }));
             }
             if missing_oi {
                 issues.push(json!({
                     "source":"open_interest","reason":"OI_RANGE_INCOMPLETE_OR_GAPPED",
-                    "first_missing_ms":oi_coverage.as_ref().and_then(|c|c.first_missing_ms)
+                    "first_missing_ms":oi_coverage.as_ref().and_then(|c|c.first_missing_ms),
+                    "origin_step":null_causes.get(&id).map(|c|c.origin_step.as_str()),
+                    "causal_null_reason":null_causes.get(&id).map(|c|c.reason)
                 }));
             }
             if missing_funding {
                 issues.push(json!({
-                    "source":"funding_rate","reason":"FUNDING_SOURCE_UNAVAILABLE"
+                    "source":"funding_rate","reason":"FUNDING_SOURCE_UNAVAILABLE",
+                    "origin_step":null_causes.get(&id).map(|c|c.origin_step.as_str()),
+                    "causal_null_reason":null_causes.get(&id).map(|c|c.reason)
                 }));
             }
             if unavailable_causal_oi {
@@ -1723,7 +1729,7 @@ mod tests {
         let oi_composed = market_request_schema(&fields, true, true, false);
         let oi_correlated = market_request_schema(&oi_fields, true, true, false);
         let funding_composed = market_request_schema(&fields, true, false, true);
-        assert_eq!(composed, "market/518.5.normalized-source-evidence-v1");
+        assert_eq!(composed, "market/518.6.source-null-origin-evidence-v1");
         assert_eq!(oi_composed, composed);
         assert_ne!(composed, "market/518.2.composition-quality-v1");
         assert_ne!(oi_composed, "market/518.2.oi-composition-quality-v1");
@@ -1734,7 +1740,7 @@ mod tests {
         assert_eq!(oi_correlated, oi_composed);
         assert_eq!(
             funding_composed,
-            "market/518.5.normalized-source-evidence-v1"
+            "market/518.6.source-null-origin-evidence-v1"
         );
         assert_eq!(
             funding_composed,
@@ -2307,7 +2313,9 @@ mod tests {
         let missing = compute_row_planned(loaded, &request, None, &plan, true).unwrap();
         assert!(missing["metrics"]["risk"].is_null());
         assert!(missing["metrics"]["exit"].is_null());
-        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["reason"], "SOURCE_OBSERVATION_MISSING");
+        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["reason"], "CANDLE_RANGE_INCOMPLETE_OR_GAPPED");
+        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["source"], "candles");
+        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["causal_null_reason"], "SOURCE_OBSERVATION_MISSING");
         assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["origin_step"], "close");
         assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["first_missing_ms"], 98 * 60_000);
     }
