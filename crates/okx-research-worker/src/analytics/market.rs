@@ -49,7 +49,8 @@ impl AnalyticsService {
         // K7 source, type and range validation precedes every venue read.
         let query_plan = planner::AnalysisPlan::compile_market(&request)?;
         let oi_composition = query_plan.composition.as_ref().is_some_and(|plan| {
-            plan.sources().contains(&okx_analysis::query_plan::Source::OpenInterest)
+            plan.sources()
+                .contains(&okx_analysis::query_plan::Source::OpenInterest)
         });
         let window = query_plan.range;
         let closed_end = jiff::Timestamp::now().as_millisecond().max(0) as u64
@@ -67,7 +68,12 @@ impl AnalyticsService {
             compute_request.instruments = names;
             compute_request.universe = None;
         }
-        if oi_composition && compute_request.instruments.iter().any(|id| !id.ends_with("-SWAP")) {
+        if oi_composition
+            && compute_request
+                .instruments
+                .iter()
+                .any(|id| !id.ends_with("-SWAP"))
+        {
             return Err("composition.sources.open_interest:UNSUPPORTED_PRODUCT".into());
         }
         let mut hash_request = request.clone();
@@ -346,8 +352,12 @@ impl AnalyticsService {
         global_rank: bool,
         plan: okx_analysis::query_plan::QueryPlan,
     ) -> Result<(Vec<Value>, Option<Value>), String> {
-        let need_candles = plan.sources.contains(&okx_analysis::query_plan::Source::Candles);
-        let need_oi = plan.sources.contains(&okx_analysis::query_plan::Source::OpenInterest);
+        let need_candles = plan
+            .sources
+            .contains(&okx_analysis::query_plan::Source::Candles);
+        let need_oi = plan
+            .sources
+            .contains(&okx_analysis::query_plan::Source::OpenInterest);
         let count = (request.end_ms - request.start_ms) / request.timeframe_ms;
         let total_bars = count
             .checked_mul(request.instruments.len() as u64)
@@ -361,7 +371,11 @@ impl AnalyticsService {
             okx_analysis::query_plan::CheckedComposition::compile(
                 okx_analysis::query_plan::CompositionRequest {
                     version: composition.version.clone(),
-                    steps: composition.steps.iter().map(|checked| checked.step.clone()).collect(),
+                    steps: composition
+                        .steps
+                        .iter()
+                        .map(|checked| checked.step.clone())
+                        .collect(),
                     result_steps: composition.result_steps.clone(),
                 },
                 total_bars,
@@ -583,9 +597,13 @@ fn compute_row(
             okx_analysis::query_plan::CheckedComposition::compile(*c, count)
         })
         .transpose()?;
-    let needs_candles = checked.as_ref().is_some_and(|plan| plan.sources().contains(&okx_analysis::query_plan::Source::Candles))
-        || planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?
-            .sources.contains("candles");
+    let needs_candles =
+        checked.as_ref().is_some_and(|plan| {
+            plan.sources()
+                .contains(&okx_analysis::query_plan::Source::Candles)
+        }) || planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?
+            .sources
+            .contains("candles");
     compute_row_checked(row, request, peer, checked.as_ref(), needs_candles)
 }
 fn compute_row_checked(
@@ -652,7 +670,10 @@ fn compute_row_checked(
             .ok()
             .map(|range| range.coverage(points.iter().map(|(time, _)| *time)))
         });
-    let composition_oi = composition.is_some_and(|plan| plan.sources().contains(&okx_analysis::query_plan::Source::OpenInterest));
+    let composition_oi = composition.is_some_and(|plan| {
+        plan.sources()
+            .contains(&okx_analysis::query_plan::Source::OpenInterest)
+    });
     if request.fields.iter().any(|field| field == "oi_change") || composition_oi {
         if let Some(Err(_)) = &row.oi {
             gaps.push("OI_SOURCE_UNAVAILABLE".into());
@@ -810,7 +831,8 @@ fn compute_row_checked(
                 for &(time, value) in points {
                     if let Some(offset) = time.checked_sub(request.start_ms)
                         && offset % request.timeframe_ms == 0
-                        && let Some(slot) = open_interest.get_mut((offset / request.timeframe_ms) as usize)
+                        && let Some(slot) =
+                            open_interest.get_mut((offset / request.timeframe_ms) as usize)
                     {
                         *slot = Some(value);
                     }
@@ -822,14 +844,27 @@ fn compute_row_checked(
         };
         for (id, (value, unit)) in evaluated {
             let dependencies = &source_dependencies[&id];
-            let missing_candles = incomplete_candles && dependencies.contains(&okx_analysis::query_plan::Source::Candles);
+            let missing_candles = incomplete_candles
+                && dependencies.contains(&okx_analysis::query_plan::Source::Candles);
             let missing_oi = dependencies.contains(&okx_analysis::query_plan::Source::OpenInterest)
-                && oi_coverage.as_ref().is_none_or(|coverage| !coverage.complete);
+                && oi_coverage
+                    .as_ref()
+                    .is_none_or(|coverage| !coverage.complete);
             // Event-time alone does not prove a historical OI observation was
             // available at decision time. Never certify an OI-derived signal.
-            let unavailable_causal_oi = dependencies.contains(&okx_analysis::query_plan::Source::OpenInterest)
-                && matches!(unit, okx_analysis::query_plan::Unit::Boolean | okx_analysis::query_plan::Unit::Event | okx_analysis::query_plan::Unit::OutcomeRatio);
-            let value = if missing_candles || missing_oi || unavailable_causal_oi { None } else { value };
+            let unavailable_causal_oi = dependencies
+                .contains(&okx_analysis::query_plan::Source::OpenInterest)
+                && matches!(
+                    unit,
+                    okx_analysis::query_plan::Unit::Boolean
+                        | okx_analysis::query_plan::Unit::Event
+                        | okx_analysis::query_plan::Unit::OutcomeRatio
+                );
+            let value = if missing_candles || missing_oi || unavailable_causal_oi {
+                None
+            } else {
+                value
+            };
             if unavailable_causal_oi {
                 gaps.push(format!("CAUSAL_AVAILABILITY_UNVERIFIED:{id}"));
             }
@@ -860,12 +895,20 @@ fn compute_row_checked(
         }
     }
     let source_captures = if composition_oi {
-        let oi_capture = row.oi.as_ref().and_then(|source| source.as_ref().ok())
+        let oi_capture = row
+            .oi
+            .as_ref()
+            .and_then(|source| source.as_ref().ok())
             .map(|points| -> Result<Value, String> {
                 let hash = okx_research::canonical_sha256(&(
                     "okx.market.oi-source-capture/v1",
-                    &row.instrument, request.start_ms, request.end_ms, request.timeframe_ms, points,
-                )).map_err(|error| error.to_string())?;
+                    &row.instrument,
+                    request.start_ms,
+                    request.end_ms,
+                    request.timeframe_ms,
+                    points,
+                ))
+                .map_err(|error| error.to_string())?;
                 Ok(json!({
                     "source":"okx/open_interest",
                     "capture_hash":hash,
@@ -877,20 +920,27 @@ fn compute_row_checked(
                     "last_event_ms":points.last().map(|(time, _)| time),
                     "publication_time_verified":false,
                 }))
-            }).transpose()?;
-        let candle_capture = needs_candles.then(|| -> Result<Value, String> {
-            let hash = okx_research::canonical_sha256(&(
-                "okx.market.candle-source-capture/v1",
-                &row.instrument, request.start_ms, request.end_ms, request.timeframe_ms,
-                bars.as_ref(),
-            )).map_err(|error| error.to_string())?;
-            Ok(json!({
-                "source":"okx/closed_candles",
-                "capture_hash":hash,
-                "observed_points":bars.len(),
-                "availability":"after_close",
-            }))
-        }).transpose()?;
+            })
+            .transpose()?;
+        let candle_capture = needs_candles
+            .then(|| -> Result<Value, String> {
+                let hash = okx_research::canonical_sha256(&(
+                    "okx.market.candle-source-capture/v1",
+                    &row.instrument,
+                    request.start_ms,
+                    request.end_ms,
+                    request.timeframe_ms,
+                    bars.as_ref(),
+                ))
+                .map_err(|error| error.to_string())?;
+                Ok(json!({
+                    "source":"okx/closed_candles",
+                    "capture_hash":hash,
+                    "observed_points":bars.len(),
+                    "availability":"after_close",
+                }))
+            })
+            .transpose()?;
         Some(json!({"open_interest":oi_capture,"candles":candle_capture}))
     } else {
         None
@@ -1418,7 +1468,7 @@ mod tests {
                     period: None,
                     threshold: None,
                     when: None,
-                other: None,
+                    other: None,
                 },
                 okx_analysis::query_plan::SeriesStep {
                     id: "w1".into(),
@@ -1427,7 +1477,7 @@ mod tests {
                     period: Some(2),
                     threshold: None,
                     when: None,
-                other: None,
+                    other: None,
                 },
             ],
             result_steps: vec!["w1".into()],
@@ -1744,47 +1794,78 @@ mod global_rank_tests {
             "timeframe_ms":60000,
             "start_ms":0,
             "end_ms":6000000
-        })).unwrap();
-        query.composition = Some(Box::new(serde_json::from_value(json!({
-            "version":"okx.market.composition/v1",
-            "steps":[
-                {"id":"oi_return","op":"returns_series","input":"open_interest"},
-                {"id":"positive","op":"greater_than","input":"oi_return","threshold":0.0},
-                {"id":"event","op":"rising_edge","input":"positive"}
-            ],
-            "result_steps":["oi_return","event"]
-        })).unwrap()));
+        }))
+        .unwrap();
+        query.composition = Some(Box::new(
+            serde_json::from_value(json!({
+                "version":"okx.market.composition/v1",
+                "steps":[
+                    {"id":"oi_return","op":"returns_series","input":"open_interest"},
+                    {"id":"positive","op":"greater_than","input":"oi_return","threshold":0.0},
+                    {"id":"event","op":"rising_edge","input":"positive"}
+                ],
+                "result_steps":["oi_return","event"]
+            }))
+            .unwrap(),
+        ));
         let checked = planner::AnalysisPlan::compile_market(&query).unwrap();
-        let points = (0..100).map(|i| (i * 60_000, 10.0 + i as f64)).collect::<Vec<_>>();
-        let fixture = || {
-            Loaded {
-                instrument: "BTC-USDT-SWAP".into(),
-                bars: Ok(Arc::new((0..100).map(|i| Bar {
-                    time: i * 60_000,
-                    open: 100.0,
-                    high: 102.0,
-                    low: 99.0,
-                    close: 100.0 + i as f64,
-                    volume: 1.0,
-                    funding_rate: None,
-                }).collect())),
-                ticker: None,
-                funding: None,
-                oi: Some(Ok(points.clone())),
-                excluded: None,
-            }
+        let points = (0..100)
+            .map(|i| (i * 60_000, 10.0 + i as f64))
+            .collect::<Vec<_>>();
+        let fixture = || Loaded {
+            instrument: "BTC-USDT-SWAP".into(),
+            bars: Ok(Arc::new(
+                (0..100)
+                    .map(|i| Bar {
+                        time: i * 60_000,
+                        open: 100.0,
+                        high: 102.0,
+                        low: 99.0,
+                        close: 100.0 + i as f64,
+                        volume: 1.0,
+                        funding_rate: None,
+                    })
+                    .collect(),
+            )),
+            ticker: None,
+            funding: None,
+            oi: Some(Ok(points.clone())),
+            excluded: None,
         };
-        let first = compute_row_checked(fixture(), &query, None, checked.composition.as_ref(), true).unwrap();
-        let repeat = compute_row_checked(fixture(), &query, None, checked.composition.as_ref(), true).unwrap();
+        let first =
+            compute_row_checked(fixture(), &query, None, checked.composition.as_ref(), true)
+                .unwrap();
+        let repeat =
+            compute_row_checked(fixture(), &query, None, checked.composition.as_ref(), true)
+                .unwrap();
         assert_eq!(first["source_captures"], repeat["source_captures"]);
         assert!(first["metrics"]["oi_return"].is_number());
         assert!(first["metrics"]["event"].is_null());
-        assert_eq!(first["metric_time_basis"]["event"], "oi_event_time_publication_unverified");
-        assert!(first["gaps"].as_array().unwrap().contains(&json!("CAUSAL_AVAILABILITY_UNVERIFIED:event")));
+        assert_eq!(
+            first["metric_time_basis"]["event"],
+            "oi_event_time_publication_unverified"
+        );
+        assert!(
+            first["gaps"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("CAUSAL_AVAILABILITY_UNVERIFIED:event"))
+        );
         let mut changed = fixture();
-        changed.oi.as_mut().unwrap().as_mut().unwrap().last_mut().unwrap().1 += 1.0;
-        let after = compute_row_checked(changed, &query, None, checked.composition.as_ref(), true).unwrap();
-        assert_ne!(first["source_captures"]["open_interest"]["capture_hash"],
-            after["source_captures"]["open_interest"]["capture_hash"]);
+        changed
+            .oi
+            .as_mut()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .1 += 1.0;
+        let after =
+            compute_row_checked(changed, &query, None, checked.composition.as_ref(), true).unwrap();
+        assert_ne!(
+            first["source_captures"]["open_interest"]["capture_hash"],
+            after["source_captures"]["open_interest"]["capture_hash"]
+        );
     }
 }

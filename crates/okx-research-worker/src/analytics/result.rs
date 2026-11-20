@@ -90,7 +90,37 @@ pub(super) fn verify_export_manifest(
             {
                 return Err("EXPERIMENT_PROVENANCE_MISMATCH".into());
             }
-            Some(json!({"artifact":id,"checksum_verified":true,"references_match":true}))
+            let basis = &inputs["economic_basis"];
+            let reference_id = basis["reference_capture_artifact"].as_str();
+            if basis["product"] == "linear_swap" && reference_id.is_none() {
+                return Err("EXPERIMENT_PROVENANCE_MISMATCH".into());
+            }
+            if let Some(reference_id) = reference_id {
+                let captured: Value = read_verified_result(store, reference_id)?;
+                if captured["schema"] != "okx.research.reference-capture/v1"
+                    || captured["instrument"] != inputs["instrument"]
+                    || captured["reference_generation"] != basis["reference_generation"]
+                    || captured["acquired_at_ms"] != basis["reference_acquired_at_ms"]
+                    || captured["contract_value_currency"] != basis["source_ct_val_ccy"]
+                    || captured["contract_type"] != basis["source_ct_type"]
+                    || captured["settle_currency"] != basis["source_settle_currency"]
+                    || captured["contract_value"] != basis["source_ct_val"]
+                {
+                    return Err("EXPERIMENT_PROVENANCE_MISMATCH".into());
+                }
+                let raw: Vec<u8> = serde_json::from_value(captured["raw_body"].clone())
+                    .map_err(|_| "EXPERIMENT_PROVENANCE_MISMATCH")?;
+                let recomputed =
+                    okx_research::canonical_sha256(&("okx.public.reference.raw/v1", &raw))
+                        .map_err(|error| error.to_string())?;
+                if basis["reference_capture_hash"] != recomputed {
+                    return Err("EXPERIMENT_PROVENANCE_MISMATCH".into());
+                }
+            }
+            Some(
+                json!({"artifact":id,"checksum_verified":true,"references_match":true,
+                "reference_capture_verified":reference_id.is_some()}),
+            )
         }
         None => None,
     };

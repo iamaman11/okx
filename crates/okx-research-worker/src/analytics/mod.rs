@@ -388,6 +388,12 @@ impl AnalyticsService {
                 self.artifact_graph(child, seen)?;
             }
         }
+        if let Some(reference) = value
+            .pointer("/economic_basis/reference_capture_artifact")
+            .and_then(Value::as_str)
+        {
+            self.artifact_graph(reference, seen)?;
+        }
         Ok(())
     }
     pub fn pin_job(&self, id: &str, pinned: bool) -> Result<(), String> {

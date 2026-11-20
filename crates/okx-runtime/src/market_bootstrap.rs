@@ -149,6 +149,8 @@ impl MarketBootstrapper {
                     instrument: PublicReferenceInstrument {
                         contract_type: value.instrument.contract_type,
                         contract_value: value.instrument.contract_value,
+                        contract_value_currency: value.instrument.contract_value_currency,
+                        settle_currency: value.instrument.settle_currency,
                     },
                     reference_generation: value.reference_generation,
                     acquired_at_ms: value.acquired_at_ms,

@@ -443,6 +443,16 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
     assert_eq!(experiment["code_version"], replay::CAUSAL_REPLAY_VERSION);
     assert_eq!(experiment["spec"]["seed"], 7);
     assert_eq!(experiment["spec"]["costs"]["taker_fee_bps"], 1.0);
+    assert_eq!(experiment["economic_basis"]["product"], "spot");
+    assert_eq!(experiment["economic_basis"]["quantity_unit"], "base_asset");
+    assert_eq!(
+        experiment["economic_basis"]["replay_arithmetic"],
+        "f64_approximation"
+    );
+    assert_eq!(
+        experiment["economic_basis"]["historical_rules_verified"],
+        false
+    );
     assert_eq!(
         experiment["variants"],
         json!([{"fast":2,"slow":5},{"fast":3,"slow":8}])
@@ -562,6 +572,85 @@ fn c17_export_rejects_corrupt_or_mismatched_experiment_provenance() {
         .unwrap()
         .remove("experiment_artifact");
     assert!(verify_export_manifest(&service.artifacts, &manifest).unwrap()["experiment"].is_null());
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn t13_linear_research_source_bytes_are_attested_exported_and_retained() {
+    let (root, service) = service();
+    let raw = vec![1u8, 2, 3];
+    let reference = service
+        .artifacts
+        .publish_evidence(&json!({
+            "schema":"okx.research.reference-capture/v1",
+            "instrument":"BTC-USDT-SWAP",
+            "raw_body":raw,
+            "reference_generation":"sha256:fixture",
+            "acquired_at_ms":"123456789",
+            "contract_type":"linear",
+            "contract_value":"0.01",
+            "contract_value_currency":"BTC",
+            "settle_currency":"USDT"
+        }))
+        .unwrap()
+        .0;
+    let source_hash =
+        okx_research::canonical_sha256(&("okx.public.reference.raw/v1", &[1u8, 2, 3])).unwrap();
+    let dataset = service
+        .artifacts
+        .publish_evidence(&json!({"schema":"fixture.dataset/v1"}))
+        .unwrap()
+        .0;
+    let experiment = service
+        .artifacts
+        .publish_evidence(&json!({
+            "schema":"okx.research.experiment-inputs/v1",
+            "instrument":"BTC-USDT-SWAP",
+            "dataset_artifact":dataset,
+            "code_version":replay::CAUSAL_REPLAY_VERSION,
+            "economic_basis":{
+                "product":"linear_swap",
+                "source_ct_val":"0.01",
+                "source_ct_val_ccy":"BTC",
+                "source_ct_type":"linear",
+                "source_settle_currency":"USDT",
+                "reference_generation":"sha256:fixture",
+                "reference_acquired_at_ms":"123456789",
+                "reference_capture_hash":source_hash,
+                "reference_capture_artifact":reference
+            }
+        }))
+        .unwrap()
+        .0;
+    let manifest = json!({
+        "trade_pages":[],"total_trades":0,
+        "dataset_artifact":dataset,
+        "code_version":replay::CAUSAL_REPLAY_VERSION,
+        "experiment_artifact":experiment
+    });
+    let integrity = verify_export_manifest(&service.artifacts, &manifest).unwrap();
+    assert_eq!(integrity["experiment"]["reference_capture_verified"], true);
+    let mut graph = std::collections::BTreeSet::new();
+    service.artifact_graph(&experiment, &mut graph).unwrap();
+    assert!(graph.contains(&reference));
+
+    // Even a valid immutable artifact is not acceptable when its *content*
+    // contradicts the reference declared in the experiment.
+    let mut mismatched: Value = service.artifacts.read_evidence_json(&experiment).unwrap();
+    mismatched["economic_basis"]["source_settle_currency"] = json!("USD");
+    let bad_experiment = service.artifacts.publish_evidence(&mismatched).unwrap().0;
+    let mut bad_manifest = manifest.clone();
+    bad_manifest["experiment_artifact"] = json!(bad_experiment);
+    assert_eq!(
+        verify_export_manifest(&service.artifacts, &bad_manifest).unwrap_err(),
+        "EXPERIMENT_PROVENANCE_MISMATCH"
+    );
+    service.artifacts.remove_evidence(&reference).unwrap();
+    assert_eq!(
+        verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+        "ARTIFACT_CORRUPT"
+    );
     drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }

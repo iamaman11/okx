@@ -99,7 +99,8 @@ impl CheckedComposition {
             {
                 return Err(format!("{path}.id:INVALID"));
             }
-            if matches!(step.id.as_str(), "close" | "open_interest") || known.contains_key(&step.id) {
+            if matches!(step.id.as_str(), "close" | "open_interest") || known.contains_key(&step.id)
+            {
                 return Err(format!("{path}.id:DUPLICATE"));
             }
             let (input_unit, parent_depth) = match step.input.as_str() {
@@ -116,13 +117,17 @@ impl CheckedComposition {
                 return Err(format!("{path}.other:UNEXPECTED"));
             }
             let other = if step.op == SeriesOp::AddSeries {
-                let name = step.other.as_deref().ok_or_else(|| format!("{path}.other:REQUIRED"))?;
+                let name = step
+                    .other
+                    .as_deref()
+                    .ok_or_else(|| format!("{path}.other:REQUIRED"))?;
                 Some(match name {
                     "close" => (Unit::Price, 0),
                     "open_interest" => (Unit::Contracts, 0),
-                    _ => known.get(name).copied().ok_or_else(|| {
-                        format!("{path}.other:UNKNOWN_OR_FORWARD_STEP:{name}")
-                    })?,
+                    _ => known
+                        .get(name)
+                        .copied()
+                        .ok_or_else(|| format!("{path}.other:UNKNOWN_OR_FORWARD_STEP:{name}"))?,
                 })
             } else {
                 None
@@ -142,7 +147,10 @@ impl CheckedComposition {
             } else {
                 0
             };
-            let depth = parent_depth.max(condition_depth).max(other.map_or(0, |(_, d)| d)) + 1;
+            let depth = parent_depth
+                .max(condition_depth)
+                .max(other.map_or(0, |(_, d)| d))
+                + 1;
             if depth > 8 {
                 return Err(format!("{path}:DEPTH_LIMIT"));
             }
@@ -264,7 +272,11 @@ impl CheckedComposition {
                 1
             };
             estimated_work = estimated_work
-                .checked_add(total_bars.checked_mul(cost_per_bar).ok_or("composition:WORK_OVERFLOW")?)
+                .checked_add(
+                    total_bars
+                        .checked_mul(cost_per_bar)
+                        .ok_or("composition:WORK_OVERFLOW")?,
+                )
                 .ok_or("composition:WORK_OVERFLOW")?;
             if estimated_work > MAX_COMPOSITION_WORK_UNITS {
                 return Err("composition:WORK_LIMIT".into());
@@ -283,7 +295,8 @@ impl CheckedComposition {
             }
         }
         if steps.iter().any(|s| s.step.input == "open_interest")
-            && total_bars.checked_mul(steps.len() as u64 + 2)
+            && total_bars
+                .checked_mul(steps.len() as u64 + 2)
                 .is_none_or(|cells| cells > 8_000_000)
         {
             return Err("composition:SOURCE_CELLS_LIMIT".into());
@@ -317,7 +330,11 @@ impl CheckedComposition {
         if close.len() != open_interest.len() {
             return Err("composition.sources:ALIGNMENT_LENGTH_MISMATCH".into());
         }
-        if open_interest.iter().flatten().any(|value| !value.is_finite() || *value < 0.0) {
+        if open_interest
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite() || *value < 0.0)
+        {
             return Err("composition.sources.open_interest:INVALID_CONTRACT_COUNT".into());
         }
         Ok(self.evaluate_at_sources(close, Some(open_interest), close.len().saturating_sub(1)))
@@ -330,20 +347,36 @@ impl CheckedComposition {
         at: usize,
     ) -> BTreeMap<String, (Option<f64>, Unit)> {
         let mut values = BTreeMap::<String, Vec<Option<f64>>>::new();
-        values.insert("close".into(), close.iter().map(|v| v.is_finite().then_some(*v)).collect());
-        if self.steps.iter().any(|step| step.step.input == "open_interest") {
-            values.insert("open_interest".into(), open_interest
-                .map(|source| source.to_vec()).unwrap_or_else(|| vec![None; close.len()]));
+        values.insert(
+            "close".into(),
+            close.iter().map(|v| v.is_finite().then_some(*v)).collect(),
+        );
+        if self
+            .steps
+            .iter()
+            .any(|step| step.step.input == "open_interest")
+        {
+            values.insert(
+                "open_interest".into(),
+                open_interest
+                    .map(|source| source.to_vec())
+                    .unwrap_or_else(|| vec![None; close.len()]),
+            );
         }
         for checked in &self.steps {
             let input = values[&checked.step.input].clone();
             let output = match checked.step.op {
                 SeriesOp::AddSeries => {
-                    let other = &values[checked.step.other.as_ref().expect("validated second input")];
-                    input.iter().zip(other).map(|(left, right)| match (left, right) {
-                        (Some(a), Some(b)) => (a + b).is_finite().then_some(a + b),
-                        _ => None,
-                    }).collect()
+                    let other =
+                        &values[checked.step.other.as_ref().expect("validated second input")];
+                    input
+                        .iter()
+                        .zip(other)
+                        .map(|(left, right)| match (left, right) {
+                            (Some(a), Some(b)) => (a + b).is_finite().then_some(a + b),
+                            _ => None,
+                        })
+                        .collect()
                 }
                 SeriesOp::ReturnsSeries => {
                     let mut result = vec![None; input.len()];
@@ -441,7 +474,10 @@ impl CheckedComposition {
     pub fn result_sources(&self) -> BTreeMap<String, BTreeSet<Source>> {
         let mut known = BTreeMap::<String, BTreeSet<Source>>::new();
         known.insert("close".into(), BTreeSet::from([Source::Candles]));
-        known.insert("open_interest".into(), BTreeSet::from([Source::OpenInterest]));
+        known.insert(
+            "open_interest".into(),
+            BTreeSet::from([Source::OpenInterest]),
+        );
         for checked in &self.steps {
             let mut sources = known[&checked.step.input].clone();
             if let Some(condition) = &checked.step.when {
@@ -452,7 +488,10 @@ impl CheckedComposition {
             }
             known.insert(checked.step.id.clone(), sources);
         }
-        self.result_steps.iter().map(|id| (id.clone(), known[id].clone())).collect()
+        self.result_steps
+            .iter()
+            .map(|id| (id.clone(), known[id].clone()))
+            .collect()
     }
 
     pub fn sources(&self) -> BTreeSet<Source> {
@@ -750,7 +789,7 @@ mod tests {
                     period: None,
                     threshold: None,
                     when: None,
-                other: None,
+                    other: None,
                 },
                 SeriesStep {
                     id: "w1".into(),
@@ -759,7 +798,7 @@ mod tests {
                     period: Some(2),
                     threshold: None,
                     when: None,
-                other: None,
+                    other: None,
                 },
             ],
             result_steps: vec!["w1".into()],
@@ -801,7 +840,7 @@ mod tests {
             period: Some(3),
             threshold: None,
             when: None,
-        other: None,
+            other: None,
         });
         spec.result_steps.push("w2".into());
         let checked = CheckedComposition::compile(spec.clone(), 20).unwrap();
@@ -863,7 +902,7 @@ mod tests {
                     period: Some(1),
                     threshold: None,
                     when: None,
-                other: None,
+                    other: None,
                 })
                 .collect(),
             result_steps: vec!["w0".into()],
@@ -1029,7 +1068,7 @@ mod tests {
             period: None,
             threshold: Some(0.0),
             when: None,
-        other: None,
+            other: None,
         });
         assert_eq!(
             CheckedComposition::compile(leakage.clone(), 7).unwrap_err(),
@@ -1294,27 +1333,47 @@ mod t02_t06_multisource_regression {
                 {"id":"combined","op":"add_series","input":"price_return","other":"oi_return"}
             ],
             "result_steps":["price_return","oi_return","combined"]
-        })).unwrap();
+        }))
+        .unwrap();
         let checked = CheckedComposition::compile(request.clone(), 4).unwrap();
-        assert_eq!(checked.result_sources()["combined"], BTreeSet::from([
-            Source::Candles, Source::OpenInterest,
-        ]));
-        assert_eq!(checked.result_sources()["oi_return"], BTreeSet::from([Source::OpenInterest]));
+        assert_eq!(
+            checked.result_sources()["combined"],
+            BTreeSet::from([Source::Candles, Source::OpenInterest,])
+        );
+        assert_eq!(
+            checked.result_sources()["oi_return"],
+            BTreeSet::from([Source::OpenInterest])
+        );
         let close = [100.0, 105.0, 110.0, 100.0];
         let oi = [Some(10.0), Some(12.0), None, Some(12.0)];
-        let at_one = checked.evaluate_with_open_interest(&close[..2], &oi[..2]).unwrap();
+        let at_one = checked
+            .evaluate_with_open_interest(&close[..2], &oi[..2])
+            .unwrap();
         assert!((at_one["combined"].0.unwrap() - 0.25).abs() < 1e-12);
-        assert!(checked.evaluate_with_open_interest(&close, &oi).unwrap()["combined"].0.is_none());
-        assert_eq!(checked.evaluate_with_open_interest(&close, &oi[..3]).unwrap_err(),
-            "composition.sources:ALIGNMENT_LENGTH_MISMATCH");
+        assert!(
+            checked.evaluate_with_open_interest(&close, &oi).unwrap()["combined"]
+                .0
+                .is_none()
+        );
+        assert_eq!(
+            checked
+                .evaluate_with_open_interest(&close, &oi[..3])
+                .unwrap_err(),
+            "composition.sources:ALIGNMENT_LENGTH_MISMATCH"
+        );
         let mut invalid = request.clone();
         invalid.steps[2].other = Some("close".into());
-        assert_eq!(CheckedComposition::compile(invalid, 4).unwrap_err(),
-            "composition.steps[2].other:UNIT_MISMATCH:expected=ratio:actual=price");
+        assert_eq!(
+            CheckedComposition::compile(invalid, 4).unwrap_err(),
+            "composition.steps[2].other:UNIT_MISMATCH:expected=ratio:actual=price"
+        );
         let mut forward = request;
         forward.steps[2].other = Some("future".into());
-        assert!(CheckedComposition::compile(forward, 4).unwrap_err()
-            .contains("other:UNKNOWN_OR_FORWARD_STEP"));
+        assert!(
+            CheckedComposition::compile(forward, 4)
+                .unwrap_err()
+                .contains("other:UNKNOWN_OR_FORWARD_STEP")
+        );
     }
 
     #[test]
@@ -1323,9 +1382,12 @@ mod t02_t06_multisource_regression {
             "version":"okx.market.composition/v1",
             "steps":[{"id":"window","op":"rolling_mean","input":"close","period":1000}],
             "result_steps":["window"]
-        })).unwrap();
-        assert_eq!(CheckedComposition::compile(request.clone(), 1_000_000).unwrap_err(),
-            "composition:WORK_LIMIT");
+        }))
+        .unwrap();
+        assert_eq!(
+            CheckedComposition::compile(request.clone(), 1_000_000).unwrap_err(),
+            "composition:WORK_LIMIT"
+        );
         request.steps[0].op = SeriesOp::RollingMax;
         assert!(CheckedComposition::compile(request, 1_000_000).is_ok());
     }

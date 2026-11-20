@@ -323,7 +323,7 @@ impl AnalyticsService {
             .map(|p| p.warmup_for(&strategy).map(|_| p))
             .collect::<Result<Vec<_>, _>>()?;
         let first = *variants.first().ok_or("EMPTY_VARIANTS")?;
-        let mechanics = if instruments[0].ends_with("-SWAP") {
+        let (mechanics, economic_basis, reference_capture) = if instruments[0].ends_with("-SWAP") {
             let reference = self
                 .sources
                 .bootstrap
@@ -333,16 +333,75 @@ impl AnalyticsService {
             if reference.instrument.contract_type.as_deref() != Some("linear") {
                 return Err("UNSUPPORTED_INVERSE_CONTRACT".into());
             }
-            let multiplier = okx_research::economics::LinearContract::from_reference(
+            let contract = okx_research::economics::LinearContract::from_reference(
                 &instruments[0],
                 reference.instrument.contract_type.as_deref(),
                 reference.instrument.contract_value.as_deref(),
-            )?.multiplier_f64()?;
-            Mechanics::Linear {
-                contract_multiplier: multiplier,
-            }
+                reference.instrument.contract_value_currency.as_deref(),
+                reference.instrument.settle_currency.as_deref(),
+            )?;
+            let multiplier = contract.multiplier_f64()?;
+            let source_hash = okx_research::canonical_sha256(&(
+                "okx.public.reference.raw/v1",
+                &reference.raw_body,
+            ))
+            .map_err(|error| error.to_string())?;
+            // Keep the captured bytes; a detached digest alone cannot be
+            // independently checked after the original venue response expires.
+            let source_evidence = json!({
+                "schema": "okx.research.reference-capture/v1",
+                "instrument": instruments[0],
+                "raw_body": &reference.raw_body,
+                "reference_generation": &reference.reference_generation,
+                "acquired_at_ms": &reference.acquired_at_ms,
+                "contract_type": &reference.instrument.contract_type,
+                "contract_value": &reference.instrument.contract_value,
+                "contract_value_currency": &reference.instrument.contract_value_currency,
+                "settle_currency": &reference.instrument.settle_currency,
+            });
+            (
+                Mechanics::Linear {
+                    contract_multiplier: multiplier,
+                },
+                json!({
+                    "product": "linear_swap",
+                    "instrument": contract.instrument,
+                    "base_asset": contract.base_asset,
+                    "quote_currency": contract.quote_currency,
+                    "contract_value": contract.base_per_contract.to_string(),
+                    "contract_value_unit": "base_asset_per_contract",
+                    "source_ct_val": reference.instrument.contract_value,
+                    "source_ct_val_ccy": reference.instrument.contract_value_currency,
+                    "source_ct_type": reference.instrument.contract_type,
+                    "source_settle_currency": reference.instrument.settle_currency,
+                    "reference_generation": reference.reference_generation,
+                    "reference_acquired_at_ms": reference.acquired_at_ms,
+                    "reference_capture_hash": source_hash,
+                    "reference_time_basis": "current_at_replay_not_historical",
+                    "replay_arithmetic": "f64_approximation",
+                    "historical_rules_verified": false,
+                    "historical_fees_verified": false,
+                }),
+                Some(source_evidence),
+            )
         } else if instruments[0].split('-').count() == 2 {
-            Mechanics::Spot
+            let pair = okx_research::economics::SpotPair::from_instrument(&instruments[0])?;
+            (
+                Mechanics::Spot,
+                json!({
+                    "product": "spot",
+                    "instrument": pair.instrument,
+                    "base_asset": pair.base_asset,
+                    "quote_currency": pair.quote_currency,
+                    "quantity_unit": "base_asset",
+                    "price_unit": "quote_currency_per_base_asset",
+                    "reference_time_basis": "pair_name_only_no_reference_capture",
+                    "replay_arithmetic": "f64_approximation",
+                    "historical_rules_verified": false,
+                    "historical_fees_verified": false,
+                }),
+                None,
+            )
         } else {
             return Err("UNSUPPORTED_INSTRUMENT_TYPE".into());
         };
@@ -403,6 +462,11 @@ impl AnalyticsService {
                     // replay. This is immutable artifact metadata, not another
                     // job catalog, and its ID comes from the existing store.
                     let policy = if is_grid { Some(replay::grid_policy(bars.len(), &spec.strategy_id, &variants)?) } else { None };
+                    let mut economic_basis = economic_basis;
+                    if let Some(reference_capture) = reference_capture {
+                        let id = store.publish_evidence(&reference_capture).map_err(|e|e.to_string())?.0;
+                        economic_basis["reference_capture_artifact"] = json!(id);
+                    }
                     let experiment = store.publish_evidence(&json!({
                         "schema":"okx.research.experiment-inputs/v1",
                         "dataset_artifact":dataset,"instrument":instruments[0],
@@ -410,7 +474,7 @@ impl AnalyticsService {
                         "effective_range":{"start_ms":bars.first().map(|b|b.time),"end_ms":bars.last().map(|b|b.time+ms)},
                         "bar_count":bars.len(),"timeframe_ms":ms,
                         "code_version":replay::CAUSAL_REPLAY_VERSION,"producer":producer,"spec":spec,
-                        "variants":variants,"selection_policy":policy,
+                        "variants":variants,"selection_policy":policy,"economic_basis":economic_basis,
                         "result_role":"counterfactual_research_only"
                     })).map_err(|e|e.to_string())?.0;
                     let(result,grid)=if is_grid{let g=replay::grid_with_observer(&bars,&spec,&variants,&cancelled,&|value|{if let Some((tracker,index))=&observation {tracker.observe(*index,value)}})?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":spec.seed,"strategy_id":spec.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.warmup_for(&spec.strategy_id)?,bars.len(),&cancelled)?,None)};

@@ -1,6 +1,6 @@
 //! Immutable content-addressed research artifacts and causal strategy replay.
-pub mod strategy_registry;
 pub mod economics;
+pub mod strategy_registry;
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{

@@ -293,6 +293,14 @@ pub struct PublicFundingCapture {
 pub struct PublicReferenceInstrument {
     pub contract_type: Option<String>,
     pub contract_value: Option<String>,
+    /// Unit of ctVal. Without this, ctVal cannot be converted to base assets.
+    /// Optional on the wire so an older native peer can still be decoded;
+    /// consumers must reject its absence before using contract economics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_value_currency: Option<String>,
+    /// Settlement unit of realized PnL and funding. Older IPC peers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_currency: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicReferenceCapture {
@@ -300,6 +308,49 @@ pub struct PublicReferenceCapture {
     pub instrument: PublicReferenceInstrument,
     pub reference_generation: String,
     pub acquired_at_ms: String,
+}
+#[cfg(test)]
+mod reference_unit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn t02_reference_ipc_preserves_contract_unit_and_decodes_older_peer() {
+        let capture = PublicReferenceCapture {
+            raw_body: vec![1, 2, 3],
+            instrument: PublicReferenceInstrument {
+                contract_type: Some("linear".into()),
+                contract_value: Some("0.01".into()),
+                contract_value_currency: Some("BTC".into()),
+                settle_currency: Some("USDT".into()),
+            },
+            reference_generation: "sha256:example".into(),
+            acquired_at_ms: "123456789".into(),
+        };
+        let wire = serde_json::to_value(&capture).unwrap();
+        assert_eq!(wire["instrument"]["contract_value_currency"], "BTC");
+        assert_eq!(wire["instrument"]["settle_currency"], "USDT");
+        let roundtrip: PublicReferenceCapture = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            roundtrip.instrument.contract_value_currency.as_deref(),
+            Some("BTC")
+        );
+        assert_eq!(
+            roundtrip.instrument.settle_currency.as_deref(),
+            Some("USDT")
+        );
+        let mut old_peer = wire;
+        old_peer["instrument"]
+            .as_object_mut()
+            .unwrap()
+            .remove("contract_value_currency");
+        old_peer["instrument"]
+            .as_object_mut()
+            .unwrap()
+            .remove("settle_currency");
+        let legacy: PublicReferenceCapture = serde_json::from_value(old_peer).unwrap();
+        assert_eq!(legacy.instrument.contract_value_currency, None);
+        assert_eq!(legacy.instrument.settle_currency, None);
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResearchTicker {
