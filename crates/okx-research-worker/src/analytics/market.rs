@@ -3028,7 +3028,15 @@ mod global_rank_tests {
 
     #[test]
     fn t06_shifted_oi_event_cannot_fill_a_candle_gap_or_certify_a_signal() {
-        let mut request = request(vec!["returns"]);
+        let mut request: MarketRequest = serde_json::from_value(json!({
+            "action":"screen",
+            "instruments":["BTC-USDT-SWAP"],
+            "fields":["returns"],
+            "timeframe_ms":60000,
+            "start_ms":0,
+            "end_ms":6000000
+        }))
+        .unwrap();
         request.composition = Some(Box::new(serde_json::from_value(json!({
             "version":okx_analysis::query_plan::COMPOSITION_VERSION,
             "steps":[
@@ -3038,11 +3046,30 @@ mod global_rank_tests {
             "result_steps":["oi_change","positive"]
         })).unwrap()));
         let plan = planner::AnalysisPlan::compile_market(&request).unwrap();
-        let mut loaded = row();
+        let mut loaded = Loaded {
+            instrument: "BTC-USDT-SWAP".into(),
+            bars: Ok(Arc::new(
+                (0..100)
+                    .map(|index| Bar {
+                        time: index * 60_000,
+                        open: 100.0,
+                        high: 200.0,
+                        low: 99.0,
+                        close: 100.0 + index as f64,
+                        volume: 1.0,
+                        funding_rate: None,
+                    })
+                    .collect(),
+            )),
+            ticker: None,
+            funding: None,
+            oi: None,
+            excluded: None,
+        };
         let mut oi = (0..100).map(|index| (index * 60_000, 20.0 + index as f64))
             .collect::<Vec<_>>();
-        // 42,000 ms is not the same observation as the closed-bar event at
-        // 42 * 60,000 ms. A nearest/as-of join would fabricate a usable point.
+        // A one-millisecond shift is not the closed-bar event at 42 * 60,000.
+        // A nearest/as-of join would fabricate a usable point here.
         oi[42].0 += 1;
         loaded.oi = Some(Ok(oi));
         let result = compute_row_planned(loaded, &request, None, &plan, true).unwrap();
