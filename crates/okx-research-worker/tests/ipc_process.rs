@@ -616,6 +616,9 @@ async fn t11_t12_real_worker_observation_and_cancel_survive_saturated_work_lane(
         }
     }).await.expect("saturated work lane was not observed");
     assert!(source_requests > 0, "test must actually cross the child source boundary");
+    // Public status/cancel validate a full canonical SHA-shaped job ID before
+    // querying SQLite. Use a well-formed but absent ID to exercise that path.
+    let unknown_job = "f".repeat(64);
 
     let mut latencies_ms = Vec::new();
     for step in 0..100usize {
@@ -624,10 +627,10 @@ async fn t11_t12_real_worker_observation_and_cancel_survive_saturated_work_lane(
         let command = match step % 3 {
             0 => ResearchCommand::Capabilities,
             1 => ResearchCommand::Explain {
-                job_id: JobId::new("not-present".into()).unwrap(),
+                job_id: JobId::new(unknown_job.clone()).unwrap(),
             },
             _ => ResearchCommand::Research {
-                request: ResearchRequest::Status { job_id: "not-present".into() },
+                request: ResearchRequest::Status { job_id: unknown_job.clone() },
             },
         };
         assert_eq!(command.lane(), ResearchLane::Observation);
@@ -659,7 +662,7 @@ async fn t11_t12_real_worker_observation_and_cancel_survive_saturated_work_lane(
     // saturated work lane and four read-only observation slots.
     for (number, command) in [
         ResearchCommand::Research { request: ResearchRequest::Cancel {
-            job_id: "not-present".into(), idempotency_key: "cancel-under-load".into(),
+            job_id: unknown_job, idempotency_key: "cancel-under-load".into(),
         } },
         ResearchCommand::Drain,
     ].into_iter().enumerate() {
