@@ -29,7 +29,13 @@ fn market_source_rate_deferred(loaded: &[Loaded]) -> bool {
 // of being recalculated. Limit the T06 bump to funding consumers so unrelated
 // historical market jobs keep their existing cache entries.
 fn market_job_schema(fields: &[String]) -> &'static str {
-    if fields.iter().any(|field| field == "funding_sum") {
+    let funding = fields.iter().any(|field| field == "funding_sum");
+    let correlation = fields.iter().any(|field| field == "pearson_correlation");
+    if funding && correlation {
+        "market/518.1.funding-correlation-coverage-v1"
+    } else if correlation {
+        "market/518.1.correlation-coverage-v1"
+    } else if funding {
         "market/448.4.funding-realized-only-v1"
     } else {
         "market/448.2"
@@ -112,7 +118,14 @@ impl AnalyticsService {
             0
         };
         let hash = okx_research::canonical_sha256(&(
-            if oi_composition {
+            if oi_composition
+                && hash_request
+                    .fields
+                    .iter()
+                    .any(|field| field == "pearson_correlation")
+            {
+                "market/518.1.oi-composition-correlation-coverage-v1"
+            } else if oi_composition {
                 "market/448.5.oi-composition-v1"
             } else {
                 market_job_schema(&hash_request.fields)
@@ -1055,19 +1068,53 @@ fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64, end_ms: u64) -> Value {
         values.push(row);
         counts.push(samples);
     }
-    let usable_samples = series
+    let per_source = series
         .iter()
         .map(|samples| {
             samples.as_ref().and_then(|s| {
                 okx_analysis::time_series::align_exact_at(s, s, end_ms)
                     .ok()
-                    .map(|(_, counts)| counts.left_usable)
+                    .map(|(_, counts)| counts)
             })
+        })
+        .collect::<Vec<_>>();
+    let usable_samples = per_source
+        .iter()
+        .map(|counts| counts.map(|counts| counts.left_usable))
+        .collect::<Vec<_>>();
+    let source_coverage = loaded
+        .iter()
+        .zip(series.iter())
+        .zip(per_source.iter())
+        .map(|((source, returns), counts)| match (returns, counts) {
+            (Some(returns), Some(counts)) => json!({
+                "instrument":source.instrument,
+                "source_state":"valid_closed_return_series",
+                "return_observations":counts.left_total,
+                "usable_at_cutoff":counts.left_usable,
+                "not_available_at_cutoff":counts.left_unavailable,
+                "nonfinite_observations":counts.left_nonfinite,
+                "first_return_event_ms":returns.first().map(|v|v.time_ms),
+                "last_return_event_ms":returns.last().map(|v|v.time_ms),
+            }),
+            _ => json!({
+                "instrument":source.instrument,
+                "source_state": if source.bars.is_err() {"source_unavailable"}
+                    else {"invalid_or_gapped_closed_candles"},
+                "return_observations":0,
+                "usable_at_cutoff":0,
+                "not_available_at_cutoff":0,
+                "nonfinite_observations":0,
+                "first_return_event_ms":null,
+                "last_return_event_ms":null,
+            }),
         })
         .collect::<Vec<_>>();
     json!({"basis":"aligned_closed_bar_log_returns","instruments":loaded.iter()
         .map(|r|r.instrument.clone()).collect::<Vec<_>>(),"values":values,
         "sample_counts":counts,"usable_samples":usable_samples,
+        "source_coverage":source_coverage,
+        "join_semantics":"exact_event_time_no_forward_fill",
         "availability_rule":"candle_close_boundary","decision_cutoff_ms":end_ms,
         "quality":if complete{"complete"}else{"partial"}})
 }
@@ -1081,11 +1128,25 @@ mod tests {
         let funding = request(vec!["funding_sum"]);
         let mixed = request(vec!["returns", "funding_sum", "spread_bps"]);
         let returns = request(vec!["returns"]);
+        let correlation = request(vec!["pearson_correlation"]);
+        let combined = request(vec!["funding_sum", "pearson_correlation"]);
         assert_eq!(
             market_job_schema(&funding.fields),
             market_job_schema(&mixed.fields)
         );
         assert_eq!(market_job_schema(&returns.fields), "market/448.2");
+        assert_eq!(
+            market_job_schema(&correlation.fields),
+            "market/518.1.correlation-coverage-v1"
+        );
+        assert_ne!(
+            market_job_schema(&combined.fields),
+            market_job_schema(&funding.fields)
+        );
+        assert_ne!(
+            market_job_schema(&combined.fields),
+            market_job_schema(&correlation.fields)
+        );
 
         // Reproduce the exact persisted pre-T06 key for a closed historical
         // query. The new key must not replay that completed stale artifact.
@@ -1217,8 +1278,12 @@ mod tests {
             });
         }
         let full = pairwise_matrix(&rows, 60_000, 31 * 60_000);
+        assert_eq!(full["join_semantics"], "exact_event_time_no_forward_fill");
         assert_eq!(full["sample_counts"][0][1], 30);
         assert_eq!(full["usable_samples"], json!([30, 30]));
+        assert_eq!(full["source_coverage"][0]["return_observations"], 30);
+        assert_eq!(full["source_coverage"][1]["usable_at_cutoff"], 30);
+        assert_eq!(full["source_coverage"][0]["not_available_at_cutoff"], 0);
         assert!((full["values"][0][1].as_f64().unwrap() - 1.0).abs() < 1e-9);
 
         // Last bar was observed in the recorded fixture but cannot be used
@@ -1226,6 +1291,8 @@ mod tests {
         let early = pairwise_matrix(&rows, 60_000, 30 * 60_000);
         assert_eq!(early["sample_counts"][0][1], 29);
         assert_eq!(early["usable_samples"], json!([29, 29]));
+        assert_eq!(early["source_coverage"][0]["not_available_at_cutoff"], 1);
+        assert_eq!(early["source_coverage"][1]["usable_at_cutoff"], 29);
         assert!(early["values"][0][1].is_null());
 
         // Equal array lengths cannot substitute for equal timestamps.
@@ -1233,9 +1300,18 @@ mod tests {
         for bar in Arc::make_mut(shifted[1].bars.as_mut().unwrap()).iter_mut() {
             bar.time += 60_000;
         }
-        let unaligned = pairwise_matrix(&shifted, 60_000, 31 * 60_000);
+        let unaligned = pairwise_matrix(&shifted, 60_000, 32 * 60_000);
         assert_eq!(unaligned["sample_counts"][0][1], 29);
+        assert_eq!(unaligned["usable_samples"], json!([30, 30]));
         assert!(unaligned["values"][0][1].is_null());
+        shifted[1].bars = Err("SOURCE_UNAVAILABLE".into());
+        let absent = pairwise_matrix(&shifted, 60_000, 32 * 60_000);
+        assert_eq!(
+            absent["source_coverage"][1]["source_state"],
+            "source_unavailable"
+        );
+        assert!(absent["usable_samples"][1].is_null());
+        assert_eq!(absent["sample_counts"][0][1], 0);
     }
     #[test]
     fn t06_oi_interior_gap_is_exposed_and_never_accepted_as_endpoint_only() {
