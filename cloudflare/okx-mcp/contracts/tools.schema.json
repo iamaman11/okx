@@ -627,6 +627,7 @@
                             "rolling_max",
                             "rolling_min",
                             "rolling_pearson",
+                            "rolling_zscore",
                             "add_series",
                             "subtract_series",
                             "divide_series",

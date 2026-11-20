@@ -422,6 +422,7 @@ impl AnalyticsService {
                     {"op":"rolling_max","input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
                     {"op":"rolling_min","input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
                     {"op":"rolling_pearson","input_unit":"ratio","other_unit":"ratio","output_unit":"coefficient","period_min":30,"period_max":1000,"null_policy":"strict_exact_pairs","compute_cost":"linear_in_series_length","minimum_pairs":30},
+                    {"op":"rolling_zscore","version":1,"input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"coefficient","period_min":2,"period_max":1000,"variance":"population_inclusive_window","null_policy":"strict_window_or_zero_variance","compute_cost":"linear_in_series_length","causal":true},
                     {"op":"add_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing"},
                     {"op":"subtract_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing","numeric_policy":"finite_only"},
                     {"op":"divide_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing_or_zero_denominator","numeric_policy":"finite_only"},
@@ -2534,6 +2535,63 @@ mod global_rank_tests {
         assert_eq!(
             result["composition_quality"]["rate"]["status"],
             "retrospective_publication_unverified"
+        );
+    }
+    #[test]
+    fn t15_public_zscore_composes_price_deviation_into_a_causal_condition() {
+        let query: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT"],"fields":["returns"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":6000000,
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"deviation","op":"rolling_zscore","input":"close","period":3},
+                {"id":"above","op":"greater_than","input":"deviation","threshold":1.0}
+            ],"result_steps":["deviation","above"]}
+        }))
+        .unwrap();
+        let plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+        let fixture = |flat: bool| Loaded {
+            instrument: "BTC-USDT".into(),
+            bars: Ok(Arc::new(
+                (0..100)
+                    .map(|i| Bar {
+                        time: i * 60_000,
+                        open: 100.0,
+                        high: 201.0,
+                        low: 99.0,
+                        close: if flat { 100.0 } else { 100.0 + i as f64 },
+                        volume: 1.0,
+                        funding_rate: None,
+                    })
+                    .collect(),
+            )),
+            ticker: None,
+            funding: None,
+            oi: None,
+            excluded: None,
+        };
+        let output = compute_row_planned(fixture(false), &query, None, &plan, true).unwrap();
+        assert!(
+            (output["metrics"]["deviation"].as_f64().unwrap() - (1.0 / (2.0f64 / 3.0).sqrt()))
+                .abs()
+                < 1e-10
+        );
+        assert_eq!(output["metrics"]["above"], true);
+        assert_eq!(output["units"]["deviation"], "coefficient");
+        assert_eq!(
+            output["composition_quality"]["above"]["status"],
+            "available_at_closed_bar"
+        );
+        assert_eq!(output["quality"], "complete");
+        let flat = compute_row_planned(fixture(true), &query, None, &plan, true).unwrap();
+        assert!(flat["metrics"]["deviation"].is_null());
+        assert_eq!(
+            flat["composition_quality"]["deviation"]["issues"][0]["reason"],
+            "ZERO_VARIANCE"
+        );
+        assert!(flat["metrics"]["above"].is_null());
+        assert_eq!(
+            flat["composition_quality"]["above"]["issues"][0]["origin_step"],
+            "deviation"
         );
     }
     #[test]

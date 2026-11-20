@@ -50,6 +50,29 @@ const extremaGraph={...composed,steps:[
  {id:'lower',op:'rolling_min',input:'close',period:20},
 ],result_steps:['upper','lower']};
 fail(validTool('market',{...marketScreen,composition:extremaGraph}),'typed causal extrema share one public request');
+const zscoreGraph={...composed,steps:[
+ {id:'standard',op:'rolling_zscore',input:'close',period:20},
+ {id:'high',op:'greater_than',input:'standard',threshold:1.5},
+],result_steps:['standard','high']};
+fail(validTool('market',{...marketScreen,composition:zscoreGraph}),
+ 'T15 typed causal zscore is public without a new route');
+const fundingZscore={...composed,steps:[
+ {id:'standard',op:'rolling_zscore',input:'funding_rate',period:2},
+],result_steps:['standard']};
+fail(validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:fundingZscore}),
+ 'funding normalization available for swap research');
+fail(!validTool('market',{...marketScreen,instruments:['BTC-USDT'],composition:fundingZscore}),
+ 'funding normalization rejects spot before venue reads');
+for(const bad of [
+ {id:'standard',op:'rolling_zscore',input:'close'},
+ {id:'standard',op:'rolling_zscore',input:'close',period:1},
+ {id:'standard',op:'rolling_zscore',input:'close',period:1001},
+ {id:'standard',op:'rolling_zscore',input:'close',period:20,threshold:1},
+ {id:'standard',op:'rolling_zscore',input:'close',period:20,other:'close'},
+]){
+ fail(!validTool('market',{...marketScreen,composition:{...zscoreGraph,steps:[bad],result_steps:['standard']}}),
+  'rolling_zscore rejects malformed period and extraneous arguments');
+}
 const joinedGraph={...composed,steps:[
  {id:'price_return',op:'returns_series',input:'close'},
  {id:'oi_return',op:'returns_series',input:'open_interest'},

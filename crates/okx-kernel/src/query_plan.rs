@@ -48,6 +48,7 @@ pub enum SeriesOp {
     RollingMax,
     RollingMin,
     RollingPearson,
+    RollingZscore,
     AddSeries,
     SubtractSeries,
     DivideSeries,
@@ -190,6 +191,24 @@ impl CheckedComposition {
                 return Err(format!("{path}:DEPTH_LIMIT"));
             }
             let output_unit = match step.op {
+                SeriesOp::RollingZscore => {
+                    if !matches!(
+                        input_unit,
+                        Unit::Price | Unit::Ratio | Unit::Contracts | Unit::Coefficient
+                    ) {
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
+                            composition_unit_name(input_unit)
+                        ));
+                    }
+                    if !matches!(step.period, Some(2..=1000)) {
+                        return Err(format!("{path}.period:INVALID:2..1000"));
+                    }
+                    if step.threshold.is_some() {
+                        return Err(format!("{path}.threshold:UNEXPECTED"));
+                    }
+                    Unit::Coefficient
+                }
                 SeriesOp::RollingPearson => {
                     if input_unit != Unit::Ratio {
                         return Err(format!(
@@ -580,6 +599,10 @@ impl CheckedComposition {
             // cloning it here multiplied peak memory and source work.
             let input = &values[&checked.step.input];
             let output = match checked.step.op {
+                SeriesOp::RollingZscore => rolling_zscore(
+                    input,
+                    checked.step.period.expect("validated zscore period") as usize,
+                ),
                 SeriesOp::RollingPearson => {
                     let other =
                         &values[checked.step.other.as_ref().expect("validated second input")];
@@ -785,6 +808,24 @@ impl CheckedComposition {
                 .then(|| self.null_cause_at(values, name, index))
         };
         match step.op {
+            SeriesOp::RollingZscore => {
+                let period = step.period.expect("validated zscore window") as usize;
+                if at + 1 < period {
+                    return cause("WARMUP");
+                }
+                let mut stats = SlidingPearson::default();
+                for index in (at + 1 - period)..=at {
+                    if let Some(upstream) = trace(&step.input, index) {
+                        return upstream;
+                    }
+                    let value = value(&step.input, index).expect("present after trace");
+                    stats.add(value, value);
+                }
+                if stats.m2_x <= 0.0 {
+                    return cause("ZERO_VARIANCE");
+                }
+                cause("NON_FINITE_RESULT")
+            }
             SeriesOp::AddSeries
             | SeriesOp::SubtractSeries
             | SeriesOp::DivideSeries
@@ -939,6 +980,7 @@ fn source_buffer_count(steps: &[CheckedSeriesStep]) -> u64 {
 fn series_cost_per_bar(op: SeriesOp) -> u64 {
     match op {
         SeriesOp::RollingMean => 3,
+        SeriesOp::RollingZscore => 6,
         SeriesOp::RollingPearson => 8,
         SeriesOp::AddSeries
         | SeriesOp::SubtractSeries
@@ -1043,6 +1085,45 @@ fn rolling_pearson(left: &[Option<f64>], right: &[Option<f64>], period: usize) -
         }
         if i + 1 >= period && missing == 0 {
             output[i] = stats.coefficient();
+        }
+    }
+    output
+}
+
+/// Causal z-score of the current sample against its inclusive rolling window:
+/// (x - mean) / population_stddev. A missing sample, insufficient history or
+/// zero variance yields None. Online centered variance avoids cancellation
+/// from raw sums of squares; bounded periodic rebases cap long-run drift.
+fn rolling_zscore(input: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
+    let mut output = vec![None; input.len()];
+    let mut stats = SlidingPearson::default();
+    let mut missing = 0usize;
+    for i in 0..input.len() {
+        if i >= period {
+            match input[i - period] {
+                Some(value) => stats.remove(value, value),
+                None => missing -= 1,
+            }
+        }
+        if i > 0 && i.is_multiple_of(4096) {
+            stats = SlidingPearson::default();
+            missing = 0;
+            for prior in i.saturating_sub(period - 1)..i {
+                match input[prior] {
+                    Some(value) => stats.add(value, value),
+                    None => missing += 1,
+                }
+            }
+        }
+        match input[i] {
+            Some(value) => stats.add(value, value),
+            None => missing += 1,
+        }
+        if i + 1 >= period && missing == 0 && stats.m2_x > 0.0 {
+            let variance = stats.m2_x / period as f64;
+            let deviation = variance.sqrt();
+            let z = (input[i].expect("complete window") - stats.mean_x) / deviation;
+            output[i] = z.is_finite().then_some(z);
         }
     }
     output
@@ -2145,6 +2226,160 @@ mod t15_causal_window_extrema {
 #[cfg(test)]
 mod t02_t06_multisource_regression {
     use super::*;
+
+    #[test]
+    fn t15_rolling_zscore_is_typed_causal_and_matches_independent_oracle() {
+        let spec: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"normalized","op":"rolling_zscore","input":"close","period":3},
+                {"id":"above","op":"greater_than","input":"normalized","threshold":0.5},
+                {"id":"rise","op":"rising_edge","input":"above"}
+            ],"result_steps":["normalized","above","rise"]
+        }))
+        .unwrap();
+        let plan = CheckedComposition::compile(spec.clone(), 100).unwrap();
+        assert_eq!(plan.steps[0].unit, Unit::Coefficient);
+        assert_eq!(plan.steps[1].unit, Unit::Boolean);
+        assert_eq!(
+            plan.result_sources()["rise"],
+            BTreeSet::from([Source::Candles])
+        );
+        let prices = [100., 110., 99., 105., 115.];
+        let first = plan.evaluate_at(&prices, 2);
+        let oracle = (99. - 103.) / (74.0f64 / 3.0).sqrt();
+        assert!((first["normalized"].0.unwrap() - oracle).abs() < 1e-12);
+        let mut changed_future = prices;
+        changed_future[3] *= 2.0;
+        changed_future[4] *= 2.0;
+        assert_eq!(
+            plan.evaluate_at(&prices, 2),
+            plan.evaluate_at(&changed_future, 2)
+        );
+        assert_eq!(
+            plan.evaluate_with_diagnostics(&prices[..2]).1["normalized"].reason,
+            "WARMUP"
+        );
+
+        let mut bad = spec.clone();
+        bad.steps[0].period = Some(1);
+        assert_eq!(
+            CheckedComposition::compile(bad, 100).unwrap_err(),
+            "composition.steps[0].period:INVALID:2..1000"
+        );
+        let mut bad = spec.clone();
+        bad.steps[0].threshold = Some(1.0);
+        assert_eq!(
+            CheckedComposition::compile(bad, 100).unwrap_err(),
+            "composition.steps[0].threshold:UNEXPECTED"
+        );
+        let mut bad = spec.clone();
+        bad.steps[0].other = Some("close".into());
+        assert_eq!(
+            CheckedComposition::compile(bad, 100).unwrap_err(),
+            "composition.steps[0].other:UNEXPECTED"
+        );
+        let mut bad = spec.clone();
+        bad.steps.push(SeriesStep {
+            id: "miscast".into(),
+            op: SeriesOp::RollingZscore,
+            input: "above".into(),
+            period: Some(2),
+            threshold: None,
+            when: None,
+            other: None,
+        });
+        assert_eq!(
+            CheckedComposition::compile(bad, 100).unwrap_err(),
+            "composition.steps[3].input:UNIT_MISMATCH:expected=numeric_series:actual=boolean"
+        );
+        let mut bad = spec;
+        bad.steps[0].input = "above".into();
+        assert!(
+            CheckedComposition::compile(bad, 100)
+                .unwrap_err()
+                .contains("UNKNOWN_OR_FORWARD_STEP")
+        );
+    }
+
+    #[test]
+    fn t15_zscore_preserves_sparse_gaps_zero_variance_and_linear_budget() {
+        let spec: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[{"id":"standard","op":"rolling_zscore","input":"close","period":1000}],
+            "result_steps":["standard"]
+        }))
+        .unwrap();
+        let checked = CheckedComposition::compile(spec, 1_000_000).unwrap();
+        assert!(checked.validate_global_budget(1_000_000).is_ok());
+        assert_eq!(series_cost_per_bar(SeriesOp::RollingZscore), 6);
+        let prices = (0..100_000)
+            .map(|i| Some(1_000_000_000_000.0 + ((i * 7) % 191) as f64 * 0.25))
+            .collect::<Vec<_>>();
+        let output = rolling_zscore(&prices, 1000);
+        assert!(output[..999].iter().all(Option::is_none));
+        for index in [999usize, 4096, 9999, 99_999] {
+            let window = &prices[index + 1 - 1000..=index];
+            let mean = window
+                .iter()
+                .map(|v| (v.unwrap() - 1_000_000_000_000.0) / 1000.0)
+                .sum::<f64>()
+                + 1_000_000_000_000.0;
+            let variance = window
+                .iter()
+                .map(|v| (v.unwrap() - mean).powi(2))
+                .sum::<f64>()
+                / 1000.0;
+            let expected = (prices[index].unwrap() - mean) / variance.sqrt();
+            assert!(
+                (output[index].unwrap() - expected).abs() < 0.001,
+                "index={index}"
+            );
+        }
+        let mut interrupted = prices;
+        interrupted[99_500] = None;
+        let gaps = rolling_zscore(&interrupted, 1000);
+        assert!(gaps[99_999].is_none());
+        let (_out, causes) = checked.evaluate_with_diagnostics(&vec![5.0; 1000]);
+        assert_eq!(causes["standard"].reason, "ZERO_VARIANCE");
+        let (_, causes) = checked.evaluate_with_diagnostics(&[]);
+        assert_eq!(causes["standard"].reason, "WARMUP");
+        let mut interrupted = vec![5.0; 1000];
+        interrupted[500] = f64::NAN;
+        let (_, causes) = checked.evaluate_with_diagnostics(&interrupted);
+        assert_eq!(causes["standard"].reason, "SOURCE_OBSERVATION_MISSING");
+    }
+
+    #[test]
+    fn t15_zscore_of_funding_events_does_not_replace_missing_rates_with_zero() {
+        let spec: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[{"id":"rate_deviation","op":"rolling_zscore","input":"funding_rate","period":2}],
+            "result_steps":["rate_deviation"]
+        })).unwrap();
+        let plan = CheckedComposition::compile(spec, 4).unwrap();
+        assert_eq!(plan.steps[0].unit, Unit::Coefficient);
+        assert_eq!(
+            plan.result_sources()["rate_deviation"],
+            BTreeSet::from([Source::Funding])
+        );
+        let close = [f64::NAN; 4];
+        let rates = [None, Some(0.01), None, Some(-0.01)];
+        let (results, diagnostics) = plan
+            .evaluate_with_sources_diagnostics(&close, None, Some(&rates))
+            .unwrap();
+        assert!(results["rate_deviation"].0.is_none());
+        assert_eq!(
+            diagnostics["rate_deviation"].reason,
+            "SOURCE_OBSERVATION_MISSING"
+        );
+        assert_eq!(diagnostics["rate_deviation"].origin_step, "funding_rate");
+        let dense = [None, Some(-0.01), Some(0.01), Some(0.03)];
+        let (results, _) = plan
+            .evaluate_with_sources_diagnostics(&close, None, Some(&dense))
+            .unwrap();
+        assert!((results["rate_deviation"].0.unwrap() - 1.0).abs() < 1e-12);
+    }
 
     #[test]
     fn t02_t06_sparse_realized_funding_joins_price_returns_by_event_time() {
