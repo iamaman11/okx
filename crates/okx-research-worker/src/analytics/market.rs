@@ -1162,7 +1162,10 @@ fn compute_row_planned(
         let composition_ohlcv = ["open", "high", "low", "volume"]
             .iter()
             .any(|name| composition.uses_source(name));
-        let evaluated = if composition_oi || composition_funding || composition_ohlcv {
+        // A missing candle in a close-only graph also requires exact-grid
+        // evaluation. Compacting the remaining bars would hide the null's
+        // origin and shift rolling windows across the missing timestamp.
+        let evaluated = if composition_oi || composition_funding || composition_ohlcv || incomplete_candles {
             let count = ((request.end_ms - request.start_ms) / request.timeframe_ms) as usize;
             let mut prices = vec![f64::NAN; count];
             // Allocate only projected dependencies. Unused OHLC branches do
