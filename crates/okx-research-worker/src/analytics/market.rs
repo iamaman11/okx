@@ -388,6 +388,8 @@ impl AnalyticsService {
                     {"op":"rolling_max","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
                     {"op":"rolling_min","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
                     {"op":"add_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing"},
+                    {"op":"and","input_unit":"boolean","other_unit":"boolean","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
+                    {"op":"or","input_unit":"boolean","other_unit":"boolean","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
                     {"op":"lag","input_unit":"causal_series","output_unit":"same_as_input","period_min":1,"period_max":1000},
                     {"op":"greater_than","input_unit":"price_or_ratio","output_unit":"boolean","requires":"finite_threshold"},
                     {"op":"rising_edge","input_unit":"boolean","output_unit":"event","trigger":"false_to_true"},
@@ -1671,6 +1673,47 @@ mod tests {
         assert_eq!(
             compute_row_planned(row(), &mismatched, None, &checked, true).unwrap_err(),
             "COMPILED_PLAN_PROJECTION_MISMATCH"
+        );
+    }
+    #[test]
+    fn t07_t15_public_boolean_composition_uses_existing_candle_execution() {
+        let mut request = request(vec!["returns"]);
+        request.composition = Some(Box::new(
+            serde_json::from_value(json!({
+                "version":okx_analysis::query_plan::COMPOSITION_VERSION,
+                "steps":[
+                    {"id":"returns_series","op":"returns_series","input":"close"},
+                    {"id":"positive","op":"greater_than","input":"returns_series","threshold":0},
+                    {"id":"previous","op":"lag","input":"positive","period":1},
+                    {"id":"both","op":"and","input":"positive","other":"previous"},
+                    {"id":"either","op":"or","input":"positive","other":"previous"},
+                    {"id":"event","op":"rising_edge","input":"both"}
+                ],
+                "result_steps":["both","either","event"]
+            }))
+            .unwrap(),
+        ));
+        let plan = planner::AnalysisPlan::compile_market(&request).unwrap();
+        assert_eq!(
+            plan.sources,
+            vec![okx_analysis::query_plan::Source::Candles]
+        );
+        let result = compute_row_planned(row(), &request, None, &plan, true).unwrap();
+        assert_eq!(result["metrics"]["both"], true);
+        assert_eq!(result["metrics"]["either"], true);
+        assert_eq!(result["metrics"]["event"], false);
+        assert_eq!(result["units"]["both"], "boolean");
+        assert_eq!(
+            result["composition_quality"]["both"]["status"],
+            "available_at_closed_bar"
+        );
+        let mut missing = row();
+        Arc::make_mut(missing.bars.as_mut().unwrap()).remove(42);
+        let partial = compute_row_planned(missing, &request, None, &plan, true).unwrap();
+        assert!(partial["metrics"]["both"].is_null());
+        assert_eq!(
+            partial["composition_quality"]["both"]["issues"][0]["first_missing_ms"],
+            42 * 60_000
         );
     }
     #[test]

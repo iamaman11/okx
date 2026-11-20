@@ -21,6 +21,18 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
     assert_eq!(capabilities["effects"]["venue_post"], false);
     assert_eq!(capabilities["effects"]["write_finance"], false);
     assert_eq!(capabilities["effects"]["write_governance"], false);
+    for op in ["and", "or"] {
+        let operation = capabilities["composition"]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["op"] == op)
+            .unwrap();
+        assert_eq!(operation["input_unit"], "boolean");
+        assert_eq!(operation["other_unit"], "boolean");
+        assert_eq!(operation["null_policy"], "propagate_unknown");
+        assert_eq!(operation["causal"], true);
+    }
     assert_eq!(
         capabilities["availability_policy"],
         "actual_data_and_rights_checked_per_request"

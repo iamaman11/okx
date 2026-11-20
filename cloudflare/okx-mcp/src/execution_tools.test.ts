@@ -79,6 +79,26 @@ const causalSteps=[
 ];
 const causalGraph={...composed,steps:causalSteps,result_steps:['positive','event','prior','outcome']};
 fail(validTool('market',{...marketScreen,composition:causalGraph}), 'bounded event and future label graph passes strict public schema');
+const booleanGraph={...composed,steps:[
+ {id:'returns',op:'returns_series',input:'close'},
+ {id:'positive',op:'greater_than',input:'returns',threshold:0},
+ {id:'prior',op:'lag',input:'positive',period:1},
+ {id:'both',op:'and',input:'positive',other:'prior'},
+ {id:'either',op:'or',input:'positive',other:'prior'},
+ {id:'event',op:'rising_edge',input:'both'},
+],result_steps:['both','either','event']};
+fail(validTool('market',{...marketScreen,composition:booleanGraph}),
+ 'T07/T15 boolean conjunction and disjunction accepted through public market schema');
+for(const op of ['and','or']){
+ for(const bad of [
+  {id:'both',op,input:'positive'},
+  {id:'both',op,input:'positive',other:'prior',period:2},
+  {id:'both',op,input:'positive',other:'prior',threshold:1},
+ ]){
+  fail(!validTool('market',{...marketScreen,composition:{...booleanGraph,steps:[...booleanGraph.steps.slice(0,3),bad]}}),
+   `${op} rejects missing other or unrelated parameter`);
+ }
+}
 for(const invalid of [
  {...causalSteps[1],threshold:undefined},
  {...causalSteps[1],threshold:Infinity},

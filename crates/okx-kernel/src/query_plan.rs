@@ -34,7 +34,7 @@ pub struct SeriesStep {
     /// Only a prior rising_edge event may condition a future outcome label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
-    /// Second prior series, supported only for dimensionless add_series.
+    /// Second prior series for dimensionless addition or Boolean conjunction/disjunction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub other: Option<String>,
 }
@@ -47,6 +47,8 @@ pub enum SeriesOp {
     RollingMax,
     RollingMin,
     AddSeries,
+    And,
+    Or,
     Lag,
     GreaterThan,
     RisingEdge,
@@ -113,10 +115,12 @@ impl CheckedComposition {
             if step.when.is_some() && step.op != SeriesOp::ForwardReturnLabel {
                 return Err(format!("{path}.when:UNEXPECTED"));
             }
-            if step.other.is_some() && step.op != SeriesOp::AddSeries {
+            if step.other.is_some()
+                && !matches!(step.op, SeriesOp::AddSeries | SeriesOp::And | SeriesOp::Or)
+            {
                 return Err(format!("{path}.other:UNEXPECTED"));
             }
-            let other = if step.op == SeriesOp::AddSeries {
+            let other = if matches!(step.op, SeriesOp::AddSeries | SeriesOp::And | SeriesOp::Or) {
                 let name = step
                     .other
                     .as_deref()
@@ -176,6 +180,28 @@ impl CheckedComposition {
                         return Err(format!("{path}.threshold:UNEXPECTED"));
                     }
                     Unit::Ratio
+                }
+                SeriesOp::And | SeriesOp::Or => {
+                    if input_unit != Unit::Boolean {
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=boolean:actual={}",
+                            composition_unit_name(input_unit)
+                        ));
+                    }
+                    let unit = other.expect("validated second condition").0;
+                    if unit != Unit::Boolean {
+                        return Err(format!(
+                            "{path}.other:UNIT_MISMATCH:expected=boolean:actual={}",
+                            composition_unit_name(unit)
+                        ));
+                    }
+                    if step.period.is_some() {
+                        return Err(format!("{path}.period:UNEXPECTED"));
+                    }
+                    if step.threshold.is_some() {
+                        return Err(format!("{path}.threshold:UNEXPECTED"));
+                    }
+                    Unit::Boolean
                 }
                 SeriesOp::ReturnsSeries => {
                     if !matches!(input_unit, Unit::Price | Unit::Contracts) {
@@ -266,13 +292,7 @@ impl CheckedComposition {
             };
             // Rolling mean is a true sliding window: the cost does not grow
             // with period. Count add/remove/emit, not O(window) rescans.
-            let cost_per_bar = if step.op == SeriesOp::RollingMean {
-                3
-            } else if step.op == SeriesOp::AddSeries {
-                2
-            } else {
-                1
-            };
+            let cost_per_bar = series_cost_per_bar(step.op);
             estimated_work = estimated_work
                 .checked_add(
                     total_bars
@@ -323,11 +343,7 @@ impl CheckedComposition {
         }
         let mut work = 0u64;
         for checked in &self.steps {
-            let cost = match checked.step.op {
-                SeriesOp::RollingMean => 3,
-                SeriesOp::AddSeries => 2,
-                _ => 1,
-            };
+            let cost = series_cost_per_bar(checked.step.op);
             work = work
                 .checked_add(
                     total_bars
@@ -419,6 +435,26 @@ impl CheckedComposition {
                         .zip(other)
                         .map(|(left, right)| match (left, right) {
                             (Some(a), Some(b)) => (a + b).is_finite().then_some(a + b),
+                            _ => None,
+                        })
+                        .collect()
+                }
+                SeriesOp::And | SeriesOp::Or => {
+                    let other = &values[checked
+                        .step
+                        .other
+                        .as_ref()
+                        .expect("validated second condition")];
+                    input
+                        .iter()
+                        .zip(other)
+                        .map(|(left, right)| match (left, right) {
+                            (Some(a), Some(b)) => Some(if checked.step.op == SeriesOp::And {
+                                f64::from(*a == 1.0 && *b == 1.0)
+                            } else {
+                                f64::from(*a == 1.0 || *b == 1.0)
+                            }),
+                            // A missing observation is unknown, never false.
                             _ => None,
                         })
                         .collect()
@@ -563,6 +599,14 @@ impl CheckedComposition {
 
     pub fn sources(&self) -> BTreeSet<Source> {
         self.result_sources().into_values().flatten().collect()
+    }
+}
+
+fn series_cost_per_bar(op: SeriesOp) -> u64 {
+    match op {
+        SeriesOp::RollingMean => 3,
+        SeriesOp::AddSeries | SeriesOp::And | SeriesOp::Or => 2,
+        _ => 1,
     }
 }
 
@@ -1052,6 +1096,90 @@ mod tests {
             CheckedComposition::compile(spec, 3_000_000)
                 .unwrap_err()
                 .contains("CELLS_LIMIT")
+        );
+    }
+    #[test]
+    fn t03_t07_boolean_branches_are_typed_causal_and_unknown_is_not_false() {
+        let graph: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"returns","op":"returns_series","input":"close"},
+                {"id":"positive","op":"greater_than","input":"returns","threshold":0},
+                {"id":"previous","op":"lag","input":"positive","period":1},
+                {"id":"both","op":"and","input":"positive","other":"previous"},
+                {"id":"either","op":"or","input":"positive","other":"previous"},
+                {"id":"event","op":"rising_edge","input":"both"}
+            ],
+            "result_steps":["both","either","event"]
+        }))
+        .unwrap();
+        let compiled = CheckedComposition::compile(graph.clone(), 6).unwrap();
+        assert_eq!(compiled.steps[3].unit, Unit::Boolean);
+        assert_eq!(compiled.steps[4].unit, Unit::Boolean);
+        let series = [100.0, 110.0, 121.0, 108.9, 119.79, 131.769];
+        assert_eq!(compiled.evaluate_at(&series, 0)["both"].0, None);
+        assert_eq!(compiled.evaluate_at(&series, 1)["either"].0, None);
+        assert_eq!(compiled.evaluate_at(&series, 3)["both"].0, Some(0.0));
+        assert_eq!(compiled.evaluate_at(&series, 3)["either"].0, Some(1.0));
+        assert_eq!(compiled.evaluate_at(&series, 5)["both"].0, Some(1.0));
+        assert_eq!(compiled.evaluate_at(&series, 5)["event"].0, Some(1.0));
+        let mut broken = series;
+        broken[2] = f64::NAN;
+        assert_eq!(compiled.evaluate_at(&broken, 2)["both"].0, None);
+        assert_eq!(compiled.evaluate_at(&broken, 2)["either"].0, None);
+        let mut future_changed = series;
+        future_changed[4] = 1.0;
+        future_changed[5] = 2.0;
+        assert_eq!(
+            compiled.evaluate_at(&series, 3),
+            compiled.evaluate_at(&future_changed, 3)
+        );
+        let mut bad_input = graph.clone();
+        bad_input.steps[3].input = "close".into();
+        assert_eq!(
+            CheckedComposition::compile(bad_input, 6).unwrap_err(),
+            "composition.steps[3].input:UNIT_MISMATCH:expected=boolean:actual=price"
+        );
+        let mut bad_other = graph.clone();
+        bad_other.steps[4].other = Some("returns".into());
+        assert_eq!(
+            CheckedComposition::compile(bad_other, 6).unwrap_err(),
+            "composition.steps[4].other:UNIT_MISMATCH:expected=boolean:actual=ratio"
+        );
+        let mut absent_other = graph.clone();
+        absent_other.steps[3].other = None;
+        assert_eq!(
+            CheckedComposition::compile(absent_other, 6).unwrap_err(),
+            "composition.steps[3].other:REQUIRED"
+        );
+        let mut bad_extra = graph.clone();
+        bad_extra.steps[4].period = Some(1);
+        assert_eq!(
+            CheckedComposition::compile(bad_extra, 6).unwrap_err(),
+            "composition.steps[4].period:UNEXPECTED"
+        );
+        let mut future = graph;
+        future.steps.push(SeriesStep {
+            id: "outcome".into(),
+            op: SeriesOp::ForwardReturnLabel,
+            input: "close".into(),
+            period: Some(2),
+            threshold: None,
+            when: Some("event".into()),
+            other: None,
+        });
+        future.steps.push(SeriesStep {
+            id: "leak".into(),
+            op: SeriesOp::Or,
+            input: "positive".into(),
+            period: None,
+            threshold: None,
+            when: None,
+            other: Some("outcome".into()),
+        });
+        assert_eq!(
+            CheckedComposition::compile(future, 6).unwrap_err(),
+            "composition.steps[7].other:UNIT_MISMATCH:expected=boolean:actual=outcome_ratio"
         );
     }
     #[test]
