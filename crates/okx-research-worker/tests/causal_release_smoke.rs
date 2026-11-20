@@ -13,7 +13,7 @@ fn causal_market_wire() -> Value {
         "fields": ["returns"],
         "timeframe_ms": 60_000,
         "start_ms": 60_000,
-        "end_ms": 360_000,
+        "end_ms": 480_000,
         "limit": 1,
         "composition": {
             "version": "okx.market.composition/v1",
@@ -32,24 +32,24 @@ fn causal_market_wire() -> Value {
 fn compile_worker_wire(wire: Value) -> Result<CheckedComposition, String> {
     let request: MarketRequest = serde_json::from_value(wire).expect("typed market request");
     assert!(request.valid(), "public market request constraints");
-    CheckedComposition::compile(
-        *request.composition.expect("explicit composition"),
-        5,
-    )
+    CheckedComposition::compile(*request.composition.expect("explicit composition"), 7)
 }
 
 #[test]
 fn public_market_wire_keeps_causal_prefix_and_separates_future_outcome() {
     let checked = compile_worker_wire(causal_market_wire()).expect("checked graph");
-    assert_eq!(checked.estimated_cells, 25);
-    assert_eq!(checked.steps.last().expect("label step").unit, Unit::OutcomeRatio);
+    assert_eq!(checked.estimated_cells, 35);
+    assert_eq!(
+        checked.steps.last().expect("label step").unit,
+        Unit::OutcomeRatio
+    );
 
-    // At index 2 the preceding return is positive, producing a rising edge.
-    // Changing only the subsequent history must not alter any causal feature.
-    let prefix = [100.0, 102.0, 98.0];
-    let extended = [100.0, 102.0, 98.0, 99.0, 102.0];
-    let before = checked.evaluate_at(&prefix, 2);
-    let after = checked.evaluate_at(&extended, 2);
+    // At index 4 a positive lagged return follows a negative one: an edge.
+    // Appending later bars must not alter an already-observed causal feature.
+    let prefix = [100.0, 102.0, 98.0, 99.0, 100.0];
+    let extended = [100.0, 102.0, 98.0, 99.0, 100.0, 101.0, 110.0];
+    let before = checked.evaluate_at(&prefix, 4);
+    let after = checked.evaluate_at(&extended, 4);
     assert_eq!(before["lag1"], after["lag1"]);
     assert_eq!(before["event"], after["event"]);
     assert_eq!(after["event"], (Some(1.0), Unit::Event));
@@ -57,10 +57,13 @@ fn public_market_wire_keeps_causal_prefix_and_separates_future_outcome() {
     // The outcome is not available on the prefix and cannot be projected at
     // the newest closed bar even when older event labels are confirmed.
     assert_eq!(before["label"], (None, Unit::OutcomeRatio));
-    assert_eq!(checked.evaluate(&extended)["label"], (None, Unit::OutcomeRatio));
+    assert_eq!(
+        checked.evaluate(&extended)["label"],
+        (None, Unit::OutcomeRatio)
+    );
     let (confirmed, unit) = after["label"];
     assert_eq!(unit, Unit::OutcomeRatio);
-    assert!((confirmed.expect("two future bars") - (102.0 / 98.0 - 1.0)).abs() < 1e-12);
+    assert!((confirmed.expect("two future bars") - (110.0 / 100.0 - 1.0)).abs() < 1e-12);
 }
 
 #[test]
