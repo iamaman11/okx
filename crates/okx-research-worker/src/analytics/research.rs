@@ -326,8 +326,10 @@ impl AnalyticsService {
             }
             match outcome {
                 Ok(a) => {
-                    if this.jobs.update_async(hash.clone(), jobs::State::Completed, Some(a), None).await.is_ok() {
-                        tracing::info!(job_id = %hash, stage = "terminal", state = "completed", "research job completed");
+                    match this.jobs.update_async(hash.clone(), jobs::State::Completed, Some(a), None).await {
+                        Ok(true) => tracing::info!(job_id = %hash, stage = "terminal", state = "completed", "research job completed"),
+                        Ok(false) => tracing::info!(job_id = %hash, stage = "terminal", state = "cancelled", "late research completion rejected by cancellation fence"),
+                        Err(_) => tracing::warn!(job_id = %hash, stage = "terminal", reason_code = "RESEARCH_TERMINAL_COMMIT_FAILED", "research result not committed"),
                     }
                 }
                 Err(e) => {
@@ -344,8 +346,10 @@ impl AnalyticsService {
                         .await
                         .ok()
                         .and_then(|j| j.artifact);
-                    if this.jobs.update_async(hash.clone(), state, artifact, Some(e)).await.is_ok() {
-                        tracing::info!(job_id = %hash, stage = "terminal", state = terminal_state, reason_code, "research job ended");
+                    match this.jobs.update_async(hash.clone(), state, artifact, Some(e)).await {
+                        Ok(true) => tracing::info!(job_id = %hash, stage = "terminal", state = terminal_state, reason_code, "research job ended"),
+                        Ok(false) => tracing::info!(job_id = %hash, stage = "terminal", state = "cancelled", "late research failure rejected by cancellation fence"),
+                        Err(_) => tracing::warn!(job_id = %hash, stage = "terminal", reason_code = "RESEARCH_TERMINAL_COMMIT_FAILED", "research terminal state not committed"),
                     }
                 }
             }

@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(reopened.get(&running.id).unwrap().artifact.as_deref(), Some("proof"));
         let (_, duplicate, _) = reopened.enqueue("t14-queued".into(), "queue".into()).unwrap();
         assert!(!duplicate);
-        assert_eq!(reopened.update(&queued.id, State::Completed, Some("forged".into()), None).unwrap(), ());
+        assert!(!reopened.update(&queued.id, State::Completed, Some("forged".into()), None).unwrap());
         assert!(reopened.get(&queued.id).unwrap().artifact.is_none());
     }
 }

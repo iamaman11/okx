@@ -551,7 +551,7 @@ impl Jobs {
         state: State,
         artifact: Option<String>,
         error: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         // Admission alone creates QUEUED, and startup recovery alone creates
         // INTERRUPTED. Neither is a permissible executor transition: a late
         // CPU task may not requeue itself or forge a restart diagnosis.
@@ -577,7 +577,10 @@ impl Jobs {
         if updated == 0 {
             match Self::read(&db, id)?.ok_or("JOB_NOT_FOUND")?.state {
                 // A cancelled job cannot be resurrected by late compute.
-                State::Cancelled => return Ok(()),
+                // A terminal-cancelled job may not be revived. Returning an
+                // explicit non-commit receipt prevents callers from reporting
+                // success merely because this safe late write was ignored.
+                State::Cancelled => return Ok(false),
                 _ => return Err("RESEARCH_TERMINAL_IMMUTABLE".into()),
             }
         }
@@ -589,7 +592,7 @@ impl Jobs {
                 .remove(id);
         }
         drop(db);
-        Ok(())
+        Ok(true)
     }
     /// Same catalog owner and terminal fence as job transitions. Late CPU
     /// observations may never mutate cancellation or terminal snapshots.
@@ -848,7 +851,7 @@ impl Jobs {
         state: State,
         artifact: Option<String>,
         error: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let owner = self.clone();
         tokio::task::spawn_blocking(move || owner.update(&id, state, artifact, error))
             .await

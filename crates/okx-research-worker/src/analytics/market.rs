@@ -184,6 +184,9 @@ impl AnalyticsService {
                 .get_async(job_id.into())
                 .await
                 .map_err(|_| "MARKET_CURSOR_NOT_FOUND")?;
+            if job.state != jobs::State::Completed {
+                return Err("MARKET_CURSOR_NOT_READY".into());
+            }
             let artifact = job.artifact.ok_or("MARKET_CURSOR_NOT_READY")?;
             let store = self.artifacts.clone();
             let offset = offset.to_owned();
@@ -219,7 +222,15 @@ impl AnalyticsService {
             .await?;
         tracing::info!(job_id = %job.id, stage = "admission", state = if new { "queued" } else { "replayed" }, "market job admission");
         if !new {
-            if let Some(artifact) = job.artifact {
+            // A retained partial artifact is NOT a completed response. In
+            // particular a cancelled/interrupted job must never be mistaken
+            // for a successful cached market query after reconnect.
+            if let Some(artifact) = job
+                .artifact
+                .as_ref()
+                .filter(|_| job.state == jobs::State::Completed)
+                .cloned()
+            {
                 let store = self.artifacts.clone();
                 return self
                     .cpu
@@ -272,9 +283,13 @@ impl AnalyticsService {
                             Ok(store.publish_evidence(&value).map_err(|e| e.to_string())?.0)
                         })
                         .await?;
-                    this.jobs
+                    let committed = this.jobs
                         .update_async(hash.clone(), jobs::State::Completed, Some(artifact), None)
                         .await?;
+                    if !committed {
+                        tracing::info!(job_id = %hash, stage = "terminal", state = "cancelled", "market completion lost cancellation race");
+                        return Err("CANCELLED".into());
+                    }
                     tracing::info!(job_id = %hash, stage = "terminal", state = "completed", "market job completed");
                 }
                 Err(e) => {
@@ -1980,6 +1995,104 @@ fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64, end_ms: u64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn t14_market_retry_and_cursor_never_publish_cancelled_or_interrupted_partial_result() {
+        let (root, service) = super::super::artifact_job_fixtures::service();
+        let make_id = |request: &MarketRequest| {
+            okx_research::canonical_sha256(&(
+                market_request_schema(&request.fields, false, false, false),
+                request,
+                &Option::<Value>::None,
+                0_i64,
+            ))
+            .unwrap()
+            .trim_start_matches("sha256:")
+            .to_owned()
+        };
+        let cancelled_request = request(vec!["returns"]);
+        assert!(cancelled_request.valid());
+        let cancelled_id = make_id(&cancelled_request);
+        let fingerprint = okx_research::canonical_sha256(&(
+            "market/448.cursor-v1",
+            &cancelled_request,
+            &Option::<Value>::None,
+        ))
+        .unwrap();
+        // This is an authentic immutable page hierarchy, but the catalog
+        // marks it as partial. Old Market retry/cursor paths checked only
+        // artifact.is_some() and would serve it as a completed query.
+        let row_page = service
+            .artifacts
+            .publish_evidence(&vec![json!({"instrument":"UNCOMMITTED"}), json!({"instrument":"UNCOMMITTED_2"})])
+            .unwrap()
+            .0;
+        let manifest = service
+            .artifacts
+            .publish_evidence(&json!({"row_pages":[row_page],"total_rows":2}))
+            .unwrap()
+            .0;
+        let partial = service
+            .artifacts
+            .publish_evidence(&json!({
+                "job_id":cancelled_id,"market_request_fingerprint":fingerprint,
+                "rows":[{"instrument":"UNCOMMITTED"}],"total_rows":2,
+                "result_artifact":manifest,"page_limit":1,
+                "next_cursor":format!("{}:1",cancelled_id)
+            }))
+            .unwrap()
+            .0;
+        let (created, fresh, _) = service
+            .jobs
+            .enqueue(format!("market-{cancelled_id}"), cancelled_id.clone())
+            .unwrap();
+        assert!(fresh);
+        assert!(service.jobs.update(&created.id, jobs::State::Running, Some(partial.clone()), None).unwrap());
+        service.jobs.cancel(&cancelled_id, "t14-cancel-key").unwrap();
+        assert_eq!(service.jobs.get(&cancelled_id).unwrap().state, jobs::State::Cancelled);
+        let retry = service.market(cancelled_request.clone(), None, None).await.unwrap();
+        assert_eq!(retry["state"], "cancelled");
+        assert!(retry["rows"].is_null(), "cancelled job cannot claim published market rows");
+        let mut cancelled_cursor = cancelled_request.clone();
+        cancelled_cursor.cursor = Some(format!("{cancelled_id}:1"));
+        assert_eq!(
+            service.market(cancelled_cursor, None, None).await.unwrap_err(),
+            "MARKET_CURSOR_NOT_READY"
+        );
+        assert_eq!(
+            service.result_page(cancelled_id.clone(), None, 1, ResearchResultView::Trades).unwrap_err(),
+            "RESULT_NOT_READY"
+        );
+        assert!(!service.jobs.update(&cancelled_id, jobs::State::Completed, Some(partial.clone()), None).unwrap());
+        assert_eq!(service.jobs.get(&cancelled_id).unwrap().state, jobs::State::Cancelled);
+
+        // The second job is interrupted by reopening the same durable owner.
+        let interrupted_request = request(vec!["rolling_mean"]);
+        let interrupted_id = make_id(&interrupted_request);
+        let (created, fresh, _) = service
+            .jobs
+            .enqueue(format!("market-{interrupted_id}"), interrupted_id.clone())
+            .unwrap();
+        assert!(fresh);
+        assert!(service.jobs.update(&created.id, jobs::State::Running, Some(partial), None).unwrap());
+        let bootstrap = service.sources.bootstrap.clone();
+        drop(service);
+        let reopened = AnalyticsService::new(root.clone(), bootstrap).unwrap();
+        assert_eq!(reopened.jobs.get(&interrupted_id).unwrap().state, jobs::State::Interrupted);
+        let retry = reopened.market(interrupted_request.clone(), None, None).await.unwrap();
+        assert_eq!(retry["state"], "interrupted");
+        assert!(retry["rows"].is_null(), "interrupted job cannot claim completed rows");
+        let mut interrupted_cursor = interrupted_request;
+        interrupted_cursor.cursor = Some(format!("{interrupted_id}:1"));
+        assert_eq!(
+            reopened.market(interrupted_cursor, None, None).await.unwrap_err(),
+            "MARKET_CURSOR_NOT_READY"
+        );
+        assert_eq!(reopened.diagnostic_job(&interrupted_id)["job"]["result_ref"], Value::Null);
+        assert_eq!(reopened.diagnostic_job(&interrupted_id)["job"]["error_code"], "RESEARCH_INTERRUPTED");
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn t02_funding_composition_rejects_non_swap_before_source_reads() {

@@ -395,11 +395,48 @@ async fn lost_enqueue_ack_retry_preserves_job_and_rejects_conflict() {
     drop(db);
     let next = WorkerSession::new("session-2".into()).unwrap();
     let (mut child, mut input, mut output) = start(&root, &next, &scope).await;
+    // The old request's response was lost, but its durable state is not a
+    // completed result. Observe the actual restarted child before retrying.
     send(
         &mut input,
         HostFrame::Request {
             invocation: None,
             id: RequestId::new("h1".into()).unwrap(),
+            session: next.clone(),
+            command: Box::new(ResearchCommand::Research {
+                request: ResearchRequest::Status { job_id: durable_id.clone() },
+            }),
+        },
+    )
+    .await;
+    assert!(
+        matches!(receive(&mut output).await,
+            WorkerFrame::Response { result: Ok(WorkerReply::Product(value)), .. }
+            if value["id"] == durable_id && value["state"] == "interrupted"
+                && value["error"] == "process restarted before completion")
+    );
+    send(
+        &mut input,
+        HostFrame::Request {
+            invocation: None,
+            id: RequestId::new("h2".into()).unwrap(),
+            session: next.clone(),
+            command: Box::new(ResearchCommand::Research {
+                request: ResearchRequest::Result {
+                    job_id: durable_id.clone(), cursor: None, limit: 1,
+                    view: okx_protocol::analytics::ResearchResultView::Summary,
+                },
+            }),
+        },
+    )
+    .await;
+    assert!(matches!(receive(&mut output).await,
+        WorkerFrame::Response { result: Err(error), .. } if error == "RESULT_NOT_READY"));
+    send(
+        &mut input,
+        HostFrame::Request {
+            invocation: None,
+            id: RequestId::new("h3".into()).unwrap(),
             session: next.clone(),
             command: Box::new(ResearchCommand::Research {
                 request: backtest(1),
@@ -411,14 +448,18 @@ async fn lost_enqueue_ack_retry_preserves_job_and_rejects_conflict() {
         WorkerFrame::Response {
             result: Ok(WorkerReply::Product(value)),
             ..
-        } => assert_eq!(value["id"].as_str(), Some(durable_id.as_str())),
+        } => {
+            assert_eq!(value["id"].as_str(), Some(durable_id.as_str()));
+            assert_eq!(value["state"], "interrupted");
+            assert!(value["artifact"].is_null());
+        },
         _ => panic!("missing retry response"),
     }
     send(
         &mut input,
         HostFrame::Request {
             invocation: None,
-            id: RequestId::new("h2".into()).unwrap(),
+            id: RequestId::new("h4".into()).unwrap(),
             session: next,
             command: Box::new(ResearchCommand::Research {
                 request: backtest(2),
