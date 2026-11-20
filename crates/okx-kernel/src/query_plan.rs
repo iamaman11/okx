@@ -955,9 +955,6 @@ impl CheckedComposition {
             origin_step: id.to_owned(),
             origin_index: at,
         };
-        if values.get(id).is_none_or(|series| at >= series.len()) {
-            return cause("PROJECTION_INDEX_OUT_OF_RANGE");
-        }
         let Some(checked) = self.steps.iter().find(|item| item.step.id == id) else {
             return cause("SOURCE_OBSERVATION_MISSING");
         };
@@ -3274,7 +3271,7 @@ mod t02_t06_multisource_regression {
         let plan = CheckedComposition::compile(spec, 3).unwrap();
         assert_eq!(plan.evaluate_at(&[100., 110., 105.], usize::MAX)["w1"].0, None);
         let (_, causes) = plan.evaluate_with_diagnostics(&[]);
-        assert_eq!(causes["w1"].reason, "PROJECTION_INDEX_OUT_OF_RANGE");
+        assert_eq!(causes["w1"].reason, "WARMUP");
         assert_eq!(causes["w1"].origin_step, "w1");
     }
 
