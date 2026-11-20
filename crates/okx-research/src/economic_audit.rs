@@ -288,6 +288,12 @@ mod tests {
         altered.trades[0].side = -1;
         assert_eq!(
             audit_replay(&bars, &spec, &altered, "USDT", 1, 3, &|| false).unwrap_err(),
+            "REPLAY_AUDIT_EQUITY_MISMATCH"
+        );
+        let mut altered = result.clone();
+        altered.trades[0].quantity = 0.6;
+        assert_eq!(
+            audit_replay(&bars, &spec, &altered, "USDT", 1, 3, &|| false).unwrap_err(),
             "REPLAY_AUDIT_INVALID_POSITION_TRANSITION"
         );
         assert_eq!(
