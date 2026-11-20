@@ -264,8 +264,10 @@ impl CheckedComposition {
                     Unit::OutcomeRatio
                 }
             };
+            // Rolling mean is a true sliding window: the cost does not grow
+            // with period. Count add/remove/emit, not O(window) rescans.
             let cost_per_bar = if step.op == SeriesOp::RollingMean {
-                step.period.expect("validated mean period") as u64
+                3
             } else if step.op == SeriesOp::AddSeries {
                 2
             } else {
@@ -364,7 +366,9 @@ impl CheckedComposition {
             );
         }
         for checked in &self.steps {
-            let input = values[&checked.step.input].clone();
+            // A shared upstream series is read by reference for all branches;
+            // cloning it here multiplied peak memory and source work.
+            let input = &values[&checked.step.input];
             let output = match checked.step.op {
                 SeriesOp::AddSeries => {
                     let other =
@@ -394,10 +398,32 @@ impl CheckedComposition {
                 SeriesOp::RollingMean => {
                     let period = checked.step.period.unwrap_or(1) as usize;
                     let mut result = vec![None; input.len()];
-                    for i in (period - 1)..input.len() {
-                        let window = &input[i + 1 - period..=i];
-                        if window.iter().all(Option::is_some) {
-                            let mean = window.iter().flatten().sum::<f64>() / period as f64;
+                    // Accumulate normalized contributions to avoid overflow
+                    // when finite prices sum beyond f64::MAX although their
+                    // *mean* is representable.
+                    let mut mean_sum = 0.0f64;
+                    let mut correction = 0.0f64;
+                    let divisor = period as f64;
+                    let mut missing = 0usize;
+                    for (i, current) in input.iter().copied().enumerate() {
+                        if i >= period {
+                            match input[i - period] {
+                                Some(removed) => compensated_add(
+                                    &mut mean_sum,
+                                    &mut correction,
+                                    -removed / divisor,
+                                ),
+                                None => missing -= 1,
+                            }
+                        }
+                        match current {
+                            Some(value) => {
+                                compensated_add(&mut mean_sum, &mut correction, value / divisor)
+                            }
+                            None => missing += 1,
+                        }
+                        if i + 1 >= period && missing == 0 {
+                            let mean = mean_sum + correction;
                             result[i] = mean.is_finite().then_some(mean);
                         }
                     }
@@ -497,6 +523,18 @@ impl CheckedComposition {
     pub fn sources(&self) -> BTreeSet<Source> {
         self.result_sources().into_values().flatten().collect()
     }
+}
+
+/// Compensated add/subtract for a sliding window, preserving small terms
+/// when a large observation exits. Each update is constant time.
+fn compensated_add(sum: &mut f64, correction: &mut f64, term: f64) {
+    let next = *sum + term;
+    if sum.abs() >= term.abs() {
+        *correction += (*sum - next) + term;
+    } else {
+        *correction += (term - next) + *sum;
+    }
+    *sum = next;
 }
 
 /// Causal, closed-bar window extrema in O(bars) time and O(period) memory.
@@ -694,6 +732,13 @@ impl QueryPlan {
                 return Err(format!("parameters.{name}:INVALID"));
             }
         }
+        // Resolve optional operator defaults once, in the pure plan owner.
+        // The worker must execute these values, not maintain another set of
+        // independent defaults which could drift between validation and I/O.
+        let mut parameters = parameters;
+        for name in ["ema_period", "atr_period", "rsi_period"] {
+            parameters.entry(name.into()).or_insert(14.0);
+        }
         for (idx, filter) in filters.iter().enumerate() {
             if !selected.contains(&filter.operator) {
                 return Err(format!("filters[{idx}].operator:NOT_PROJECTED"));
@@ -773,6 +818,29 @@ impl QueryPlan {
         }
         Ok(self)
     }
+
+    /// Bind a resolved venue universe without recompiling operation IDs or
+    /// silently applying the 100-explicit-instrument limit to a global scan.
+    /// This check runs before source reads or durable job admission.
+    pub fn with_resolved_universe(
+        mut self,
+        instruments: Vec<String>,
+        globally_ranked: bool,
+    ) -> Result<Self, String> {
+        let cap = if globally_ranked { 512 } else { 100 };
+        if instruments.is_empty()
+            || instruments.len() > cap
+            || instruments.iter().any(|id| id.is_empty() || id.len() > 64)
+        {
+            return Err(format!("universe:RESOLVED_INSTRUMENT_LIMIT:{cap}"));
+        }
+        let mut distinct = BTreeSet::new();
+        if instruments.iter().any(|id| !distinct.insert(id)) {
+            return Err("universe:DUPLICATE_INSTRUMENT".into());
+        }
+        self.universe = instruments;
+        Ok(self)
+    }
 }
 
 #[cfg(test)]
@@ -829,6 +897,45 @@ mod tests {
                 .abs()
                 < 1e-12
         );
+    }
+    #[test]
+    fn t02_scalar_window_and_contract_currency_mix_fail_before_sources() {
+        let scalar: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[{"id":"wrong","op":"rolling_mean","input":"returns","period":2}],
+            "result_steps":["wrong"]
+        }))
+        .unwrap();
+        assert_eq!(
+            CheckedComposition::compile(scalar, 100).unwrap_err(),
+            "composition.steps[0].input:UNKNOWN_OR_FORWARD_STEP:returns"
+        );
+        let contracts: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[{"id":"wrong","op":"add_series","input":"open_interest","other":"close"}],
+            "result_steps":["wrong"]
+        }))
+        .unwrap();
+        assert_eq!(
+            CheckedComposition::compile(contracts, 100).unwrap_err(),
+            "composition.steps[0].input:UNIT_MISMATCH:expected=ratio:actual=contracts"
+        );
+        let zero: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"return","op":"returns_series","input":"close"},
+                {"id":"window","op":"rolling_mean","input":"return","period":1}
+            ],"result_steps":["window"]
+        }))
+        .unwrap();
+        let checked = CheckedComposition::compile(zero, 2).unwrap();
+        assert_eq!(checked.evaluate_at(&[100.0, 100.0], 0)["window"].0, None);
+        assert_eq!(
+            checked.evaluate_at(&[100.0, 100.0], 1)["window"].0,
+            Some(0.0)
+        );
+        let loss = checked.evaluate_at(&[100.0, 90.0], 1)["window"].0.unwrap();
+        assert!((loss + 0.1).abs() < 1e-12);
     }
     #[test]
     fn t03_checked_composition_allows_branching_and_repeated_ops_but_rejects_bad_refs() {
@@ -1160,6 +1267,55 @@ mod tests {
         assert_eq!(plan.range.expected_bars, 20);
     }
     #[test]
+    fn t02_t03_t10_plan_owns_defaults_and_binds_global_universe_once() {
+        let range = ClosedRange::strict(0, 100 * 60_000, 60_000).unwrap();
+        let query = QueryPlan::compile(
+            vec![],
+            range,
+            vec![Operator::Ema, Operator::Returns],
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(query.parameters["ema_period"], 14.0);
+        assert_eq!(query.parameters["atr_period"], 14.0);
+        assert_eq!(query.parameters["rsi_period"], 14.0);
+        assert_eq!(query.warmup_bars, 14);
+        let symbols = (0..512)
+            .map(|idx| format!("ASSET{idx}-USDT-SWAP"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            query
+                .clone()
+                .with_resolved_universe(symbols.clone(), false)
+                .unwrap_err(),
+            "universe:RESOLVED_INSTRUMENT_LIMIT:100"
+        );
+        let bound = query
+            .clone()
+            .with_resolved_universe(symbols.clone(), true)
+            .unwrap();
+        assert_eq!(bound.universe.len(), 512);
+        assert_eq!(bound.operators, query.operators);
+        assert_eq!(bound.parameters, query.parameters);
+        let mut excessive = symbols.clone();
+        excessive.push("EXTRA-USDT-SWAP".into());
+        assert_eq!(
+            query
+                .clone()
+                .with_resolved_universe(excessive, true)
+                .unwrap_err(),
+            "universe:RESOLVED_INSTRUMENT_LIMIT:512"
+        );
+        let mut duplicate = symbols;
+        duplicate[1] = duplicate[0].clone();
+        assert_eq!(
+            query.with_resolved_universe(duplicate, true).unwrap_err(),
+            "universe:DUPLICATE_INSTRUMENT"
+        );
+    }
+    #[test]
     fn k7_invalid_operator_bounds_or_parameter_fail_closed() {
         let (universe, range, ops) = fixture();
         let params = BTreeMap::from([("unrecognized_parameter".to_string(), 1.0)]);
@@ -1377,18 +1533,52 @@ mod t02_t06_multisource_regression {
     }
 
     #[test]
-    fn t10_mean_work_cost_is_bounded_before_source_io() {
+    fn t10_sliding_mean_cost_is_linear_and_all_other_work_still_bounded() {
         let mut request: CompositionRequest = serde_json::from_value(serde_json::json!({
             "version":"okx.market.composition/v1",
             "steps":[{"id":"window","op":"rolling_mean","input":"close","period":1000}],
             "result_steps":["window"]
         }))
         .unwrap();
-        assert_eq!(
-            CheckedComposition::compile(request.clone(), 1_000_000).unwrap_err(),
-            "composition:WORK_LIMIT"
-        );
+        assert!(CheckedComposition::compile(request.clone(), 1_000_000).is_ok());
         request.steps[0].op = SeriesOp::RollingMax;
         assert!(CheckedComposition::compile(request, 1_000_000).is_ok());
+    }
+    #[test]
+    fn t05_t10_sliding_mean_agrees_with_independent_window_oracle_and_propagates_gaps() {
+        let plan: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":"okx.market.composition/v1",
+            "steps":[{"id":"window","op":"rolling_mean","input":"close","period":1000}],
+            "result_steps":["window"]
+        }))
+        .unwrap();
+        let compiled = CheckedComposition::compile(plan, 10_000).unwrap();
+        let numbers = (0..10_000)
+            .map(|i| 10_000.0 + (i % 97) as f64)
+            .collect::<Vec<_>>();
+        for at in [998, 999, 1000, 4999, 9999] {
+            let value = compiled.evaluate_at(&numbers, at)["window"].0;
+            if at < 999 {
+                assert!(value.is_none());
+            } else {
+                let oracle = numbers[at + 1 - 1000..=at].iter().sum::<f64>() / 1000.0;
+                assert!((value.unwrap() - oracle).abs() < 1e-9);
+            }
+        }
+        let mut with_gap = numbers;
+        with_gap[4999] = f64::NAN;
+        assert!(compiled.evaluate_at(&with_gap, 5000)["window"].0.is_none());
+        assert!(compiled.evaluate_at(&with_gap, 6000)["window"].0.is_some());
+        let extremes: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":"okx.market.composition/v1",
+            "steps":[{"id":"window","op":"rolling_mean","input":"close","period":2}],
+            "result_steps":["window"]
+        }))
+        .unwrap();
+        let extremes = CheckedComposition::compile(extremes, 4).unwrap();
+        let near_max = f64::MAX / 2.0;
+        let series = [near_max, near_max, 2.0, 4.0];
+        assert_eq!(extremes.evaluate_at(&series, 1)["window"].0, Some(near_max));
+        assert_eq!(extremes.evaluate_at(&series, 3)["window"].0, Some(3.0));
     }
 }

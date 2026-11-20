@@ -42,6 +42,26 @@ fn market_job_schema(fields: &[String]) -> &'static str {
     }
 }
 
+// A composition now publishes explicit per-result quality and source failure
+// witnesses. Existing immutable jobs cannot be silently reinterpreted as
+// satisfying that new result contract; preserve their old namespace for
+// cursor reads while new requests get a distinct content identity.
+fn market_request_schema(
+    fields: &[String],
+    has_composition: bool,
+    oi_composition: bool,
+) -> &'static str {
+    if oi_composition && fields.iter().any(|field| field == "pearson_correlation") {
+        "market/518.2.oi-composition-correlation-quality-v1"
+    } else if oi_composition {
+        "market/518.2.oi-composition-quality-v1"
+    } else if has_composition {
+        "market/518.2.composition-quality-v1"
+    } else {
+        market_job_schema(fields)
+    }
+}
+
 impl AnalyticsService {
     pub async fn market(
         &self,
@@ -118,18 +138,11 @@ impl AnalyticsService {
             0
         };
         let hash = okx_research::canonical_sha256(&(
-            if oi_composition
-                && hash_request
-                    .fields
-                    .iter()
-                    .any(|field| field == "pearson_correlation")
-            {
-                "market/518.1.oi-composition-correlation-coverage-v1"
-            } else if oi_composition {
-                "market/448.5.oi-composition-v1"
-            } else {
-                market_job_schema(&hash_request.fields)
-            },
+            market_request_schema(
+                &hash_request.fields,
+                hash_request.composition.is_some(),
+                oi_composition,
+            ),
             &hash_request,
             &universe_page,
             bucket,
@@ -167,6 +180,12 @@ impl AnalyticsService {
                 })
                 .await;
         }
+        // A cursor reads its immutable original result. Only a new job needs
+        // to bind the resolved venue instruments before durable admission.
+        // The checked operation IDs/parameters remain those of the first plan.
+        let execution_plan = query_plan
+            .clone()
+            .with_resolved_universe(compute_request.instruments.clone(), global_rank)?;
         let (job, new, cancel) = self
             .jobs
             .enqueue_async(
@@ -209,7 +228,7 @@ impl AnalyticsService {
                 None
             };
             let mut outcome = this
-                .market_execute(compute_request, cancel.clone(), global_rank)
+                .market_execute(compute_request, cancel.clone(), global_rank, execution_plan)
                 .await;
             outcome = outcome.and_then(|mut value| {
                 value["query_plan"] =
@@ -265,6 +284,7 @@ impl AnalyticsService {
         request: MarketRequest,
         cancel: Arc<super::executor::Cancel>,
         global_rank: bool,
+        plan: okx_analysis::query_plan::QueryPlan,
     ) -> Result<Value, String> {
         // The public request was validated before expanding the immutable
         // venue reference generation. No >100 explicit input is accepted.
@@ -275,7 +295,6 @@ impl AnalyticsService {
         {
             return Err("MARKET_LIMIT:BOUNDED_INSTRUMENTS_AND_ROWS".into());
         }
-        let plan = planner::AnalysisPlan::compile_market(&request)?;
         let (rows, correlation_matrix) = self
             .market_rows(&request, cancel.clone(), global_rank, plan.clone())
             .await?;
@@ -316,6 +335,28 @@ impl AnalyticsService {
             .iter()
             .map(|&operator| {
                 let info = okx_analysis::operators::registry(operator);
+                let (time_basis, data_availability) = match operator {
+                    Operator::SpreadBps => (
+                        "current_ticker_snapshot_not_historical",
+                        "live_snapshot_timestamp_unverified",
+                    ),
+                    Operator::FundingSum => (
+                        "realized_funding_event_time_not_publication_time",
+                        "historical_publication_time_unverified",
+                    ),
+                    Operator::OiChange => (
+                        "open_interest_event_time_not_publication_time",
+                        "historical_publication_time_unverified",
+                    ),
+                    Operator::PearsonCorrelation => (
+                        "exact_closed_candle_join",
+                        "requires_thirty_common_eligible_pairs",
+                    ),
+                    Operator::PositionSize | Operator::CostEstimate => {
+                        ("request_parameters", "requires_typed_request_arguments")
+                    }
+                    _ => ("closed_candles", "checked_per_request"),
+                };
                 let typed_inputs = info
                     .inputs
                     .iter()
@@ -324,11 +365,17 @@ impl AnalyticsService {
                     })
                     .collect::<Vec<_>>();
                 json!({"name":operator,"version":1,"status":"code_supported",
+                    "route_status":"public_market_screen_compare",
+                    "data_availability":data_availability,"time_basis":time_basis,
                     "output_shape":"scalar","unit":info.unit,"inputs":info.inputs,
                     "typed_inputs":typed_inputs})
             })
             .collect::<Vec<_>>();
         json!({"schema":"okx.market.capabilities/v1",
+            "route_owner":"okx-research-worker","compute_owner":"okx-kernel",
+            "availability_policy":"actual_data_and_rights_checked_per_request",
+            "effects":{"read_sources":true,"write_research_jobs":true,
+                "write_finance":false,"write_governance":false,"venue_post":false},
             "actions":["screen","compare","instruments","snapshot","microstructure","capabilities"],
             "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
             "operators":operators,
@@ -337,7 +384,7 @@ impl AnalyticsService {
                 "source_units":{"close":"price","open_interest":"contracts"},
                 "open_interest_policy":"exact_timestamps_no_forward_fill_publication_time_unverified",
                 "operations":[{"op":"returns_series","input_unit":"price_or_contracts","output_unit":"ratio"},
-                    {"op":"rolling_mean","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000},
+                    {"op":"rolling_mean","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"compute_cost":"linear_in_series_length"},
                     {"op":"rolling_max","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
                     {"op":"rolling_min","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
                     {"op":"add_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing"},
@@ -527,11 +574,11 @@ impl AnalyticsService {
                     if cancel.load(Ordering::Acquire) {
                         return Err("CANCELLED".into());
                     }
-                    rows.push(compute_row_checked(
+                    rows.push(compute_row_planned(
                         row,
                         &request,
                         peer.as_deref(),
-                        plan.composition.as_ref(),
+                        &plan,
                         need_candles,
                     )?);
                 }
@@ -619,6 +666,7 @@ fn compute_row(
             .contains("candles");
     compute_row_checked(row, request, peer, checked.as_ref(), needs_candles)
 }
+#[cfg(test)]
 fn compute_row_checked(
     row: Loaded,
     request: &MarketRequest,
@@ -626,6 +674,32 @@ fn compute_row_checked(
     composition: Option<&okx_analysis::query_plan::CheckedComposition>,
     needs_candles: bool,
 ) -> Result<Value, String> {
+    let mut checked = planner::AnalysisPlan::compile_market(request)?;
+    checked.composition = composition.cloned();
+    compute_row_planned(row, request, peer, &checked, needs_candles)
+}
+fn compute_row_planned(
+    row: Loaded,
+    request: &MarketRequest,
+    peer: Option<&Vec<Bar>>,
+    plan: &okx_analysis::query_plan::QueryPlan,
+    needs_candles: bool,
+) -> Result<Value, String> {
+    if plan.operators.len() != request.fields.len()
+        || plan.result_projection.len() != request.fields.len()
+        || plan
+            .operators
+            .iter()
+            .zip(&plan.result_projection)
+            .zip(&request.fields)
+            .any(|((descriptor, projection), field)| {
+                descriptor.id != *projection
+                    || serde_json::to_value(descriptor.id).ok().as_ref() != Some(&json!(field))
+            })
+    {
+        return Err("COMPILED_PLAN_PROJECTION_MISMATCH".into());
+    }
+    let composition = plan.composition.as_ref();
     let mut gaps = Vec::new();
     // A source-specific metric does not imply that candle observations exist.
     // Preserve candle coverage for mixed queries and composed price series,
@@ -722,10 +796,10 @@ fn compute_row_checked(
     }
     let mut metrics = serde_json::Map::new();
     let mut units = serde_json::Map::new();
-    for field in &request.fields {
-        let op: Operator = serde_json::from_value(json!(field)).map_err(|e| e.to_string())?;
+    for (field, descriptor) in request.fields.iter().zip(&plan.operators) {
+        let op = descriptor.id;
         let param =
-            |name: &str, default: f64| request.parameters.get(name).copied().unwrap_or(default);
+            |name: &str, default: f64| plan.parameters.get(name).copied().unwrap_or(default);
         let value = match op {
             Operator::SpreadBps => {
                 row.ticker
@@ -826,6 +900,7 @@ fn compute_row_checked(
         metrics.insert(field.clone(), value.map_or(Value::Null, |v| json!(v)));
         units.insert(field.clone(), json!(registry(op).unit));
     }
+    let mut composition_quality = serde_json::Map::new();
     if let Some(composition) = composition {
         let source_dependencies = composition.result_sources();
         let evaluated = if composition_oi {
@@ -857,16 +932,17 @@ fn compute_row_checked(
         };
         for (id, (value, unit)) in evaluated {
             let dependencies = &source_dependencies[&id];
+            let depends_on_oi =
+                dependencies.contains(&okx_analysis::query_plan::Source::OpenInterest);
             let missing_candles = incomplete_candles
                 && dependencies.contains(&okx_analysis::query_plan::Source::Candles);
-            let missing_oi = dependencies.contains(&okx_analysis::query_plan::Source::OpenInterest)
+            let missing_oi = depends_on_oi
                 && oi_coverage
                     .as_ref()
                     .is_none_or(|coverage| !coverage.complete);
             // Event-time alone does not prove a historical OI observation was
             // available at decision time. Never certify an OI-derived signal.
-            let unavailable_causal_oi = dependencies
-                .contains(&okx_analysis::query_plan::Source::OpenInterest)
+            let unavailable_causal_oi = depends_on_oi
                 && matches!(
                     unit,
                     okx_analysis::query_plan::Unit::Boolean
@@ -878,8 +954,24 @@ fn compute_row_checked(
             } else {
                 value
             };
+            let mut issues = Vec::new();
+            if missing_candles {
+                issues.push(json!({
+                    "source":"candles","reason":"CANDLE_RANGE_INCOMPLETE_OR_GAPPED",
+                    "first_missing_ms":candle_coverage.as_ref().and_then(|c|c.first_missing_ms)
+                }));
+            }
+            if missing_oi {
+                issues.push(json!({
+                    "source":"open_interest","reason":"OI_RANGE_INCOMPLETE_OR_GAPPED",
+                    "first_missing_ms":oi_coverage.as_ref().and_then(|c|c.first_missing_ms)
+                }));
+            }
             if unavailable_causal_oi {
                 gaps.push(format!("CAUSAL_AVAILABILITY_UNVERIFIED:{id}"));
+                issues.push(json!({
+                    "source":"open_interest","reason":"CAUSAL_PUBLICATION_TIME_UNVERIFIED"
+                }));
             }
             if value.is_none() {
                 gaps.push(if unit == okx_analysis::query_plan::Unit::OutcomeRatio {
@@ -887,7 +979,27 @@ fn compute_row_checked(
                 } else {
                     format!("MISSING_INPUT_OR_MINIMUM_SAMPLES:{id}")
                 });
+                if issues.is_empty() {
+                    issues.push(json!({
+                        "reason":if unit == okx_analysis::query_plan::Unit::OutcomeRatio {
+                            "OUTCOME_UNCONFIRMED"
+                        } else {"MISSING_INPUT_OR_WARMUP"}
+                    }));
+                }
             }
+            let status = if value.is_none() {
+                "unavailable"
+            } else if depends_on_oi {
+                "retrospective_publication_unverified"
+            } else {
+                "available_at_closed_bar"
+            };
+            composition_quality.insert(
+                id.clone(),
+                json!({
+                    "status":status,"dependencies":dependencies,"issues":issues
+                }),
+            );
             let metric = match unit {
                 okx_analysis::query_plan::Unit::Boolean | okx_analysis::query_plan::Unit::Event => {
                     value.map_or(Value::Null, |v| json!(v == 1.0))
@@ -958,7 +1070,10 @@ fn compute_row_checked(
     } else {
         None
     };
-    let mut result = json!({"instrument":row.instrument,"metrics":metrics,"units":units,"parameters":{"ema_period":request.parameters.get("ema_period").unwrap_or(&14.0),"atr_period":request.parameters.get("atr_period").unwrap_or(&14.0),"rsi_period":request.parameters.get("rsi_period").unwrap_or(&14.0)},"source_start_ms":bars.first().map(|b|b.time),"source_end_ms":bars.last().map(|b|b.time),"unclosed_candles_excluded":row.excluded,"candle_coverage":candle_coverage,"quality":if gaps.is_empty(){"complete"}else{"partial"},"gaps":gaps});
+    let mut result = json!({"instrument":row.instrument,"metrics":metrics,"units":units,"parameters":{"ema_period":plan.parameters.get("ema_period"),"atr_period":plan.parameters.get("atr_period"),"rsi_period":plan.parameters.get("rsi_period")},"source_start_ms":bars.first().map(|b|b.time),"source_end_ms":bars.last().map(|b|b.time),"unclosed_candles_excluded":row.excluded,"candle_coverage":candle_coverage,"quality":if gaps.is_empty(){"complete"}else{"partial"},"gaps":gaps});
+    if composition.is_some() {
+        result["composition_quality"] = Value::Object(composition_quality);
+    }
     if request.fields.iter().any(|field| field == "oi_change") || composition_oi {
         result["oi_coverage"] = json!(oi_coverage);
     }
@@ -1122,6 +1237,23 @@ fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64, end_ms: u64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t13_composition_quality_uses_a_new_namespace_without_invalidating_legacy_results() {
+        let fields = vec!["returns".to_owned()];
+        let oi_fields = vec!["pearson_correlation".to_owned()];
+        assert_eq!(market_request_schema(&fields, false, false), "market/448.2");
+        let composed = market_request_schema(&fields, true, false);
+        let oi_composed = market_request_schema(&fields, true, true);
+        let oi_correlated = market_request_schema(&oi_fields, true, true);
+        assert_ne!(composed, market_request_schema(&fields, false, false));
+        assert_ne!(oi_composed, composed);
+        assert_ne!(oi_correlated, oi_composed);
+        assert_eq!(
+            market_request_schema(&oi_fields, false, false),
+            "market/518.1.correlation-coverage-v1"
+        );
+    }
 
     #[test]
     fn t06_funding_result_schema_invalidates_only_funding_jobs() {
@@ -1530,6 +1662,27 @@ mod tests {
         assert!(output["metrics"]["rolling_mean"].is_null());
     }
     #[test]
+    fn t02_t03_public_row_uses_checked_operator_and_parameter_binding() {
+        let query = request(vec!["ema", "returns"]);
+        let checked = planner::AnalysisPlan::compile_market(&query).unwrap();
+        assert_eq!(checked.parameters["ema_period"], 14.0);
+        let result = compute_row_planned(row(), &query, None, &checked, true).unwrap();
+        let direct = compute_row(row(), &query, None).unwrap();
+        assert_eq!(result["metrics"], direct["metrics"]);
+        assert_eq!(result["parameters"]["ema_period"], 14.0);
+        let mut changed = checked.clone();
+        changed.parameters.insert("ema_period".into(), 3.0);
+        let value = compute_row_planned(row(), &query, None, &changed, true).unwrap();
+        assert_ne!(value["metrics"]["ema"], result["metrics"]["ema"]);
+        assert_eq!(value["parameters"]["ema_period"], 3.0);
+        let mut mismatched = query.clone();
+        mismatched.fields.reverse();
+        assert_eq!(
+            compute_row_planned(row(), &mismatched, None, &checked, true).unwrap_err(),
+            "COMPILED_PLAN_PROJECTION_MISMATCH"
+        );
+    }
+    #[test]
     fn t05_composition_reuses_closed_candles_and_projects_a_distinct_ratio() {
         let mut request = request(vec!["returns"]);
         request.start_ms = 0;
@@ -1918,6 +2071,14 @@ mod global_rank_tests {
         assert!(first["metrics"]["oi_return"].is_number());
         assert!(first["metrics"]["event"].is_null());
         assert_eq!(
+            first["composition_quality"]["oi_return"]["status"],
+            "retrospective_publication_unverified"
+        );
+        assert_eq!(
+            first["composition_quality"]["event"]["issues"][0]["reason"],
+            "CAUSAL_PUBLICATION_TIME_UNVERIFIED"
+        );
+        assert_eq!(
             first["metric_time_basis"]["event"],
             "oi_event_time_publication_unverified"
         );
@@ -1942,6 +2103,15 @@ mod global_rank_tests {
         assert_ne!(
             first["source_captures"]["open_interest"]["capture_hash"],
             after["source_captures"]["open_interest"]["capture_hash"]
+        );
+        let mut gap = fixture();
+        gap.oi.as_mut().unwrap().as_mut().unwrap().remove(42);
+        let partial =
+            compute_row_checked(gap, &query, None, checked.composition.as_ref(), true).unwrap();
+        assert!(partial["metrics"]["oi_return"].is_null());
+        assert_eq!(
+            partial["composition_quality"]["oi_return"]["issues"][0]["first_missing_ms"],
+            42 * 60_000
         );
     }
 }

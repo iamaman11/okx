@@ -266,6 +266,25 @@ mod tests {
             "ALIGNMENT_INVALID_AVAILABILITY"
         );
     }
+    #[test]
+    fn t04_exact_five_bar_grid_distinguishes_missing_duplicate_and_right_boundary() {
+        let range = ClosedRange::strict(60_000, 360_000, 60_000).unwrap();
+        let times = [60_000, 120_000, 240_000, 300_000];
+        let partial = range.coverage(times);
+        assert_eq!(partial.expected_bars, 5);
+        assert_eq!(partial.observed_unique_bars, 4);
+        assert_eq!(partial.missing_bars, 1);
+        assert_eq!(partial.first_missing_ms, Some(180_000));
+        assert_eq!(partial.missing_sample_ms, vec![180_000]);
+        assert!(!partial.complete);
+        let duplicate = range.coverage([60_000, 120_000, 120_000, 240_000, 300_000]);
+        assert_eq!(duplicate.duplicate_bars, 1);
+        assert_eq!(duplicate.first_missing_ms, Some(180_000));
+        let boundary = range.coverage([60_000, 120_000, 180_000, 240_000, 300_000, 360_000]);
+        assert_eq!(boundary.observed_unique_bars, 5);
+        assert_eq!(boundary.unexpected_bars, 1);
+        assert!(!boundary.complete);
+    }
 
     #[test]
     fn k7_v03_relative_seven_days_hourly_has_exact_168_closed_bars() {

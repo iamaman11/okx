@@ -18,6 +18,13 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
         .map(|operator| operator["name"].clone())
         .collect::<Vec<_>>();
     assert_eq!(names, expected);
+    assert_eq!(capabilities["effects"]["venue_post"], false);
+    assert_eq!(capabilities["effects"]["write_finance"], false);
+    assert_eq!(capabilities["effects"]["write_governance"], false);
+    assert_eq!(
+        capabilities["availability_policy"],
+        "actual_data_and_rights_checked_per_request"
+    );
     assert_eq!(
         names
             .iter()
@@ -29,6 +36,9 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
     for operator in operators {
         assert_eq!(operator["version"], 1);
         assert_eq!(operator["status"], "code_supported");
+        assert_eq!(operator["route_status"], "public_market_screen_compare");
+        assert!(operator["data_availability"].is_string());
+        assert!(operator["time_basis"].is_string());
         assert_eq!(operator["output_shape"], "scalar");
         assert_eq!(
             operator["typed_inputs"].as_array().unwrap().len(),
@@ -43,6 +53,28 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
         position["typed_inputs"][0],
         json!({"name":"budget","source":"request","unit":"quote_currency"})
     );
+    assert_eq!(position["time_basis"], "request_parameters");
+    let spread = operators
+        .iter()
+        .find(|operator| operator["name"] == "spread_bps")
+        .unwrap();
+    assert_eq!(
+        spread["data_availability"],
+        "live_snapshot_timestamp_unverified"
+    );
+    let funding = operators
+        .iter()
+        .find(|operator| operator["name"] == "funding_sum")
+        .unwrap();
+    assert_eq!(
+        funding["data_availability"],
+        "historical_publication_time_unverified"
+    );
+    let pearson = operators
+        .iter()
+        .find(|operator| operator["name"] == "pearson_correlation")
+        .unwrap();
+    assert_eq!(pearson["time_basis"], "exact_closed_candle_join");
     assert!(
         operators
             .iter()
