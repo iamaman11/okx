@@ -34,7 +34,7 @@ pub struct SeriesStep {
     /// Only a prior rising_edge event may condition a future outcome label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
-    /// Second prior series for dimensionless addition or Boolean conjunction/disjunction.
+    /// Second prior series for dimensionless arithmetic or Boolean logic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub other: Option<String>,
 }
@@ -47,6 +47,8 @@ pub enum SeriesOp {
     RollingMax,
     RollingMin,
     AddSeries,
+    SubtractSeries,
+    DivideSeries,
     And,
     Or,
     Lag,
@@ -116,11 +118,25 @@ impl CheckedComposition {
                 return Err(format!("{path}.when:UNEXPECTED"));
             }
             if step.other.is_some()
-                && !matches!(step.op, SeriesOp::AddSeries | SeriesOp::And | SeriesOp::Or)
+                && !matches!(
+                    step.op,
+                    SeriesOp::AddSeries
+                        | SeriesOp::SubtractSeries
+                        | SeriesOp::DivideSeries
+                        | SeriesOp::And
+                        | SeriesOp::Or
+                )
             {
                 return Err(format!("{path}.other:UNEXPECTED"));
             }
-            let other = if matches!(step.op, SeriesOp::AddSeries | SeriesOp::And | SeriesOp::Or) {
+            let other = if matches!(
+                step.op,
+                SeriesOp::AddSeries
+                    | SeriesOp::SubtractSeries
+                    | SeriesOp::DivideSeries
+                    | SeriesOp::And
+                    | SeriesOp::Or
+            ) {
                 let name = step
                     .other
                     .as_deref()
@@ -159,7 +175,7 @@ impl CheckedComposition {
                 return Err(format!("{path}:DEPTH_LIMIT"));
             }
             let output_unit = match step.op {
-                SeriesOp::AddSeries => {
+                SeriesOp::AddSeries | SeriesOp::SubtractSeries | SeriesOp::DivideSeries => {
                     if input_unit != Unit::Ratio {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=ratio:actual={}",
@@ -427,14 +443,23 @@ impl CheckedComposition {
             // cloning it here multiplied peak memory and source work.
             let input = &values[&checked.step.input];
             let output = match checked.step.op {
-                SeriesOp::AddSeries => {
+                SeriesOp::AddSeries | SeriesOp::SubtractSeries | SeriesOp::DivideSeries => {
                     let other =
                         &values[checked.step.other.as_ref().expect("validated second input")];
                     input
                         .iter()
                         .zip(other)
                         .map(|(left, right)| match (left, right) {
-                            (Some(a), Some(b)) => (a + b).is_finite().then_some(a + b),
+                            (Some(a), Some(b)) => {
+                                let value = match checked.step.op {
+                                    SeriesOp::AddSeries => *a + *b,
+                                    SeriesOp::SubtractSeries => *a - *b,
+                                    SeriesOp::DivideSeries if *b != 0.0 => *a / *b,
+                                    SeriesOp::DivideSeries => return None,
+                                    _ => unreachable!("checked binary arithmetic"),
+                                };
+                                value.is_finite().then_some(value)
+                            }
                             _ => None,
                         })
                         .collect()
@@ -605,7 +630,11 @@ impl CheckedComposition {
 fn series_cost_per_bar(op: SeriesOp) -> u64 {
     match op {
         SeriesOp::RollingMean => 3,
-        SeriesOp::AddSeries | SeriesOp::And | SeriesOp::Or => 2,
+        SeriesOp::AddSeries
+        | SeriesOp::SubtractSeries
+        | SeriesOp::DivideSeries
+        | SeriesOp::And
+        | SeriesOp::Or => 2,
         _ => 1,
     }
 }
@@ -1758,6 +1787,82 @@ mod t02_t06_multisource_regression {
             CheckedComposition::compile(forward, 4)
                 .unwrap_err()
                 .contains("other:UNKNOWN_OR_FORWARD_STEP")
+        );
+    }
+
+    #[test]
+    fn t02_t05_t06_cross_source_divergence_and_division_preserve_zero_and_missing() {
+        let spec: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"price_return","op":"returns_series","input":"close"},
+                {"id":"oi_return","op":"returns_series","input":"open_interest"},
+                {"id":"difference","op":"subtract_series","input":"price_return","other":"oi_return"},
+                {"id":"relative","op":"divide_series","input":"price_return","other":"oi_return"}
+            ],
+            "result_steps":["difference","relative"]
+        }))
+        .unwrap();
+        let compiled = CheckedComposition::compile(spec.clone(), 3).unwrap();
+        assert_eq!(compiled.steps[2].unit, Unit::Ratio);
+        assert_eq!(compiled.steps[3].unit, Unit::Ratio);
+        assert_eq!(
+            compiled.result_sources()["difference"],
+            BTreeSet::from([Source::Candles, Source::OpenInterest])
+        );
+        let prices = [100., 110., 99.];
+        let oi = [Some(10.), Some(12.), Some(11.)];
+        let first = compiled
+            .evaluate_with_open_interest(&prices[..2], &oi[..2])
+            .unwrap();
+        // Independent fractions: (1/10 - 1/5) = -1/10,
+        // and (1/10)/(1/5) = 1/2.
+        assert!((first["difference"].0.unwrap() + 0.1).abs() < 1e-12);
+        assert!((first["relative"].0.unwrap() - 0.5).abs() < 1e-12);
+        let last = compiled.evaluate_with_open_interest(&prices, &oi).unwrap();
+        // -1/10 - (-1/12) = -1/60; (-1/10)/(-1/12) = 6/5.
+        assert!((last["difference"].0.unwrap() + 1. / 60.).abs() < 1e-12);
+        assert!((last["relative"].0.unwrap() - 1.2).abs() < 1e-12);
+        assert_eq!(
+            compiled
+                .evaluate_with_open_interest(&[100., 100.], &[Some(10.), Some(11.)])
+                .unwrap()["relative"]
+                .0,
+            Some(0.0)
+        );
+        let zero_denominator = compiled
+            .evaluate_with_open_interest(&[100., 110.], &[Some(10.), Some(10.)])
+            .unwrap();
+        assert!((zero_denominator["difference"].0.unwrap() - 0.1).abs() < 1e-12);
+        assert_eq!(zero_denominator["relative"].0, None);
+        let missing = compiled
+            .evaluate_with_open_interest(&[100., 110.], &[Some(10.), None])
+            .unwrap();
+        assert_eq!(missing["difference"].0, None);
+        assert_eq!(missing["relative"].0, None);
+        let mut wrong_first = spec.clone();
+        wrong_first.steps[2].input = "open_interest".into();
+        assert_eq!(
+            CheckedComposition::compile(wrong_first, 3).unwrap_err(),
+            "composition.steps[2].input:UNIT_MISMATCH:expected=ratio:actual=contracts"
+        );
+        let mut wrong_second = spec.clone();
+        wrong_second.steps[3].other = Some("close".into());
+        assert_eq!(
+            CheckedComposition::compile(wrong_second, 3).unwrap_err(),
+            "composition.steps[3].other:UNIT_MISMATCH:expected=ratio:actual=price"
+        );
+        let mut unexpected = spec.clone();
+        unexpected.steps[3].period = Some(2);
+        assert_eq!(
+            CheckedComposition::compile(unexpected, 3).unwrap_err(),
+            "composition.steps[3].period:UNEXPECTED"
+        );
+        let mut forward = spec;
+        forward.steps[2].other = Some("relative".into());
+        assert_eq!(
+            CheckedComposition::compile(forward, 3).unwrap_err(),
+            "composition.steps[2].other:UNKNOWN_OR_FORWARD_STEP:relative"
         );
     }
 

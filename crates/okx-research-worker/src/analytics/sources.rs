@@ -636,6 +636,31 @@ mod extension_tests {
         assert_eq!(boolean_row["quality"], "complete");
         assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
+        // T05/T15: ratio arithmetic is available through the same binary,
+        // venue source decoder and immutable result route without new I/O.
+        let arithmetic_query: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT"],"fields":["returns"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":1200000,"limit":20,
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"gain","op":"returns_series","input":"close"},
+                {"id":"previous","op":"lag","input":"gain","period":1},
+                {"id":"difference","op":"subtract_series","input":"gain","other":"previous"},
+                {"id":"relative","op":"divide_series","input":"gain","other":"previous"}
+            ],"result_steps":["difference","relative"]}
+        }))
+        .unwrap();
+        let arithmetic = service.market(arithmetic_query, None, None).await.unwrap();
+        let arithmetic_row = &arithmetic["rows"][0];
+        assert!(
+            (arithmetic_row["metrics"]["difference"].as_f64().unwrap() + 1. / 342.).abs() < 1e-12
+        );
+        assert!(
+            (arithmetic_row["metrics"]["relative"].as_f64().unwrap() - 18. / 19.).abs() < 1e-12
+        );
+        assert_eq!(arithmetic_row["units"]["difference"], "ratio");
+        assert_eq!(arithmetic_row["quality"], "complete");
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
         // T13: composition must disclose its candle dependency even when
         // the only legacy projection depends solely on request parameters.
         let composition_only_source: MarketRequest = serde_json::from_value(json!({

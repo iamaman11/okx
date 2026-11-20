@@ -33,6 +33,18 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
         assert_eq!(operation["null_policy"], "propagate_unknown");
         assert_eq!(operation["causal"], true);
     }
+    for op in ["subtract_series", "divide_series"] {
+        let operation = capabilities["composition"]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["op"] == op)
+            .unwrap();
+        assert_eq!(operation["input_unit"], "ratio");
+        assert_eq!(operation["other_unit"], "ratio");
+        assert_eq!(operation["output_unit"], "ratio");
+        assert_eq!(operation["numeric_policy"], "finite_only");
+    }
     assert_eq!(
         capabilities["availability_policy"],
         "actual_data_and_rights_checked_per_request"

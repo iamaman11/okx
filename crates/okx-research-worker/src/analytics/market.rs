@@ -388,6 +388,8 @@ impl AnalyticsService {
                     {"op":"rolling_max","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
                     {"op":"rolling_min","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
                     {"op":"add_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing"},
+                    {"op":"subtract_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing","numeric_policy":"finite_only"},
+                    {"op":"divide_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing_or_zero_denominator","numeric_policy":"finite_only"},
                     {"op":"and","input_unit":"boolean","other_unit":"boolean","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
                     {"op":"or","input_unit":"boolean","other_unit":"boolean","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
                     {"op":"lag","input_unit":"causal_series","output_unit":"same_as_input","period_min":1,"period_max":1000},
@@ -2146,6 +2148,76 @@ mod global_rank_tests {
         assert_eq!(
             partial["composition_quality"]["oi_return"]["issues"][0]["first_missing_ms"],
             42 * 60_000
+        );
+    }
+    #[test]
+    fn t02_t05_t06_public_ratio_divergence_uses_exact_oi_grid_and_null_denominator() {
+        let mut query: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT-SWAP"],"fields":["returns"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":6000000
+        }))
+        .unwrap();
+        query.composition = Some(Box::new(
+            serde_json::from_value(json!({
+                "version":"okx.market.composition/v1",
+                "steps":[
+                    {"id":"price_return","op":"returns_series","input":"close"},
+                    {"id":"oi_return","op":"returns_series","input":"open_interest"},
+                    {"id":"difference","op":"subtract_series","input":"price_return","other":"oi_return"},
+                    {"id":"relative","op":"divide_series","input":"price_return","other":"oi_return"}
+                ],"result_steps":["difference","relative"]
+            }))
+            .unwrap(),
+        ));
+        let plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+        let fixture = |flat_oi: bool| Loaded {
+            instrument: "BTC-USDT-SWAP".into(),
+            bars: Ok(Arc::new(
+                (0..100)
+                    .map(|i| Bar {
+                        time: i * 60_000,
+                        open: 100.0,
+                        high: 102.0,
+                        low: 99.0,
+                        close: 100.0 + i as f64,
+                        volume: 1.0,
+                        funding_rate: None,
+                    })
+                    .collect(),
+            )),
+            ticker: None,
+            funding: None,
+            oi: Some(Ok((0..100)
+                .map(|i| (i * 60_000, if flat_oi { 10.0 } else { 10.0 + i as f64 }))
+                .collect())),
+            excluded: None,
+        };
+        let output = compute_row_planned(fixture(false), &query, None, &plan, true).unwrap();
+        let price_return = 199.0 / 198.0 - 1.0;
+        let oi_return = 109.0 / 108.0 - 1.0;
+        assert!(
+            (output["metrics"]["difference"].as_f64().unwrap() - (price_return - oi_return)).abs()
+                < 1e-12
+        );
+        assert!(
+            (output["metrics"]["relative"].as_f64().unwrap() - price_return / oi_return).abs()
+                < 1e-12
+        );
+        assert_eq!(output["units"]["difference"], "ratio");
+        assert_eq!(
+            output["composition_quality"]["relative"]["status"],
+            "retrospective_publication_unverified"
+        );
+        let zero = compute_row_planned(fixture(true), &query, None, &plan, true).unwrap();
+        assert!(zero["metrics"]["relative"].is_null());
+        assert!(zero["metrics"]["difference"].is_number());
+        assert_eq!(
+            zero["composition_quality"]["relative"]["status"],
+            "unavailable"
+        );
+        assert_eq!(
+            zero["source_captures"]["open_interest"]["publication_time_verified"],
+            false
         );
     }
 }

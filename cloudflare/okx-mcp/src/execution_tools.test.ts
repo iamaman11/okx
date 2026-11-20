@@ -57,6 +57,23 @@ const joinedGraph={...composed,steps:[
 ],result_steps:['combined']};
 fail(validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:joinedGraph}),
  'two dimensionless series combine in one public composition');
+const divergenceGraph={...joinedGraph,steps:[
+ ...joinedGraph.steps.slice(0,2),
+ {id:'difference',op:'subtract_series',input:'price_return',other:'oi_return'},
+ {id:'relative',op:'divide_series',input:'price_return',other:'oi_return'},
+],result_steps:['difference','relative']};
+fail(validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:divergenceGraph}),
+ 'T02/T05/T15 typed difference and division share the registered market route');
+for(const op of ['subtract_series','divide_series']){
+ for(const bad of [
+  {id:'difference',op,input:'price_return'},
+  {id:'difference',op,input:'price_return',other:'oi_return',period:2},
+  {id:'difference',op,input:'price_return',other:'oi_return',threshold:0},
+ ]){
+  fail(!validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:{...divergenceGraph,steps:[...divergenceGraph.steps.slice(0,2),bad]}}),
+   `${op} rejects missing other and unrelated parameters`);
+ }
+}
 for(const bad of [
  {id:'combined',op:'add_series',input:'price_return'},
  {id:'combined',op:'add_series',input:'price_return',other:'oi_return',period:2},
