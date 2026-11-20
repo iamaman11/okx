@@ -509,6 +509,126 @@ pub fn group_quote_by_currency(amounts: &[QuoteAmount]) -> Result<Vec<CurrencyTo
         .collect())
 }
 
+/// One exact settlement-currency identity for a modeled, independent position.
+/// Funding is a signed cost: negative funding means income. Nothing here
+/// attests historical fees, exchange rules, or portfolio-wide FX conversion.
+/// Private components prevent consumers from constructing inconsistent flows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementCashflow {
+    gross: QuoteAmount,
+    fees: QuoteAmount,
+    funding: QuoteAmount,
+    net: QuoteAmount,
+}
+
+impl SettlementCashflow {
+    pub fn checked(
+        gross: QuoteAmount,
+        fees: QuoteAmount,
+        funding: QuoteAmount,
+        net: QuoteAmount,
+    ) -> Result<Self, String> {
+        for amount in [&gross, &fees, &funding, &net] {
+            QuoteAmount::exact(&amount.currency, amount.value)?;
+            if amount.currency != gross.currency {
+                return Err("CURRENCY_MISMATCH_FX_REQUIRED".into());
+            }
+        }
+        if fees.value < Decimal::ZERO {
+            return Err("INVALID_FEE".into());
+        }
+        let reconciled = gross
+            .value
+            .checked_sub(fees.value)
+            .and_then(|value| value.checked_sub(funding.value))
+            .ok_or("MONEY_OVERFLOW")?;
+        if reconciled != net.value {
+            return Err("ECONOMIC_CASHFLOW_NOT_RECONCILED".into());
+        }
+        Ok(Self {
+            gross,
+            fees,
+            funding,
+            net,
+        })
+    }
+
+    pub fn gross(&self) -> &QuoteAmount {
+        &self.gross
+    }
+
+    pub fn fees(&self) -> &QuoteAmount {
+        &self.fees
+    }
+
+    pub fn funding(&self) -> &QuoteAmount {
+        &self.funding
+    }
+
+    pub fn net(&self) -> &QuoteAmount {
+        &self.net
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrencyCashflowTotal {
+    pub currency: String,
+    pub gross: Decimal,
+    pub fees: Decimal,
+    pub funding: Decimal,
+    pub net: Decimal,
+    pub contributors: usize,
+}
+
+/// Exact same-currency attribution over independent position outcomes. Each
+/// component is added separately, checked for overflow and reconciled against
+/// net. Sorted currency buckets are not a joint portfolio equity or risk.
+pub fn group_settlement_cashflows(
+    flows: &[SettlementCashflow],
+) -> Result<Vec<CurrencyCashflowTotal>, String> {
+    let mut buckets = BTreeMap::<String, CurrencyCashflowTotal>::new();
+    for flow in flows {
+        let bucket = buckets
+            .entry(flow.net().currency.clone())
+            .or_insert_with(|| CurrencyCashflowTotal {
+                currency: flow.net().currency.clone(),
+                gross: Decimal::ZERO,
+                fees: Decimal::ZERO,
+                funding: Decimal::ZERO,
+                net: Decimal::ZERO,
+                contributors: 0,
+            });
+        bucket.gross = bucket
+            .gross
+            .checked_add(flow.gross().value)
+            .ok_or("MONEY_OVERFLOW")?;
+        bucket.fees = bucket
+            .fees
+            .checked_add(flow.fees().value)
+            .ok_or("MONEY_OVERFLOW")?;
+        bucket.funding = bucket
+            .funding
+            .checked_add(flow.funding().value)
+            .ok_or("MONEY_OVERFLOW")?;
+        bucket.net = bucket
+            .net
+            .checked_add(flow.net().value)
+            .ok_or("MONEY_OVERFLOW")?;
+        bucket.contributors = bucket.contributors.checked_add(1).ok_or("COUNT_OVERFLOW")?;
+    }
+    for bucket in buckets.values() {
+        let reconciled = bucket
+            .gross
+            .checked_sub(bucket.fees)
+            .and_then(|value| value.checked_sub(bucket.funding))
+            .ok_or("MONEY_OVERFLOW")?;
+        if reconciled != bucket.net {
+            return Err("ECONOMIC_CASHFLOW_NOT_RECONCILED".into());
+        }
+    }
+    Ok(buckets.into_values().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1060,6 +1180,70 @@ mod tests {
             }])
             .unwrap_err(),
             "INVALID_CURRENCY"
+        );
+    }
+
+    #[test]
+    fn t09_checked_settlement_cashflow_rejects_fx_mismatch_and_false_net() {
+        let money = |currency, value| QuoteAmount::exact(currency, Decimal::from(value)).unwrap();
+        let valid = SettlementCashflow::checked(
+            money("USDT", -3), money("USDT", 1), money("USDT", -2), money("USDT", -2),
+        ).unwrap();
+        assert_eq!(valid.gross().value, Decimal::from(-3));
+        assert_eq!(valid.funding().value, Decimal::from(-2));
+        assert_eq!(valid.net().value, Decimal::from(-2));
+        assert_eq!(
+            SettlementCashflow::checked(
+                money("USDT", 10), money("USD", 1), money("USDT", 0), money("USDT", 9),
+            ).unwrap_err(),
+            "CURRENCY_MISMATCH_FX_REQUIRED"
+        );
+        assert_eq!(
+            SettlementCashflow::checked(
+                money("USDT", 10), money("USDT", -1), money("USDT", 0), money("USDT", 11),
+            ).unwrap_err(),
+            "INVALID_FEE"
+        );
+        assert_eq!(
+            SettlementCashflow::checked(
+                money("USDT", 10), money("USDT", 1), money("USDT", 2), money("USDT", 8),
+            ).unwrap_err(),
+            "ECONOMIC_CASHFLOW_NOT_RECONCILED"
+        );
+    }
+
+    #[test]
+    fn t09_cashflow_buckets_reconcile_exact_currency_and_signed_funding() {
+        let flow = |currency: &str, gross: &str, fees: &str, funding: &str, net: &str| {
+            SettlementCashflow::checked(
+                QuoteAmount::parse_exact(currency, gross).unwrap(),
+                QuoteAmount::parse_exact(currency, fees).unwrap(),
+                QuoteAmount::parse_exact(currency, funding).unwrap(),
+                QuoteAmount::parse_exact(currency, net).unwrap(),
+            ).unwrap()
+        };
+        let values = [
+            flow("USDT", "20", "1.25", "0", "18.75"),
+            flow("BTC", "0.1", "0.001", "-0.002", "0.101"),
+            flow("USDT", "-3", "0.25", "-0.5", "-2.75"),
+        ];
+        assert_eq!(group_settlement_cashflows(&values).unwrap(), vec![
+            CurrencyCashflowTotal {
+                currency: "BTC".into(), gross: Decimal::new(1,1),
+                fees: Decimal::new(1,3), funding: Decimal::new(-2,3),
+                net: Decimal::new(101,3), contributors: 1,
+            },
+            CurrencyCashflowTotal {
+                currency: "USDT".into(), gross: Decimal::from(17),
+                fees: Decimal::new(15,1), funding: Decimal::new(-5,1),
+                net: Decimal::from(16), contributors: 2,
+            },
+        ]);
+        assert!(group_settlement_cashflows(&[]).unwrap().is_empty());
+        let near_limit = flow("USDT", &Decimal::MAX.to_string(), "0", "0", &Decimal::MAX.to_string());
+        assert_eq!(
+            group_settlement_cashflows(&[near_limit.clone(), near_limit]).unwrap_err(),
+            "MONEY_OVERFLOW"
         );
     }
 }

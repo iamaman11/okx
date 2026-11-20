@@ -3,10 +3,11 @@
 use super::*;
 use okx_protocol::analytics::{EconomicCase, EconomicProduct, EconomicSide};
 use okx_research::economics::{
-    InverseContract, LinearContract, QuoteAmount, SpotPair, group_quote_by_currency,
+    InverseContract, LinearContract, QuoteAmount, SettlementCashflow, SpotPair,
+    group_settlement_cashflows,
 };
 use rust_decimal::Decimal;
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
 fn exact_positive(input: &str) -> Result<Decimal, String> {
     let value = Decimal::from_str(input).map_err(|_| "INVALID_EXACT_AMOUNT")?;
@@ -16,7 +17,7 @@ fn exact_positive(input: &str) -> Result<Decimal, String> {
     Ok(value)
 }
 
-fn evaluated_case(case: &EconomicCase) -> Result<(QuoteAmount, QuoteAmount, Value), String> {
+fn evaluated_case(case: &EconomicCase) -> Result<(SettlementCashflow, Value), String> {
     let quantity = exact_positive(&case.quantity)?;
     let entry = exact_positive(&case.entry_price)?;
     let exit = exact_positive(&case.exit_price)?;
@@ -97,7 +98,8 @@ fn evaluated_case(case: &EconomicCase) -> Result<(QuoteAmount, QuoteAmount, Valu
         }
         EconomicProduct::Option => return Err("UNSUPPORTED_OPTION_ECONOMICS_MODEL".into()),
     };
-    Ok(unit_and_contract)
+    let (gross, net, details) = unit_and_contract;
+    Ok((SettlementCashflow::checked(gross, fees, funding, net)?, details))
 }
 
 pub(super) fn evaluate(
@@ -121,38 +123,55 @@ pub(super) fn evaluate(
             "historical_rules_verified":false,"effects":effects}),
         );
     }
-    let mut totals = Vec::new();
+    let mut flows = Vec::new();
+    let mut blocked_reason_counts = BTreeMap::<String, usize>::new();
     let mut rows = Vec::with_capacity(cases.len());
     for (index, case) in cases.iter().enumerate() {
         let outcome = evaluated_case(case);
         let row = match outcome {
-            Ok((gross, net, details)) => {
-                totals.push(net.clone());
-                json!({"index":index,"instrument":case.instrument,"product":case.product,
+            Ok((flow, details)) => {
+                let row = json!({"index":index,"instrument":case.instrument,"product":case.product,
                     "side":case.side,"state":"completed",
                     "quantity_exact":case.quantity,
-                    "gross":{"currency":gross.currency,"amount_exact":gross.value.normalize().to_string()},
-                    "net":{"currency":net.currency,"amount_exact":net.value.normalize().to_string()},
+                    "gross":{"currency":flow.gross().currency,"amount_exact":flow.gross().value.normalize().to_string()},
+                    "fees":{"currency":flow.fees().currency,"amount_exact":flow.fees().value.normalize().to_string()},
+                    "funding":{"currency":flow.funding().currency,"amount_exact":flow.funding().value.normalize().to_string()},
+                    "net":{"currency":flow.net().currency,"amount_exact":flow.net().value.normalize().to_string()},
+                    "settlement_identity":"gross_minus_fees_minus_signed_funding_equals_net",
                     "units":details,"reference_time_basis":"caller_supplied_unverified",
-                    "historical_rules_verified":false,"historical_fees_verified":false})
+                    "historical_rules_verified":false,"historical_fees_verified":false});
+                flows.push(flow);
+                row
             }
-            Err(reason) => json!({"index":index,"instrument":case.instrument,
+            Err(reason) => {
+                *blocked_reason_counts.entry(reason.clone()).or_default() += 1;
+                json!({"index":index,"instrument":case.instrument,
                 "product":case.product,"side":case.side,"state":"blocked",
-                "reason_code":reason,"historical_rules_verified":false}),
+                "reason_code":reason,"historical_rules_verified":false})
+            }
         };
         rows.push(row);
     }
-    let grouped = group_quote_by_currency(&totals)?;
-    let completed = totals.len();
+    let grouped = group_settlement_cashflows(&flows)?;
+    let completed = flows.len();
+    let cashflow_totals = grouped.iter().map(|group| json!({
+        "currency":group.currency,"contributors":group.contributors,
+        "gross_exact":group.gross.normalize().to_string(),
+        "fees_exact":group.fees.normalize().to_string(),
+        "funding_exact":group.funding.normalize().to_string(),
+        "net_exact":group.net.normalize().to_string()
+    })).collect::<Vec<_>>();
     Ok(
         json!({"schema":"okx.research.economics/v1","kind":"economic_scenario",
         "status":"completed","mode":"counterfactual",
         "input_fingerprint":fingerprint,"rows":rows,
         "summary":{"quality":if completed == cases.len(){"complete"}else{"partial"},
-            "completed":completed,"blocked":cases.len()-completed,
+            "requested":cases.len(),"completed":completed,"blocked":cases.len()-completed,
+            "blocked_reason_counts":blocked_reason_counts,
             "totals_by_settlement_currency":grouped.iter().map(|group|json!({
-                "currency":group.currency,"amount_exact":group.amount.normalize().to_string(),
+                "currency":group.currency,"amount_exact":group.net.normalize().to_string(),
                 "contributors":group.contributors})).collect::<Vec<_>>(),
+            "cashflow_by_settlement_currency":cashflow_totals,
             "aggregation":"independent_positions_no_fx_no_joint_risk"},
         "model_basis":"caller_supplied_counterfactual_only",
         "historical_rules_verified":false,"historical_fees_verified":false,
@@ -217,6 +236,9 @@ mod tests {
         let result = evaluate(cases.clone(), data_mode).unwrap();
         assert_eq!(result["rows"][0]["units"]["position_unit"], "base_asset");
         assert_eq!(result["rows"][0]["net"]["amount_exact"], "19");
+        assert_eq!(result["rows"][0]["gross"]["amount_exact"], "20");
+        assert_eq!(result["rows"][0]["fees"]["amount_exact"], "1");
+        assert_eq!(result["rows"][0]["funding"]["amount_exact"], "0");
         assert_eq!(result["rows"][1]["units"]["position_unit"], "contracts");
         assert_eq!(result["rows"][1]["units"]["base_quantity_exact"], "0.3");
         assert_eq!(result["rows"][1]["gross"]["amount_exact"], "3");
@@ -235,6 +257,9 @@ mod tests {
             "UNSUPPORTED_OPTION_ECONOMICS_MODEL"
         );
         assert_eq!(result["summary"]["quality"], "partial");
+        assert_eq!(result["summary"]["requested"], 4);
+        assert_eq!(result["summary"]["blocked_reason_counts"],
+            json!({"UNSUPPORTED_OPTION_ECONOMICS_MODEL":1}));
         assert_eq!(
             result["summary"]["totals_by_settlement_currency"][0]["currency"],
             "BTC"
@@ -247,6 +272,10 @@ mod tests {
             result["summary"]["totals_by_settlement_currency"][1]["amount_exact"],
             "22"
         );
+        assert_eq!(result["summary"]["cashflow_by_settlement_currency"][1], json!({
+            "currency":"USDT","contributors":2,
+            "gross_exact":"23","fees_exact":"1","funding_exact":"0","net_exact":"22"
+        }));
         assert!(result["portfolio_equity"].is_null());
         assert_eq!(result["effects"]["public_reads"], 0);
         assert_eq!(result["effects"]["finance_writes"], 0);
@@ -302,6 +331,12 @@ mod tests {
             result["summary"]["totals_by_settlement_currency"],
             json!([])
         );
+        assert_eq!(result["summary"]["cashflow_by_settlement_currency"], json!([]));
+        assert_eq!(result["summary"]["blocked_reason_counts"], json!({
+            "CONTRACT_UNIT_MISMATCH":1,"CURRENCY_MISMATCH_FX_REQUIRED":1,
+            "CONTRACT_MULTIPLIER_MISSING":1,"SPOT_SHORT_REQUIRES_BORROW_MODEL":1,
+            "SPOT_FUNDING_UNSUPPORTED":1
+        }));
     }
 
     #[test]
@@ -318,6 +353,52 @@ mod tests {
         assert_eq!(result["rows"][0]["units"]["base_quantity_exact"], "-0.3");
         assert_eq!(result["rows"][0]["gross"]["amount_exact"], "-3");
         assert_eq!(result["rows"][0]["net"]["amount_exact"], "-2.5");
+        assert_eq!(result["rows"][0]["funding"]["amount_exact"], "-0.5");
+        assert_eq!(result["summary"]["cashflow_by_settlement_currency"][0]["gross_exact"], "-3");
+        assert_eq!(result["summary"]["cashflow_by_settlement_currency"][0]["funding_exact"], "-0.5");
+    }
+
+    #[test]
+    fn t09_exact_cashflow_attribution_reconciles_mixed_products_without_fx() {
+        let spot = counterfactual_case("spot");
+        let mut linear = counterfactual_case("linear_swap");
+        linear["fees"]["amount"] = json!("0.1");
+        linear["funding"]["amount"] = json!("0.2");
+        let mut inverse = counterfactual_case("inverse_swap");
+        inverse["fees"]["amount"] = json!("0.001");
+        inverse["funding"]["amount"] = json!("-0.002");
+        let ResearchRequest::Economics { cases, data_mode } =
+            request(vec![spot, linear, inverse, counterfactual_case("option")], "counterfactual")
+        else { panic!() };
+        let result = evaluate(cases, data_mode).unwrap();
+        for row in result["rows"].as_array().unwrap().iter().take(3) {
+            let amounts = ["gross", "fees", "funding", "net"]
+                .map(|field| Decimal::from_str(row[field]["amount_exact"].as_str().unwrap()).unwrap());
+            assert_eq!(amounts[0] - amounts[1] - amounts[2], amounts[3]);
+            for field in ["gross", "fees", "funding", "net"] {
+                assert_eq!(row[field]["currency"], row["net"]["currency"]);
+            }
+            assert_eq!(row["settlement_identity"], "gross_minus_fees_minus_signed_funding_equals_net");
+            assert_eq!(row["historical_rules_verified"], false);
+        }
+        let grouped = result["summary"]["cashflow_by_settlement_currency"].as_array().unwrap();
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0]["currency"], "BTC");
+        assert_eq!(grouped[0]["contributors"], 1);
+        assert_eq!(grouped[0]["fees_exact"], "0.001");
+        assert_eq!(grouped[0]["funding_exact"], "-0.002");
+        assert_eq!(grouped[1], json!({
+            "currency":"USDT","contributors":2,"gross_exact":"23",
+            "fees_exact":"1.1","funding_exact":"0.2","net_exact":"21.7"
+        }));
+        for total in grouped {
+            let values = ["gross_exact", "fees_exact", "funding_exact", "net_exact"]
+                .map(|field| Decimal::from_str(total[field].as_str().unwrap()).unwrap());
+            assert_eq!(values[0] - values[1] - values[2], values[3]);
+        }
+        assert!(result["portfolio_equity"].is_null());
+        assert!(result["joint_portfolio_risk"].is_null());
+        assert_eq!(result["effects"]["venue_posts"], 0);
     }
 
     #[test]
