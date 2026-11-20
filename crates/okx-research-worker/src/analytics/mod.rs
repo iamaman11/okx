@@ -378,6 +378,25 @@ impl AnalyticsService {
                 }
             }
         }
+        // Market row pages are arrays, not object manifests. Their nested
+        // capture references must be traversed or retention can erase source
+        // witnesses of a still-pinned/referenced completed market result.
+        let rows = value
+            .as_array()
+            .or_else(|| value.get("rows").and_then(Value::as_array));
+        if let Some(rows) = rows {
+            for row in rows {
+                if let Some(captures) = row.get("source_captures").and_then(Value::as_object) {
+                    for capture in captures.values() {
+                        if let Some(child) =
+                            capture.get("evidence_artifact").and_then(Value::as_str)
+                        {
+                            self.artifact_graph(child, seen)?;
+                        }
+                    }
+                }
+            }
+        }
         for key in [
             "dataset_artifact",
             "result_artifact",

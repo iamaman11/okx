@@ -82,6 +82,83 @@ fn ordinary_market_cursor_reads_exact_persisted_pages() {
 }
 
 #[test]
+fn t13_t14_retention_traverses_market_source_pages_and_preserves_pinned_twin() {
+    let (root, service) = super::artifact_job_fixtures::service();
+    let points = service
+        .artifacts
+        .publish_evidence(&vec![(60000, 2.0)])
+        .unwrap()
+        .0;
+    let source = service
+        .artifacts
+        .publish_evidence(&json!({
+            "schema":"okx.market.normalized-source/v1",
+            "source":"open_interest", "chunks":[points], "observed_points":1
+        }))
+        .unwrap()
+        .0;
+    let row = json!({
+        "instrument":"BTC-USDT-SWAP",
+        "source_captures":{"open_interest":{"evidence_artifact":source}}
+    });
+    let row_page = service
+        .artifacts
+        .publish_evidence(&vec![row.clone()])
+        .unwrap()
+        .0;
+    let manifest = service
+        .artifacts
+        .publish_evidence(&json!({
+            "kind":"market_pages", "row_pages":[row_page], "total_rows":1
+        }))
+        .unwrap()
+        .0;
+    let result = service
+        .artifacts
+        .publish_evidence(&json!({
+            "kind":"market", "result_artifact":manifest, "rows":[row],
+            "job_id":"f".repeat(64), "total_rows":1
+        }))
+        .unwrap()
+        .0;
+    let mut graph = std::collections::BTreeSet::new();
+    service.artifact_graph(&result, &mut graph).unwrap();
+    assert!(
+        graph.contains(&points),
+        "source observations must remain reachable"
+    );
+    assert!(graph.contains(&source));
+    assert!(graph.contains(&row_page));
+    assert!(graph.contains(&manifest));
+    for (key, job_id) in [
+        ("market-expiring", "a".repeat(64)),
+        ("market-pinned", "b".repeat(64)),
+    ] {
+        service.jobs.enqueue(key.into(), job_id.clone()).unwrap();
+        service
+            .jobs
+            .update(&job_id, jobs::State::Completed, Some(result.clone()), None)
+            .unwrap();
+    }
+    service.pin_job(&"b".repeat(64), true).unwrap();
+    let future = jiff::Timestamp::now().as_millisecond().max(0) as u64 + 8 * 86400000;
+    assert_eq!(service.apply_retention(future).unwrap(), 1);
+    for id in [&result, &manifest, &row_page, &source, &points] {
+        assert!(
+            service.artifacts.read_evidence(id).is_ok(),
+            "pinned twin retains {id}"
+        );
+    }
+    service.pin_job(&"b".repeat(64), false).unwrap();
+    assert_eq!(service.apply_retention(future).unwrap(), 1);
+    for id in [&result, &manifest, &row_page, &source, &points] {
+        assert!(service.artifacts.read_evidence(id).is_err(), "expired {id}");
+    }
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn market_universe_metadata_persisted_with_final_artifact_and_queue() {
     let page = json!({
         "reference_generation":"generation-a",

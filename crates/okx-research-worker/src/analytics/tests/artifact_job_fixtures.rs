@@ -263,6 +263,79 @@ async fn market_artifact_publication_and_cached_result_roundtrip() {
     drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn t13_composed_market_route_persists_input_evidence_and_replays_same_job() {
+    let (root, service) = service();
+    let bars = (0..100)
+        .map(|i| replay::Bar {
+            time: i * 60000,
+            open: 100.0,
+            high: 103.0,
+            low: 99.0,
+            close: 100.0 + i as f64,
+            volume: 1.0,
+            funding_rate: None,
+        })
+        .collect::<Vec<_>>();
+    service
+        .sources
+        .cache
+        .load(
+            cache::SourceKey {
+                source: "candles".into(),
+                instrument: "BTC-USDT".into(),
+                timeframe_ms: 60000,
+                start_ms: 0,
+                end_ms: 6000000,
+                closed_only: true,
+                schema: 1,
+            },
+            || async { Ok(bars.clone()) },
+        )
+        .await
+        .unwrap();
+    let request: MarketRequest = serde_json::from_value(json!({
+        "action":"screen", "instruments":["BTC-USDT"], "fields":["returns"],
+        "timeframe_ms":60000, "start_ms":0, "end_ms":6000000,
+        "composition":{"version":"okx.market.composition/v1", "steps":[
+            {"id":"z","op":"rolling_zscore","input":"close","period":20}
+        ],"result_steps":["z"]}
+    }))
+    .unwrap();
+    let admitted = service.market(request.clone(), None, None).await.unwrap();
+    let result = completed_market(&service, request.clone(), admitted).await;
+    assert_eq!(result["rows"].as_array().unwrap().len(), 1);
+    assert!(result["rows"][0]["metrics"]["z"].is_number());
+    let captured = &result["rows"][0]["source_captures"]["candles"];
+    let id = captured["evidence_artifact"].as_str().unwrap();
+    let manifest: Value = service.artifacts.read_evidence_json(id).unwrap();
+    assert_eq!(manifest["observed_points"], 100);
+    assert_eq!(manifest["capture_hash"], captured["capture_hash"]);
+    let reconstructed: Vec<replay::Bar> = service
+        .artifacts
+        .read_evidence_json(manifest["chunks"][0].as_str().unwrap())
+        .unwrap();
+    assert_eq!(reconstructed.len(), 100);
+    assert_eq!(reconstructed.last().unwrap().close, 199.0);
+    assert_eq!(
+        result["rows"][0]["source_captures"]["open_interest"],
+        Value::Null
+    );
+    assert_eq!(service.market(request, None, None).await.unwrap(), result);
+    let mut graph = std::collections::BTreeSet::new();
+    let job_artifact = service
+        .jobs
+        .get(result["job_id"].as_str().unwrap())
+        .unwrap()
+        .artifact
+        .unwrap();
+    service.artifact_graph(&job_artifact, &mut graph).unwrap();
+    assert!(graph.contains(id));
+    assert!(graph.contains(manifest["chunks"][0].as_str().unwrap()));
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
 #[tokio::test(flavor = "current_thread")]
 async fn ordinary_market_cursors_resume_one_job_and_reject_other_queries() {
     let (root, service) = service();

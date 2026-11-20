@@ -1,6 +1,7 @@
 use super::*;
 use okx_analysis::operators::{Operator, registry, scalar};
 use replay::Bar;
+use serde::Serialize;
 use tracing::Instrument;
 struct Loaded {
     instrument: String,
@@ -11,6 +12,10 @@ struct Loaded {
     oi: Option<Result<Vec<(u64, f64)>, String>>,
     excluded: Option<usize>,
 }
+
+#[cfg(test)]
+#[path = "tests/market_source_evidence_tests.rs"]
+mod source_evidence_tests;
 
 /// A public rate defer is transient source capacity, not durable analytical evidence.
 fn market_source_rate_deferred(loaded: &[Loaded]) -> bool {
@@ -42,23 +47,17 @@ fn market_job_schema(fields: &[String]) -> &'static str {
     }
 }
 
-// Composition quality now diagnoses nulls and counts exact aligned source
-// observations. Do not replay pre-diagnostic immutable artifacts as if they
-// carried these new witnesses; legacy market queries keep their prior keys.
+// Composed results now retain immutable normalized observations as well as
+// their capture hashes. Completed old jobs cannot provide this witness, so
+// isolate the new contract without invalidating legacy flat queries.
 fn market_request_schema(
     fields: &[String],
     has_composition: bool,
     oi_composition: bool,
     funding_composition: bool,
 ) -> &'static str {
-    if funding_composition {
-        "market/518.4.funding-event-composition-v1"
-    } else if oi_composition && fields.iter().any(|field| field == "pearson_correlation") {
-        "market/518.3.oi-composition-correlation-alignment-v1"
-    } else if oi_composition {
-        "market/518.3.oi-composition-alignment-v1"
-    } else if has_composition {
-        "market/518.3.composition-null-causes-v1"
+    if has_composition || oi_composition || funding_composition {
+        "market/518.5.normalized-source-evidence-v1"
     } else {
         market_job_schema(fields)
     }
@@ -405,6 +404,13 @@ impl AnalyticsService {
                 "funding_event_alignment":{"location":"funding_event_alignment",
                     "expected_events":null,"join_semantics":"exact_event_timestamp_no_forward_fill",
                     "publication_time_verified":false},
+                "source_evidence":{"location":"source_captures.<source>.evidence_artifact",
+                    "schema":"okx.market.normalized-source/v1",
+                    "chunk_size":4096,"storage":"immutable_content_addressed",
+                    "capture_hash":"canonical_source_tuple_sha256",
+                    "retrieval":"retained_with_completed_market_job",
+                    "scope":"composition_sources_only",
+                    "publication_time_verified_for_oi_and_funding":false},
                 "null_diagnostics":{"location":"composition_quality.<result>.issues",
                     "origin_step":true,
                     "reason_codes":["SOURCE_OBSERVATION_MISSING","WARMUP",
@@ -580,6 +586,7 @@ impl AnalyticsService {
             return Err("GLOBAL_RANK_CANDLE_COVERAGE_INCOMPLETE".into());
         }
         let request = request.clone();
+        let store = self.artifacts.clone();
         self.cpu
             .run(cancel, move |cancel| {
                 let matrix = if matches!(request.action, MarketAction::Compare)
@@ -608,13 +615,14 @@ impl AnalyticsService {
                     if cancel.load(Ordering::Acquire) {
                         return Err("CANCELLED".into());
                     }
-                    rows.push(compute_row_planned(
-                        row,
-                        &request,
-                        peer.as_deref(),
-                        &plan,
-                        need_candles,
-                    )?);
+                    let source_evidence = if plan.composition.is_some() {
+                        publish_composition_source_evidence(&store, &row, &request, &plan, &cancel)?
+                    } else {
+                        Vec::new()
+                    };
+                    let result =
+                        compute_row_planned(row, &request, peer.as_deref(), &plan, need_candles)?;
+                    rows.push(attach_composition_source_evidence(result, source_evidence)?);
                 }
                 if global_rank {
                     // Never drop deficient candidates via a metric filter and
@@ -636,6 +644,145 @@ impl AnalyticsService {
             })
             .await
     }
+}
+
+// The evidence is the exact normalized input to the checked composition,
+// published in bounded pages. The existing source-capture hashes remain the
+// domain-separated witnesses over the full ordered source, not over pages.
+// Neither a missing source nor a failed source read creates a fabricated page.
+const MARKET_SOURCE_EVIDENCE_CHUNK: usize = 4096;
+type PublishedMarketSource = (&'static str, String, String);
+
+fn attach_composition_source_evidence(
+    mut result: Value,
+    evidence: Vec<PublishedMarketSource>,
+) -> Result<Value, String> {
+    for (source, capture_hash, artifact) in evidence {
+        let capture = result["source_captures"][source]
+            .as_object_mut()
+            .ok_or("COMPOSITION_SOURCE_CAPTURE_MISSING")?;
+        if capture.get("capture_hash") != Some(&json!(capture_hash)) {
+            return Err("COMPOSITION_SOURCE_CAPTURE_HASH_MISMATCH".into());
+        }
+        capture.insert("evidence_artifact".into(), json!(artifact));
+    }
+    Ok(result)
+}
+
+fn publish_normalized_source<T: Serialize>(
+    store: &ResearchArtifactStore,
+    request: &MarketRequest,
+    instrument: &str,
+    source: &'static str,
+    hash_domain: &'static str,
+    observations: &[T],
+    cancel: &super::executor::Cancel,
+) -> Result<PublishedMarketSource, String> {
+    let capture_hash = okx_research::canonical_sha256(&(
+        hash_domain,
+        instrument,
+        request.start_ms,
+        request.end_ms,
+        request.timeframe_ms,
+        observations,
+    ))
+    .map_err(|e| e.to_string())?;
+    let mut chunks = Vec::new();
+    for chunk in observations.chunks(MARKET_SOURCE_EVIDENCE_CHUNK) {
+        if cancel.load(Ordering::Acquire) {
+            return Err("CANCELLED".into());
+        }
+        chunks.push(store.publish_evidence(&chunk).map_err(|e| e.to_string())?.0);
+    }
+    if cancel.load(Ordering::Acquire) {
+        return Err("CANCELLED".into());
+    }
+    let manifest = store
+        .publish_evidence(&json!({
+            "schema":"okx.market.normalized-source/v1",
+            "source":source,
+            "instrument":instrument,
+            "requested_start_ms":request.start_ms,
+            "requested_end_ms":request.end_ms,
+            "timeframe_ms":request.timeframe_ms,
+            "capture_hash":capture_hash,
+            "hash_domain":hash_domain,
+            "observed_points":observations.len(),
+            "chunk_size":MARKET_SOURCE_EVIDENCE_CHUNK,
+            "chunks":chunks,
+            "time_basis":if source == "funding_rate" {
+                "realized_settlement_event_time_publication_unverified"
+            } else if source == "open_interest" {
+                "observation_event_time_publication_unverified"
+            } else {
+                "closed_candle_time"
+            },
+            "publication_time_verified":false,
+            "availability_assumption":if source == "candles" {
+                "after_closed_bar"
+            } else {
+                "historical_event_only"
+            },
+        }))
+        .map_err(|e| e.to_string())?
+        .0;
+    Ok((source, capture_hash, manifest))
+}
+
+fn publish_composition_source_evidence(
+    store: &ResearchArtifactStore,
+    row: &Loaded,
+    request: &MarketRequest,
+    plan: &okx_analysis::query_plan::QueryPlan,
+    cancel: &super::executor::Cancel,
+) -> Result<Vec<PublishedMarketSource>, String> {
+    use okx_analysis::query_plan::Source;
+    let composition_sources = plan
+        .composition
+        .as_ref()
+        .ok_or("COMPOSITION_EVIDENCE_WITHOUT_PLAN")?
+        .sources();
+    let mut evidence = Vec::with_capacity(3);
+    if plan.sources.contains(&Source::Candles) {
+        if let Ok(bars) = &row.bars {
+            evidence.push(publish_normalized_source(
+                store,
+                request,
+                &row.instrument,
+                "candles",
+                "okx.market.candle-source-capture/v1",
+                bars,
+                cancel,
+            )?);
+        }
+    }
+    if composition_sources.contains(&Source::OpenInterest) {
+        if let Some(Ok(points)) = &row.oi {
+            evidence.push(publish_normalized_source(
+                store,
+                request,
+                &row.instrument,
+                "open_interest",
+                "okx.market.oi-source-capture/v1",
+                points,
+                cancel,
+            )?);
+        }
+    }
+    if composition_sources.contains(&Source::Funding) {
+        if let Some(Ok(events)) = &row.funding {
+            evidence.push(publish_normalized_source(
+                store,
+                request,
+                &row.instrument,
+                "funding_rate",
+                "okx.market.funding-realized-event-source-capture/v1",
+                events,
+                cancel,
+            )?);
+        }
+    }
+    Ok(evidence)
 }
 /// Full-universe scores require identical *closed* time coverage for all candidates.
 fn complete_rank_history(bars: &[Bar], start: u64, end: u64, step: u64) -> bool {
@@ -738,6 +885,7 @@ fn compute_row_planned(
     // A source-specific metric does not imply that candle observations exist.
     // Preserve candle coverage for mixed queries and composed price series,
     // but report N/A (null) when the typed plan excludes candle sources.
+    let candles_available = row.bars.is_ok();
     let bars = match row.bars {
         Ok(b) => b,
         Err(e) => {
@@ -1160,7 +1308,7 @@ fn compute_row_planned(
             units.insert(id, json!(unit_name));
         }
     }
-    let source_captures = if composition_oi || composition_funding {
+    let source_captures = if composition.is_some() {
         let mut captures = serde_json::Map::new();
         if composition_oi {
             let oi_capture = row
@@ -1227,7 +1375,7 @@ fn compute_row_planned(
                 funding_capture.unwrap_or(Value::Null),
             );
         }
-        let candle_capture = needs_candles
+        let candle_capture = (needs_candles && candles_available)
             .then(|| -> Result<Value, String> {
                 let hash = okx_research::canonical_sha256(&(
                     "okx.market.candle-source-capture/v1",
@@ -1445,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn t13_composition_quality_uses_a_new_namespace_without_invalidating_legacy_results() {
+    fn t13_composition_evidence_uses_a_new_namespace_without_invalidating_legacy_results() {
         let fields = vec!["returns".to_owned()];
         let oi_fields = vec!["pearson_correlation".to_owned()];
         assert_eq!(
@@ -1456,19 +1604,18 @@ mod tests {
         let oi_composed = market_request_schema(&fields, true, true, false);
         let oi_correlated = market_request_schema(&oi_fields, true, true, false);
         let funding_composed = market_request_schema(&fields, true, false, true);
-        assert_eq!(composed, "market/518.3.composition-null-causes-v1");
-        assert_eq!(oi_composed, "market/518.3.oi-composition-alignment-v1");
+        assert_eq!(composed, "market/518.5.normalized-source-evidence-v1");
+        assert_eq!(oi_composed, composed);
         assert_ne!(composed, "market/518.2.composition-quality-v1");
         assert_ne!(oi_composed, "market/518.2.oi-composition-quality-v1");
         assert_ne!(
             composed,
             market_request_schema(&fields, false, false, false)
         );
-        assert_ne!(oi_composed, composed);
-        assert_ne!(oi_correlated, oi_composed);
+        assert_eq!(oi_correlated, oi_composed);
         assert_eq!(
             funding_composed,
-            "market/518.4.funding-event-composition-v1"
+            "market/518.5.normalized-source-evidence-v1"
         );
         assert_eq!(
             funding_composed,
