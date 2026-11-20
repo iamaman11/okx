@@ -448,6 +448,37 @@ fn restart_marks_job_interrupted() {
     assert_eq!(t.get("fixture").unwrap().state, State::Interrupted);
 }
 #[test]
+fn t14_executor_cannot_forge_queue_recovery_or_inconsistent_terminal_state() {
+    let jobs = Jobs::open(path("t14-transitions")).unwrap();
+    let id = "f".repeat(64);
+    jobs.enqueue("t14-key".into(), id.clone()).unwrap();
+    for forbidden in [State::Queued, State::Interrupted] {
+        assert_eq!(
+            jobs.update(&id, forbidden, None, None).unwrap_err(),
+            "RESEARCH_TRANSITION_INVALID"
+        );
+    }
+    assert_eq!(
+        jobs.update(
+            &id,
+            State::Completed,
+            Some("a".repeat(64)),
+            Some("error".into())
+        )
+        .unwrap_err(),
+        "RESEARCH_COMPLETED_ERROR_UNEXPECTED"
+    );
+    assert_eq!(jobs.get(&id).unwrap().state, State::Queued);
+    jobs.update(&id, State::Running, None, None).unwrap();
+    jobs.update(&id, State::Completed, Some("a".repeat(64)), None)
+        .unwrap();
+    assert_eq!(jobs.get(&id).unwrap().state, State::Completed);
+    assert_eq!(
+        jobs.update(&id, State::Running, None, None).unwrap_err(),
+        "RESEARCH_TERMINAL_IMMUTABLE"
+    );
+}
+#[test]
 fn wrapped_source_throttle_is_retryable() {
     assert!(is_transient_rate_defer(Some(
         "public OKX market API error: OKX rate/backpressure defer: LocalBudget"
@@ -596,7 +627,7 @@ async fn research_io_does_not_block_trade_loop() {
 #[test]
 fn job_status_reads_bounded_rows_at_100k_jobs() {
     let p = path("load");
-    let s = Jobs::open(p).unwrap();
+    let s = Jobs::open(p.clone()).unwrap();
     {
         let mut db = s.db.lock().unwrap();
         let tx = db.transaction().unwrap();
@@ -632,6 +663,33 @@ fn job_status_reads_bounded_rows_at_100k_jobs() {
         );
     }
     assert_eq!(s.retention_candidates(u64::MAX, 64).unwrap().len(), 0);
+    {
+        let db = s.db.lock().unwrap();
+        let plan = db
+            .prepare("EXPLAIN QUERY PLAN SELECT id,state FROM research_jobs ORDER BY created_ms DESC,id DESC LIMIT 129")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join(" ");
+        assert!(
+            plan.contains("idx_research_jobs_diagnostics_recent"),
+            "{plan}"
+        );
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    }
+    drop(s);
+    let reopened = Jobs::open(p).unwrap();
+    let latest = reopened.diagnostic_readback("job_099999");
+    assert_eq!(latest["job"]["state"], "completed");
+    assert_eq!(latest["job"]["origin"], "durable_startup_subset");
+    assert_eq!(latest["retained"], 128);
+    assert_eq!(latest["startup_subset_truncated"], true);
+    assert_eq!(
+        reopened.diagnostic_readback("job_000000")["reason_code"],
+        "UNKNOWN_NOT_RETAINED"
+    );
 }
 
 #[test]

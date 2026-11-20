@@ -173,6 +173,10 @@ impl Jobs {
                     ON research_jobs(created_ms,id) WHERE artifact IS NOT NULL AND pinned=0;
                  CREATE INDEX IF NOT EXISTS idx_research_jobs_active
                     ON research_jobs(state,id);
+                 -- Latest committed jobs must be observable after restart
+                 -- without a full-table scan or ordering by random hash IDs.
+                 CREATE INDEX IF NOT EXISTS idx_research_jobs_diagnostics_recent
+                    ON research_jobs(created_ms DESC,id DESC);
                  CREATE INDEX IF NOT EXISTS idx_research_jobs_artifact
                     ON research_jobs(artifact) WHERE artifact IS NOT NULL;
                  CREATE TABLE IF NOT EXISTS research_cancel_keys(
@@ -548,8 +552,17 @@ impl Jobs {
         artifact: Option<String>,
         error: Option<String>,
     ) -> Result<(), String> {
+        // Admission alone creates QUEUED, and startup recovery alone creates
+        // INTERRUPTED. Neither is a permissible executor transition: a late
+        // CPU task may not requeue itself or forge a restart diagnosis.
+        if matches!(state, State::Queued | State::Interrupted) {
+            return Err("RESEARCH_TRANSITION_INVALID".into());
+        }
         if state == State::Completed && artifact.is_none() {
             return Err("RESEARCH_COMPLETED_RESULT_REQUIRED".into());
+        }
+        if state == State::Completed && error.is_some() {
+            return Err("RESEARCH_COMPLETED_ERROR_UNEXPECTED".into());
         }
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let updated = db
