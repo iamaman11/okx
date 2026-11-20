@@ -3262,7 +3262,16 @@ mod t02_t06_multisource_regression {
 
     #[test]
     fn t07_out_of_range_historical_projection_is_null_not_a_panic_or_future_read() {
-        let plan = CheckedComposition::compile(two_step_composition(), 3).unwrap();
+        let spec = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"r1","op":"returns_series","input":"close"},
+                {"id":"w1","op":"rolling_mean","input":"r1","period":2}
+            ],
+            "result_steps":["w1"]
+        }))
+        .unwrap();
+        let plan = CheckedComposition::compile(spec, 3).unwrap();
         assert_eq!(plan.evaluate_at(&[100., 110., 105.], usize::MAX)["w1"].0, None);
         let (_, causes) = plan.evaluate_with_diagnostics(&[]);
         assert_eq!(causes["w1"].reason, "PROJECTION_INDEX_OUT_OF_RANGE");
