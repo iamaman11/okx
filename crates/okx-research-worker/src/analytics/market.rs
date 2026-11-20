@@ -400,6 +400,27 @@ impl AnalyticsService {
                     "typed_inputs":typed_inputs})
             })
             .collect::<Vec<_>>();
+        // Keep the primitive catalog separate from the enclosing capability
+        // object: a single giant json! expansion hits Rust's macro recursion
+        // limit as the finite typed operator set grows.
+        let composition_operations = json!([
+            {"op":"returns_series","input_unit":"price_or_contracts","output_unit":"ratio"},
+            {"op":"rolling_mean","input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"compute_cost":"linear_in_series_length"},
+            {"op":"rolling_max","input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
+            {"op":"rolling_min","input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
+            {"op":"rolling_pearson","input_unit":"ratio","other_unit":"ratio","output_unit":"coefficient","period_min":30,"period_max":1000,"null_policy":"strict_exact_pairs","compute_cost":"linear_in_series_length","minimum_pairs":30},
+            {"op":"rolling_zscore","version":1,"input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"coefficient","period_min":2,"period_max":1000,"variance":"population_inclusive_window","null_policy":"strict_window_or_zero_variance","compute_cost":"linear_in_series_length","causal":true},
+            {"op":"add_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing"},
+            {"op":"subtract_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing","numeric_policy":"finite_only"},
+            {"op":"divide_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing_or_zero_denominator","numeric_policy":"finite_only"},
+            {"op":"and","input_unit":"boolean","other_unit":"boolean","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
+            {"op":"or","input_unit":"boolean","other_unit":"boolean","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
+            {"op":"lag","input_unit":"causal_series","output_unit":"same_as_input","period_min":1,"period_max":1000},
+            {"op":"greater_than","input_unit":"price_or_ratio_or_coefficient","output_unit":"boolean","requires":"finite_threshold"},
+            {"op":"greater_than_series","input_unit":"price_or_ratio_or_contracts_or_coefficient","other_unit":"same_as_input","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
+            {"op":"rising_edge","input_unit":"boolean","output_unit":"event","trigger":"false_to_true"},
+            {"op":"forward_return_label","input_unit":"price","output_unit":"outcome_ratio","requires":"prior_event_step_in_when","period_min":1,"period_max":1000,"causal_feature":false}
+        ]);
         let mut capabilities = json!({"schema":"okx.market.capabilities/v1",
             "route_owner":"okx-research-worker","compute_owner":"okx-kernel",
             "availability_policy":"actual_data_and_rights_checked_per_request",
@@ -436,22 +457,7 @@ impl AnalyticsService {
                         "observed_oi_observations","aligned_observations",
                         "paired_return_observations"],
                     "publication_time_verified":false},
-                "operations":[{"op":"returns_series","input_unit":"price_or_contracts","output_unit":"ratio"},
-                    {"op":"rolling_mean","input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"compute_cost":"linear_in_series_length"},
-                    {"op":"rolling_max","input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
-                    {"op":"rolling_min","input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
-                    {"op":"rolling_pearson","input_unit":"ratio","other_unit":"ratio","output_unit":"coefficient","period_min":30,"period_max":1000,"null_policy":"strict_exact_pairs","compute_cost":"linear_in_series_length","minimum_pairs":30},
-                    {"op":"rolling_zscore","version":1,"input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"coefficient","period_min":2,"period_max":1000,"variance":"population_inclusive_window","null_policy":"strict_window_or_zero_variance","compute_cost":"linear_in_series_length","causal":true},
-                    {"op":"add_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing"},
-                    {"op":"subtract_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing","numeric_policy":"finite_only"},
-                    {"op":"divide_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing_or_zero_denominator","numeric_policy":"finite_only"},
-                    {"op":"and","input_unit":"boolean","other_unit":"boolean","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
-                    {"op":"or","input_unit":"boolean","other_unit":"boolean","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
-                    {"op":"lag","input_unit":"causal_series","output_unit":"same_as_input","period_min":1,"period_max":1000},
-                    {"op":"greater_than","input_unit":"price_or_ratio_or_coefficient","output_unit":"boolean","requires":"finite_threshold"},
-                    {"op":"greater_than_series","input_unit":"price_or_ratio_or_contracts_or_coefficient","other_unit":"same_as_input","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
-                    {"op":"rising_edge","input_unit":"boolean","output_unit":"event","trigger":"false_to_true"},
-                    {"op":"forward_return_label","input_unit":"price","output_unit":"outcome_ratio","requires":"prior_event_step_in_when","period_min":1,"period_max":1000,"causal_feature":false}],
+                "operations":composition_operations,
                 "limits":{"max_steps":32,"max_depth":8,"max_result_steps":14,"max_cells":8000000,"max_work_units":64000000},
                 "result_projection":"last_closed_observation","outcome_policy":"unconfirmed_without_future_bars_never_a_signal"},
             "limits":{"max_explicit_instruments":100,"max_page_rows":50,
@@ -1159,8 +1165,8 @@ fn compute_row_planned(
             let mut opens = composition.uses_source("open").then(|| vec![f64::NAN; count]);
             let mut highs = composition.uses_source("high").then(|| vec![f64::NAN; count]);
             let mut lows = composition.uses_source("low").then(|| vec![f64::NAN; count]);
-            let mut open_interest = vec![None; count];
-            let mut funding_rate = vec![None; count];
+            let mut open_interest = if composition_oi { vec![None; count] } else { Vec::new() };
+            let mut funding_rate = if composition_funding { vec![None; count] } else { Vec::new() };
             for bar in bars.iter() {
                 if let Some(offset) = bar.time.checked_sub(request.start_ms)
                     && offset % request.timeframe_ms == 0
