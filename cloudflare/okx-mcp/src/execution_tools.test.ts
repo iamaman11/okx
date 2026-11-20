@@ -162,6 +162,15 @@ const ohlcGraph={...composed,steps:[
 ],result_steps:['confirmed']};
 fail(validTool('market',{...marketScreen,composition:ohlcGraph}),
  'T02/T04 four closed-candle inputs can compose into a typed signal');
+const volumeGraph={...composed,steps:[
+ {id:'fast_volume',op:'rolling_mean',input:'volume',period:2},
+ {id:'slow_volume',op:'rolling_mean',input:'volume',period:3},
+ {id:'lift',op:'greater_than_series',input:'fast_volume',other:'slow_volume'},
+ {id:'entry',op:'rising_edge',input:'lift'},
+ {id:'volume_change',op:'returns_series',input:'volume'},
+],result_steps:['fast_volume','lift','entry','volume_change']};
+fail(validTool('market',{...marketScreen,composition:volumeGraph}),
+ 'T02/T07 venue-native volume can feed causal typed series composition');
 for(const bad of [
  {id:'above',op:'greater_than_series',input:'fast'},
  {id:'above',op:'greater_than_series',input:'fast',other:'slow',period:2},

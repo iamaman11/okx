@@ -22,10 +22,16 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
     assert_eq!(capabilities["effects"]["write_finance"], false);
     assert_eq!(capabilities["effects"]["write_governance"], false);
     assert_eq!(capabilities["composition"]["input_sources"],
-        serde_json::json!(["open", "high", "low", "close", "open_interest", "funding_rate"]));
+        serde_json::json!(["open", "high", "low", "close", "volume", "open_interest", "funding_rate"]));
     for source in ["open", "high", "low", "close"] {
         assert_eq!(capabilities["composition"]["source_units"][source], "price");
     }
+    assert_eq!(capabilities["composition"]["source_units"]["volume"], "native_volume");
+    assert_eq!(capabilities["composition"]["ohlc_policy"],
+        "same_instrument_closed_candle_grid_no_forward_fill");
+    let volume_change = operators.iter().find(|item| item["name"] == "volume_change").unwrap();
+    assert_eq!(volume_change["typed_inputs"][0]["unit"], "native_volume");
+    assert_eq!(volume_change["typed_inputs"][0]["source"], "candles");
     let comparator = capabilities["composition"]["operations"]
         .as_array().unwrap().iter()
         .find(|item| item["op"] == "greater_than_series").unwrap();

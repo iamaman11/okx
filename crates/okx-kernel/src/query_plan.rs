@@ -25,7 +25,8 @@ pub struct CompositionRequest {
 pub struct SeriesStep {
     pub id: String,
     pub op: SeriesOp,
-    /// "open", "high", "low", "close" (closed-candle prices), "open_interest"
+    /// "open", "high", "low", "close" (closed-candle prices), "volume"
+    /// (native venue volume per candle and instrument), "open_interest"
     /// (contracts), and sparse "funding_rate" (realized event-time ratio) are
     /// sources; other names must identify previously compiled steps.
     pub input: String,
@@ -85,7 +86,7 @@ pub struct CompositionNullCause {
     pub origin_step: String,
 }
 
-/// Optional aligned closed-candle columns. A missing observation is NaN;
+/// Optional aligned closed-candle columns (OHLCV). A missing observation is NaN;
 /// the evaluation layer turns it into an unknown, never a synthetic zero.
 /// An absent *required column* is an error before evaluation.
 #[derive(Debug, Clone, Copy, Default)]
@@ -93,6 +94,7 @@ pub struct CandlePriceInputs<'a> {
     pub open: Option<&'a [f64]>,
     pub high: Option<&'a [f64]>,
     pub low: Option<&'a [f64]>,
+    pub volume: Option<&'a [f64]>,
 }
 
 impl CheckedComposition {
@@ -161,13 +163,14 @@ impl CheckedComposition {
             {
                 return Err(format!("{path}.id:INVALID"));
             }
-            if matches!(step.id.as_str(), "open" | "high" | "low" | "close" | "open_interest" | "funding_rate")
+            if matches!(step.id.as_str(), "open" | "high" | "low" | "close" | "volume" | "open_interest" | "funding_rate")
                 || known.contains_key(&step.id)
             {
                 return Err(format!("{path}.id:DUPLICATE"));
             }
             let (input_unit, parent_depth) = match step.input.as_str() {
                 "open" | "high" | "low" | "close" => (Unit::Price, 0),
+                "volume" => (Unit::NativeVolume, 0),
                 "open_interest" => (Unit::Contracts, 0),
                 "funding_rate" => (Unit::Ratio, 0),
                 _ => known.get(&step.input).copied().ok_or_else(|| {
@@ -207,6 +210,7 @@ impl CheckedComposition {
                     .ok_or_else(|| format!("{path}.other:REQUIRED"))?;
                 Some(match name {
                     "open" | "high" | "low" | "close" => (Unit::Price, 0),
+                    "volume" => (Unit::NativeVolume, 0),
                     "open_interest" => (Unit::Contracts, 0),
                     "funding_rate" => (Unit::Ratio, 0),
                     _ => known
@@ -243,7 +247,7 @@ impl CheckedComposition {
                 SeriesOp::RollingZscore => {
                     if !matches!(
                         input_unit,
-                        Unit::Price | Unit::Ratio | Unit::Contracts | Unit::Coefficient
+                        Unit::Price | Unit::Ratio | Unit::Contracts | Unit::NativeVolume | Unit::Coefficient
                     ) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
@@ -325,7 +329,7 @@ impl CheckedComposition {
                     Unit::Boolean
                 }
                 SeriesOp::ReturnsSeries => {
-                    if !matches!(input_unit, Unit::Price | Unit::Contracts) {
+                    if !matches!(input_unit, Unit::Price | Unit::Contracts | Unit::NativeVolume) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=price:actual={}",
                             composition_unit_name(input_unit)
@@ -345,7 +349,7 @@ impl CheckedComposition {
                 | SeriesOp::Lag => {
                     let numeric = matches!(
                         input_unit,
-                        Unit::Price | Unit::Ratio | Unit::Contracts | Unit::Coefficient
+                        Unit::Price | Unit::Ratio | Unit::Contracts | Unit::NativeVolume | Unit::Coefficient
                     );
                     let lagged_discrete = step.op == SeriesOp::Lag
                         && matches!(input_unit, Unit::Boolean | Unit::Event);
@@ -364,7 +368,7 @@ impl CheckedComposition {
                     input_unit
                 }
                 SeriesOp::GreaterThan => {
-                    if !matches!(input_unit, Unit::Price | Unit::Ratio | Unit::Coefficient) {
+                    if !matches!(input_unit, Unit::Price | Unit::Ratio | Unit::NativeVolume | Unit::Coefficient) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
                             composition_unit_name(input_unit)
@@ -379,7 +383,7 @@ impl CheckedComposition {
                     Unit::Boolean
                 }
                 SeriesOp::GreaterThanSeries => {
-                    if !matches!(input_unit, Unit::Price | Unit::Ratio | Unit::Contracts | Unit::Coefficient) {
+                    if !matches!(input_unit, Unit::Price | Unit::Ratio | Unit::Contracts | Unit::NativeVolume | Unit::Coefficient) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
                             composition_unit_name(input_unit)
@@ -611,13 +615,18 @@ impl CheckedComposition {
         ),
         String,
     > {
-        for (name, series) in [("open", candles.open), ("high", candles.high), ("low", candles.low)] {
+        for (name, series) in [("open", candles.open), ("high", candles.high), ("low", candles.low), ("volume", candles.volume)] {
             if self.uses_source(name) && series.is_none() {
                 return Err(format!("composition.sources.{name}:REQUIRED"));
             }
             if series.is_some_and(|values| values.len() != close.len()) {
                 return Err(format!("composition.sources.{name}:ALIGNMENT_LENGTH_MISMATCH"));
             }
+        }
+        if candles.volume.is_some_and(|values| {
+            values.iter().any(|value| !value.is_nan() && (!value.is_finite() || *value < 0.0))
+        }) {
+            return Err("composition.sources.volume:INVALID_NON_NEGATIVE_VOLUME".into());
         }
         if let Some(oi) = open_interest {
             self.check_open_interest(close, oi)?;
@@ -677,7 +686,7 @@ impl CheckedComposition {
             "close".into(),
             close.iter().map(|v| v.is_finite().then_some(*v)).collect(),
         );
-        for (name, source) in [("open", candles.open), ("high", candles.high), ("low", candles.low)] {
+        for (name, source) in [("open", candles.open), ("high", candles.high), ("low", candles.low), ("volume", candles.volume)] {
             if self.uses_source(name) {
                 values.insert(
                     name.into(),
@@ -1061,7 +1070,7 @@ impl CheckedComposition {
     pub fn result_sources(&self) -> BTreeMap<String, BTreeSet<Source>> {
         let mut known = BTreeMap::<String, BTreeSet<Source>>::new();
         known.insert("close".into(), BTreeSet::from([Source::Candles]));
-        for source in ["open", "high", "low"] {
+        for source in ["open", "high", "low", "volume"] {
             known.insert(source.into(), BTreeSet::from([Source::Candles]));
         }
         known.insert(
@@ -1097,7 +1106,7 @@ fn source_buffer_count(steps: &[CheckedSeriesStep]) -> u64 {
         })
     };
     1 + u64::from(uses("open")) + u64::from(uses("high"))
-        + u64::from(uses("low")) + u64::from(uses("open_interest"))
+        + u64::from(uses("low")) + u64::from(uses("volume")) + u64::from(uses("open_interest"))
         + u64::from(uses("funding_rate"))
 }
 
@@ -1317,6 +1326,9 @@ pub enum Source {
 pub enum Unit {
     Price,
     Contracts,
+    /// Provider-native candle volume. Spot base quantity and derivative
+    /// contract counts must not silently become interchangeable dimensions.
+    NativeVolume,
     Ratio,
     Boolean,
     Event,
@@ -1332,6 +1344,7 @@ fn composition_unit_name(unit: Unit) -> &'static str {
     match unit {
         Unit::Price => "price",
         Unit::Contracts => "contracts",
+        Unit::NativeVolume => "native_volume",
         Unit::Ratio => "ratio",
         Unit::Boolean => "boolean",
         Unit::Event => "event",
@@ -1394,7 +1407,7 @@ pub struct QueryPlan {
 pub fn input(name: &str) -> Result<Input, String> {
     let (source, unit) = match name {
         "close" | "high" | "low" | "peer_close" => (Source::Candles, Unit::Price),
-        "volume" => (Source::Candles, Unit::Quantity),
+        "volume" => (Source::Candles, Unit::NativeVolume),
         "bid" | "ask" => (Source::Ticker, Unit::Price),
         "funding" | "funding_rate" => (Source::Funding, Unit::Ratio),
         "open_interest" => (Source::OpenInterest, Unit::Contracts),
@@ -1594,6 +1607,83 @@ mod tests {
     use super::*;
 
     #[test]
+    fn t02_t04_t07_native_volume_is_composable_but_never_an_implicit_price_or_contract() {
+        let request: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"short","op":"rolling_mean","input":"volume","period":2},
+                {"id":"long","op":"rolling_mean","input":"volume","period":3},
+                {"id":"lift","op":"greater_than_series","input":"short","other":"long"},
+                {"id":"entry","op":"rising_edge","input":"lift"},
+                {"id":"change","op":"returns_series","input":"volume"}
+            ],
+            "result_steps":["short","lift","entry","change"]
+        })).unwrap();
+        let checked = CheckedComposition::compile(request, 5).unwrap();
+        assert_eq!(input("volume").unwrap().unit, Unit::NativeVolume);
+        assert_eq!(checked.steps[0].unit, Unit::NativeVolume);
+        assert_eq!(checked.steps[1].unit, Unit::NativeVolume);
+        assert_eq!(checked.steps[2].unit, Unit::Boolean);
+        assert_eq!(checked.steps[3].unit, Unit::Event);
+        assert_eq!(checked.steps[4].unit, Unit::Ratio);
+        assert_eq!(checked.sources(), BTreeSet::from([Source::Candles]));
+        assert!(checked.uses_source("volume"));
+        assert!(!checked.uses_source("open"));
+        let close = [100.0; 5];
+        let volume = [10.0, 10.0, 10.0, 10.0, 30.0];
+        let candles = CandlePriceInputs { volume: Some(&volume), ..Default::default() };
+        let (result, causes) = checked.evaluate_with_candle_sources_diagnostics(
+            &close, candles, None, None,
+        ).unwrap();
+        assert!(causes.is_empty());
+        assert_eq!(result["short"], (Some(20.0), Unit::NativeVolume));
+        assert_eq!(result["lift"], (Some(1.0), Unit::Boolean));
+        assert_eq!(result["entry"], (Some(1.0), Unit::Event));
+        assert_eq!(result["change"], (Some(2.0), Unit::Ratio));
+        let mut missing = volume;
+        missing[4] = f64::NAN;
+        let (partial, causes) = checked.evaluate_with_candle_sources_diagnostics(
+            &close, CandlePriceInputs { volume: Some(&missing), ..Default::default() }, None, None,
+        ).unwrap();
+        assert_eq!(partial["lift"].0, None);
+        assert_eq!(causes["lift"].reason, "SOURCE_OBSERVATION_MISSING");
+        assert_eq!(causes["lift"].origin_step, "volume");
+        let mut negative = volume;
+        negative[4] = -1.0;
+        assert_eq!(checked.evaluate_with_candle_sources_diagnostics(
+            &close, CandlePriceInputs { volume: Some(&negative), ..Default::default() }, None, None,
+        ).unwrap_err(), "composition.sources.volume:INVALID_NON_NEGATIVE_VOLUME");
+        let mut zero = volume;
+        zero[4] = 0.0;
+        let (values, causes) = checked.evaluate_with_candle_sources_diagnostics(
+            &close, CandlePriceInputs { volume: Some(&zero), ..Default::default() }, None, None,
+        ).unwrap();
+        assert_eq!(values["short"].0, Some(5.0));
+        assert_eq!(values["change"].0, None);
+        assert_eq!(causes["change"].reason, "NON_POSITIVE_RETURN_INPUT");
+    }
+
+    #[test]
+    fn t02_native_volume_static_mismatch_and_source_shadowing_fail_before_io() {
+        let build = |input: &str, other: &str| serde_json::from_value::<CompositionRequest>(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[{"id":"comparison","op":"greater_than_series","input":input,"other":other}],
+            "result_steps":["comparison"]
+        })).unwrap();
+        assert_eq!(CheckedComposition::compile(build("volume", "close"), 5).unwrap_err(),
+            "composition.steps[0].other:UNIT_MISMATCH:expected=native_volume:actual=price");
+        assert_eq!(CheckedComposition::compile(build("volume", "open_interest"), 5).unwrap_err(),
+            "composition.steps[0].other:UNIT_MISMATCH:expected=native_volume:actual=contracts");
+        let shadow: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[{"id":"volume","op":"rolling_mean","input":"close","period":2}],
+            "result_steps":["volume"]
+        })).unwrap();
+        assert_eq!(CheckedComposition::compile(shadow, 5).unwrap_err(),
+            "composition.steps[0].id:DUPLICATE");
+    }
+
+    #[test]
     fn t03_t07_t15_two_price_windows_compose_into_a_causal_crossing_event() {
         let request: CompositionRequest = serde_json::from_value(serde_json::json!({
             "version":COMPOSITION_VERSION,
@@ -1642,6 +1732,7 @@ mod tests {
             open: Some(&open),
             high: Some(&high),
             low: Some(&low),
+            volume: None,
         };
         let (values, causes) = checked.evaluate_with_candle_sources_diagnostics(
             &close, candles, None, None,
