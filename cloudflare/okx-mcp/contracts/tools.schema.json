@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "accounts",
-      "description": "Accounts and limits.",
+      "description": "Accounts.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -44,34 +44,13 @@
                 "$ref": "#/$defs/d"
               },
               "max_notional_usdt": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/d"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/z"
               },
               "max_leverage": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/d"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/z"
               },
               "max_daily_realized_loss_usdt": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/d"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/z"
               },
               "max_drawdown_ratio": {
                 "anyOf": [
@@ -117,8 +96,7 @@
             "maximum": 9007199254740991
           },
           "link_id": {
-            "type": "string",
-            "pattern": "^link_[a-f0-9]{32}$"
+            "$ref": "#/$defs/l"
           }
         },
         "required": [
@@ -132,8 +110,7 @@
                 "const": "list"
               },
               "link_id": {
-                "type": "string",
-                "pattern": "^link_[a-f0-9]{32}$"
+                "$ref": "#/$defs/l"
               }
             },
             "required": [
@@ -148,8 +125,7 @@
               },
               "account": {},
               "link_id": {
-                "type": "string",
-                "pattern": "^link_[a-f0-9]{32}$"
+                "$ref": "#/$defs/l"
               }
             },
             "required": [
@@ -170,8 +146,7 @@
               "limits": {},
               "enabled": {},
               "link_id": {
-                "type": "string",
-                "pattern": "^link_[a-f0-9]{32}$"
+                "$ref": "#/$defs/l"
               }
             },
             "required": [
@@ -196,8 +171,7 @@
               "idempotency_key": {},
               "expected_revision": {},
               "link_id": {
-                "type": "string",
-                "pattern": "^link_[a-f0-9]{32}$"
+                "$ref": "#/$defs/l"
               }
             },
             "required": [
@@ -218,8 +192,7 @@
               "expected_revision": {},
               "limits": {},
               "link_id": {
-                "type": "string",
-                "pattern": "^link_[a-f0-9]{32}$"
+                "$ref": "#/$defs/l"
               }
             },
             "required": [
@@ -247,13 +220,28 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 64
+          },
+          "l": {
+            "type": "string",
+            "pattern": "^link_[a-f0-9]{32}$"
+          },
+          "z": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+                "maxLength": 29
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
       "annotations": {
         "readOnlyHint": false,
-        "destructiveHint": true,
-        "openWorldHint": false
+        "destructiveHint": true
       }
     },
     {
@@ -262,7 +250,6 @@
       "inputSchema": {
         "oneOf": [
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "list"
@@ -278,7 +265,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "status"
@@ -298,7 +284,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "create"
@@ -321,24 +306,7 @@
                 "maximum": 1
               },
               "parameters": {
-                "type": "object",
-                "properties": {
-                  "fast": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 999
-                  },
-                  "slow": {
-                    "type": "integer",
-                    "minimum": 2,
-                    "maximum": 1000
-                  }
-                },
-                "required": [
-                  "fast",
-                  "slow"
-                ],
-                "additionalProperties": false
+                "$ref": "#/$defs/h"
               },
               "instruments": {
                 "type": "array",
@@ -372,7 +340,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "update"
@@ -392,24 +359,7 @@
                 "maximum": 9007199254740991
               },
               "parameters": {
-                "type": "object",
-                "properties": {
-                  "fast": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 999
-                  },
-                  "slow": {
-                    "type": "integer",
-                    "minimum": 2,
-                    "maximum": 1000
-                  }
-                },
-                "required": [
-                  "fast",
-                  "slow"
-                ],
-                "additionalProperties": false
+                "$ref": "#/$defs/h"
               },
               "budget_usd": {
                 "$ref": "#/$defs/d"
@@ -427,7 +377,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "enum": [
@@ -454,7 +403,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "capital_assign"
@@ -516,22 +464,40 @@
             "minLength": 8,
             "maxLength": 128,
             "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "h": {
+            "type": "object",
+            "properties": {
+              "fast": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 999
+              },
+              "slow": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 1000
+              }
+            },
+            "required": [
+              "fast",
+              "slow"
+            ],
+            "additionalProperties": false
           }
         }
       },
       "annotations": {
         "readOnlyHint": false,
-        "destructiveHint": true,
-        "openWorldHint": false
+        "destructiveHint": true
       }
     },
     {
       "name": "market",
-      "description": "Market data; see capabilities.",
+      "description": "Market data.",
       "inputSchema": {
         "oneOf": [
           {
-            "type": "object",
             "properties": {
               "action": {
                 "enum": [
@@ -829,7 +795,6 @@
             ]
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "instruments"
@@ -852,7 +817,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "snapshot"
@@ -868,7 +832,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "microstructure"
@@ -889,7 +852,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "capabilities"
@@ -920,8 +882,7 @@
       },
       "annotations": {
         "readOnlyHint": true,
-        "destructiveHint": false,
-        "openWorldHint": false
+        "destructiveHint": false
       }
     },
     {
@@ -930,7 +891,6 @@
       "inputSchema": {
         "oneOf": [
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "record_decision"
@@ -982,7 +942,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "decision"
@@ -1001,7 +960,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "enum": [
@@ -1013,13 +971,7 @@
                 "$ref": "#/$defs/k"
               },
               "instruments": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/s"
-                },
-                "maxItems": 8,
-                "uniqueItems": true,
-                "minItems": 1
+                "$ref": "#/$defs/u"
               },
               "timeframe_ms": {
                 "type": "integer",
@@ -1036,37 +988,7 @@
                 "$ref": "#/$defs/r"
               },
               "costs": {
-                "type": "object",
-                "properties": {
-                  "maker_fee_bps": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 1000
-                  },
-                  "taker_fee_bps": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 1000
-                  },
-                  "slippage_bps": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 1000
-                  },
-                  "funding_mode": {
-                    "enum": [
-                      "observed",
-                      "zero_assumption"
-                    ]
-                  }
-                },
-                "required": [
-                  "maker_fee_bps",
-                  "taker_fee_bps",
-                  "slippage_bps",
-                  "funding_mode"
-                ],
-                "additionalProperties": false
+                "$ref": "#/$defs/c"
               },
               "data_mode": {
                 "enum": [
@@ -1149,7 +1071,6 @@
             ]
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "benchmark"
@@ -1165,7 +1086,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "status"
@@ -1181,7 +1101,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "cancel"
@@ -1201,7 +1120,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "result"
@@ -1237,7 +1155,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "capabilities"
@@ -1249,19 +1166,102 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
+            "properties": {
+              "action": {
+                "const": "economics"
+              },
+              "cases": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "instrument": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "product": {
+                      "enum": [
+                        "spot",
+                        "linear_swap",
+                        "inverse_swap",
+                        "option"
+                      ]
+                    },
+                    "side": {
+                      "enum": [
+                        "long",
+                        "short"
+                      ]
+                    },
+                    "quantity": {
+                      "$ref": "#/$defs/d"
+                    },
+                    "entry_price": {
+                      "$ref": "#/$defs/d"
+                    },
+                    "exit_price": {
+                      "$ref": "#/$defs/d"
+                    },
+                    "contract_type": {
+                      "enum": [
+                        "linear",
+                        "inverse"
+                      ]
+                    },
+                    "contract_value": {
+                      "$ref": "#/$defs/d"
+                    },
+                    "contract_value_currency": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16
+                    },
+                    "settle_currency": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16
+                    },
+                    "fees": {
+                      "$ref": "#/$defs/e"
+                    },
+                    "funding": {
+                      "$ref": "#/$defs/e"
+                    }
+                  },
+                  "required": [
+                    "instrument",
+                    "product",
+                    "side",
+                    "quantity",
+                    "entry_price",
+                    "exit_price",
+                    "fees",
+                    "funding"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 1,
+                "maxItems": 8
+              },
+              "data_mode": {
+                "$ref": "#/$defs/v"
+              }
+            },
+            "required": [
+              "action",
+              "cases",
+              "data_mode"
+            ],
+            "additionalProperties": false
+          },
+          {
             "properties": {
               "action": {
                 "const": "validate"
               },
               "instruments": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/s"
-                },
-                "maxItems": 8,
-                "uniqueItems": true,
-                "minItems": 1
+                "$ref": "#/$defs/u"
               },
               "timeframe_ms": {
                 "type": "integer",
@@ -1287,43 +1287,10 @@
                 "$ref": "#/$defs/q"
               },
               "costs": {
-                "type": "object",
-                "properties": {
-                  "maker_fee_bps": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 1000
-                  },
-                  "taker_fee_bps": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 1000
-                  },
-                  "slippage_bps": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 1000
-                  },
-                  "funding_mode": {
-                    "enum": [
-                      "observed",
-                      "zero_assumption"
-                    ]
-                  }
-                },
-                "required": [
-                  "maker_fee_bps",
-                  "taker_fee_bps",
-                  "slippage_bps",
-                  "funding_mode"
-                ],
-                "additionalProperties": false
+                "$ref": "#/$defs/c"
               },
               "data_mode": {
-                "enum": [
-                  "counterfactual",
-                  "historical_observed"
-                ]
+                "$ref": "#/$defs/v"
               }
             },
             "required": [
@@ -1341,15 +1308,15 @@
           }
         ],
         "$defs": {
+          "d": {
+            "type": "string",
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "maxLength": 29
+          },
           "t": {
             "type": "string",
             "minLength": 1,
             "maxLength": 128
-          },
-          "s": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64
           },
           "a": {
             "type": "string",
@@ -1414,13 +1381,82 @@
                 "additionalProperties": false
               }
             ]
+          },
+          "c": {
+            "type": "object",
+            "properties": {
+              "maker_fee_bps": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "taker_fee_bps": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "slippage_bps": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "funding_mode": {
+                "enum": [
+                  "observed",
+                  "zero_assumption"
+                ]
+              }
+            },
+            "required": [
+              "maker_fee_bps",
+              "taker_fee_bps",
+              "slippage_bps",
+              "funding_mode"
+            ],
+            "additionalProperties": false
+          },
+          "e": {
+            "type": "object",
+            "properties": {
+              "currency": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16
+              },
+              "amount": {
+                "type": "string",
+                "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+                "maxLength": 29
+              }
+            },
+            "required": [
+              "currency",
+              "amount"
+            ],
+            "additionalProperties": false
+          },
+          "u": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "maxItems": 8,
+            "uniqueItems": true,
+            "minItems": 1
+          },
+          "v": {
+            "enum": [
+              "counterfactual",
+              "historical_observed"
+            ]
           }
         }
       },
       "annotations": {
         "readOnlyHint": false,
-        "destructiveHint": true,
-        "openWorldHint": false
+        "destructiveHint": true
       }
     },
     {
@@ -1429,7 +1465,6 @@
       "inputSchema": {
         "oneOf": [
           {
-            "type": "object",
             "properties": {
               "action": {
                 "enum": [
@@ -1438,12 +1473,7 @@
                 ]
               },
               "accounts": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/t"
-                },
-                "maxItems": 32,
-                "uniqueItems": true
+                "$ref": "#/$defs/w"
               },
               "start_ms": {
                 "type": "integer",
@@ -1456,12 +1486,7 @@
                 "maximum": 9007199254740991
               },
               "strategies": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/t"
-                },
-                "maxItems": 32,
-                "uniqueItems": true
+                "$ref": "#/$defs/w"
               },
               "currencies": {
                 "type": "array",
@@ -1494,7 +1519,6 @@
             "additionalProperties": false
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "scenario"
@@ -1601,17 +1625,21 @@
             "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
             "maxLength": 29
           },
-          "t": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
+          "w": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "maxItems": 32,
+            "uniqueItems": true
           }
         }
       },
       "annotations": {
         "readOnlyHint": true,
-        "destructiveHint": false,
-        "openWorldHint": false
+        "destructiveHint": false
       }
     },
     {
@@ -1620,7 +1648,6 @@
       "inputSchema": {
         "oneOf": [
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "explain"
@@ -1672,7 +1699,6 @@
             ]
           },
           {
-            "type": "object",
             "properties": {
               "action": {
                 "const": "runtime"
@@ -1694,15 +1720,13 @@
       },
       "annotations": {
         "readOnlyHint": true,
-        "destructiveHint": false,
-        "openWorldHint": false
+        "destructiveHint": false
       }
     },
     {
       "name": "trade.preview",
       "description": "Preview; no order.",
       "inputSchema": {
-        "type": "object",
         "properties": {
           "account": {
             "$ref": "#/$defs/t"
@@ -1862,6 +1886,7 @@
             }
           }
         ],
+        "type": "object",
         "$defs": {
           "d": {
             "type": "string",
@@ -1890,7 +1915,6 @@
       "name": "trade.execute",
       "description": "Submit real order; loss possible. Requires approval, limits and STOP.",
       "inputSchema": {
-        "type": "object",
         "properties": {
           "account": {
             "$ref": "#/$defs/t"
@@ -2063,6 +2087,7 @@
             }
           }
         ],
+        "type": "object",
         "$defs": {
           "d": {
             "type": "string",
@@ -2091,7 +2116,6 @@
       "name": "trade.status",
       "description": "Trade status.",
       "inputSchema": {
-        "type": "object",
         "properties": {
           "account": {
             "$ref": "#/$defs/t"
@@ -2105,6 +2129,7 @@
           "reference"
         ],
         "additionalProperties": false,
+        "type": "object",
         "$defs": {
           "t": {
             "type": "string",
@@ -2123,7 +2148,6 @@
       "name": "trade.cancel",
       "description": "Cancel venue order.",
       "inputSchema": {
-        "type": "object",
         "properties": {
           "account": {
             "$ref": "#/$defs/t"
@@ -2144,6 +2168,7 @@
           "reference"
         ],
         "additionalProperties": false,
+        "type": "object",
         "$defs": {
           "t": {
             "type": "string",
@@ -2162,7 +2187,6 @@
       "name": "trade.close",
       "description": "Submit real close order.",
       "inputSchema": {
-        "type": "object",
         "properties": {
           "account": {
             "$ref": "#/$defs/t"
@@ -2189,6 +2213,7 @@
           "expires_in_ms"
         ],
         "additionalProperties": false,
+        "type": "object",
         "$defs": {
           "t": {
             "type": "string",
@@ -2205,9 +2230,8 @@
     },
     {
       "name": "trade.capabilities",
-      "description": "Trade permissions.",
+      "description": "Permissions.",
       "inputSchema": {
-        "type": "object",
         "properties": {
           "account": {
             "type": "string",
@@ -2218,7 +2242,8 @@
         "required": [
           "account"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "type": "object"
       },
       "annotations": {
         "readOnlyHint": true,
@@ -2230,7 +2255,6 @@
       "name": "trade.preflight",
       "description": "Readiness; no order.",
       "inputSchema": {
-        "type": "object",
         "properties": {
           "account": {
             "type": "string",
@@ -2241,7 +2265,8 @@
         "required": [
           "account"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "type": "object"
       },
       "annotations": {
         "readOnlyHint": true,

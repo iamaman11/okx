@@ -1353,6 +1353,7 @@ dependencies = [
  "okx-runtime",
  "reqwest",
  "rusqlite",
+ "rust_decimal",
  "serde",
  "serde_json",
  "sha2",

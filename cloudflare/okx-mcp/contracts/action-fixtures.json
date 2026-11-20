@@ -1028,6 +1028,100 @@
   },
   {
     "tool": "research",
+    "action": "economics",
+    "positive": {
+      "action": "economics",
+      "cases": [
+        {
+          "instrument": "BTC-USDT",
+          "product": "spot",
+          "side": "long",
+          "quantity": "2",
+          "entry_price": "100",
+          "exit_price": "110",
+          "fees": {
+            "currency": "USDT",
+            "amount": "0"
+          },
+          "funding": {
+            "currency": "USDT",
+            "amount": "0"
+          }
+        }
+      ],
+      "data_mode": "counterfactual"
+    },
+    "negative": [
+      {
+        "action": "economics",
+        "cases": [
+          {
+            "instrument": "BTC-USDT",
+            "product": "spot",
+            "side": "long",
+            "quantity": "2",
+            "entry_price": "100",
+            "exit_price": "110",
+            "fees": {
+              "currency": "USDT",
+              "amount": "0"
+            },
+            "funding": {
+              "currency": "USDT",
+              "amount": "0"
+            }
+          }
+        ],
+        "data_mode": "counterfactual",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "cases": [
+          {
+            "instrument": "BTC-USDT",
+            "product": "spot",
+            "side": "long",
+            "quantity": "2",
+            "entry_price": "100",
+            "exit_price": "110",
+            "fees": {
+              "currency": "USDT",
+              "amount": "0"
+            },
+            "funding": {
+              "currency": "USDT",
+              "amount": "0"
+            }
+          }
+        ],
+        "data_mode": "counterfactual"
+      },
+      {
+        "action": 12,
+        "cases": [
+          {
+            "instrument": "BTC-USDT",
+            "product": "spot",
+            "side": "long",
+            "quantity": "2",
+            "entry_price": "100",
+            "exit_price": "110",
+            "fees": {
+              "currency": "USDT",
+              "amount": "0"
+            },
+            "funding": {
+              "currency": "USDT",
+              "amount": "0"
+            }
+          }
+        ],
+        "data_mode": "counterfactual"
+      }
+    ]
+  },
+  {
+    "tool": "research",
     "action": "validate",
     "positive": {
       "action": "validate",

@@ -138,6 +138,118 @@ pub enum ResearchDecisionStatus {
     Rejected,
     Deferred,
 }
+
+/// Explicit counterfactual position units. This request never conveys trading
+/// authority or claims historical venue contract rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EconomicProduct {
+    Spot,
+    LinearSwap,
+    InverseSwap,
+    Option,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EconomicSide {
+    Long,
+    Short,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EconomicAmount {
+    pub currency: String,
+    pub amount: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EconomicCase {
+    pub instrument: String,
+    pub product: EconomicProduct,
+    pub side: EconomicSide,
+    /// Spot: base asset; swaps: number of contracts. Exact decimal string.
+    pub quantity: String,
+    /// Price in explicit quote currency per base asset.
+    pub entry_price: String,
+    pub exit_price: String,
+    /// A caller-supplied *assumption*, never a verified historical reference.
+    #[serde(default)]
+    pub contract_type: Option<String>,
+    #[serde(default)]
+    pub contract_value: Option<String>,
+    #[serde(default)]
+    pub contract_value_currency: Option<String>,
+    #[serde(default)]
+    pub settle_currency: Option<String>,
+    pub fees: EconomicAmount,
+    pub funding: EconomicAmount,
+}
+
+#[cfg(test)]
+mod economic_case_contract_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn request() -> Value {
+        json!({"action":"economics","data_mode":"counterfactual","cases":[{
+            "instrument":"BTC-USDT-SWAP","product":"linear_swap","side":"long",
+            "quantity":"3","entry_price":"100","exit_price":"110",
+            "contract_type":"linear","contract_value":"0.1",
+            "contract_value_currency":"BTC","settle_currency":"USDT",
+            "fees":{"currency":"USDT","amount":"0"},
+            "funding":{"currency":"USDT","amount":"0"}
+        }]})
+    }
+
+    #[test]
+    fn t02_t09_economics_is_strictly_typed_bounded_and_backwards_compatible() {
+        let value = request();
+        let typed: ResearchRequest = serde_json::from_value(value.clone()).unwrap();
+        assert!(typed.valid());
+        assert_eq!(serde_json::to_value(typed).unwrap(), value);
+        for (pointer, bad) in [
+            ("/cases/0/product", json!("token")),
+            ("/cases/0/side", json!("buy")),
+            ("/cases/0/quantity", json!(3)),
+            ("/cases/0/fees/currency", json!(42)),
+            ("/data_mode", json!("historical_data_maybe")),
+        ] {
+            let mut invalid = value.clone();
+            *invalid.pointer_mut(pointer).unwrap() = bad;
+            assert!(
+                serde_json::from_value::<ResearchRequest>(invalid).is_err(),
+                "{pointer}"
+            );
+        }
+        let mut invalid = value.clone();
+        invalid["cases"][0]["raw_rpc"] = json!("forbidden");
+        assert!(serde_json::from_value::<ResearchRequest>(invalid).is_err());
+        let mut too_many = value.clone();
+        too_many["cases"] = json!(vec![value["cases"][0].clone(); 9]);
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(too_many)
+                .unwrap()
+                .valid()
+        );
+        let mut empty = value.clone();
+        empty["cases"] = json!([]);
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(empty)
+                .unwrap()
+                .valid()
+        );
+        let mut long = value;
+        long["cases"][0]["entry_price"] = json!("1".repeat(37));
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(long)
+                .unwrap()
+                .valid()
+        );
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResearchRequest {
@@ -157,6 +269,11 @@ pub enum ResearchRequest {
         decision_id: Option<String>,
     },
     Capabilities {},
+    /// Pure, bounded economic oracle. No market read, job, account or order.
+    Economics {
+        cases: Vec<EconomicCase>,
+        data_mode: ResearchDataMode,
+    },
     /// Read-only, opt-in K9 acceptance performed by this same running Agent.
     Benchmark {
         idempotency_key: String,
@@ -296,6 +413,34 @@ impl ResearchRequest {
     pub fn valid(&self) -> bool {
         match self {
             Self::Capabilities {} => true,
+            Self::Economics { cases, .. } => {
+                !cases.is_empty()
+                    && cases.len() <= 8
+                    && cases.iter().all(|case| {
+                        !case.instrument.is_empty()
+                            && case.instrument.len() <= 64
+                            && [
+                                case.quantity.as_str(),
+                                case.entry_price.as_str(),
+                                case.exit_price.as_str(),
+                                case.fees.amount.as_str(),
+                                case.funding.amount.as_str(),
+                            ]
+                            .iter()
+                            .all(|s| !s.is_empty() && s.len() <= 36)
+                            && [case.fees.currency.as_str(), case.funding.currency.as_str()]
+                                .iter()
+                                .all(|s| !s.is_empty() && s.len() <= 16)
+                            && [
+                                case.contract_type.as_deref(),
+                                case.contract_value.as_deref(),
+                                case.contract_value_currency.as_deref(),
+                                case.settle_currency.as_deref(),
+                            ]
+                            .iter()
+                            .all(|v| v.is_none_or(|s| !s.is_empty() && s.len() <= 36))
+                    })
+            }
             Self::Benchmark { idempotency_key } => {
                 (8..=128).contains(&idempotency_key.len())
                     && idempotency_key

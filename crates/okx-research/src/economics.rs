@@ -167,10 +167,29 @@ impl LinearContract {
         fees: &QuoteAmount,
         funding: &QuoteAmount,
     ) -> Result<QuotePnl, String> {
-        if contracts < Decimal::ZERO
-            || entry_quote_per_base <= Decimal::ZERO
-            || exit_quote_per_base <= Decimal::ZERO
-        {
+        if contracts < Decimal::ZERO {
+            return Err("INVALID_LINEAR_POSITION".into());
+        }
+        self.pnl_signed(
+            contracts,
+            entry_quote_per_base,
+            exit_quote_per_base,
+            fees,
+            funding,
+        )
+    }
+
+    /// Signed contracts allow short counterfactuals without representing
+    /// contract counts as base units or reversing fee/funding currencies.
+    pub fn pnl_signed(
+        &self,
+        signed_contracts: Decimal,
+        entry_quote_per_base: Decimal,
+        exit_quote_per_base: Decimal,
+        fees: &QuoteAmount,
+        funding: &QuoteAmount,
+    ) -> Result<QuotePnl, String> {
+        if entry_quote_per_base <= Decimal::ZERO || exit_quote_per_base <= Decimal::ZERO {
             return Err("INVALID_LINEAR_POSITION".into());
         }
         if fees.currency != self.quote_currency || funding.currency != self.quote_currency {
@@ -179,7 +198,10 @@ impl LinearContract {
         if fees.value < Decimal::ZERO {
             return Err("INVALID_FEE".into());
         }
-        let quantity = self.contracts_to_base(contracts)?.value;
+        let quantity = self
+            .base_per_contract
+            .checked_mul(signed_contracts)
+            .ok_or("MONEY_OVERFLOW")?;
         let difference = exit_quote_per_base
             .checked_sub(entry_quote_per_base)
             .ok_or("MONEY_OVERFLOW")?;
@@ -192,6 +214,113 @@ impl LinearContract {
             base_quantity: quantity,
             gross_quote: QuoteAmount::exact(&self.quote_currency, gross)?,
             net_quote: QuoteAmount::exact(&self.quote_currency, net)?,
+        })
+    }
+}
+
+/// Exact quote-face inverse swap economics in its *base settlement* currency.
+/// Only a complete explicitly supplied counterfactual model is admissible;
+/// this does not authorize inverse replay or assert historical contract rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InverseContract {
+    pub instrument: String,
+    pub base_asset: String,
+    pub quote_currency: String,
+    pub face_quote_per_contract: Decimal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementPnl {
+    pub gross: QuoteAmount,
+    pub net: QuoteAmount,
+}
+
+impl InverseContract {
+    pub fn from_reference(
+        instrument: &str,
+        contract_type: Option<&str>,
+        contract_value: Option<&str>,
+        contract_value_currency: Option<&str>,
+        settle_currency: Option<&str>,
+    ) -> Result<Self, String> {
+        let mut parts = instrument.split('-');
+        let base = parts.next().ok_or("UNSUPPORTED_INSTRUMENT_TYPE")?;
+        let quote = parts.next().ok_or("UNSUPPORTED_INSTRUMENT_TYPE")?;
+        if base.is_empty()
+            || quote.is_empty()
+            || parts.next() != Some("SWAP")
+            || parts.next().is_some()
+            || ![base, quote].iter().all(|s| {
+                s.bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            })
+        {
+            return Err("UNSUPPORTED_INSTRUMENT_TYPE".into());
+        }
+        if contract_type != Some("inverse") {
+            return Err("UNSUPPORTED_INVERSE_CONTRACT_MODEL".into());
+        }
+        match contract_value_currency {
+            None | Some("") => return Err("CONTRACT_UNIT_MISSING".into()),
+            Some(unit) if unit != quote => return Err("CONTRACT_UNIT_MISMATCH".into()),
+            _ => {}
+        }
+        match settle_currency {
+            None | Some("") => return Err("SETTLEMENT_UNIT_MISSING".into()),
+            Some(unit) if unit != base => return Err("SETTLEMENT_UNIT_MISMATCH".into()),
+            _ => {}
+        }
+        let face = Decimal::from_str(contract_value.ok_or("CONTRACT_MULTIPLIER_MISSING")?)
+            .map_err(|_| "INVALID_CONTRACT_MULTIPLIER")?;
+        if face <= Decimal::ZERO {
+            return Err("INVALID_CONTRACT_MULTIPLIER".into());
+        }
+        Ok(Self {
+            instrument: instrument.into(),
+            base_asset: base.into(),
+            quote_currency: quote.into(),
+            face_quote_per_contract: face,
+        })
+    }
+
+    /// Long gross in base = contracts × quote-face × (exit-entry)/(entry×exit).
+    /// One division avoids intermediate reciprocal rounding. Short reverses
+    /// the sign; fees and funding are exact amounts in the base settlement.
+    pub fn pnl_signed(
+        &self,
+        signed_contracts: Decimal,
+        entry_quote_per_base: Decimal,
+        exit_quote_per_base: Decimal,
+        fees: &QuoteAmount,
+        funding: &QuoteAmount,
+    ) -> Result<SettlementPnl, String> {
+        if entry_quote_per_base <= Decimal::ZERO || exit_quote_per_base <= Decimal::ZERO {
+            return Err("INVALID_INVERSE_POSITION".into());
+        }
+        if fees.currency != self.base_asset || funding.currency != self.base_asset {
+            return Err("CURRENCY_MISMATCH_FX_REQUIRED".into());
+        }
+        if fees.value < Decimal::ZERO {
+            return Err("INVALID_FEE".into());
+        }
+        let change = exit_quote_per_base
+            .checked_sub(entry_quote_per_base)
+            .ok_or("MONEY_OVERFLOW")?;
+        let numerator = signed_contracts
+            .checked_mul(self.face_quote_per_contract)
+            .and_then(|v| v.checked_mul(change))
+            .ok_or("MONEY_OVERFLOW")?;
+        let denominator = entry_quote_per_base
+            .checked_mul(exit_quote_per_base)
+            .ok_or("MONEY_OVERFLOW")?;
+        let gross = numerator.checked_div(denominator).ok_or("MONEY_OVERFLOW")?;
+        let net = gross
+            .checked_sub(fees.value)
+            .and_then(|value| value.checked_sub(funding.value))
+            .ok_or("MONEY_OVERFLOW")?;
+        Ok(SettlementPnl {
+            gross: QuoteAmount::exact(&self.base_asset, gross)?,
+            net: QuoteAmount::exact(&self.base_asset, net)?,
         })
     }
 }
@@ -383,6 +512,176 @@ pub fn group_quote_by_currency(amounts: &[QuoteAmount]) -> Result<Vec<CurrencyTo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t02_t09_inverse_reference_requires_quote_face_and_base_settlement() {
+        let inverse = InverseContract::from_reference(
+            "BTC-USD-SWAP",
+            Some("inverse"),
+            Some("100"),
+            Some("USD"),
+            Some("BTC"),
+        )
+        .unwrap();
+        assert_eq!(inverse.face_quote_per_contract, Decimal::from(100));
+        let zero = QuoteAmount::exact("BTC", Decimal::ZERO).unwrap();
+        let long = inverse
+            .pnl_signed(
+                Decimal::ONE,
+                Decimal::from(100),
+                Decimal::from(110),
+                &zero,
+                &zero,
+            )
+            .unwrap();
+        let short = inverse
+            .pnl_signed(
+                -Decimal::ONE,
+                Decimal::from(100),
+                Decimal::from(110),
+                &zero,
+                &zero,
+            )
+            .unwrap();
+        assert_eq!(long.gross.currency, "BTC");
+        assert_eq!(long.gross.value, -short.gross.value);
+        assert_eq!(
+            long.gross.value,
+            Decimal::from_str("0.0909090909090909090909090909").unwrap()
+        );
+        for (reference, unit, settlement, reason) in [
+            (
+                Some("inverse"),
+                Some("BTC"),
+                Some("BTC"),
+                "CONTRACT_UNIT_MISMATCH",
+            ),
+            (Some("inverse"), None, Some("BTC"), "CONTRACT_UNIT_MISSING"),
+            (
+                Some("inverse"),
+                Some("USD"),
+                None,
+                "SETTLEMENT_UNIT_MISSING",
+            ),
+            (
+                Some("inverse"),
+                Some("USD"),
+                Some("USD"),
+                "SETTLEMENT_UNIT_MISMATCH",
+            ),
+            (
+                Some("linear"),
+                Some("USD"),
+                Some("BTC"),
+                "UNSUPPORTED_INVERSE_CONTRACT_MODEL",
+            ),
+        ] {
+            assert_eq!(
+                InverseContract::from_reference(
+                    "BTC-USD-SWAP",
+                    reference,
+                    Some("100"),
+                    unit,
+                    settlement
+                )
+                .unwrap_err(),
+                reason
+            );
+        }
+        assert_eq!(
+            inverse
+                .pnl_signed(
+                    Decimal::ONE,
+                    Decimal::from(100),
+                    Decimal::from(110),
+                    &QuoteAmount::exact("USD", Decimal::ZERO).unwrap(),
+                    &zero
+                )
+                .unwrap_err(),
+            "CURRENCY_MISMATCH_FX_REQUIRED"
+        );
+        assert_eq!(
+            inverse
+                .pnl_signed(
+                    Decimal::ONE,
+                    Decimal::ZERO,
+                    Decimal::from(110),
+                    &zero,
+                    &zero
+                )
+                .unwrap_err(),
+            "INVALID_INVERSE_POSITION"
+        );
+        let fee = QuoteAmount::exact("BTC", Decimal::from_str("0.01").unwrap()).unwrap();
+        let funding = QuoteAmount::exact("BTC", Decimal::from_str("-0.02").unwrap()).unwrap();
+        let net = inverse
+            .pnl_signed(
+                Decimal::ONE,
+                Decimal::from(100),
+                Decimal::from(110),
+                &fee,
+                &funding,
+            )
+            .unwrap();
+        assert_eq!(
+            net.net.value,
+            long.gross.value + Decimal::from_str("0.01").unwrap()
+        );
+    }
+
+    #[test]
+    fn t02_t09_linear_contract_conversion_is_typed_and_shorts_reverse_gross() {
+        let linear = LinearContract::from_reference(
+            "BTC-USDT-SWAP",
+            Some("linear"),
+            Some("0.1"),
+            Some("BTC"),
+            Some("USDT"),
+        )
+        .unwrap();
+        let zero = QuoteAmount::exact("USDT", Decimal::ZERO).unwrap();
+        let long = linear
+            .pnl_signed(
+                Decimal::from(3),
+                Decimal::from(100),
+                Decimal::from(110),
+                &zero,
+                &zero,
+            )
+            .unwrap();
+        let short = linear
+            .pnl_signed(
+                Decimal::from(-3),
+                Decimal::from(100),
+                Decimal::from(110),
+                &zero,
+                &zero,
+            )
+            .unwrap();
+        assert_eq!(
+            linear.contracts_to_base(Decimal::from(3)).unwrap(),
+            BaseQuantity {
+                asset: "BTC".into(),
+                value: Decimal::from_str("0.3").unwrap()
+            }
+        );
+        assert_eq!(long.base_quantity, Decimal::from_str("0.3").unwrap());
+        assert_eq!(short.base_quantity, Decimal::from_str("-0.3").unwrap());
+        assert_eq!(long.gross_quote.value, Decimal::from(3));
+        assert_eq!(short.gross_quote.value, Decimal::from(-3));
+        assert_eq!(
+            linear
+                .pnl(
+                    Decimal::from(-3),
+                    Decimal::from(100),
+                    Decimal::from(110),
+                    &zero,
+                    &zero
+                )
+                .unwrap_err(),
+            "INVALID_LINEAR_POSITION"
+        );
+    }
 
     #[test]
     fn t09_funding_settlement_belongs_to_bar_ending_at_event_not_starting_at_it() {

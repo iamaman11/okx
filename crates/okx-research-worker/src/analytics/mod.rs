@@ -4,6 +4,7 @@ pub mod cache;
 pub mod candidate_progress;
 mod cursor;
 mod decision;
+mod economic_scenario;
 pub mod executor;
 pub mod jobs;
 mod market;
@@ -137,6 +138,9 @@ impl AnalyticsService {
                     .await
             }
             ResearchRequest::Capabilities {} => Ok(research_capabilities()),
+            ResearchRequest::Economics { cases, data_mode } => {
+                economic_scenario::evaluate(cases, data_mode)
+            }
             ResearchRequest::Validate {
                 data_mode,
                 instruments,
@@ -559,6 +563,18 @@ fn research_capabilities() -> Value {
         "oos":{"grid_train_test_split":true,"selected_variant_from_train_only":true},
         "economics":{
             "replay_products":["spot","linear_swap"],
+            "counterfactual_oracle":{"action":"economics","schema":"okx.research.economics/v1",
+                "products":["spot","linear_swap","inverse_swap"],
+                "option_policy":"blocked_without_explicit_valuation_model",
+                "position_units":{"spot":"base_asset","linear_swap":"contracts",
+                    "inverse_swap":"contracts"},
+                "settlement_units":{"spot":"quote","linear_swap":"quote",
+                    "inverse_swap":"base"},
+                "input_basis":"caller_supplied_unverified_current_and_historical",
+                "money":"exact_decimal_strings","max_cases":8,
+                "independent_currency_totals":true,"fx_conversion":false,
+                "joint_portfolio_risk":false,"market_reads":false,"job_created":false,
+                "trading_authority":false},
             "unsupported_products":["inverse_swap","option","unverified_contract"],
             "linear_contract_units":"base_asset_per_contract_with_quote_settlement_verified_from_current_reference",
             "replay_money_precision":"decimal_ledger_with_f64_price_inputs",
