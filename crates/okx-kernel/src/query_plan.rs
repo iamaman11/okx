@@ -20,6 +20,196 @@ pub struct CompositionRequest {
     pub result_steps: Vec<String>,
 }
 
+#[cfg(test)]
+mod t07_t10_projected_prefix_evaluation {
+    use super::*;
+
+    fn graph() -> CheckedComposition {
+        let spec = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"price_return","op":"returns_series","input":"close"},
+                {"id":"positive","op":"greater_than","input":"price_return","threshold":0.0},
+                {"id":"entry","op":"rising_edge","input":"positive"},
+                {"id":"smooth_price","op":"rolling_mean","input":"close","period":2},
+                {"id":"outcome","op":"forward_return_label","input":"smooth_price","when":"entry","period":2},
+                {"id":"risk","op":"rolling_stddev","input":"close","period":2},
+                {"id":"oi_return","op":"returns_series","input":"open_interest"},
+                {"id":"divergence","op":"subtract_series","input":"price_return","other":"oi_return"},
+                {"id":"volume_window","op":"rolling_mean","input":"volume","period":2}
+            ],
+            "result_steps":["entry","outcome","risk","divergence","volume_window"]
+        }))
+        .unwrap();
+        CheckedComposition::compile(spec, 100_000).unwrap()
+    }
+
+    #[test]
+    fn causal_branches_stop_at_decision_while_only_the_label_price_reads_future_horizon() {
+        let plan = graph();
+        let required = plan.required_prefixes(100_000, 2);
+        assert_eq!(required["close"], 5);
+        assert_eq!(required["smooth_price"], 5);
+        assert_eq!(required["outcome"], 3);
+        assert_eq!(required["price_return"], 3);
+        assert_eq!(required["positive"], 3);
+        assert_eq!(required["entry"], 3);
+        assert_eq!(required["risk"], 3);
+        assert_eq!(required["open_interest"], 3);
+        assert_eq!(required["volume"], 3);
+        assert!(!required.contains_key("funding_rate"));
+        // A large future tail is not traversed or copied by a causal branch.
+        assert_eq!(plan.required_prefixes(100_000, 0)["risk"], 1);
+        assert_eq!(plan.required_prefixes(100_000, 0)["smooth_price"], 3);
+        assert_eq!(plan.required_prefixes(100_000, 99_999)["close"], 100_000);
+        assert_eq!(plan.required_prefixes(3, 2)["close"], 3);
+        assert_eq!(plan.required_prefixes(3, usize::MAX)["entry"], 3);
+    }
+
+    #[test]
+    fn multi_source_historical_projection_is_future_invariant_except_for_its_outcome() {
+        let plan = graph();
+        let mut closes = vec![100.0; 1000];
+        closes[..7].copy_from_slice(&[100.0, 90.0, 95.0, 99.0, 120.0, 110.0, 108.0]);
+        let oi = (0..closes.len()).map(|i| Some(10.0 + i as f64)).collect::<Vec<_>>();
+        let volume = (0..closes.len()).map(|i| 1.0 + i as f64).collect::<Vec<_>>();
+        let evaluate = |close: &[f64], observations: &[Option<f64>], volumes: &[f64]| {
+            plan.evaluate_at_with_candle_sources_diagnostics(
+                close,
+                CandlePriceInputs { volume: Some(volumes), ..Default::default() },
+                Some(observations),
+                None,
+                2,
+            ).unwrap()
+        };
+        let (first, causes) = evaluate(&closes, &oi, &volume);
+        assert!(causes.is_empty());
+        assert_eq!(first["entry"], (Some(1.0), Unit::Event));
+        assert_eq!(first["risk"], (Some(2.5), Unit::Price));
+        assert_eq!(first["volume_window"], (Some(2.5), Unit::NativeVolume));
+        assert!((first["outcome"].0.unwrap() - (109.5 / 92.5 - 1.0)).abs() < 1e-12);
+
+        let mut changed_tail = closes.clone();
+        changed_tail[5..].fill(99_999.0);
+        let mut changed_oi = oi.clone();
+        changed_oi[3..].fill(None);
+        let mut changed_volume = volume.clone();
+        changed_volume[3..].fill(999.0);
+        assert_eq!(first, evaluate(&changed_tail, &changed_oi, &changed_volume).0);
+
+        // Validation is causal as well: corrupt later OI/volume must not
+        // invalidate a historical decision, but latest-bar validation must
+        // still reject the exact same malformed sources.
+        let mut future_invalid_oi = oi.clone();
+        future_invalid_oi[500] = Some(-1.0);
+        let mut future_invalid_volume = volume.clone();
+        future_invalid_volume[500] = -1.0;
+        assert_eq!(first, evaluate(&closes, &future_invalid_oi, &future_invalid_volume).0);
+        assert_eq!(
+            plan.evaluate_with_candle_sources_diagnostics(
+                &closes,
+                CandlePriceInputs { volume: Some(&volume), ..Default::default() },
+                Some(&future_invalid_oi), None,
+            ).unwrap_err(),
+            "composition.sources.open_interest:INVALID_CONTRACT_COUNT"
+        );
+        assert_eq!(
+            plan.evaluate_with_candle_sources_diagnostics(
+                &closes,
+                CandlePriceInputs { volume: Some(&future_invalid_volume), ..Default::default() },
+                Some(&oi), None,
+            ).unwrap_err(),
+            "composition.sources.volume:INVALID_NON_NEGATIVE_VOLUME"
+        );
+
+        let mut changed_outcome = closes.clone();
+        changed_outcome[4] = 200.0;
+        let after = evaluate(&changed_outcome, &oi, &volume).0;
+        for feature in ["entry", "risk", "divergence", "volume_window"] {
+            assert_eq!(first[feature], after[feature], "future leaked into {feature}");
+        }
+        assert_ne!(first["outcome"], after["outcome"]);
+
+        let mut missing_oi = oi.clone();
+        missing_oi[2] = None;
+        let (missing, causes) = evaluate(&closes, &missing_oi, &volume);
+        assert_eq!(missing["divergence"].0, None);
+        assert_eq!(causes["divergence"].origin_step, "open_interest");
+        assert_eq!(causes["divergence"].origin_index, 2);
+        assert_eq!(missing["outcome"], first["outcome"]);
+        assert_eq!(plan.evaluate_at_with_candle_sources_diagnostics(
+            &closes,
+            CandlePriceInputs { volume: Some(&volume), ..Default::default() },
+            Some(&oi[..999]), None, 2,
+        ).unwrap_err(), "composition.sources:ALIGNMENT_LENGTH_MISMATCH");
+    }
+
+    #[test]
+    fn projected_outcome_cannot_read_beyond_supplied_prefix_or_skip_unknown_event() {
+        let plan = graph();
+        let closes = [100.0, 90.0, 95.0, 99.0, 120.0];
+        let oi = [Some(10.0), Some(11.0), Some(12.0), Some(13.0), Some(14.0)];
+        let volumes = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let evaluate = |len| plan.evaluate_at_with_candle_sources_diagnostics(
+            &closes[..len],
+            CandlePriceInputs { volume: Some(&volumes[..len]), ..Default::default() },
+            Some(&oi[..len]), None, 2,
+        ).unwrap();
+        let (short, cause) = evaluate(4);
+        assert_eq!(short["entry"].0, Some(1.0));
+        assert_eq!(short["outcome"].0, None);
+        assert_eq!(cause["outcome"].reason, "OUTCOME_UNCONFIRMED");
+        let (confirmed, _) = evaluate(5);
+        assert!(confirmed["outcome"].0.is_some());
+        let latest = plan.evaluate_with_candle_sources_diagnostics(
+            &closes,
+            CandlePriceInputs { volume: Some(&volumes), ..Default::default() },
+            Some(&oi), None,
+        ).unwrap();
+        let explicit = plan.evaluate_at_with_candle_sources_diagnostics(
+            &closes,
+            CandlePriceInputs { volume: Some(&volumes), ..Default::default() },
+            Some(&oi), None, 4,
+        ).unwrap();
+        assert_eq!(latest, explicit);
+    }
+
+    #[test]
+    fn historical_funding_value_checks_stop_at_the_requested_source_prefix() {
+        let request = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[{"id":"mean_rate","op":"rolling_mean","input":"funding_rate","period":2}],
+            "result_steps":["mean_rate"]
+        })).unwrap();
+        let plan = CheckedComposition::compile(request, 1000).unwrap();
+        let close = vec![f64::NAN; 1000];
+        let mut rates = vec![None; 1000];
+        rates[1] = Some(0.01);
+        rates[2] = Some(-0.01);
+        let (historical, causes) = plan.evaluate_at_with_candle_sources_diagnostics(
+            &close, CandlePriceInputs::default(), None, Some(&rates), 2,
+        ).unwrap();
+        assert_eq!(historical["mean_rate"].0, Some(0.0));
+        assert!(causes.is_empty());
+        rates[900] = Some(f64::INFINITY);
+        let after = plan.evaluate_at_with_candle_sources_diagnostics(
+            &close, CandlePriceInputs::default(), None, Some(&rates), 2,
+        ).unwrap();
+        assert_eq!(historical, after.0);
+        assert_eq!(plan.evaluate_with_candle_sources_diagnostics(
+            &close, CandlePriceInputs::default(), None, Some(&rates),
+        ).unwrap_err(), "composition.sources.funding_rate:NONFINITE_RATE");
+        // Sparse gaps remain unknown rather than becoming synthetic zeros.
+        rates[2] = None;
+        let (missing, cause) = plan.evaluate_at_with_candle_sources_diagnostics(
+            &close, CandlePriceInputs::default(), None, Some(&rates), 2,
+        ).unwrap();
+        assert_eq!(missing["mean_rate"].0, None);
+        assert_eq!(cause["mean_rate"].origin_step, "funding_rate");
+        assert_eq!(cause["mean_rate"].origin_index, 2);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SeriesStep {
@@ -138,6 +328,46 @@ impl CheckedComposition {
             }
         }
         reachable
+    }
+
+    /// Compute the minimum prefix required by each reachable step and source
+    /// for a historical projection. Ordinary features stop at the requested
+    /// closed index. Only a forward outcome's *price input* may extend to its
+    /// declared horizon; its event condition and independent feature branches
+    /// remain at the decision cutoff. No value from an unused branch is read.
+    fn required_prefixes(&self, available: usize, at: usize) -> BTreeMap<String, usize> {
+        let decision_prefix = at.saturating_add(1).min(available);
+        let mut required = self
+            .result_steps
+            .iter()
+            .map(|id| (id.clone(), decision_prefix))
+            .collect::<BTreeMap<_, _>>();
+        for checked in self.steps.iter().rev() {
+            let step = &checked.step;
+            let Some(&end) = required.get(step.id.as_str()) else {
+                continue;
+            };
+            let input_end = if step.op == SeriesOp::ForwardReturnLabel {
+                end.saturating_add(step.period.expect("validated horizon") as usize)
+                    .min(available)
+            } else {
+                end
+            };
+            let mut extend = |name: &str, length: usize| {
+                required
+                    .entry(name.to_owned())
+                    .and_modify(|existing| *existing = (*existing).max(length))
+                    .or_insert(length);
+            };
+            extend(step.input.as_str(), input_end);
+            if let Some(other) = step.other.as_deref() {
+                extend(other, end);
+            }
+            if let Some(condition) = step.when.as_deref() {
+                extend(condition, end);
+            }
+        }
+        required
     }
 
     pub fn compile(request: CompositionRequest, total_bars: u64) -> Result<Self, String> {
@@ -628,6 +858,45 @@ impl CheckedComposition {
         ),
         String,
     > {
+        self.evaluate_at_with_candle_sources_diagnostics(
+            close,
+            candles,
+            open_interest,
+            funding_rate,
+            close.len().saturating_sub(1),
+        )
+    }
+
+    /// Historical projection over aligned sources with bounded per-step
+    /// prefixes. Event-time OI/funding columns are retrospective unless the
+    /// caller separately attests their *publication* times; this method does
+    /// not silently certify those observations for live decision-making.
+    pub fn evaluate_at_with_candle_sources_diagnostics(
+        &self,
+        close: &[f64],
+        candles: CandlePriceInputs<'_>,
+        open_interest: Option<&[Option<f64>]>,
+        funding_rate: Option<&[Option<f64>]>,
+        at: usize,
+    ) -> Result<
+        (
+            BTreeMap<String, (Option<f64>, Unit)>,
+            BTreeMap<String, CompositionNullCause>,
+        ),
+        String,
+    > {
+        let required = self.required_prefixes(close.len(), at);
+        // Preserve the full legacy validation for a latest-bar projection.
+        // Historical feature checks must not inspect a future source value:
+        // a malformed observation recorded after `at` cannot retroactively
+        // change whether an earlier closed-bar decision was computable.
+        let inspected = |name: &str| {
+            if at >= close.len().saturating_sub(1) {
+                close.len()
+            } else {
+                required.get(name).copied().unwrap_or(0)
+            }
+        };
         for (name, series) in [("open", candles.open), ("high", candles.high), ("low", candles.low), ("volume", candles.volume)] {
             if self.uses_source(name) && series.is_none() {
                 return Err(format!("composition.sources.{name}:REQUIRED"));
@@ -637,18 +906,24 @@ impl CheckedComposition {
             }
         }
         if candles.volume.is_some_and(|values| {
-            values.iter().any(|value| !value.is_nan() && (!value.is_finite() || *value < 0.0))
+            values[..inspected("volume")]
+                .iter()
+                .any(|value| !value.is_nan() && (!value.is_finite() || *value < 0.0))
         }) {
             return Err("composition.sources.volume:INVALID_NON_NEGATIVE_VOLUME".into());
         }
         if let Some(oi) = open_interest {
-            self.check_open_interest(close, oi)?;
+            self.check_open_interest_prefix(close, oi, inspected("open_interest"))?;
         }
         if let Some(rates) = funding_rate {
             if rates.len() != close.len() {
                 return Err("composition.sources:ALIGNMENT_LENGTH_MISMATCH".into());
             }
-            if rates.iter().flatten().any(|rate| !rate.is_finite()) {
+            if rates[..inspected("funding_rate")]
+                .iter()
+                .flatten()
+                .any(|rate| !rate.is_finite())
+            {
                 return Err("composition.sources.funding_rate:NONFINITE_RATE".into());
             }
         }
@@ -657,7 +932,7 @@ impl CheckedComposition {
             candles,
             open_interest,
             funding_rate,
-            close.len().saturating_sub(1),
+            at,
             true,
         ))
     }
@@ -667,10 +942,19 @@ impl CheckedComposition {
         close: &[f64],
         open_interest: &[Option<f64>],
     ) -> Result<(), String> {
+        self.check_open_interest_prefix(close, open_interest, close.len())
+    }
+
+    fn check_open_interest_prefix(
+        &self,
+        close: &[f64],
+        open_interest: &[Option<f64>],
+        inspected: usize,
+    ) -> Result<(), String> {
         if close.len() != open_interest.len() {
             return Err("composition.sources:ALIGNMENT_LENGTH_MISMATCH".into());
         }
-        if open_interest
+        if open_interest[..inspected]
             .iter()
             .flatten()
             .any(|value| !value.is_finite() || *value < 0.0)
@@ -692,45 +976,53 @@ impl CheckedComposition {
         BTreeMap<String, (Option<f64>, Unit)>,
         BTreeMap<String, CompositionNullCause>,
     ) {
-        let reachable = self.reachable_steps();
-        let used_sources = self.sources();
+        let required = self.required_prefixes(close.len(), at);
         let mut values = BTreeMap::<String, Vec<Option<f64>>>::new();
+        let close_end = required.get("close").copied().unwrap_or(0);
         values.insert(
             "close".into(),
-            close.iter().map(|v| v.is_finite().then_some(*v)).collect(),
+            close[..close_end]
+                .iter()
+                .map(|v| v.is_finite().then_some(*v))
+                .collect(),
         );
         for (name, source) in [("open", candles.open), ("high", candles.high), ("low", candles.low), ("volume", candles.volume)] {
-            if self.uses_source(name) {
+            if let Some(&end) = required.get(name) {
                 values.insert(
                     name.into(),
-                    source.map(|values| values.iter().map(|v| v.is_finite().then_some(*v)).collect())
-                        .unwrap_or_else(|| vec![None; close.len()]),
+                    source.map(|values| values[..end].iter().map(|v| v.is_finite().then_some(*v)).collect())
+                        .unwrap_or_else(|| vec![None; end]),
                 );
             }
         }
-        if used_sources.contains(&Source::OpenInterest) {
+        if let Some(&end) = required.get("open_interest") {
             values.insert(
                 "open_interest".into(),
                 open_interest
-                    .map(|source| source.to_vec())
-                    .unwrap_or_else(|| vec![None; close.len()]),
+                    .map(|source| source[..end].to_vec())
+                    .unwrap_or_else(|| vec![None; end]),
             );
         }
-        if used_sources.contains(&Source::Funding) {
+        if let Some(&end) = required.get("funding_rate") {
             values.insert(
                 "funding_rate".into(),
                 funding_rate
-                    .map(|source| source.to_vec())
-                    .unwrap_or_else(|| vec![None; close.len()]),
+                    .map(|source| source[..end].to_vec())
+                    .unwrap_or_else(|| vec![None; end]),
             );
         }
         for checked in &self.steps {
-            if !reachable.contains(checked.step.id.as_str()) {
+            let Some(&end) = required.get(checked.step.id.as_str()) else {
                 continue;
-            }
+            };
             // A shared upstream series is read by reference for all branches;
             // cloning it here multiplied peak memory and source work.
-            let input = &values[&checked.step.input];
+            let full_input = &values[&checked.step.input];
+            let input = if checked.step.op == SeriesOp::ForwardReturnLabel {
+                full_input.as_slice()
+            } else {
+                &full_input[..end]
+            };
             let output = match checked.step.op {
                 SeriesOp::RollingZscore => rolling_zscore(
                     input,
@@ -899,8 +1191,8 @@ impl CheckedComposition {
                 SeriesOp::ForwardReturnLabel => {
                     let horizon = checked.step.period.expect("validated horizon") as usize;
                     let condition = &values[checked.step.when.as_ref().expect("validated event")];
-                    let mut result = vec![None; input.len()];
-                    for i in 0..input.len().saturating_sub(horizon) {
+                    let mut result = vec![None; end];
+                    for i in 0..end.min(input.len().saturating_sub(horizon)) {
                         if condition[i] == Some(1.0)
                             && let (Some(start), Some(end)) = (input[i], input[i + horizon])
                             && start > 0.0
