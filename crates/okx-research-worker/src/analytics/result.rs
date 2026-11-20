@@ -1,6 +1,6 @@
 //! Native Research result presentation: artifact integrity, export verification,
 //! bounded paging, and signed cursors. No SQL mutation or research execution.
-use super::{AnalyticsService, cursor, jobs};
+use super::{AnalyticsService, cursor, jobs, result_reexecution};
 use okx_protocol::analytics::ResearchResultView;
 use okx_research::{
     ResearchArtifactStore,
@@ -160,13 +160,21 @@ pub(super) fn verify_export_manifest(
             Some("verified" | "not_applicable")
         )
     });
+    let reexecution = if let Some(id) = manifest["experiment_artifact"].as_str() {
+        let inputs: Value = read_verified_result(store, id)?;
+        result_reexecution::verify(store, &inputs, manifest)?
+    } else {
+        json!({"schema":"okx.research.immutable-reexecution/v1", "quality":"not_verified",
+            "reason_code":"LEGACY_EXPERIMENT_INPUTS_NOT_RETAINED"})
+    };
     Ok(json!({
         "quality":if dataset_verified && funding_verified {"complete"} else {"partial"},
         "evidence_scope":if dataset_verified && funding_verified {"result_pages_and_replay_sources"} else {"result_pages_or_partial_sources"},
         "counts_verified":true,
         "checksums_verified":true,"dataset_verified":dataset_verified,
         "funding_capture_verified":funding_verified,
-        "trades":trades,"rows":rows,"equity":equity,"experiment":experiment
+        "trades":trades,"rows":rows,"equity":equity,"experiment":experiment,
+        "reexecution":reexecution
     }))
 }
 

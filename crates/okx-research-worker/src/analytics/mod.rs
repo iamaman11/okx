@@ -10,6 +10,7 @@ pub mod jobs;
 mod market;
 pub mod planner;
 mod research;
+mod result_reexecution;
 mod resource_gate;
 mod resource_observation;
 mod result;

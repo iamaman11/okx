@@ -164,7 +164,7 @@ async fn t08_public_breakout_grid_persists_typed_selection_and_rejects_65_before
     assert_eq!(service.research(request).await.unwrap()["id"], id);
     let result = service
         .research(ResearchRequest::Result {
-            job_id: id,
+            job_id: id.clone(),
             cursor: None,
             limit: 50,
             view: ResearchResultView::Summary,
@@ -183,6 +183,43 @@ async fn t08_public_breakout_grid_persists_typed_selection_and_rejects_65_before
         result["metadata"]["economic_audit"]["historical_rules_verified"],
         false
     );
+    let export = service
+        .research(ResearchRequest::Result {
+            job_id: id.clone(),
+            cursor: None,
+            limit: 50,
+            view: ResearchResultView::Export,
+        })
+        .await
+        .unwrap();
+    assert_eq!(export["integrity"]["quality"], "complete");
+    assert_eq!(
+        export["integrity"]["reexecution"]["quality"],
+        "verified_reexecution"
+    );
+    assert_eq!(export["integrity"]["reexecution"]["bars_rehydrated"], 200);
+    assert_eq!(
+        export["integrity"]["reexecution"]["exact_cashflow_reaudited"],
+        true
+    );
+    let mut forged: Value = service
+        .artifacts
+        .read_evidence_json(&service.jobs.get(&id).unwrap().artifact.unwrap())
+        .unwrap();
+    forged["economic_audit"]["net_exact"] = json!("999999");
+    assert_eq!(
+        verify_export_manifest(&service.artifacts, &forged).unwrap_err(),
+        "EXPORT_REEXECUTION_MISMATCH"
+    );
+    let mut changed_selection: Value = service
+        .artifacts
+        .read_evidence_json(&service.jobs.get(&id).unwrap().artifact.unwrap())
+        .unwrap();
+    changed_selection["grid"]["selected"] = json!({"lookback":999});
+    assert_eq!(
+        verify_export_manifest(&service.artifacts, &changed_selection).unwrap_err(),
+        "EXPORT_REEXECUTION_MISMATCH"
+    );
     assert!(result["metadata"]["grid"]["selected"]["lookback"].is_u64());
     assert_eq!(result["metadata"]["grid"]["split_index"], 140);
     assert_eq!(result["metadata"]["grid"]["warmup_bars"], 65);
@@ -199,6 +236,183 @@ async fn t08_public_breakout_grid_persists_typed_selection_and_rejects_65_before
         "lookback_ascending"
     );
     drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn t13_reexecution_budget_rejects_large_grids_before_loading_pages() {
+    let (root, service) = service();
+    let input = json!({
+        "bar_count":1_000_000,
+        "variants":[{"fast":3,"slow":9}],
+        "code_version":replay::CAUSAL_REPLAY_VERSION
+    });
+    let result = json!({
+        "grid":{"selected":{"fast":3,"slow":9}},
+        "economic_audit":{"schema":okx_research::economic_audit::REPLAY_ECONOMIC_AUDIT_VERSION},
+        "code_version":replay::CAUSAL_REPLAY_VERSION
+    });
+    let proof = super::result_reexecution::verify(&service.artifacts, &input, &result).unwrap();
+    assert_eq!(proof["quality"], "not_verified");
+    assert_eq!(proof["reason_code"], "REEXECUTION_BUDGET_EXCEEDED");
+    assert_eq!(proof["max_work_units"], 65_536);
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t13_replay_reexecution_restarts_preserves_old_reads_and_tracks_changed_seed() {
+    let (root, service) = service();
+    let bars = (0..240)
+        .map(|index| {
+            let center = 100.0 + (index as f64 / 11.0).sin() * 8.0 + index as f64 * 0.03;
+            replay::Bar {
+                time: index * 60_000,
+                open: center,
+                high: center + 1.0,
+                low: center - 1.0,
+                close: center + 0.2,
+                volume: 10.0,
+                funding_rate: None,
+            }
+        })
+        .collect();
+    service
+        .sources
+        .cache
+        .load(
+            cache::SourceKey {
+                source: "candles".into(),
+                instrument: "BTC-USDT".into(),
+                timeframe_ms: 60_000,
+                start_ms: 0,
+                end_ms: 14_400_000,
+                closed_only: true,
+                schema: 1,
+            },
+            || async { Ok(bars) },
+        )
+        .await
+        .unwrap();
+    let template = ResearchRequest::Backtest {
+        idempotency_key: "t13-repeat-original".into(),
+        instruments: vec!["BTC-USDT".into()],
+        timeframe_ms: 60_000,
+        start_ms: 0,
+        end_ms: 14_400_000,
+        strategy_id: "ema_cross_v1".into(),
+        parameters: EmaParameters { fast: 3, slow: 9 }.into(),
+        costs: ResearchCosts {
+            maker_fee_bps: 0.0,
+            taker_fee_bps: 1.25,
+            slippage_bps: 0.75,
+            funding_mode: FundingMode::ZeroAssumption,
+        },
+        data_mode: ResearchDataMode::Counterfactual,
+        seed: 73,
+    };
+    let mut recorded = Vec::new();
+    for (key, seed) in [
+        ("t13-repeat-original", 73),
+        ("t13-repeat-separate", 73),
+        ("t13-changed-seed", 74),
+    ] {
+        let mut request = template.clone();
+        if let ResearchRequest::Backtest {
+            idempotency_key,
+            seed: replay_seed,
+            ..
+        } = &mut request
+        {
+            *idempotency_key = key.into();
+            *replay_seed = seed;
+        }
+        let admitted = service.research(request.clone()).await.unwrap();
+        let id = admitted["id"].as_str().unwrap().to_owned();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let job = service.jobs.get(&id).unwrap();
+                match job.state {
+                    jobs::State::Completed => break,
+                    jobs::State::Queued | jobs::State::Running => {}
+                    other => panic!("T13 replay {other:?}: {:?}", job.error),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(service.research(request).await.unwrap()["id"], id);
+        let export = service
+            .research(ResearchRequest::Result {
+                job_id: id.clone(),
+                cursor: None,
+                limit: 50,
+                view: ResearchResultView::Export,
+            })
+            .await
+            .unwrap();
+        assert_eq!(export["integrity"]["reexecution"]["quality"], "verified_reexecution");
+        assert_eq!(export["integrity"]["reexecution"]["bars_rehydrated"], 240);
+        assert_eq!(export["integrity"]["reexecution"]["exact_cashflow_reaudited"], true);
+        recorded.push((id, export));
+    }
+    assert_ne!(recorded[0].0, recorded[1].0);
+    assert_eq!(recorded[0].1["result_hash"], recorded[1].1["result_hash"]);
+    assert_eq!(recorded[0].1["result_id"], recorded[1].1["result_id"]);
+    assert_eq!(recorded[0].1["dataset_hash"], recorded[2].1["dataset_hash"]);
+    assert_ne!(recorded[0].1["result_hash"], recorded[2].1["result_hash"]);
+    assert_ne!(recorded[0].1["result_id"], recorded[2].1["result_id"]);
+    let bootstrap = service.sources.bootstrap.clone();
+    drop(service);
+    let reopened = AnalyticsService::new(root.clone(), bootstrap).unwrap();
+    for (id, original) in &recorded {
+        let repeated = reopened
+            .research(ResearchRequest::Result {
+                job_id: id.clone(),
+                cursor: None,
+                limit: 50,
+                view: ResearchResultView::Export,
+            })
+            .await
+            .unwrap();
+        assert_eq!(&repeated, original, "immutable export survives owner restart");
+        let summary = reopened
+            .research(ResearchRequest::Result {
+                job_id: id.clone(),
+                cursor: None,
+                limit: 50,
+                view: ResearchResultView::Summary,
+            })
+            .await
+            .unwrap();
+        assert_eq!(summary["metadata"]["result_hash"], original["result_hash"]);
+        let first_page = reopened
+            .research(ResearchRequest::Result {
+                job_id: id.clone(),
+                cursor: None,
+                limit: 1,
+                view: ResearchResultView::Trades,
+            })
+            .await
+            .unwrap();
+        assert_eq!(first_page["metadata"]["result_hash"], original["result_hash"]);
+        if let Some(cursor) = first_page["next_cursor"].as_str() {
+            assert_eq!(
+                reopened
+                    .research(ResearchRequest::Result {
+                        job_id: id.clone(),
+                        cursor: Some(cursor.into()),
+                        limit: 1,
+                        view: ResearchResultView::Trades,
+                    })
+                    .await
+                    .unwrap()["returned_rows"],
+                1
+            );
+        }
+    }
+    drop(reopened);
     std::fs::remove_dir_all(root).unwrap();
 }
 #[tokio::test(flavor = "current_thread")]
@@ -1511,6 +1725,15 @@ async fn immutable_result_pages_and_restart_catalog() {
     drop(s);
     let s = AnalyticsService::new(root.clone(), bootstrap).unwrap();
     assert_eq!(s.jobs.get(&id).unwrap().state, jobs::State::Completed);
+    let legacy = s
+        .result_page(id.clone(), None, 1, ResearchResultView::Export)
+        .unwrap();
+    assert_eq!(legacy["integrity"]["quality"], "partial");
+    assert_eq!(legacy["integrity"]["reexecution"]["quality"], "not_verified");
+    assert_eq!(
+        legacy["integrity"]["reexecution"]["reason_code"],
+        "LEGACY_EXPERIMENT_INPUTS_NOT_RETAINED"
+    );
     assert!(
         s.jobs
             .enqueue("fixture-request".into(), "b".repeat(64))
