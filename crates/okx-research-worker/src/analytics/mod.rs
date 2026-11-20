@@ -265,6 +265,7 @@ fn publish_replay(
     dataset: &str,
     grid: Option<Value>,
     experiment: Option<&str>,
+    economic_audit: Option<Value>,
     producer: Option<&crate::producer::Producer>,
     cancel: &impl Fn() -> bool,
 ) -> Result<String, String> {
@@ -282,7 +283,7 @@ fn publish_replay(
         }
         curve_pages.push(store.publish_evidence(&chunk).map_err(|e| e.to_string())?.0);
     }
-    let manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"experiment_artifact":experiment,"producer":producer,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
+    let manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"experiment_artifact":experiment,"economic_audit":economic_audit,"producer":producer,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
     Ok(store
         .publish_evidence(&manifest)
         .map_err(|e| e.to_string())?

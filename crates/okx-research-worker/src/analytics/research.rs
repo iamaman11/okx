@@ -7,6 +7,7 @@ use tracing::Instrument;
 // positions, historical conversion and an explicit portfolio model.
 fn independent_replay_currency_totals(rows: &[Value]) -> Result<Value, String> {
     let mut values = Vec::new();
+    let mut cashflows = Vec::new();
     for row in rows {
         if row["state"] != "completed" {
             continue;
@@ -20,6 +21,31 @@ fn independent_replay_currency_totals(rows: &[Value]) -> Result<Value, String> {
         values.push(okx_research::economics::QuoteAmount::parse_exact(
             currency, pnl,
         )?);
+        if let Some(audit) = row.get("economic_audit").filter(|value| !value.is_null()) {
+            let amount = |field: &str| -> Result<okx_research::economics::QuoteAmount, String> {
+                okx_research::economics::QuoteAmount::parse_exact(
+                    currency,
+                    audit[field].as_str().ok_or("REPLAY_ECONOMIC_AUDIT_INCOMPLETE")?,
+                )
+            };
+            if audit["settlement_currency"] != currency || audit["net_exact"] != pnl {
+                return Err("REPLAY_ECONOMIC_AUDIT_MISMATCH".into());
+            }
+            let flow = okx_research::economics::SettlementCashflow::checked(
+                amount("gross_exact")?,
+                amount("fees_exact")?,
+                amount("funding_cost_exact")?,
+                amount("net_exact")?,
+            )?;
+            if amount("funding_income_exact")?.value
+                != rust_decimal::Decimal::ZERO
+                    .checked_sub(flow.funding().value)
+                    .ok_or("MONEY_OVERFLOW")?
+            {
+                return Err("REPLAY_ECONOMIC_AUDIT_FUNDING_SIGN_MISMATCH".into());
+            }
+            cashflows.push(flow);
+        }
     }
     let grouped = okx_research::economics::group_quote_by_currency(&values)?;
     let currencies = grouped
@@ -32,9 +58,26 @@ fn independent_replay_currency_totals(rows: &[Value]) -> Result<Value, String> {
             })
         })
         .collect::<Vec<_>>();
+    let complete_audit = cashflows.len() == values.len() && !values.is_empty();
+    let flows = if complete_audit {
+        Some(okx_research::economics::group_settlement_cashflows(&cashflows)?
+            .into_iter()
+            .map(|total| json!({
+                "currency":total.currency,"contributors":total.contributors,
+                "gross_exact":total.gross.normalize().to_string(),
+                "fees_exact":total.fees.normalize().to_string(),
+                "funding_cost_exact":total.funding.normalize().to_string(),
+                "net_exact":total.net.normalize().to_string()
+            }))
+            .collect::<Vec<_>>())
+    } else {
+        None
+    };
     Ok(json!({
         "basis":"independent_counterfactual_replay_net_pnl",
         "by_quote_currency":currencies,
+        "cashflow_by_settlement_currency":flows,
+        "cashflow_quality":if complete_audit{"reconciled_from_replay_ledger"}else{"legacy_or_incomplete_audit"},
         "completed_contributors":values.len(),
         "fx_conversion":"not_performed",
         "cross_currency_total":null,
@@ -45,19 +88,12 @@ fn independent_replay_currency_totals(rows: &[Value]) -> Result<Value, String> {
 }
 
 fn research_job_versions(request: &ResearchRequest) -> (&'static str, &'static str) {
-    let observed_funding = match request {
-        ResearchRequest::Backtest { costs, .. } | ResearchRequest::Grid { costs, .. } => {
-            matches!(costs.funding_mode, FundingMode::Observed)
-        }
-        _ => false,
-    };
-    if observed_funding {
-        (
-            "analytics/518.3.funding-presence-proof-v1",
-            "analytics/semantic/518.3.funding-presence-proof-v1",
-        )
-    } else {
-        ("analytics/448.1", "analytics/semantic/v1")
+    match request {
+        ResearchRequest::Backtest { .. } | ResearchRequest::Grid { .. } => (
+            "analytics/518.4.reconciled-replay-cashflow-v1",
+            "analytics/semantic/518.4.reconciled-replay-cashflow-v1",
+        ),
+        _ => ("analytics/448.1", "analytics/semantic/v1"),
     }
 }
 
@@ -219,9 +255,21 @@ impl AnalyticsService {
                         // Verify exact money before acknowledging this successful
                         // instrument; malformed evidence must not enter a total.
                         okx_research::economics::QuoteAmount::parse_exact(quote,result["summary"]["pnl_exact"].as_str().ok_or("REPLAY_EXACT_PNL_MISSING")?)?;
+                        let audit = result.get("economic_audit")
+                            .filter(|value| value.is_object())
+                            .ok_or("REPLAY_ECONOMIC_AUDIT_MISSING")?;
+                        if audit["schema"] != okx_research::economic_audit::REPLAY_ECONOMIC_AUDIT_VERSION
+                            || audit["settlement_currency"] != quote
+                            || audit["result_hash"] != result["hash"]
+                            || audit["dataset_hash"] != result["dataset_hash"]
+                            || audit["net_exact"] != result["summary"]["pnl_exact"]
+                        {
+                            return Err("REPLAY_ECONOMIC_AUDIT_MISMATCH".into());
+                        }
                         artifacts.push(artifact.clone());
                         json!({"index":index,"instrument":instrument,"state":"completed","artifact":artifact,
                             "quote_currency":quote,"product":product,"summary":result["summary"],
+                            "economic_audit":audit,
                             "dataset_hash":result["dataset_hash"],"grid":result["grid"],
                             "trades_cursor":format!("instrument:{index}:0")})
                     },Err(error)=>json!({"index":index,"instrument":instrument,"state":"failed","reason_code":error})};
@@ -600,6 +648,10 @@ impl AnalyticsService {
                         let id = store.publish_evidence(&funding_capture).map_err(|e|e.to_string())?.0;
                         economic_basis["funding_capture_artifact"] = json!(id);
                     }
+                    let settlement_currency = economic_basis["quote_currency"]
+                        .as_str()
+                        .ok_or("REPLAY_CURRENCY_MISSING")?
+                        .to_owned();
                     let experiment = store.publish_evidence(&json!({
                         "schema":"okx.research.experiment-inputs/v1",
                         "dataset_artifact":dataset,"instrument":instruments[0],
@@ -611,7 +663,15 @@ impl AnalyticsService {
                         "result_role":"counterfactual_research_only"
                     })).map_err(|e|e.to_string())?.0;
                     let(result,grid)=if is_grid{let g=replay::grid_with_observer(&bars,&spec,&variants,&cancelled,&|value|{if let Some((tracker,index))=&observation {tracker.observe(*index,value)}})?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":spec.seed,"strategy_id":spec.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.warmup_for(&spec.strategy_id)?,bars.len(),&cancelled)?,None)};
-                    publish_replay(&store,&result,&dataset,grid,Some(&experiment),producer.as_ref(),&cancelled)
+                    let score_start = grid.as_ref()
+                        .and_then(|value| value["split_index"].as_u64())
+                        .map(|index| index as usize)
+                        .unwrap_or(first.warmup_for(&spec.strategy_id)?);
+                    let audit = okx_research::economic_audit::audit_replay(
+                        &bars, &spec, &result, &settlement_currency,
+                        score_start, bars.len(), &cancelled,
+                    )?;
+                    publish_replay(&store,&result,&dataset,grid,Some(&experiment),Some(json!(audit)),producer.as_ref(),&cancelled)
                 }).await?;
         Ok::<_, String>(artifact)
     }
@@ -622,7 +682,7 @@ mod t09_currency_batch_tests {
     use super::*;
 
     #[test]
-    fn t09_t13_funding_settlement_migration_is_scoped_to_observed_research_jobs() {
+    fn t09_t13_reconciled_cashflow_gets_new_version_for_all_replay_jobs() {
         let mut body = json!({
             "action":"backtest","idempotency_key":"funding-v2-proof",
             "instruments":["BTC-USDT-SWAP"],"timeframe_ms":60000,
@@ -635,15 +695,18 @@ mod t09_currency_batch_tests {
         let previous: ResearchRequest = serde_json::from_value(body.clone()).unwrap();
         assert_eq!(
             research_job_versions(&previous),
-            ("analytics/448.1", "analytics/semantic/v1")
+            (
+                "analytics/518.4.reconciled-replay-cashflow-v1",
+                "analytics/semantic/518.4.reconciled-replay-cashflow-v1"
+            )
         );
         body["costs"]["funding_mode"] = json!("observed");
         let migrated: ResearchRequest = serde_json::from_value(body.clone()).unwrap();
         assert_eq!(
             research_job_versions(&migrated),
             (
-                "analytics/518.3.funding-presence-proof-v1",
-                "analytics/semantic/518.3.funding-presence-proof-v1"
+                "analytics/518.4.reconciled-replay-cashflow-v1",
+                "analytics/semantic/518.4.reconciled-replay-cashflow-v1"
             )
         );
         body["action"] = json!("grid");
@@ -684,6 +747,39 @@ mod t09_currency_batch_tests {
         assert_eq!(
             independent_replay_currency_totals(&invalid).unwrap_err(),
             "INVALID_EXACT_AMOUNT"
+        );
+    }
+
+    #[test]
+    fn t09_t13_audited_batch_reconciles_gross_fees_funding_and_currency() {
+        let audited = |currency: &str, gross: &str, fees: &str, funding_cost: &str,
+                       income: &str, net: &str| {
+            json!({"state":"completed","quote_currency":currency,
+                "summary":{"pnl_exact":net},
+                "economic_audit":{"settlement_currency":currency,
+                    "gross_exact":gross,"fees_exact":fees,
+                    "funding_cost_exact":funding_cost,
+                    "funding_income_exact":income,"net_exact":net}})
+        };
+        let rows = vec![
+            audited("USDT", "3", "0.1", "0.2", "-0.2", "2.7"),
+            audited("USD", "1", "0", "0", "0", "1"),
+            audited("USDT", "-1", "0.1", "-0.2", "0.2", "-0.9"),
+        ];
+        let result = independent_replay_currency_totals(&rows).unwrap();
+        assert_eq!(result["cashflow_quality"], "reconciled_from_replay_ledger");
+        assert_eq!(result["by_quote_currency"].as_array().unwrap().len(), 2);
+        assert_eq!(result["cross_currency_total"], Value::Null);
+        assert_eq!(result["cashflow_by_settlement_currency"][1], json!({
+            "currency":"USDT","contributors":2,
+            "gross_exact":"2","fees_exact":"0.2",
+            "funding_cost_exact":"0","net_exact":"1.8"
+        }));
+        let mut forged = rows;
+        forged[0]["economic_audit"]["funding_income_exact"] = json!("0.2");
+        assert_eq!(
+            independent_replay_currency_totals(&forged).unwrap_err(),
+            "REPLAY_ECONOMIC_AUDIT_FUNDING_SIGN_MISMATCH"
         );
     }
 }

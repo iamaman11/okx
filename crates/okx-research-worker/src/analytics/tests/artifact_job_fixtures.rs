@@ -171,6 +171,18 @@ async fn t08_public_breakout_grid_persists_typed_selection_and_rejects_65_before
         })
         .await
         .unwrap();
+    assert_eq!(
+        result["metadata"]["economic_audit"]["schema"],
+        okx_research::economic_audit::REPLAY_ECONOMIC_AUDIT_VERSION
+    );
+    assert_eq!(
+        result["metadata"]["economic_audit"]["net_exact"],
+        result["metadata"]["summary"]["pnl_exact"]
+    );
+    assert_eq!(
+        result["metadata"]["economic_audit"]["historical_rules_verified"],
+        false
+    );
     assert!(result["metadata"]["grid"]["selected"]["lookback"].is_u64());
     assert_eq!(result["metadata"]["grid"]["split_index"], 140);
     assert_eq!(result["metadata"]["grid"]["warmup_bars"], 65);
@@ -587,6 +599,20 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
         assert_eq!(bucket["independent_replay_count"], 1);
         assert!(bucket["net_pnl_exact"].is_string());
     }
+    assert_eq!(
+        result["summary"]["economic_totals"]["cashflow_quality"],
+        "reconciled_from_replay_ledger"
+    );
+    let cashflows = result["summary"]["economic_totals"]["cashflow_by_settlement_currency"]
+        .as_array()
+        .unwrap();
+    assert_eq!(cashflows.len(), 2);
+    for row in cashflows {
+        use std::str::FromStr;
+        let money = ["gross_exact", "fees_exact", "funding_cost_exact", "net_exact"]
+            .map(|field| rust_decimal::Decimal::from_str(row[field].as_str().unwrap()).unwrap());
+        assert_eq!(money[0] - money[1] - money[2], money[3]);
+    }
     let summary = s
         .research(ResearchRequest::Result {
             job_id: id.clone(),
@@ -602,6 +628,8 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
     );
     assert_eq!(summary["rows"][0]["quote_currency"], "USDT");
     assert_eq!(summary["rows"][1]["quote_currency"], "USD");
+    assert_eq!(summary["rows"][0]["economic_audit"]["settlement_currency"], "USDT");
+    assert_eq!(summary["rows"][1]["economic_audit"]["settlement_currency"], "USD");
     assert_eq!(summary["rows"][0]["product"], "spot");
     assert_eq!(
         summary["rows"][1]["net_pnl_exact"],
@@ -1444,7 +1472,7 @@ async fn immutable_result_pages_and_restart_catalog() {
             .collect(),
     };
     let artifact =
-        publish_replay(&s.artifacts, &result, &data, None, None, None, &|| false).unwrap();
+        publish_replay(&s.artifacts, &result, &data, None, None, None, None, &|| false).unwrap();
     let id = "a".repeat(64);
     s.jobs
         .enqueue("fixture-request".into(), id.clone())

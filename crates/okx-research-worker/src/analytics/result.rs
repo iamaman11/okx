@@ -466,6 +466,7 @@ impl AnalyticsService {
                 "integrity":verify_export_manifest(&self.artifacts, &value)?,
                 "dataset_hash":value.get("dataset_hash"),
                 "result_hash":value.get("hash"),
+                "economic_audit":value.get("economic_audit"),
                 "code_version":value.get("code_version"),
                 "producer":value.get("producer"),
                 "experiment_artifact":value.get("experiment_artifact"),
@@ -476,6 +477,7 @@ impl AnalyticsService {
             "job_id":job_id,"artifact":artifact,
             "expires_at_ms":j.expires_at_ms,
             "summary":value.get("summary").or_else(||value.pointer("/test/summary")),
+            "economic_audit":value.get("economic_audit"),
             "grid":value.get("grid").map(|g| json!({
                 "selected":g.get("selected"),"train":g.get("train"),
                 "test":value.get("summary"),"split_index":g.get("split_index"),
@@ -508,6 +510,7 @@ impl AnalyticsService {
                         "product": row.get("product"),
                         "quote_currency": row.get("quote_currency"),
                         "net_pnl_exact": row.pointer("/summary/pnl_exact"),
+                        "economic_audit": row.get("economic_audit"),
                         "state": row.get("state"),
                         "reason_code": row.get("reason_code"),
                         "artifact": row.get("artifact"),

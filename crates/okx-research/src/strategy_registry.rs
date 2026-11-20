@@ -558,23 +558,23 @@ pub fn grid_with_observer(
     })
 }
 
-fn dec(v: f64) -> Result<Decimal, String> {
+pub(crate) fn dec(v: f64) -> Result<Decimal, String> {
     if !v.is_finite() {
         return Err("MONEY_NONFINITE".into());
     }
     Decimal::from_str(&v.to_string()).map_err(|_| "MONEY_PRECISION".into())
 }
-fn mul(a: Decimal, b: Decimal) -> Result<Decimal, String> {
+pub(crate) fn mul(a: Decimal, b: Decimal) -> Result<Decimal, String> {
     a.checked_mul(b).ok_or("MONEY_OVERFLOW".into())
 }
-struct Money {
-    cash: Decimal,
-    fees: Decimal,
-    funding: Decimal,
-    turnover: Decimal,
+pub(crate) struct Money {
+    pub(crate) cash: Decimal,
+    pub(crate) fees: Decimal,
+    pub(crate) funding: Decimal,
+    pub(crate) turnover: Decimal,
 }
 impl Money {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             cash: Decimal::from(10000),
             fees: Decimal::ZERO,
@@ -582,7 +582,7 @@ impl Money {
             turnover: Decimal::ZERO,
         }
     }
-    fn trade(&mut self, quantity: f64, price: f64, bps: f64) -> Result<(), String> {
+    pub(crate) fn trade(&mut self, quantity: f64, price: f64, bps: f64) -> Result<(), String> {
         let notional = mul(dec(quantity)?, dec(price)?)?;
         let fee = mul(notional.abs(), dec(bps)?)?
             .checked_div(Decimal::from(10000))
@@ -599,7 +599,7 @@ impl Money {
             .ok_or("MONEY_OVERFLOW")?;
         Ok(())
     }
-    fn fund(&mut self, quantity: f64, price: f64, rate: f64) -> Result<(), String> {
+    pub(crate) fn fund(&mut self, quantity: f64, price: f64, rate: f64) -> Result<(), String> {
         let funding = mul(mul(dec(quantity)?, dec(price)?)?, dec(rate)?)?;
         self.cash = self.cash.checked_sub(funding).ok_or("MONEY_OVERFLOW")?;
         self.funding = self.funding.checked_sub(funding).ok_or("MONEY_OVERFLOW")?;

@@ -211,6 +211,7 @@ async fn grid_result_includes_selected_train_test_and_equity() {
         Some(grid),
         None,
         None,
+        None,
         &|| false,
     )
     .unwrap();
