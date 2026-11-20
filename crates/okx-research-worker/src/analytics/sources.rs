@@ -689,6 +689,18 @@ mod extension_tests {
         );
         assert_eq!(market["rows"][0]["candle_coverage"]["missing_bars"], 0);
         assert_eq!(market["rows"][0]["unclosed_candles_excluded"], 1);
+        assert_eq!(
+            market["rows"][0]["source_integrity"]["quality"],
+            "verified_normalized_sources"
+        );
+        assert_eq!(
+            market["rows"][0]["source_integrity"]["verified_sources"][0]["source"],
+            "candles"
+        );
+        assert_eq!(
+            market["rows"][0]["source_integrity"]["replay_metric_reexecution_verified"],
+            false
+        );
         // T07/T15: a previously undeclared combination executes through the
         // public source decoder and durable market artifact path with the same
         // binary. The already captured candles are reused, with no venue POST.

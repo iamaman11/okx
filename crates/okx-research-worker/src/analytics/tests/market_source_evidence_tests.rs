@@ -62,6 +62,19 @@ fn t06_t13_all_three_sources_are_immutable_chunked_and_reconstructable() {
     assert_eq!(sources.len(), 3);
     let original = compute_row_planned(inputs, &query, None, &plan, true).unwrap();
     let linked = attach_composition_source_evidence(original.clone(), sources.clone()).unwrap();
+    let integrity =
+        verify_composition_source_pages(&service.artifacts, &linked, &query, &plan, &cancellation)
+            .unwrap();
+    assert_eq!(integrity["quality"], "verified_normalized_sources");
+    assert_eq!(integrity["verified_sources"].as_array().unwrap().len(), 3);
+    assert_eq!(integrity["unavailable_sources"], json!([]));
+    assert_eq!(integrity["replay_metric_reexecution_verified"], false);
+    assert_eq!(integrity["historical_publication_time_verified"], false);
+    for source in integrity["verified_sources"].as_array().unwrap() {
+        assert_eq!(source["quality"], "verified_normalized_capture");
+        assert!(source["capture_hash"].is_string());
+        assert_eq!(source["publication_time_verified"], false);
+    }
     assert!(linked["metrics"]["combined"].is_number());
     assert_eq!(
         linked["composition_quality"]["combined"]["status"],
@@ -176,6 +189,100 @@ fn t06_t13_all_three_sources_are_immutable_chunked_and_reconstructable() {
 }
 
 #[test]
+fn t13_market_source_integrity_rejects_rehashed_forged_metadata_or_reordered_pages() {
+    let (root, service) = super::super::artifact_job_fixtures::service();
+    let count = MARKET_SOURCE_EVIDENCE_CHUNK + 1;
+    let query = composed_request(count);
+    let plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+    let cancel = super::super::executor::Cancel::default();
+    let input = composed_row(count);
+    let base = compute_row_planned(input.clone(), &query, None, &plan, true).unwrap();
+    let captures =
+        publish_composition_source_evidence(&service.artifacts, &input, &query, &plan, &cancel)
+            .unwrap();
+    let linked = attach_composition_source_evidence(base, captures).unwrap();
+    let candle_id = linked["source_captures"]["candles"]["evidence_artifact"]
+        .as_str()
+        .unwrap();
+    let original: Value = service.artifacts.read_evidence_json(candle_id).unwrap();
+    let changes = [
+        ("forged_count", {
+            let mut m = original.clone();
+            m["observed_points"] = json!(count - 1);
+            m
+        }),
+        ("wrong_range", {
+            let mut m = original.clone();
+            m["requested_end_ms"] = json!(99_999_999);
+            m
+        }),
+        ("false_time_proof", {
+            let mut m = original.clone();
+            m["publication_time_verified"] = json!(true);
+            m
+        }),
+        ("changed_hash_domain", {
+            let mut m = original.clone();
+            m["hash_domain"] = json!("other-domain");
+            m
+        }),
+        ("reordered_pages", {
+            let mut m = original.clone();
+            m["chunks"].as_array_mut().unwrap().reverse();
+            m
+        }),
+        ("duplicate_page", {
+            let mut m = original.clone();
+            let first = m["chunks"][0].clone();
+            m["chunks"][1] = first;
+            m
+        }),
+        ("missing_page", {
+            let mut m = original.clone();
+            m["chunks"].as_array_mut().unwrap().pop();
+            m
+        }),
+    ];
+    for (name, metadata) in changes {
+        let id = service.artifacts.publish_evidence(&metadata).unwrap().0;
+        let mut forged = linked.clone();
+        forged["source_captures"]["candles"]["evidence_artifact"] = json!(id);
+        assert_eq!(
+            verify_composition_source_pages(&service.artifacts, &forged, &query, &plan, &cancel)
+                .unwrap_err(),
+            "COMPOSITION_SOURCE_EVIDENCE_MISMATCH",
+            "forged {name} must not be treated as verified evidence"
+        );
+    }
+    // Every individual artifact is content-addressed and the attacker can
+    // publish a perfectly valid new page and manifest. Neither SHA alone
+    // proves it is the page that actually fed the original market metric.
+    let first_chunk = original["chunks"][0].as_str().unwrap();
+    let mut altered: Vec<Bar> = service.artifacts.read_evidence_json(first_chunk).unwrap();
+    altered[0].close += 10.0;
+    let altered_chunk = service.artifacts.publish_evidence(&altered).unwrap().0;
+    let mut altered_manifest = original.clone();
+    altered_manifest["chunks"][0] = json!(altered_chunk);
+    let altered_id = service.artifacts.publish_evidence(&altered_manifest).unwrap().0;
+    let mut forged = linked.clone();
+    forged["source_captures"]["candles"]["evidence_artifact"] = json!(altered_id);
+    assert_eq!(
+        verify_composition_source_pages(&service.artifacts, &forged, &query, &plan, &cancel)
+            .unwrap_err(),
+        "COMPOSITION_SOURCE_EVIDENCE_MISMATCH"
+    );
+    let mut mismatched_capture = linked;
+    mismatched_capture["source_captures"]["open_interest"]["capture_hash"] = json!("sha256:forged");
+    assert_eq!(
+        verify_composition_source_pages(&service.artifacts, &mismatched_capture, &query, &plan, &cancel)
+            .unwrap_err(),
+        "COMPOSITION_SOURCE_EVIDENCE_MISMATCH"
+    );
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn t06_missing_sources_have_no_false_capture_and_cancel_does_not_publish() {
     let (root, service) = super::super::artifact_job_fixtures::service();
     let query = composed_request(100);
@@ -199,6 +306,15 @@ fn t06_missing_sources_have_no_false_capture_and_cancel_does_not_publish() {
     assert_eq!(linked["source_captures"]["open_interest"], Value::Null);
     assert_eq!(linked["source_captures"]["funding_rate"], Value::Null);
     assert!(linked["metrics"]["combined"].is_null());
+    let integrity =
+        verify_composition_source_pages(&service.artifacts, &linked, &query, &plan, &cancel)
+            .unwrap();
+    assert_eq!(integrity["quality"], "partial_source_unavailable");
+    assert_eq!(
+        integrity["unavailable_sources"],
+        json!(["open_interest", "funding_rate"])
+    );
+    assert_eq!(integrity["verified_sources"].as_array().unwrap().len(), 1);
     let mut missing_bars = composed_row(100);
     missing_bars.bars = Err("CANDLES_UNAVAILABLE".into());
     let evidence = publish_composition_source_evidence(

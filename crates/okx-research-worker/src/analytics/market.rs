@@ -1,7 +1,9 @@
 use super::*;
 use okx_analysis::operators::{Operator, registry, scalar};
 use replay::Bar;
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned, ser::SerializeSeq};
+use sha2::Digest;
+use std::{io::Write, marker::PhantomData};
 use tracing::Instrument;
 #[derive(Clone)]
 struct Loaded {
@@ -58,7 +60,7 @@ fn market_request_schema(
     funding_composition: bool,
 ) -> &'static str {
     if has_composition || oi_composition || funding_composition {
-        "market/518.7.exact-event-grid-null-time-v1"
+        "market/518.8.verified-source-pages-v1"
     } else {
         market_job_schema(fields)
     }
@@ -449,6 +451,10 @@ impl AnalyticsService {
                     "schema":"okx.market.normalized-source/v1",
                     "chunk_size":4096,"storage":"immutable_content_addressed",
                     "capture_hash":"canonical_source_tuple_sha256",
+                    "integrity_location":"source_integrity",
+                    "integrity_schema":"okx.market.composition-source-integrity/v1",
+                    "verification":"bounded_streaming_reconstructed_canonical_capture_hash",
+                    "metric_reexecution_verified":false,
                     "retrieval":"retained_with_completed_market_job",
                     "scope":"composition_sources_only",
                     "publication_time_verified_for_oi_and_funding":false},
@@ -705,8 +711,12 @@ impl AnalyticsService {
                         let evidence = publish_composition_source_evidence(
                             &store, inputs, &request, &plan, &cancel,
                         )?;
-                        *result =
+                        let mut linked =
                             attach_composition_source_evidence(std::mem::take(result), evidence)?;
+                        linked["source_integrity"] = verify_composition_source_pages(
+                            &store, &linked, &request, &plan, &cancel,
+                        )?;
+                        *result = linked;
                     }
                 }
                 Ok((rows, matrix))
@@ -721,6 +731,221 @@ impl AnalyticsService {
 // Neither a missing source nor a failed source read creates a fabricated page.
 const MARKET_SOURCE_EVIDENCE_CHUNK: usize = 4096;
 type PublishedMarketSource = (&'static str, String, String);
+
+/// Stream a source's content-addressed pages through the same canonical JSON
+/// tuple as the original capture. No 1M-row reconstruction or second
+/// full-series buffer is required. This verifies the *recorded* observations,
+/// not unavailable venue publication times or a separate execution oracle.
+struct VerifiedSourcePages<'a, T> {
+    store: &'a ResearchArtifactStore,
+    chunks: &'a [String],
+    expected: usize,
+    cancel: &'a super::executor::Cancel,
+    row: PhantomData<T>,
+}
+
+impl<T: Serialize + DeserializeOwned> Serialize for VerifiedSourcePages<'_, T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(self.expected))?;
+        let mut observed = 0usize;
+        for (index, id) in self.chunks.iter().enumerate() {
+            if self.cancel.load(Ordering::Acquire) {
+                return Err(serde::ser::Error::custom("CANCELLED"));
+            }
+            let rows: Vec<T> = self
+                .store
+                .read_evidence_json(id)
+                .map_err(serde::ser::Error::custom)?;
+            if rows.is_empty()
+                || rows.len() > MARKET_SOURCE_EVIDENCE_CHUNK
+                || (index + 1 < self.chunks.len() && rows.len() != MARKET_SOURCE_EVIDENCE_CHUNK)
+            {
+                return Err(serde::ser::Error::custom("COMPOSITION_SOURCE_PAGE_SIZE_INVALID"));
+            }
+            observed = observed
+                .checked_add(rows.len())
+                .ok_or_else(|| serde::ser::Error::custom("COMPOSITION_SOURCE_COUNT_OVERFLOW"))?;
+            if observed > self.expected {
+                return Err(serde::ser::Error::custom("COMPOSITION_SOURCE_COUNT_MISMATCH"));
+            }
+            for row in &rows {
+                sequence.serialize_element(row)?;
+            }
+        }
+        if observed != self.expected {
+            return Err(serde::ser::Error::custom("COMPOSITION_SOURCE_COUNT_MISMATCH"));
+        }
+        sequence.end()
+    }
+}
+
+struct SourceHashWriter(sha2::Sha256);
+
+impl Write for SourceHashWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn verify_one_source_pages<T: Serialize + DeserializeOwned>(
+    store: &ResearchArtifactStore,
+    request: &MarketRequest,
+    instrument: &str,
+    capture: &Value,
+    source: &str,
+    hash_domain: &str,
+    time_basis: &str,
+    cancel: &super::executor::Cancel,
+) -> Result<Value, String> {
+    let invalid = || "COMPOSITION_SOURCE_EVIDENCE_MISMATCH".to_owned();
+    let manifest_id = capture["evidence_artifact"].as_str().ok_or_else(invalid)?;
+    let manifest: Value = store.read_evidence_json(manifest_id).map_err(|_| invalid())?;
+    let expected = manifest["observed_points"].as_u64().ok_or_else(invalid)?;
+    if expected > 1_000_000
+        || manifest["schema"] != "okx.market.normalized-source/v1"
+        || manifest["source"] != source
+        || manifest["instrument"] != instrument
+        || manifest["requested_start_ms"] != request.start_ms
+        || manifest["requested_end_ms"] != request.end_ms
+        || manifest["timeframe_ms"] != request.timeframe_ms
+        || manifest["hash_domain"] != hash_domain
+        || manifest["time_basis"] != time_basis
+        || manifest["publication_time_verified"] != false
+        || manifest["availability_assumption"]
+            != (if source == "candles" {
+                "after_closed_bar"
+            } else {
+                "historical_event_only"
+            })
+        || manifest["chunk_size"] != MARKET_SOURCE_EVIDENCE_CHUNK
+        || manifest["capture_hash"] != capture["capture_hash"]
+        || capture["source"]
+            != (if source == "candles" {
+                "okx/closed_candles"
+            } else if source == "open_interest" {
+                "okx/open_interest"
+            } else {
+                "okx/funding-rate-history"
+            })
+    {
+        return Err(invalid());
+    }
+    let expected = expected as usize;
+    let chunks = manifest["chunks"].as_array().ok_or_else(invalid)?;
+    if chunks.len() != expected.div_ceil(MARKET_SOURCE_EVIDENCE_CHUNK) {
+        return Err(invalid());
+    }
+    let ids = chunks
+        .iter()
+        .map(|value| value.as_str().map(str::to_owned).ok_or_else(invalid))
+        .collect::<Result<Vec<_>, _>>()?;
+    let rows = VerifiedSourcePages::<T> {
+        store,
+        chunks: &ids,
+        expected,
+        cancel,
+        row: PhantomData,
+    };
+    let mut writer = SourceHashWriter(sha2::Sha256::new());
+    serde_json::to_writer(
+        &mut writer,
+        &(
+            hash_domain,
+            instrument,
+            request.start_ms,
+            request.end_ms,
+            request.timeframe_ms,
+            rows,
+        ),
+    )
+    .map_err(|_| {
+        if cancel.load(Ordering::Acquire) {
+            "CANCELLED".into()
+        } else {
+            invalid()
+        }
+    })?;
+    let reconstructed_hash = format!("sha256:{:x}", writer.0.finalize());
+    if capture["capture_hash"] != reconstructed_hash
+        || (source == "candles" && capture["observed_points"] != expected)
+        || (source == "open_interest" && capture["observed_points"] != expected)
+        || (source == "funding_rate" && capture["observed_events"] != expected)
+    {
+        return Err(invalid());
+    }
+    Ok(json!({"source":source,"quality":"verified_normalized_capture",
+        "pages":ids.len(),"observed_points":expected,"capture_hash":reconstructed_hash,
+        "publication_time_verified":false}))
+}
+
+fn verify_composition_source_pages(
+    store: &ResearchArtifactStore,
+    row: &Value,
+    request: &MarketRequest,
+    plan: &okx_analysis::query_plan::QueryPlan,
+    cancel: &super::executor::Cancel,
+) -> Result<Value, String> {
+    use okx_analysis::query_plan::Source;
+    let graph = plan
+        .composition
+        .as_ref()
+        .ok_or("COMPOSITION_EVIDENCE_WITHOUT_PLAN")?;
+    let required = graph.sources();
+    let mut verified = Vec::new();
+    let mut unavailable = Vec::new();
+    let instrument = row["instrument"]
+        .as_str()
+        .ok_or("COMPOSITION_INSTRUMENT_MISSING")?;
+    let sources = [
+        (
+            "candles",
+            Source::Candles,
+            "okx.market.candle-source-capture/v1",
+            "closed_candle_time",
+        ),
+        (
+            "open_interest",
+            Source::OpenInterest,
+            "okx.market.oi-source-capture/v1",
+            "observation_event_time_publication_unverified",
+        ),
+        (
+            "funding_rate",
+            Source::Funding,
+            "okx.market.funding-realized-event-source-capture/v1",
+            "realized_settlement_event_time_publication_unverified",
+        ),
+    ];
+    for (name, kind, domain, time_basis) in sources {
+        if !required.contains(&kind) {
+            continue;
+        }
+        let capture = &row["source_captures"][name];
+        if capture.is_null() {
+            unavailable.push(name);
+            continue;
+        }
+        verified.push(match kind {
+            Source::Candles => verify_one_source_pages::<Bar>(
+                store, request, instrument, capture, name, domain, time_basis, cancel,
+            )?,
+            _ => verify_one_source_pages::<(u64, f64)>(
+                store, request, instrument, capture, name, domain, time_basis, cancel,
+            )?,
+        });
+    }
+    Ok(json!({"schema":"okx.market.composition-source-integrity/v1",
+        "quality":if unavailable.is_empty(){"verified_normalized_sources"}else{"partial_source_unavailable"},
+        "verified_sources":verified,"unavailable_sources":unavailable,
+        "replay_metric_reexecution_verified":false,
+        "historical_publication_time_verified":false,
+        "proof":"bounded_chunk_read_identity_and_reconstructed_canonical_capture_hash"}))
+}
 
 fn attach_composition_source_evidence(
     mut result: Value,
@@ -1772,7 +1997,7 @@ mod tests {
         let oi_composed = market_request_schema(&fields, true, true, false);
         let oi_correlated = market_request_schema(&oi_fields, true, true, false);
         let funding_composed = market_request_schema(&fields, true, false, true);
-        assert_eq!(composed, "market/518.7.exact-event-grid-null-time-v1");
+        assert_eq!(composed, "market/518.8.verified-source-pages-v1");
         assert_eq!(oi_composed, composed);
         assert_ne!(composed, "market/518.2.composition-quality-v1");
         assert_ne!(oi_composed, "market/518.2.oi-composition-quality-v1");
@@ -1783,7 +2008,7 @@ mod tests {
         assert_eq!(oi_correlated, oi_composed);
         assert_eq!(
             funding_composed,
-            "market/518.7.exact-event-grid-null-time-v1"
+            "market/518.8.verified-source-pages-v1"
         );
         assert_eq!(
             funding_composed,
