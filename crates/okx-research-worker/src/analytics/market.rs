@@ -306,6 +306,8 @@ impl AnalyticsService {
                 "available_for":"screen","input_sources":["close"],
                 "operations":[{"op":"returns_series","input_unit":"price","output_unit":"ratio"},
                     {"op":"rolling_mean","input_unit":"price_or_ratio","output_unit":"same_as_input","period_min":1,"period_max":1000},
+                    {"op":"rolling_max","input_unit":"price_or_ratio","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
+                    {"op":"rolling_min","input_unit":"price_or_ratio","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
                     {"op":"lag","input_unit":"causal_series","output_unit":"same_as_input","period_min":1,"period_max":1000},
                     {"op":"greater_than","input_unit":"price_or_ratio","output_unit":"boolean","requires":"finite_threshold"},
                     {"op":"rising_edge","input_unit":"boolean","output_unit":"event","trigger":"false_to_true"},
@@ -1365,6 +1367,64 @@ mod tests {
             compute_row_checked(partial_fixture, &request, None, composition, true).unwrap();
         assert_eq!(partial["metrics"]["w1"], Value::Null);
         assert_eq!(partial["quality"], "partial");
+    }
+    #[test]
+    fn t15_public_window_extrema_share_candle_source_and_preserve_units() {
+        let mut request = request(vec!["returns"]);
+        request.start_ms = 0;
+        request.end_ms = 180_000;
+        request.composition = Some(Box::new(
+            serde_json::from_value(json!({
+                "version":"okx.market.composition/v1",
+                "steps":[
+                    {"id":"upper","op":"rolling_max","input":"close","period":3},
+                    {"id":"lower","op":"rolling_min","input":"close","period":3}
+                ],
+                "result_steps":["upper","lower"]
+            }))
+            .unwrap(),
+        ));
+        let mut fixture = row();
+        fixture.bars = Ok(Arc::new(
+            [100.0, 110.0, 99.0]
+                .into_iter()
+                .enumerate()
+                .map(|(i, price)| Bar {
+                    time: i as u64 * 60_000,
+                    open: price,
+                    high: price,
+                    low: price,
+                    close: price,
+                    volume: 1.0,
+                    funding_rate: None,
+                })
+                .collect(),
+        ));
+        let checked = planner::AnalysisPlan::compile_market(&request).unwrap();
+        assert_eq!(
+            checked.sources,
+            vec![okx_analysis::query_plan::Source::Candles]
+        );
+        let mut partial_fixture = row();
+        partial_fixture.bars = fixture.bars.clone();
+        let out = compute_row_checked(fixture, &request, None, checked.composition.as_ref(), true)
+            .unwrap();
+        assert_eq!(out["metrics"]["upper"], 110.0);
+        assert_eq!(out["metrics"]["lower"], 99.0);
+        assert_eq!(out["units"]["upper"], "price");
+        assert_eq!(out["units"]["lower"], "price");
+        Arc::make_mut(partial_fixture.bars.as_mut().unwrap()).remove(1);
+        let partial = compute_row_checked(
+            partial_fixture,
+            &request,
+            None,
+            checked.composition.as_ref(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(partial["quality"], "partial");
+        assert!(partial["metrics"]["upper"].is_null());
+        assert!(partial["metrics"]["lower"].is_null());
     }
     #[test]
     fn t07_event_graph_exposes_boolean_metrics_but_not_unconfirmed_future_outcomes() {

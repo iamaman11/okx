@@ -4,7 +4,7 @@ use crate::{
     time_series::ClosedRange,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const QUERY_PLAN_VERSION: &str = "okx.query-plan/448.1";
 pub const COMPOSITION_VERSION: &str = "okx.market.composition/v1";
@@ -40,6 +40,8 @@ pub struct SeriesStep {
 pub enum SeriesOp {
     ReturnsSeries,
     RollingMean,
+    RollingMax,
+    RollingMin,
     Lag,
     GreaterThan,
     RisingEdge,
@@ -140,7 +142,10 @@ impl CheckedComposition {
                     }
                     Unit::Ratio
                 }
-                SeriesOp::RollingMean | SeriesOp::Lag => {
+                SeriesOp::RollingMean
+                | SeriesOp::RollingMax
+                | SeriesOp::RollingMin
+                | SeriesOp::Lag => {
                     let numeric = matches!(input_unit, Unit::Price | Unit::Ratio);
                     let lagged_discrete = step.op == SeriesOp::Lag
                         && matches!(input_unit, Unit::Boolean | Unit::Event);
@@ -273,6 +278,11 @@ impl CheckedComposition {
                     }
                     result
                 }
+                SeriesOp::RollingMax | SeriesOp::RollingMin => rolling_extremum(
+                    &input,
+                    checked.step.period.expect("validated extrema period") as usize,
+                    checked.step.op == SeriesOp::RollingMax,
+                ),
                 SeriesOp::Lag => {
                     let period = checked.step.period.expect("validated lag") as usize;
                     let mut result = vec![None; input.len()];
@@ -335,6 +345,44 @@ impl CheckedComposition {
             })
             .collect()
     }
+}
+
+/// Causal, closed-bar window extrema in O(bars) time and O(period) memory.
+/// Every incomplete window, including one with an interior gap, stays None.
+fn rolling_extremum(input: &[Option<f64>], period: usize, maximum: bool) -> Vec<Option<f64>> {
+    let mut result = vec![None; input.len()];
+    let mut deque = VecDeque::<(usize, f64)>::with_capacity(period);
+    let mut missing = 0usize;
+    for (index, value) in input.iter().copied().enumerate() {
+        if index >= period && input[index - period].is_none() {
+            missing -= 1;
+        }
+        match value {
+            Some(value) => {
+                while deque.back().is_some_and(|(_, prior)| {
+                    if maximum {
+                        *prior <= value
+                    } else {
+                        *prior >= value
+                    }
+                }) {
+                    deque.pop_back();
+                }
+                deque.push_back((index, value));
+            }
+            None => missing += 1,
+        }
+        while deque
+            .front()
+            .is_some_and(|(prior, _)| prior.saturating_add(period) <= index)
+        {
+            deque.pop_front();
+        }
+        if index + 1 >= period && missing == 0 {
+            result[index] = deque.front().map(|(_, value)| *value);
+        }
+    }
+    result
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1022,5 +1070,90 @@ mod c20_query_plan_extension {
         assert_eq!(plan.operators[0].warmup_bars, 14);
         assert_eq!(plan.operators[0].null_policy, "propagate_missing");
         assert!(plan.operators[0].deterministic);
+    }
+}
+
+#[cfg(test)]
+mod t15_causal_window_extrema {
+    use super::*;
+
+    fn plan() -> CheckedComposition {
+        CheckedComposition::compile(
+            serde_json::from_value(serde_json::json!({
+                "version":"okx.market.composition/v1",
+                "steps":[
+                    {"id":"upper","op":"rolling_max","input":"close","period":3},
+                    {"id":"lower","op":"rolling_min","input":"close","period":3},
+                    {"id":"gain","op":"returns_series","input":"close"},
+                    {"id":"low_gain","op":"rolling_min","input":"gain","period":2}
+                ],
+                "result_steps":["upper","lower","low_gain"]
+            }))
+            .unwrap(),
+            100,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn independent_oracle_handles_gaps_zero_negative_ratios_and_future_tail() {
+        let plan = plan();
+        let closes = [100., 105., 100., 101., f64::NAN, 99., 102., 98., 104.];
+        for index in 0..closes.len() {
+            let values = plan.evaluate_at(&closes, index);
+            for (name, max) in [("upper", true), ("lower", false)] {
+                let oracle = if index < 2 {
+                    None
+                } else {
+                    let window = &closes[index - 2..=index];
+                    window.iter().all(|v| v.is_finite()).then(|| {
+                        window.iter().copied().fold(
+                            if max {
+                                f64::NEG_INFINITY
+                            } else {
+                                f64::INFINITY
+                            },
+                            |acc, val| if max { acc.max(val) } else { acc.min(val) },
+                        )
+                    })
+                };
+                assert_eq!(values[name].0, oracle, "{name}, index={index}");
+                assert_eq!(values[name].1, Unit::Price);
+            }
+            assert_eq!(values["low_gain"].1, Unit::Ratio);
+        }
+        let first = plan.evaluate_at(&closes, 3);
+        let mut future_changed = closes;
+        future_changed[4..].copy_from_slice(&[5000., 1., 9000., 2., 8000.]);
+        assert_eq!(first, plan.evaluate_at(&future_changed, 3));
+        assert!((plan.evaluate_at(&closes, 3)["low_gain"].0.unwrap() + 5.0 / 105.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn invalid_extrema_edges_fail_before_source_io_with_step_path() {
+        let mut request = serde_json::json!({
+            "version":"okx.market.composition/v1",
+            "steps":[{"id":"window","op":"rolling_max","input":"close","period":3}],
+            "result_steps":["window"]
+        });
+        let checked = |value| {
+            CheckedComposition::compile(serde_json::from_value(value).unwrap(), 100).unwrap_err()
+        };
+        request["steps"][0]["period"] = serde_json::json!(0);
+        assert_eq!(
+            checked(request.clone()),
+            "composition.steps[0].period:INVALID"
+        );
+        request["steps"][0]["period"] = serde_json::json!(1001);
+        assert_eq!(
+            checked(request.clone()),
+            "composition.steps[0].period:INVALID"
+        );
+        request["steps"][0]["period"] = serde_json::json!(2);
+        request["steps"][0]["threshold"] = serde_json::json!(1.0);
+        assert_eq!(
+            checked(request),
+            "composition.steps[0].threshold:UNEXPECTED"
+        );
     }
 }

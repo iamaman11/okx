@@ -45,6 +45,16 @@ fail(!validTool('market',{...marketScreen,action:'compare',composition:composed}
 fail(!validTool('market',{...marketScreen,composition:{...composed,version:'unknown'}}), 'composition version rejected');
 fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'rolling_mean',input:'close'}]}}), 'window must specify period');
 fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'returns_series',input:'close',period:2}]}}), 'returns does not accept window period');
+const extremaGraph={...composed,steps:[
+ {id:'upper',op:'rolling_max',input:'close',period:20},
+ {id:'lower',op:'rolling_min',input:'close',period:20},
+],result_steps:['upper','lower']};
+fail(validTool('market',{...marketScreen,composition:extremaGraph}),'typed causal extrema share one public request');
+for(const op of ['rolling_max','rolling_min']){
+ for(const bad of [{id:'upper',op,input:'close'},{id:'upper',op,input:'close',period:1001},{id:'upper',op,input:'close',period:2,threshold:3}]){
+  fail(!validTool('market',{...marketScreen,composition:{...extremaGraph,steps:[bad]}}),`${op} rejects absent, excessive and unrelated parameters`);
+ }
+}
 const causalSteps=[
  {id:'returns',op:'returns_series',input:'close'},
  {id:'positive',op:'greater_than',input:'returns',threshold:0},

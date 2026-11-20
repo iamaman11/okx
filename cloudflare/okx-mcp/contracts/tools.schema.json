@@ -624,6 +624,8 @@
                           "enum": [
                             "returns_series",
                             "rolling_mean",
+                            "rolling_max",
+                            "rolling_min",
                             "lag",
                             "greater_than",
                             "rising_edge",
