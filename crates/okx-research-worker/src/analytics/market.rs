@@ -355,12 +355,17 @@ impl AnalyticsService {
         if (need_candles || need_oi) && total_bars > 1_000_000 {
             return Err("LIMIT_TOTAL_BARS:1000000".into());
         }
-        if plan.composition.as_ref().is_some_and(|composition| {
-            total_bars
-                .checked_mul(composition.steps.len() as u64)
-                .is_none_or(|cells| cells > 8_000_000)
-        }) {
-            return Err("composition:CELLS_LIMIT".into());
+        if let Some(composition) = plan.composition.as_ref() {
+            // One global work/column budget across all instruments, not one
+            // budget per independently executed candidate.
+            okx_analysis::query_plan::CheckedComposition::compile(
+                okx_analysis::query_plan::CompositionRequest {
+                    version: composition.version.clone(),
+                    steps: composition.steps.iter().map(|checked| checked.step.clone()).collect(),
+                    result_steps: composition.result_steps.clone(),
+                },
+                total_bars,
+            )?;
         }
         let loading = stream::iter(request.instruments.iter().cloned().map(|instrument| {
             let sources = self.sources.clone();
@@ -854,9 +859,48 @@ fn compute_row_checked(
             units.insert(id, json!(unit_name));
         }
     }
+    let source_captures = if composition_oi {
+        let oi_capture = row.oi.as_ref().and_then(|source| source.as_ref().ok())
+            .map(|points| -> Result<Value, String> {
+                let hash = okx_research::canonical_sha256(&(
+                    "okx.market.oi-source-capture/v1",
+                    &row.instrument, request.start_ms, request.end_ms, request.timeframe_ms, points,
+                )).map_err(|error| error.to_string())?;
+                Ok(json!({
+                    "source":"okx/open_interest",
+                    "capture_hash":hash,
+                    "requested_start_ms":request.start_ms,
+                    "requested_end_ms":request.end_ms,
+                    "timeframe_ms":request.timeframe_ms,
+                    "observed_points":points.len(),
+                    "first_event_ms":points.first().map(|(time, _)| time),
+                    "last_event_ms":points.last().map(|(time, _)| time),
+                    "publication_time_verified":false,
+                }))
+            }).transpose()?;
+        let candle_capture = needs_candles.then(|| -> Result<Value, String> {
+            let hash = okx_research::canonical_sha256(&(
+                "okx.market.candle-source-capture/v1",
+                &row.instrument, request.start_ms, request.end_ms, request.timeframe_ms,
+                bars.as_ref(),
+            )).map_err(|error| error.to_string())?;
+            Ok(json!({
+                "source":"okx/closed_candles",
+                "capture_hash":hash,
+                "observed_points":bars.len(),
+                "availability":"after_close",
+            }))
+        }).transpose()?;
+        Some(json!({"open_interest":oi_capture,"candles":candle_capture}))
+    } else {
+        None
+    };
     let mut result = json!({"instrument":row.instrument,"metrics":metrics,"units":units,"parameters":{"ema_period":request.parameters.get("ema_period").unwrap_or(&14.0),"atr_period":request.parameters.get("atr_period").unwrap_or(&14.0),"rsi_period":request.parameters.get("rsi_period").unwrap_or(&14.0)},"source_start_ms":bars.first().map(|b|b.time),"source_end_ms":bars.last().map(|b|b.time),"unclosed_candles_excluded":row.excluded,"candle_coverage":candle_coverage,"quality":if gaps.is_empty(){"complete"}else{"partial"},"gaps":gaps});
     if request.fields.iter().any(|field| field == "oi_change") || composition_oi {
         result["oi_coverage"] = json!(oi_coverage);
+    }
+    if let Some(source_captures) = source_captures {
+        result["source_captures"] = source_captures;
     }
     let mut metric_time_basis = serde_json::Map::new();
     if let Some(composition) = composition {
@@ -1690,5 +1734,39 @@ mod global_rank_tests {
             sort_market_rows(&mut rows, Some(&sort), true).unwrap_err(),
             "GLOBAL_RANK_SOURCE_INCOMPLETE"
         );
+    }
+    #[test]
+    fn t06_t07_t13_oi_provenance_is_stable_and_does_not_certify_a_signal() {
+        let mut query = request(vec!["returns"]);
+        query.instruments = vec!["BTC-USDT-SWAP".into()];
+        query.composition = Some(Box::new(serde_json::from_value(json!({
+            "version":"okx.market.composition/v1",
+            "steps":[
+                {"id":"oi_return","op":"returns_series","input":"open_interest"},
+                {"id":"positive","op":"greater_than","input":"oi_return","threshold":0.0},
+                {"id":"event","op":"rising_edge","input":"positive"}
+            ],
+            "result_steps":["oi_return","event"]
+        })).unwrap()));
+        let checked = planner::AnalysisPlan::compile_market(&query).unwrap();
+        let points = (0..100).map(|i| (i * 60_000, 10.0 + i as f64)).collect::<Vec<_>>();
+        let fixture = || {
+            let mut loaded = row();
+            loaded.instrument = "BTC-USDT-SWAP".into();
+            loaded.oi = Some(Ok(points.clone()));
+            loaded
+        };
+        let first = compute_row_checked(fixture(), &query, None, checked.composition.as_ref(), true).unwrap();
+        let repeat = compute_row_checked(fixture(), &query, None, checked.composition.as_ref(), true).unwrap();
+        assert_eq!(first["source_captures"], repeat["source_captures"]);
+        assert!(first["metrics"]["oi_return"].is_number());
+        assert!(first["metrics"]["event"].is_null());
+        assert_eq!(first["metric_time_basis"]["event"], "oi_event_time_publication_unverified");
+        assert!(first["gaps"].as_array().unwrap().contains(&json!("CAUSAL_AVAILABILITY_UNVERIFIED:event")));
+        let mut changed = fixture();
+        changed.oi.as_mut().unwrap().as_mut().unwrap().last_mut().unwrap().1 += 1.0;
+        let after = compute_row_checked(changed, &query, None, checked.composition.as_ref(), true).unwrap();
+        assert_ne!(first["source_captures"]["open_interest"]["capture_hash"],
+            after["source_captures"]["open_interest"]["capture_hash"]);
     }
 }
