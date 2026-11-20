@@ -611,6 +611,31 @@ mod extension_tests {
         );
         assert_eq!(market["rows"][0]["candle_coverage"]["missing_bars"], 0);
         assert_eq!(market["rows"][0]["unclosed_candles_excluded"], 1);
+        // T07/T15: a previously undeclared combination executes through the
+        // public source decoder and durable market artifact path with the same
+        // binary. The already captured candles are reused, with no venue POST.
+        let boolean_query: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT"],"fields":["returns"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":1200000,"limit":20,
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"return","op":"returns_series","input":"close"},
+                {"id":"positive","op":"greater_than","input":"return","threshold":0},
+                {"id":"prior","op":"lag","input":"positive","period":1},
+                {"id":"both","op":"and","input":"positive","other":"prior"},
+                {"id":"either","op":"or","input":"positive","other":"prior"},
+                {"id":"event","op":"rising_edge","input":"both"}
+            ],"result_steps":["both","either","event"]}
+        }))
+        .unwrap();
+        let boolean_result = service.market(boolean_query, None, None).await.unwrap();
+        let boolean_row = &boolean_result["rows"][0];
+        assert_eq!(boolean_row["metrics"]["both"], true);
+        assert_eq!(boolean_row["metrics"]["either"], true);
+        assert_eq!(boolean_row["metrics"]["event"], false);
+        assert_eq!(boolean_row["units"]["both"], "boolean");
+        assert_eq!(boolean_row["quality"], "complete");
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
         // T13: composition must disclose its candle dependency even when
         // the only legacy projection depends solely on request parameters.
         let composition_only_source: MarketRequest = serde_json::from_value(json!({

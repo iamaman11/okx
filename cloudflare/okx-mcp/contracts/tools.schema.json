@@ -627,6 +627,8 @@
                             "rolling_max",
                             "rolling_min",
                             "add_series",
+                            "and",
+                            "or",
                             "lag",
                             "greater_than",
                             "rising_edge",
