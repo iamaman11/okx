@@ -84,6 +84,31 @@ pub struct CompositionNullCause {
 }
 
 impl CheckedComposition {
+    /// Resolve the transitive dependency closure of projected results. The
+    /// complete declaration is still validated, fingerprinted and budgeted;
+    /// only the work actually contributing to a result is evaluated. This
+    /// also prevents dead OI/funding branches from becoming source reads.
+    fn reachable_steps(&self) -> BTreeSet<&str> {
+        let mut reachable = self
+            .result_steps
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        for checked in self.steps.iter().rev() {
+            let step = &checked.step;
+            if reachable.contains(step.id.as_str()) {
+                reachable.insert(&step.input);
+                if let Some(other) = step.other.as_deref() {
+                    reachable.insert(other);
+                }
+                if let Some(when) = step.when.as_deref() {
+                    reachable.insert(when);
+                }
+            }
+        }
+        reachable
+    }
+
     pub fn compile(request: CompositionRequest, total_bars: u64) -> Result<Self, String> {
         if request.version != COMPOSITION_VERSION {
             return Err("composition.version:UNSUPPORTED".into());
@@ -567,16 +592,14 @@ impl CheckedComposition {
         BTreeMap<String, (Option<f64>, Unit)>,
         BTreeMap<String, CompositionNullCause>,
     ) {
+        let reachable = self.reachable_steps();
+        let used_sources = self.sources();
         let mut values = BTreeMap::<String, Vec<Option<f64>>>::new();
         values.insert(
             "close".into(),
             close.iter().map(|v| v.is_finite().then_some(*v)).collect(),
         );
-        if self
-            .steps
-            .iter()
-            .any(|step| step.step.input == "open_interest")
-        {
+        if used_sources.contains(&Source::OpenInterest) {
             values.insert(
                 "open_interest".into(),
                 open_interest
@@ -584,9 +607,7 @@ impl CheckedComposition {
                     .unwrap_or_else(|| vec![None; close.len()]),
             );
         }
-        if self.steps.iter().any(|step| {
-            step.step.input == "funding_rate" || step.step.other.as_deref() == Some("funding_rate")
-        }) {
+        if used_sources.contains(&Source::Funding) {
             values.insert(
                 "funding_rate".into(),
                 funding_rate
@@ -595,6 +616,9 @@ impl CheckedComposition {
             );
         }
         for checked in &self.steps {
+            if !reachable.contains(checked.step.id.as_str()) {
+                continue;
+            }
             // A shared upstream series is read by reference for all branches;
             // cloning it here multiplied peak memory and source work.
             let input = &values[&checked.step.input];
@@ -1517,6 +1541,75 @@ mod tests {
                 + 0.01)
                 .abs()
                 < 1e-12
+        );
+    }
+
+    #[test]
+    fn t10_only_projected_dependency_closure_executes_while_all_declarations_validate() {
+        let baseline = two_step_composition();
+        let mut request = baseline.clone();
+        // These valid but unprojected branches must neither become extra
+        // public data reads nor change the scalar value or its diagnostics.
+        request.steps.extend([
+            SeriesStep {
+                id: "dead_oi".into(),
+                op: SeriesOp::ReturnsSeries,
+                input: "open_interest".into(),
+                period: None,
+                threshold: None,
+                when: None,
+                other: None,
+            },
+            SeriesStep {
+                id: "dead_funding".into(),
+                op: SeriesOp::RollingMean,
+                input: "funding_rate".into(),
+                period: Some(2),
+                threshold: None,
+                when: None,
+                other: None,
+            },
+            SeriesStep {
+                id: "dead_joint".into(),
+                op: SeriesOp::And,
+                input: "dead_oi".into(),
+                period: None,
+                threshold: None,
+                when: None,
+                other: Some("dead_funding".into()),
+            },
+        ]);
+        // An unused invalid step remains a pre-I/O error. The graph cannot
+        // hide a future-reference or an incompatible unit in a dead branch.
+        assert!(
+            CheckedComposition::compile(request.clone(), 3)
+                .unwrap_err()
+                .contains("UNIT_MISMATCH")
+        );
+        request.steps[4].op = SeriesOp::SubtractSeries;
+        request.steps[4].input = "dead_funding".into();
+        request.steps[4].other = Some("dead_funding".into());
+        let checked = CheckedComposition::compile(request, 3).unwrap();
+        let plain = CheckedComposition::compile(baseline, 3).unwrap();
+        assert_eq!(checked.steps.len(), 5);
+        assert_eq!(
+            checked.reachable_steps(),
+            BTreeSet::from(["close", "r1", "w1"])
+        );
+        assert_eq!(checked.sources(), BTreeSet::from([Source::Candles]));
+        assert_eq!(checked.estimated_cells, 15); // conservative declared budget
+        let prices = [100.0, 110.0, 99.0];
+        assert_eq!(
+            checked.evaluate_with_diagnostics(&prices),
+            plain.evaluate_with_diagnostics(&prices)
+        );
+        let oi = [None; 3];
+        let funding = [None; 3];
+        assert_eq!(
+            checked
+                .evaluate_with_sources_diagnostics(&prices, Some(&oi), Some(&funding))
+                .unwrap(),
+            plain.evaluate_with_diagnostics(&prices)
         );
     }
     #[test]

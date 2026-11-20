@@ -142,6 +142,13 @@ pub struct AlignmentCounts {
     pub left_nonfinite: usize,
     pub right_nonfinite: usize,
     pub matched: usize,
+    /// Eligible observations present only on one side of the exact join.
+    pub left_unmatched: usize,
+    pub right_unmatched: usize,
+    pub first_unmatched_ms: Option<u64>,
+    /// Earliest event excluded because its close/publication is not yet known
+    /// at the caller's decision cutoff, even if both sides have that event.
+    pub first_unavailable_ms: Option<u64>,
 }
 
 /// Finite values paired by the same event timestamp.
@@ -161,10 +168,11 @@ pub fn align_exact_at(
     fn eligible(
         samples: &[TimedValue],
         decision_ms: u64,
-    ) -> Result<(Vec<&TimedValue>, usize, usize), &'static str> {
+    ) -> Result<(Vec<&TimedValue>, usize, usize, Option<u64>), &'static str> {
         let mut available = Vec::with_capacity(samples.len());
         let (mut unavailable, mut nonfinite) = (0, 0);
         let mut previous = None;
+        let mut first_unavailable = None;
         for sample in samples {
             if previous.is_some_and(|time| time >= sample.time_ms) {
                 return Err("ALIGNMENT_DUPLICATE_OR_UNORDERED_TIME");
@@ -175,28 +183,51 @@ pub fn align_exact_at(
             previous = Some(sample.time_ms);
             if sample.time_ms >= decision_ms || sample.available_at_ms > decision_ms {
                 unavailable += 1;
+                if first_unavailable.is_none() {
+                    first_unavailable = Some(sample.time_ms);
+                }
             } else if !sample.value.is_finite() {
                 nonfinite += 1;
             } else {
                 available.push(sample);
             }
         }
-        Ok((available, unavailable, nonfinite))
+        Ok((available, unavailable, nonfinite, first_unavailable))
     }
-    let (a, left_unavailable, left_nonfinite) = eligible(left, decision_ms)?;
-    let (b, right_unavailable, right_nonfinite) = eligible(right, decision_ms)?;
+    let (a, left_unavailable, left_nonfinite, first_left_unavailable) =
+        eligible(left, decision_ms)?;
+    let (b, right_unavailable, right_nonfinite, first_right_unavailable) =
+        eligible(right, decision_ms)?;
     let mut pairs = Vec::with_capacity(a.len().min(b.len()));
     let (mut i, mut j) = (0, 0);
+    let (mut left_unmatched, mut right_unmatched, mut first_unmatched_ms) = (0, 0, None);
     while i < a.len() && j < b.len() {
         match a[i].time_ms.cmp(&b[j].time_ms) {
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Less => {
+                left_unmatched += 1;
+                first_unmatched_ms.get_or_insert(a[i].time_ms);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                right_unmatched += 1;
+                first_unmatched_ms.get_or_insert(b[j].time_ms);
+                j += 1;
+            }
             std::cmp::Ordering::Equal => {
                 pairs.push((a[i].value, b[j].value));
                 i += 1;
                 j += 1;
             }
         }
+    }
+    for sample in &a[i..] {
+        left_unmatched += 1;
+        first_unmatched_ms.get_or_insert(sample.time_ms);
+    }
+    for sample in &b[j..] {
+        right_unmatched += 1;
+        first_unmatched_ms =
+            Some(first_unmatched_ms.map_or(sample.time_ms, |time| time.min(sample.time_ms)));
     }
     let matched = pairs.len();
     Ok((
@@ -211,6 +242,13 @@ pub fn align_exact_at(
             left_nonfinite,
             right_nonfinite,
             matched,
+            left_unmatched,
+            right_unmatched,
+            first_unmatched_ms,
+            first_unavailable_ms: first_left_unavailable
+                .into_iter()
+                .chain(first_right_unavailable)
+                .min(),
         },
     ))
 }
@@ -251,6 +289,10 @@ mod tests {
         assert_eq!(counts.right_usable, 1);
         assert_eq!(counts.right_unavailable, 1);
         assert_eq!(counts.matched, 1);
+        assert_eq!(counts.left_unmatched, 1);
+        assert_eq!(counts.right_unmatched, 0);
+        assert_eq!(counts.first_unmatched_ms, Some(60));
+        assert_eq!(counts.first_unavailable_ms, Some(60));
         assert_eq!(align_exact_at(&left, &right, 180).unwrap().0.len(), 2);
         let duplicate = [right[0], right[0]];
         assert_eq!(
@@ -265,6 +307,54 @@ mod tests {
             align_exact_at(&impossible, &right, 180).unwrap_err(),
             "ALIGNMENT_INVALID_AVAILABILITY"
         );
+    }
+    #[test]
+    fn t06_alignment_distinguishes_shifted_events_from_late_publication() {
+        let left = [
+            TimedValue {
+                time_ms: 60,
+                available_at_ms: 120,
+                value: 1.0,
+            },
+            TimedValue {
+                time_ms: 120,
+                available_at_ms: 180,
+                value: 2.0,
+            },
+            TimedValue {
+                time_ms: 180,
+                available_at_ms: 240,
+                value: 3.0,
+            },
+        ];
+        let right = [
+            TimedValue {
+                time_ms: 60,
+                available_at_ms: 120,
+                value: 2.0,
+            },
+            TimedValue {
+                time_ms: 180,
+                available_at_ms: 240,
+                value: 6.0,
+            },
+            TimedValue {
+                time_ms: 240,
+                available_at_ms: 300,
+                value: 8.0,
+            },
+        ];
+        let (pairs, counts) = align_exact_at(&left, &right, 300).unwrap();
+        assert_eq!(pairs, vec![(1.0, 2.0), (3.0, 6.0)]);
+        assert_eq!(counts.left_unmatched, 1);
+        assert_eq!(counts.right_unmatched, 1);
+        assert_eq!(counts.first_unmatched_ms, Some(120));
+        assert_eq!(counts.first_unavailable_ms, None);
+        let (early, counts) = align_exact_at(&left, &right, 180).unwrap();
+        assert_eq!(early, vec![(1.0, 2.0)]);
+        assert_eq!(counts.first_unavailable_ms, Some(180));
+        assert_eq!(counts.left_unmatched, 1);
+        assert_eq!(counts.right_unmatched, 0);
     }
     #[test]
     fn t04_exact_five_bar_grid_distinguishes_missing_duplicate_and_right_boundary() {

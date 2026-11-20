@@ -38,9 +38,9 @@ fn market_job_schema(fields: &[String]) -> &'static str {
     let funding = fields.iter().any(|field| field == "funding_sum");
     let correlation = fields.iter().any(|field| field == "pearson_correlation");
     if funding && correlation {
-        "market/518.1.funding-correlation-coverage-v1"
+        "market/518.2.funding-correlation-pair-diagnostics-v1"
     } else if correlation {
-        "market/518.1.correlation-coverage-v1"
+        "market/518.2.correlation-pair-diagnostics-v1"
     } else if funding {
         "market/448.4.funding-realized-only-v1"
     } else {
@@ -349,6 +349,17 @@ impl AnalyticsService {
         }).await
     }
     pub fn market_capabilities(&self) -> Value {
+        let correlation_matrix = json!({"input":"closed_candle_log_returns",
+            "minimum_common_pairs":30,
+            "join":"exact_event_time_no_forward_fill",
+            "availability":"after_candle_close",
+            "source_coverage":"correlation_matrix.source_coverage",
+            "pair_coverage":"correlation_matrix.pair_diagnostics",
+            "pair_layout":"upper_triangle_without_diagonal",
+            "pair_reason_codes":["AVAILABLE","INSUFFICIENT_COMMON_PAIRS",
+                "ZERO_VARIANCE_OR_NONFINITE_CORRELATION",
+                "SOURCE_SERIES_UNAVAILABLE_OR_GAPPED",
+                "ALIGNMENT_DUPLICATE_OR_UNORDERED_TIME","ALIGNMENT_INVALID_AVAILABILITY"]});
         let operators = okx_analysis::operators::SUPPORTED_OPERATORS
             .iter()
             .map(|&operator| {
@@ -389,7 +400,7 @@ impl AnalyticsService {
                     "typed_inputs":typed_inputs})
             })
             .collect::<Vec<_>>();
-        json!({"schema":"okx.market.capabilities/v1",
+        let mut capabilities = json!({"schema":"okx.market.capabilities/v1",
             "route_owner":"okx-research-worker","compute_owner":"okx-kernel",
             "availability_policy":"actual_data_and_rights_checked_per_request",
             "effects":{"read_sources":true,"write_research_jobs":true,
@@ -450,7 +461,9 @@ impl AnalyticsService {
                 "global_rank_source_budget_bars":1000000,
                 "global_rank_uses_immutable_artifact_cursor":true,
                 "max_instruments_per_page":100},
-            "quality":"complete"})
+            "quality":"complete"});
+        capabilities["correlation_matrix"] = correlation_matrix;
+        capabilities
     }
     pub(super) async fn market_rows(
         &self,
@@ -1534,21 +1547,55 @@ fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64, end_ms: u64) -> Value {
         .collect::<Vec<_>>();
     let mut values = Vec::with_capacity(loaded.len());
     let mut counts = Vec::with_capacity(loaded.len());
+    // Upper triangle only: source coverage already describes the diagonal,
+    // and the other half has the same timestamps with reversed ownership.
+    let mut pair_diagnostics = Vec::new();
     let mut complete = true;
-    for left in &series {
+    for (left_idx, left) in series.iter().enumerate() {
         let mut row = Vec::with_capacity(series.len());
         let mut samples = Vec::with_capacity(series.len());
-        for right in &series {
+        for (right_idx, right) in series.iter().enumerate() {
             let (correlation, n) = match (left, right) {
                 (Some(a), Some(b)) => match okx_analysis::time_series::align_exact_at(a, b, end_ms)
                 {
-                    Ok((pairs, counts)) => (
-                        okx_analysis::operators::correlation_pairs(&pairs),
-                        counts.matched,
-                    ),
-                    Err(_) => (None, 0),
+                    Ok((pairs, alignment)) => {
+                        let correlation = okx_analysis::operators::correlation_pairs(&pairs);
+                        if left_idx < right_idx {
+                            pair_diagnostics.push(json!({
+                                "left_index":left_idx,"right_index":right_idx,
+                                "matched":alignment.matched,
+                                "left_unmatched":alignment.left_unmatched,
+                                "right_unmatched":alignment.right_unmatched,
+                                "first_unmatched_ms":alignment.first_unmatched_ms,
+                                "left_unavailable_at_cutoff":alignment.left_unavailable,
+                                "right_unavailable_at_cutoff":alignment.right_unavailable,
+                                "first_unavailable_ms":alignment.first_unavailable_ms,
+                                "reason":if correlation.is_some() {"AVAILABLE"}
+                                    else if alignment.matched < 30 {"INSUFFICIENT_COMMON_PAIRS"}
+                                    else {"ZERO_VARIANCE_OR_NONFINITE_CORRELATION"}
+                            }));
+                        }
+                        (correlation, alignment.matched)
+                    }
+                    Err(reason) => {
+                        if left_idx < right_idx {
+                            pair_diagnostics.push(json!({
+                                "left_index":left_idx,"right_index":right_idx,
+                                "matched":0,"reason":reason
+                            }));
+                        }
+                        (None, 0)
+                    }
                 },
-                _ => (None, 0),
+                _ => {
+                    if left_idx < right_idx {
+                        pair_diagnostics.push(json!({
+                            "left_index":left_idx,"right_index":right_idx,
+                            "matched":0,"reason":"SOURCE_SERIES_UNAVAILABLE_OR_GAPPED"
+                        }));
+                    }
+                    (None, 0)
+                }
             };
             if correlation.is_none() {
                 complete = false;
@@ -1604,7 +1651,7 @@ fn pairwise_matrix(loaded: &[Loaded], timeframe_ms: u64, end_ms: u64) -> Value {
     json!({"basis":"aligned_closed_bar_log_returns","instruments":loaded.iter()
         .map(|r|r.instrument.clone()).collect::<Vec<_>>(),"values":values,
         "sample_counts":counts,"usable_samples":usable_samples,
-        "source_coverage":source_coverage,
+        "source_coverage":source_coverage,"pair_diagnostics":pair_diagnostics,
         "join_semantics":"exact_event_time_no_forward_fill",
         "availability_rule":"candle_close_boundary","decision_cutoff_ms":end_ms,
         "quality":if complete{"complete"}else{"partial"}})
@@ -1662,7 +1709,7 @@ mod tests {
         );
         assert_eq!(
             market_request_schema(&oi_fields, false, false, false),
-            "market/518.1.correlation-coverage-v1"
+            "market/518.2.correlation-pair-diagnostics-v1"
         );
     }
 
@@ -1680,7 +1727,7 @@ mod tests {
         assert_eq!(market_job_schema(&returns.fields), "market/448.2");
         assert_eq!(
             market_job_schema(&correlation.fields),
-            "market/518.1.correlation-coverage-v1"
+            "market/518.2.correlation-pair-diagnostics-v1"
         );
         assert_ne!(
             market_job_schema(&combined.fields),
@@ -1826,6 +1873,9 @@ mod tests {
         assert_eq!(full["usable_samples"], json!([30, 30]));
         assert_eq!(full["source_coverage"][0]["return_observations"], 30);
         assert_eq!(full["source_coverage"][1]["usable_at_cutoff"], 30);
+        assert_eq!(full["pair_diagnostics"][0]["reason"], "AVAILABLE");
+        assert_eq!(full["pair_diagnostics"][0]["matched"], 30);
+        assert_eq!(full["pair_diagnostics"].as_array().unwrap().len(), 1);
         assert_eq!(full["source_coverage"][0]["not_available_at_cutoff"], 0);
         assert!((full["values"][0][1].as_f64().unwrap() - 1.0).abs() < 1e-9);
 
@@ -1836,6 +1886,14 @@ mod tests {
         assert_eq!(early["usable_samples"], json!([29, 29]));
         assert_eq!(early["source_coverage"][0]["not_available_at_cutoff"], 1);
         assert_eq!(early["source_coverage"][1]["usable_at_cutoff"], 29);
+        assert_eq!(
+            early["pair_diagnostics"][0]["reason"],
+            "INSUFFICIENT_COMMON_PAIRS"
+        );
+        assert_eq!(
+            early["pair_diagnostics"][0]["first_unavailable_ms"],
+            1_800_000
+        );
         assert!(early["values"][0][1].is_null());
 
         // Equal array lengths cannot substitute for equal timestamps.
@@ -1846,6 +1904,12 @@ mod tests {
         let unaligned = pairwise_matrix(&shifted, 60_000, 32 * 60_000);
         assert_eq!(unaligned["sample_counts"][0][1], 29);
         assert_eq!(unaligned["usable_samples"], json!([30, 30]));
+        assert_eq!(unaligned["pair_diagnostics"][0]["left_unmatched"], 1);
+        assert_eq!(unaligned["pair_diagnostics"][0]["right_unmatched"], 1);
+        assert_eq!(
+            unaligned["pair_diagnostics"][0]["first_unmatched_ms"],
+            60_000
+        );
         assert!(unaligned["values"][0][1].is_null());
         shifted[1].bars = Err("SOURCE_UNAVAILABLE".into());
         let absent = pairwise_matrix(&shifted, 60_000, 32 * 60_000);
@@ -1855,6 +1919,10 @@ mod tests {
         );
         assert!(absent["usable_samples"][1].is_null());
         assert_eq!(absent["sample_counts"][0][1], 0);
+        assert_eq!(
+            absent["pair_diagnostics"][0]["reason"],
+            "SOURCE_SERIES_UNAVAILABLE_OR_GAPPED"
+        );
     }
     #[test]
     fn t06_oi_interior_gap_is_exposed_and_never_accepted_as_endpoint_only() {
@@ -2133,6 +2201,46 @@ mod tests {
             partial["composition_quality"]["both"]["issues"][0]["first_missing_ms"],
             42 * 60_000
         );
+    }
+    #[test]
+    fn t10_unprojected_oi_and_funding_branches_never_require_sources_on_spot() {
+        let mut request = request(vec!["returns"]);
+        request.composition = Some(Box::new(serde_json::from_value(json!({
+            "version":okx_analysis::query_plan::COMPOSITION_VERSION,
+            "steps":[
+                {"id":"r","op":"returns_series","input":"close"},
+                {"id":"projected","op":"rolling_mean","input":"r","period":2},
+                {"id":"unneeded_oi","op":"returns_series","input":"open_interest"},
+                {"id":"unneeded_funding","op":"rolling_mean","input":"funding_rate","period":2},
+                {"id":"unneeded_pair","op":"subtract_series","input":"unneeded_oi","other":"unneeded_funding"}
+            ],
+            "result_steps":["projected"]
+        })).unwrap()));
+        let plan = planner::AnalysisPlan::compile_market(&request).unwrap();
+        assert_eq!(
+            plan.sources,
+            vec![okx_analysis::query_plan::Source::Candles]
+        );
+        assert!(
+            !plan
+                .composition
+                .as_ref()
+                .unwrap()
+                .sources()
+                .contains(&okx_analysis::query_plan::Source::OpenInterest)
+        );
+        assert!(validate_composition_source_products(&request.instruments, false, false).is_ok());
+        // No OI/funding values exist in this spot fixture. An unreachable
+        // branch must not downgrade the projected result or invent evidence.
+        let result = compute_row_planned(row(), &request, None, &plan, true).unwrap();
+        assert!(result["metrics"]["projected"].is_number());
+        assert_eq!(
+            result["composition_quality"]["projected"]["status"],
+            "available_at_closed_bar"
+        );
+        assert!(result["source_captures"].get("open_interest").is_none());
+        assert!(result["source_captures"].get("funding_rate").is_none());
+        assert_eq!(result["quality"], "complete");
     }
     #[test]
     fn t05_composition_reuses_closed_candles_and_projects_a_distinct_ratio() {
