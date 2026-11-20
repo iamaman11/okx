@@ -34,7 +34,7 @@ pub struct SeriesStep {
     pub period: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<f64>,
-    /// Only a prior rising_edge event may condition a future outcome label.
+    /// Only a prior edge event may condition a future outcome label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
     /// Second prior series for dimensionless arithmetic or Boolean logic.
@@ -51,6 +51,7 @@ pub enum SeriesOp {
     RollingMin,
     RollingPearson,
     RollingZscore,
+    RollingStddev,
     AddSeries,
     SubtractSeries,
     DivideSeries,
@@ -59,7 +60,10 @@ pub enum SeriesOp {
     Lag,
     GreaterThan,
     GreaterThanSeries,
+    LessThan,
+    LessThanSeries,
     RisingEdge,
+    FallingEdge,
     ForwardReturnLabel,
 }
 
@@ -188,6 +192,7 @@ impl CheckedComposition {
                         | SeriesOp::DivideSeries
                         | SeriesOp::RollingPearson
                         | SeriesOp::GreaterThanSeries
+                        | SeriesOp::LessThanSeries
                         | SeriesOp::And
                         | SeriesOp::Or
                 )
@@ -201,6 +206,7 @@ impl CheckedComposition {
                     | SeriesOp::DivideSeries
                     | SeriesOp::RollingPearson
                     | SeriesOp::GreaterThanSeries
+                    | SeriesOp::LessThanSeries
                     | SeriesOp::And
                     | SeriesOp::Or
             ) {
@@ -244,7 +250,7 @@ impl CheckedComposition {
                 return Err(format!("{path}:DEPTH_LIMIT"));
             }
             let output_unit = match step.op {
-                SeriesOp::RollingZscore => {
+                SeriesOp::RollingZscore | SeriesOp::RollingStddev => {
                     if !matches!(
                         input_unit,
                         Unit::Price | Unit::Ratio | Unit::Contracts | Unit::NativeVolume | Unit::Coefficient
@@ -260,7 +266,11 @@ impl CheckedComposition {
                     if step.threshold.is_some() {
                         return Err(format!("{path}.threshold:UNEXPECTED"));
                     }
-                    Unit::Coefficient
+                    if step.op == SeriesOp::RollingZscore {
+                        Unit::Coefficient
+                    } else {
+                        input_unit
+                    }
                 }
                 SeriesOp::RollingPearson => {
                     if input_unit != Unit::Ratio {
@@ -367,7 +377,7 @@ impl CheckedComposition {
                     }
                     input_unit
                 }
-                SeriesOp::GreaterThan => {
+                SeriesOp::GreaterThan | SeriesOp::LessThan => {
                     if !matches!(input_unit, Unit::Price | Unit::Ratio | Unit::NativeVolume | Unit::Coefficient) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
@@ -382,7 +392,7 @@ impl CheckedComposition {
                     }
                     Unit::Boolean
                 }
-                SeriesOp::GreaterThanSeries => {
+                SeriesOp::GreaterThanSeries | SeriesOp::LessThanSeries => {
                     if !matches!(input_unit, Unit::Price | Unit::Ratio | Unit::Contracts | Unit::NativeVolume | Unit::Coefficient) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
@@ -404,7 +414,7 @@ impl CheckedComposition {
                     }
                     Unit::Boolean
                 }
-                SeriesOp::RisingEdge => {
+                SeriesOp::RisingEdge | SeriesOp::FallingEdge => {
                     if input_unit != Unit::Boolean {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=boolean:actual={}",
@@ -723,6 +733,10 @@ impl CheckedComposition {
                     input,
                     checked.step.period.expect("validated zscore period") as usize,
                 ),
+                SeriesOp::RollingStddev => rolling_stddev(
+                    input,
+                    checked.step.period.expect("validated stddev period") as usize,
+                ),
                 SeriesOp::RollingPearson => {
                     let other =
                         &values[checked.step.other.as_ref().expect("validated second input")];
@@ -833,29 +847,48 @@ impl CheckedComposition {
                     }
                     result
                 }
-                SeriesOp::GreaterThan => {
+                SeriesOp::GreaterThan | SeriesOp::LessThan => {
                     let threshold = checked.step.threshold.expect("validated threshold");
                     input
                         .iter()
-                        .map(|value| value.map(|v| if v > threshold { 1.0 } else { 0.0 }))
+                        .map(|value| {
+                            value.map(|v| {
+                                f64::from(if checked.step.op == SeriesOp::GreaterThan {
+                                    v > threshold
+                                } else {
+                                    v < threshold
+                                })
+                            })
+                        })
                         .collect()
                 }
-                SeriesOp::GreaterThanSeries => {
-                    let other = &values[checked.step.other.as_ref().expect("validated comparison input")];
-                    input.iter().zip(other).map(|(a,b)| match (a,b) {
-                        (Some(a), Some(b)) => Some(f64::from(a > b)),
-                        _ => None,
-                    }).collect()
+                SeriesOp::GreaterThanSeries | SeriesOp::LessThanSeries => {
+                    let other =
+                        &values[checked.step.other.as_ref().expect("validated comparison input")];
+                    input
+                        .iter()
+                        .zip(other)
+                        .map(|(a, b)| match (a, b) {
+                            (Some(a), Some(b)) => Some(f64::from(
+                                if checked.step.op == SeriesOp::GreaterThanSeries {
+                                    a > b
+                                } else {
+                                    a < b
+                                },
+                            )),
+                            _ => None,
+                        })
+                        .collect()
                 }
-                SeriesOp::RisingEdge => {
+                SeriesOp::RisingEdge | SeriesOp::FallingEdge => {
                     let mut result = vec![None; input.len()];
                     for i in 1..input.len() {
                         if let (Some(previous), Some(current)) = (input[i - 1], input[i]) {
-                            result[i] = Some(if previous == 0.0 && current == 1.0 {
-                                1.0
+                            result[i] = Some(f64::from(if checked.step.op == SeriesOp::RisingEdge {
+                                previous == 0.0 && current == 1.0
                             } else {
-                                0.0
-                            });
+                                previous == 1.0 && current == 0.0
+                            }));
                         }
                     }
                     result
@@ -935,8 +968,8 @@ impl CheckedComposition {
                 .then(|| self.null_cause_at(values, name, index))
         };
         match step.op {
-            SeriesOp::RollingZscore => {
-                let period = step.period.expect("validated zscore window") as usize;
+            SeriesOp::RollingZscore | SeriesOp::RollingStddev => {
+                let period = step.period.expect("validated dispersion window") as usize;
                 if at + 1 < period {
                     return cause("WARMUP");
                 }
@@ -948,7 +981,7 @@ impl CheckedComposition {
                     let value = value(&step.input, index).expect("present after trace");
                     stats.add(value, value);
                 }
-                if stats.m2_x <= 0.0 {
+                if stats.m2_x <= 0.0 && step.op == SeriesOp::RollingZscore {
                     return cause("ZERO_VARIANCE");
                 }
                 cause("NON_FINITE_RESULT")
@@ -957,6 +990,7 @@ impl CheckedComposition {
             | SeriesOp::SubtractSeries
             | SeriesOp::DivideSeries
             | SeriesOp::GreaterThanSeries
+            | SeriesOp::LessThanSeries
             | SeriesOp::And
             | SeriesOp::Or => {
                 let other = step.other.as_deref().expect("validated second operand");
@@ -1028,10 +1062,10 @@ impl CheckedComposition {
                 }
                 trace(&step.input, at - period).unwrap_or_else(|| cause("NON_FINITE_RESULT"))
             }
-            SeriesOp::GreaterThan => {
+            SeriesOp::GreaterThan | SeriesOp::LessThan => {
                 trace(&step.input, at).unwrap_or_else(|| cause("NON_FINITE_RESULT"))
             }
-            SeriesOp::RisingEdge => {
+            SeriesOp::RisingEdge | SeriesOp::FallingEdge => {
                 if at == 0 {
                     return cause("WARMUP");
                 }
@@ -1114,11 +1148,13 @@ fn series_cost_per_bar(op: SeriesOp) -> u64 {
     match op {
         SeriesOp::RollingMean => 3,
         SeriesOp::RollingZscore => 6,
+        SeriesOp::RollingStddev => 6,
         SeriesOp::RollingPearson => 8,
         SeriesOp::AddSeries
         | SeriesOp::SubtractSeries
         | SeriesOp::DivideSeries
         | SeriesOp::GreaterThanSeries
+        | SeriesOp::LessThanSeries
         | SeriesOp::And
         | SeriesOp::Or => 2,
         _ => 1,
@@ -1224,11 +1260,12 @@ fn rolling_pearson(left: &[Option<f64>], right: &[Option<f64>], period: usize) -
     output
 }
 
-/// Causal z-score of the current sample against its inclusive rolling window:
-/// (x - mean) / population_stddev. A missing sample, insufficient history or
-/// zero variance yields None. Online centered variance avoids cancellation
-/// from raw sums of squares; bounded periodic rebases cap long-run drift.
-fn rolling_zscore(input: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
+/// Causal population dispersion over an inclusive complete window. Standard
+/// deviation preserves the input dimension and returns zero for a constant
+/// window; z-score is dimensionless and marks zero variance as unknown.
+/// Online centered variance avoids cancellation from raw squared sums;
+/// periodic rebasing caps drift without an O(window) per-bar rescan.
+fn rolling_dispersion(input: &[Option<f64>], period: usize, zscore: bool) -> Vec<Option<f64>> {
     let mut output = vec![None; input.len()];
     let mut stats = SlidingPearson::default();
     let mut missing = 0usize;
@@ -1253,14 +1290,31 @@ fn rolling_zscore(input: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
             Some(value) => stats.add(value, value),
             None => missing += 1,
         }
-        if i + 1 >= period && missing == 0 && stats.m2_x > 0.0 {
-            let variance = stats.m2_x / period as f64;
-            let deviation = variance.sqrt();
-            let z = (input[i].expect("complete window") - stats.mean_x) / deviation;
-            output[i] = z.is_finite().then_some(z);
+        if i + 1 >= period && missing == 0 && stats.m2_x.is_finite() {
+            // Tiny negative M2 after long add/remove sequences is rounding,
+            // not evidence of real negative variance. Clamp only for stddev;
+            // z-score still requires positive, resolvable variance.
+            if zscore && stats.m2_x <= 0.0 {
+                continue;
+            }
+            let deviation = (stats.m2_x.max(0.0) / period as f64).sqrt();
+            let projected = if zscore {
+                (input[i].expect("complete window") - stats.mean_x) / deviation
+            } else {
+                deviation
+            };
+            output[i] = projected.is_finite().then_some(projected);
         }
     }
     output
+}
+
+fn rolling_zscore(input: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
+    rolling_dispersion(input, period, true)
+}
+
+fn rolling_stddev(input: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
+    rolling_dispersion(input, period, false)
 }
 
 /// Compensated add/subtract for a sliding window, preserving small terms
@@ -2602,6 +2656,120 @@ mod t15_causal_window_extrema {
             checked(request),
             "composition.steps[0].threshold:UNEXPECTED"
         );
+    }
+}
+
+#[cfg(test)]
+mod t07_t15_symmetric_causal_signals {
+    use super::*;
+    use serde_json::json;
+
+    fn compiled(steps: serde_json::Value, results: &[&str]) -> Result<CheckedComposition, String> {
+        CheckedComposition::compile(
+            serde_json::from_value(json!({
+                "version": COMPOSITION_VERSION,
+                "steps": steps,
+                "result_steps": results
+            }))
+            .unwrap(),
+            100,
+        )
+    }
+
+    #[test]
+    fn population_stddev_matches_independent_oracle_on_full_windows_and_gaps() {
+        let input = [Some(-0.1), Some(0.0), Some(0.1), Some(0.1), None,
+            Some(0.0), Some(0.0), Some(0.0), Some(0.0)];
+        let observed = rolling_stddev(&input, 3);
+        for (i, value) in observed.iter().enumerate() {
+            let expected = if i >= 2 {
+                let window = &input[i - 2..=i];
+                if window.iter().all(Option::is_some) {
+                    let mean = window.iter().map(|n| n.unwrap()).sum::<f64>() / 3.0;
+                    Some((window.iter().map(|n| (n.unwrap() - mean).powi(2)).sum::<f64>() / 3.0).sqrt())
+                } else { None }
+            } else { None };
+            assert_eq!(value.is_some(), expected.is_some(), "bar={i}");
+            if let (Some(value), Some(expected)) = (value, expected) {
+                assert!((value - expected).abs() < 1e-12, "bar={i} actual={value} expected={expected}");
+            }
+        }
+        assert_eq!(observed[8], Some(0.0));
+        assert_eq!(rolling_zscore(&input, 3)[8], None);
+        let offset = (0..200).map(|i| Some(1e12 + (i % 5) as f64)).collect::<Vec<_>>();
+        let stable = rolling_stddev(&offset, 5);
+        for value in stable.iter().skip(4) {
+            assert!((value.unwrap() - 2f64.sqrt()).abs() < 0.02);
+        }
+    }
+
+    #[test]
+    fn opposite_thresholds_and_falling_edge_are_typed_and_future_invariant() {
+        let plan = compiled(json!([
+            {"id":"average","op":"rolling_mean","input":"close","period":2},
+            {"id":"risk","op":"rolling_stddev","input":"close","period":2},
+            {"id":"lower","op":"less_than","input":"close","threshold":100.0},
+            {"id":"below_avg","op":"less_than_series","input":"close","other":"average"},
+            {"id":"exit","op":"falling_edge","input":"lower"},
+            {"id":"outcome","op":"forward_return_label","input":"close","when":"exit","period":1}
+        ]), &["risk", "below_avg", "lower", "exit", "outcome"]).unwrap();
+        assert_eq!(plan.steps[1].unit, Unit::Price);
+        assert_eq!(plan.steps[2].unit, Unit::Boolean);
+        assert_eq!(plan.steps[4].unit, Unit::Event);
+        assert_eq!(plan.steps[5].unit, Unit::OutcomeRatio);
+        let prices = [100.0, 90.0, 80.0, 100.0, 110.0];
+        assert_eq!(plan.evaluate_at(&prices, 2)["below_avg"].0, Some(1.0));
+        assert_eq!(plan.evaluate_at(&prices, 2)["exit"].0, Some(0.0));
+        let event = plan.evaluate_at(&prices, 3);
+        assert_eq!(event["lower"].0, Some(0.0));
+        assert_eq!(event["exit"].0, Some(1.0));
+        assert_eq!(event["risk"].0, Some(10.0));
+        assert!((event["outcome"].0.unwrap() - 0.1).abs() < 1e-12);
+        let mut future = prices;
+        future[4] = 200.0;
+        let changed = plan.evaluate_at(&future, 3);
+        for field in ["risk", "below_avg", "lower", "exit"] {
+            assert_eq!(event[field], changed[field], "causal feature {field}");
+        }
+        assert_ne!(event["outcome"], changed["outcome"]);
+        assert_eq!(plan.evaluate_at(&prices, 4)["exit"].0, Some(0.0));
+        let (_, causes) = plan.evaluate_with_diagnostics(&prices);
+        assert_eq!(causes["outcome"].reason, "OUTCOME_UNCONFIRMED");
+        let gap = [100.0, 90.0, f64::NAN, 100.0];
+        let (_, causes) = plan.evaluate_with_diagnostics(&gap);
+        assert_eq!(causes["exit"].reason, "SOURCE_OBSERVATION_MISSING");
+        assert_eq!(causes["exit"].origin_step, "close");
+        assert_eq!(causes["risk"].reason, "SOURCE_OBSERVATION_MISSING");
+    }
+
+    #[test]
+    fn validation_rejects_untyped_lower_edges_and_future_label_reuse() {
+        let reject = |steps, results: &[&str]| compiled(steps, results).unwrap_err();
+        assert_eq!(reject(json!([{"id":"risk","op":"rolling_stddev","input":"close","period":1}]), &["risk"]),
+            "composition.steps[0].period:INVALID:2..1000");
+        assert_eq!(reject(json!([{"id":"risk","op":"rolling_stddev","input":"close","period":2,"threshold":1}]), &["risk"]),
+            "composition.steps[0].threshold:UNEXPECTED");
+        assert_eq!(reject(json!([{"id":"below","op":"less_than","input":"close"}]), &["below"]),
+            "composition.steps[0].threshold:INVALID");
+        assert_eq!(reject(json!([{"id":"edge","op":"falling_edge","input":"close"}]), &["edge"]),
+            "composition.steps[0].input:UNIT_MISMATCH:expected=boolean:actual=price");
+        assert_eq!(reject(json!([
+            {"id":"ret","op":"returns_series","input":"close"},
+            {"id":"below","op":"less_than_series","input":"close","other":"ret"}
+        ]), &["below"]),
+            "composition.steps[1].other:UNIT_MISMATCH:expected=price:actual=ratio");
+        assert_eq!(reject(json!([
+            {"id":"cond","op":"less_than","input":"close","threshold":100},
+            {"id":"event","op":"falling_edge","input":"cond"},
+            {"id":"label","op":"forward_return_label","input":"close","when":"event","period":1},
+            {"id":"leak","op":"rolling_stddev","input":"label","period":2}
+        ]), &["leak"]),
+            "composition.steps[3].input:UNIT_MISMATCH:expected=numeric_series:actual=outcome_ratio");
+        assert_eq!(reject(json!([
+            {"id":"v","op":"rolling_mean","input":"volume","period":2},
+            {"id":"wrong","op":"less_than_series","input":"v","other":"close"}
+        ]), &["wrong"]),
+            "composition.steps[1].other:UNIT_MISMATCH:expected=native_volume:actual=price");
     }
 }
 

@@ -38,6 +38,18 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
     assert_eq!(comparator["other_unit"], "same_as_input");
     assert_eq!(comparator["output_unit"], "boolean");
     assert_eq!(comparator["causal"], true);
+    let operations = capabilities["composition"]["operations"].as_array().unwrap();
+    let stddev = operations.iter().find(|item| item["op"] == "rolling_stddev").unwrap();
+    assert_eq!(stddev["output_unit"], "same_as_input");
+    assert_eq!(stddev["variance"], "population_inclusive_window");
+    assert_eq!(stddev["period_min"], 2);
+    assert_eq!(stddev["null_policy"], "strict_window_zero_for_constant");
+    let lower = operations.iter().find(|item| item["op"] == "less_than_series").unwrap();
+    assert_eq!(lower["other_unit"], "same_as_input");
+    assert_eq!(lower["null_policy"], "propagate_unknown");
+    let falling = operations.iter().find(|item| item["op"] == "falling_edge").unwrap();
+    assert_eq!(falling["input_unit"], "boolean");
+    assert_eq!(falling["trigger"], "true_to_false");
     for op in ["and", "or"] {
         let operation = capabilities["composition"]["operations"]
             .as_array()

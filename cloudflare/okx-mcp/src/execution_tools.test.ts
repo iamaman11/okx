@@ -69,6 +69,33 @@ const zscoreGraph={...composed,steps:[
 ],result_steps:['standard','high']};
 fail(validTool('market',{...marketScreen,composition:zscoreGraph}),
  'T15 typed causal zscore is public without a new route');
+const twoSidedRisk={...composed,steps:[
+ {id:'fast',op:'rolling_mean',input:'close',period:2},
+ {id:'slow',op:'rolling_mean',input:'close',period:3},
+ {id:'below',op:'less_than_series',input:'fast',other:'slow'},
+ {id:'exit',op:'falling_edge',input:'below'},
+ {id:'risk',op:'rolling_stddev',input:'close',period:2},
+ {id:'quiet',op:'less_than',input:'risk',threshold:4},
+],result_steps:['exit','risk','quiet']};
+fail(validTool('market',{...marketScreen,composition:twoSidedRisk}),
+ 'T07/T15 symmetric typed exit and causal population volatility use the existing route');
+for(const bad of [
+ {id:'risk',op:'rolling_stddev',input:'close'},
+ {id:'risk',op:'rolling_stddev',input:'close',period:1},
+ {id:'risk',op:'rolling_stddev',input:'close',period:2,threshold:1},
+ {id:'risk',op:'rolling_stddev',input:'close',period:2,other:'close'},
+])fail(!validTool('market',{...marketScreen,composition:{...twoSidedRisk,steps:[bad],result_steps:['risk']}}),
+ 'T02/T03 stddev rejects invalid period or unrelated parameters');
+for(const bad of [
+ {id:'below',op:'less_than_series',input:'fast'},
+ {id:'below',op:'less_than_series',input:'fast',other:'slow',threshold:0},
+ {id:'below',op:'less_than_series',input:'fast',other:'slow',period:2},
+ {id:'quiet',op:'less_than',input:'close'},
+ {id:'quiet',op:'less_than',input:'close',threshold:0,other:'open'},
+ {id:'exit',op:'falling_edge',input:'below',period:2},
+])fail(!validTool('market',{...marketScreen,composition:{...twoSidedRisk,
+ steps:[...twoSidedRisk.steps.slice(0,2),bad],result_steps:[bad.id]}}),
+ 'T02/T03 symmetric thresholds and edge reject malformed arguments');
 const fundingZscore={...composed,steps:[
  {id:'standard',op:'rolling_zscore',input:'funding_rate',period:2},
 ],result_steps:['standard']};

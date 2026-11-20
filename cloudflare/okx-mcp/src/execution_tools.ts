@@ -47,7 +47,7 @@ const knownMarketOperator=(value:unknown):boolean=>
  typeof value==='string'&&MARKET_OPERATOR_SET.has(value);
 const marketParameters=object({ema_period:integer(1,1000),atr_period:integer(1,1000),rsi_period:integer(1,1000),budget:number(0.000000001),price:number(0.000000001),stop_distance:number(0.000000001,0.999999999),notional:number(),fee_bps:number(0,10000),slippage_bps:number(0,10000)},[]);
 const stepId={type:'string',pattern:'^[a-z0-9_]{1,32}$'};
-const compositionStep=object({id:stepId,op:choice('returns_series','rolling_mean','rolling_max','rolling_min','rolling_pearson','rolling_zscore','add_series','subtract_series','divide_series','and','or','lag','greater_than','greater_than_series','rising_edge','forward_return_label'),input:stepId,other:stepId,period:integer(1,1000),threshold:{type:'number'},when:stepId},['id','op','input']);
+const compositionStep=object({id:stepId,op:choice('returns_series','rolling_mean','rolling_max','rolling_min','rolling_pearson','rolling_zscore','rolling_stddev','add_series','subtract_series','divide_series','and','or','lag','greater_than','greater_than_series','less_than','less_than_series','rising_edge','falling_edge','forward_return_label'),input:stepId,other:stepId,period:integer(1,1000),threshold:{type:'number'},when:stepId},['id','op','input']);
 const composition=object({version:choice('okx.market.composition/v1'),steps:{type:'array',items:compositionStep,minItems:1,maxItems:32},result_steps:{type:'array',items:stepId,minItems:1,maxItems:14}});
 const universe=object({instrument_type:choice('SPOT','SWAP','FUTURES'),settle_currency:text(16),after_instrument:text(64),reference_generation:text(128),limit:integer(1,100),rank_globally:{type:'boolean'}},['instrument_type']);
 const screenCompare=action('screen',{...range,universe,fields:{...array(text(64),14),minItems:1},composition,parameters:marketParameters,filters:array(object({field:text(64),min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:text(64),descending:{type:'boolean'}},['field']),limit:integer(1,50),cursor:text(512)},['fields','timeframe_ms','start_ms','end_ms','limit']);
@@ -94,12 +94,12 @@ const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destruct
 };
 const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  preview:{description:'Preview; no order.',readOnlyHint:true,destructiveHint:false},
- execute:{description:'Submit real order; loss possible. Requires approval, limits and STOP.',readOnlyHint:false,destructiveHint:true},
+ execute:{description:'Real order; loss possible. Approval, limits, STOP required.',readOnlyHint:false,destructiveHint:true},
  status:{description:'Status.',readOnlyHint:true,destructiveHint:false},
- cancel:{description:'Cancel venue order.',readOnlyHint:false,destructiveHint:true},
- close:{description:'Submit real close order.',readOnlyHint:false,destructiveHint:true},
+ cancel:{description:'Cancel order.',readOnlyHint:false,destructiveHint:true},
+ close:{description:'Real close order.',readOnlyHint:false,destructiveHint:true},
  capabilities:{description:'Rights.',readOnlyHint:true,destructiveHint:false},
- preflight:{description:'Readiness check.',readOnlyHint:true,destructiveHint:false},
+ preflight:{description:'Readiness.',readOnlyHint:true,destructiveHint:false},
 };
 const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
  readOnlyHint:meta.readOnlyHint,destructiveHint:meta.destructiveHint,openWorldHint:false
@@ -203,14 +203,14 @@ function validMarketOperatorRefs(args:Record<string,unknown>):boolean {
 }
 function validCompositionStep(s:unknown):boolean {
  if(!isObject(s))return false;
- if(['add_series','subtract_series','divide_series','rolling_pearson','greater_than_series','and','or'].includes(String(s.op))){
+ if(['add_series','subtract_series','divide_series','rolling_pearson','greater_than_series','less_than_series','and','or'].includes(String(s.op))){
   if(typeof s.other!=='string')return false;
  }else if('other'in s)return false;
- const hasPeriod=['rolling_mean','rolling_max','rolling_min','rolling_pearson','rolling_zscore','lag','forward_return_label'].includes(String(s.op));
+ const hasPeriod=['rolling_mean','rolling_max','rolling_min','rolling_pearson','rolling_zscore','rolling_stddev','lag','forward_return_label'].includes(String(s.op));
  if(hasPeriod?!Number.isInteger(s.period)||Number(s.period)<1||Number(s.period)>1000:'period'in s)return false;
  if(s.op==='rolling_pearson'&&Number(s.period)<30)return false;
- if(s.op==='rolling_zscore'&&Number(s.period)<2)return false;
- if(s.op==='greater_than'){
+ if(['rolling_zscore','rolling_stddev'].includes(String(s.op))&&Number(s.period)<2)return false;
+ if(['greater_than','less_than'].includes(String(s.op))){
   if(typeof s.threshold!=='number'||!Number.isFinite(s.threshold))return false;
  }else if('threshold'in s)return false;
  if(s.op==='forward_return_label'){

@@ -410,6 +410,7 @@ impl AnalyticsService {
             {"op":"rolling_min","input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
             {"op":"rolling_pearson","input_unit":"ratio","other_unit":"ratio","output_unit":"coefficient","period_min":30,"period_max":1000,"null_policy":"strict_exact_pairs","compute_cost":"linear_in_series_length","minimum_pairs":30},
             {"op":"rolling_zscore","version":1,"input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","output_unit":"coefficient","period_min":2,"period_max":1000,"variance":"population_inclusive_window","null_policy":"strict_window_or_zero_variance","compute_cost":"linear_in_series_length","causal":true},
+            {"op":"rolling_stddev","version":1,"input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","output_unit":"same_as_input","period_min":2,"period_max":1000,"variance":"population_inclusive_window","null_policy":"strict_window_zero_for_constant","compute_cost":"linear_in_series_length","causal":true},
             {"op":"add_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing"},
             {"op":"subtract_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing","numeric_policy":"finite_only"},
             {"op":"divide_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing_or_zero_denominator","numeric_policy":"finite_only"},
@@ -418,7 +419,10 @@ impl AnalyticsService {
             {"op":"lag","input_unit":"causal_series","output_unit":"same_as_input","period_min":1,"period_max":1000},
             {"op":"greater_than","input_unit":"price_or_ratio_or_native_volume_or_coefficient","output_unit":"boolean","requires":"finite_threshold"},
             {"op":"greater_than_series","input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","other_unit":"same_as_input","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
+            {"op":"less_than","input_unit":"price_or_ratio_or_native_volume_or_coefficient","output_unit":"boolean","requires":"finite_threshold"},
+            {"op":"less_than_series","input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","other_unit":"same_as_input","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
             {"op":"rising_edge","input_unit":"boolean","output_unit":"event","trigger":"false_to_true"},
+            {"op":"falling_edge","input_unit":"boolean","output_unit":"event","trigger":"true_to_false"},
             {"op":"forward_return_label","input_unit":"price","output_unit":"outcome_ratio","requires":"prior_event_step_in_when","period_min":1,"period_max":1000,"causal_feature":false}
         ]);
         let mut capabilities = json!({"schema":"okx.market.capabilities/v1",
@@ -2264,6 +2268,48 @@ mod tests {
         assert_eq!(result["units"]["cross"], "event");
         assert_eq!(result["composition_quality"]["cross"]["status"], "available_at_closed_bar");
         assert!(result["source_captures"]["candles"]["capture_hash"].is_string());
+    }
+    #[test]
+    fn t07_t15_public_bidirectional_exit_and_population_risk_share_the_checked_market_route() {
+        let mut request = request(vec!["returns"]);
+        request.composition = Some(Box::new(serde_json::from_value(json!({
+            "version":okx_analysis::query_plan::COMPOSITION_VERSION,
+            "steps":[
+                {"id":"fast","op":"rolling_mean","input":"close","period":2},
+                {"id":"slow","op":"rolling_mean","input":"close","period":3},
+                {"id":"below","op":"less_than_series","input":"fast","other":"slow"},
+                {"id":"exit","op":"falling_edge","input":"below"},
+                {"id":"risk","op":"rolling_stddev","input":"close","period":2},
+                {"id":"quiet","op":"less_than","input":"risk","threshold":4.0}
+            ],
+            "result_steps":["below","exit","risk","quiet"]
+        })).unwrap()));
+        let plan = planner::AnalysisPlan::compile_market(&request).unwrap();
+        assert_eq!(plan.sources, vec![okx_analysis::query_plan::Source::Candles]);
+        let mut loaded = row();
+        let bars = Arc::make_mut(loaded.bars.as_mut().unwrap());
+        for (index, close) in [(95, 100.0), (96, 99.0), (97, 97.0), (98, 95.0), (99, 102.0)] {
+            bars[index].close = close;
+            bars[index].open = close;
+            bars[index].high = close + 1.0;
+            bars[index].low = close - 1.0;
+        }
+        let result = compute_row_planned(loaded.clone(), &request, None, &plan, true).unwrap();
+        assert_eq!(result["metrics"]["below"], false);
+        assert_eq!(result["metrics"]["exit"], true);
+        assert_eq!(result["metrics"]["risk"], 3.5);
+        assert_eq!(result["metrics"]["quiet"], true);
+        assert_eq!(result["units"]["risk"], "price");
+        assert_eq!(result["units"]["exit"], "event");
+        assert_eq!(result["composition_quality"]["risk"]["status"], "available_at_closed_bar");
+        assert!(result["source_captures"]["candles"]["capture_hash"].is_string());
+        Arc::make_mut(loaded.bars.as_mut().unwrap()).remove(98);
+        let missing = compute_row_planned(loaded, &request, None, &plan, true).unwrap();
+        assert!(missing["metrics"]["risk"].is_null());
+        assert!(missing["metrics"]["exit"].is_null());
+        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["reason"], "SOURCE_OBSERVATION_MISSING");
+        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["origin_step"], "close");
+        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["first_missing_ms"], 98 * 60_000);
     }
     #[test]
     fn t02_t04_public_ohlc_graph_diagnoses_a_missing_high_without_forward_fill() {

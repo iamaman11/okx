@@ -594,6 +594,7 @@
                             "rolling_min",
                             "rolling_pearson",
                             "rolling_zscore",
+                            "rolling_stddev",
                             "add_series",
                             "subtract_series",
                             "divide_series",
@@ -602,7 +603,10 @@
                             "lag",
                             "greater_than",
                             "greater_than_series",
+                            "less_than",
+                            "less_than_series",
                             "rising_edge",
+                            "falling_edge",
                             "forward_return_label"
                           ]
                         },
@@ -1914,7 +1918,7 @@
     },
     {
       "name": "trade.execute",
-      "description": "Submit real order; loss possible. Requires approval, limits and STOP.",
+      "description": "Real order; loss possible. Approval, limits, STOP required.",
       "inputSchema": {
         "properties": {
           "account": {
@@ -2147,7 +2151,7 @@
     },
     {
       "name": "trade.cancel",
-      "description": "Cancel venue order.",
+      "description": "Cancel order.",
       "inputSchema": {
         "properties": {
           "account": {
@@ -2186,7 +2190,7 @@
     },
     {
       "name": "trade.close",
-      "description": "Submit real close order.",
+      "description": "Real close order.",
       "inputSchema": {
         "properties": {
           "account": {
@@ -2254,7 +2258,7 @@
     },
     {
       "name": "trade.preflight",
-      "description": "Readiness check.",
+      "description": "Readiness.",
       "inputSchema": {
         "properties": {
           "account": {
