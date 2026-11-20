@@ -162,7 +162,19 @@ impl Sources {
                 oldest = oldest.min(time);
                 if time >= start && time < end {
                     let rate = realized_funding_rate(row.realized_rate.as_deref())?;
-                    out.insert(time, rate);
+                    // API pages may overlap; identical events are harmless,
+                    // conflicting realized rates cannot be silently overwritten.
+                    match out.entry(time) {
+                        std::collections::btree_map::Entry::Vacant(slot) => {
+                            slot.insert(rate);
+                        }
+                        std::collections::btree_map::Entry::Occupied(slot)
+                            if *slot.get() != rate =>
+                        {
+                            return Err("FUNDING_CONFLICTING_EVENT_TIMESTAMP".into());
+                        }
+                        _ => {}
+                    }
                 }
             }
             if oldest <= start || oldest >= cursor.parse().unwrap_or(u64::MAX) {
@@ -267,6 +279,72 @@ mod extension_tests {
                 None => assert_eq!(actual.unwrap_err(), "FUNDING_REALIZED_RATE_UNAVAILABLE"),
             }
             assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+            drop(service);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn t06_duplicate_funding_event_requires_consistent_realized_rate() {
+        struct PagedFunding {
+            calls: AtomicUsize,
+            second_rate: &'static str,
+        }
+        impl HttpTransport for PagedFunding {
+            fn send(&self, request: okx_api::HttpRequest, _: std::time::Instant) -> HttpSend<'_> {
+                let page = self.calls.fetch_add(1, Ordering::Relaxed);
+                assert_eq!(request.method(), reqwest::Method::GET);
+                assert_eq!(request.url().path(), "/api/v5/public/funding-rate-history");
+                let cursor = request
+                    .url()
+                    .query_pairs()
+                    .find(|(name, _)| name == "after")
+                    .expect("funding pagination cursor")
+                    .1
+                    .into_owned();
+                assert_eq!(cursor, if page == 0 { "30000" } else { "25000" });
+                let rate = if page == 0 { "0.02" } else { self.second_rate };
+                let body = serde_json::to_vec(&json!({"code":"0","msg":"","data":[
+                    {"instId":"BTC-USDT-SWAP","fundingTime":"25000",
+                     "fundingRate":"0.09","realizedRate":rate}
+                ]}))
+                .unwrap();
+                Box::pin(async move {
+                    Ok(RawHttpResponse {
+                        status: okx_api::HttpStatusCode::OK,
+                        headers: Default::default(),
+                        body,
+                    })
+                })
+            }
+        }
+        for (other_rate, expected) in [
+            ("0.02", None),
+            ("0.03", Some("FUNDING_CONFLICTING_EVENT_TIMESTAMP")),
+        ] {
+            let transport = Arc::new(PagedFunding {
+                calls: AtomicUsize::new(0),
+                second_rate: other_rate,
+            });
+            let (root, mut service) = super::super::artifact_job_fixtures::service();
+            service.sources.bootstrap = MarketBootstrapper::new(
+                okx_api::OkxPublicClient::with_http_transport(
+                    okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
+                    okx_api::RateBudget::new(),
+                    transport.clone(),
+                )
+                .unwrap(),
+            )
+            .into();
+            let result = service
+                .sources
+                .funding("BTC-USDT-SWAP", 20_000, 30_000)
+                .await;
+            match expected {
+                None => assert_eq!(result.unwrap(), vec![(25_000, 0.02)]),
+                Some(error) => assert_eq!(result.unwrap_err(), error),
+            }
+            assert_eq!(transport.calls.load(Ordering::Relaxed), 2);
             drop(service);
             std::fs::remove_dir_all(root).unwrap();
         }

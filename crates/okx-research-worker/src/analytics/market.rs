@@ -49,8 +49,11 @@ fn market_request_schema(
     fields: &[String],
     has_composition: bool,
     oi_composition: bool,
+    funding_composition: bool,
 ) -> &'static str {
-    if oi_composition && fields.iter().any(|field| field == "pearson_correlation") {
+    if funding_composition {
+        "market/518.4.funding-event-composition-v1"
+    } else if oi_composition && fields.iter().any(|field| field == "pearson_correlation") {
         "market/518.3.oi-composition-correlation-alignment-v1"
     } else if oi_composition {
         "market/518.3.oi-composition-alignment-v1"
@@ -59,6 +62,20 @@ fn market_request_schema(
     } else {
         market_job_schema(fields)
     }
+}
+
+fn validate_composition_source_products(
+    instruments: &[String],
+    oi_composition: bool,
+    funding_composition: bool,
+) -> Result<(), String> {
+    if oi_composition && instruments.iter().any(|id| !id.ends_with("-SWAP")) {
+        return Err("composition.sources.open_interest:UNSUPPORTED_PRODUCT".into());
+    }
+    if funding_composition && instruments.iter().any(|id| !id.ends_with("-SWAP")) {
+        return Err("composition.sources.funding_rate:UNSUPPORTED_PRODUCT".into());
+    }
+    Ok(())
 }
 
 impl AnalyticsService {
@@ -77,6 +94,10 @@ impl AnalyticsService {
             plan.sources()
                 .contains(&okx_analysis::query_plan::Source::OpenInterest)
         });
+        let funding_composition = query_plan.composition.as_ref().is_some_and(|plan| {
+            plan.sources()
+                .contains(&okx_analysis::query_plan::Source::Funding)
+        });
         let window = query_plan.range;
         let closed_end = jiff::Timestamp::now().as_millisecond().max(0) as u64
             / request.timeframe_ms
@@ -93,14 +114,11 @@ impl AnalyticsService {
             compute_request.instruments = names;
             compute_request.universe = None;
         }
-        if oi_composition
-            && compute_request
-                .instruments
-                .iter()
-                .any(|id| !id.ends_with("-SWAP"))
-        {
-            return Err("composition.sources.open_interest:UNSUPPORTED_PRODUCT".into());
-        }
+        validate_composition_source_products(
+            &compute_request.instruments,
+            oi_composition,
+            funding_composition,
+        )?;
         let mut hash_request = request.clone();
         // A page selector is not a separate computation.
         let cursor = hash_request.cursor.take();
@@ -141,6 +159,7 @@ impl AnalyticsService {
                 &hash_request.fields,
                 hash_request.composition.is_some(),
                 oi_composition,
+                funding_composition,
             ),
             &hash_request,
             &universe_page,
@@ -379,9 +398,13 @@ impl AnalyticsService {
             "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
             "operators":operators,
             "composition":{"version":okx_analysis::query_plan::COMPOSITION_VERSION,
-                "available_for":"screen","input_sources":["close","open_interest"],
-                "source_units":{"close":"price","open_interest":"contracts"},
+                "available_for":"screen","input_sources":["close","open_interest","funding_rate"],
+                "source_units":{"close":"price","open_interest":"contracts","funding_rate":"ratio"},
                 "open_interest_policy":"exact_timestamps_no_forward_fill_publication_time_unverified",
+                "funding_rate_policy":"sparse_realized_settlement_events_exact_timestamp_no_forward_fill_publication_time_unverified_swap_only",
+                "funding_event_alignment":{"location":"funding_event_alignment",
+                    "expected_events":null,"join_semantics":"exact_event_timestamp_no_forward_fill",
+                    "publication_time_verified":false},
                 "null_diagnostics":{"location":"composition_quality.<result>.issues",
                     "origin_step":true,
                     "reason_codes":["SOURCE_OBSERVATION_MISSING","WARMUP",
@@ -434,11 +457,14 @@ impl AnalyticsService {
         let need_oi = plan
             .sources
             .contains(&okx_analysis::query_plan::Source::OpenInterest);
+        let need_funding = plan
+            .sources
+            .contains(&okx_analysis::query_plan::Source::Funding);
         let count = (request.end_ms - request.start_ms) / request.timeframe_ms;
         let total_bars = count
             .checked_mul(request.instruments.len() as u64)
             .ok_or("LIMIT_TOTAL_BARS:OVERFLOW")?;
-        if (need_candles || need_oi) && total_bars > 1_000_000 {
+        if (need_candles || need_oi || need_funding) && total_bars > 1_000_000 {
             return Err("LIMIT_TOTAL_BARS:1000000".into());
         }
         // The QueryPlan checked the same source and graph-wide work budget
@@ -483,7 +509,7 @@ impl AnalyticsService {
                 } else {
                     None
                 };
-                let funding = if fields.iter().any(|f| f == "funding_sum") {
+                let funding = if need_funding {
                     Some(sources.funding(&instrument, start, end).await)
                 } else {
                     None
@@ -768,6 +794,10 @@ fn compute_row_planned(
         plan.sources()
             .contains(&okx_analysis::query_plan::Source::OpenInterest)
     });
+    let composition_funding = composition.is_some_and(|plan| {
+        plan.sources()
+            .contains(&okx_analysis::query_plan::Source::Funding)
+    });
     if request.fields.iter().any(|field| field == "oi_change") || composition_oi {
         if let Some(Err(_)) = &row.oi {
             gaps.push("OI_SOURCE_UNAVAILABLE".into());
@@ -782,13 +812,16 @@ fn compute_row_planned(
         }
     }
     let funding_requested = request.fields.iter().any(|field| field == "funding_sum");
-    if funding_requested {
+    if funding_requested || composition_funding {
         // Funding history exposes event time and an eventual realized rate,
         // but not the moment that value became publicly available. Preserve
         // the retrospective sum while refusing to certify it as causal input.
         match &row.funding {
             Some(Ok(_)) => gaps.push("FUNDING_PUBLICATION_TIME_UNVERIFIED".into()),
-            Some(Err(reason)) if reason.starts_with("FUNDING_REALIZED_RATE_") => {
+            Some(Err(reason))
+                if reason.starts_with("FUNDING_REALIZED_RATE_")
+                    || reason == "FUNDING_CONFLICTING_EVENT_TIMESTAMP" =>
+            {
                 gaps.push(reason.clone());
                 gaps.push("FUNDING_SOURCE_UNAVAILABLE".into());
             }
@@ -909,12 +942,14 @@ fn compute_row_planned(
     }
     let mut composition_quality = serde_json::Map::new();
     let mut source_alignment = None;
+    let mut funding_event_alignment = None;
     if let Some(composition) = composition {
         let source_dependencies = composition.result_sources();
-        let evaluated = if composition_oi {
+        let evaluated = if composition_oi || composition_funding {
             let count = ((request.end_ms - request.start_ms) / request.timeframe_ms) as usize;
             let mut prices = vec![f64::NAN; count];
             let mut open_interest = vec![None; count];
+            let mut funding_rate = vec![None; count];
             for bar in bars.iter() {
                 if let Some(offset) = bar.time.checked_sub(request.start_ms)
                     && offset % request.timeframe_ms == 0
@@ -934,35 +969,69 @@ fn compute_row_planned(
                     }
                 }
             }
-            let (mut candle_points, mut oi_points, mut aligned, mut paired_returns) =
-                (0usize, 0usize, 0usize, 0usize);
-            let (mut first_unaligned_ms, mut prior_return_pair) = (None, false);
-            for (i, (&price, &oi)) in prices.iter().zip(&open_interest).enumerate() {
-                let candle_present = price.is_finite();
-                let oi_present = oi.is_some();
-                candle_points += usize::from(candle_present);
-                oi_points += usize::from(oi_present);
-                aligned += usize::from(candle_present && oi_present);
-                if !(candle_present && oi_present) && first_unaligned_ms.is_none() {
-                    first_unaligned_ms = Some(request.start_ms + i as u64 * request.timeframe_ms);
+            if composition_funding {
+                let mut off_grid_events = 0usize;
+                if let Some(Ok(events)) = &row.funding {
+                    for &(time, value) in events {
+                        if let Some(offset) = time.checked_sub(request.start_ms)
+                            && offset % request.timeframe_ms == 0
+                            && let Some(slot) =
+                                funding_rate.get_mut((offset / request.timeframe_ms) as usize)
+                        {
+                            *slot = Some(value);
+                        } else {
+                            off_grid_events += 1;
+                        }
+                    }
                 }
-                let return_pair = price.is_finite() && price > 0.0 && oi.is_some_and(|v| v > 0.0);
-                if i > 0 && prior_return_pair && return_pair {
-                    paired_returns += 1;
-                }
-                prior_return_pair = return_pair;
+                funding_event_alignment = Some(json!({
+                    "join_semantics":"exact_event_timestamp_no_forward_fill",
+                    "rate_basis":"realized_settlement_rate",
+                    "observed_events":row.funding.as_ref().and_then(|v|v.as_ref().ok()).map(|v|v.len()),
+                    "aligned_events":funding_rate.iter().flatten().count(),
+                    "off_grid_events":off_grid_events,
+                    "expected_events":null,
+                    "publication_time_verified":false,
+                    "last_bar_has_event":funding_rate.last().is_some_and(Option::is_some)
+                }));
             }
-            source_alignment = Some(json!({
-                "join_semantics":"exact_closed_bar_timestamp_no_forward_fill",
-                "expected_observations":count,
-                "observed_candle_observations":candle_points,
-                "observed_oi_observations":oi_points,
-                "aligned_observations":aligned,
-                "paired_return_observations":paired_returns,
-                "first_unaligned_ms":first_unaligned_ms,
-                "oi_publication_time_verified":false
-            }));
-            composition.evaluate_with_open_interest_diagnostics(&prices, &open_interest)?
+            if composition_oi {
+                let (mut candle_points, mut oi_points, mut aligned, mut paired_returns) =
+                    (0usize, 0usize, 0usize, 0usize);
+                let (mut first_unaligned_ms, mut prior_return_pair) = (None, false);
+                for (i, (&price, &oi)) in prices.iter().zip(&open_interest).enumerate() {
+                    let candle_present = price.is_finite();
+                    let oi_present = oi.is_some();
+                    candle_points += usize::from(candle_present);
+                    oi_points += usize::from(oi_present);
+                    aligned += usize::from(candle_present && oi_present);
+                    if !(candle_present && oi_present) && first_unaligned_ms.is_none() {
+                        first_unaligned_ms =
+                            Some(request.start_ms + i as u64 * request.timeframe_ms);
+                    }
+                    let return_pair =
+                        price.is_finite() && price > 0.0 && oi.is_some_and(|v| v > 0.0);
+                    if i > 0 && prior_return_pair && return_pair {
+                        paired_returns += 1;
+                    }
+                    prior_return_pair = return_pair;
+                }
+                source_alignment = Some(json!({
+                    "join_semantics":"exact_closed_bar_timestamp_no_forward_fill",
+                    "expected_observations":count,
+                    "observed_candle_observations":candle_points,
+                    "observed_oi_observations":oi_points,
+                    "aligned_observations":aligned,
+                    "paired_return_observations":paired_returns,
+                    "first_unaligned_ms":first_unaligned_ms,
+                    "oi_publication_time_verified":false
+                }));
+            }
+            composition.evaluate_with_sources_diagnostics(
+                &prices,
+                composition_oi.then_some(open_interest.as_slice()),
+                composition_funding.then_some(funding_rate.as_slice()),
+            )?
         } else {
             composition.evaluate_with_diagnostics(close)
         };
@@ -971,12 +1040,15 @@ fn compute_row_planned(
             let dependencies = &source_dependencies[&id];
             let depends_on_oi =
                 dependencies.contains(&okx_analysis::query_plan::Source::OpenInterest);
+            let depends_on_funding =
+                dependencies.contains(&okx_analysis::query_plan::Source::Funding);
             let missing_candles = incomplete_candles
                 && dependencies.contains(&okx_analysis::query_plan::Source::Candles);
             let missing_oi = depends_on_oi
                 && oi_coverage
                     .as_ref()
                     .is_none_or(|coverage| !coverage.complete);
+            let missing_funding = depends_on_funding && !matches!(&row.funding, Some(Ok(_)));
             // Event-time alone does not prove a historical OI observation was
             // available at decision time. Never certify an OI-derived signal.
             let unavailable_causal_oi = depends_on_oi
@@ -986,7 +1058,19 @@ fn compute_row_planned(
                         | okx_analysis::query_plan::Unit::Event
                         | okx_analysis::query_plan::Unit::OutcomeRatio
                 );
-            let value = if missing_candles || missing_oi || unavailable_causal_oi {
+            let unavailable_causal_funding = depends_on_funding
+                && matches!(
+                    unit,
+                    okx_analysis::query_plan::Unit::Boolean
+                        | okx_analysis::query_plan::Unit::Event
+                        | okx_analysis::query_plan::Unit::OutcomeRatio
+                );
+            let value = if missing_candles
+                || missing_oi
+                || missing_funding
+                || unavailable_causal_oi
+                || unavailable_causal_funding
+            {
                 None
             } else {
                 value
@@ -1004,10 +1088,21 @@ fn compute_row_planned(
                     "first_missing_ms":oi_coverage.as_ref().and_then(|c|c.first_missing_ms)
                 }));
             }
+            if missing_funding {
+                issues.push(json!({
+                    "source":"funding_rate","reason":"FUNDING_SOURCE_UNAVAILABLE"
+                }));
+            }
             if unavailable_causal_oi {
                 gaps.push(format!("CAUSAL_AVAILABILITY_UNVERIFIED:{id}"));
                 issues.push(json!({
                     "source":"open_interest","reason":"CAUSAL_PUBLICATION_TIME_UNVERIFIED"
+                }));
+            }
+            if unavailable_causal_funding {
+                gaps.push(format!("CAUSAL_AVAILABILITY_UNVERIFIED:{id}"));
+                issues.push(json!({
+                    "source":"funding_rate","reason":"CAUSAL_PUBLICATION_TIME_UNVERIFIED"
                 }));
             }
             if value.is_none() {
@@ -1033,7 +1128,7 @@ fn compute_row_planned(
             }
             let status = if value.is_none() {
                 "unavailable"
-            } else if depends_on_oi {
+            } else if depends_on_oi || depends_on_funding {
                 "retrospective_publication_unverified"
             } else {
                 "available_at_closed_bar"
@@ -1064,34 +1159,73 @@ fn compute_row_planned(
             units.insert(id, json!(unit_name));
         }
     }
-    let source_captures = if composition_oi {
-        let oi_capture = row
-            .oi
-            .as_ref()
-            .and_then(|source| source.as_ref().ok())
-            .map(|points| -> Result<Value, String> {
-                let hash = okx_research::canonical_sha256(&(
-                    "okx.market.oi-source-capture/v1",
-                    &row.instrument,
-                    request.start_ms,
-                    request.end_ms,
-                    request.timeframe_ms,
-                    points,
-                ))
-                .map_err(|error| error.to_string())?;
-                Ok(json!({
-                    "source":"okx/open_interest",
-                    "capture_hash":hash,
-                    "requested_start_ms":request.start_ms,
-                    "requested_end_ms":request.end_ms,
-                    "timeframe_ms":request.timeframe_ms,
-                    "observed_points":points.len(),
-                    "first_event_ms":points.first().map(|(time, _)| time),
-                    "last_event_ms":points.last().map(|(time, _)| time),
-                    "publication_time_verified":false,
-                }))
-            })
-            .transpose()?;
+    let source_captures = if composition_oi || composition_funding {
+        let mut captures = serde_json::Map::new();
+        if composition_oi {
+            let oi_capture = row
+                .oi
+                .as_ref()
+                .and_then(|source| source.as_ref().ok())
+                .map(|points| -> Result<Value, String> {
+                    let hash = okx_research::canonical_sha256(&(
+                        "okx.market.oi-source-capture/v1",
+                        &row.instrument,
+                        request.start_ms,
+                        request.end_ms,
+                        request.timeframe_ms,
+                        points,
+                    ))
+                    .map_err(|error| error.to_string())?;
+                    Ok(json!({
+                        "source":"okx/open_interest",
+                        "capture_hash":hash,
+                        "requested_start_ms":request.start_ms,
+                        "requested_end_ms":request.end_ms,
+                        "timeframe_ms":request.timeframe_ms,
+                        "observed_points":points.len(),
+                        "first_event_ms":points.first().map(|(time, _)| time),
+                        "last_event_ms":points.last().map(|(time, _)| time),
+                        "publication_time_verified":false,
+                    }))
+                })
+                .transpose()?;
+            captures.insert("open_interest".into(), oi_capture.unwrap_or(Value::Null));
+        }
+        if composition_funding {
+            let funding_capture = row
+                .funding
+                .as_ref()
+                .and_then(|source| source.as_ref().ok())
+                .map(|events| -> Result<Value, String> {
+                    let hash = okx_research::canonical_sha256(&(
+                        "okx.market.funding-realized-event-source-capture/v1",
+                        &row.instrument,
+                        request.start_ms,
+                        request.end_ms,
+                        request.timeframe_ms,
+                        events,
+                    ))
+                    .map_err(|error| error.to_string())?;
+                    Ok(json!({
+                        "source":"okx/funding-rate-history",
+                        "capture_hash":hash,
+                        "requested_start_ms":request.start_ms,
+                        "requested_end_ms":request.end_ms,
+                        "timeframe_ms":request.timeframe_ms,
+                        "observed_events":events.len(),
+                        "first_event_ms":events.first().map(|(time, _)| time),
+                        "last_event_ms":events.last().map(|(time, _)| time),
+                        "rate_basis":"realized_settlement_rate",
+                        "publication_time_verified":false,
+                        "expected_events":null
+                    }))
+                })
+                .transpose()?;
+            captures.insert(
+                "funding_rate".into(),
+                funding_capture.unwrap_or(Value::Null),
+            );
+        }
         let candle_capture = needs_candles
             .then(|| -> Result<Value, String> {
                 let hash = okx_research::canonical_sha256(&(
@@ -1111,7 +1245,8 @@ fn compute_row_planned(
                 }))
             })
             .transpose()?;
-        Some(json!({"open_interest":oi_capture,"candles":candle_capture}))
+        captures.insert("candles".into(), candle_capture.unwrap_or(Value::Null));
+        Some(Value::Object(captures))
     } else {
         None
     };
@@ -1128,10 +1263,15 @@ fn compute_row_planned(
     if let Some(source_alignment) = source_alignment {
         result["source_alignment"] = source_alignment;
     }
+    if let Some(funding_event_alignment) = funding_event_alignment {
+        result["funding_event_alignment"] = funding_event_alignment;
+    }
     let mut metric_time_basis = serde_json::Map::new();
     if let Some(composition) = composition {
         for (id, sources) in composition.result_sources() {
-            if sources.contains(&okx_analysis::query_plan::Source::OpenInterest) {
+            if sources.contains(&okx_analysis::query_plan::Source::Funding) {
+                metric_time_basis.insert(id, json!("funding_event_time_publication_unverified"));
+            } else if sources.contains(&okx_analysis::query_plan::Source::OpenInterest) {
                 metric_time_basis.insert(id, json!("oi_event_time_publication_unverified"));
             }
         }
@@ -1287,22 +1427,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn t02_funding_composition_rejects_non_swap_before_source_reads() {
+        let spot = vec!["BTC-USDT-SWAP".to_owned(), "ETH-USDT".to_owned()];
+        assert_eq!(
+            validate_composition_source_products(&spot, false, true).unwrap_err(),
+            "composition.sources.funding_rate:UNSUPPORTED_PRODUCT"
+        );
+        assert_eq!(
+            validate_composition_source_products(&spot, true, true).unwrap_err(),
+            "composition.sources.open_interest:UNSUPPORTED_PRODUCT"
+        );
+        assert!(
+            validate_composition_source_products(&["BTC-USDT-SWAP".into()], true, true).is_ok()
+        );
+        assert!(validate_composition_source_products(&spot, false, false).is_ok());
+    }
+
+    #[test]
     fn t13_composition_quality_uses_a_new_namespace_without_invalidating_legacy_results() {
         let fields = vec!["returns".to_owned()];
         let oi_fields = vec!["pearson_correlation".to_owned()];
-        assert_eq!(market_request_schema(&fields, false, false), "market/448.2");
-        let composed = market_request_schema(&fields, true, false);
-        let oi_composed = market_request_schema(&fields, true, true);
-        let oi_correlated = market_request_schema(&oi_fields, true, true);
+        assert_eq!(
+            market_request_schema(&fields, false, false, false),
+            "market/448.2"
+        );
+        let composed = market_request_schema(&fields, true, false, false);
+        let oi_composed = market_request_schema(&fields, true, true, false);
+        let oi_correlated = market_request_schema(&oi_fields, true, true, false);
+        let funding_composed = market_request_schema(&fields, true, false, true);
         assert_eq!(composed, "market/518.3.composition-null-causes-v1");
         assert_eq!(oi_composed, "market/518.3.oi-composition-alignment-v1");
         assert_ne!(composed, "market/518.2.composition-quality-v1");
         assert_ne!(oi_composed, "market/518.2.oi-composition-quality-v1");
-        assert_ne!(composed, market_request_schema(&fields, false, false));
+        assert_ne!(
+            composed,
+            market_request_schema(&fields, false, false, false)
+        );
         assert_ne!(oi_composed, composed);
         assert_ne!(oi_correlated, oi_composed);
         assert_eq!(
-            market_request_schema(&oi_fields, false, false),
+            funding_composed,
+            "market/518.4.funding-event-composition-v1"
+        );
+        assert_eq!(
+            funding_composed,
+            market_request_schema(&fields, true, true, true)
+        );
+        assert_eq!(
+            market_request_schema(&oi_fields, false, false, false),
             "market/518.1.correlation-coverage-v1"
         );
     }
@@ -2205,6 +2377,207 @@ mod global_rank_tests {
         assert_eq!(
             partial["composition_quality"]["oi_return"]["issues"][0]["first_missing_ms"],
             42 * 60_000
+        );
+    }
+
+    #[test]
+    fn t02_t06_funding_events_join_price_returns_with_provenance_not_causal_signals() {
+        let query: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT-SWAP"],"fields":["returns"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":6000000,
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"price_return","op":"returns_series","input":"close"},
+                {"id":"net_return","op":"subtract_series","input":"price_return","other":"funding_rate"},
+                {"id":"positive","op":"greater_than","input":"net_return","threshold":0.0}
+            ],"result_steps":["net_return","positive"]}
+        })).unwrap();
+        let plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+        assert!(
+            plan.sources
+                .contains(&okx_analysis::query_plan::Source::Funding)
+        );
+        let fixture = || Loaded {
+            instrument: "BTC-USDT-SWAP".into(),
+            bars: Ok(Arc::new(
+                (0..100)
+                    .map(|i| Bar {
+                        time: i * 60_000,
+                        open: 100.0,
+                        high: 200.0,
+                        low: 99.0,
+                        close: 100.0 + i as f64,
+                        volume: 1.0,
+                        funding_rate: None,
+                    })
+                    .collect(),
+            )),
+            ticker: None,
+            funding: Some(Ok(vec![
+                (60_000, 0.001),
+                (60_001, 0.006),
+                (99 * 60_000, -0.002),
+            ])),
+            oi: None,
+            excluded: None,
+        };
+        let first = compute_row_planned(fixture(), &query, None, &plan, true).unwrap();
+        let repeated = compute_row_planned(fixture(), &query, None, &plan, true).unwrap();
+        assert_eq!(first["source_captures"], repeated["source_captures"]);
+        assert!(
+            (first["metrics"]["net_return"].as_f64().unwrap() - (199.0 / 198.0 - 1.0 + 0.002))
+                .abs()
+                < 1e-12
+        );
+        assert!(first["metrics"]["positive"].is_null());
+        assert_eq!(
+            first["composition_quality"]["net_return"]["status"],
+            "retrospective_publication_unverified"
+        );
+        assert_eq!(
+            first["composition_quality"]["positive"]["issues"][0]["reason"],
+            "CAUSAL_PUBLICATION_TIME_UNVERIFIED"
+        );
+        assert_eq!(
+            first["metric_time_basis"]["net_return"],
+            "funding_event_time_publication_unverified"
+        );
+        assert_eq!(first["funding_event_alignment"]["observed_events"], 3);
+        assert_eq!(first["funding_event_alignment"]["aligned_events"], 2);
+        assert_eq!(first["funding_event_alignment"]["off_grid_events"], 1);
+        assert_eq!(
+            first["funding_event_alignment"]["expected_events"],
+            Value::Null
+        );
+        assert_eq!(
+            first["funding_event_alignment"]["publication_time_verified"],
+            false
+        );
+        assert_eq!(
+            first["source_captures"]["funding_rate"]["observed_events"],
+            3
+        );
+        assert_eq!(first["source_captures"]["candles"]["observed_points"], 100);
+        assert!(
+            first["gaps"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("CAUSAL_AVAILABILITY_UNVERIFIED:positive"))
+        );
+
+        let mut changed = fixture();
+        changed
+            .funding
+            .as_mut()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .1 = -0.003;
+        let after = compute_row_planned(changed, &query, None, &plan, true).unwrap();
+        assert_ne!(
+            first["source_captures"]["funding_rate"]["capture_hash"],
+            after["source_captures"]["funding_rate"]["capture_hash"]
+        );
+        let mut absent = fixture();
+        absent.funding.as_mut().unwrap().as_mut().unwrap().pop();
+        let missing = compute_row_planned(absent, &query, None, &plan, true).unwrap();
+        assert!(missing["metrics"]["net_return"].is_null());
+        assert_eq!(
+            missing["composition_quality"]["net_return"]["issues"][0],
+            json!({"reason":"SOURCE_OBSERVATION_MISSING","origin_step":"funding_rate"})
+        );
+        assert_eq!(
+            missing["funding_event_alignment"]["last_bar_has_event"],
+            false
+        );
+        let mut unavailable = fixture();
+        unavailable.funding = Some(Err("FUNDING_RANGE_UNAVAILABLE".into()));
+        let failed = compute_row_planned(unavailable, &query, None, &plan, true).unwrap();
+        assert_eq!(
+            failed["composition_quality"]["net_return"]["issues"][0]["reason"],
+            "FUNDING_SOURCE_UNAVAILABLE"
+        );
+        assert!(failed["source_captures"]["funding_rate"].is_null());
+    }
+
+    #[test]
+    fn t06_funding_only_graph_does_not_require_or_invent_candles() {
+        let query: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["ETH-USDT-SWAP"],"fields":["funding_sum"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":6000000,
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"rate","op":"rolling_mean","input":"funding_rate","period":1}
+            ],"result_steps":["rate"]}
+        }))
+        .unwrap();
+        let plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+        assert!(
+            !plan
+                .sources
+                .contains(&okx_analysis::query_plan::Source::Candles)
+        );
+        let loaded = Loaded {
+            instrument: "ETH-USDT-SWAP".into(),
+            bars: Ok(Arc::new(vec![])),
+            ticker: None,
+            funding: Some(Ok(vec![(99 * 60_000, -0.001)])),
+            oi: None,
+            excluded: None,
+        };
+        let result = compute_row_planned(loaded, &query, None, &plan, false).unwrap();
+        assert_eq!(result["metrics"]["funding_sum"], json!(-0.001));
+        assert_eq!(result["metrics"]["rate"], json!(-0.001));
+        assert_eq!(result["funding_event_alignment"]["aligned_events"], 1);
+        assert_eq!(result["source_captures"]["candles"], Value::Null);
+        assert_eq!(result["candle_coverage"], Value::Null);
+        assert_eq!(
+            result["composition_quality"]["rate"]["status"],
+            "retrospective_publication_unverified"
+        );
+    }
+    #[test]
+    fn t02_t06_funding_and_open_interest_keep_independent_source_evidence() {
+        let query: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT-SWAP"],"fields":["funding_sum"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":6000000,
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"oi_return","op":"returns_series","input":"open_interest"},
+                {"id":"joint","op":"add_series","input":"funding_rate","other":"oi_return"}
+            ],"result_steps":["joint"]}
+        }))
+        .unwrap();
+        let plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+        assert!(
+            !plan
+                .sources
+                .contains(&okx_analysis::query_plan::Source::Candles)
+        );
+        let loaded = Loaded {
+            instrument: "BTC-USDT-SWAP".into(),
+            bars: Ok(Arc::new(vec![])),
+            ticker: None,
+            funding: Some(Ok(vec![(99 * 60_000, 0.001)])),
+            oi: Some(Ok((0..100)
+                .map(|i| (i * 60_000, 100.0 + i as f64))
+                .collect())),
+            excluded: None,
+        };
+        let output = compute_row_planned(loaded, &query, None, &plan, false).unwrap();
+        assert!(
+            (output["metrics"]["joint"].as_f64().unwrap() - (0.001 + 1.0 / 198.0)).abs() < 1e-12
+        );
+        assert!(output["source_captures"]["open_interest"]["capture_hash"].is_string());
+        assert!(output["source_captures"]["funding_rate"]["capture_hash"].is_string());
+        assert_eq!(output["source_alignment"]["observed_oi_observations"], 100);
+        assert_eq!(output["funding_event_alignment"]["aligned_events"], 1);
+        assert_eq!(
+            output["metric_time_basis"]["joint"],
+            "funding_event_time_publication_unverified"
+        );
+        assert_eq!(
+            output["composition_quality"]["joint"]["status"],
+            "retrospective_publication_unverified"
         );
     }
     #[test]

@@ -25,7 +25,8 @@ pub struct CompositionRequest {
 pub struct SeriesStep {
     pub id: String,
     pub op: SeriesOp,
-    /// "close" (price) and "open_interest" (contracts) are sources; all other names refer to prior steps.
+    /// "close" (price), "open_interest" (contracts), and sparse "funding_rate"
+    /// (realized settlement ratio at event time) are sources; other names are prior steps.
     pub input: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub period: Option<u16>,
@@ -112,13 +113,15 @@ impl CheckedComposition {
             {
                 return Err(format!("{path}.id:INVALID"));
             }
-            if matches!(step.id.as_str(), "close" | "open_interest") || known.contains_key(&step.id)
+            if matches!(step.id.as_str(), "close" | "open_interest" | "funding_rate")
+                || known.contains_key(&step.id)
             {
                 return Err(format!("{path}.id:DUPLICATE"));
             }
             let (input_unit, parent_depth) = match step.input.as_str() {
                 "close" => (Unit::Price, 0),
                 "open_interest" => (Unit::Contracts, 0),
+                "funding_rate" => (Unit::Ratio, 0),
                 _ => known.get(&step.input).copied().ok_or_else(|| {
                     format!("{path}.input:UNKNOWN_OR_FORWARD_STEP:{}", step.input)
                 })?,
@@ -155,6 +158,7 @@ impl CheckedComposition {
                 Some(match name {
                     "close" => (Unit::Price, 0),
                     "open_interest" => (Unit::Contracts, 0),
+                    "funding_rate" => (Unit::Ratio, 0),
                     _ => known
                         .get(name)
                         .copied()
@@ -368,9 +372,9 @@ impl CheckedComposition {
                 return Err(format!("composition.result_steps[{idx}]:INVALID_REFERENCE"));
             }
         }
-        if steps.iter().any(|s| s.step.input == "open_interest")
+        if source_buffer_count(&steps) > 1
             && total_bars
-                .checked_mul(steps.len() as u64 + 2)
+                .checked_mul(steps.len() as u64 + source_buffer_count(&steps))
                 .is_none_or(|cells| cells > 8_000_000)
         {
             return Err("composition:SOURCE_CELLS_LIMIT".into());
@@ -407,12 +411,9 @@ impl CheckedComposition {
                 return Err("composition:WORK_LIMIT".into());
             }
         }
-        if self
-            .steps
-            .iter()
-            .any(|checked| checked.step.input == "open_interest")
+        if source_buffer_count(&self.steps) > 1
             && total_bars
-                .checked_mul(self.steps.len() as u64 + 2)
+                .checked_mul(self.steps.len() as u64 + source_buffer_count(&self.steps))
                 .is_none_or(|source_cells| source_cells > 8_000_000)
         {
             return Err("composition:SOURCE_CELLS_LIMIT".into());
@@ -430,7 +431,7 @@ impl CheckedComposition {
     /// Causal outputs at index `at` must be invariant under changes after `at`.
     /// Outcome labels are explicitly non-causal and may use later bars.
     pub fn evaluate_at(&self, close: &[f64], at: usize) -> BTreeMap<String, (Option<f64>, Unit)> {
-        self.evaluate_at_sources(close, None, at, false).0
+        self.evaluate_at_sources(close, None, None, at, false).0
     }
 
     /// Preserve the legacy value projection; add precise explanations only
@@ -442,7 +443,7 @@ impl CheckedComposition {
         BTreeMap<String, (Option<f64>, Unit)>,
         BTreeMap<String, CompositionNullCause>,
     ) {
-        self.evaluate_at_sources(close, None, close.len().saturating_sub(1), true)
+        self.evaluate_at_sources(close, None, None, close.len().saturating_sub(1), true)
     }
 
     pub fn evaluate_with_open_interest(
@@ -455,6 +456,7 @@ impl CheckedComposition {
             .evaluate_at_sources(
                 close,
                 Some(open_interest),
+                None,
                 close.len().saturating_sub(1),
                 false,
             )
@@ -476,6 +478,42 @@ impl CheckedComposition {
         Ok(self.evaluate_at_sources(
             close,
             Some(open_interest),
+            None,
+            close.len().saturating_sub(1),
+            true,
+        ))
+    }
+
+    /// Aligned source values must be event-time exact. A missing funding event
+    /// stays `None` rather than becoming a zero-rate or forward-filled sample.
+    /// The caller owns publication-time qualification of any derived output.
+    pub fn evaluate_with_sources_diagnostics(
+        &self,
+        close: &[f64],
+        open_interest: Option<&[Option<f64>]>,
+        funding_rate: Option<&[Option<f64>]>,
+    ) -> Result<
+        (
+            BTreeMap<String, (Option<f64>, Unit)>,
+            BTreeMap<String, CompositionNullCause>,
+        ),
+        String,
+    > {
+        if let Some(oi) = open_interest {
+            self.check_open_interest(close, oi)?;
+        }
+        if let Some(rates) = funding_rate {
+            if rates.len() != close.len() {
+                return Err("composition.sources:ALIGNMENT_LENGTH_MISMATCH".into());
+            }
+            if rates.iter().flatten().any(|rate| !rate.is_finite()) {
+                return Err("composition.sources.funding_rate:NONFINITE_RATE".into());
+            }
+        }
+        Ok(self.evaluate_at_sources(
+            close,
+            open_interest,
+            funding_rate,
             close.len().saturating_sub(1),
             true,
         ))
@@ -503,6 +541,7 @@ impl CheckedComposition {
         &self,
         close: &[f64],
         open_interest: Option<&[Option<f64>]>,
+        funding_rate: Option<&[Option<f64>]>,
         at: usize,
         explain_nulls: bool,
     ) -> (
@@ -522,6 +561,16 @@ impl CheckedComposition {
             values.insert(
                 "open_interest".into(),
                 open_interest
+                    .map(|source| source.to_vec())
+                    .unwrap_or_else(|| vec![None; close.len()]),
+            );
+        }
+        if self.steps.iter().any(|step| {
+            step.step.input == "funding_rate" || step.step.other.as_deref() == Some("funding_rate")
+        }) {
+            values.insert(
+                "funding_rate".into(),
+                funding_rate
                     .map(|source| source.to_vec())
                     .unwrap_or_else(|| vec![None; close.len()]),
             );
@@ -856,6 +905,7 @@ impl CheckedComposition {
             "open_interest".into(),
             BTreeSet::from([Source::OpenInterest]),
         );
+        known.insert("funding_rate".into(), BTreeSet::from([Source::Funding]));
         for checked in &self.steps {
             let mut sources = known[&checked.step.input].clone();
             if let Some(condition) = &checked.step.when {
@@ -875,6 +925,15 @@ impl CheckedComposition {
     pub fn sources(&self) -> BTreeSet<Source> {
         self.result_sources().into_values().flatten().collect()
     }
+}
+
+fn source_buffer_count(steps: &[CheckedSeriesStep]) -> u64 {
+    let uses = |name: &str| {
+        steps.iter().any(|checked| {
+            checked.step.input == name || checked.step.other.as_deref() == Some(name)
+        })
+    };
+    1 + u64::from(uses("open_interest")) + u64::from(uses("funding_rate"))
 }
 
 fn series_cost_per_bar(op: SeriesOp) -> u64 {
@@ -1131,7 +1190,7 @@ pub fn input(name: &str) -> Result<Input, String> {
         "close" | "high" | "low" | "peer_close" => (Source::Candles, Unit::Price),
         "volume" => (Source::Candles, Unit::Quantity),
         "bid" | "ask" => (Source::Ticker, Unit::Price),
-        "funding" => (Source::Funding, Unit::Ratio),
+        "funding" | "funding_rate" => (Source::Funding, Unit::Ratio),
         "open_interest" => (Source::OpenInterest, Unit::Contracts),
         "budget" | "notional" => (Source::Request, Unit::QuoteCurrency),
         "price" => (Source::Request, Unit::Price),
@@ -1307,11 +1366,12 @@ impl QueryPlan {
             .expected_bars
             .checked_mul(instruments.len() as u64)
             .ok_or("LIMIT_TOTAL_BARS:OVERFLOW")?;
-        if self
-            .sources
-            .iter()
-            .any(|source| matches!(source, Source::Candles | Source::OpenInterest))
-            && total_bars > 1_000_000
+        if self.sources.iter().any(|source| {
+            matches!(
+                source,
+                Source::Candles | Source::OpenInterest | Source::Funding
+            )
+        }) && total_bars > 1_000_000
         {
             return Err("LIMIT_TOTAL_BARS:1000000".into());
         }
@@ -2085,6 +2145,96 @@ mod t15_causal_window_extrema {
 #[cfg(test)]
 mod t02_t06_multisource_regression {
     use super::*;
+
+    #[test]
+    fn t02_t06_sparse_realized_funding_joins_price_returns_by_event_time() {
+        let spec: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"price_return","op":"returns_series","input":"close"},
+                {"id":"net_return","op":"subtract_series","input":"price_return","other":"funding_rate"},
+                {"id":"signal","op":"greater_than","input":"net_return","threshold":0.0}
+            ],"result_steps":["net_return","signal"]
+        }))
+        .unwrap();
+        let plan = CheckedComposition::compile(spec.clone(), 4).unwrap();
+        assert_eq!(plan.steps[1].unit, Unit::Ratio);
+        assert_eq!(
+            plan.result_sources()["net_return"],
+            BTreeSet::from([Source::Candles, Source::Funding])
+        );
+        assert_eq!(
+            plan.result_sources()["signal"],
+            BTreeSet::from([Source::Candles, Source::Funding])
+        );
+        let prices = [100., 110., 121., 133.1];
+        let events = [None, Some(0.001), None, Some(-0.002)];
+        let at_event = plan
+            .evaluate_with_sources_diagnostics(&prices[..2], None, Some(&events[..2]))
+            .unwrap();
+        assert!((at_event.0["net_return"].0.unwrap() - 0.099).abs() < 1e-12);
+        let absent = plan
+            .evaluate_with_sources_diagnostics(&prices[..3], None, Some(&events[..3]))
+            .unwrap();
+        assert!(absent.0["net_return"].0.is_none());
+        assert_eq!(absent.1["net_return"].reason, "SOURCE_OBSERVATION_MISSING");
+        assert_eq!(absent.1["net_return"].origin_step, "funding_rate");
+        let latest = plan
+            .evaluate_with_sources_diagnostics(&prices, None, Some(&events))
+            .unwrap();
+        assert!((latest.0["net_return"].0.unwrap() - 0.102).abs() < 1e-12);
+        assert_eq!(latest.0["signal"].0, Some(1.0));
+        assert_eq!(
+            plan.evaluate_with_sources_diagnostics(&prices, None, Some(&events[..3]))
+                .unwrap_err(),
+            "composition.sources:ALIGNMENT_LENGTH_MISMATCH"
+        );
+        assert_eq!(
+            plan.evaluate_with_sources_diagnostics(
+                &prices,
+                None,
+                Some(&[None, Some(f64::NAN), None, None])
+            )
+            .unwrap_err(),
+            "composition.sources.funding_rate:NONFINITE_RATE"
+        );
+        let mut invalid = spec;
+        invalid.steps[0].id = "funding_rate".into();
+        assert_eq!(
+            CheckedComposition::compile(invalid, 4).unwrap_err(),
+            "composition.steps[0].id:DUPLICATE"
+        );
+    }
+
+    #[test]
+    fn t02_t06_funding_as_first_operand_and_oi_joint_budget() {
+        let spec: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"price_return","op":"returns_series","input":"close"},
+                {"id":"oi_return","op":"returns_series","input":"open_interest"},
+                {"id":"funding_spread","op":"subtract_series","input":"funding_rate","other":"price_return"},
+                {"id":"combined","op":"add_series","input":"funding_spread","other":"oi_return"}
+            ],"result_steps":["combined"]
+        })).unwrap();
+        let graph = CheckedComposition::compile(spec, 100).unwrap();
+        assert_eq!(
+            graph.sources(),
+            BTreeSet::from([Source::Candles, Source::OpenInterest, Source::Funding])
+        );
+        assert_eq!(source_buffer_count(&graph.steps), 3);
+        let prices = [100., 110.];
+        let oi = [Some(10.), Some(12.)];
+        let funding = [None, Some(0.01)];
+        let result = graph
+            .evaluate_with_sources_diagnostics(&prices, Some(&oi), Some(&funding))
+            .unwrap();
+        assert!((result.0["combined"].0.unwrap() - 0.11).abs() < 1e-12);
+        assert_eq!(
+            graph.validate_global_budget(8_000_000 / 7 + 1).unwrap_err(),
+            "composition:SOURCE_CELLS_LIMIT"
+        );
+    }
 
     #[test]
     fn t02_contract_count_and_type_checked_source_dependencies() {
