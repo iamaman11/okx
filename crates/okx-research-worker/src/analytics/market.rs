@@ -1737,8 +1737,14 @@ mod global_rank_tests {
     }
     #[test]
     fn t06_t07_t13_oi_provenance_is_stable_and_does_not_certify_a_signal() {
-        let mut query = request(vec!["returns"]);
-        query.instruments = vec!["BTC-USDT-SWAP".into()];
+        let mut query: MarketRequest = serde_json::from_value(json!({
+            "action":"screen",
+            "instruments":["BTC-USDT-SWAP"],
+            "fields":["returns"],
+            "timeframe_ms":60000,
+            "start_ms":0,
+            "end_ms":6000000
+        })).unwrap();
         query.composition = Some(Box::new(serde_json::from_value(json!({
             "version":"okx.market.composition/v1",
             "steps":[
@@ -1751,10 +1757,22 @@ mod global_rank_tests {
         let checked = planner::AnalysisPlan::compile_market(&query).unwrap();
         let points = (0..100).map(|i| (i * 60_000, 10.0 + i as f64)).collect::<Vec<_>>();
         let fixture = || {
-            let mut loaded = row();
-            loaded.instrument = "BTC-USDT-SWAP".into();
-            loaded.oi = Some(Ok(points.clone()));
-            loaded
+            Loaded {
+                instrument: "BTC-USDT-SWAP".into(),
+                bars: Ok(Arc::new((0..100).map(|i| Bar {
+                    time: i * 60_000,
+                    open: 100.0,
+                    high: 102.0,
+                    low: 99.0,
+                    close: 100.0 + i as f64,
+                    volume: 1.0,
+                    funding_rate: None,
+                }).collect())),
+                ticker: None,
+                funding: None,
+                oi: Some(Ok(points.clone())),
+                excluded: None,
+            }
         };
         let first = compute_row_checked(fixture(), &query, None, checked.composition.as_ref(), true).unwrap();
         let repeat = compute_row_checked(fixture(), &query, None, checked.composition.as_ref(), true).unwrap();
