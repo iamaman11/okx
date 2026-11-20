@@ -71,11 +71,13 @@ mod tests {
         let token = b.clone();
         let second = tokio::spawn(async move { acquire(&h, &m, 3072, &token).await });
         timeout(Duration::from_secs(1), async {
-            while heavy.available_permits() != 0 {
+            while heavy.available_permits() != 0 || memory.available_permits() != 0 {
                 tokio::task::yield_now().await;
             }
         }).await.unwrap();
-        assert_eq!(memory.available_permits(), 1024);
+        // Tokio acquire_many reserves the 1024 spare permits while queued.
+        // They do not authorize execution and must be returned on cancel.
+        assert_eq!(memory.available_permits(), 0);
 
         // C queues for heavy; cancellation of B releases its heavy slot and
         // cancellation of C must never reserve any memory.
@@ -127,7 +129,9 @@ mod tests {
         let (h, m, c) = (heavy.clone(), memory.clone(), token.clone());
         let mut third = tokio::spawn(async move { acquire(&h, &m, 1536, &c).await });
         assert!(timeout(Duration::from_millis(30), &mut third).await.is_err());
-        assert_eq!(memory.available_permits(), 1024);
+        // A pending acquire_many hides the 1024 otherwise free permits until
+        // enough permits arrive; it is not a third granted resource lease.
+        assert_eq!(memory.available_permits(), 0);
         drop(first);
         let third_lease = timeout(Duration::from_secs(1), third).await.unwrap().unwrap().unwrap();
         assert_eq!(third_lease.reserved_mib, 1536);
