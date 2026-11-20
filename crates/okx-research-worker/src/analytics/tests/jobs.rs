@@ -233,9 +233,13 @@ fn c17_os_kill_child_process() {
         .publish_evidence(&serde_json::json!({"phase":phase,"quality":"verified"}))
         .unwrap()
         .0;
-    if phase == "running" {
+    if phase == "running" || phase == "cancelled" {
         jobs.update(&id, State::Running, Some(artifact), None)
             .unwrap();
+        if phase == "cancelled" {
+            let cancelled = jobs.cancel(&id, "os-kill-cancel-key").unwrap();
+            assert_eq!(cancelled.state, State::Cancelled);
+        }
     } else if phase == "completed" {
         jobs.update(&id, State::Running, None, None).unwrap();
         jobs.update(&id, State::Completed, Some(artifact), None)
@@ -256,7 +260,7 @@ fn c17_actual_child_os_kill_recovers_wal_and_blocks_false_success() {
     };
     let file = path("c17-physical-kill");
     let exe = std::env::current_exe().unwrap();
-    let phases = ["queued", "running", "completed"];
+    let phases = ["queued", "running", "cancelled", "completed"];
     for phase in phases {
         let ready = file.with_extension(format!("{phase}.ready"));
         let mut child = Command::new(&exe)
@@ -305,6 +309,15 @@ fn c17_actual_child_os_kill_recovers_wal_and_blocks_false_success() {
                     .unwrap_err(),
                 "RESEARCH_TERMINAL_IMMUTABLE"
             );
+        } else if phase == "cancelled" {
+            assert_eq!(job.state, State::Cancelled);
+            assert!(job.artifact.is_some(), "cancelled partial evidence retained");
+            restarted
+                .update(&id, State::Completed, Some("forged".into()), None)
+                .unwrap();
+            assert_eq!(restarted.get(&id).unwrap().state, State::Cancelled);
+            assert!(!restarted.enqueue(id.clone(), id.clone()).unwrap().1);
+            assert_eq!(restarted.cancel(&id, "os-kill-cancel-key").unwrap().state, State::Cancelled);
         } else {
             assert_eq!(job.state, State::Interrupted);
             assert_eq!(
@@ -323,7 +336,7 @@ fn c17_actual_child_os_kill_recovers_wal_and_blocks_false_success() {
             "test_binary":exe.file_name().and_then(|name|name.to_str()).unwrap_or("unknown"),
             "phases":phases,
             "kill_mode":"OS process kill + WAL reopen, no graceful shutdown",
-            "assertions":"completed remains immutable; queued/running interrupted; SHA artifact readback",
+            "assertions":"completed immutable; queued/running interrupted; cancelled terminal immutable after SIGKILL; SHA artifact readback",
             "trading_effects":"none"
         })
     );

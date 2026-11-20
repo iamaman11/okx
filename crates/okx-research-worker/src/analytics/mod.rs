@@ -10,6 +10,8 @@ pub mod jobs;
 mod market;
 pub mod planner;
 mod research;
+mod resource_gate;
+mod resource_observation;
 mod result;
 pub mod sources;
 
@@ -561,6 +563,13 @@ fn research_capabilities() -> Value {
         "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
         "limits":{"max_instruments":8,"max_bars_total":1000000,"max_grid_variants":64,"research_memory_total_mib":budget::MEMORY_TOTAL_MIB,"memory_admission":"conservative_pre_source_shared",
             "max_result_page_rows":50,"max_heavy_concurrent_jobs":2},
+        "resource_proof":{"memory_admission":"shared_estimated_mib_permit_lease_through_terminal_sql_attempt",
+            "cancel_while_waiting":"both_heavy_and_memory_permits_released",
+            "benchmark_process_memory":"windows_psapi_or_linux_procfs_rss_high_watermark",
+            "memory_measurement_scope":"whole_process_not_per_job_and_not_hard_enforcement",
+            "other_platform_measurement":"not_evaluated",
+            "stop_under_load":"two_actual_causal_grids_with_cooperative_cancel",
+            "mcp_and_finance_under_load":"not_evaluated"},
         "result_views":["summary","trades","variants","equity","export"],
         "decisions":{"statuses":["accepted","rejected","deferred"],"single_experiment_only":true,"max_revisions":256,"max_annotation_json_bytes":6144,"trading_authority":false},
         "oos":{"grid_train_test_split":true,"selected_variant_from_train_only":true},

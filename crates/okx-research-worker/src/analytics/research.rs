@@ -93,6 +93,10 @@ fn research_job_versions(request: &ResearchRequest) -> (&'static str, &'static s
             "analytics/518.4.reconciled-replay-cashflow-v1",
             "analytics/semantic/518.4.reconciled-replay-cashflow-v1",
         ),
+        ResearchRequest::Benchmark { .. } => (
+            "analytics/518.5.resource-lease-rss-v1",
+            "analytics/semantic/518.5.resource-lease-rss-v1",
+        ),
         _ => ("analytics/448.1", "analytics/semantic/v1"),
     }
 }
@@ -160,154 +164,154 @@ impl AnalyticsService {
                 )
                 .await;
             }
-            let outcome = async {
-                // Bounded SQL admission happens at submit. Accepted queued
-                // jobs wait for an existing heavy permit instead of becoming
-                // FAILED because two other research jobs are in progress.
-                let _heavy = tokio::select! {
-                    result = this.heavy.clone().acquire_owned() =>
-                        result.map_err(|_| "ANALYTICS_QUEUE_CLOSED")?,
-                    _ = executor::cancelled(cancel.clone()) =>
-                        return Err("CANCELLED".into()),
-                };
-                // Hold the entire batch reservation through artifact publish
-                // and terminal state transition. Multiple heavy jobs share one
-                // global 4 GiB estimate; wait cancellably, never oversubscribe.
-                let _memory = tokio::select! {
-                    permit = this.research_memory.clone().acquire_many_owned(memory_mib) =>
-                        permit.map_err(|_| "RESEARCH_MEMORY_POOL_CLOSED")?,
-                    _ = executor::cancelled(cancel.clone()) =>
-                        return Err("CANCELLED".into()),
-                };
-                this.jobs
-                    .update_async(hash.clone(), jobs::State::Running, None, None)
-                    .await?;
-                tracing::info!(job_id = %hash, stage = "execution", state = "running", "research job running");
-                if matches!(request, ResearchRequest::Benchmark { .. }) {
-                    return benchmark::run(
-                        this.cpu.clone(),
-                        this.artifacts.clone(),
-                        cancel.clone(),
-                        this.producer.clone(),
-                    )
-                    .await;
-                }
-                let instruments = match &request {
-                    ResearchRequest::Backtest { instruments, .. }
-                    | ResearchRequest::Grid { instruments, .. } => instruments.clone(),
-                    _ => unreachable!(),
-                };
-                if instruments.len() == 1 {
-                    return this
-                        .execute_one_observed(
-                            request,
+            // The outer slot outlives the inner computation future. This is
+            // deliberate: the lease must survive its terminal SQLite write.
+            let mut active_lease = None;
+            let outcome = {
+                let outcome = async {
+                    // Bounded SQL admission happens at submit. Accepted queued
+                    // jobs wait for an existing heavy permit instead of becoming
+                    // FAILED because two other research jobs are in progress.
+                    // One typed lease owns BOTH existing resource permits. If a
+                    // queued request is cancelled, all partial reservations drop.
+                    // Keep the lease through artifact publication and SQL commit.
+                    let lease = resource_gate::acquire(
+                        &this.heavy, &this.research_memory, memory_mib, &cancel,
+                    ).await?;
+                    tracing::info!(job_id = %hash, reserved_mib = lease.reserved_mib,
+                        wait_ms = lease.wait_ms, phase = "research_resource_acquired",
+                        "research resource lease acquired");
+                    active_lease = Some(lease);
+                    this.jobs
+                        .update_async(hash.clone(), jobs::State::Running, None, None)
+                        .await?;
+                    tracing::info!(job_id = %hash, stage = "execution", state = "running", "research job running");
+                    if matches!(request, ResearchRequest::Benchmark { .. }) {
+                        return benchmark::run(
+                            this.cpu.clone(),
+                            this.artifacts.clone(),
                             cancel.clone(),
-                            progress.clone().map(|p| (p, 0)),
+                            this.producer.clone(),
                         )
                         .await;
-                }
-                let mut work = stream::iter(instruments.into_iter().enumerate().map(
-                    |(index, instrument)| {
-                        let service = this.clone();
-                        let mut single = request.clone();
-                        let token = cancel.clone();
-                        let observation = progress.clone().map(|p| (p, index));
-                        match &mut single {
-                            ResearchRequest::Backtest { instruments, .. }
-                            | ResearchRequest::Grid { instruments, .. } => {
-                                *instruments = vec![instrument.clone()]
-                            }
-                            _ => unreachable!(),
-                        };
-                        async move {
-                            (
-                                index,
-                                instrument,
-                                service
-                                    .execute_one_observed(single, token, observation)
-                                    .await,
-                            )
-                        }
-                    },
-                ))
-                .buffer_unordered(4);
-                let mut rows = Vec::new();
-                let mut artifacts = Vec::new();
-                while let Some((index, instrument, outcome)) = work.next().await {
-                    if cancel.load(Ordering::Acquire) {
-                        return Err("CANCELLED".into());
                     }
-                    let store = this.artifacts.clone();
-                    let producer = this.producer.clone();
-                    let previous_rows = rows;
-                    let previous_artifacts = artifacts;
-                    let (next_rows,next_artifacts,manifest)=this.cpu.run(cancel.clone(),move |_|{
-                        let mut rows=previous_rows;let mut artifacts=previous_artifacts;
-                    let row=match outcome {Ok(artifact)=>{
-                        let result:Value=store.read_evidence_json(&artifact).map_err(|e|e.to_string())?;
-                        let experiment_id=result["experiment_artifact"].as_str().ok_or("REPLAY_EXPERIMENT_MISSING")?;
-                        let experiment:Value=store.read_evidence_json(experiment_id).map_err(|e|e.to_string())?;
-                        if experiment["instrument"]!=instrument || experiment["economic_basis"]["instrument"]!=instrument {
-                            return Err("REPLAY_ECONOMIC_INSTRUMENT_MISMATCH".into());
+                    let instruments = match &request {
+                        ResearchRequest::Backtest { instruments, .. }
+                        | ResearchRequest::Grid { instruments, .. } => instruments.clone(),
+                        _ => unreachable!(),
+                    };
+                    if instruments.len() == 1 {
+                        return this
+                            .execute_one_observed(
+                                request,
+                                cancel.clone(),
+                                progress.clone().map(|p| (p, 0)),
+                            )
+                            .await;
+                    }
+                    let mut work = stream::iter(instruments.into_iter().enumerate().map(
+                        |(index, instrument)| {
+                            let service = this.clone();
+                            let mut single = request.clone();
+                            let token = cancel.clone();
+                            let observation = progress.clone().map(|p| (p, index));
+                            match &mut single {
+                                ResearchRequest::Backtest { instruments, .. }
+                                | ResearchRequest::Grid { instruments, .. } => {
+                                    *instruments = vec![instrument.clone()]
+                                }
+                                _ => unreachable!(),
+                            };
+                            async move {
+                                (
+                                    index,
+                                    instrument,
+                                    service
+                                        .execute_one_observed(single, token, observation)
+                                        .await,
+                                )
+                            }
+                        },
+                    ))
+                    .buffer_unordered(4);
+                    let mut rows = Vec::new();
+                    let mut artifacts = Vec::new();
+                    while let Some((index, instrument, outcome)) = work.next().await {
+                        if cancel.load(Ordering::Acquire) {
+                            return Err("CANCELLED".into());
                         }
-                        let quote=experiment["economic_basis"]["quote_currency"].as_str().ok_or("REPLAY_CURRENCY_MISSING")?;
-                        let product=experiment["economic_basis"]["product"].as_str().ok_or("REPLAY_PRODUCT_MISSING")?;
-                        // Verify exact money before acknowledging this successful
-                        // instrument; malformed evidence must not enter a total.
-                        okx_research::economics::QuoteAmount::parse_exact(quote,result["summary"]["pnl_exact"].as_str().ok_or("REPLAY_EXACT_PNL_MISSING")?)?;
-                        let audit = result.get("economic_audit")
-                            .filter(|value| value.is_object())
-                            .ok_or("REPLAY_ECONOMIC_AUDIT_MISSING")?;
-                        if audit["schema"] != okx_research::economic_audit::REPLAY_ECONOMIC_AUDIT_VERSION
-                            || audit["settlement_currency"] != quote
-                            || audit["result_hash"] != result["hash"]
-                            || audit["dataset_hash"] != result["dataset_hash"]
-                            || audit["net_exact"] != result["summary"]["pnl_exact"]
-                        {
-                            return Err("REPLAY_ECONOMIC_AUDIT_MISMATCH".into());
-                        }
-                        artifacts.push(artifact.clone());
-                        json!({"index":index,"instrument":instrument,"state":"completed","artifact":artifact,
-                            "quote_currency":quote,"product":product,"summary":result["summary"],
-                            "economic_audit":audit,
-                            "dataset_hash":result["dataset_hash"],"grid":result["grid"],
-                            "trades_cursor":format!("instrument:{index}:0")})
-                    },Err(error)=>json!({"index":index,"instrument":instrument,"state":"failed","reason_code":error})};
-                    rows.push(row);rows.sort_by_key(|r|r["index"].as_u64().unwrap_or(0));
-                    let economics=independent_replay_currency_totals(&rows)?;
-                    let page=store.publish_evidence(&rows).map_err(|e|e.to_string())?.0;
-                    let manifest=store.publish_evidence(&json!({"kind":"research_batch","schema":"okx.research.batch/518.1","producer":producer,
-                        "summary":{"semantics":"independent_instruments","quality":if artifacts.len()==rows.len(){"complete"}else{"partial"},
-                        "completed":artifacts.len(),"failed":rows.len()-artifacts.len(),"economic_totals":economics},
-                        "row_pages":[page],"total_rows":rows.len(),"instrument_artifacts":artifacts,"instruments":rows})).map_err(|e|e.to_string())?.0;
+                        let store = this.artifacts.clone();
+                        let producer = this.producer.clone();
+                        let previous_rows = rows;
+                        let previous_artifacts = artifacts;
+                        let (next_rows,next_artifacts,manifest)=this.cpu.run(cancel.clone(),move |_|{
+                            let mut rows=previous_rows;let mut artifacts=previous_artifacts;
+                        let row=match outcome {Ok(artifact)=>{
+                            let result:Value=store.read_evidence_json(&artifact).map_err(|e|e.to_string())?;
+                            let experiment_id=result["experiment_artifact"].as_str().ok_or("REPLAY_EXPERIMENT_MISSING")?;
+                            let experiment:Value=store.read_evidence_json(experiment_id).map_err(|e|e.to_string())?;
+                            if experiment["instrument"]!=instrument || experiment["economic_basis"]["instrument"]!=instrument {
+                                return Err("REPLAY_ECONOMIC_INSTRUMENT_MISMATCH".into());
+                            }
+                            let quote=experiment["economic_basis"]["quote_currency"].as_str().ok_or("REPLAY_CURRENCY_MISSING")?;
+                            let product=experiment["economic_basis"]["product"].as_str().ok_or("REPLAY_PRODUCT_MISSING")?;
+                            // Verify exact money before acknowledging this successful
+                            // instrument; malformed evidence must not enter a total.
+                            okx_research::economics::QuoteAmount::parse_exact(quote,result["summary"]["pnl_exact"].as_str().ok_or("REPLAY_EXACT_PNL_MISSING")?)?;
+                            let audit = result.get("economic_audit")
+                                .filter(|value| value.is_object())
+                                .ok_or("REPLAY_ECONOMIC_AUDIT_MISSING")?;
+                            if audit["schema"] != okx_research::economic_audit::REPLAY_ECONOMIC_AUDIT_VERSION
+                                || audit["settlement_currency"] != quote
+                                || audit["result_hash"] != result["hash"]
+                                || audit["dataset_hash"] != result["dataset_hash"]
+                                || audit["net_exact"] != result["summary"]["pnl_exact"]
+                            {
+                                return Err("REPLAY_ECONOMIC_AUDIT_MISMATCH".into());
+                            }
+                            artifacts.push(artifact.clone());
+                            json!({"index":index,"instrument":instrument,"state":"completed","artifact":artifact,
+                                "quote_currency":quote,"product":product,"summary":result["summary"],
+                                "economic_audit":audit,
+                                "dataset_hash":result["dataset_hash"],"grid":result["grid"],
+                                "trades_cursor":format!("instrument:{index}:0")})
+                        },Err(error)=>json!({"index":index,"instrument":instrument,"state":"failed","reason_code":error})};
+                        rows.push(row);rows.sort_by_key(|r|r["index"].as_u64().unwrap_or(0));
+                        let economics=independent_replay_currency_totals(&rows)?;
+                        let page=store.publish_evidence(&rows).map_err(|e|e.to_string())?.0;
+                        let manifest=store.publish_evidence(&json!({"kind":"research_batch","schema":"okx.research.batch/518.1","producer":producer,
+                            "summary":{"semantics":"independent_instruments","quality":if artifacts.len()==rows.len(){"complete"}else{"partial"},
+                            "completed":artifacts.len(),"failed":rows.len()-artifacts.len(),"economic_totals":economics},
+                            "row_pages":[page],"total_rows":rows.len(),"instrument_artifacts":artifacts,"instruments":rows})).map_err(|e|e.to_string())?.0;
 
-                        Ok((rows,artifacts,manifest))
-                    }).await?;
-                    rows = next_rows;
-                    artifacts = next_artifacts;
+                            Ok((rows,artifacts,manifest))
+                        }).await?;
+                        rows = next_rows;
+                        artifacts = next_artifacts;
+                        this.jobs
+                            .update_async(hash.clone(), jobs::State::Running, Some(manifest), None)
+                            .await?;
+                    }
                     this.jobs
-                        .update_async(hash.clone(), jobs::State::Running, Some(manifest), None)
-                        .await?;
-                }
-                this.jobs
-                    .get_async(hash.clone())
-                    .await?
-                    .artifact
-                    .ok_or_else(|| "EMPTY_BATCH".into())
-            };
-            // Poll observations alongside the existing job future. One bounded
-            // snapshot per tick; no detached consumer survives any exit path.
-            tokio::pin!(outcome);
-            let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut committed = None;
-            let outcome = loop {
-                tokio::select! {
-                    result = &mut outcome => break result,
-                    _ = tick.tick(), if progress.is_some() => {
-                        let value = progress.as_ref().unwrap().snapshot();
-                        if committed.as_ref() != Some(&value) && candidate_progress::publish(this.jobs.clone(), hash.clone(), value.clone()).await.is_ok() {
-                            committed = Some(value);
+                        .get_async(hash.clone())
+                        .await?
+                        .artifact
+                        .ok_or_else(|| "EMPTY_BATCH".into())
+                };
+                // Poll observations alongside the existing job future. One bounded
+                // snapshot per tick; no detached consumer survives any exit path.
+                tokio::pin!(outcome);
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut committed = None;
+                loop {
+                    tokio::select! {
+                        result = &mut outcome => break result,
+                        _ = tick.tick(), if progress.is_some() => {
+                            let value = progress.as_ref().unwrap().snapshot();
+                            if committed.as_ref() != Some(&value) && candidate_progress::publish(this.jobs.clone(), hash.clone(), value.clone()).await.is_ok() {
+                                committed = Some(value);
+                            }
                         }
                     }
                 }
@@ -345,6 +349,9 @@ impl AnalyticsService {
                     }
                 }
             }
+            // Cancel, error and success all release permits only after the
+            // durable terminal transition has been attempted.
+            drop(active_lease);
         }.instrument(tracing::Span::current()));
         Ok(json!(job))
     }
@@ -680,6 +687,27 @@ impl AnalyticsService {
 #[cfg(test)]
 mod t09_currency_batch_tests {
     use super::*;
+
+    #[test]
+    fn t10_benchmark_memory_evidence_uses_distinct_immutable_job_identity() {
+        let benchmark: ResearchRequest = serde_json::from_value(json!({
+            "action":"benchmark","idempotency_key":"t10-k9-memory-proof"
+        })).unwrap();
+        assert_eq!(research_job_versions(&benchmark), (
+            "analytics/518.5.resource-lease-rss-v1",
+            "analytics/semantic/518.5.resource-lease-rss-v1",
+        ));
+        let replay: ResearchRequest = serde_json::from_value(json!({
+            "action":"backtest","idempotency_key":"t10-replay-no-rehash",
+            "instruments":["BTC-USDT-SWAP"],"timeframe_ms":60000,
+            "start_ms":0,"end_ms":6000000,"strategy_id":"ema_cross_v1",
+            "parameters":{"fast":2,"slow":4},
+            "costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,
+                "funding_mode":"zero_assumption"},"data_mode":"counterfactual"
+        })).unwrap();
+        assert_eq!(research_job_versions(&replay).0,
+            "analytics/518.4.reconciled-replay-cashflow-v1");
+    }
 
     #[test]
     fn t09_t13_reconciled_cashflow_gets_new_version_for_all_replay_jobs() {
