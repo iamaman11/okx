@@ -19,6 +19,8 @@ struct Loaded {
 #[cfg(test)]
 #[path = "tests/market_source_evidence_tests.rs"]
 mod source_evidence_tests;
+#[path = "market_replay_proof.rs"]
+mod replay_proof;
 
 /// A public rate defer is transient source capacity, not durable analytical evidence.
 fn market_source_rate_deferred(loaded: &[Loaded]) -> bool {
@@ -60,7 +62,7 @@ fn market_request_schema(
     funding_composition: bool,
 ) -> &'static str {
     if has_composition || oi_composition || funding_composition {
-        "market/518.8.verified-source-pages-v1"
+        "market/518.9.verified-metric-reexecution-v1"
     } else {
         market_job_schema(fields)
     }
@@ -454,7 +456,8 @@ impl AnalyticsService {
                     "integrity_location":"source_integrity",
                     "integrity_schema":"okx.market.composition-source-integrity/v1",
                     "verification":"bounded_streaming_reconstructed_canonical_capture_hash",
-                    "metric_reexecution_verified":false,
+                    "metric_reexecution":"verified_source_rehydration_and_semantic_row_or_explicit_not_verified",
+                    "max_metric_reexecution_observations":65536,
                     "retrieval":"retained_with_completed_market_job",
                     "scope":"composition_sources_only",
                     "publication_time_verified_for_oi_and_funding":false},
@@ -716,6 +719,12 @@ impl AnalyticsService {
                         linked["source_integrity"] = verify_composition_source_pages(
                             &store, &linked, &request, &plan, &cancel,
                         )?;
+                        let proof = replay_proof::verify_persisted_market_metrics(
+                            &store, &linked, &request, &plan, need_candles, &cancel,
+                        )?;
+                        linked["source_integrity"]["replay_metric_reexecution_verified"] =
+                            json!(proof["quality"] == "verified_reexecution");
+                        linked["source_integrity"]["metric_reexecution"] = proof;
                         *result = linked;
                     }
                 }
@@ -891,11 +900,12 @@ fn verify_composition_source_pages(
     cancel: &super::executor::Cancel,
 ) -> Result<Value, String> {
     use okx_analysis::query_plan::Source;
-    let graph = plan
-        .composition
+    plan.composition
         .as_ref()
         .ok_or("COMPOSITION_EVIDENCE_WITHOUT_PLAN")?;
-    let required = graph.sources();
+    // A composed market response can include legacy flat projections alongside
+    // graph outputs. Their normalized sources are also part of its evidence.
+    let required = &plan.sources;
     let mut verified = Vec::new();
     let mut unavailable = Vec::new();
     let instrument = row["instrument"]
@@ -1031,11 +1041,9 @@ fn publish_composition_source_evidence(
     cancel: &super::executor::Cancel,
 ) -> Result<Vec<PublishedMarketSource>, String> {
     use okx_analysis::query_plan::Source;
-    let composition_sources = plan
-        .composition
+    plan.composition
         .as_ref()
-        .ok_or("COMPOSITION_EVIDENCE_WITHOUT_PLAN")?
-        .sources();
+        .ok_or("COMPOSITION_EVIDENCE_WITHOUT_PLAN")?;
     let mut evidence = Vec::with_capacity(3);
     if plan.sources.contains(&Source::Candles) {
         if let Ok(bars) = &row.bars {
@@ -1050,7 +1058,7 @@ fn publish_composition_source_evidence(
             )?);
         }
     }
-    if composition_sources.contains(&Source::OpenInterest) {
+    if plan.sources.contains(&Source::OpenInterest) {
         if let Some(Ok(points)) = &row.oi {
             evidence.push(publish_normalized_source(
                 store,
@@ -1063,7 +1071,7 @@ fn publish_composition_source_evidence(
             )?);
         }
     }
-    if composition_sources.contains(&Source::Funding) {
+    if plan.sources.contains(&Source::Funding) {
         if let Some(Ok(events)) = &row.funding {
             evidence.push(publish_normalized_source(
                 store,
@@ -1241,6 +1249,10 @@ fn compute_row_planned(
         plan.sources()
             .contains(&okx_analysis::query_plan::Source::Funding)
     });
+    let capture_oi = composition.is_some()
+        && plan.sources.contains(&okx_analysis::query_plan::Source::OpenInterest);
+    let capture_funding = composition.is_some()
+        && plan.sources.contains(&okx_analysis::query_plan::Source::Funding);
     if request.fields.iter().any(|field| field == "oi_change") || composition_oi {
         if let Some(Err(_)) = &row.oi {
             gaps.push("OI_SOURCE_UNAVAILABLE".into());
@@ -1669,7 +1681,7 @@ fn compute_row_planned(
     }
     let source_captures = if composition.is_some() {
         let mut captures = serde_json::Map::new();
-        if composition_oi {
+        if capture_oi {
             let oi_capture = row
                 .oi
                 .as_ref()
@@ -1699,7 +1711,7 @@ fn compute_row_planned(
                 .transpose()?;
             captures.insert("open_interest".into(), oi_capture.unwrap_or(Value::Null));
         }
-        if composition_funding {
+        if capture_funding {
             let funding_capture = row
                 .funding
                 .as_ref()
@@ -1997,7 +2009,7 @@ mod tests {
         let oi_composed = market_request_schema(&fields, true, true, false);
         let oi_correlated = market_request_schema(&oi_fields, true, true, false);
         let funding_composed = market_request_schema(&fields, true, false, true);
-        assert_eq!(composed, "market/518.8.verified-source-pages-v1");
+        assert_eq!(composed, "market/518.9.verified-metric-reexecution-v1");
         assert_eq!(oi_composed, composed);
         assert_ne!(composed, "market/518.2.composition-quality-v1");
         assert_ne!(oi_composed, "market/518.2.oi-composition-quality-v1");
@@ -2008,7 +2020,7 @@ mod tests {
         assert_eq!(oi_correlated, oi_composed);
         assert_eq!(
             funding_composed,
-            "market/518.8.verified-source-pages-v1"
+            "market/518.9.verified-metric-reexecution-v1"
         );
         assert_eq!(
             funding_composed,

@@ -61,7 +61,7 @@ fn t06_t13_all_three_sources_are_immutable_chunked_and_reconstructable() {
     .unwrap();
     assert_eq!(sources.len(), 3);
     let original = compute_row_planned(inputs, &query, None, &plan, true).unwrap();
-    let linked = attach_composition_source_evidence(original.clone(), sources.clone()).unwrap();
+    let mut linked = attach_composition_source_evidence(original.clone(), sources.clone()).unwrap();
     let integrity =
         verify_composition_source_pages(&service.artifacts, &linked, &query, &plan, &cancellation)
             .unwrap();
@@ -75,6 +75,32 @@ fn t06_t13_all_three_sources_are_immutable_chunked_and_reconstructable() {
         assert!(source["capture_hash"].is_string());
         assert_eq!(source["publication_time_verified"], false);
     }
+    linked["source_integrity"] = integrity;
+    let proof = replay_proof::verify_persisted_market_metrics(
+        &service.artifacts, &linked, &query, &plan, true, &cancellation,
+    )
+    .unwrap();
+    assert_eq!(proof["quality"], "verified_reexecution");
+    assert_eq!(proof["observations_rehydrated"], 2 * count + 3);
+    assert!(proof["semantic_row_hash"].is_string());
+    let mut altered_metric = linked.clone();
+    altered_metric["metrics"]["combined"] = json!(42.0);
+    assert_eq!(
+        replay_proof::verify_persisted_market_metrics(
+            &service.artifacts, &altered_metric, &query, &plan, true, &cancellation,
+        )
+        .unwrap_err(),
+        "COMPOSITION_SOURCE_REEXECUTION_MISMATCH"
+    );
+    let mut altered_diagnostics = linked.clone();
+    altered_diagnostics["composition_quality"]["combined"]["status"] = json!("available_at_closed_bar");
+    assert_eq!(
+        replay_proof::verify_persisted_market_metrics(
+            &service.artifacts, &altered_diagnostics, &query, &plan, true, &cancellation,
+        )
+        .unwrap_err(),
+        "COMPOSITION_SOURCE_REEXECUTION_MISMATCH"
+    );
     assert!(linked["metrics"]["combined"].is_number());
     assert_eq!(
         linked["composition_quality"]["combined"]["status"],
@@ -283,6 +309,66 @@ fn t13_market_source_integrity_rejects_rehashed_forged_metadata_or_reordered_pag
 }
 
 #[test]
+fn t06_t13_flat_projection_sources_are_included_in_composed_reexecution() {
+    let (root, service) = super::super::artifact_job_fixtures::service();
+    let mut request = composed_request(8);
+    request.fields = vec!["returns".into(), "oi_change".into(), "funding_sum".into()];
+    request.composition = Some(serde_json::from_value(json!({
+        "version":"okx.market.composition/v1",
+        "steps":[{"id":"price_change","op":"returns_series","input":"close"}],
+        "result_steps":["price_change"]
+    })).unwrap());
+    let plan = planner::AnalysisPlan::compile_market(&request).unwrap();
+    let input = composed_row(8);
+    let cancel = super::super::executor::Cancel::default();
+    let computed = compute_row_planned(input.clone(), &request, None, &plan, true).unwrap();
+    let evidence = publish_composition_source_evidence(
+        &service.artifacts, &input, &request, &plan, &cancel,
+    ).unwrap();
+    assert_eq!(evidence.len(), 3, "flat sources must also be captured");
+    let mut linked = attach_composition_source_evidence(computed, evidence).unwrap();
+    linked["source_integrity"] = verify_composition_source_pages(
+        &service.artifacts, &linked, &request, &plan, &cancel,
+    ).unwrap();
+    assert_eq!(linked["source_integrity"]["verified_sources"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        replay_proof::verify_persisted_market_metrics(
+            &service.artifacts, &linked, &request, &plan, true, &cancel,
+        ).unwrap()["quality"],
+        "verified_reexecution"
+    );
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn t10_t13_large_composition_proves_sources_without_unbounded_reexecution() {
+    let (root, service) = super::super::artifact_job_fixtures::service();
+    let count = 32_767;
+    let query = composed_request(count);
+    let plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+    let cancel = super::super::executor::Cancel::default();
+    let input = composed_row(count);
+    let computed = compute_row_planned(input.clone(), &query, None, &plan, true).unwrap();
+    let evidence = publish_composition_source_evidence(
+        &service.artifacts, &input, &query, &plan, &cancel,
+    ).unwrap();
+    let mut linked = attach_composition_source_evidence(computed, evidence).unwrap();
+    linked["source_integrity"] = verify_composition_source_pages(
+        &service.artifacts, &linked, &query, &plan, &cancel,
+    ).unwrap();
+    assert_eq!(linked["source_integrity"]["quality"], "verified_normalized_sources");
+    let proof = replay_proof::verify_persisted_market_metrics(
+        &service.artifacts, &linked, &query, &plan, true, &cancel,
+    ).unwrap();
+    assert_eq!(proof["quality"], "not_verified");
+    assert_eq!(proof["reason"], "REEXECUTION_OBSERVATION_BUDGET_EXCEEDED");
+    assert_eq!(proof["max_observations"], 65_536);
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn t06_missing_sources_have_no_false_capture_and_cancel_does_not_publish() {
     let (root, service) = super::super::artifact_job_fixtures::service();
     let query = composed_request(100);
@@ -315,6 +401,15 @@ fn t06_missing_sources_have_no_false_capture_and_cancel_does_not_publish() {
         json!(["open_interest", "funding_rate"])
     );
     assert_eq!(integrity["verified_sources"].as_array().unwrap().len(), 1);
+    let mut source_limited = linked.clone();
+    source_limited["source_integrity"] = integrity;
+    assert_eq!(
+        replay_proof::verify_persisted_market_metrics(
+            &service.artifacts, &source_limited, &query, &plan, true, &cancel,
+        )
+        .unwrap()["reason"],
+        "SOURCE_UNAVAILABLE"
+    );
     let mut missing_bars = composed_row(100);
     missing_bars.bars = Err("CANDLES_UNAVAILABLE".into());
     let evidence = publish_composition_source_evidence(

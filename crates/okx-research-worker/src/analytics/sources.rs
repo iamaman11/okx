@@ -699,7 +699,11 @@ mod extension_tests {
         );
         assert_eq!(
             market["rows"][0]["source_integrity"]["replay_metric_reexecution_verified"],
-            false
+            true
+        );
+        assert_eq!(
+            market["rows"][0]["source_integrity"]["metric_reexecution"]["quality"],
+            "verified_reexecution"
         );
         // T07/T15: a previously undeclared combination executes through the
         // public source decoder and durable market artifact path with the same
