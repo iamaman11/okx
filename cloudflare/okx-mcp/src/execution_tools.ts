@@ -38,7 +38,7 @@ const knownMarketOperator=(value:unknown):boolean=>
  typeof value==='string'&&MARKET_OPERATOR_SET.has(value);
 const marketParameters=object({ema_period:integer(1,1000),atr_period:integer(1,1000),rsi_period:integer(1,1000),budget:number(0.000000001),price:number(0.000000001),stop_distance:number(0.000000001,0.999999999),notional:number(),fee_bps:number(0,10000),slippage_bps:number(0,10000)},[]);
 const stepId={type:'string',pattern:'^[a-z0-9_]{1,32}$'};
-const compositionStep=object({id:stepId,op:choice('returns_series','rolling_mean'),input:stepId,period:integer(1,1000)},['id','op','input']);
+const compositionStep=object({id:stepId,op:choice('returns_series','rolling_mean','lag','greater_than','rising_edge','forward_return_label'),input:stepId,period:integer(1,1000),threshold:{type:'number'},when:stepId},['id','op','input']);
 const composition=object({version:choice('okx.market.composition/v1'),steps:{type:'array',items:compositionStep,minItems:1,maxItems:32},result_steps:{type:'array',items:stepId,minItems:1,maxItems:14}});
 const universe=object({instrument_type:choice('SPOT','SWAP','FUTURES'),settle_currency:text(16),after_instrument:text(64),reference_generation:text(128),limit:integer(1,100),rank_globally:{type:'boolean'}},['instrument_type']);
 const screenCompare=action('screen',{...range,universe,fields:{...array(text(64),14),minItems:1},composition,parameters:marketParameters,filters:array(object({field:text(64),min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:text(64),descending:{type:'boolean'}},['field']),limit:integer(1,50),cursor:text(512)},['fields','timeframe_ms','start_ms','end_ms','limit']);
@@ -70,17 +70,17 @@ ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['
 const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  accounts:{description:'Accounts and limits.',readOnlyHint:false,destructiveHint:true},
  strategies:{description:'Strategies; may trade.',readOnlyHint:false,destructiveHint:true},
- market:{description:'Market data. Use action=capabilities to discover operators.',readOnlyHint:true,destructiveHint:false},
+ market:{description:'Market data; see capabilities.',readOnlyHint:true,destructiveHint:false},
  research:{description:'Research.',readOnlyHint:false,destructiveHint:true},
  portfolio:{description:'Portfolio.',readOnlyHint:true,destructiveHint:false},
  diagnostics:{description:'Diagnostics.',readOnlyHint:true,destructiveHint:false},
 };
 const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  preview:{description:'Preview; no order.',readOnlyHint:true,destructiveHint:false},
- execute:{description:'Submit a real order; financial loss possible. Requires approval, account limits and STOP.',readOnlyHint:false,destructiveHint:true},
+ execute:{description:'Submit real order; loss possible. Requires approval, limits and STOP.',readOnlyHint:false,destructiveHint:true},
  status:{description:'Trade status.',readOnlyHint:true,destructiveHint:false},
  cancel:{description:'Cancel venue order.',readOnlyHint:false,destructiveHint:true},
- close:{description:'Close via real exchange order.',readOnlyHint:false,destructiveHint:true},
+ close:{description:'Submit real close order.',readOnlyHint:false,destructiveHint:true},
  capabilities:{description:'Trade permissions.',readOnlyHint:true,destructiveHint:false},
  preflight:{description:'Readiness; no order.',readOnlyHint:true,destructiveHint:false},
 };
@@ -171,7 +171,19 @@ function validMarketOperatorRefs(args:Record<string,unknown>):boolean {
  if(isObject(args.sort)&&!knownMarketOperator(args.sort.field))return false;
  return true;
 }
-export function validTool(name:string,args:unknown):boolean {if(name==='market'&&isObject(args)&&!validMarketOperatorRefs(args))return false;if(name==='research'&&isObject(args)&&args.action==='record_decision'){for(const [field,max]of [['name',128],['hypothesis',4096],['reason',2048]]as const){const value=args[field];if(typeof value!=='string'||!value.trim()||new TextEncoder().encode(value).byteLength>max)return false;}if(new TextEncoder().encode(JSON.stringify([args.name,args.hypothesis,args.reason])).byteLength>6144)return false;}if(name==='market'&&isObject(args)&&isObject(args.composition)){if(args.action!=='screen'||!Array.isArray(args.fields)||!Array.isArray(args.composition.result_steps)||args.fields.length+args.composition.result_steps.length>14)return false;if(Array.isArray(args.composition.steps)&&args.composition.steps.some((s:unknown)=>!isObject(s)||(s.op==='rolling_mean'?!Number.isInteger(s.period):'period'in s)))return false;}if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);}
+function validCompositionStep(s:unknown):boolean {
+ if(!isObject(s))return false;
+ const hasPeriod=['rolling_mean','lag','forward_return_label'].includes(String(s.op));
+ if(hasPeriod?!Number.isInteger(s.period)||Number(s.period)<1||Number(s.period)>1000:'period'in s)return false;
+ if(s.op==='greater_than'){
+  if(typeof s.threshold!=='number'||!Number.isFinite(s.threshold))return false;
+ }else if('threshold'in s)return false;
+ if(s.op==='forward_return_label'){
+  if(typeof s.when!=='string')return false;
+ }else if('when'in s)return false;
+ return true;
+}
+export function validTool(name:string,args:unknown):boolean {if(name==='market'&&isObject(args)&&!validMarketOperatorRefs(args))return false;if(name==='research'&&isObject(args)&&args.action==='record_decision'){for(const [field,max]of [['name',128],['hypothesis',4096],['reason',2048]]as const){const value=args[field];if(typeof value!=='string'||!value.trim()||new TextEncoder().encode(value).byteLength>max)return false;}if(new TextEncoder().encode(JSON.stringify([args.name,args.hypothesis,args.reason])).byteLength>6144)return false;}if(name==='market'&&isObject(args)&&isObject(args.composition)){if(args.action!=='screen'||!Array.isArray(args.fields)||!Array.isArray(args.composition.result_steps)||args.fields.length+args.composition.result_steps.length>14)return false;if(Array.isArray(args.composition.steps)&&!args.composition.steps.every(validCompositionStep))return false;}if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);}
 export function isExecutionMutation(type:unknown,action?:unknown):boolean{return type==='connect_account'||(type==='trade'&&action!=='preview'&&action!=='status')||(type==='strategies'&&!['list','status'].includes(String(action)))||(type==='research'&&['backtest','grid','cancel','record_decision'].includes(String(action)));}
 export function executionProfilePermitsOperation(profile:unknown,_type:unknown):boolean{return profile==='engine';}
 

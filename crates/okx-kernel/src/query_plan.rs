@@ -11,7 +11,7 @@ pub const COMPOSITION_VERSION: &str = "okx.market.composition/v1";
 
 /// A bounded sequence of typed series operations, evaluated by the existing
 /// market worker. No general-purpose expressions, I/O or financial effects.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompositionRequest {
     pub version: String,
@@ -19,7 +19,7 @@ pub struct CompositionRequest {
     pub result_steps: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SeriesStep {
     pub id: String,
@@ -28,6 +28,11 @@ pub struct SeriesStep {
     pub input: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub period: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f64>,
+    /// Only a prior rising_edge event may condition a future outcome label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,16 +40,20 @@ pub struct SeriesStep {
 pub enum SeriesOp {
     ReturnsSeries,
     RollingMean,
+    Lag,
+    GreaterThan,
+    RisingEdge,
+    ForwardReturnLabel,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CheckedSeriesStep {
     pub step: SeriesStep,
     pub unit: Unit,
     pub depth: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CheckedComposition {
     pub version: String,
     pub steps: Vec<CheckedSeriesStep>,
@@ -93,28 +102,112 @@ impl CheckedComposition {
                     .copied()
                     .ok_or_else(|| format!("{path}.input:UNKNOWN_OR_FORWARD_STEP:{}", step.input))?
             };
-            let depth = parent_depth + 1;
+            if step.when.is_some() && step.op != SeriesOp::ForwardReturnLabel {
+                return Err(format!("{path}.when:UNEXPECTED"));
+            }
+            let condition_depth = if let Some(id) = &step.when {
+                let (unit, depth) = known
+                    .get(id)
+                    .copied()
+                    .ok_or_else(|| format!("{path}.when:UNKNOWN_OR_FORWARD_STEP:{id}"))?;
+                if unit != Unit::Event {
+                    return Err(format!(
+                        "{path}.when:UNIT_MISMATCH:expected=event:actual={}",
+                        composition_unit_name(unit)
+                    ));
+                }
+                depth
+            } else {
+                0
+            };
+            let depth = parent_depth.max(condition_depth) + 1;
             if depth > 8 {
                 return Err(format!("{path}:DEPTH_LIMIT"));
             }
             let output_unit = match step.op {
                 SeriesOp::ReturnsSeries => {
                     if input_unit != Unit::Price {
-                        let actual = match input_unit {
-                            Unit::Ratio => "ratio",
-                            _ => "unsupported",
-                        };
                         return Err(format!(
-                            "{path}.input:UNIT_MISMATCH:expected=price:actual={actual}"
+                            "{path}.input:UNIT_MISMATCH:expected=price:actual={}",
+                            composition_unit_name(input_unit)
                         ));
                     }
                     if step.period.is_some() {
                         return Err(format!("{path}.period:UNEXPECTED"));
                     }
+                    if step.threshold.is_some() {
+                        return Err(format!("{path}.threshold:UNEXPECTED"));
+                    }
                     Unit::Ratio
                 }
-                SeriesOp::RollingMean if matches!(step.period, Some(1..=1000)) => input_unit,
-                SeriesOp::RollingMean => return Err(format!("{path}.period:INVALID")),
+                SeriesOp::RollingMean | SeriesOp::Lag => {
+                    let numeric = matches!(input_unit, Unit::Price | Unit::Ratio);
+                    let lagged_discrete = step.op == SeriesOp::Lag
+                        && matches!(input_unit, Unit::Boolean | Unit::Event);
+                    if !(numeric || lagged_discrete) {
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=causal_series:actual={}",
+                            composition_unit_name(input_unit)
+                        ));
+                    }
+                    if !matches!(step.period, Some(1..=1000)) {
+                        return Err(format!("{path}.period:INVALID"));
+                    }
+                    if step.threshold.is_some() {
+                        return Err(format!("{path}.threshold:UNEXPECTED"));
+                    }
+                    input_unit
+                }
+                SeriesOp::GreaterThan => {
+                    if !matches!(input_unit, Unit::Price | Unit::Ratio) {
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
+                            composition_unit_name(input_unit)
+                        ));
+                    }
+                    if step.period.is_some() {
+                        return Err(format!("{path}.period:UNEXPECTED"));
+                    }
+                    if !step.threshold.is_some_and(f64::is_finite) {
+                        return Err(format!("{path}.threshold:INVALID"));
+                    }
+                    Unit::Boolean
+                }
+                SeriesOp::RisingEdge => {
+                    if input_unit != Unit::Boolean {
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=boolean:actual={}",
+                            composition_unit_name(input_unit)
+                        ));
+                    }
+                    if step.period.is_some() {
+                        return Err(format!("{path}.period:UNEXPECTED"));
+                    }
+                    if step.threshold.is_some() {
+                        return Err(format!("{path}.threshold:UNEXPECTED"));
+                    }
+                    Unit::Event
+                }
+                SeriesOp::ForwardReturnLabel => {
+                    if input_unit != Unit::Price {
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=price:actual={}",
+                            composition_unit_name(input_unit)
+                        ));
+                    }
+                    if !matches!(step.period, Some(1..=1000)) {
+                        return Err(format!("{path}.period:INVALID"));
+                    }
+                    if step.threshold.is_some() {
+                        return Err(format!("{path}.threshold:UNEXPECTED"));
+                    }
+                    if step.when.is_none() {
+                        return Err(format!("{path}.when:REQUIRED_EVENT"));
+                    }
+                    // An outcome is deliberately not a numeric feature type.
+                    // No causal operator accepts it as an input.
+                    Unit::OutcomeRatio
+                }
             };
             known.insert(step.id.clone(), (output_unit, depth));
             steps.push(CheckedSeriesStep {
@@ -137,9 +230,16 @@ impl CheckedComposition {
         })
     }
 
-    /// Returns only bounded scalar projections; intermediate series stay inside
-    /// the existing worker and can be reused by multiple downstream steps.
+    /// Returns only bounded scalar projections for the latest closed bar.
+    /// Outcome labels cannot be confirmed at this index without future bars.
     pub fn evaluate(&self, close: &[f64]) -> BTreeMap<String, (Option<f64>, Unit)> {
+        self.evaluate_at(close, close.len().saturating_sub(1))
+    }
+
+    /// Project at a historical closed index using one deterministic graph pass.
+    /// Causal outputs at index `at` must be invariant under changes after `at`.
+    /// Outcome labels are explicitly non-causal and may use later bars.
+    pub fn evaluate_at(&self, close: &[f64], at: usize) -> BTreeMap<String, (Option<f64>, Unit)> {
         let mut values = BTreeMap::<String, Vec<Option<f64>>>::new();
         for checked in &self.steps {
             let input = if checked.step.input == "close" {
@@ -173,6 +273,50 @@ impl CheckedComposition {
                     }
                     result
                 }
+                SeriesOp::Lag => {
+                    let period = checked.step.period.expect("validated lag") as usize;
+                    let mut result = vec![None; input.len()];
+                    if period < input.len() {
+                        result[period..].copy_from_slice(&input[..input.len() - period]);
+                    }
+                    result
+                }
+                SeriesOp::GreaterThan => {
+                    let threshold = checked.step.threshold.expect("validated threshold");
+                    input
+                        .iter()
+                        .map(|value| value.map(|v| if v > threshold { 1.0 } else { 0.0 }))
+                        .collect()
+                }
+                SeriesOp::RisingEdge => {
+                    let mut result = vec![None; input.len()];
+                    for i in 1..input.len() {
+                        if let (Some(previous), Some(current)) = (input[i - 1], input[i]) {
+                            result[i] = Some(if previous == 0.0 && current == 1.0 {
+                                1.0
+                            } else {
+                                0.0
+                            });
+                        }
+                    }
+                    result
+                }
+                SeriesOp::ForwardReturnLabel => {
+                    let horizon = checked.step.period.expect("validated horizon") as usize;
+                    let condition = &values[checked.step.when.as_ref().expect("validated event")];
+                    let mut result = vec![None; input.len()];
+                    for i in 0..input.len().saturating_sub(horizon) {
+                        if condition[i] == Some(1.0)
+                            && let (Some(start), Some(end)) = (input[i], input[i + horizon])
+                            && start > 0.0
+                            && end > 0.0
+                        {
+                            let outcome = end / start - 1.0;
+                            result[i] = outcome.is_finite().then_some(outcome);
+                        }
+                    }
+                    result
+                }
             };
             values.insert(checked.step.id.clone(), output);
         }
@@ -186,7 +330,7 @@ impl CheckedComposition {
                     .expect("checked projection");
                 (
                     id.clone(),
-                    (values[id].last().copied().flatten(), checked.unit),
+                    (values[id].get(at).copied().flatten(), checked.unit),
                 )
             })
             .collect()
@@ -206,12 +350,30 @@ pub enum Source {
 pub enum Unit {
     Price,
     Ratio,
+    Boolean,
+    Event,
+    OutcomeRatio,
     AnnualizedRatio,
     Coefficient,
     Index,
     Bps,
     Quantity,
     QuoteCurrency,
+}
+fn composition_unit_name(unit: Unit) -> &'static str {
+    match unit {
+        Unit::Price => "price",
+        Unit::Ratio => "ratio",
+        Unit::Boolean => "boolean",
+        Unit::Event => "event",
+        Unit::OutcomeRatio => "outcome_ratio",
+        Unit::AnnualizedRatio => "annualized_ratio",
+        Unit::Coefficient => "coefficient",
+        Unit::Index => "index",
+        Unit::Bps => "bps",
+        Unit::Quantity => "quantity",
+        Unit::QuoteCurrency => "quote_currency",
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Input {
@@ -423,12 +585,16 @@ mod tests {
                     op: SeriesOp::ReturnsSeries,
                     input: "close".into(),
                     period: None,
+                    threshold: None,
+                    when: None,
                 },
                 SeriesStep {
                     id: "w1".into(),
                     op: SeriesOp::RollingMean,
                     input: "r1".into(),
                     period: Some(2),
+                    threshold: None,
+                    when: None,
                 },
             ],
             result_steps: vec!["w1".into()],
@@ -468,6 +634,8 @@ mod tests {
             op: SeriesOp::RollingMean,
             input: "r1".into(),
             period: Some(3),
+            threshold: None,
+            when: None,
         });
         spec.result_steps.push("w2".into());
         let checked = CheckedComposition::compile(spec.clone(), 20).unwrap();
@@ -527,6 +695,8 @@ mod tests {
                     op: SeriesOp::RollingMean,
                     input: "close".into(),
                     period: Some(1),
+                    threshold: None,
+                    when: None,
                 })
                 .collect(),
             result_steps: vec!["w0".into()],
@@ -574,6 +744,184 @@ mod tests {
                 .abs()
                 < 1e-12
         );
+    }
+
+    fn causal_event_graph() -> CompositionRequest {
+        let step = |id: &str, op, input: &str, period, threshold, when: Option<&str>| SeriesStep {
+            id: id.into(),
+            op,
+            input: input.into(),
+            period,
+            threshold,
+            when: when.map(str::to_owned),
+        };
+        CompositionRequest {
+            version: COMPOSITION_VERSION.into(),
+            steps: vec![
+                step("return", SeriesOp::ReturnsSeries, "close", None, None, None),
+                step(
+                    "positive",
+                    SeriesOp::GreaterThan,
+                    "return",
+                    None,
+                    Some(0.0),
+                    None,
+                ),
+                step("entry", SeriesOp::RisingEdge, "positive", None, None, None),
+                step("previous", SeriesOp::Lag, "close", Some(1), None, None),
+                step(
+                    "outcome",
+                    SeriesOp::ForwardReturnLabel,
+                    "close",
+                    Some(2),
+                    None,
+                    Some("entry"),
+                ),
+            ],
+            result_steps: vec![
+                "return".into(),
+                "positive".into(),
+                "entry".into(),
+                "previous".into(),
+                "outcome".into(),
+            ],
+        }
+    }
+
+    #[test]
+    fn t06_causal_graph_lag_boolean_edge_and_outcomes_have_separate_time_directions() {
+        let graph = CheckedComposition::compile(causal_event_graph(), 7).unwrap();
+        let prices = [100.0, 90.0, 95.0, 99.0, 120.0, 110.0, 108.0];
+        let at_event = graph.evaluate_at(&prices, 2);
+        assert_eq!(at_event["positive"], (Some(1.0), Unit::Boolean));
+        assert_eq!(at_event["entry"], (Some(1.0), Unit::Event));
+        assert_eq!(at_event["previous"], (Some(90.0), Unit::Price));
+        assert!((at_event["outcome"].0.unwrap() - (120.0 / 95.0 - 1.0)).abs() < 1e-12);
+        assert_eq!(at_event["outcome"].1, Unit::OutcomeRatio);
+        assert_eq!(graph.evaluate_at(&prices, 3)["entry"].0, Some(0.0));
+        assert_eq!(graph.evaluate_at(&prices, 1)["entry"].0, None);
+        assert_eq!(graph.evaluate(&prices)["outcome"].0, None);
+
+        let first_three = graph.evaluate_at(&prices[..3], 2);
+        let altered_future = graph.evaluate_at(&[100.0, 90.0, 95.0, 99.0, 60.0, 200.0], 2);
+        for causal in ["return", "positive", "entry", "previous"] {
+            assert_eq!(first_three[causal], at_event[causal]);
+            assert_eq!(altered_future[causal], at_event[causal]);
+        }
+        assert_eq!(first_three["outcome"].0, None);
+        assert!((altered_future["outcome"].0.unwrap() - (60.0 / 95.0 - 1.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn t06_every_causal_projection_is_prefix_invariant_for_each_closed_index() {
+        let graph = CheckedComposition::compile(causal_event_graph(), 7).unwrap();
+        let closes = [100.0, 90.0, 95.0, 99.0, 120.0, 110.0, 108.0];
+        for at in 0..closes.len() {
+            let full = graph.evaluate_at(&closes, at);
+            let prefix = graph.evaluate_at(&closes[..=at], at);
+            let mut changed_future = closes;
+            for later in &mut changed_future[at + 1..] {
+                *later = 55.0;
+            }
+            let changed = graph.evaluate_at(&changed_future, at);
+            for feature in ["return", "positive", "entry", "previous"] {
+                assert_eq!(
+                    full[feature], prefix[feature],
+                    "prefix mismatch: {feature} at {at}"
+                );
+                assert_eq!(
+                    full[feature], changed[feature],
+                    "future leak: {feature} at {at}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t05_original_composition_wire_omits_new_optional_graph_fields() {
+        let old = two_step_composition();
+        let encoded = serde_json::to_value(&old).unwrap();
+        assert_eq!(encoded["steps"][0]["op"], "returns_series");
+        assert!(encoded["steps"][0].get("threshold").is_none());
+        assert!(encoded["steps"][0].get("when").is_none());
+        assert_eq!(
+            serde_json::from_value::<CompositionRequest>(encoded).unwrap(),
+            old
+        );
+    }
+
+    #[test]
+    fn t07_outcome_cannot_be_a_feature_or_event_condition() {
+        let spec = causal_event_graph();
+        let mut leakage = spec.clone();
+        leakage.steps.push(SeriesStep {
+            id: "leak".into(),
+            op: SeriesOp::GreaterThan,
+            input: "outcome".into(),
+            period: None,
+            threshold: Some(0.0),
+            when: None,
+        });
+        assert_eq!(
+            CheckedComposition::compile(leakage.clone(), 7).unwrap_err(),
+            "composition.steps[5].input:UNIT_MISMATCH:expected=numeric_series:actual=outcome_ratio"
+        );
+        leakage.steps[5].op = SeriesOp::Lag;
+        leakage.steps[5].period = Some(1);
+        leakage.steps[5].threshold = None;
+        assert_eq!(
+            CheckedComposition::compile(leakage, 7).unwrap_err(),
+            "composition.steps[5].input:UNIT_MISMATCH:expected=causal_series:actual=outcome_ratio"
+        );
+
+        let mut missing_event = spec.clone();
+        missing_event.steps[4].when = Some("future".into());
+        assert_eq!(
+            CheckedComposition::compile(missing_event, 7).unwrap_err(),
+            "composition.steps[4].when:UNKNOWN_OR_FORWARD_STEP:future"
+        );
+        let mut non_event = spec.clone();
+        non_event.steps[4].when = Some("positive".into());
+        assert_eq!(
+            CheckedComposition::compile(non_event, 7).unwrap_err(),
+            "composition.steps[4].when:UNIT_MISMATCH:expected=event:actual=boolean"
+        );
+        let mut no_event = spec.clone();
+        no_event.steps[4].when = None;
+        assert_eq!(
+            CheckedComposition::compile(no_event, 7).unwrap_err(),
+            "composition.steps[4].when:REQUIRED_EVENT"
+        );
+        let mut bad_threshold = spec.clone();
+        bad_threshold.steps[1].threshold = Some(f64::NAN);
+        assert_eq!(
+            CheckedComposition::compile(bad_threshold, 7).unwrap_err(),
+            "composition.steps[1].threshold:INVALID"
+        );
+        let mut bad_horizon = spec.clone();
+        bad_horizon.steps[4].period = Some(0);
+        assert_eq!(
+            CheckedComposition::compile(bad_horizon, 7).unwrap_err(),
+            "composition.steps[4].period:INVALID"
+        );
+        let mut unexpected_when = spec;
+        unexpected_when.steps[0].when = Some("entry".into());
+        assert_eq!(
+            CheckedComposition::compile(unexpected_when, 7).unwrap_err(),
+            "composition.steps[0].when:UNEXPECTED"
+        );
+    }
+
+    #[test]
+    fn t04_causal_graph_preserves_nulls_across_missing_and_warmup_bars() {
+        let graph = CheckedComposition::compile(causal_event_graph(), 6).unwrap();
+        let inputs = [100.0, f64::NAN, 95.0, 99.0, 120.0, 110.0];
+        assert_eq!(graph.evaluate_at(&inputs, 2)["return"].0, None);
+        assert_eq!(graph.evaluate_at(&inputs, 2)["positive"].0, None);
+        assert_eq!(graph.evaluate_at(&inputs, 2)["entry"].0, None);
+        assert_eq!(graph.evaluate_at(&inputs, 2)["previous"].0, None);
+        assert_eq!(graph.evaluate_at(&inputs, 2)["outcome"].0, None);
+        assert_eq!(graph.evaluate_at(&inputs, 0)["previous"].0, None);
     }
     fn fixture() -> (Vec<String>, ClosedRange, Vec<Operator>) {
         (
