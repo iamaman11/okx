@@ -258,18 +258,62 @@ pub enum SeriesOp {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckedSeriesStep {
     pub step: SeriesStep,
     pub unit: Unit,
     pub depth: u8,
 }
 
+/// Only the compiler may create this value. A decoded snapshot must be
+/// recompiled: JSON fields describing checked units, graph depth and budget
+/// are evidence, never authority to bypass validation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "StoredCheckedComposition")]
 pub struct CheckedComposition {
-    pub version: String,
-    pub steps: Vec<CheckedSeriesStep>,
-    pub result_steps: Vec<String>,
-    pub estimated_cells: u64,
+    version: String,
+    steps: Vec<CheckedSeriesStep>,
+    result_steps: Vec<String>,
+    estimated_cells: u64,
+}
+
+/// Keep the existing JSON shape for old immutable artifacts, but do not
+/// deserialize a trusted plan from it. The serialized checked annotations
+/// must agree exactly with a fresh compilation of the underlying requests.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCheckedComposition {
+    version: String,
+    steps: Vec<CheckedSeriesStep>,
+    result_steps: Vec<String>,
+    estimated_cells: u64,
+}
+
+impl TryFrom<StoredCheckedComposition> for CheckedComposition {
+    type Error = String;
+
+    fn try_from(stored: StoredCheckedComposition) -> Result<Self, Self::Error> {
+        if stored.steps.is_empty() || stored.steps.len() > 32 {
+            return Err("composition.checked:INVALID_STEP_COUNT".into());
+        }
+        let step_count = stored.steps.len() as u64;
+        if stored.estimated_cells % step_count != 0 {
+            return Err("composition.checked:INVALID_ESTIMATED_CELLS".into());
+        }
+        let total_bars = stored.estimated_cells / step_count;
+        let checked = CheckedComposition::compile(
+            CompositionRequest {
+                version: stored.version,
+                steps: stored.steps.iter().map(|step| step.step.clone()).collect(),
+                result_steps: stored.result_steps,
+            },
+            total_bars,
+        )?;
+        if checked.steps != stored.steps || checked.estimated_cells != stored.estimated_cells {
+            return Err("composition.checked:FORGED_BINDINGS_OR_BUDGET".into());
+        }
+        Ok(checked)
+    }
 }
 
 /// A deterministic explanation for a projected null. Diagnosed from the
@@ -295,6 +339,24 @@ pub struct CandlePriceInputs<'a> {
 }
 
 impl CheckedComposition {
+    /// Read-only accessors preserve inspection without permitting the caller
+    /// to mutate checked bindings after validation.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub fn steps(&self) -> &[CheckedSeriesStep] {
+        &self.steps
+    }
+
+    pub fn result_steps(&self) -> &[String] {
+        &self.result_steps
+    }
+
+    pub fn estimated_cells(&self) -> u64 {
+        self.estimated_cells
+    }
+
     /// Inspect only the transitive projection closure: unused declarations
     /// neither fetch sources nor allocate their columns at execution time.
     pub fn uses_source(&self, source: &str) -> bool {
@@ -1750,6 +1812,7 @@ pub struct Rank {
     pub descending: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "StoredQueryPlan")]
 pub struct QueryPlan {
     pub version: String,
     pub universe: Vec<String>,
@@ -1767,6 +1830,73 @@ pub struct QueryPlan {
     pub resource_budget_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composition: Option<CheckedComposition>,
+}
+
+/// Restore the existing artifact shape, then attest its cross-field bindings.
+/// CheckedComposition separately validates every operator, input and unit;
+/// this layer prevents a valid subgraph being paired with a forged cheap grid
+/// or a source manifest that omits one of its dependencies.
+#[derive(Deserialize)]
+struct StoredQueryPlan {
+    version: String,
+    universe: Vec<String>,
+    dataset_refs: Vec<String>,
+    range: ClosedRange,
+    timeframe_ms: u64,
+    warmup_bars: u64,
+    sources: Vec<Source>,
+    operators: Vec<OperatorDescriptor>,
+    filters: Vec<Filter>,
+    ranking: Option<Rank>,
+    result_projection: Vec<Operator>,
+    parameters: BTreeMap<String, f64>,
+    assumptions: Vec<String>,
+    resource_budget_ref: String,
+    #[serde(default)]
+    composition: Option<CheckedComposition>,
+}
+
+impl TryFrom<StoredQueryPlan> for QueryPlan {
+    type Error = String;
+
+    fn try_from(snapshot: StoredQueryPlan) -> Result<Self, Self::Error> {
+        let plan = Self {
+            version: snapshot.version,
+            universe: snapshot.universe,
+            dataset_refs: snapshot.dataset_refs,
+            range: snapshot.range,
+            timeframe_ms: snapshot.timeframe_ms,
+            warmup_bars: snapshot.warmup_bars,
+            sources: snapshot.sources,
+            operators: snapshot.operators,
+            filters: snapshot.filters,
+            ranking: snapshot.ranking,
+            result_projection: snapshot.result_projection,
+            parameters: snapshot.parameters,
+            assumptions: snapshot.assumptions,
+            resource_budget_ref: snapshot.resource_budget_ref,
+            composition: snapshot.composition,
+        };
+        if let Some(graph) = &plan.composition {
+            let cells = plan.range.expected_bars
+                .checked_mul(graph.steps().len() as u64)
+                .ok_or("query_plan.composition:CELLS_OVERFLOW")?;
+            if cells != graph.estimated_cells()
+                || plan.timeframe_ms != plan.range.timeframe_ms
+            {
+                return Err("query_plan.composition:RANGE_BINDING_MISMATCH".into());
+            }
+            let sources = graph.sources();
+            if !sources.iter().all(|source| plan.sources.contains(source)) {
+                return Err("query_plan.composition:SOURCE_BINDING_MISMATCH".into());
+            }
+            let total_bars = plan.range.expected_bars
+                .checked_mul(plan.universe.len().max(1) as u64)
+                .ok_or("query_plan.composition:GLOBAL_BARS_OVERFLOW")?;
+            graph.validate_global_budget(total_bars)?;
+        }
+        Ok(plan)
+    }
 }
 /// One source/type mapping for plan compilation and public capability discovery.
 pub fn input(name: &str) -> Result<Input, String> {
@@ -1970,6 +2100,94 @@ impl QueryPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t02_t03_t13_serialized_checked_plan_roundtrips_only_after_recompilation() {
+        let original = CheckedComposition::compile(two_step_composition(), 7).unwrap();
+        let snapshot = serde_json::to_value(&original).unwrap();
+        let restored: CheckedComposition = serde_json::from_value(snapshot.clone()).unwrap();
+        assert_eq!(restored, original);
+        assert_eq!(restored.version(), COMPOSITION_VERSION);
+        assert_eq!(restored.steps().len(), 2);
+        assert_eq!(restored.result_steps(), &["w1".to_owned()]);
+        assert_eq!(restored.estimated_cells(), 14);
+        assert_eq!(
+            restored.evaluate(&[100.0, 110.0, 99.0]),
+            original.evaluate(&[100.0, 110.0, 99.0])
+        );
+        // A durable QueryPlan with the same checked graph remains readable.
+        let range = ClosedRange::strict(0, 420_000, 60_000).unwrap();
+        let query = QueryPlan::compile(
+            vec!["BTC-USDT".into()], range, vec![Operator::Returns],
+            BTreeMap::new(), vec![], None,
+        )
+        .unwrap()
+        .with_composition(Some(two_step_composition()))
+        .unwrap();
+        let wire = serde_json::to_value(&query).unwrap();
+        let decoded: QueryPlan = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, query);
+    }
+
+    #[test]
+    fn t02_t03_checked_graph_restore_rejects_forged_units_edges_depth_and_limits() {
+        let baseline = serde_json::to_value(
+            CheckedComposition::compile(two_step_composition(), 7).unwrap(),
+        )
+        .unwrap();
+        let mutations: Vec<(&str, serde_json::Value)> = vec![
+            ("unit", { let mut v = baseline.clone(); v["steps"][1]["unit"] = serde_json::json!("price"); v }),
+            ("depth", { let mut v = baseline.clone(); v["steps"][1]["depth"] = serde_json::json!(1); v }),
+            ("output", { let mut v = baseline.clone(); v["result_steps"] = serde_json::json!(["not_a_step"]); v }),
+            ("forward", { let mut v = baseline.clone(); v["steps"][0]["step"]["input"] = serde_json::json!("w1"); v }),
+            ("unit_from_op", { let mut v = baseline.clone(); v["steps"][1]["step"]["op"] = serde_json::json!("returns_series"); v }),
+            ("version", { let mut v = baseline.clone(); v["version"] = serde_json::json!("future-version"); v }),
+            ("non_integral_cells", { let mut v = baseline.clone(); v["estimated_cells"] = serde_json::json!(13); v }),
+            ("over_budget", { let mut v = baseline.clone(); v["estimated_cells"] = serde_json::json!(8_000_002); v }),
+            ("undeclared", { let mut v = baseline.clone(); v["authority"] = serde_json::json!("trade"); v }),
+        ];
+        for (name, forged) in mutations {
+            assert!(
+                serde_json::from_value::<CheckedComposition>(forged).is_err(),
+                "forged {name} cannot construct a checked plan"
+            );
+        }
+        // This is the same decoding route as a persisted QueryPlan snapshot.
+        let range = ClosedRange::strict(0, 420_000, 60_000).unwrap();
+        let query = QueryPlan::compile(
+            vec!["BTC-USDT".into()], range, vec![Operator::Returns],
+            BTreeMap::new(), vec![], None,
+        )
+        .unwrap()
+        .with_composition(Some(two_step_composition()))
+        .unwrap();
+        let mut wire = serde_json::to_value(query).unwrap();
+        for (name, path, value) in [
+            ("binding", vec!["composition", "steps", "0", "unit"], serde_json::json!("boolean")),
+            ("timeframe", vec!["timeframe_ms"], serde_json::json!(120_000)),
+            ("range_budget", vec!["range", "expected_bars"], serde_json::json!(1)),
+            ("required_source", vec!["sources"], serde_json::json!([])),
+            ("composition_cells", vec!["composition", "estimated_cells"], serde_json::json!(12)),
+        ] {
+            let mut invalid = wire.clone();
+            let mut target = &mut invalid;
+            for segment in &path {
+                target = if let Ok(index) = segment.parse::<usize>() {
+                    &mut target[index]
+                } else {
+                    &mut target[*segment]
+                };
+            }
+            *target = value;
+            assert!(
+                serde_json::from_value::<QueryPlan>(invalid).is_err(),
+                "forged {name} must not restore a checked query plan"
+            );
+        }
+        // Keep the original intact for legacy immutable artifact replay.
+        let valid: QueryPlan = serde_json::from_value(wire.take()).unwrap();
+        assert_eq!(valid.composition.unwrap().estimated_cells(), 14);
+    }
 
     #[test]
     fn t02_t04_t07_native_volume_is_composable_but_never_an_implicit_price_or_contract() {

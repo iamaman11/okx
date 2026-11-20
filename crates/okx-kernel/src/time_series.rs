@@ -4,11 +4,37 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "StoredClosedRange")]
 pub struct ClosedRange {
     pub start_ms: u64,
     pub end_ms: u64,
     pub timeframe_ms: u64,
     pub expected_bars: u64,
+}
+
+/// A persisted expected count is a claim about the grid, not an input that
+/// may override its actual size. This also protects direct JSON restores of
+/// plans that contain a ClosedRange.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredClosedRange {
+    start_ms: u64,
+    end_ms: u64,
+    timeframe_ms: u64,
+    expected_bars: u64,
+}
+
+impl TryFrom<StoredClosedRange> for ClosedRange {
+    type Error = String;
+
+    fn try_from(stored: StoredClosedRange) -> Result<Self, Self::Error> {
+        let range = Self::strict(stored.start_ms, stored.end_ms, stored.timeframe_ms)
+            .map_err(|reason| format!("range:{reason}"))?;
+        if range.expected_bars != stored.expected_bars {
+            return Err("range:EXPECTED_BARS_MISMATCH".into());
+        }
+        Ok(range)
+    }
 }
 
 impl ClosedRange {
@@ -322,6 +348,35 @@ pub fn align_exact_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t04_t13_restored_closed_range_cannot_forge_grid_size_or_alignment() {
+        let range = ClosedRange::strict(60_000, 360_000, 60_000).unwrap();
+        let wire = serde_json::to_value(range).unwrap();
+        let restored: ClosedRange = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(restored, range);
+        assert_eq!(restored.expected_bars, 5);
+        assert_eq!(
+            restored.coverage([60_000, 120_000, 240_000, 300_000]).first_missing_ms,
+            Some(180_000)
+        );
+        for (field, value) in [
+            ("expected_bars", serde_json::json!(1)),
+            ("timeframe_ms", serde_json::json!(0)),
+            ("timeframe_ms", serde_json::json!(45_000)),
+            ("end_ms", serde_json::json!(60_000)),
+        ] {
+            let mut invalid = wire.clone();
+            invalid[field] = value;
+            assert!(
+                serde_json::from_value::<ClosedRange>(invalid).is_err(),
+                "forged field {field} must not create a trusted range"
+            );
+        }
+        let mut extra = wire;
+        extra["capture_override"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ClosedRange>(extra).is_err());
+    }
 
     #[test]
     fn t06_sparse_event_grid_is_exact_and_does_not_invent_publication_time() {
