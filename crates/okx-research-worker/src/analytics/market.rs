@@ -42,21 +42,20 @@ fn market_job_schema(fields: &[String]) -> &'static str {
     }
 }
 
-// A composition now publishes explicit per-result quality and source failure
-// witnesses. Existing immutable jobs cannot be silently reinterpreted as
-// satisfying that new result contract; preserve their old namespace for
-// cursor reads while new requests get a distinct content identity.
+// Composition quality now diagnoses nulls and counts exact aligned source
+// observations. Do not replay pre-diagnostic immutable artifacts as if they
+// carried these new witnesses; legacy market queries keep their prior keys.
 fn market_request_schema(
     fields: &[String],
     has_composition: bool,
     oi_composition: bool,
 ) -> &'static str {
     if oi_composition && fields.iter().any(|field| field == "pearson_correlation") {
-        "market/518.2.oi-composition-correlation-quality-v1"
+        "market/518.3.oi-composition-correlation-alignment-v1"
     } else if oi_composition {
-        "market/518.2.oi-composition-quality-v1"
+        "market/518.3.oi-composition-alignment-v1"
     } else if has_composition {
-        "market/518.2.composition-quality-v1"
+        "market/518.3.composition-null-causes-v1"
     } else {
         market_job_schema(fields)
     }
@@ -383,6 +382,18 @@ impl AnalyticsService {
                 "available_for":"screen","input_sources":["close","open_interest"],
                 "source_units":{"close":"price","open_interest":"contracts"},
                 "open_interest_policy":"exact_timestamps_no_forward_fill_publication_time_unverified",
+                "null_diagnostics":{"location":"composition_quality.<result>.issues",
+                    "origin_step":true,
+                    "reason_codes":["SOURCE_OBSERVATION_MISSING","WARMUP",
+                        "DIVISION_BY_ZERO","NON_FINITE_RESULT","NON_POSITIVE_RETURN_INPUT",
+                        "EVENT_NOT_TRIGGERED","OUTCOME_UNCONFIRMED"]},
+                "source_alignment":{"location":"source_alignment",
+                    "when":"composition_depends_on_open_interest",
+                    "join_semantics":"exact_closed_bar_timestamp_no_forward_fill",
+                    "counts":["expected_observations","observed_candle_observations",
+                        "observed_oi_observations","aligned_observations",
+                        "paired_return_observations"],
+                    "publication_time_verified":false},
                 "operations":[{"op":"returns_series","input_unit":"price_or_contracts","output_unit":"ratio"},
                     {"op":"rolling_mean","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"compute_cost":"linear_in_series_length"},
                     {"op":"rolling_max","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
@@ -896,6 +907,7 @@ fn compute_row_planned(
         units.insert(field.clone(), json!(registry(op).unit));
     }
     let mut composition_quality = serde_json::Map::new();
+    let mut source_alignment = None;
     if let Some(composition) = composition {
         let source_dependencies = composition.result_sources();
         let evaluated = if composition_oi {
@@ -921,10 +933,39 @@ fn compute_row_planned(
                     }
                 }
             }
-            composition.evaluate_with_open_interest(&prices, &open_interest)?
+            let (mut candle_points, mut oi_points, mut aligned, mut paired_returns) =
+                (0usize, 0usize, 0usize, 0usize);
+            let (mut first_unaligned_ms, mut prior_return_pair) = (None, false);
+            for (i, (&price, &oi)) in prices.iter().zip(&open_interest).enumerate() {
+                let candle_present = price.is_finite();
+                let oi_present = oi.is_some();
+                candle_points += usize::from(candle_present);
+                oi_points += usize::from(oi_present);
+                aligned += usize::from(candle_present && oi_present);
+                if !(candle_present && oi_present) && first_unaligned_ms.is_none() {
+                    first_unaligned_ms = Some(request.start_ms + i as u64 * request.timeframe_ms);
+                }
+                let return_pair = price.is_finite() && price > 0.0 && oi.is_some_and(|v| v > 0.0);
+                if i > 0 && prior_return_pair && return_pair {
+                    paired_returns += 1;
+                }
+                prior_return_pair = return_pair;
+            }
+            source_alignment = Some(json!({
+                "join_semantics":"exact_closed_bar_timestamp_no_forward_fill",
+                "expected_observations":count,
+                "observed_candle_observations":candle_points,
+                "observed_oi_observations":oi_points,
+                "aligned_observations":aligned,
+                "paired_return_observations":paired_returns,
+                "first_unaligned_ms":first_unaligned_ms,
+                "oi_publication_time_verified":false
+            }));
+            composition.evaluate_with_open_interest_diagnostics(&prices, &open_interest)?
         } else {
-            composition.evaluate(close)
+            composition.evaluate_with_diagnostics(close)
         };
+        let (evaluated, null_causes) = evaluated;
         for (id, (value, unit)) in evaluated {
             let dependencies = &source_dependencies[&id];
             let depends_on_oi =
@@ -975,11 +1016,18 @@ fn compute_row_planned(
                     format!("MISSING_INPUT_OR_MINIMUM_SAMPLES:{id}")
                 });
                 if issues.is_empty() {
-                    issues.push(json!({
-                        "reason":if unit == okx_analysis::query_plan::Unit::OutcomeRatio {
-                            "OUTCOME_UNCONFIRMED"
-                        } else {"MISSING_INPUT_OR_WARMUP"}
-                    }));
+                    if let Some(cause) = null_causes.get(&id) {
+                        issues.push(json!({
+                            "reason":cause.reason,
+                            "origin_step":cause.origin_step
+                        }));
+                    } else {
+                        issues.push(json!({
+                            "reason":if unit == okx_analysis::query_plan::Unit::OutcomeRatio {
+                                "OUTCOME_UNCONFIRMED"
+                            } else {"MISSING_INPUT_OR_WARMUP"}
+                        }));
+                    }
                 }
             }
             let status = if value.is_none() {
@@ -1074,6 +1122,9 @@ fn compute_row_planned(
     }
     if let Some(source_captures) = source_captures {
         result["source_captures"] = source_captures;
+    }
+    if let Some(source_alignment) = source_alignment {
+        result["source_alignment"] = source_alignment;
     }
     let mut metric_time_basis = serde_json::Map::new();
     if let Some(composition) = composition {
@@ -1241,6 +1292,10 @@ mod tests {
         let composed = market_request_schema(&fields, true, false);
         let oi_composed = market_request_schema(&fields, true, true);
         let oi_correlated = market_request_schema(&oi_fields, true, true);
+        assert_eq!(composed, "market/518.3.composition-null-causes-v1");
+        assert_eq!(oi_composed, "market/518.3.oi-composition-alignment-v1");
+        assert_ne!(composed, "market/518.2.composition-quality-v1");
+        assert_ne!(oi_composed, "market/518.2.oi-composition-quality-v1");
         assert_ne!(composed, market_request_schema(&fields, false, false));
         assert_ne!(oi_composed, composed);
         assert_ne!(oi_correlated, oi_composed);
@@ -2164,8 +2219,9 @@ mod global_rank_tests {
                     {"id":"price_return","op":"returns_series","input":"close"},
                     {"id":"oi_return","op":"returns_series","input":"open_interest"},
                     {"id":"difference","op":"subtract_series","input":"price_return","other":"oi_return"},
-                    {"id":"relative","op":"divide_series","input":"price_return","other":"oi_return"}
-                ],"result_steps":["difference","relative"]
+                    {"id":"relative","op":"divide_series","input":"price_return","other":"oi_return"},
+                    {"id":"delayed_relative","op":"lag","input":"relative","period":1}
+                ],"result_steps":["difference","relative","delayed_relative"]
             }))
             .unwrap(),
         ));
@@ -2204,6 +2260,17 @@ mod global_rank_tests {
                 < 1e-12
         );
         assert_eq!(output["units"]["difference"], "ratio");
+        assert_eq!(output["source_alignment"]["expected_observations"], 100);
+        assert_eq!(output["source_alignment"]["aligned_observations"], 100);
+        assert_eq!(output["source_alignment"]["paired_return_observations"], 99);
+        assert_eq!(
+            output["source_alignment"]["first_unaligned_ms"],
+            Value::Null
+        );
+        assert_eq!(
+            output["source_alignment"]["oi_publication_time_verified"],
+            false
+        );
         assert_eq!(
             output["composition_quality"]["relative"]["status"],
             "retrospective_publication_unverified"
@@ -2214,6 +2281,34 @@ mod global_rank_tests {
         assert_eq!(
             zero["composition_quality"]["relative"]["status"],
             "unavailable"
+        );
+        assert_eq!(
+            zero["composition_quality"]["relative"]["issues"][0],
+            json!({"reason":"DIVISION_BY_ZERO","origin_step":"relative"})
+        );
+        assert_eq!(
+            zero["composition_quality"]["delayed_relative"]["issues"][0],
+            json!({"reason":"DIVISION_BY_ZERO","origin_step":"relative"})
+        );
+        assert!(zero["metrics"]["delayed_relative"].is_null());
+        let mut interrupted = fixture(false);
+        interrupted
+            .oi
+            .as_mut()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .remove(50);
+        let partial = compute_row_planned(interrupted, &query, None, &plan, true).unwrap();
+        assert!(partial["metrics"]["difference"].is_null());
+        assert_eq!(partial["source_alignment"]["aligned_observations"], 99);
+        assert_eq!(
+            partial["source_alignment"]["paired_return_observations"],
+            97
+        );
+        assert_eq!(
+            partial["source_alignment"]["first_unaligned_ms"],
+            50 * 60_000
         );
         assert_eq!(
             zero["source_captures"]["open_interest"]["publication_time_verified"],

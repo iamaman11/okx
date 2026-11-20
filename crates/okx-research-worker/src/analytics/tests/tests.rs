@@ -46,6 +46,25 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
         assert_eq!(operation["numeric_policy"], "finite_only");
     }
     assert_eq!(
+        capabilities["composition"]["null_diagnostics"]["origin_step"],
+        true
+    );
+    assert!(
+        capabilities["composition"]["null_diagnostics"]["reason_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "DIVISION_BY_ZERO")
+    );
+    assert_eq!(
+        capabilities["composition"]["source_alignment"]["publication_time_verified"],
+        false
+    );
+    assert_eq!(
+        capabilities["composition"]["source_alignment"]["join_semantics"],
+        "exact_closed_bar_timestamp_no_forward_fill"
+    );
+    assert_eq!(
         capabilities["availability_policy"],
         "actual_data_and_rights_checked_per_request"
     );

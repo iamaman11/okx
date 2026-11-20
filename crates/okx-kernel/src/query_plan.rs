@@ -72,6 +72,14 @@ pub struct CheckedComposition {
     pub estimated_cells: u64,
 }
 
+/// A deterministic explanation for a projected null. Diagnosed from the
+/// already-evaluated series, without storing another per-bar quality graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositionNullCause {
+    pub reason: &'static str,
+    pub origin_step: String,
+}
+
 impl CheckedComposition {
     pub fn compile(request: CompositionRequest, total_bars: u64) -> Result<Self, String> {
         if request.version != COMPOSITION_VERSION {
@@ -394,7 +402,19 @@ impl CheckedComposition {
     /// Causal outputs at index `at` must be invariant under changes after `at`.
     /// Outcome labels are explicitly non-causal and may use later bars.
     pub fn evaluate_at(&self, close: &[f64], at: usize) -> BTreeMap<String, (Option<f64>, Unit)> {
-        self.evaluate_at_sources(close, None, at)
+        self.evaluate_at_sources(close, None, at, false).0
+    }
+
+    /// Preserve the legacy value projection; add precise explanations only
+    /// for projected nulls, calculated once at the requested closed index.
+    pub fn evaluate_with_diagnostics(
+        &self,
+        close: &[f64],
+    ) -> (
+        BTreeMap<String, (Option<f64>, Unit)>,
+        BTreeMap<String, CompositionNullCause>,
+    ) {
+        self.evaluate_at_sources(close, None, close.len().saturating_sub(1), true)
     }
 
     pub fn evaluate_with_open_interest(
@@ -402,6 +422,42 @@ impl CheckedComposition {
         close: &[f64],
         open_interest: &[Option<f64>],
     ) -> Result<BTreeMap<String, (Option<f64>, Unit)>, String> {
+        self.check_open_interest(close, open_interest)?;
+        Ok(self
+            .evaluate_at_sources(
+                close,
+                Some(open_interest),
+                close.len().saturating_sub(1),
+                false,
+            )
+            .0)
+    }
+
+    pub fn evaluate_with_open_interest_diagnostics(
+        &self,
+        close: &[f64],
+        open_interest: &[Option<f64>],
+    ) -> Result<
+        (
+            BTreeMap<String, (Option<f64>, Unit)>,
+            BTreeMap<String, CompositionNullCause>,
+        ),
+        String,
+    > {
+        self.check_open_interest(close, open_interest)?;
+        Ok(self.evaluate_at_sources(
+            close,
+            Some(open_interest),
+            close.len().saturating_sub(1),
+            true,
+        ))
+    }
+
+    fn check_open_interest(
+        &self,
+        close: &[f64],
+        open_interest: &[Option<f64>],
+    ) -> Result<(), String> {
         if close.len() != open_interest.len() {
             return Err("composition.sources:ALIGNMENT_LENGTH_MISMATCH".into());
         }
@@ -412,7 +468,7 @@ impl CheckedComposition {
         {
             return Err("composition.sources.open_interest:INVALID_CONTRACT_COUNT".into());
         }
-        Ok(self.evaluate_at_sources(close, Some(open_interest), close.len().saturating_sub(1)))
+        Ok(())
     }
 
     fn evaluate_at_sources(
@@ -420,7 +476,11 @@ impl CheckedComposition {
         close: &[f64],
         open_interest: Option<&[Option<f64>]>,
         at: usize,
-    ) -> BTreeMap<String, (Option<f64>, Unit)> {
+        explain_nulls: bool,
+    ) -> (
+        BTreeMap<String, (Option<f64>, Unit)>,
+        BTreeMap<String, CompositionNullCause>,
+    ) {
         let mut values = BTreeMap::<String, Vec<Option<f64>>>::new();
         values.insert(
             "close".into(),
@@ -583,7 +643,17 @@ impl CheckedComposition {
             };
             values.insert(checked.step.id.clone(), output);
         }
-        self.result_steps
+        let diagnostics = if explain_nulls {
+            self.result_steps
+                .iter()
+                .filter(|id| values[id.as_str()].get(at).copied().flatten().is_none())
+                .map(|id| (id.clone(), self.null_cause_at(&values, id, at)))
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
+        let results = self
+            .result_steps
             .iter()
             .map(|id| {
                 let checked = self
@@ -596,7 +666,125 @@ impl CheckedComposition {
                     (values[id].get(at).copied().flatten(), checked.unit),
                 )
             })
-            .collect()
+            .collect();
+        (results, diagnostics)
+    }
+
+    /// Only the projected nulls are traced. Graph depth <=8, windows <=1000,
+    /// and projected results <=14 bound diagnostics independently of bar count.
+    fn null_cause_at(
+        &self,
+        values: &BTreeMap<String, Vec<Option<f64>>>,
+        id: &str,
+        at: usize,
+    ) -> CompositionNullCause {
+        let cause = |reason| CompositionNullCause {
+            reason,
+            origin_step: id.to_owned(),
+        };
+        let Some(checked) = self.steps.iter().find(|item| item.step.id == id) else {
+            return cause("SOURCE_OBSERVATION_MISSING");
+        };
+        let step = &checked.step;
+        let value = |name: &str, index: usize| {
+            values
+                .get(name)
+                .and_then(|series| series.get(index))
+                .copied()
+                .flatten()
+        };
+        let trace = |name: &str, index: usize| -> Option<CompositionNullCause> {
+            value(name, index)
+                .is_none()
+                .then(|| self.null_cause_at(values, name, index))
+        };
+        match step.op {
+            SeriesOp::AddSeries
+            | SeriesOp::SubtractSeries
+            | SeriesOp::DivideSeries
+            | SeriesOp::And
+            | SeriesOp::Or => {
+                let other = step.other.as_deref().expect("validated second operand");
+                if let Some(upstream) = trace(&step.input, at).or_else(|| trace(other, at)) {
+                    return upstream;
+                }
+                if step.op == SeriesOp::DivideSeries && value(other, at) == Some(0.0) {
+                    return cause("DIVISION_BY_ZERO");
+                }
+                cause("NON_FINITE_RESULT")
+            }
+            SeriesOp::ReturnsSeries => {
+                if at == 0 {
+                    return cause("WARMUP");
+                }
+                if let Some(upstream) =
+                    trace(&step.input, at - 1).or_else(|| trace(&step.input, at))
+                {
+                    return upstream;
+                }
+                if value(&step.input, at - 1).is_some_and(|v| v <= 0.0)
+                    || value(&step.input, at).is_some_and(|v| v <= 0.0)
+                {
+                    return cause("NON_POSITIVE_RETURN_INPUT");
+                }
+                cause("NON_FINITE_RESULT")
+            }
+            SeriesOp::RollingMean | SeriesOp::RollingMax | SeriesOp::RollingMin => {
+                let period = step.period.expect("validated window") as usize;
+                if at + 1 < period {
+                    return cause("WARMUP");
+                }
+                for index in (at + 1 - period)..=at {
+                    if let Some(upstream) = trace(&step.input, index) {
+                        return upstream;
+                    }
+                }
+                cause("NON_FINITE_RESULT")
+            }
+            SeriesOp::Lag => {
+                let period = step.period.expect("validated lag") as usize;
+                if at < period {
+                    return cause("WARMUP");
+                }
+                trace(&step.input, at - period).unwrap_or_else(|| cause("NON_FINITE_RESULT"))
+            }
+            SeriesOp::GreaterThan => {
+                trace(&step.input, at).unwrap_or_else(|| cause("NON_FINITE_RESULT"))
+            }
+            SeriesOp::RisingEdge => {
+                if at == 0 {
+                    return cause("WARMUP");
+                }
+                trace(&step.input, at - 1)
+                    .or_else(|| trace(&step.input, at))
+                    .unwrap_or_else(|| cause("NON_FINITE_RESULT"))
+            }
+            SeriesOp::ForwardReturnLabel => {
+                let horizon = step.period.expect("validated horizon") as usize;
+                let Some(end) = at
+                    .checked_add(horizon)
+                    .filter(|end| *end < values[&step.input].len())
+                else {
+                    return cause("OUTCOME_UNCONFIRMED");
+                };
+                let condition = step.when.as_deref().expect("validated event");
+                if let Some(upstream) = trace(condition, at) {
+                    return upstream;
+                }
+                if value(condition, at) != Some(1.0) {
+                    return cause("EVENT_NOT_TRIGGERED");
+                }
+                if let Some(upstream) = trace(&step.input, at).or_else(|| trace(&step.input, end)) {
+                    return upstream;
+                }
+                if value(&step.input, at).is_some_and(|v| v <= 0.0)
+                    || value(&step.input, end).is_some_and(|v| v <= 0.0)
+                {
+                    return cause("NON_POSITIVE_RETURN_INPUT");
+                }
+                cause("NON_FINITE_RESULT")
+            }
+        }
     }
 
     pub fn result_sources(&self) -> BTreeMap<String, BTreeSet<Source>> {
@@ -1864,6 +2052,81 @@ mod t02_t06_multisource_regression {
             CheckedComposition::compile(forward, 3).unwrap_err(),
             "composition.steps[2].other:UNKNOWN_OR_FORWARD_STEP:relative"
         );
+    }
+
+    #[test]
+    fn t05_t06_null_causes_distinguish_zero_missing_warmup_and_nonfinite_through_branches() {
+        let request: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"price_return","op":"returns_series","input":"close"},
+                {"id":"oi_return","op":"returns_series","input":"open_interest"},
+                {"id":"relative","op":"divide_series","input":"price_return","other":"oi_return"},
+                {"id":"delayed","op":"lag","input":"relative","period":1},
+                {"id":"smoothed","op":"rolling_mean","input":"delayed","period":2}
+            ],"result_steps":["price_return","oi_return","relative","delayed","smoothed"]
+        }))
+        .unwrap();
+        let plan = CheckedComposition::compile(request, 4).unwrap();
+        let prices = [100., 110., 121., 133.1];
+        let flat_oi = [Some(10.), Some(10.), Some(10.), Some(10.)];
+        let (values, causes) = plan
+            .evaluate_with_open_interest_diagnostics(&prices, &flat_oi)
+            .unwrap();
+        assert_eq!(
+            values,
+            plan.evaluate_with_open_interest(&prices, &flat_oi).unwrap()
+        );
+        assert!((values["price_return"].0.unwrap() - 0.1).abs() < 1e-12);
+        assert_eq!(values["oi_return"].0, Some(0.0));
+        for id in ["relative", "delayed", "smoothed"] {
+            assert_eq!(values[id].0, None);
+            assert_eq!(
+                causes[id],
+                CompositionNullCause {
+                    reason: "DIVISION_BY_ZERO",
+                    origin_step: "relative".into()
+                }
+            );
+        }
+        assert!(!causes.contains_key("price_return"));
+        let (_, warmup) = plan
+            .evaluate_with_open_interest_diagnostics(&prices[..1], &flat_oi[..1])
+            .unwrap();
+        assert_eq!(warmup["relative"].reason, "WARMUP");
+        assert_eq!(warmup["relative"].origin_step, "price_return");
+        let mut incomplete_oi = flat_oi;
+        incomplete_oi[3] = None;
+        let (_, missing) = plan
+            .evaluate_with_open_interest_diagnostics(&prices, &incomplete_oi)
+            .unwrap();
+        assert_eq!(missing["relative"].reason, "SOURCE_OBSERVATION_MISSING");
+        assert_eq!(missing["relative"].origin_step, "open_interest");
+
+        let standalone: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[{"id":"ret","op":"returns_series","input":"close"}],
+            "result_steps":["ret"]
+        }))
+        .unwrap();
+        let compiled = CheckedComposition::compile(standalone, 2).unwrap();
+        let (_, invalid_domain) = compiled.evaluate_with_diagnostics(&[100., 0.]);
+        assert_eq!(invalid_domain["ret"].reason, "NON_POSITIVE_RETURN_INPUT");
+        let (_, overflow) = compiled.evaluate_with_diagnostics(&[f64::MIN_POSITIVE, f64::MAX]);
+        assert_eq!(overflow["ret"].reason, "NON_FINITE_RESULT");
+
+        let label: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"condition","op":"greater_than","input":"close","threshold":105.},
+                {"id":"event","op":"rising_edge","input":"condition"},
+                {"id":"label","op":"forward_return_label","input":"close","when":"event","period":1}
+            ],"result_steps":["label"]
+        }))
+        .unwrap();
+        let label_plan = CheckedComposition::compile(label, 2).unwrap();
+        let (_, unconfirmed) = label_plan.evaluate_with_diagnostics(&[100., 110.]);
+        assert_eq!(unconfirmed["label"].reason, "OUTCOME_UNCONFIRMED");
     }
 
     #[test]
