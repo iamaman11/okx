@@ -81,6 +81,114 @@ fn research_fixture_catalog_roots_are_distinct_even_with_parallel_starts() {
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(roots.len(), 128);
 }
+
+#[tokio::test]
+async fn t08_public_breakout_grid_persists_typed_selection_and_rejects_65_before_sources() {
+    let (root, service) = service();
+    let bars = (0..200)
+        .map(|i| replay::Bar {
+            time: i * 60_000,
+            open: 100.0 + i as f64 * 0.2,
+            high: 101.0 + i as f64 * 0.2,
+            low: 99.0 + i as f64 * 0.2,
+            close: 100.5 + i as f64 * 0.2,
+            volume: 10.0,
+            funding_rate: None,
+        })
+        .collect();
+    service
+        .sources
+        .cache
+        .load(
+            cache::SourceKey {
+                source: "candles".into(),
+                instrument: "BTC-USDT".into(),
+                timeframe_ms: 60_000,
+                start_ms: 0,
+                end_ms: 12_000_000,
+                closed_only: true,
+                schema: 1,
+            },
+            || async { Ok(bars) },
+        )
+        .await
+        .unwrap();
+
+    let variants = (2..66)
+        .map(|lookback| okx_protocol::analytics::BreakoutParameters { lookback }.into())
+        .collect::<Vec<_>>();
+    let mut request = ResearchRequest::Grid {
+        idempotency_key: "typed-breakout-grid".into(),
+        instruments: vec!["BTC-USDT".into()],
+        timeframe_ms: 60_000,
+        start_ms: 0,
+        end_ms: 12_000_000,
+        strategy_id: "close_breakout_v1".into(),
+        variants,
+        costs: ResearchCosts {
+            maker_fee_bps: 0.0,
+            taker_fee_bps: 0.0,
+            slippage_bps: 0.0,
+            funding_mode: FundingMode::ZeroAssumption,
+        },
+        data_mode: ResearchDataMode::Counterfactual,
+        seed: 7,
+    };
+    assert!(request.valid());
+    if let ResearchRequest::Grid { variants, .. } = &mut request {
+        variants.push(okx_protocol::analytics::BreakoutParameters { lookback: 66 }.into());
+    }
+    assert!(!request.valid());
+    assert_eq!(
+        service.research(request.clone()).await.unwrap_err(),
+        "INVALID_RESEARCH_REQUEST"
+    );
+    assert!(service.jobs.snapshot().is_empty());
+    if let ResearchRequest::Grid { variants, .. } = &mut request {
+        variants.pop();
+    }
+    let admitted = service.research(request.clone()).await.unwrap();
+    let id = admitted["id"].as_str().unwrap().to_owned();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let state = service.jobs.get(&id).unwrap();
+            if state.state == jobs::State::Completed {
+                break;
+            }
+            assert_ne!(state.state, jobs::State::Failed, "{:?}", state.error);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(service.research(request).await.unwrap()["id"], id);
+    let result = service
+        .research(ResearchRequest::Result {
+            job_id: id,
+            cursor: None,
+            limit: 50,
+            view: ResearchResultView::Summary,
+        })
+        .await
+        .unwrap();
+    assert!(result["metadata"]["grid"]["selected"]["lookback"].is_u64());
+    assert_eq!(result["metadata"]["grid"]["split_index"], 140);
+    assert_eq!(result["metadata"]["grid"]["warmup_bars"], 65);
+    assert_eq!(
+        result["metadata"]["grid"]["strategy_id"],
+        "close_breakout_v1"
+    );
+    let artifact = result["metadata"]["experiment_artifact"].as_str().unwrap();
+    let evidence: Value = service.artifacts.read_evidence_json(artifact).unwrap();
+    assert_eq!(evidence["variants"].as_array().unwrap().len(), 64);
+    assert_eq!(evidence["variants"][0], json!({"lookback":2}));
+    assert_eq!(
+        evidence["selection_policy"]["tie_break"][1],
+        "lookback_ascending"
+    );
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
 #[tokio::test(flavor = "current_thread")]
 async fn market_artifact_publication_and_cached_result_roundtrip() {
     let (root, s) = service();
@@ -271,8 +379,8 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
         end_ms: 24000000,
         strategy_id: "ema_cross_v1".into(),
         variants: vec![
-            EmaParameters { fast: 2, slow: 5 },
-            EmaParameters { fast: 3, slow: 8 },
+            EmaParameters { fast: 2, slow: 5 }.into(),
+            EmaParameters { fast: 3, slow: 8 }.into(),
         ],
         costs: ResearchCosts {
             maker_fee_bps: 0.0,

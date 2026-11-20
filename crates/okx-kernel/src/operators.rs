@@ -1,6 +1,9 @@
 //! Typed, finite-only, causal operators shared by live and replay.
 use serde::{Deserialize, Serialize};
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+use std::collections::VecDeque;
+
+pub const BREAKOUT_STRATEGY_ID: &str = "close_breakout_v1";
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct EmaParameters {
     pub fast: usize,
@@ -13,6 +16,135 @@ impl EmaParameters {
         } else {
             Ok(self)
         }
+    }
+}
+
+/// Research definitions share this exact parameter contract with the signal
+/// kernel. Untagged wire serialization preserves existing `{fast,slow}` EMA
+/// requests, while each new definition has a disjoint, strict parameter type.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct BreakoutParameters {
+    pub lookback: usize,
+}
+
+impl BreakoutParameters {
+    pub fn validate(self) -> Result<Self, String> {
+        if !(2..=1000).contains(&self.lookback) {
+            Err("BREAKOUT_LOOKBACK_OUT_OF_RANGE:2..1000".into())
+        } else {
+            Ok(self)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(untagged)]
+pub enum StrategyParameters {
+    Ema(EmaParameters),
+    Breakout(BreakoutParameters),
+}
+
+impl From<EmaParameters> for StrategyParameters {
+    fn from(value: EmaParameters) -> Self {
+        Self::Ema(value)
+    }
+}
+
+impl From<BreakoutParameters> for StrategyParameters {
+    fn from(value: BreakoutParameters) -> Self {
+        Self::Breakout(value)
+    }
+}
+
+impl StrategyParameters {
+    pub fn warmup_for(self, strategy_id: &str) -> Result<usize, String> {
+        match (strategy_id, self) {
+            (BREAKOUT_STRATEGY_ID, Self::Breakout(p)) => Ok(p.validate()?.lookback),
+            ("ema_cross_v1" | "ema_momentum_confirm_v1", Self::Ema(p)) => Ok(p.validate()?.slow),
+            ("close_momentum", Self::Ema(p)) => {
+                p.validate()?;
+                Ok(1)
+            }
+            ("two_bar_momentum", Self::Ema(p)) => {
+                p.validate()?;
+                Ok(2)
+            }
+            ("no_trade", Self::Ema(p)) => {
+                p.validate()?;
+                Ok(0)
+            }
+            (
+                BREAKOUT_STRATEGY_ID
+                | "ema_cross_v1"
+                | "ema_momentum_confirm_v1"
+                | "close_momentum"
+                | "two_bar_momentum"
+                | "no_trade",
+                _,
+            ) => Err("STRATEGY_PARAMETERS_MISMATCH".into()),
+            _ => Err("UNSUPPORTED_STRATEGY".into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BreakoutKernel {
+    lookback: usize,
+    index: usize,
+    maxima: VecDeque<(usize, f64)>,
+    minima: VecDeque<(usize, f64)>,
+}
+
+impl BreakoutKernel {
+    pub fn new(params: BreakoutParameters) -> Result<Self, String> {
+        Ok(Self {
+            lookback: params.validate()?.lookback,
+            index: 0,
+            maxima: VecDeque::with_capacity(params.lookback),
+            minima: VecDeque::with_capacity(params.lookback),
+        })
+    }
+
+    fn push_closed(&mut self, close: f64) -> Option<i8> {
+        // Sliding extrema are amortized O(1), including for a million bars and
+        // a thousand-bar window. Only PRIOR closed observations are compared.
+        let earliest = self.index.saturating_sub(self.lookback);
+        while self
+            .maxima
+            .front()
+            .is_some_and(|(index, _)| *index < earliest)
+        {
+            self.maxima.pop_front();
+        }
+        while self
+            .minima
+            .front()
+            .is_some_and(|(index, _)| *index < earliest)
+        {
+            self.minima.pop_front();
+        }
+        let result = (self.index >= self.lookback).then(|| {
+            let highest = self.maxima.front().expect("warmed maximum").1;
+            let lowest = self.minima.front().expect("warmed minimum").1;
+            if close > highest {
+                1
+            } else if close < lowest {
+                -1
+            } else {
+                0
+            }
+        });
+        while self.maxima.back().is_some_and(|(_, value)| *value <= close) {
+            self.maxima.pop_back();
+        }
+        while self.minima.back().is_some_and(|(_, value)| *value >= close) {
+            self.minima.pop_back();
+        }
+        self.maxima.push_back((self.index, close));
+        self.minima.push_back((self.index, close));
+        self.index += 1;
+        result
     }
 }
 #[derive(Debug, Clone)]
@@ -372,6 +504,7 @@ impl MomentumKernel {
 #[derive(Debug, Clone)]
 pub enum StrategyKernel {
     Ema(EmaKernel),
+    Breakout(BreakoutKernel),
     NoTrade,
     Momentum(MomentumKernel),
     EmaMomentumConfirm {
@@ -385,15 +518,35 @@ pub enum StrategyKernel {
 }
 impl StrategyKernel {
     pub fn from_id(id: &str, p: EmaParameters) -> Result<Self, String> {
+        // Preserve the original Engine entry point and its parameter policy.
+        // The new Research definition route validates its own parameter type.
         match id {
-            "ema_cross_v1" => Ok(Self::Ema(EmaKernel::new(p)?)),
             "no_trade" => Ok(Self::NoTrade),
             "close_momentum" => Ok(Self::Momentum(MomentumKernel::default())),
-            "ema_momentum_confirm_v1" => Ok(Self::EmaMomentumConfirm {
-                ema: EmaKernel::new(p)?,
-                momentum: MomentumKernel::default(),
-            }),
             "two_bar_momentum" => Ok(Self::TwoBar {
+                antecedent: None,
+                previous: None,
+            }),
+            _ => Self::from_definition(id, p.into()),
+        }
+    }
+
+    pub fn from_definition(id: &str, parameters: StrategyParameters) -> Result<Self, String> {
+        parameters.warmup_for(id)?;
+        match (id, parameters) {
+            ("ema_cross_v1", StrategyParameters::Ema(p)) => Ok(Self::Ema(EmaKernel::new(p)?)),
+            (BREAKOUT_STRATEGY_ID, StrategyParameters::Breakout(p)) => {
+                Ok(Self::Breakout(BreakoutKernel::new(p)?))
+            }
+            ("no_trade", _) => Ok(Self::NoTrade),
+            ("close_momentum", _) => Ok(Self::Momentum(MomentumKernel::default())),
+            ("ema_momentum_confirm_v1", StrategyParameters::Ema(p)) => {
+                Ok(Self::EmaMomentumConfirm {
+                    ema: EmaKernel::new(p)?,
+                    momentum: MomentumKernel::default(),
+                })
+            }
+            ("two_bar_momentum", _) => Ok(Self::TwoBar {
                 antecedent: None,
                 previous: None,
             }),
@@ -406,6 +559,7 @@ impl StrategyKernel {
         }
         Ok(match self {
             Self::Ema(k) => return k.push_closed(close),
+            Self::Breakout(k) => k.push_closed(close),
             Self::NoTrade => Some(0),
             Self::Momentum(kernel) => kernel.push_closed(close),
             Self::EmaMomentumConfirm { ema, momentum } => {
@@ -704,5 +858,114 @@ mod c20_rolling_extension {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod t08_strategy_definition_tests {
+    use super::*;
+
+    #[test]
+    fn breakout_wire_is_disjoint_strict_and_has_own_warmup() {
+        let breakout = StrategyParameters::Breakout(BreakoutParameters { lookback: 2 });
+        assert_eq!(
+            serde_json::to_value(breakout).unwrap(),
+            serde_json::json!({"lookback":2})
+        );
+        assert_eq!(breakout.warmup_for(BREAKOUT_STRATEGY_ID).unwrap(), 2);
+        let restored: StrategyParameters =
+            serde_json::from_value(serde_json::json!({"fast":2,"slow":4})).unwrap();
+        assert_eq!(
+            restored,
+            StrategyParameters::Ema(EmaParameters { fast: 2, slow: 4 })
+        );
+        for malformed in [
+            serde_json::json!({"lookback":1}),
+            serde_json::json!({"lookback":1001}),
+            serde_json::json!({"lookback":2,"slow":4}),
+            serde_json::json!({"lookback":"2"}),
+        ] {
+            if let Ok(parameters) = serde_json::from_value::<StrategyParameters>(malformed) {
+                assert!(parameters.warmup_for(BREAKOUT_STRATEGY_ID).is_err());
+            }
+        }
+        assert_eq!(
+            breakout.warmup_for("ema_cross_v1").unwrap_err(),
+            "STRATEGY_PARAMETERS_MISMATCH"
+        );
+        assert_eq!(
+            StrategyParameters::Ema(EmaParameters { fast: 2, slow: 4 })
+                .warmup_for(BREAKOUT_STRATEGY_ID)
+                .unwrap_err(),
+            "STRATEGY_PARAMETERS_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn breakout_only_reads_prior_closed_bars_and_is_prefix_invariant() {
+        let parameters = StrategyParameters::Breakout(BreakoutParameters { lookback: 2 });
+        let signals = |closes: &[f64]| {
+            let mut kernel =
+                StrategyKernel::from_definition(BREAKOUT_STRATEGY_ID, parameters).unwrap();
+            closes
+                .iter()
+                .map(|close| kernel.push_closed(*close).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let prefix = [100., 101., 102., 102., 98., 97., 103.];
+        assert_eq!(
+            signals(&prefix),
+            vec![None, None, Some(1), Some(0), Some(-1), Some(-1), Some(1)]
+        );
+        let mut extended = prefix.to_vec();
+        extended.extend([1000., 1., 2000.]);
+        assert_eq!(&signals(&extended)[..prefix.len()], signals(&prefix));
+        let mut invalid =
+            StrategyKernel::from_definition(BREAKOUT_STRATEGY_ID, parameters).unwrap();
+        assert_eq!(invalid.push_closed(f64::NAN).unwrap_err(), "INVALID_CLOSE");
+    }
+
+    #[test]
+    fn existing_ema_signal_outputs_are_byte_for_byte_compatible() {
+        let params = EmaParameters { fast: 2, slow: 4 };
+        let sample = [100., 99., 101., 103., 96., 105., 109.];
+        let mut legacy = StrategyKernel::from_id("ema_cross_v1", params).unwrap();
+        let mut typed = StrategyKernel::from_definition("ema_cross_v1", params.into()).unwrap();
+        for close in sample {
+            assert_eq!(legacy.push_closed(close), typed.push_closed(close));
+        }
+    }
+
+    #[test]
+    fn amortized_breakout_extrema_match_independent_window_oracle() {
+        let input = (0..1100)
+            .map(|i| (i * 37 % 103 + 1) as f64)
+            .collect::<Vec<_>>();
+        for lookback in [2usize, 3, 32, 1000] {
+            let mut actual = StrategyKernel::from_definition(
+                BREAKOUT_STRATEGY_ID,
+                BreakoutParameters { lookback }.into(),
+            )
+            .unwrap();
+            for (index, close) in input.iter().enumerate() {
+                let expected = (index >= lookback).then(|| {
+                    let prior = &input[index - lookback..index];
+                    let high = prior.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    let low = prior.iter().copied().fold(f64::INFINITY, f64::min);
+                    if *close > high {
+                        1
+                    } else if *close < low {
+                        -1
+                    } else {
+                        0
+                    }
+                });
+                assert_eq!(
+                    actual.push_closed(*close).unwrap(),
+                    expected,
+                    "window={lookback},bar={index}"
+                );
+            }
+        }
     }
 }

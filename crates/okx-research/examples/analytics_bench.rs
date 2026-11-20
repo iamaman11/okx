@@ -1,5 +1,5 @@
 //! Run: cargo run -p okx-research --release --example analytics_bench
-use okx_analysis::operators::EmaParameters;
+use okx_analysis::operators::{EmaParameters, StrategyParameters};
 use okx_research::strategy_registry::*;
 fn dataset(n: usize, ms: u64) -> Vec<Bar> {
     (0..n)
@@ -20,7 +20,7 @@ fn dataset(n: usize, ms: u64) -> Vec<Bar> {
 fn spec() -> ReplaySpec {
     ReplaySpec {
         strategy_id: "ema_cross_v1".into(),
-        parameters: EmaParameters { fast: 20, slow: 50 },
+        parameters: EmaParameters { fast: 20, slow: 50 }.into(),
         mechanics: Mechanics::Linear {
             contract_multiplier: 0.01,
         },
@@ -60,9 +60,12 @@ fn main() {
     let baseline = peak_memory();
     let big = dataset(100000, 900000);
     let variants = (0..100)
-        .map(|i| EmaParameters {
-            fast: 1 + i,
-            slow: 101 + i,
+        .map(|i| {
+            EmaParameters {
+                fast: 1 + i,
+                slow: 101 + i,
+            }
+            .into()
         })
         .collect::<Vec<_>>();
     let t = std::time::Instant::now();
@@ -156,9 +159,12 @@ fn k9_fixed_profile() {
         })
         .collect::<Vec<_>>();
     let variants = (0..VARIANT_COUNT)
-        .map(|i| EmaParameters {
-            fast: 2 + i % 16,
-            slow: 40 + i,
+        .map(|i| {
+            EmaParameters {
+                fast: 2 + i % 16,
+                slow: 40 + i,
+            }
+            .into()
         })
         .collect::<Vec<_>>();
     let mut mechanics = spec();
@@ -235,7 +241,7 @@ fn k9_fixed_profile() {
 fn run_fixed_batch(
     sources: &[Vec<Bar>],
     replay_spec: &ReplaySpec,
-    variants: &[EmaParameters],
+    variants: &[StrategyParameters],
     workers: usize,
 ) -> Vec<String> {
     let mut result_hashes = Vec::new();

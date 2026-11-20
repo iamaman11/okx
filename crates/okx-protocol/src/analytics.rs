@@ -1,4 +1,5 @@
 //! Public compact analytics contract. No transport or financial logic.
+pub use okx_kernel::operators::{BreakoutParameters, EmaParameters, StrategyParameters};
 use okx_kernel::query_plan::CompositionRequest;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -101,12 +102,6 @@ pub enum MarketAction {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EmaParameters {
-    pub fast: usize,
-    pub slow: usize,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ResearchCosts {
     pub maker_fee_bps: f64,
     pub taker_fee_bps: f64,
@@ -174,7 +169,7 @@ pub enum ResearchRequest {
         #[serde(default)]
         range_mode: RangeMode,
         strategy_id: String,
-        parameters: EmaParameters,
+        parameters: StrategyParameters,
         costs: ResearchCosts,
         data_mode: ResearchDataMode,
     },
@@ -185,7 +180,7 @@ pub enum ResearchRequest {
         start_ms: u64,
         end_ms: u64,
         strategy_id: String,
-        parameters: EmaParameters,
+        parameters: StrategyParameters,
         costs: ResearchCosts,
         data_mode: ResearchDataMode,
         #[serde(default)]
@@ -198,7 +193,7 @@ pub enum ResearchRequest {
         start_ms: u64,
         end_ms: u64,
         strategy_id: String,
-        variants: Vec<EmaParameters>,
+        variants: Vec<StrategyParameters>,
         costs: ResearchCosts,
         data_mode: ResearchDataMode,
         #[serde(default)]
@@ -290,11 +285,6 @@ fn valid_range(ms: u64, start: u64, end: u64) -> bool {
     ) && end > start
         && (end - start) / ms <= 1_000_000
 }
-impl EmaParameters {
-    fn valid(&self) -> bool {
-        self.fast >= 1 && self.fast < self.slow && self.slow <= 1000
-    }
-}
 impl ResearchCosts {
     fn valid(&self) -> bool {
         [self.maker_fee_bps, self.taker_fee_bps, self.slippage_bps]
@@ -329,7 +319,7 @@ impl ResearchRequest {
                 start_ms: *start_ms,
                 end_ms: *end_ms,
                 strategy_id: strategy_id.clone(),
-                parameters: parameters.clone(),
+                parameters: *parameters,
                 costs: costs.clone(),
                 data_mode: *data_mode,
                 seed: 0,
@@ -363,11 +353,12 @@ impl ResearchRequest {
                         strategy_id.as_str(),
                         "ema_cross_v1"
                             | "ema_momentum_confirm_v1"
+                            | okx_kernel::operators::BREAKOUT_STRATEGY_ID
                             | "no_trade"
                             | "close_momentum"
                             | "two_bar_momentum"
                     )
-                    && parameters.valid()
+                    && parameters.warmup_for(strategy_id).is_ok()
                     && costs.valid()
             }
             Self::Grid {
@@ -398,13 +389,14 @@ impl ResearchRequest {
                         strategy_id.as_str(),
                         "ema_cross_v1"
                             | "ema_momentum_confirm_v1"
+                            | okx_kernel::operators::BREAKOUT_STRATEGY_ID
                             | "no_trade"
                             | "close_momentum"
                             | "two_bar_momentum"
                     )
                     && !variants.is_empty()
                     && variants.len() <= 64
-                    && variants.iter().all(EmaParameters::valid)
+                    && variants.iter().all(|p| p.warmup_for(strategy_id).is_ok())
                     && costs.valid()
             }
             Self::RecordDecision {
@@ -588,7 +580,7 @@ mod batch_tests {
     #[test]
     fn k9_grid_variants_match_canonical_sixty_four_limit() {
         let parameters = EmaParameters { fast: 2, slow: 4 };
-        let variants = (0..64).map(|_| parameters.clone()).collect();
+        let variants = (0..64).map(|_| parameters.into()).collect();
         let mut request = ResearchRequest::Grid {
             idempotency_key: "k9-grid".into(),
             instruments: vec!["BTC-USDT".into()],
@@ -608,7 +600,7 @@ mod batch_tests {
         };
         assert!(request.valid());
         if let ResearchRequest::Grid { variants, .. } = &mut request {
-            variants.push(parameters);
+            variants.push(parameters.into());
         }
         assert!(!request.valid());
     }
@@ -622,7 +614,7 @@ mod batch_tests {
             start_ms: 0,
             end_ms: 30000000000,
             strategy_id: "ema_cross_v1".into(),
-            parameters: EmaParameters { fast: 20, slow: 50 },
+            parameters: EmaParameters { fast: 20, slow: 50 }.into(),
             costs: ResearchCosts {
                 maker_fee_bps: 0.0,
                 taker_fee_bps: 0.0,
@@ -758,5 +750,91 @@ mod composition_contract_tests {
                 .unwrap()
                 .valid()
         );
+    }
+}
+
+#[cfg(test)]
+mod t08_breakout_public_wire_tests {
+    use super::*;
+
+    fn request(action: &str) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "action":action,"instruments":["BTC-USDT"],"timeframe_ms":60000,
+            "start_ms":0,"end_ms":12000000,"strategy_id":"close_breakout_v1",
+            "costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,"funding_mode":"zero_assumption"},
+            "data_mode":"counterfactual"
+        });
+        if action != "validate" {
+            value["idempotency_key"] = serde_json::json!("t08-breakout-wire");
+        }
+        if action == "grid" {
+            value["variants"] = serde_json::json!(
+                (2..66)
+                    .map(|lookback| serde_json::json!({"lookback":lookback}))
+                    .collect::<Vec<_>>()
+            );
+        } else {
+            value["parameters"] = serde_json::json!({"lookback":20});
+        }
+        value
+    }
+
+    #[test]
+    fn validate_backtest_grid_accept_breakout_and_reject_mismatched_parameters() {
+        for action in ["validate", "backtest", "grid"] {
+            let wire = request(action);
+            let typed = serde_json::from_value::<ResearchRequest>(wire.clone()).unwrap();
+            assert!(typed.valid(), "{action}");
+            let roundtrip =
+                serde_json::from_value::<ResearchRequest>(serde_json::to_value(&typed).unwrap())
+                    .unwrap();
+            assert_eq!(typed, roundtrip);
+            let mut invalid = wire.clone();
+            invalid["strategy_id"] = serde_json::json!("ema_cross_v1");
+            assert!(
+                !serde_json::from_value::<ResearchRequest>(invalid)
+                    .unwrap()
+                    .valid()
+            );
+            let mut invalid = wire;
+            if action == "grid" {
+                invalid["variants"][0] = serde_json::json!({"fast":2,"slow":4});
+            } else {
+                invalid["parameters"] = serde_json::json!({"fast":2,"slow":4});
+            }
+            assert!(
+                !serde_json::from_value::<ResearchRequest>(invalid)
+                    .unwrap()
+                    .valid()
+            );
+        }
+    }
+
+    #[test]
+    fn breakout_public_grid_allows_64_rejects_65_before_sources() {
+        let mut wire = request("grid");
+        assert!(
+            serde_json::from_value::<ResearchRequest>(wire.clone())
+                .unwrap()
+                .valid()
+        );
+        wire["variants"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"lookback":66}));
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(wire)
+                .unwrap()
+                .valid()
+        );
+        for lookback in [1, 1001] {
+            let mut invalid = request("validate");
+            invalid["parameters"] = serde_json::json!({"lookback":lookback});
+            assert!(
+                !serde_json::from_value::<ResearchRequest>(invalid)
+                    .unwrap()
+                    .valid()
+            );
+        }
     }
 }

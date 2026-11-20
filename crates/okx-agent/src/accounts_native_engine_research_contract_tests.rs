@@ -73,7 +73,7 @@ fn heavy_grid(key: &str) -> ResearchRequest {
         end_ms: 60_000 * 60_000,
         strategy_id: "ema_cross_v1".into(),
         variants: (3..67)
-            .map(|slow| EmaParameters { fast: 2, slow })
+            .map(|slow| EmaParameters { fast: 2, slow }.into())
             .collect(),
         costs: ResearchCosts {
             maker_fee_bps: 1.,

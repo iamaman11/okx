@@ -285,6 +285,7 @@ impl AnalyticsService {
             strategy.as_str(),
             "ema_cross_v1"
                 | "ema_momentum_confirm_v1"
+                | okx_analysis::operators::BREAKOUT_STRATEGY_ID
                 | "no_trade"
                 | "close_momentum"
                 | "two_bar_momentum"
@@ -319,13 +320,7 @@ impl AnalyticsService {
         }
         let variants = variants
             .into_iter()
-            .map(|p| {
-                okx_analysis::operators::EmaParameters {
-                    fast: p.fast,
-                    slow: p.slow,
-                }
-                .validate()
-            })
+            .map(|p| p.warmup_for(&strategy).map(|_| p))
             .collect::<Result<Vec<_>, _>>()?;
         let first = *variants.first().ok_or("EMPTY_VARIANTS")?;
         let mechanics = if instruments[0].ends_with("-SWAP") {
@@ -409,7 +404,7 @@ impl AnalyticsService {
                     // Persist the exact inputs and selection policy before any
                     // replay. This is immutable artifact metadata, not another
                     // job catalog, and its ID comes from the existing store.
-                    let policy = if is_grid { Some(replay::grid_policy(bars.len(), &variants)?) } else { None };
+                    let policy = if is_grid { Some(replay::grid_policy(bars.len(), &spec.strategy_id, &variants)?) } else { None };
                     let experiment = store.publish_evidence(&json!({
                         "schema":"okx.research.experiment-inputs/v1",
                         "dataset_artifact":dataset,"instrument":instruments[0],
@@ -420,7 +415,7 @@ impl AnalyticsService {
                         "variants":variants,"selection_policy":policy,
                         "result_role":"counterfactual_research_only"
                     })).map_err(|e|e.to_string())?.0;
-                    let(result,grid)=if is_grid{let g=replay::grid_with_observer(&bars,&spec,&variants,&cancelled,&|value|{if let Some((tracker,index))=&observation {tracker.observe(*index,value)}})?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":spec.seed,"strategy_id":spec.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.slow,bars.len(),&cancelled)?,None)};
+                    let(result,grid)=if is_grid{let g=replay::grid_with_observer(&bars,&spec,&variants,&cancelled,&|value|{if let Some((tracker,index))=&observation {tracker.observe(*index,value)}})?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":spec.seed,"strategy_id":spec.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.warmup_for(&spec.strategy_id)?,bars.len(),&cancelled)?,None)};
                     publish_replay(&store,&result,&dataset,grid,Some(&experiment),producer.as_ref(),&cancelled)
                 }).await?;
         Ok::<_, String>(artifact)

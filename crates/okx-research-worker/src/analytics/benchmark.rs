@@ -6,7 +6,7 @@ use std::{
 };
 
 use futures_util::{StreamExt, stream};
-use okx_analysis::operators::EmaParameters;
+use okx_analysis::operators::{EmaParameters, StrategyParameters};
 use okx_research::{
     ResearchArtifactStore,
     strategy_registry::{self as replay, Bar, Costs, Mechanics, ReplaySpec},
@@ -69,15 +69,18 @@ pub(super) async fn run(
     let sources = Arc::new(sources);
     let variants = Arc::new(
         (0..VARIANTS)
-            .map(|i| EmaParameters {
-                fast: 2 + i % 16,
-                slow: 40 + i,
+            .map(|i| {
+                EmaParameters {
+                    fast: 2 + i % 16,
+                    slow: 40 + i,
+                }
+                .into()
             })
             .collect::<Vec<_>>(),
     );
     let spec = Arc::new(ReplaySpec {
         strategy_id: "ema_cross_v1".into(),
-        parameters: EmaParameters { fast: 20, slow: 50 },
+        parameters: EmaParameters { fast: 20, slow: 50 }.into(),
         mechanics: Mechanics::Linear {
             contract_multiplier: 0.01,
         },
@@ -204,7 +207,7 @@ pub(super) async fn run(
 async fn run_grid(
     cpu: &CpuExecutor,
     sources: &Arc<Vec<Arc<Vec<Bar>>>>,
-    variants: &Arc<Vec<EmaParameters>>,
+    variants: &Arc<Vec<StrategyParameters>>,
     spec: &Arc<ReplaySpec>,
     cancel: Arc<super::executor::Cancel>,
     workers: usize,

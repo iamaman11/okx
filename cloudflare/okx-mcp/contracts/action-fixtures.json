@@ -1986,6 +1986,347 @@
   },
   {
     "tool": "research",
+    "action": "backtest_breakout",
+    "positive": {
+      "action": "backtest",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "close_breakout_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "parameters": {
+        "lookback": 20
+      }
+    },
+    "negative": [
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "lookback": 1
+        }
+      },
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "lookback": 1001
+        }
+      },
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 9,
+          "slow": 21
+        }
+      },
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "lookback": 20
+        }
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "grid_breakout",
+    "positive": {
+      "action": "grid",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "close_breakout_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "variants": [
+        {
+          "lookback": 20
+        }
+      ]
+    },
+    "negative": [
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "lookback": 1
+          }
+        ]
+      },
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "lookback": 1001
+          }
+        ]
+      },
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 9,
+            "slow": 21
+          }
+        ]
+      },
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "lookback": 20
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "validate_breakout",
+    "positive": {
+      "action": "validate",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "close_breakout_v1",
+      "parameters": {
+        "lookback": 20
+      },
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "counterfactual"
+    },
+    "negative": [
+      {
+        "action": "validate",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "parameters": {
+          "lookback": 1
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual"
+      },
+      {
+        "action": "validate",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "parameters": {
+          "lookback": 1001
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual"
+      },
+      {
+        "action": "validate",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "parameters": {
+          "fast": 9,
+          "slow": 21
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual"
+      },
+      {
+        "action": "validate",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "parameters": {
+          "lookback": 20
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual"
+      }
+    ]
+  },
+  {
+    "tool": "research",
     "action": "backtest_period_bounds",
     "positive": {
       "action": "backtest",

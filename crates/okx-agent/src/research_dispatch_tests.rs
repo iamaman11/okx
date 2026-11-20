@@ -91,7 +91,7 @@ pub(super) fn grid(key: &str) -> ResearchRequest {
         end_ms: 12_000_000,
         strategy_id: "ema_cross_v1".into(),
         variants: (3..67)
-            .map(|slow| EmaParameters { fast: 2, slow })
+            .map(|slow| EmaParameters { fast: 2, slow }.into())
             .collect(),
         costs: costs(),
         data_mode: ResearchDataMode::Counterfactual,
@@ -207,7 +207,7 @@ async fn real_worker_decision_replay_and_scope_are_durable_without_source_reads(
         start_ms: 0,
         end_ms: 12_000_000,
         strategy_id: "ema_cross_v1".into(),
-        parameters: EmaParameters { fast: 2, slow: 3 },
+        parameters: EmaParameters { fast: 2, slow: 3 }.into(),
         costs: costs(),
         data_mode: ResearchDataMode::Counterfactual,
         seed: 7,

@@ -197,6 +197,20 @@ for(const action of ['backtest','grid','validate']){
 
 for(const action of ['backtest','grid','validate']){
  const base=payloadFixtures.find(x=>x.tool==='research'&&x.action===action)!.positive;
+ const withLookback=(lookback:number)=>action==='grid'
+   ?{...base,strategy_id:'close_breakout_v1',variants:[{lookback}]}
+   :{...base,strategy_id:'close_breakout_v1',parameters:{lookback}};
+ const positive=withLookback(20);
+ const wrongType=action==='grid'?{...positive,variants:[{fast:9,slow:21}]}:{...positive,parameters:{fast:9,slow:21}};
+ const mismatch=action==='grid'?{...base,variants:[{lookback:20}]}:{...base,parameters:{lookback:20}};
+ const invalid=[withLookback(1),withLookback(1001),wrongType,mismatch];
+ fail(validTool('research',positive),`research ${action} accepts own breakout parameters`);
+ for(const bad of invalid)fail(!validTool('research',bad),`research ${action} rejects malformed or mismatched breakout`);
+ payloadFixtures.push({tool:'research',action:action+'_breakout',positive,negative:invalid});
+}
+
+for(const action of ['backtest','grid','validate']){
+ const base=payloadFixtures.find(x=>x.tool==='research'&&x.action===action)!.positive;
  const withPeriods=(fast:number,slow:number)=>action==='grid'?{...base,variants:[{fast,slow}]}:{...base,parameters:{fast,slow}};
  const positive=withPeriods(999,1000),negative=[withPeriods(999,1001),withPeriods(1000,1000)];
  fail(validTool('research',positive),`research ${action} maximum supported periods`);

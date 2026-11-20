@@ -43,7 +43,7 @@ fn job(key: &str) -> ResearchRequest {
         start_ms: 0,
         end_ms: 12_000_000,
         strategy_id: "ema_cross_v1".into(),
-        parameters: EmaParameters { fast: 2, slow: 3 },
+        parameters: EmaParameters { fast: 2, slow: 3 }.into(),
         costs: ResearchCosts {
             maker_fee_bps: 1.0,
             taker_fee_bps: 2.0,

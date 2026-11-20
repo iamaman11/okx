@@ -1068,46 +1068,12 @@
                 "maximum": 9007199254740991
               },
               "parameters": {
-                "type": "object",
-                "properties": {
-                  "fast": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 999
-                  },
-                  "slow": {
-                    "type": "integer",
-                    "minimum": 2,
-                    "maximum": 1000
-                  }
-                },
-                "required": [
-                  "fast",
-                  "slow"
-                ],
-                "additionalProperties": false
+                "$ref": "#/$defs/q"
               },
               "variants": {
                 "type": "array",
                 "items": {
-                  "type": "object",
-                  "properties": {
-                    "fast": {
-                      "type": "integer",
-                      "minimum": 1,
-                      "maximum": 999
-                    },
-                    "slow": {
-                      "type": "integer",
-                      "minimum": 2,
-                      "maximum": 1000
-                    }
-                  },
-                  "required": [
-                    "fast",
-                    "slow"
-                  ],
-                  "additionalProperties": false
+                  "$ref": "#/$defs/q"
                 },
                 "maxItems": 64,
                 "uniqueItems": true
@@ -1306,24 +1272,7 @@
                 "$ref": "#/$defs/r"
               },
               "parameters": {
-                "type": "object",
-                "properties": {
-                  "fast": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 999
-                  },
-                  "slow": {
-                    "type": "integer",
-                    "minimum": 2,
-                    "maximum": 1000
-                  }
-                },
-                "required": [
-                  "fast",
-                  "slow"
-                ],
-                "additionalProperties": false
+                "$ref": "#/$defs/q"
               },
               "costs": {
                 "type": "object",
@@ -1412,7 +1361,46 @@
           "r": {
             "enum": [
               "ema_cross_v1",
-              "ema_momentum_confirm_v1"
+              "ema_momentum_confirm_v1",
+              "close_breakout_v1"
+            ]
+          },
+          "q": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "fast": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 999
+                  },
+                  "slow": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 1000
+                  }
+                },
+                "required": [
+                  "fast",
+                  "slow"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "lookback": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 1000
+                  }
+                },
+                "required": [
+                  "lookback"
+                ],
+                "additionalProperties": false
+              }
             ]
           }
         }

@@ -639,7 +639,7 @@ mod extension_tests {
             start_ms: 0,
             end_ms: 1200000,
             strategy_id: "ema_momentum_confirm_v1".into(),
-            parameters: EmaParameters { fast: 1, slow: 2 },
+            parameters: EmaParameters { fast: 1, slow: 2 }.into(),
             costs: ResearchCosts {
                 maker_fee_bps: 0.,
                 taker_fee_bps: 0.,

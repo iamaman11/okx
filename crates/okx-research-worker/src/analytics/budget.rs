@@ -81,9 +81,12 @@ mod tests {
             end_ms: 60_000 * (bars + 1),
             strategy_id: "ema_cross_v1".into(),
             variants: (0..variants)
-                .map(|i| EmaParameters {
-                    fast: 2 + i,
-                    slow: 90 + i,
+                .map(|i| {
+                    EmaParameters {
+                        fast: 2 + i,
+                        slow: 90 + i,
+                    }
+                    .into()
                 })
                 .collect(),
             costs: ResearchCosts {
@@ -113,6 +116,61 @@ mod tests {
             "LIMIT_EXCEEDED:RESEARCH_BARS"
         );
         let request = job(8, 125_000, 65);
+        assert_eq!(
+            estimated_mib(&request).unwrap_err(),
+            "LIMIT_EXCEEDED:RESEARCH_REQUEST"
+        );
+    }
+    #[test]
+    fn t10_breakout_grid_reuses_existing_pre_source_resource_fences() {
+        let mut request = job(8, 125_000, 64);
+        if let ResearchRequest::Grid {
+            strategy_id,
+            variants,
+            ..
+        } = &mut request
+        {
+            *strategy_id = "close_breakout_v1".into();
+            *variants = (2..66)
+                .map(|lookback| BreakoutParameters { lookback }.into())
+                .collect();
+        }
+        assert!(request.valid());
+        let admitted_mib = estimated_mib(&request).unwrap();
+        assert!(admitted_mib <= MEMORY_TOTAL_MIB);
+
+        if let ResearchRequest::Grid { end_ms, .. } = &mut request {
+            *end_ms += 60_000;
+        }
+        assert!(!request.valid());
+        assert_eq!(
+            estimated_mib(&request).unwrap_err(),
+            "LIMIT_EXCEEDED:RESEARCH_BARS"
+        );
+        if let ResearchRequest::Grid {
+            end_ms,
+            instruments,
+            ..
+        } = &mut request
+        {
+            *end_ms -= 60_000;
+            instruments.push("TEST-8".into());
+        }
+        assert!(!request.valid());
+        assert_eq!(
+            estimated_mib(&request).unwrap_err(),
+            "LIMIT_EXCEEDED:RESEARCH_REQUEST"
+        );
+        if let ResearchRequest::Grid {
+            instruments,
+            variants,
+            ..
+        } = &mut request
+        {
+            instruments.pop();
+            variants.push(BreakoutParameters { lookback: 66 }.into());
+        }
+        assert!(!request.valid());
         assert_eq!(
             estimated_mib(&request).unwrap_err(),
             "LIMIT_EXCEEDED:RESEARCH_REQUEST"

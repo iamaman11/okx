@@ -149,7 +149,7 @@ mod heavy_fixtures {
         );
         let spec = ReplaySpec {
             strategy_id: "ema_cross_v1".into(),
-            parameters: EmaParameters { fast: 10, slow: 30 },
+            parameters: EmaParameters { fast: 10, slow: 30 }.into(),
             mechanics: Mechanics::Spot,
             costs: Costs {
                 maker_fee_bps: 0.0,
@@ -166,9 +166,12 @@ mod heavy_fixtures {
             take_profit_fraction: None,
         };
         let variants = (0..64)
-            .map(|i| EmaParameters {
-                fast: i + 1,
-                slow: i + 101,
+            .map(|i| {
+                EmaParameters {
+                    fast: i + 1,
+                    slow: i + 101,
+                }
+                .into()
             })
             .collect::<Vec<_>>();
         let mut stop_times = Vec::new();
