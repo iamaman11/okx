@@ -333,13 +333,11 @@ impl AnalyticsService {
             if reference.instrument.contract_type.as_deref() != Some("linear") {
                 return Err("UNSUPPORTED_INVERSE_CONTRACT".into());
             }
-            let multiplier = reference
-                .instrument
-                .contract_value
-                .as_deref()
-                .ok_or("CONTRACT_MULTIPLIER_MISSING")?
-                .parse::<f64>()
-                .map_err(|e| e.to_string())?;
+            let multiplier = okx_research::economics::LinearContract::from_reference(
+                &instruments[0],
+                reference.instrument.contract_type.as_deref(),
+                reference.instrument.contract_value.as_deref(),
+            )?.multiplier_f64()?;
             Mechanics::Linear {
                 contract_multiplier: multiplier,
             }

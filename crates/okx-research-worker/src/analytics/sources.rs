@@ -577,6 +577,7 @@ mod extension_tests {
                                 period: None,
                                 threshold: None,
                                 when: None,
+                                other: None,
                             },
                             okx_analysis::query_plan::SeriesStep {
                                 id: "w1".into(),
@@ -585,6 +586,7 @@ mod extension_tests {
                                 period: Some(2),
                                 threshold: None,
                                 when: None,
+                                other: None,
                             },
                         ],
                         result_steps: vec!["w1".into()],

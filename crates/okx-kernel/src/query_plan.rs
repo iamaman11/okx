@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const QUERY_PLAN_VERSION: &str = "okx.query-plan/448.1";
 pub const COMPOSITION_VERSION: &str = "okx.market.composition/v1";
+const MAX_COMPOSITION_WORK_UNITS: u64 = 64_000_000;
 
 /// A bounded sequence of typed series operations, evaluated by the existing
 /// market worker. No general-purpose expressions, I/O or financial effects.
@@ -24,7 +25,7 @@ pub struct CompositionRequest {
 pub struct SeriesStep {
     pub id: String,
     pub op: SeriesOp,
-    /// "close" is the only source in v1; every other name is a prior step ID.
+    /// "close" (price) and "open_interest" (contracts) are sources; all other names refer to prior steps.
     pub input: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub period: Option<u16>,
@@ -33,6 +34,9 @@ pub struct SeriesStep {
     /// Only a prior rising_edge event may condition a future outcome label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
+    /// Second prior series, supported only for dimensionless add_series.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +46,7 @@ pub enum SeriesOp {
     RollingMean,
     RollingMax,
     RollingMin,
+    AddSeries,
     Lag,
     GreaterThan,
     RisingEdge,
@@ -82,6 +87,7 @@ impl CheckedComposition {
         }
         let mut known = BTreeMap::<String, (Unit, u8)>::new();
         let mut steps = Vec::with_capacity(request.steps.len());
+        let mut estimated_work = 0u64;
         for (idx, step) in request.steps.into_iter().enumerate() {
             let path = format!("composition.steps[{idx}]");
             if step.id.is_empty()
@@ -93,20 +99,34 @@ impl CheckedComposition {
             {
                 return Err(format!("{path}.id:INVALID"));
             }
-            if step.id == "close" || known.contains_key(&step.id) {
+            if matches!(step.id.as_str(), "close" | "open_interest") || known.contains_key(&step.id) {
                 return Err(format!("{path}.id:DUPLICATE"));
             }
-            let (input_unit, parent_depth) = if step.input == "close" {
-                (Unit::Price, 0)
-            } else {
-                known
-                    .get(&step.input)
-                    .copied()
-                    .ok_or_else(|| format!("{path}.input:UNKNOWN_OR_FORWARD_STEP:{}", step.input))?
+            let (input_unit, parent_depth) = match step.input.as_str() {
+                "close" => (Unit::Price, 0),
+                "open_interest" => (Unit::Contracts, 0),
+                _ => known.get(&step.input).copied().ok_or_else(|| {
+                    format!("{path}.input:UNKNOWN_OR_FORWARD_STEP:{}", step.input)
+                })?,
             };
             if step.when.is_some() && step.op != SeriesOp::ForwardReturnLabel {
                 return Err(format!("{path}.when:UNEXPECTED"));
             }
+            if step.other.is_some() && step.op != SeriesOp::AddSeries {
+                return Err(format!("{path}.other:UNEXPECTED"));
+            }
+            let other = if step.op == SeriesOp::AddSeries {
+                let name = step.other.as_deref().ok_or_else(|| format!("{path}.other:REQUIRED"))?;
+                Some(match name {
+                    "close" => (Unit::Price, 0),
+                    "open_interest" => (Unit::Contracts, 0),
+                    _ => known.get(name).copied().ok_or_else(|| {
+                        format!("{path}.other:UNKNOWN_OR_FORWARD_STEP:{name}")
+                    })?,
+                })
+            } else {
+                None
+            };
             let condition_depth = if let Some(id) = &step.when {
                 let (unit, depth) = known
                     .get(id)
@@ -122,13 +142,35 @@ impl CheckedComposition {
             } else {
                 0
             };
-            let depth = parent_depth.max(condition_depth) + 1;
+            let depth = parent_depth.max(condition_depth).max(other.map_or(0, |(_, d)| d)) + 1;
             if depth > 8 {
                 return Err(format!("{path}:DEPTH_LIMIT"));
             }
             let output_unit = match step.op {
+                SeriesOp::AddSeries => {
+                    if input_unit != Unit::Ratio {
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=ratio:actual={}",
+                            composition_unit_name(input_unit)
+                        ));
+                    }
+                    let unit = other.expect("validated second input").0;
+                    if unit != Unit::Ratio {
+                        return Err(format!(
+                            "{path}.other:UNIT_MISMATCH:expected=ratio:actual={}",
+                            composition_unit_name(unit)
+                        ));
+                    }
+                    if step.period.is_some() {
+                        return Err(format!("{path}.period:UNEXPECTED"));
+                    }
+                    if step.threshold.is_some() {
+                        return Err(format!("{path}.threshold:UNEXPECTED"));
+                    }
+                    Unit::Ratio
+                }
                 SeriesOp::ReturnsSeries => {
-                    if input_unit != Unit::Price {
+                    if !matches!(input_unit, Unit::Price | Unit::Contracts) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=price:actual={}",
                             composition_unit_name(input_unit)
@@ -146,7 +188,7 @@ impl CheckedComposition {
                 | SeriesOp::RollingMax
                 | SeriesOp::RollingMin
                 | SeriesOp::Lag => {
-                    let numeric = matches!(input_unit, Unit::Price | Unit::Ratio);
+                    let numeric = matches!(input_unit, Unit::Price | Unit::Ratio | Unit::Contracts);
                     let lagged_discrete = step.op == SeriesOp::Lag
                         && matches!(input_unit, Unit::Boolean | Unit::Event);
                     if !(numeric || lagged_discrete) {
@@ -214,6 +256,19 @@ impl CheckedComposition {
                     Unit::OutcomeRatio
                 }
             };
+            let cost_per_bar = if step.op == SeriesOp::RollingMean {
+                step.period.expect("validated mean period") as u64
+            } else if step.op == SeriesOp::AddSeries {
+                2
+            } else {
+                1
+            };
+            estimated_work = estimated_work
+                .checked_add(total_bars.checked_mul(cost_per_bar).ok_or("composition:WORK_OVERFLOW")?)
+                .ok_or("composition:WORK_OVERFLOW")?;
+            if estimated_work > MAX_COMPOSITION_WORK_UNITS {
+                return Err("composition:WORK_LIMIT".into());
+            }
             known.insert(step.id.clone(), (output_unit, depth));
             steps.push(CheckedSeriesStep {
                 step,
@@ -226,6 +281,12 @@ impl CheckedComposition {
             if !known.contains_key(id) || !unique_outputs.insert(id) {
                 return Err(format!("composition.result_steps[{idx}]:INVALID_REFERENCE"));
             }
+        }
+        if steps.iter().any(|s| s.step.input == "open_interest")
+            && total_bars.checked_mul(steps.len() as u64 + 2)
+                .is_none_or(|cells| cells > 8_000_000)
+        {
+            return Err("composition:SOURCE_CELLS_LIMIT".into());
         }
         Ok(Self {
             version: request.version,
@@ -245,14 +306,45 @@ impl CheckedComposition {
     /// Causal outputs at index `at` must be invariant under changes after `at`.
     /// Outcome labels are explicitly non-causal and may use later bars.
     pub fn evaluate_at(&self, close: &[f64], at: usize) -> BTreeMap<String, (Option<f64>, Unit)> {
+        self.evaluate_at_sources(close, None, at)
+    }
+
+    pub fn evaluate_with_open_interest(
+        &self,
+        close: &[f64],
+        open_interest: &[Option<f64>],
+    ) -> Result<BTreeMap<String, (Option<f64>, Unit)>, String> {
+        if close.len() != open_interest.len() {
+            return Err("composition.sources:ALIGNMENT_LENGTH_MISMATCH".into());
+        }
+        if open_interest.iter().flatten().any(|value| !value.is_finite() || *value < 0.0) {
+            return Err("composition.sources.open_interest:INVALID_CONTRACT_COUNT".into());
+        }
+        Ok(self.evaluate_at_sources(close, Some(open_interest), close.len().saturating_sub(1)))
+    }
+
+    fn evaluate_at_sources(
+        &self,
+        close: &[f64],
+        open_interest: Option<&[Option<f64>]>,
+        at: usize,
+    ) -> BTreeMap<String, (Option<f64>, Unit)> {
         let mut values = BTreeMap::<String, Vec<Option<f64>>>::new();
+        values.insert("close".into(), close.iter().map(|v| v.is_finite().then_some(*v)).collect());
+        if self.steps.iter().any(|step| step.step.input == "open_interest") {
+            values.insert("open_interest".into(), open_interest
+                .map(|source| source.to_vec()).unwrap_or_else(|| vec![None; close.len()]));
+        }
         for checked in &self.steps {
-            let input = if checked.step.input == "close" {
-                close.iter().map(|v| v.is_finite().then_some(*v)).collect()
-            } else {
-                values[&checked.step.input].clone()
-            };
+            let input = values[&checked.step.input].clone();
             let output = match checked.step.op {
+                SeriesOp::AddSeries => {
+                    let other = &values[checked.step.other.as_ref().expect("validated second input")];
+                    input.iter().zip(other).map(|(left, right)| match (left, right) {
+                        (Some(a), Some(b)) => (a + b).is_finite().then_some(a + b),
+                        _ => None,
+                    }).collect()
+                }
                 SeriesOp::ReturnsSeries => {
                     let mut result = vec![None; input.len()];
                     for i in 1..input.len() {
@@ -345,6 +437,27 @@ impl CheckedComposition {
             })
             .collect()
     }
+
+    pub fn result_sources(&self) -> BTreeMap<String, BTreeSet<Source>> {
+        let mut known = BTreeMap::<String, BTreeSet<Source>>::new();
+        known.insert("close".into(), BTreeSet::from([Source::Candles]));
+        known.insert("open_interest".into(), BTreeSet::from([Source::OpenInterest]));
+        for checked in &self.steps {
+            let mut sources = known[&checked.step.input].clone();
+            if let Some(condition) = &checked.step.when {
+                sources.extend(known[condition].iter().copied());
+            }
+            if let Some(other) = &checked.step.other {
+                sources.extend(known[other].iter().copied());
+            }
+            known.insert(checked.step.id.clone(), sources);
+        }
+        self.result_steps.iter().map(|id| (id.clone(), known[id].clone())).collect()
+    }
+
+    pub fn sources(&self) -> BTreeSet<Source> {
+        self.result_sources().into_values().flatten().collect()
+    }
 }
 
 /// Causal, closed-bar window extrema in O(bars) time and O(period) memory.
@@ -397,6 +510,7 @@ pub enum Source {
 #[serde(rename_all = "snake_case")]
 pub enum Unit {
     Price,
+    Contracts,
     Ratio,
     Boolean,
     Event,
@@ -411,6 +525,7 @@ pub enum Unit {
 fn composition_unit_name(unit: Unit) -> &'static str {
     match unit {
         Unit::Price => "price",
+        Unit::Contracts => "contracts",
         Unit::Ratio => "ratio",
         Unit::Boolean => "boolean",
         Unit::Event => "event",
@@ -476,7 +591,7 @@ pub fn input(name: &str) -> Result<Input, String> {
         "volume" => (Source::Candles, Unit::Quantity),
         "bid" | "ask" => (Source::Ticker, Unit::Price),
         "funding" => (Source::Funding, Unit::Ratio),
-        "open_interest" => (Source::OpenInterest, Unit::Quantity),
+        "open_interest" => (Source::OpenInterest, Unit::Contracts),
         "budget" | "notional" => (Source::Request, Unit::QuoteCurrency),
         "price" => (Source::Request, Unit::Price),
         "stop_distance" => (Source::Request, Unit::Ratio),
@@ -608,14 +723,14 @@ impl QueryPlan {
 
     pub fn with_composition(mut self, request: Option<CompositionRequest>) -> Result<Self, String> {
         if let Some(request) = request {
-            self.composition = Some(CheckedComposition::compile(
-                request,
-                self.range.expected_bars,
-            )?);
-            if !self.sources.contains(&Source::Candles) {
-                self.sources.push(Source::Candles);
-                self.sources.sort();
+            let checked = CheckedComposition::compile(request, self.range.expected_bars)?;
+            for source in checked.sources() {
+                if !self.sources.contains(&source) {
+                    self.sources.push(source);
+                }
             }
+            self.sources.sort();
+            self.composition = Some(checked);
         }
         Ok(self)
     }
@@ -635,6 +750,7 @@ mod tests {
                     period: None,
                     threshold: None,
                     when: None,
+                other: None,
                 },
                 SeriesStep {
                     id: "w1".into(),
@@ -643,6 +759,7 @@ mod tests {
                     period: Some(2),
                     threshold: None,
                     when: None,
+                other: None,
                 },
             ],
             result_steps: vec!["w1".into()],
@@ -684,6 +801,7 @@ mod tests {
             period: Some(3),
             threshold: None,
             when: None,
+        other: None,
         });
         spec.result_steps.push("w2".into());
         let checked = CheckedComposition::compile(spec.clone(), 20).unwrap();
@@ -745,6 +863,7 @@ mod tests {
                     period: Some(1),
                     threshold: None,
                     when: None,
+                other: None,
                 })
                 .collect(),
             result_steps: vec!["w0".into()],
@@ -802,6 +921,7 @@ mod tests {
             period,
             threshold,
             when: when.map(str::to_owned),
+            other: None,
         };
         CompositionRequest {
             version: COMPOSITION_VERSION.into(),
@@ -909,6 +1029,7 @@ mod tests {
             period: None,
             threshold: Some(0.0),
             when: None,
+        other: None,
         });
         assert_eq!(
             CheckedComposition::compile(leakage.clone(), 7).unwrap_err(),
@@ -1155,5 +1276,57 @@ mod t15_causal_window_extrema {
             checked(request),
             "composition.steps[0].threshold:UNEXPECTED"
         );
+    }
+}
+
+#[cfg(test)]
+mod t02_t06_multisource_regression {
+    use super::*;
+
+    #[test]
+    fn t02_contract_count_and_type_checked_source_dependencies() {
+        assert_eq!(input("open_interest").unwrap().unit, Unit::Contracts);
+        let request: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":"okx.market.composition/v1",
+            "steps":[
+                {"id":"price_return","op":"returns_series","input":"close"},
+                {"id":"oi_return","op":"returns_series","input":"open_interest"},
+                {"id":"combined","op":"add_series","input":"price_return","other":"oi_return"}
+            ],
+            "result_steps":["price_return","oi_return","combined"]
+        })).unwrap();
+        let checked = CheckedComposition::compile(request.clone(), 4).unwrap();
+        assert_eq!(checked.result_sources()["combined"], BTreeSet::from([
+            Source::Candles, Source::OpenInterest,
+        ]));
+        assert_eq!(checked.result_sources()["oi_return"], BTreeSet::from([Source::OpenInterest]));
+        let close = [100.0, 105.0, 110.0, 100.0];
+        let oi = [Some(10.0), Some(12.0), None, Some(12.0)];
+        let at_one = checked.evaluate_with_open_interest(&close[..2], &oi[..2]).unwrap();
+        assert!((at_one["combined"].0.unwrap() - 0.25).abs() < 1e-12);
+        assert!(checked.evaluate_with_open_interest(&close, &oi).unwrap()["combined"].0.is_none());
+        assert_eq!(checked.evaluate_with_open_interest(&close, &oi[..3]).unwrap_err(),
+            "composition.sources:ALIGNMENT_LENGTH_MISMATCH");
+        let mut invalid = request.clone();
+        invalid.steps[2].other = Some("close".into());
+        assert_eq!(CheckedComposition::compile(invalid, 4).unwrap_err(),
+            "composition.steps[2].other:UNIT_MISMATCH:expected=ratio:actual=price");
+        let mut forward = request;
+        forward.steps[2].other = Some("future".into());
+        assert!(CheckedComposition::compile(forward, 4).unwrap_err()
+            .contains("other:UNKNOWN_OR_FORWARD_STEP"));
+    }
+
+    #[test]
+    fn t10_mean_work_cost_is_bounded_before_source_io() {
+        let mut request: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":"okx.market.composition/v1",
+            "steps":[{"id":"window","op":"rolling_mean","input":"close","period":1000}],
+            "result_steps":["window"]
+        })).unwrap();
+        assert_eq!(CheckedComposition::compile(request.clone(), 1_000_000).unwrap_err(),
+            "composition:WORK_LIMIT");
+        request.steps[0].op = SeriesOp::RollingMax;
+        assert!(CheckedComposition::compile(request, 1_000_000).is_ok());
     }
 }

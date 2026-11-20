@@ -48,6 +48,9 @@ impl AnalyticsService {
         }
         // K7 source, type and range validation precedes every venue read.
         let query_plan = planner::AnalysisPlan::compile_market(&request)?;
+        let oi_composition = query_plan.composition.as_ref().is_some_and(|plan| {
+            plan.sources().contains(&okx_analysis::query_plan::Source::OpenInterest)
+        });
         let window = query_plan.range;
         let closed_end = jiff::Timestamp::now().as_millisecond().max(0) as u64
             / request.timeframe_ms
@@ -63,6 +66,9 @@ impl AnalyticsService {
         if let Some(names) = resolved_instruments {
             compute_request.instruments = names;
             compute_request.universe = None;
+        }
+        if oi_composition && compute_request.instruments.iter().any(|id| !id.ends_with("-SWAP")) {
+            return Err("composition.sources.open_interest:UNSUPPORTED_PRODUCT".into());
         }
         let mut hash_request = request.clone();
         // A page selector is not a separate computation.
@@ -91,6 +97,7 @@ impl AnalyticsService {
             .fields
             .iter()
             .any(|f| matches!(f.as_str(), "spread_bps" | "oi_change"))
+            || oi_composition
         {
             jiff::Timestamp::now().as_millisecond() / 1000
         } else if request.end_ms > jiff::Timestamp::now().as_millisecond().max(0) as u64 {
@@ -99,7 +106,11 @@ impl AnalyticsService {
             0
         };
         let hash = okx_research::canonical_sha256(&(
-            market_job_schema(&hash_request.fields),
+            if oi_composition {
+                "market/448.5.oi-composition-v1"
+            } else {
+                market_job_schema(&hash_request.fields)
+            },
             &hash_request,
             &universe_page,
             bucket,
@@ -303,16 +314,19 @@ impl AnalyticsService {
             "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
             "operators":operators,
             "composition":{"version":okx_analysis::query_plan::COMPOSITION_VERSION,
-                "available_for":"screen","input_sources":["close"],
-                "operations":[{"op":"returns_series","input_unit":"price","output_unit":"ratio"},
-                    {"op":"rolling_mean","input_unit":"price_or_ratio","output_unit":"same_as_input","period_min":1,"period_max":1000},
-                    {"op":"rolling_max","input_unit":"price_or_ratio","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
-                    {"op":"rolling_min","input_unit":"price_or_ratio","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
+                "available_for":"screen","input_sources":["close","open_interest"],
+                "source_units":{"close":"price","open_interest":"contracts"},
+                "open_interest_policy":"exact_timestamps_no_forward_fill_publication_time_unverified",
+                "operations":[{"op":"returns_series","input_unit":"price_or_contracts","output_unit":"ratio"},
+                    {"op":"rolling_mean","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000},
+                    {"op":"rolling_max","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
+                    {"op":"rolling_min","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
+                    {"op":"add_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing"},
                     {"op":"lag","input_unit":"causal_series","output_unit":"same_as_input","period_min":1,"period_max":1000},
                     {"op":"greater_than","input_unit":"price_or_ratio","output_unit":"boolean","requires":"finite_threshold"},
                     {"op":"rising_edge","input_unit":"boolean","output_unit":"event","trigger":"false_to_true"},
                     {"op":"forward_return_label","input_unit":"price","output_unit":"outcome_ratio","requires":"prior_event_step_in_when","period_min":1,"period_max":1000,"causal_feature":false}],
-                "limits":{"max_steps":32,"max_depth":8,"max_result_steps":14,"max_cells":8000000},
+                "limits":{"max_steps":32,"max_depth":8,"max_result_steps":14,"max_cells":8000000,"max_work_units":64000000},
                 "result_projection":"last_closed_observation","outcome_policy":"unconfirmed_without_future_bars_never_a_signal"},
             "limits":{"max_explicit_instruments":100,"max_page_rows":50,
                 "max_correlation_instruments":8,"max_candles_total":1000000},
@@ -332,14 +346,13 @@ impl AnalyticsService {
         global_rank: bool,
         plan: okx_analysis::query_plan::QueryPlan,
     ) -> Result<(Vec<Value>, Option<Value>), String> {
-        let need_candles = plan
-            .sources
-            .contains(&okx_analysis::query_plan::Source::Candles);
+        let need_candles = plan.sources.contains(&okx_analysis::query_plan::Source::Candles);
+        let need_oi = plan.sources.contains(&okx_analysis::query_plan::Source::OpenInterest);
         let count = (request.end_ms - request.start_ms) / request.timeframe_ms;
         let total_bars = count
             .checked_mul(request.instruments.len() as u64)
             .ok_or("LIMIT_TOTAL_BARS:OVERFLOW")?;
-        if need_candles && total_bars > 1_000_000 {
+        if (need_candles || need_oi) && total_bars > 1_000_000 {
             return Err("LIMIT_TOTAL_BARS:1000000".into());
         }
         if plan.composition.as_ref().is_some_and(|composition| {
@@ -389,7 +402,7 @@ impl AnalyticsService {
                 } else {
                     None
                 };
-                let oi = if fields.iter().any(|f| f == "oi_change") {
+                let oi = if need_oi {
                     let _p = sources.cache.permit().await;
                     Some(
                         async {
@@ -565,10 +578,9 @@ fn compute_row(
             okx_analysis::query_plan::CheckedComposition::compile(*c, count)
         })
         .transpose()?;
-    let needs_candles = checked.is_some()
+    let needs_candles = checked.as_ref().is_some_and(|plan| plan.sources().contains(&okx_analysis::query_plan::Source::Candles))
         || planner::AnalysisPlan::build(&request.fields, request.start_ms, request.end_ms)?
-            .sources
-            .contains("candles");
+            .sources.contains("candles");
     compute_row_checked(row, request, peer, checked.as_ref(), needs_candles)
 }
 fn compute_row_checked(
@@ -635,7 +647,8 @@ fn compute_row_checked(
             .ok()
             .map(|range| range.coverage(points.iter().map(|(time, _)| *time)))
         });
-    if request.fields.iter().any(|field| field == "oi_change") {
+    let composition_oi = composition.is_some_and(|plan| plan.sources().contains(&okx_analysis::query_plan::Source::OpenInterest));
+    if request.fields.iter().any(|field| field == "oi_change") || composition_oi {
         if let Some(Err(_)) = &row.oi {
             gaps.push("OI_SOURCE_UNAVAILABLE".into());
         } else if oi_coverage
@@ -643,6 +656,9 @@ fn compute_row_checked(
             .is_none_or(|coverage| !coverage.complete)
         {
             gaps.push("OI_RANGE_INCOMPLETE_OR_GAPPED".into());
+        }
+        if composition_oi {
+            gaps.push("OI_PUBLICATION_TIME_UNVERIFIED".into());
         }
     }
     let funding_requested = request.fields.iter().any(|field| field == "funding_sum");
@@ -772,8 +788,46 @@ fn compute_row_checked(
         units.insert(field.clone(), json!(registry(op).unit));
     }
     if let Some(composition) = composition {
-        for (id, (value, unit)) in composition.evaluate(close) {
-            let value = if incomplete_candles { None } else { value };
+        let source_dependencies = composition.result_sources();
+        let evaluated = if composition_oi {
+            let count = ((request.end_ms - request.start_ms) / request.timeframe_ms) as usize;
+            let mut prices = vec![f64::NAN; count];
+            let mut open_interest = vec![None; count];
+            for bar in bars.iter() {
+                if let Some(offset) = bar.time.checked_sub(request.start_ms)
+                    && offset % request.timeframe_ms == 0
+                    && let Some(slot) = prices.get_mut((offset / request.timeframe_ms) as usize)
+                {
+                    *slot = bar.close;
+                }
+            }
+            if let Some(Ok(points)) = &row.oi {
+                for &(time, value) in points {
+                    if let Some(offset) = time.checked_sub(request.start_ms)
+                        && offset % request.timeframe_ms == 0
+                        && let Some(slot) = open_interest.get_mut((offset / request.timeframe_ms) as usize)
+                    {
+                        *slot = Some(value);
+                    }
+                }
+            }
+            composition.evaluate_with_open_interest(&prices, &open_interest)?
+        } else {
+            composition.evaluate(close)
+        };
+        for (id, (value, unit)) in evaluated {
+            let dependencies = &source_dependencies[&id];
+            let missing_candles = incomplete_candles && dependencies.contains(&okx_analysis::query_plan::Source::Candles);
+            let missing_oi = dependencies.contains(&okx_analysis::query_plan::Source::OpenInterest)
+                && oi_coverage.as_ref().is_none_or(|coverage| !coverage.complete);
+            // Event-time alone does not prove a historical OI observation was
+            // available at decision time. Never certify an OI-derived signal.
+            let unavailable_causal_oi = dependencies.contains(&okx_analysis::query_plan::Source::OpenInterest)
+                && matches!(unit, okx_analysis::query_plan::Unit::Boolean | okx_analysis::query_plan::Unit::Event | okx_analysis::query_plan::Unit::OutcomeRatio);
+            let value = if missing_candles || missing_oi || unavailable_causal_oi { None } else { value };
+            if unavailable_causal_oi {
+                gaps.push(format!("CAUSAL_AVAILABILITY_UNVERIFIED:{id}"));
+            }
             if value.is_none() {
                 gaps.push(if unit == okx_analysis::query_plan::Unit::OutcomeRatio {
                     format!("OUTCOME_UNCONFIRMED:{id}")
@@ -790,6 +844,7 @@ fn compute_row_checked(
             metrics.insert(id.clone(), metric);
             let unit_name = match unit {
                 okx_analysis::query_plan::Unit::Price => "price",
+                okx_analysis::query_plan::Unit::Contracts => "contracts",
                 okx_analysis::query_plan::Unit::Ratio => "ratio",
                 okx_analysis::query_plan::Unit::Boolean => "boolean",
                 okx_analysis::query_plan::Unit::Event => "event",
@@ -800,10 +855,17 @@ fn compute_row_checked(
         }
     }
     let mut result = json!({"instrument":row.instrument,"metrics":metrics,"units":units,"parameters":{"ema_period":request.parameters.get("ema_period").unwrap_or(&14.0),"atr_period":request.parameters.get("atr_period").unwrap_or(&14.0),"rsi_period":request.parameters.get("rsi_period").unwrap_or(&14.0)},"source_start_ms":bars.first().map(|b|b.time),"source_end_ms":bars.last().map(|b|b.time),"unclosed_candles_excluded":row.excluded,"candle_coverage":candle_coverage,"quality":if gaps.is_empty(){"complete"}else{"partial"},"gaps":gaps});
-    if request.fields.iter().any(|field| field == "oi_change") {
+    if request.fields.iter().any(|field| field == "oi_change") || composition_oi {
         result["oi_coverage"] = json!(oi_coverage);
     }
     let mut metric_time_basis = serde_json::Map::new();
+    if let Some(composition) = composition {
+        for (id, sources) in composition.result_sources() {
+            if sources.contains(&okx_analysis::query_plan::Source::OpenInterest) {
+                metric_time_basis.insert(id, json!("oi_event_time_publication_unverified"));
+            }
+        }
+    }
     if spread_requested {
         metric_time_basis.insert("spread_bps".into(), json!("current_snapshot_unaligned"));
     }
@@ -1312,6 +1374,7 @@ mod tests {
                     period: None,
                     threshold: None,
                     when: None,
+                other: None,
                 },
                 okx_analysis::query_plan::SeriesStep {
                     id: "w1".into(),
@@ -1320,6 +1383,7 @@ mod tests {
                     period: Some(2),
                     threshold: None,
                     when: None,
+                other: None,
                 },
             ],
             result_steps: vec!["w1".into()],

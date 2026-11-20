@@ -50,6 +50,21 @@ const extremaGraph={...composed,steps:[
  {id:'lower',op:'rolling_min',input:'close',period:20},
 ],result_steps:['upper','lower']};
 fail(validTool('market',{...marketScreen,composition:extremaGraph}),'typed causal extrema share one public request');
+const joinedGraph={...composed,steps:[
+ {id:'price_return',op:'returns_series',input:'close'},
+ {id:'oi_return',op:'returns_series',input:'open_interest'},
+ {id:'combined',op:'add_series',input:'price_return',other:'oi_return'},
+],result_steps:['combined']};
+fail(validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:joinedGraph}),
+ 'two dimensionless series combine in one public composition');
+for(const bad of [
+ {id:'combined',op:'add_series',input:'price_return'},
+ {id:'combined',op:'add_series',input:'price_return',other:'oi_return',period:2},
+ {id:'combined',op:'returns_series',input:'price_return',other:'oi_return'},
+]){
+ fail(!validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:{...joinedGraph,steps:[...joinedGraph.steps.slice(0,2),bad]}}),
+  'add_series rejects malformed parameters');
+}
 for(const op of ['rolling_max','rolling_min']){
  for(const bad of [{id:'upper',op,input:'close'},{id:'upper',op,input:'close',period:1001},{id:'upper',op,input:'close',period:2,threshold:3}]){
   fail(!validTool('market',{...marketScreen,composition:{...extremaGraph,steps:[bad]}}),`${op} rejects absent, excessive and unrelated parameters`);
