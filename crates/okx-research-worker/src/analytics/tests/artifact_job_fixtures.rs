@@ -339,7 +339,7 @@ async fn ordinary_market_cursors_resume_one_job_and_reject_other_queries() {
 #[tokio::test]
 async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
     let (root, s) = service();
-    for (symbol, direction) in [("BTC-USDT", 1.0), ("ETH-USDT", -1.0)] {
+    for (symbol, direction) in [("BTC-USDT", 1.0), ("ETH-USD", -1.0)] {
         let bars = (0..400)
             .map(|i| {
                 let close = 1000.0 + direction * i as f64;
@@ -373,7 +373,7 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
     }
     let request = ResearchRequest::Grid {
         idempotency_key: "two-assets-grid".into(),
-        instruments: vec!["BTC-USDT".into(), "ETH-USDT".into()],
+        instruments: vec!["BTC-USDT".into(), "ETH-USD".into()],
         timeframe_ms: 60000,
         start_ms: 0,
         end_ms: 24000000,
@@ -417,16 +417,75 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
         .await
         .unwrap();
     assert_eq!(result["total_rows"], 2);
+    // The public bounded Trades response may split two independently large
+    // grid rows at its byte cap; follow its authenticated cursor to compare
+    // both original instrument summaries without weakening that limit.
+    let mut batch_rows = result["rows"].as_array().unwrap().clone();
+    let mut next = result["next_cursor"].as_str().map(str::to_owned);
+    while let Some(cursor) = next {
+        let page = s
+            .research(ResearchRequest::Result {
+                job_id: id.clone(),
+                cursor: Some(cursor),
+                limit: 50,
+                view: ResearchResultView::Trades,
+            })
+            .await
+            .unwrap();
+        batch_rows.extend(page["rows"].as_array().unwrap().iter().cloned());
+        assert!(batch_rows.len() <= 2);
+        next = page["next_cursor"].as_str().map(str::to_owned);
+    }
+    assert_eq!(batch_rows.len(), 2);
     assert_eq!(result["summary"]["semantics"], "independent_instruments");
-    assert_ne!(
-        result["rows"][0]["dataset_hash"],
-        result["rows"][1]["dataset_hash"]
+    assert_eq!(
+        result["summary"]["economic_totals"]["fx_conversion"],
+        "not_performed"
     );
-    assert_ne!(
-        result["rows"][0]["summary"]["pnl"],
-        result["rows"][1]["summary"]["pnl"]
+    assert!(result["summary"]["economic_totals"]["cross_currency_total"].is_null());
+    assert!(result["summary"]["economic_totals"]["portfolio_sharpe"].is_null());
+    assert_eq!(
+        result["summary"]["economic_totals"]["by_quote_currency"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|bucket| bucket["currency"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["USD", "USDT"]
     );
-    assert!(result["rows"][0]["grid"]["selected"].is_object());
+    for bucket in result["summary"]["economic_totals"]["by_quote_currency"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(bucket["independent_replay_count"], 1);
+        assert!(bucket["net_pnl_exact"].is_string());
+    }
+    let summary = s
+        .research(ResearchRequest::Result {
+            job_id: id.clone(),
+            cursor: None,
+            limit: 50,
+            view: ResearchResultView::Summary,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        summary["metadata"]["summary"]["economic_totals"],
+        result["summary"]["economic_totals"]
+    );
+    assert_eq!(summary["rows"][0]["quote_currency"], "USDT");
+    assert_eq!(summary["rows"][1]["quote_currency"], "USD");
+    assert_eq!(summary["rows"][0]["product"], "spot");
+    assert_eq!(
+        summary["rows"][1]["net_pnl_exact"],
+        batch_rows[1]["summary"]["pnl_exact"]
+    );
+    assert_ne!(batch_rows[0]["dataset_hash"], batch_rows[1]["dataset_hash"]);
+    assert_ne!(
+        batch_rows[0]["summary"]["pnl"],
+        batch_rows[1]["summary"]["pnl"]
+    );
+    assert!(batch_rows[0]["grid"]["selected"].is_object());
     let trades = s
         .research(ResearchRequest::Result {
             job_id: id.clone(),

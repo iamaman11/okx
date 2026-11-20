@@ -1,6 +1,49 @@
 use super::*;
 use tracing::Instrument;
 
+// A batch consists of independent counterfactual replays. Only net PnL in
+// exactly the same quote currency may be added; Sharpe, drawdown, equity and
+// cross-currency totals have no defensible aggregate without synchronized
+// positions, historical conversion and an explicit portfolio model.
+fn independent_replay_currency_totals(rows: &[Value]) -> Result<Value, String> {
+    let mut values = Vec::new();
+    for row in rows {
+        if row["state"] != "completed" {
+            continue;
+        }
+        let currency = row["quote_currency"]
+            .as_str()
+            .ok_or("REPLAY_CURRENCY_MISSING")?;
+        let pnl = row["summary"]["pnl_exact"]
+            .as_str()
+            .ok_or("REPLAY_EXACT_PNL_MISSING")?;
+        values.push(okx_research::economics::QuoteAmount::parse_exact(
+            currency, pnl,
+        )?);
+    }
+    let grouped = okx_research::economics::group_quote_by_currency(&values)?;
+    let currencies = grouped
+        .iter()
+        .map(|total| {
+            json!({
+                "currency":total.currency,
+                "net_pnl_exact":total.amount.normalize().to_string(),
+                "independent_replay_count":total.contributors
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "basis":"independent_counterfactual_replay_net_pnl",
+        "by_quote_currency":currencies,
+        "completed_contributors":values.len(),
+        "fx_conversion":"not_performed",
+        "cross_currency_total":null,
+        "portfolio_sharpe":null,
+        "portfolio_drawdown":null,
+        "portfolio_risk_reason":"JOINT_VALUATION_AND_FX_NOT_AVAILABLE"
+    }))
+}
+
 impl AnalyticsService {
     pub(super) async fn submit(&self, request: ResearchRequest) -> Result<Value, String> {
         // Estimate the complete batch before SQL admission or fetching candles.
@@ -142,10 +185,31 @@ impl AnalyticsService {
                     let previous_artifacts = artifacts;
                     let (next_rows,next_artifacts,manifest)=this.cpu.run(cancel.clone(),move |_|{
                         let mut rows=previous_rows;let mut artifacts=previous_artifacts;
-                    let row=match outcome {Ok(artifact)=>{let result:Value=store.read_evidence_json(&artifact).map_err(|e|e.to_string())?;artifacts.push(artifact.clone());json!({"index":index,"instrument":instrument,"state":"completed","artifact":artifact,"summary":result["summary"],"dataset_hash":result["dataset_hash"],"grid":result["grid"],"trades_cursor":format!("instrument:{index}:0")})},Err(error)=>json!({"index":index,"instrument":instrument,"state":"failed","reason_code":error})};
+                    let row=match outcome {Ok(artifact)=>{
+                        let result:Value=store.read_evidence_json(&artifact).map_err(|e|e.to_string())?;
+                        let experiment_id=result["experiment_artifact"].as_str().ok_or("REPLAY_EXPERIMENT_MISSING")?;
+                        let experiment:Value=store.read_evidence_json(experiment_id).map_err(|e|e.to_string())?;
+                        if experiment["instrument"]!=instrument || experiment["economic_basis"]["instrument"]!=instrument {
+                            return Err("REPLAY_ECONOMIC_INSTRUMENT_MISMATCH".into());
+                        }
+                        let quote=experiment["economic_basis"]["quote_currency"].as_str().ok_or("REPLAY_CURRENCY_MISSING")?;
+                        let product=experiment["economic_basis"]["product"].as_str().ok_or("REPLAY_PRODUCT_MISSING")?;
+                        // Verify exact money before acknowledging this successful
+                        // instrument; malformed evidence must not enter a total.
+                        okx_research::economics::QuoteAmount::parse_exact(quote,result["summary"]["pnl_exact"].as_str().ok_or("REPLAY_EXACT_PNL_MISSING")?)?;
+                        artifacts.push(artifact.clone());
+                        json!({"index":index,"instrument":instrument,"state":"completed","artifact":artifact,
+                            "quote_currency":quote,"product":product,"summary":result["summary"],
+                            "dataset_hash":result["dataset_hash"],"grid":result["grid"],
+                            "trades_cursor":format!("instrument:{index}:0")})
+                    },Err(error)=>json!({"index":index,"instrument":instrument,"state":"failed","reason_code":error})};
                     rows.push(row);rows.sort_by_key(|r|r["index"].as_u64().unwrap_or(0));
+                    let economics=independent_replay_currency_totals(&rows)?;
                     let page=store.publish_evidence(&rows).map_err(|e|e.to_string())?.0;
-                    let manifest=store.publish_evidence(&json!({"kind":"research_batch","producer":producer,"summary":{"semantics":"independent_instruments","quality":if artifacts.len()==rows.len(){"complete"}else{"partial"},"completed":artifacts.len(),"failed":rows.len()-artifacts.len()},"row_pages":[page],"total_rows":rows.len(),"instrument_artifacts":artifacts,"instruments":rows})).map_err(|e|e.to_string())?.0;
+                    let manifest=store.publish_evidence(&json!({"kind":"research_batch","schema":"okx.research.batch/518.1","producer":producer,
+                        "summary":{"semantics":"independent_instruments","quality":if artifacts.len()==rows.len(){"complete"}else{"partial"},
+                        "completed":artifacts.len(),"failed":rows.len()-artifacts.len(),"economic_totals":economics},
+                        "row_pages":[page],"total_rows":rows.len(),"instrument_artifacts":artifacts,"instruments":rows})).map_err(|e|e.to_string())?.0;
 
                         Ok((rows,artifacts,manifest))
                     }).await?;
@@ -481,5 +545,41 @@ impl AnalyticsService {
                     publish_replay(&store,&result,&dataset,grid,Some(&experiment),producer.as_ref(),&cancelled)
                 }).await?;
         Ok::<_, String>(artifact)
+    }
+}
+
+#[cfg(test)]
+mod t09_currency_batch_tests {
+    use super::*;
+
+    #[test]
+    fn partial_batch_aggregates_only_completed_exact_same_currency_pnl() {
+        let rows = vec![
+            json!({"state":"completed","quote_currency":"USDT","summary":{"pnl_exact":"1.25"}}),
+            json!({"state":"failed","reason_code":"UNSUPPORTED_INVERSE_CONTRACT"}),
+            json!({"state":"completed","quote_currency":"USDT","summary":{"pnl_exact":"-0.25"}}),
+        ];
+        let result = independent_replay_currency_totals(&rows).unwrap();
+        assert_eq!(result["completed_contributors"], 2);
+        assert_eq!(result["by_quote_currency"][0]["currency"], "USDT");
+        assert_eq!(result["by_quote_currency"][0]["net_pnl_exact"], "1");
+        assert_eq!(
+            result["by_quote_currency"][0]["independent_replay_count"],
+            2
+        );
+        assert!(result["portfolio_drawdown"].is_null());
+        assert!(result["cross_currency_total"].is_null());
+        let mut invalid = rows;
+        invalid[0]["quote_currency"] = Value::Null;
+        assert_eq!(
+            independent_replay_currency_totals(&invalid).unwrap_err(),
+            "REPLAY_CURRENCY_MISSING"
+        );
+        invalid[0]["quote_currency"] = json!("USDT");
+        invalid[0]["summary"]["pnl_exact"] = json!("invalid");
+        assert_eq!(
+            independent_replay_currency_totals(&invalid).unwrap_err(),
+            "INVALID_EXACT_AMOUNT"
+        );
     }
 }

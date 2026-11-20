@@ -1,7 +1,7 @@
 //! Exact, explicitly unit-scoped economic checks for research evidence.
 //! This does not estimate inverse/option products, FX, or authorize trades.
 use rust_decimal::{Decimal, prelude::ToPrimitive};
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinearContract {
@@ -202,6 +202,11 @@ pub struct QuoteAmount {
     pub value: Decimal,
 }
 impl QuoteAmount {
+    pub fn parse_exact(currency: &str, value: &str) -> Result<Self, String> {
+        let value = Decimal::from_str(value).map_err(|_| "INVALID_EXACT_AMOUNT")?;
+        Self::exact(currency, value)
+    }
+
     pub fn exact(currency: &str, value: Decimal) -> Result<Self, String> {
         if currency.is_empty()
             || currency.len() > 16
@@ -239,6 +244,37 @@ pub fn sum_quote(amounts: &[QuoteAmount]) -> Result<QuoteAmount, String> {
         sum = sum.checked_add(value.value).ok_or("MONEY_OVERFLOW")?;
     }
     QuoteAmount::exact(&first.currency, sum)
+}
+
+/// Counterfactual amounts may be grouped by their own currency without FX.
+/// These are independent sums, not a cross-currency portfolio valuation or
+/// a replacement for synchronized portfolio risk and account permissions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrencyTotal {
+    pub currency: String,
+    pub amount: Decimal,
+    pub contributors: usize,
+}
+
+/// Deterministic order, checked fixed-point math, no implicit conversion.
+pub fn group_quote_by_currency(amounts: &[QuoteAmount]) -> Result<Vec<CurrencyTotal>, String> {
+    let mut totals = BTreeMap::<String, (Decimal, usize)>::new();
+    for amount in amounts {
+        QuoteAmount::exact(&amount.currency, amount.value)?;
+        let entry = totals
+            .entry(amount.currency.clone())
+            .or_insert((Decimal::ZERO, 0));
+        entry.0 = entry.0.checked_add(amount.value).ok_or("MONEY_OVERFLOW")?;
+        entry.1 = entry.1.checked_add(1).ok_or("COUNT_OVERFLOW")?;
+    }
+    Ok(totals
+        .into_iter()
+        .map(|(currency, (amount, contributors))| CurrencyTotal {
+            currency,
+            amount,
+            contributors,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -455,5 +491,64 @@ mod tests {
                 "UNSUPPORTED_INSTRUMENT_TYPE"
             );
         }
+    }
+
+    #[test]
+    fn t09_multi_currency_counterfactual_grouping_preserves_units_and_zero() {
+        let amounts = [
+            QuoteAmount::exact("USDT", Decimal::new(625, 1)).unwrap(),
+            QuoteAmount::exact("USD", Decimal::from(-3)).unwrap(),
+            QuoteAmount::exact("USDT", Decimal::new(95, 1)).unwrap(),
+            QuoteAmount::exact("BTC", Decimal::ZERO).unwrap(),
+        ];
+        assert_eq!(
+            group_quote_by_currency(&amounts).unwrap(),
+            vec![
+                CurrencyTotal {
+                    currency: "BTC".into(),
+                    amount: Decimal::ZERO,
+                    contributors: 1
+                },
+                CurrencyTotal {
+                    currency: "USD".into(),
+                    amount: Decimal::from(-3),
+                    contributors: 1
+                },
+                CurrencyTotal {
+                    currency: "USDT".into(),
+                    amount: Decimal::from(72),
+                    contributors: 2
+                },
+            ]
+        );
+        assert_eq!(
+            sum_quote(&amounts).unwrap_err(),
+            "CURRENCY_MISMATCH_FX_REQUIRED"
+        );
+        assert_eq!(
+            QuoteAmount::parse_exact("USDT", "62.50").unwrap(),
+            amounts[0]
+        );
+        assert_eq!(
+            QuoteAmount::parse_exact("USD", "not-a-number").unwrap_err(),
+            "INVALID_EXACT_AMOUNT"
+        );
+        assert!(group_quote_by_currency(&[]).unwrap().is_empty());
+        let overflow = [
+            QuoteAmount::exact("USDT", Decimal::MAX).unwrap(),
+            QuoteAmount::exact("USDT", Decimal::ONE).unwrap(),
+        ];
+        assert_eq!(
+            group_quote_by_currency(&overflow).unwrap_err(),
+            "MONEY_OVERFLOW"
+        );
+        assert_eq!(
+            group_quote_by_currency(&[QuoteAmount {
+                currency: "usd".into(),
+                value: Decimal::ONE
+            }])
+            .unwrap_err(),
+            "INVALID_CURRENCY"
+        );
     }
 }

@@ -253,6 +253,9 @@ impl AnalyticsService {
                     json!({
                         "index": row.get("index"),
                         "instrument": row.get("instrument"),
+                        "product": row.get("product"),
+                        "quote_currency": row.get("quote_currency"),
+                        "net_pnl_exact": row.pointer("/summary/pnl_exact"),
                         "state": row.get("state"),
                         "reason_code": row.get("reason_code"),
                         "artifact": row.get("artifact"),
