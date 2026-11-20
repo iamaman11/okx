@@ -626,6 +626,7 @@
                             "rolling_mean",
                             "rolling_max",
                             "rolling_min",
+                            "add_series",
                             "lag",
                             "greater_than",
                             "rising_edge",
@@ -633,6 +634,9 @@
                           ]
                         },
                         "input": {
+                          "$ref": "#/$defs/x"
+                        },
+                        "other": {
                           "$ref": "#/$defs/x"
                         },
                         "period": {
