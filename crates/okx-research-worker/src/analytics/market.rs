@@ -58,7 +58,7 @@ fn market_request_schema(
     funding_composition: bool,
 ) -> &'static str {
     if has_composition || oi_composition || funding_composition {
-        "market/518.6.source-null-origin-evidence-v1"
+        "market/518.7.exact-event-grid-null-time-v1"
     } else {
         market_job_schema(fields)
     }
@@ -442,6 +442,8 @@ impl AnalyticsService {
                 "funding_rate_policy":"sparse_realized_settlement_events_exact_timestamp_no_forward_fill_publication_time_unverified_swap_only",
                 "funding_event_alignment":{"location":"funding_event_alignment",
                     "expected_events":null,"join_semantics":"exact_event_timestamp_no_forward_fill",
+                    "first_off_grid_ms":"earliest_event_not_on_closed_bar_grid",
+                    "first_empty_grid_ms":"not_a_funding_coverage_gap_sparse_events_are_expected",
                     "publication_time_verified":false},
                 "source_evidence":{"location":"source_captures.<source>.evidence_artifact",
                     "schema":"okx.market.normalized-source/v1",
@@ -452,15 +454,18 @@ impl AnalyticsService {
                     "publication_time_verified_for_oi_and_funding":false},
                 "null_diagnostics":{"location":"composition_quality.<result>.issues",
                     "origin_step":true,
+                    "origin_event_ms":true,
+                    "origin_event_time_is_not_publication_time":true,
                     "reason_codes":["SOURCE_OBSERVATION_MISSING","WARMUP",
                         "DIVISION_BY_ZERO","NON_FINITE_RESULT","NON_POSITIVE_RETURN_INPUT",
-                        "EVENT_NOT_TRIGGERED","OUTCOME_UNCONFIRMED","ZERO_VARIANCE"]},
+                        "EVENT_NOT_TRIGGERED","OUTCOME_UNCONFIRMED","ZERO_VARIANCE",
+                        "PROJECTION_INDEX_OUT_OF_RANGE"]},
                 "source_alignment":{"location":"source_alignment",
                     "when":"composition_depends_on_open_interest",
                     "join_semantics":"exact_closed_bar_timestamp_no_forward_fill",
                     "counts":["expected_observations","observed_candle_observations",
                         "observed_oi_observations","aligned_observations",
-                        "paired_return_observations"],
+                        "paired_return_observations","oi_off_grid_events"],
                     "publication_time_verified":false},
                 "operations":composition_operations,
                 "limits":{"max_steps":32,"max_depth":8,"max_result_steps":14,"max_cells":8000000,"max_work_units":64000000},
@@ -1165,7 +1170,11 @@ fn compute_row_planned(
         // A missing candle in a close-only graph also requires exact-grid
         // evaluation. Compacting the remaining bars would hide the null's
         // origin and shift rolling windows across the missing timestamp.
-        let evaluated = if composition_oi || composition_funding || composition_ohlcv || incomplete_candles {
+        let evaluated = if composition_oi
+            || composition_funding
+            || composition_ohlcv
+            || incomplete_candles
+        {
             let count = ((request.end_ms - request.start_ms) / request.timeframe_ms) as usize;
             let mut prices = vec![f64::NAN; count];
             // Allocate only projected dependencies. Unused OHLC branches do
@@ -1174,8 +1183,11 @@ fn compute_row_planned(
             let mut highs = composition.uses_source("high").then(|| vec![f64::NAN; count]);
             let mut lows = composition.uses_source("low").then(|| vec![f64::NAN; count]);
             let mut volumes = composition.uses_source("volume").then(|| vec![f64::NAN; count]);
-            let mut open_interest = if composition_oi { vec![None; count] } else { Vec::new() };
-            let mut funding_rate = if composition_funding { vec![None; count] } else { Vec::new() };
+            let range = okx_analysis::time_series::ClosedRange::strict(
+                request.start_ms,
+                request.end_ms,
+                request.timeframe_ms,
+            )?;
             for bar in bars.iter() {
                 if let Some(offset) = bar.time.checked_sub(request.start_ms)
                     && offset % request.timeframe_ms == 0
@@ -1183,45 +1195,61 @@ fn compute_row_planned(
                     let index = (offset / request.timeframe_ms) as usize;
                     if let Some(slot) = prices.get_mut(index) {
                         *slot = bar.close;
-                        if let Some(column) = &mut opens { column[index] = bar.open; }
-                        if let Some(column) = &mut highs { column[index] = bar.high; }
-                        if let Some(column) = &mut lows { column[index] = bar.low; }
-                        if let Some(column) = &mut volumes { column[index] = bar.volume; }
-                    }
-                }
-            }
-            if let Some(Ok(points)) = &row.oi {
-                for &(time, value) in points {
-                    if let Some(offset) = time.checked_sub(request.start_ms)
-                        && offset % request.timeframe_ms == 0
-                        && let Some(slot) =
-                            open_interest.get_mut((offset / request.timeframe_ms) as usize)
-                    {
-                        *slot = Some(value);
-                    }
-                }
-            }
-            if composition_funding {
-                let mut off_grid_events = 0usize;
-                if let Some(Ok(events)) = &row.funding {
-                    for &(time, value) in events {
-                        if let Some(offset) = time.checked_sub(request.start_ms)
-                            && offset % request.timeframe_ms == 0
-                            && let Some(slot) =
-                                funding_rate.get_mut((offset / request.timeframe_ms) as usize)
-                        {
-                            *slot = Some(value);
-                        } else {
-                            off_grid_events += 1;
+                        if let Some(column) = &mut opens {
+                            column[index] = bar.open;
+                        }
+                        if let Some(column) = &mut highs {
+                            column[index] = bar.high;
+                        }
+                        if let Some(column) = &mut lows {
+                            column[index] = bar.low;
+                        }
+                        if let Some(column) = &mut volumes {
+                            column[index] = bar.volume;
                         }
                     }
                 }
+            }
+            let oi_grid = if composition_oi {
+                let points = row
+                    .oi
+                    .as_ref()
+                    .and_then(|source| source.as_ref().ok())
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                Some(range.align_event_values(points.iter().copied())?)
+            } else {
+                None
+            };
+            let open_interest = oi_grid
+                .as_ref()
+                .map(|grid| grid.values.as_slice())
+                .unwrap_or(&[]);
+            let funding_grid = if composition_funding {
+                let events = row
+                    .funding
+                    .as_ref()
+                    .and_then(|source| source.as_ref().ok())
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                Some(range.align_event_values(events.iter().copied())?)
+            } else {
+                None
+            };
+            let funding_rate = funding_grid
+                .as_ref()
+                .map(|grid| grid.values.as_slice())
+                .unwrap_or(&[]);
+            if composition_funding {
+                let grid = funding_grid.as_ref().expect("required funding grid");
                 funding_event_alignment = Some(json!({
                     "join_semantics":"exact_event_timestamp_no_forward_fill",
                     "rate_basis":"realized_settlement_rate",
                     "observed_events":row.funding.as_ref().and_then(|v|v.as_ref().ok()).map(|v|v.len()),
-                    "aligned_events":funding_rate.iter().flatten().count(),
-                    "off_grid_events":off_grid_events,
+                    "aligned_events":grid.aligned_events,
+                    "off_grid_events":grid.off_grid_events,
+                    "first_off_grid_ms":grid.first_off_grid_ms,
+                    "first_empty_grid_ms":grid.first_empty_grid_ms,
                     "expected_events":null,
                     "publication_time_verified":false,
                     "last_bar_has_event":funding_rate.last().is_some_and(Option::is_some)
@@ -1231,7 +1259,7 @@ fn compute_row_planned(
                 let (mut candle_points, mut oi_points, mut aligned, mut paired_returns) =
                     (0usize, 0usize, 0usize, 0usize);
                 let (mut first_unaligned_ms, mut prior_return_pair) = (None, false);
-                for (i, (&price, &oi)) in prices.iter().zip(&open_interest).enumerate() {
+                for (i, (&price, &oi)) in prices.iter().zip(open_interest).enumerate() {
                     let candle_present = price.is_finite();
                     let oi_present = oi.is_some();
                     candle_points += usize::from(candle_present);
@@ -1256,17 +1284,21 @@ fn compute_row_planned(
                     "aligned_observations":aligned,
                     "paired_return_observations":paired_returns,
                     "first_unaligned_ms":first_unaligned_ms,
+                    "oi_off_grid_events":oi_grid.as_ref().map(|grid| grid.off_grid_events),
+                    "oi_first_off_grid_ms":oi_grid.as_ref().and_then(|grid| grid.first_off_grid_ms),
                     "oi_publication_time_verified":false
                 }));
             }
             composition.evaluate_with_candle_sources_diagnostics(
                 &prices,
                 okx_analysis::query_plan::CandlePriceInputs {
-                    open: opens.as_deref(), high: highs.as_deref(), low: lows.as_deref(),
+                    open: opens.as_deref(),
+                    high: highs.as_deref(),
+                    low: lows.as_deref(),
                     volume: volumes.as_deref(),
                 },
-                composition_oi.then_some(open_interest.as_slice()),
-                composition_funding.then_some(funding_rate.as_slice()),
+                composition_oi.then_some(open_interest),
+                composition_funding.then_some(funding_rate),
             )?
         } else {
             composition.evaluate_with_diagnostics(close)
@@ -1274,6 +1306,11 @@ fn compute_row_planned(
         let (evaluated, null_causes) = evaluated;
         for (id, (value, unit)) in evaluated {
             let dependencies = &source_dependencies[&id];
+            let origin_event_ms = null_causes.get(&id).and_then(|cause| {
+                (cause.origin_index as u64)
+                    .checked_mul(request.timeframe_ms)
+                    .and_then(|offset| request.start_ms.checked_add(offset))
+            });
             let depends_on_oi =
                 dependencies.contains(&okx_analysis::query_plan::Source::OpenInterest);
             let depends_on_funding =
@@ -1317,6 +1354,7 @@ fn compute_row_planned(
                     "source":"candles","reason":"CANDLE_RANGE_INCOMPLETE_OR_GAPPED",
                     "first_missing_ms":candle_coverage.as_ref().and_then(|c|c.first_missing_ms),
                     "origin_step":null_causes.get(&id).map(|c|c.origin_step.as_str()),
+                    "origin_event_ms":origin_event_ms,
                     "causal_null_reason":null_causes.get(&id).map(|c|c.reason)
                 }));
             }
@@ -1325,6 +1363,7 @@ fn compute_row_planned(
                     "source":"open_interest","reason":"OI_RANGE_INCOMPLETE_OR_GAPPED",
                     "first_missing_ms":oi_coverage.as_ref().and_then(|c|c.first_missing_ms),
                     "origin_step":null_causes.get(&id).map(|c|c.origin_step.as_str()),
+                    "origin_event_ms":origin_event_ms,
                     "causal_null_reason":null_causes.get(&id).map(|c|c.reason)
                 }));
             }
@@ -1332,6 +1371,7 @@ fn compute_row_planned(
                 issues.push(json!({
                     "source":"funding_rate","reason":"FUNDING_SOURCE_UNAVAILABLE",
                     "origin_step":null_causes.get(&id).map(|c|c.origin_step.as_str()),
+                    "origin_event_ms":origin_event_ms,
                     "causal_null_reason":null_causes.get(&id).map(|c|c.reason)
                 }));
             }
@@ -1357,7 +1397,8 @@ fn compute_row_planned(
                     if let Some(cause) = null_causes.get(&id) {
                         issues.push(json!({
                             "reason":cause.reason,
-                            "origin_step":cause.origin_step
+                            "origin_step":cause.origin_step,
+                            "origin_event_ms":origin_event_ms
                         }));
                     } else {
                         issues.push(json!({
@@ -1732,7 +1773,7 @@ mod tests {
         let oi_composed = market_request_schema(&fields, true, true, false);
         let oi_correlated = market_request_schema(&oi_fields, true, true, false);
         let funding_composed = market_request_schema(&fields, true, false, true);
-        assert_eq!(composed, "market/518.6.source-null-origin-evidence-v1");
+        assert_eq!(composed, "market/518.7.exact-event-grid-null-time-v1");
         assert_eq!(oi_composed, composed);
         assert_ne!(composed, "market/518.2.composition-quality-v1");
         assert_ne!(oi_composed, "market/518.2.oi-composition-quality-v1");
@@ -1743,7 +1784,7 @@ mod tests {
         assert_eq!(oi_correlated, oi_composed);
         assert_eq!(
             funding_composed,
-            "market/518.6.source-null-origin-evidence-v1"
+            "market/518.7.exact-event-grid-null-time-v1"
         );
         assert_eq!(
             funding_composed,
@@ -2320,6 +2361,7 @@ mod tests {
         assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["source"], "candles");
         assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["causal_null_reason"], "SOURCE_OBSERVATION_MISSING");
         assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["origin_step"], "close");
+        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["origin_event_ms"], 98 * 60_000);
         assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["first_missing_ms"], 98 * 60_000);
     }
     #[test]
@@ -2349,6 +2391,7 @@ mod tests {
         let missing = compute_row_planned(loaded, &request, None, &plan, true).unwrap();
         assert!(missing["metrics"]["confirmed"].is_null());
         assert_eq!(missing["composition_quality"]["confirmed"]["issues"][0]["origin_step"], "high");
+        assert_eq!(missing["composition_quality"]["confirmed"]["issues"][0]["origin_event_ms"], 99 * 60_000);
         assert_eq!(missing["composition_quality"]["confirmed"]["issues"][0]["reason"], "SOURCE_OBSERVATION_MISSING");
     }
     #[test]
@@ -2924,6 +2967,8 @@ mod global_rank_tests {
         assert_eq!(first["funding_event_alignment"]["observed_events"], 3);
         assert_eq!(first["funding_event_alignment"]["aligned_events"], 2);
         assert_eq!(first["funding_event_alignment"]["off_grid_events"], 1);
+        assert_eq!(first["funding_event_alignment"]["first_off_grid_ms"], 60_001);
+        assert_eq!(first["funding_event_alignment"]["first_empty_grid_ms"], 0);
         assert_eq!(
             first["funding_event_alignment"]["expected_events"],
             Value::Null
@@ -2965,7 +3010,7 @@ mod global_rank_tests {
         assert!(missing["metrics"]["net_return"].is_null());
         assert_eq!(
             missing["composition_quality"]["net_return"]["issues"][0],
-            json!({"reason":"SOURCE_OBSERVATION_MISSING","origin_step":"funding_rate"})
+            json!({"reason":"SOURCE_OBSERVATION_MISSING","origin_step":"funding_rate", "origin_event_ms":99 * 60_000})
         );
         assert_eq!(
             missing["funding_event_alignment"]["last_bar_has_event"],
@@ -2979,6 +3024,42 @@ mod global_rank_tests {
             "FUNDING_SOURCE_UNAVAILABLE"
         );
         assert!(failed["source_captures"]["funding_rate"].is_null());
+    }
+
+    #[test]
+    fn t06_shifted_oi_event_cannot_fill_a_candle_gap_or_certify_a_signal() {
+        let mut request = request(vec!["returns"]);
+        request.composition = Some(Box::new(serde_json::from_value(json!({
+            "version":okx_analysis::query_plan::COMPOSITION_VERSION,
+            "steps":[
+                {"id":"oi_change","op":"returns_series","input":"open_interest"},
+                {"id":"positive","op":"greater_than","input":"oi_change","threshold":0.0}
+            ],
+            "result_steps":["oi_change","positive"]
+        })).unwrap()));
+        let plan = planner::AnalysisPlan::compile_market(&request).unwrap();
+        let mut loaded = row();
+        let mut oi = (0..100).map(|index| (index * 60_000, 20.0 + index as f64))
+            .collect::<Vec<_>>();
+        // 42,000 ms is not the same observation as the closed-bar event at
+        // 42 * 60,000 ms. A nearest/as-of join would fabricate a usable point.
+        oi[42].0 += 1;
+        loaded.oi = Some(Ok(oi));
+        let result = compute_row_planned(loaded, &request, None, &plan, true).unwrap();
+        assert_eq!(result["source_alignment"]["observed_oi_observations"], 99);
+        assert_eq!(result["source_alignment"]["aligned_observations"], 99);
+        assert_eq!(result["source_alignment"]["oi_off_grid_events"], 1);
+        assert_eq!(result["source_alignment"]["oi_first_off_grid_ms"], 42 * 60_000 + 1);
+        assert_eq!(result["source_alignment"]["first_unaligned_ms"], 42 * 60_000);
+        assert_eq!(result["oi_coverage"]["first_missing_ms"], 42 * 60_000);
+        assert!(result["metrics"]["oi_change"].is_null());
+        assert!(result["metrics"]["positive"].is_null());
+        assert_eq!(result["composition_quality"]["oi_change"]["issues"][0]["reason"],
+            "OI_RANGE_INCOMPLETE_OR_GAPPED");
+        assert_eq!(result["composition_quality"]["positive"]["issues"][1]["reason"],
+            "CAUSAL_PUBLICATION_TIME_UNVERIFIED");
+        assert_eq!(result["source_captures"]["open_interest"]["publication_time_verified"],
+            false);
     }
 
     #[test]
@@ -3196,11 +3277,11 @@ mod global_rank_tests {
         );
         assert_eq!(
             zero["composition_quality"]["relative"]["issues"][0],
-            json!({"reason":"DIVISION_BY_ZERO","origin_step":"relative"})
+            json!({"reason":"DIVISION_BY_ZERO","origin_step":"relative", "origin_event_ms":99 * 60_000})
         );
         assert_eq!(
             zero["composition_quality"]["delayed_relative"]["issues"][0],
-            json!({"reason":"DIVISION_BY_ZERO","origin_step":"relative"})
+            json!({"reason":"DIVISION_BY_ZERO","origin_step":"relative", "origin_event_ms":98 * 60_000})
         );
         assert!(zero["metrics"]["delayed_relative"].is_null());
         let mut interrupted = fixture(false);

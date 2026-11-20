@@ -88,6 +88,9 @@ pub struct CheckedComposition {
 pub struct CompositionNullCause {
     pub reason: &'static str,
     pub origin_step: String,
+    /// Exact aligned grid index where the missing source, warmup or failed
+    /// operation originated. This is an event index, not a publication time.
+    pub origin_index: usize,
 }
 
 /// Optional aligned closed-candle columns (OHLCV). A missing observation is NaN;
@@ -950,7 +953,11 @@ impl CheckedComposition {
         let cause = |reason| CompositionNullCause {
             reason,
             origin_step: id.to_owned(),
+            origin_index: at,
         };
+        if values.get(id).is_none_or(|series| at >= series.len()) {
+            return cause("PROJECTION_INDEX_OUT_OF_RANGE");
+        }
         let Some(checked) = self.steps.iter().find(|item| item.step.id == id) else {
             return cause("SOURCE_OBSERVATION_MISSING");
         };
@@ -3199,7 +3206,14 @@ mod t02_t06_multisource_regression {
                 causes[id],
                 CompositionNullCause {
                     reason: "DIVISION_BY_ZERO",
-                    origin_step: "relative".into()
+                    origin_step: "relative".into(),
+                    origin_index: if id == "relative" {
+                        3
+                    } else if id == "delayed" {
+                        2
+                    } else {
+                        1
+                    },
                 }
             );
         }
@@ -3209,6 +3223,7 @@ mod t02_t06_multisource_regression {
             .unwrap();
         assert_eq!(warmup["relative"].reason, "WARMUP");
         assert_eq!(warmup["relative"].origin_step, "price_return");
+        assert_eq!(warmup["relative"].origin_index, 0);
         let mut incomplete_oi = flat_oi;
         incomplete_oi[3] = None;
         let (_, missing) = plan
@@ -3216,6 +3231,7 @@ mod t02_t06_multisource_regression {
             .unwrap();
         assert_eq!(missing["relative"].reason, "SOURCE_OBSERVATION_MISSING");
         assert_eq!(missing["relative"].origin_step, "open_interest");
+        assert_eq!(missing["relative"].origin_index, 3);
 
         let standalone: CompositionRequest = serde_json::from_value(serde_json::json!({
             "version":COMPOSITION_VERSION,
@@ -3241,6 +3257,16 @@ mod t02_t06_multisource_regression {
         let label_plan = CheckedComposition::compile(label, 2).unwrap();
         let (_, unconfirmed) = label_plan.evaluate_with_diagnostics(&[100., 110.]);
         assert_eq!(unconfirmed["label"].reason, "OUTCOME_UNCONFIRMED");
+        assert_eq!(unconfirmed["label"].origin_index, 1);
+    }
+
+    #[test]
+    fn t07_out_of_range_historical_projection_is_null_not_a_panic_or_future_read() {
+        let plan = CheckedComposition::compile(two_step_composition(), 3).unwrap();
+        assert_eq!(plan.evaluate_at(&[100., 110., 105.], usize::MAX)["w1"].0, None);
+        let (_, causes) = plan.evaluate_with_diagnostics(&[]);
+        assert_eq!(causes["w1"].reason, "PROJECTION_INDEX_OUT_OF_RANGE");
+        assert_eq!(causes["w1"].origin_step, "w1");
     }
 
     #[test]

@@ -108,6 +108,72 @@ impl ClosedRange {
             complete: missing == 0 && duplicates == 0 && unexpected == 0,
         }
     }
+
+    /// Join a normalized event-time source to the exact candle-open grid.
+    ///
+    /// This is deliberately a *retrospective* join: event timestamps do not
+    /// prove publication or decision-time availability. Sparse sources such as
+    /// realized funding may have legitimate empty slots; the caller owns the
+    /// source-specific coverage policy. No rounding, shifting or forward fill.
+    pub fn align_event_values(
+        &self,
+        events: impl IntoIterator<Item = (u64, f64)>,
+    ) -> Result<EventGrid, &'static str> {
+        // Match the existing market source budget before allocating a grid.
+        if self.expected_bars > 1_000_000 {
+            return Err("GRID_BARS_LIMIT");
+        }
+        let count = usize::try_from(self.expected_bars).map_err(|_| "GRID_SIZE_OVERFLOW")?;
+        let mut values = vec![None; count];
+        let mut observed_events = 0usize;
+        let mut off_grid_events = 0usize;
+        let mut first_off_grid_ms = None;
+        let mut previous_time = None;
+        for (time, value) in events {
+            if previous_time.is_some_and(|prior| prior >= time) {
+                return Err("GRID_DUPLICATE_OR_UNORDERED_EVENT_TIME");
+            }
+            if !value.is_finite() {
+                return Err("GRID_NONFINITE_EVENT_VALUE");
+            }
+            previous_time = Some(time);
+            observed_events += 1;
+            if let Some(offset) = time.checked_sub(self.start_ms)
+                && time < self.end_ms
+                && offset.is_multiple_of(self.timeframe_ms)
+            {
+                values[(offset / self.timeframe_ms) as usize] = Some(value);
+            } else {
+                off_grid_events += 1;
+                first_off_grid_ms.get_or_insert(time);
+            }
+        }
+        let aligned_events = observed_events - off_grid_events;
+        let first_empty_grid_ms = values
+            .iter()
+            .position(Option::is_none)
+            .map(|index| self.start_ms + index as u64 * self.timeframe_ms);
+        Ok(EventGrid {
+            values,
+            observed_events,
+            aligned_events,
+            off_grid_events,
+            first_off_grid_ms,
+            first_empty_grid_ms,
+        })
+    }
+}
+
+/// Event-time alignment evidence. `first_empty_grid_ms` is not necessarily a
+/// missing source observation: periodic funding is intentionally sparse.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventGrid {
+    pub values: Vec<Option<f64>>,
+    pub observed_events: usize,
+    pub aligned_events: usize,
+    pub off_grid_events: usize,
+    pub first_off_grid_ms: Option<u64>,
+    pub first_empty_grid_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +322,85 @@ pub fn align_exact_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t06_sparse_event_grid_is_exact_and_does_not_invent_publication_time() {
+        let range = ClosedRange::strict(60, 360, 60).unwrap();
+        let joined = range
+            .align_event_values([
+                (59, 9.0),
+                (60, 0.0),
+                (180, 0.005),
+                (181, 4.0),
+                (360, 7.0),
+            ])
+            .unwrap();
+        assert_eq!(
+            joined.values,
+            vec![Some(0.0), None, Some(0.005), None, None]
+        );
+        assert_eq!(joined.observed_events, 5);
+        assert_eq!(joined.aligned_events, 2);
+        assert_eq!(joined.off_grid_events, 3);
+        assert_eq!(joined.first_off_grid_ms, Some(59));
+        assert_eq!(joined.first_empty_grid_ms, Some(120));
+        // A sparse empty slot must never be substituted with the last rate.
+        assert_eq!(joined.values[1], None);
+        assert_eq!(
+            range.align_event_values([(60, 1.0), (60, 1.0)]).unwrap_err(),
+            "GRID_DUPLICATE_OR_UNORDERED_EVENT_TIME"
+        );
+        assert_eq!(
+            range.align_event_values([(180, 1.0), (120, 1.0)]).unwrap_err(),
+            "GRID_DUPLICATE_OR_UNORDERED_EVENT_TIME"
+        );
+        assert_eq!(
+            range.align_event_values([(60, f64::NAN)]).unwrap_err(),
+            "GRID_NONFINITE_EVENT_VALUE"
+        );
+        assert_eq!(
+            range.align_event_values([(60, f64::INFINITY)]).unwrap_err(),
+            "GRID_NONFINITE_EVENT_VALUE"
+        );
+    }
+
+    #[test]
+    fn t06_event_grid_does_not_shift_late_or_misaligned_source_observations() {
+        let range = ClosedRange::strict(0, 300, 60).unwrap();
+        let left = range
+            .align_event_values([
+                (0, 10.0),
+                (60, 20.0),
+                (120, 30.0),
+                (180, 40.0),
+                (240, 50.0),
+            ])
+            .unwrap();
+        let right = range
+            .align_event_values([(0, 100.0), (61, 200.0), (120, 300.0), (240, 500.0)])
+            .unwrap();
+        assert_eq!(left.aligned_events, 5);
+        assert_eq!(right.aligned_events, 3);
+        assert_eq!(right.first_off_grid_ms, Some(61));
+        assert_eq!(right.first_empty_grid_ms, Some(60));
+        let exact_pairs = left
+            .values
+            .iter()
+            .zip(right.values.iter())
+            .filter_map(|(left, right)| left.zip(*right))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            exact_pairs,
+            [(10.0, 100.0), (30.0, 300.0), (50.0, 500.0)]
+        );
+        let oversized = ClosedRange::strict(0, 1_000_001, 1).unwrap();
+        assert_eq!(
+            oversized
+                .align_event_values(std::iter::empty())
+                .unwrap_err(),
+            "GRID_BARS_LIMIT"
+        );
+    }
 
     #[test]
     fn t06_exact_alignment_respects_availability_and_rejects_ambiguous_time() {
