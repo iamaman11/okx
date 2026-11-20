@@ -947,6 +947,7 @@ fn t13_export_and_retention_verify_realized_funding_capture_without_lookahead_cl
     let verified = verify_export_manifest(&service.artifacts, &manifest).unwrap();
     assert_eq!(verified["quality"], "complete");
     assert_eq!(verified["funding_capture_verified"], true);
+    assert_eq!(verified["experiment"]["funding_replay_attribution_verified"], false);
     assert_eq!(
         verified["experiment"]["funding_capture"]["observed_events"],
         1
@@ -982,6 +983,137 @@ fn t13_export_and_retention_verify_realized_funding_capture_without_lookahead_cl
     assert_eq!(
         verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
         "ARTIFACT_CORRUPT"
+    );
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn t09_t13_export_proves_funding_presence_and_every_replay_bar_from_source_events() {
+    let (root, service) = service();
+    let events = vec![(60_000u64, 0.0f64), (180_000, -0.01)];
+    let capture_hash = okx_research::canonical_sha256(&(
+        "okx.research.realized-funding-events/v1",
+        "BTC-USDT-SWAP",
+        0u64,
+        240_001u64,
+        &events,
+    ))
+    .unwrap();
+    let capture = service
+        .artifacts
+        .publish_evidence(&json!({
+            "schema":"okx.research.funding-event-capture/v1",
+            "instrument":"BTC-USDT-SWAP","source":"okx/funding-rate-history",
+            "start_ms":0,"end_exclusive_ms":240_001,
+            "rate_basis":"realized_settlement_rate","events":events,
+            "normalized_capture_hash":capture_hash
+        }))
+        .unwrap()
+        .0;
+    let alignment = json!({
+        "allocation_schema":"okx.research.funding-bar-observation/v1",
+        "source":"okx/funding-rate-history",
+        "rate_basis":"realized_settlement_rate",
+        "valuation_price":"candle_close_proxy_not_venue_mark_price",
+        "join_semantics":"funding_event_at_preceding_closed_bar_end_no_forward_fill",
+        "absence_semantics":"no_observed_settlement_event_not_observed_zero_rate",
+        "arithmetic_projection":"unobserved_settlement_contributes_zero_cashflow_not_zero_rate_evidence",
+        "observed_events":2,"attributed_events":2,"pre_window_events_ignored":0,
+        "observed_zero_rate_events":1,"bars_without_settlement":2,
+        "first_event_ms":60_000,"last_event_ms":180_000,
+        "max_observed_event_gap_ms":120_000,
+        "max_allowed_gap_ms":okx_research::economics::MAX_FUNDING_EVENT_GAP_MS,
+        "expected_events":null,
+        "historical_cadence_verified":false,"publication_time_verified":false,
+        "mark_price_verified":false,"normalized_source_capture_hash":capture_hash
+    });
+    let publish_dataset = |rates: [Option<f64>; 4]| {
+        let bars = rates
+            .into_iter()
+            .enumerate()
+            .map(|(index, funding_rate)| replay::Bar {
+                time: index as u64 * 60_000,
+                open: 100.0,
+                high: 101.0,
+                low: 99.0,
+                close: 100.5,
+                volume: 1.0,
+                funding_rate,
+            })
+            .collect::<Vec<_>>();
+        let mut hasher = replay::ChunkedDataHash::new(bars.len());
+        hasher.update(&bars).unwrap();
+        let hash = hasher.finish().unwrap();
+        let chunk = service.artifacts.publish_evidence(&bars).unwrap().0;
+        let dataset = service.artifacts.publish_evidence(&json!({
+            "schema":"okx.research.dataset/398.1",
+            "instrument":"BTC-USDT-SWAP","start_ms":0,"end_ms":240_000,
+            "timeframe_ms":60_000,"chunks":[chunk]
+        })).unwrap().0;
+        (dataset, hash)
+    };
+    let publish_experiment = |dataset: &str, capture: Option<&str>, alignment: &Value| {
+        service.artifacts.publish_evidence(&json!({
+            "schema":"okx.research.experiment-inputs/v1",
+            "instrument":"BTC-USDT-SWAP","dataset_artifact":dataset,
+            "bar_count":4,"timeframe_ms":60_000,
+            "requested_range":{"start_ms":0,"end_ms":240_000},
+            "effective_range":{"start_ms":0,"end_ms":240_000},
+            "code_version":replay::CAUSAL_REPLAY_VERSION,
+            "economic_basis":{"product":"funding_attribution_test_fixture",
+                "funding_capture_artifact":capture,"funding_event_alignment":alignment}
+        })).unwrap().0
+    };
+    let (dataset, dataset_hash) = publish_dataset([
+        Some(0.0), Some(0.0), Some(-0.01), Some(0.0),
+    ]);
+    let experiment = publish_experiment(&dataset, Some(&capture), &alignment);
+    let mut manifest = json!({
+        "trade_pages":[],"total_trades":0,
+        "dataset_artifact":dataset,"dataset_hash":dataset_hash,
+        "experiment_artifact":experiment,"code_version":replay::CAUSAL_REPLAY_VERSION
+    });
+    let result = verify_export_manifest(&service.artifacts, &manifest).unwrap();
+    assert_eq!(result["quality"], "complete");
+    assert_eq!(result["experiment"]["funding_replay_attribution_verified"], true);
+    assert_eq!(result["experiment"]["dataset"]["funding_bar_projection_verified"], true);
+    assert_eq!(result["experiment"]["funding_capture"]["observed_zero_rate_events"], 1);
+    assert_eq!(result["experiment"]["funding_capture"]["bars_without_settlement"], 2);
+    assert_eq!(result["experiment"]["funding_capture"]["publication_time_verified"], false);
+
+    // A malicious or buggy producer can write an internally consistent
+    // dataset and result hash with the settlement applied one bar too late.
+    // Both hashes pass, but the source-to-bar evidence must still fail.
+    for bad_rates in [
+        [Some(0.02), Some(0.0), Some(-0.01), Some(0.0)],
+        [Some(0.0), Some(-0.01), Some(0.0), Some(0.0)],
+        [None, Some(0.0), Some(-0.01), Some(0.0)],
+    ] {
+        let (bad_dataset, bad_hash) = publish_dataset(bad_rates);
+        manifest["dataset_artifact"] = json!(bad_dataset);
+        manifest["dataset_hash"] = json!(bad_hash);
+        manifest["experiment_artifact"] = json!(publish_experiment(
+            &bad_dataset, Some(&capture), &alignment,
+        ));
+        assert_eq!(
+            verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+            "EXPERIMENT_FUNDING_BAR_MISMATCH"
+        );
+    }
+    manifest["dataset_artifact"] = json!(dataset);
+    manifest["dataset_hash"] = json!(dataset_hash);
+    let mut forged = alignment.clone();
+    forged["observed_zero_rate_events"] = json!(0);
+    manifest["experiment_artifact"] = json!(publish_experiment(&dataset, Some(&capture), &forged));
+    assert_eq!(
+        verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+        "EXPERIMENT_FUNDING_MISMATCH"
+    );
+    manifest["experiment_artifact"] = json!(publish_experiment(&dataset, None, &alignment));
+    assert_eq!(
+        verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+        "EXPERIMENT_FUNDING_MISMATCH"
     );
     drop(service);
     std::fs::remove_dir_all(root).unwrap();

@@ -587,6 +587,10 @@ fn research_capabilities() -> Value {
             "observed_funding":{
                 "products":["linear_swap"],
                 "settlement_join":"funding_event_at_preceding_closed_bar_end_no_forward_fill",
+                "bar_observation_schema":"okx.research.funding-bar-observation/v1",
+                "observation_semantics":"observed_zero_distinct_from_absent_settlement",
+                "replay_arithmetic":"absent_settlement_contributes_zero_cashflow",
+                "export_evidence":"capture_counts_and_every_replay_bar_projection_verified",
                 "valuation_price":"candle_close_proxy_not_venue_mark_price",
                 "historical_cadence_verified":false,
                 "publication_time_verified":false,

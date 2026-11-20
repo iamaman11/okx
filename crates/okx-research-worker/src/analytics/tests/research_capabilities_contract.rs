@@ -30,6 +30,14 @@ fn native_capabilities_do_not_advertise_unavailable_historical_mode() {
         report["economics"]["observed_funding"]["publication_time_verified"],
         false
     );
+    assert_eq!(
+        report["economics"]["observed_funding"]["observation_semantics"],
+        "observed_zero_distinct_from_absent_settlement"
+    );
+    assert_eq!(
+        report["economics"]["observed_funding"]["export_evidence"],
+        "capture_counts_and_every_replay_bar_projection_verified"
+    );
     assert!(report["economics"]["observed_funding"]["expected_events"].is_null());
     assert_eq!(
         report["source_evidence"]["funding_event_capture_when_requested"],

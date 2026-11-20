@@ -53,8 +53,8 @@ fn research_job_versions(request: &ResearchRequest) -> (&'static str, &'static s
     };
     if observed_funding {
         (
-            "analytics/518.2.funding-settlement-close-v1",
-            "analytics/semantic/518.2.funding-settlement-close-v1",
+            "analytics/518.3.funding-presence-proof-v1",
+            "analytics/semantic/518.3.funding-presence-proof-v1",
         )
     } else {
         ("analytics/448.1", "analytics/semantic/v1")
@@ -532,10 +532,15 @@ impl AnalyticsService {
                     "source":"okx/funding-rate-history",
                     "rate_basis":"realized_settlement_rate",
                     "join_semantics":"funding_event_at_preceding_closed_bar_end_no_forward_fill",
+                    "allocation_schema":"okx.research.funding-bar-observation/v1",
+                    "absence_semantics":"no_observed_settlement_event_not_observed_zero_rate",
+                    "arithmetic_projection":"unobserved_settlement_contributes_zero_cashflow_not_zero_rate_evidence",
                     "valuation_price":"candle_close_proxy_not_venue_mark_price",
                     "observed_events":allocation.observed_events,
                     "attributed_events":allocation.attributed_events,
                     "pre_window_events_ignored":allocation.pre_window_events,
+                    "observed_zero_rate_events":allocation.observed_zero_rate_events,
+                    "bars_without_settlement":allocation.bars_without_settlement,
                     "first_event_ms":allocation.first_event_ms,
                     "last_event_ms":allocation.last_event_ms,
                     "max_observed_event_gap_ms":allocation.max_observed_gap_ms,
@@ -637,8 +642,8 @@ mod t09_currency_batch_tests {
         assert_eq!(
             research_job_versions(&migrated),
             (
-                "analytics/518.2.funding-settlement-close-v1",
-                "analytics/semantic/518.2.funding-settlement-close-v1"
+                "analytics/518.3.funding-presence-proof-v1",
+                "analytics/semantic/518.3.funding-presence-proof-v1"
             )
         );
         body["action"] = json!("grid");

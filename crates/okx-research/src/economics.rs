@@ -369,12 +369,17 @@ pub type LinearPnl = QuotePnl;
 /// have not been observed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FundingBarAllocation {
-    /// Realized rates assigned to preceding closed bars; zero means no
-    /// *observed* settlement on that boundary, never an inferred zero rate.
+    /// Arithmetic projection for the legacy candle replay: an absent event
+    /// contributes zero cashflow, but is NOT evidence of a zero-rate event.
     pub bar_rates: Vec<f64>,
+    /// Event presence is preserved separately: `Some(0.0)` is an observed
+    /// zero settlement; `None` means there was no observed settlement.
+    pub observed_bar_rates: Vec<Option<f64>>,
     pub observed_events: usize,
     pub attributed_events: usize,
     pub pre_window_events: usize,
+    pub observed_zero_rate_events: usize,
+    pub bars_without_settlement: usize,
     pub first_event_ms: Option<u64>,
     pub last_event_ms: Option<u64>,
     pub max_observed_gap_ms: Option<u64>,
@@ -384,6 +389,9 @@ pub struct FundingBarAllocation {
 /// historical cadence. OKX may use shorter settlement intervals; without a
 /// historical schedule, completeness must remain unverified in the artifact.
 pub const MAX_FUNDING_EVENT_GAP_MS: u64 = 28_800_000;
+/// Shared ceiling with research's admitted maximum; reject excessive input
+/// before allocating per-bar projections or provenance structures.
+pub const MAX_FUNDING_ALLOCATION_BARS: usize = 1_000_000;
 
 pub fn allocate_funding_at_bar_close(
     bar_opens: &[u64],
@@ -392,6 +400,9 @@ pub fn allocate_funding_at_bar_close(
 ) -> Result<FundingBarAllocation, String> {
     if timeframe_ms == 0 || bar_opens.is_empty() {
         return Err("FUNDING_INVALID_BAR_GRID".into());
+    }
+    if bar_opens.len() > MAX_FUNDING_ALLOCATION_BARS {
+        return Err("FUNDING_BAR_GRID_LIMIT".into());
     }
     if bar_opens
         .windows(2)
@@ -404,9 +415,10 @@ pub fn allocate_funding_at_bar_close(
         .last()
         .and_then(|t| t.checked_add(timeframe_ms))
         .ok_or("FUNDING_INVALID_BAR_GRID")?;
-    let mut bar_rates = vec![0.0; bar_opens.len()];
+    let mut observed_bar_rates = vec![None; bar_opens.len()];
     let mut attributed = 0usize;
     let mut before = 0usize;
+    let mut observed_zero = 0usize;
     let mut last = None;
     let mut max_gap = None::<u64>;
     let mut first_applied = None;
@@ -438,10 +450,16 @@ pub fn allocate_funding_at_bar_close(
             return Err("FUNDING_SETTLEMENT_NOT_ON_BAR_CLOSE".into());
         }
         let index = (offset / timeframe_ms - 1) as usize;
-        let Some(slot) = bar_rates.get_mut(index) else {
+        let Some(slot) = observed_bar_rates.get_mut(index) else {
             return Err("FUNDING_EVENT_OUTSIDE_BAR_RANGE".into());
         };
-        *slot = rate;
+        if slot.is_some() {
+            return Err("FUNDING_DUPLICATE_BAR_SETTLEMENT".into());
+        }
+        *slot = Some(rate);
+        if rate == 0.0 {
+            observed_zero += 1;
+        }
         attributed += 1;
         first_applied.get_or_insert(time);
         last_applied = Some(time);
@@ -454,11 +472,15 @@ pub fn allocate_funding_at_bar_close(
     {
         return Err("FUNDING_RANGE_INCOMPLETE".into());
     }
+    let bar_rates = observed_bar_rates.iter().map(|rate| rate.unwrap_or(0.0)).collect();
     Ok(FundingBarAllocation {
         bar_rates,
+        observed_bar_rates,
         observed_events: realized_events.len(),
         attributed_events: attributed,
         pre_window_events: before,
+        observed_zero_rate_events: observed_zero,
+        bars_without_settlement: bar_opens.len() - attributed,
         first_event_ms: realized_events.first().map(|(time, _)| *time),
         last_event_ms: realized_events.last().map(|(time, _)| *time),
         max_observed_gap_ms: max_gap,
@@ -813,12 +835,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.bar_rates, [0.001, 0.0, 0.0, -0.002]);
+        assert_eq!(result.observed_bar_rates, [Some(0.001), None, None, Some(-0.002)]);
+        assert_eq!(result.observed_zero_rate_events, 0);
+        assert_eq!(result.bars_without_settlement, 2);
         assert_eq!(result.observed_events, 3);
         assert_eq!(result.attributed_events, 2);
         assert_eq!(result.pre_window_events, 1);
         assert_eq!(result.first_event_ms, Some(0));
         assert_eq!(result.last_event_ms, Some(240_000));
         assert_eq!(result.max_observed_gap_ms, Some(180_000));
+    }
+
+    #[test]
+    fn t09_observed_zero_rate_is_not_an_absent_settlement() {
+        let result = allocate_funding_at_bar_close(
+            &[0, 60_000, 120_000, 180_000, 240_000],
+            60_000,
+            &[(60_000, 0.0), (180_000, -0.01), (300_000, 0.0)],
+        )
+        .unwrap();
+        assert_eq!(result.bar_rates, [0.0, 0.0, -0.01, 0.0, 0.0]);
+        assert_eq!(
+            result.observed_bar_rates,
+            [Some(0.0), None, Some(-0.01), None, Some(0.0)]
+        );
+        assert_eq!(result.observed_zero_rate_events, 2);
+        assert_eq!(result.bars_without_settlement, 2);
+        assert_eq!(result.attributed_events, 3);
+    }
+
+    #[test]
+    fn t09_funding_allocation_rejects_oversized_grid_before_projection() {
+        let oversized = vec![0; MAX_FUNDING_ALLOCATION_BARS + 1];
+        assert_eq!(
+            allocate_funding_at_bar_close(&oversized, 60_000, &[]).unwrap_err(),
+            "FUNDING_BAR_GRID_LIMIT"
+        );
     }
 
     #[test]
