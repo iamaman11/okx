@@ -428,6 +428,7 @@ impl AnalyticsService {
             {"op":"rolling_mean","input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"compute_cost":"linear_in_series_length"},
             {"op":"rolling_max","input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
             {"op":"rolling_min","input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
+            okx_analysis::query_plan::ROLLING_RANGE_DESCRIPTOR,
             {"op":"rolling_pearson","input_unit":"ratio","other_unit":"ratio","output_unit":"coefficient","period_min":30,"period_max":1000,"null_policy":"strict_exact_pairs","compute_cost":"linear_in_series_length","minimum_pairs":30},
             {"op":"rolling_zscore","version":1,"input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","output_unit":"coefficient","period_min":2,"period_max":1000,"variance":"population_inclusive_window","null_policy":"strict_window_or_zero_variance","compute_cost":"linear_in_series_length","causal":true},
             {"op":"rolling_stddev","version":1,"input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","output_unit":"same_as_input","period_min":2,"period_max":1000,"variance":"population_inclusive_window","null_policy":"strict_window_zero_for_constant","compute_cost":"linear_in_series_length","causal":true},
@@ -3476,6 +3477,53 @@ mod global_rank_tests {
             "retrospective_publication_unverified"
         );
     }
+    #[test]
+    fn t15_range_extension_uses_existing_market_planner_and_user_composes_new_graph() {
+        let mut query: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT"],"fields":["returns"],
+            "timeframe_ms":60000,"start_ms":60000,"end_ms":6060000,
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"range_price","op":"rolling_range","input":"close","period":3},
+                {"id":"wide","op":"greater_than","input":"range_price","threshold":5.0},
+                {"id":"entry","op":"rising_edge","input":"wide"},
+                {"id":"smooth","op":"rolling_mean","input":"range_price","period":2},
+                {"id":"returns","op":"returns_series","input":"close"},
+                {"id":"range_return","op":"rolling_range","input":"returns","period":2}
+            ],"result_steps":["range_price","wide","entry","smooth","range_return"]}
+        })).unwrap();
+        let loaded = || Loaded {
+            instrument: "BTC-USDT".into(),
+            bars: Ok(Arc::new((0..100).map(|i| Bar {
+                time:(i + 1) * 60_000,
+                open:100.0, high:115.0, low:99.0,
+                close:if i == 99 {110.0} else if i == 98 {101.0} else {100.0},
+                volume:1.0, funding_rate:None,
+            }).collect())),
+            ticker: None, funding: None, oi: None, excluded: None,
+        };
+        let plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+        let result = compute_row_planned(loaded(), &query, None, &plan, true).unwrap();
+        assert_eq!(result["metrics"]["range_price"], 10.0);
+        assert_eq!(result["metrics"]["wide"], true);
+        assert_eq!(result["metrics"]["entry"], true);
+        assert_eq!(result["metrics"]["smooth"], 5.5);
+        let return_range = 110.0 / 101.0 - 1.0 - 0.01;
+        assert!((result["metrics"]["range_return"].as_f64().unwrap() - return_range).abs() < 1e-12);
+        assert_eq!(result["units"]["range_price"], "price");
+        assert_eq!(result["units"]["range_return"], "ratio");
+        assert_eq!(result["composition_quality"]["entry"]["status"], "available_at_closed_bar");
+        assert_eq!(result["quality"], "complete");
+
+        // Another user graph: same Worker build, unchanged source/route and
+        // kernel executable; only the validated request threshold changes.
+        query.composition.as_mut().unwrap().steps[1].threshold = Some(20.0);
+        let changed_plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+        let changed = compute_row_planned(loaded(), &query, None, &changed_plan, true).unwrap();
+        assert_eq!(changed["metrics"]["range_price"], result["metrics"]["range_price"]);
+        assert_eq!(changed["metrics"]["wide"], false);
+        assert_eq!(changed["metrics"]["entry"], false);
+    }
+
     #[test]
     fn t15_public_zscore_composes_price_deviation_into_a_causal_condition() {
         let query: MarketRequest = serde_json::from_value(json!({

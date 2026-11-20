@@ -239,6 +239,7 @@ pub enum SeriesOp {
     RollingMean,
     RollingMax,
     RollingMin,
+    RollingRange,
     RollingPearson,
     RollingZscore,
     RollingStddev,
@@ -256,6 +257,45 @@ pub enum SeriesOp {
     FallingEdge,
     ForwardReturnLabel,
 }
+
+/// One self-contained pure extension contract. The worker serializes this
+/// descriptor directly into market capabilities instead of maintaining a
+/// second, manually copied definition. Availability of the input source is
+/// checked separately for each market request.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct RollingRangeDescriptor {
+    pub op: &'static str,
+    pub version: u16,
+    pub input_unit: &'static str,
+    pub output_unit: &'static str,
+    pub output_shape: &'static str,
+    pub period_min: u16,
+    pub period_max: u16,
+    pub warmup: &'static str,
+    pub null_policy: &'static str,
+    pub compute_cost: &'static str,
+    pub causal: bool,
+    pub time_basis: &'static str,
+    pub effects: &'static str,
+    pub owner: &'static str,
+}
+
+pub const ROLLING_RANGE_DESCRIPTOR: RollingRangeDescriptor = RollingRangeDescriptor {
+    op: "rolling_range",
+    version: 1,
+    input_unit: "price_or_ratio_or_contracts_or_native_volume_or_coefficient",
+    output_unit: "same_as_input",
+    output_shape: "series",
+    period_min: 2,
+    period_max: 1000,
+    warmup: "period_closed_bars",
+    null_policy: "strict_complete_window_no_synthetic_zero",
+    compute_cost: "linear_in_series_length",
+    causal: true,
+    time_basis: "closed_bar",
+    effects: "pure_no_io",
+    owner: "okx-kernel::query_plan::rolling_range",
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -545,7 +585,7 @@ impl CheckedComposition {
                 return Err(format!("{path}:DEPTH_LIMIT"));
             }
             let output_unit = match step.op {
-                SeriesOp::RollingZscore | SeriesOp::RollingStddev => {
+                SeriesOp::RollingZscore | SeriesOp::RollingStddev | SeriesOp::RollingRange => {
                     if !matches!(
                         input_unit,
                         Unit::Price | Unit::Ratio | Unit::Contracts | Unit::NativeVolume | Unit::Coefficient
@@ -555,7 +595,15 @@ impl CheckedComposition {
                             composition_unit_name(input_unit)
                         ));
                     }
-                    if !matches!(step.period, Some(2..=1000)) {
+                    let valid_period = if step.op == SeriesOp::RollingRange {
+                        step.period.is_some_and(|period| {
+                            period >= ROLLING_RANGE_DESCRIPTOR.period_min
+                                && period <= ROLLING_RANGE_DESCRIPTOR.period_max
+                        })
+                    } else {
+                        matches!(step.period, Some(2..=1000))
+                    };
+                    if !valid_period {
                         return Err(format!("{path}.period:INVALID:2..1000"));
                     }
                     if step.threshold.is_some() {
@@ -1094,6 +1142,10 @@ impl CheckedComposition {
                     input,
                     checked.step.period.expect("validated stddev period") as usize,
                 ),
+                SeriesOp::RollingRange => rolling_range(
+                    input,
+                    checked.step.period.expect("validated range period") as usize,
+                ),
                 SeriesOp::RollingPearson => {
                     let other =
                         &values[checked.step.other.as_ref().expect("validated second input")];
@@ -1401,7 +1453,7 @@ impl CheckedComposition {
                 }
                 cause("NON_FINITE_RESULT")
             }
-            SeriesOp::RollingMean | SeriesOp::RollingMax | SeriesOp::RollingMin => {
+            SeriesOp::RollingMean | SeriesOp::RollingMax | SeriesOp::RollingMin | SeriesOp::RollingRange => {
                 let period = step.period.expect("validated window") as usize;
                 if at + 1 < period {
                     return cause("WARMUP");
@@ -1507,6 +1559,7 @@ fn series_cost_per_bar(op: SeriesOp) -> u64 {
         SeriesOp::RollingMean => 3,
         SeriesOp::RollingZscore => 6,
         SeriesOp::RollingStddev => 6,
+        SeriesOp::RollingRange => 4,
         SeriesOp::RollingPearson => 8,
         SeriesOp::AddSeries
         | SeriesOp::SubtractSeries
@@ -1738,6 +1791,169 @@ fn rolling_extremum(input: &[Option<f64>], period: usize, maximum: bool) -> Vec<
         }
     }
     result
+}
+
+/// Inclusive closed-bar high-minus-low of an already typed numeric series.
+/// Two monotone deques make both extrema O(1) amortized per bar. Missing or
+/// nonfinite observations invalidate exactly the windows containing them;
+/// constant *complete* windows produce the observed numeric zero.
+pub fn rolling_range(input: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
+    let mut result = vec![None; input.len()];
+    if !(2..=1000).contains(&period) {
+        return result;
+    }
+    let (mut maxima, mut minima) = (
+        VecDeque::<(usize, f64)>::with_capacity(period),
+        VecDeque::<(usize, f64)>::with_capacity(period),
+    );
+    let mut missing = 0usize;
+    for (index, observed) in input.iter().copied().enumerate() {
+        if index >= period && !input[index - period].is_some_and(f64::is_finite) {
+            missing -= 1;
+        }
+        if let Some(value) = observed.filter(|value| value.is_finite()) {
+            while maxima.back().is_some_and(|(_, prior)| *prior <= value) {
+                maxima.pop_back();
+            }
+            while minima.back().is_some_and(|(_, prior)| *prior >= value) {
+                minima.pop_back();
+            }
+            maxima.push_back((index, value));
+            minima.push_back((index, value));
+        } else {
+            missing += 1;
+        }
+        while maxima.front().is_some_and(|(old, _)| old.saturating_add(period) <= index) {
+            maxima.pop_front();
+        }
+        while minima.front().is_some_and(|(old, _)| old.saturating_add(period) <= index) {
+            minima.pop_front();
+        }
+        if index + 1 >= period && missing == 0 {
+            let width = maxima.front().expect("complete maximum").1
+                - minima.front().expect("complete minimum").1;
+            result[index] = width.is_finite().then_some(width);
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod t15_extension_contract {
+    use super::*;
+    use serde_json::json;
+
+    fn compile(steps: serde_json::Value, result_steps: &[&str]) -> Result<CheckedComposition, String> {
+        let request = serde_json::from_value(json!({
+            "version": COMPOSITION_VERSION,
+            "steps": steps,
+            "result_steps": result_steps,
+        }))
+        .unwrap();
+        CheckedComposition::compile(request, 20)
+    }
+
+    #[test]
+    fn new_pure_operator_has_stable_serde_id_version_descriptor_and_numeric_oracle() {
+        assert_eq!(serde_json::to_value(SeriesOp::RollingRange).unwrap(), "rolling_range");
+        assert_eq!(ROLLING_RANGE_DESCRIPTOR.op, "rolling_range");
+        assert_eq!(ROLLING_RANGE_DESCRIPTOR.version, 1);
+        assert_eq!(ROLLING_RANGE_DESCRIPTOR.effects, "pure_no_io");
+        assert_eq!(ROLLING_RANGE_DESCRIPTOR.output_unit, "same_as_input");
+        assert_eq!(ROLLING_RANGE_DESCRIPTOR.period_min, 2);
+        assert_eq!(ROLLING_RANGE_DESCRIPTOR.period_max, 1000);
+        assert_eq!(rolling_range(&[Some(10.), Some(14.), Some(13.), Some(18.), Some(18.)], 3),
+            vec![None, None, Some(4.), Some(5.), Some(5.)]);
+        assert_eq!(rolling_range(&[Some(4.); 4], 2),
+            vec![None, Some(0.), Some(0.), Some(0.)]);
+        assert_eq!(rolling_range(&[Some(2.), None, Some(3.), Some(5.), Some(5.)], 2),
+            vec![None, None, None, Some(2.), Some(0.)]);
+        assert_eq!(rolling_range(&[Some(2.), Some(f64::NAN), Some(3.)], 2),
+            vec![None, None, None]);
+        assert_eq!(rolling_range(&[Some(f64::MAX), Some(-f64::MAX)], 2),
+            vec![None, None]);
+
+        // Deliberately independent O(period) reference, with holes and ties,
+        // against the production O(bars) two-deque implementation.
+        let observations = (0..2037)
+            .map(|i| (i % 31 != 0).then_some(((i * 37 % 101) as i32 - 50) as f64))
+            .collect::<Vec<_>>();
+        for period in [2usize, 3, 13, 31, 1000] {
+            let actual = rolling_range(&observations, period);
+            for (index, got) in actual.iter().copied().enumerate() {
+                let expected = if index + 1 < period {
+                    None
+                } else {
+                    let window = &observations[index + 1 - period..=index];
+                    window.iter().copied().collect::<Option<Vec<_>>>().map(|values| {
+                        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                        let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+                        max - min
+                    })
+                };
+                assert_eq!(got, expected, "period={period},bar={index}");
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_composes_new_operator_without_new_route_and_never_leaks_future() {
+        let graph = json!([
+            {"id":"width","op":"rolling_range","input":"close","period":3},
+            {"id":"wide","op":"greater_than","input":"width","threshold":4.5},
+            {"id":"first_wide","op":"rising_edge","input":"wide"},
+            {"id":"smooth","op":"rolling_mean","input":"width","period":2},
+            {"id":"relative","op":"returns_series","input":"close"},
+            {"id":"return_span","op":"rolling_range","input":"relative","period":2}
+        ]);
+        let compiled = compile(graph.clone(), &["width","wide","first_wide","smooth","return_span"]).unwrap();
+        let close = [10., 14., 13., 18., 18., 12.];
+        let at = compiled.evaluate_at(&close, 3);
+        assert_eq!(at["width"], (Some(5.), Unit::Price));
+        assert_eq!(at["wide"], (Some(1.), Unit::Boolean));
+        assert_eq!(at["first_wide"], (Some(1.), Unit::Event));
+        assert_eq!(at["smooth"], (Some(4.5), Unit::Price));
+        assert_eq!(at["return_span"].1, Unit::Ratio);
+        let mut future_changed = close.to_vec();
+        future_changed[4..].fill(1000.);
+        assert_eq!(at, compiled.evaluate_at(&future_changed, 3));
+
+        // Users can change conditions and branches on the same installed
+        // binary. No Rust strategy ID, routing entry or finance call is added.
+        let mut altered = graph;
+        altered[1]["threshold"] = json!(100.0);
+        let different = compile(altered, &["width","wide","first_wide","smooth","return_span"]).unwrap();
+        assert_eq!(different.evaluate_at(&close, 3)["wide"].0, Some(0.));
+        assert_eq!(different.evaluate_at(&close, 3)["first_wide"].0, Some(0.));
+        assert_eq!(different.evaluate_at(&close, 3)["width"], at["width"]);
+
+        let mut missing = close.to_vec();
+        missing[2] = f64::NAN;
+        let (values, causes) = compiled.evaluate_at_sources(&missing, CandlePriceInputs::default(), None, None, 3, true);
+        assert_eq!(values["width"].0, None);
+        assert_eq!(causes["width"].reason, "SOURCE_OBSERVATION_MISSING");
+        assert_eq!(causes["width"].origin_step, "close");
+        assert_eq!(causes["width"].origin_index, 2);
+    }
+
+    #[test]
+    fn compiler_rejects_malformed_extension_windows_units_and_future_outcomes() {
+        for (steps, message) in [
+            (json!([{"id":"range","op":"rolling_range","input":"close"}]), "composition.steps[0].period:INVALID:2..1000"),
+            (json!([{"id":"range","op":"rolling_range","input":"close","period":1}]), "composition.steps[0].period:INVALID:2..1000"),
+            (json!([{"id":"range","op":"rolling_range","input":"close","period":1001}]), "composition.steps[0].period:INVALID:2..1000"),
+            (json!([{"id":"range","op":"rolling_range","input":"close","period":2,"threshold":1}]), "composition.steps[0].threshold:UNEXPECTED"),
+            (json!([{"id":"range","op":"rolling_range","input":"close","period":2,"other":"open"}]), "composition.steps[0].other:UNEXPECTED"),
+            (json!([{"id":"flag","op":"greater_than","input":"close","threshold":1},
+                    {"id":"range","op":"rolling_range","input":"flag","period":2}]), "composition.steps[1].input:UNIT_MISMATCH:expected=numeric_series:actual=boolean"),
+            (json!([{"id":"flag","op":"greater_than","input":"close","threshold":1},
+                    {"id":"event","op":"rising_edge","input":"flag"},
+                    {"id":"outcome","op":"forward_return_label","input":"close","when":"event","period":2},
+                    {"id":"range","op":"rolling_range","input":"outcome","period":2}]), "composition.steps[3].input:UNIT_MISMATCH:expected=numeric_series:actual=outcome_ratio"),
+        ] {
+            assert_eq!(compile(steps, &["range"]).unwrap_err(), message);
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -63,6 +63,25 @@ const extremaGraph={...composed,steps:[
  {id:'lower',op:'rolling_min',input:'close',period:20},
 ],result_steps:['upper','lower']};
 fail(validTool('market',{...marketScreen,composition:extremaGraph}),'typed causal extrema share one public request');
+const rangeExtension={...composed,steps:[
+ {id:'width',op:'rolling_range',input:'close',period:3},
+ {id:'wide',op:'greater_than',input:'width',threshold:5},
+ {id:'entry',op:'rising_edge',input:'wide'},
+ {id:'smoothed',op:'rolling_mean',input:'width',period:2},
+],result_steps:['width','entry','smoothed']};
+fail(validTool('market',{...marketScreen,composition:rangeExtension}),
+ 'T15 new pure range operator and user-defined causal branching share existing market screen');
+fail(validTool('market',{...marketScreen,composition:{...rangeExtension,steps:[
+ ...rangeExtension.steps.slice(0,1),{...rangeExtension.steps[1],threshold:20},...rangeExtension.steps.slice(2)
+]}}),'T15 user can change graph parameters without an API route change');
+for(const malformed of [
+ {id:'width',op:'rolling_range',input:'close'},
+ {id:'width',op:'rolling_range',input:'close',period:1},
+ {id:'width',op:'rolling_range',input:'close',period:1001},
+ {id:'width',op:'rolling_range',input:'close',period:3,threshold:0},
+ {id:'width',op:'rolling_range',input:'close',period:3,other:'open'},
+])fail(!validTool('market',{...marketScreen,composition:{...rangeExtension,steps:[malformed],result_steps:['width']}}),
+ 'T15 extension rejects illegal windows and unrelated parameters at MCP');
 const zscoreGraph={...composed,steps:[
  {id:'standard',op:'rolling_zscore',input:'close',period:20},
  {id:'high',op:'greater_than',input:'standard',threshold:1.5},
