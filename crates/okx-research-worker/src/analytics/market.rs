@@ -3,6 +3,7 @@ use okx_analysis::operators::{Operator, registry, scalar};
 use replay::Bar;
 use serde::Serialize;
 use tracing::Instrument;
+#[derive(Clone)]
 struct Loaded {
     instrument: String,
     bars: Result<Arc<Vec<Bar>>, String>,
@@ -611,18 +612,35 @@ impl AnalyticsService {
                     .and_then(|row| row.bars.as_ref().ok())
                     .cloned();
                 let mut rows = Vec::new();
+                // Only surviving result rows own source evidence. Publishing
+                // while computing would leak permanent unreferenced blobs for
+                // rejected global ranks and ordinary metric filters.
+                let mut source_inputs = Vec::new();
                 for row in loaded {
                     if cancel.load(Ordering::Acquire) {
                         return Err("CANCELLED".into());
                     }
-                    let source_evidence = if plan.composition.is_some() {
-                        publish_composition_source_evidence(&store, &row, &request, &plan, &cancel)?
+                    if plan.composition.is_some() {
+                        let source_index = source_inputs.len();
+                        source_inputs.push(row.clone());
+                        let mut result = compute_row_planned(
+                            row,
+                            &request,
+                            peer.as_deref(),
+                            &plan,
+                            need_candles,
+                        )?;
+                        result["__evidence_source_index"] = json!(source_index);
+                        rows.push(result);
                     } else {
-                        Vec::new()
-                    };
-                    let result =
-                        compute_row_planned(row, &request, peer.as_deref(), &plan, need_candles)?;
-                    rows.push(attach_composition_source_evidence(result, source_evidence)?);
+                        rows.push(compute_row_planned(
+                            row,
+                            &request,
+                            peer.as_deref(),
+                            &plan,
+                            need_candles,
+                        )?);
+                    }
                 }
                 if global_rank {
                     // Never drop deficient candidates via a metric filter and
@@ -639,6 +657,27 @@ impl AnalyticsService {
                 }
                 if !global_rank {
                     sort_market_rows(&mut rows, request.sort.as_ref(), false)?;
+                }
+                if plan.composition.is_some() {
+                    for result in &mut rows {
+                        if cancel.load(Ordering::Acquire) {
+                            return Err("CANCELLED".into());
+                        }
+                        let index = result
+                            .as_object_mut()
+                            .and_then(|r| r.remove("__evidence_source_index"))
+                            .and_then(|v| v.as_u64())
+                            .ok_or("COMPOSITION_SOURCE_INDEX_MISSING")?
+                            as usize;
+                        let inputs = source_inputs
+                            .get(index)
+                            .ok_or("COMPOSITION_SOURCE_INDEX_INVALID")?;
+                        let evidence = publish_composition_source_evidence(
+                            &store, inputs, &request, &plan, &cancel,
+                        )?;
+                        *result =
+                            attach_composition_source_evidence(std::mem::take(result), evidence)?;
+                    }
                 }
                 Ok((rows, matrix))
             })

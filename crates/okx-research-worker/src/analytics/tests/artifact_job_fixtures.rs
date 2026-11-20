@@ -336,6 +336,60 @@ async fn t13_composed_market_route_persists_input_evidence_and_replays_same_job(
     drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn t10_filtered_composition_does_not_publish_unreachable_source_evidence() {
+    let (root, service) = service();
+    let bars = (0..100)
+        .map(|i| replay::Bar {
+            time: i * 60000,
+            open: 100.0,
+            high: 102.0,
+            low: 99.0,
+            close: 100.0 + i as f64,
+            volume: 1.0,
+            funding_rate: None,
+        })
+        .collect::<Vec<_>>();
+    service
+        .sources
+        .cache
+        .load(
+            cache::SourceKey {
+                source: "candles".into(),
+                instrument: "BTC-USDT".into(),
+                timeframe_ms: 60000,
+                start_ms: 0,
+                end_ms: 6000000,
+                closed_only: true,
+                schema: 1,
+            },
+            || async { Ok(bars) },
+        )
+        .await
+        .unwrap();
+    let request: MarketRequest = serde_json::from_value(json!({
+        "action":"screen", "instruments":["BTC-USDT"], "fields":["returns"],
+        "timeframe_ms":60000, "start_ms":0, "end_ms":6000000,
+        "filters":[{"field":"returns","min":5.0}],
+        "composition":{"version":"okx.market.composition/v1", "steps":[
+            {"id":"z","op":"rolling_zscore","input":"close","period":20}
+        ],"result_steps":["z"]}
+    }))
+    .unwrap();
+    let admitted = service.market(request.clone(), None, None).await.unwrap();
+    let result = completed_market(&service, request, admitted).await;
+    assert_eq!(result["rows"], json!([]));
+    let artifacts = std::fs::read_dir(service.artifacts.evidence_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    // One empty market page-manifest and one completed job envelope;
+    // rejected inputs do not leave unreferenced evidence blobs.
+    assert_eq!(artifacts.len(), 2, "unexpected evidence: {artifacts:?}");
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
 #[tokio::test(flavor = "current_thread")]
 async fn ordinary_market_cursors_resume_one_job_and_reject_other_queries() {
     let (root, service) = service();
