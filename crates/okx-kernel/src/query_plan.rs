@@ -1269,7 +1269,17 @@ fn rolling_dispersion(input: &[Option<f64>], period: usize, zscore: bool) -> Vec
     let mut output = vec![None; input.len()];
     let mut stats = SlidingPearson::default();
     let mut missing = 0usize;
+    // Exact flatness is structural, not a floating-point epsilon guess.
+    // Welford removal can leave a tiny positive M2 after the last changing
+    // sample exits the window; identical closed observations must yield
+    // stddev=0 and zscore=None regardless of that residual.
+    let mut identical_run = 0usize;
     for i in 0..input.len() {
+        identical_run = match (i.checked_sub(1).and_then(|prior| input[prior]), input[i]) {
+            (Some(previous), Some(current)) if previous == current => identical_run + 1,
+            (_, Some(_)) => 1,
+            _ => 0,
+        };
         if i >= period {
             match input[i - period] {
                 Some(value) => stats.remove(value, value),
@@ -1290,14 +1300,19 @@ fn rolling_dispersion(input: &[Option<f64>], period: usize, zscore: bool) -> Vec
             Some(value) => stats.add(value, value),
             None => missing += 1,
         }
-        if i + 1 >= period && missing == 0 && stats.m2_x.is_finite() {
-            // Tiny negative M2 after long add/remove sequences is rounding,
-            // not evidence of real negative variance. Clamp only for stddev;
-            // z-score still requires positive, resolvable variance.
-            if zscore && stats.m2_x <= 0.0 {
+        if i + 1 >= period && missing == 0 {
+            if identical_run >= period {
+                if !zscore {
+                    output[i] = Some(0.0);
+                }
                 continue;
             }
-            let deviation = (stats.m2_x.max(0.0) / period as f64).sqrt();
+            // Nonconstant windows with unresolvable variance stay unknown;
+            // never report a synthetic zero for a genuine price movement.
+            if stats.m2_x <= 0.0 || !stats.m2_x.is_finite() {
+                continue;
+            }
+            let deviation = (stats.m2_x / period as f64).sqrt();
             let projected = if zscore {
                 (input[i].expect("complete window") - stats.mean_x) / deviation
             } else {
@@ -2694,7 +2709,9 @@ mod t07_t15_symmetric_causal_signals {
                 assert!((value - expected).abs() < 1e-12, "bar={i} actual={value} expected={expected}");
             }
         }
+        assert_eq!(observed[7], Some(0.0));
         assert_eq!(observed[8], Some(0.0));
+        assert_eq!(rolling_zscore(&input, 3)[7], None);
         assert_eq!(rolling_zscore(&input, 3)[8], None);
         let offset = (0..200).map(|i| Some(1e12 + (i % 5) as f64)).collect::<Vec<_>>();
         let stable = rolling_stddev(&offset, 5);
