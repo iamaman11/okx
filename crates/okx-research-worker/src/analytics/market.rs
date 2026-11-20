@@ -425,21 +425,12 @@ impl AnalyticsService {
         if (need_candles || need_oi) && total_bars > 1_000_000 {
             return Err("LIMIT_TOTAL_BARS:1000000".into());
         }
-        if let Some(composition) = plan.composition.as_ref() {
-            // One global work/column budget across all instruments, not one
-            // budget per independently executed candidate.
-            okx_analysis::query_plan::CheckedComposition::compile(
-                okx_analysis::query_plan::CompositionRequest {
-                    version: composition.version.clone(),
-                    steps: composition
-                        .steps
-                        .iter()
-                        .map(|checked| checked.step.clone())
-                        .collect(),
-                    result_steps: composition.result_steps.clone(),
-                },
-                total_bars,
-            )?;
+        // The QueryPlan checked the same source and graph-wide work budget
+        // against the resolved universe before durable job admission. Do not
+        // recompile user step descriptions after planning; this second guard
+        // protects direct internal calls to market_rows.
+        if let Some(composition) = &plan.composition {
+            composition.validate_global_budget(total_bars)?;
         }
         let loading = stream::iter(request.instruments.iter().cloned().map(|instrument| {
             let sources = self.sources.clone();

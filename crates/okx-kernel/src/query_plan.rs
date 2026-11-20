@@ -311,6 +311,47 @@ impl CheckedComposition {
         })
     }
 
+    /// A fully type-checked graph can be rebound to a venue-wide instrument
+    /// set without parsing or validating the user's step descriptions again.
+    /// Check the actual global allocation and work bound before job admission.
+    pub fn validate_global_budget(&self, total_bars: u64) -> Result<(), String> {
+        let cells = total_bars
+            .checked_mul(self.steps.len() as u64)
+            .ok_or("composition:CELLS_OVERFLOW")?;
+        if cells > 8_000_000 {
+            return Err("composition:CELLS_LIMIT".into());
+        }
+        let mut work = 0u64;
+        for checked in &self.steps {
+            let cost = match checked.step.op {
+                SeriesOp::RollingMean => 3,
+                SeriesOp::AddSeries => 2,
+                _ => 1,
+            };
+            work = work
+                .checked_add(
+                    total_bars
+                        .checked_mul(cost)
+                        .ok_or("composition:WORK_OVERFLOW")?,
+                )
+                .ok_or("composition:WORK_OVERFLOW")?;
+            if work > MAX_COMPOSITION_WORK_UNITS {
+                return Err("composition:WORK_LIMIT".into());
+            }
+        }
+        if self
+            .steps
+            .iter()
+            .any(|checked| checked.step.input == "open_interest")
+            && total_bars
+                .checked_mul(self.steps.len() as u64 + 2)
+                .is_none_or(|source_cells| source_cells > 8_000_000)
+        {
+            return Err("composition:SOURCE_CELLS_LIMIT".into());
+        }
+        Ok(())
+    }
+
     /// Returns only bounded scalar projections for the latest closed bar.
     /// Outcome labels cannot be confirmed at this index without future bars.
     pub fn evaluate(&self, close: &[f64]) -> BTreeMap<String, (Option<f64>, Unit)> {
@@ -838,6 +879,22 @@ impl QueryPlan {
         if instruments.iter().any(|id| !distinct.insert(id)) {
             return Err("universe:DUPLICATE_INSTRUMENT".into());
         }
+        let total_bars = self
+            .range
+            .expected_bars
+            .checked_mul(instruments.len() as u64)
+            .ok_or("LIMIT_TOTAL_BARS:OVERFLOW")?;
+        if self
+            .sources
+            .iter()
+            .any(|source| matches!(source, Source::Candles | Source::OpenInterest))
+            && total_bars > 1_000_000
+        {
+            return Err("LIMIT_TOTAL_BARS:1000000".into());
+        }
+        if let Some(composition) = &self.composition {
+            composition.validate_global_budget(total_bars)?;
+        }
         self.universe = instruments;
         Ok(self)
     }
@@ -1313,6 +1370,50 @@ mod tests {
         assert_eq!(
             query.with_resolved_universe(duplicate, true).unwrap_err(),
             "universe:DUPLICATE_INSTRUMENT"
+        );
+    }
+    #[test]
+    fn t10_resolved_global_market_budget_is_checked_before_job_admission() {
+        let names = (0..100)
+            .map(|i| format!("ASSET{i}-USDT"))
+            .collect::<Vec<_>>();
+        let plan = |bars: u64| {
+            QueryPlan::compile(
+                Vec::new(),
+                ClosedRange::strict(0, bars * 60_000, 60_000).unwrap(),
+                vec![Operator::Returns],
+                BTreeMap::new(),
+                Vec::new(),
+                None,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            plan(10_000)
+                .with_resolved_universe(names.clone(), true)
+                .unwrap()
+                .universe
+                .len(),
+            100
+        );
+        assert_eq!(
+            plan(10_001)
+                .with_resolved_universe(names.clone(), true)
+                .unwrap_err(),
+            "LIMIT_TOTAL_BARS:1000000"
+        );
+        let composition: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":(0..9).map(|i|serde_json::json!({
+                "id":format!("r{i}"),"op":"returns_series","input":"close"
+            })).collect::<Vec<_>>(),
+            "result_steps":["r0"]
+        }))
+        .unwrap();
+        let checked = plan(10_000).with_composition(Some(composition)).unwrap();
+        assert_eq!(
+            checked.with_resolved_universe(names, true).unwrap_err(),
+            "composition:CELLS_LIMIT"
         );
     }
     #[test]
