@@ -10,6 +10,10 @@ pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 32;
 pub const QUEUE_CAPACITY: usize = 64;
 pub const REQUEST_TIMEOUT_MS: u64 = 10_000;
+/// Independent admission budgets inside the Agent and its child Worker.
+/// A flood of read-only observations cannot consume the emergency STOP/CANCEL lane.
+pub const CRITICAL_IN_FLIGHT: usize = 2;
+pub const OBSERVATION_IN_FLIGHT: usize = 4;
 
 macro_rules! id {
     ($name:ident) => {
@@ -82,6 +86,62 @@ pub enum ResearchCommand {
         job_id: JobId,
     },
     Shutdown,
+}
+
+/// Internal scheduling metadata, not a new IPC wire field or public MCP action.
+/// Both endpoints derive the same lane from the existing typed command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResearchLane {
+    Critical,
+    Observation,
+    Work,
+}
+impl ResearchCommand {
+    pub fn lane(&self) -> ResearchLane {
+        match self {
+            Self::Shutdown | Self::Drain | Self::Research {
+                request: ResearchRequest::Cancel { .. },
+            } => ResearchLane::Critical,
+            Self::Explain { .. }
+            | Self::Capabilities
+            | Self::Research {
+                request: ResearchRequest::Status { .. } | ResearchRequest::Capabilities {},
+            } => ResearchLane::Observation,
+            _ => ResearchLane::Work,
+        }
+    }
+}
+
+#[cfg(test)]
+mod priority_lane_tests {
+    use super::*;
+
+    #[test]
+    fn t11_t12_control_plane_commands_have_typed_independent_budgets() {
+        assert_eq!(CRITICAL_IN_FLIGHT, 2);
+        assert_eq!(OBSERVATION_IN_FLIGHT, 4);
+        assert_eq!(MAX_IN_FLIGHT, 32);
+        let research = |request| ResearchCommand::Research { request };
+        assert_eq!(ResearchCommand::Drain.lane(), ResearchLane::Critical);
+        assert_eq!(ResearchCommand::Shutdown.lane(), ResearchLane::Critical);
+        assert_eq!(research(ResearchRequest::Cancel {
+            job_id: "job".into(), idempotency_key: "cancel".into(),
+        }).lane(), ResearchLane::Critical);
+        assert_eq!(ResearchCommand::Explain {
+            job_id: JobId::new("job".into()).unwrap(),
+        }.lane(), ResearchLane::Observation);
+        assert_eq!(ResearchCommand::Capabilities.lane(), ResearchLane::Observation);
+        assert_eq!(research(ResearchRequest::Status { job_id: "job".into() }).lane(),
+            ResearchLane::Observation);
+        assert_eq!(research(ResearchRequest::Capabilities {}).lane(),
+            ResearchLane::Observation);
+        assert_eq!(research(ResearchRequest::Economics {
+            cases: vec![], data_mode: crate::analytics::ResearchDataMode::Counterfactual,
+        }).lane(), ResearchLane::Work);
+        assert_eq!(research(ResearchRequest::Benchmark {
+            idempotency_key: "benchmark".into(),
+        }).lane(), ResearchLane::Work);
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]

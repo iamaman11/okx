@@ -3,7 +3,7 @@ use crate::{
     source_api::{PublicSourceClient, PublicSourceProvider, SourceFuture},
 };
 use futures_util::{SinkExt, StreamExt};
-use okx_protocol::{analytics::ResearchRequest, research_ipc::*};
+use okx_protocol::research_ipc::*;
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -21,16 +21,6 @@ use tokio::{
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::Instrument;
 
-fn is_control(command: &ResearchCommand) -> bool {
-    matches!(
-        command,
-        ResearchCommand::Drain
-            | ResearchCommand::Explain { .. }
-            | ResearchCommand::Research {
-                request: ResearchRequest::Cancel { .. }
-            }
-    )
-}
 fn codec() -> LengthDelimitedCodec {
     LengthDelimitedCodec::builder()
         .max_frame_length(MAX_FRAME_BYTES)
@@ -208,7 +198,8 @@ where
     });
     let mut jobs = JoinSet::new();
     let permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
-    let controls = Arc::new(Semaphore::new(4));
+    let controls = Arc::new(Semaphore::new(CRITICAL_IN_FLIGHT));
+    let observations = Arc::new(Semaphore::new(OBSERVATION_IN_FLIGHT));
     let mut last_request = 0u64;
     loop {
         tokio::select! {
@@ -226,8 +217,11 @@ where
                         if number <= last_request || format!("h{number}") != id.as_str() { return Err("DUPLICATE_REQUEST".into()); }
                         last_request = number;
                         if matches!(command, ResearchCommand::Shutdown) { let response = WorkerFrame::Response { id, session: session.clone(), result: Ok(WorkerReply::Shutdown) }; let (ack, done) = oneshot::channel(); tokio::time::timeout(Duration::from_millis(REQUEST_TIMEOUT_MS), async { tx.send((response, Some(ack))).await.map_err(|_| "WRITER_CLOSED")?; done.await.map_err(|_| "WRITER_CLOSED") }).await.map_err(|_| "WRITE_TIMEOUT")??; break; }
-                        let control = is_control(&command);
-                        let permit = match if control { controls.clone().try_acquire_owned() } else { permits.clone().try_acquire_owned() } {
+                        let permit = match match command.lane() {
+                            ResearchLane::Critical => controls.clone().try_acquire_owned(),
+                            ResearchLane::Observation => observations.clone().try_acquire_owned(),
+                            ResearchLane::Work => permits.clone().try_acquire_owned(),
+                        } {
                             Ok(permit) => permit,
                             Err(_) => { tx.try_send((WorkerFrame::Response { id, session: session.clone(), result: Err("RESEARCH_BUSY".into()) }, None)).map_err(|_| "WRITER_CLOSED")?; continue; }
                         };
@@ -267,6 +261,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use okx_protocol::analytics::ResearchRequest;
     use tokio::io::AsyncWriteExt;
     #[tokio::test]
     async fn cancelled_source_late_reply_is_ignored_but_unissued_is_rejected() {
@@ -318,12 +313,18 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn cancellation_has_reserved_capacity_when_jobs_are_full() {
+    async fn cancellation_has_reserved_capacity_when_jobs_and_observations_are_full() {
         let permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
-        let controls = Arc::new(Semaphore::new(4));
+        let observations = Arc::new(Semaphore::new(OBSERVATION_IN_FLIGHT));
+        let controls = Arc::new(Semaphore::new(CRITICAL_IN_FLIGHT));
         let _full = permits
             .clone()
             .acquire_many_owned(MAX_IN_FLIGHT as u32)
+            .await
+            .unwrap();
+        let _observed = observations
+            .clone()
+            .acquire_many_owned(OBSERVATION_IN_FLIGHT as u32)
             .await
             .unwrap();
         let cancel = ResearchCommand::Research {
@@ -332,9 +333,10 @@ mod tests {
                 idempotency_key: "cancel".into(),
             },
         };
-        assert!(is_control(&cancel));
+        assert_eq!(cancel.lane(), ResearchLane::Critical);
         let _permit = controls.clone().try_acquire_owned().unwrap();
         assert!(permits.try_acquire().is_err());
+        assert!(observations.try_acquire().is_err());
     }
     #[tokio::test]
     async fn split_and_coalesced_frames() {

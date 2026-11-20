@@ -87,6 +87,7 @@ struct Connection {
     live: AtomicBool,
     permits: Semaphore,
     control_permits: Semaphore,
+    observation_permits: Semaphore,
     source_permits: Arc<Semaphore>,
     stop: Notify,
     closed: watch::Sender<bool>,
@@ -132,16 +133,6 @@ fn stop_if_dispatched(c: Option<&Arc<Connection>>, dispatched: bool) {
 }
 fn version_name(path: &std::path::Path) -> Option<String> {
     path.parent()?.file_name()?.to_str().map(str::to_owned)
-}
-fn is_control(command: &ResearchCommand) -> bool {
-    matches!(
-        command,
-        ResearchCommand::Drain
-            | ResearchCommand::Explain { .. }
-            | ResearchCommand::Research {
-                request: ResearchRequest::Cancel { .. }
-            }
-    )
 }
 fn next_id(id: &RequestId, prefix: char, previous: &mut u64) -> bool {
     let Some(number) = id
@@ -248,7 +239,12 @@ impl ResearchClient {
                     .map_err(|_| "WORKER_CLOSED")?;
                 let _control = c
                     .control_permits
-                    .acquire_many(4)
+                    .acquire_many(CRITICAL_IN_FLIGHT as u32)
+                    .await
+                    .map_err(|_| "WORKER_CLOSED")?;
+                let _observations = c
+                    .observation_permits
+                    .acquire_many(OBSERVATION_IN_FLIGHT as u32)
                     .await
                     .map_err(|_| "WORKER_CLOSED")?;
                 let _sources = c
@@ -349,7 +345,8 @@ impl ResearchClient {
             send_order: Mutex::new(()),
             live: AtomicBool::new(true),
             permits: Semaphore::new(MAX_IN_FLIGHT),
-            control_permits: Semaphore::new(4),
+            control_permits: Semaphore::new(CRITICAL_IN_FLIGHT),
+            observation_permits: Semaphore::new(OBSERVATION_IN_FLIGHT),
             source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             stop: Notify::new(),
             closed,
@@ -429,15 +426,12 @@ impl ResearchClient {
     ) -> Result<WorkerReply, String> {
         let _permit = if matches!(command, ResearchCommand::Shutdown) {
             None
-        } else if is_control(&command) {
-            Some(
-                c.control_permits
-                    .acquire()
-                    .await
-                    .map_err(|_| "WORKER_CLOSED")?,
-            )
         } else {
-            Some(c.permits.acquire().await.map_err(|_| "WORKER_CLOSED")?)
+            Some(match command.lane() {
+                ResearchLane::Critical => c.control_permits.acquire().await,
+                ResearchLane::Observation => c.observation_permits.acquire().await,
+                ResearchLane::Work => c.permits.acquire().await,
+            }.map_err(|_| "WORKER_CLOSED")?)
         };
         if !c.live.load(Ordering::Acquire) {
             return Err("WORKER_DISCONNECTED".into());
@@ -601,7 +595,8 @@ mod transport_tests {
             send_order: Mutex::new(()),
             live: AtomicBool::new(true),
             permits: Semaphore::new(MAX_IN_FLIGHT),
-            control_permits: Semaphore::new(4),
+            control_permits: Semaphore::new(CRITICAL_IN_FLIGHT),
+            observation_permits: Semaphore::new(OBSERVATION_IN_FLIGHT),
             source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             stop: Notify::new(),
             closed,
@@ -656,17 +651,24 @@ mod transport_tests {
             send_order: Mutex::new(()),
             live: AtomicBool::new(true),
             permits: Semaphore::new(MAX_IN_FLIGHT),
-            control_permits: Semaphore::new(4),
+            control_permits: Semaphore::new(CRITICAL_IN_FLIGHT),
+            observation_permits: Semaphore::new(OBSERVATION_IN_FLIGHT),
             source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             stop: Notify::new(),
             closed,
         });
         let held = c.permits.acquire_many(MAX_IN_FLIGHT as u32).await.unwrap();
+        let work = ResearchCommand::Research {
+            request: ResearchRequest::Economics {
+                cases: vec![],
+                data_mode: okx_protocol::analytics::ResearchDataMode::Counterfactual,
+            },
+        };
         let sent = AtomicBool::new(false);
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(10),
-                ResearchClient::send(&c, ResearchCommand::Capabilities, Some(&sent))
+                ResearchClient::send(&c, work.clone(), Some(&sent))
             )
             .await
             .is_err()
@@ -683,7 +685,7 @@ mod transport_tests {
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(10),
-                ResearchClient::send(&c, ResearchCommand::Capabilities, Some(&sent))
+                ResearchClient::send(&c, work, Some(&sent))
             )
             .await
             .is_err()
@@ -695,5 +697,65 @@ mod transport_tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn t11_t12_cancel_is_dispatchable_while_work_and_observation_lanes_are_full() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (closed, _) = watch::channel(false);
+        let c = Arc::new(Connection {
+            tx,
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session: WorkerSession::new("t11-lanes".into()).unwrap(),
+            executable: PathBuf::new(),
+            draining: AtomicBool::new(false),
+            next: AtomicU64::new(1),
+            send_order: Mutex::new(()),
+            live: AtomicBool::new(true),
+            permits: Semaphore::new(MAX_IN_FLIGHT),
+            control_permits: Semaphore::new(CRITICAL_IN_FLIGHT),
+            observation_permits: Semaphore::new(OBSERVATION_IN_FLIGHT),
+            source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            stop: Notify::new(),
+            closed,
+        });
+        let _work = c.permits.acquire_many(MAX_IN_FLIGHT as u32).await.unwrap();
+        let observations = c
+            .observation_permits
+            .acquire_many(OBSERVATION_IN_FLIGHT as u32)
+            .await
+            .unwrap();
+
+        let cancel = ResearchCommand::Research {
+            request: ResearchRequest::Cancel {
+                job_id: "job".into(),
+                idempotency_key: "t11-cancel".into(),
+            },
+        };
+        let owner = c.clone();
+        let task = tokio::spawn(async move { ResearchClient::send(&owner, cancel, None).await });
+        let frame = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await.unwrap().unwrap();
+        let HostFrame::Request { id, command, .. } = frame else { panic!("missing cancel"); };
+        assert_eq!(command.lane(), ResearchLane::Critical);
+        c.pending.lock().unwrap().remove(id.as_str()).unwrap()
+            .send(Ok(WorkerReply::Product(serde_json::json!({"state":"cancelled"}))))
+            .unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap().is_ok());
+
+        let owner = c.clone();
+        let observed = tokio::spawn(async move {
+            ResearchClient::send(&owner, ResearchCommand::Capabilities, None).await
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(30), rx.recv()).await.is_err());
+        drop(observations);
+        let frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await.unwrap().unwrap();
+        let HostFrame::Request { id, command, .. } = frame else { panic!("missing observation"); };
+        assert_eq!(command.lane(), ResearchLane::Observation);
+        c.pending.lock().unwrap().remove(id.as_str()).unwrap()
+            .send(Ok(WorkerReply::Product(serde_json::json!({"quality":"fresh"}))))
+            .unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(1), observed).await.unwrap().unwrap().is_ok());
     }
 }

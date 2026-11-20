@@ -12,6 +12,10 @@ fn t10_capabilities_separate_memory_permit_from_observed_rss_and_full_slo() {
     assert_eq!(caps["resource_proof"]["memory_measurement_scope"],
         "whole_process_not_per_job_and_not_hard_enforcement");
     assert_eq!(caps["resource_proof"]["mcp_and_finance_under_load"], "not_evaluated");
+    assert_eq!(caps["ipc_isolation"]["critical_in_flight"], 2);
+    assert_eq!(caps["ipc_isolation"]["observation_in_flight"], 4);
+    assert_eq!(caps["ipc_isolation"]["work_in_flight"], 32);
+    assert_eq!(caps["ipc_isolation"]["engine_and_finance_slo_under_load"], "not_evaluated");
 }
 #[test]
 fn native_capabilities_do_not_advertise_unavailable_historical_mode() {
