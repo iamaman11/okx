@@ -44,13 +44,35 @@ fn independent_replay_currency_totals(rows: &[Value]) -> Result<Value, String> {
     }))
 }
 
+fn research_job_versions(request: &ResearchRequest) -> (&'static str, &'static str) {
+    let observed_funding = match request {
+        ResearchRequest::Backtest { costs, .. } | ResearchRequest::Grid { costs, .. } => {
+            matches!(costs.funding_mode, FundingMode::Observed)
+        }
+        _ => false,
+    };
+    if observed_funding {
+        (
+            "analytics/518.2.funding-settlement-close-v1",
+            "analytics/semantic/518.2.funding-settlement-close-v1",
+        )
+    } else {
+        ("analytics/448.1", "analytics/semantic/v1")
+    }
+}
+
 impl AnalyticsService {
     pub(super) async fn submit(&self, request: ResearchRequest) -> Result<Value, String> {
         // Estimate the complete batch before SQL admission or fetching candles.
         // Large requests are rejected before any allocation or source I/O.
         let memory_mib = budget::estimated_mib(&request)?;
-        let hash = okx_research::canonical_sha256(&("analytics/448.1", &request))
-            .map_err(|e| e.to_string())?;
+        // Preserve old immutable job IDs for unaffected research requests.
+        // A funding-observed replay now attributes each settlement to its
+        // preceding closed bar, so the same old request must not replay an
+        // immutable result with the previous one-bar-shifted economics.
+        let (job_version, semantic_version) = research_job_versions(&request);
+        let hash =
+            okx_research::canonical_sha256(&(job_version, &request)).map_err(|e| e.to_string())?;
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
         let key = match &request {
             ResearchRequest::Backtest {
@@ -67,7 +89,7 @@ impl AnalyticsService {
             .as_object_mut()
             .ok_or("INVALID_JOB_REQUEST")?
             .remove("idempotency_key");
-        let semantic_hash = okx_research::canonical_sha256(&("analytics/semantic/v1", semantic))
+        let semantic_hash = okx_research::canonical_sha256(&(semantic_version, semantic))
             .map_err(|e| e.to_string())?;
         let key = okx_protocol::research_ipc::IdempotencyKey::new(key).map_err(str::to_owned)?;
         let runner = RunnerGuard::new(self.runners.clone());
@@ -469,32 +491,70 @@ impl AnalyticsService {
         } else {
             return Err("UNSUPPORTED_INSTRUMENT_TYPE".into());
         };
+        let mut economic_basis = economic_basis;
+        let mut funding_capture = None;
         if matches!(costs.funding_mode, FundingMode::Observed) {
             let mut owned = (*bars).clone();
             if matches!(mechanics, Mechanics::Spot) {
                 for b in &mut owned {
                     b.funding_rate = Some(0.0);
                 }
+                economic_basis["funding_policy"] = json!("not_applicable_spot");
             } else {
-                let funding = self.sources.funding(&instruments[0], start, end).await?;
-                if funding
-                    .first()
-                    .is_none_or(|v| v.0 > start.saturating_add(28_800_000))
-                    || funding
-                        .last()
-                        .is_none_or(|v| v.0.saturating_add(28_800_000) < end)
-                {
-                    return Err("FUNDING_RANGE_INCOMPLETE".into());
+                // Include the final *actual closed bar's* settlement, even
+                // when the requested right boundary is not grid-aligned.
+                // Source reads use a half-open event range.
+                let last_close = owned
+                    .last()
+                    .and_then(|bar| bar.time.checked_add(ms))
+                    .ok_or("FUNDING_INVALID_BAR_GRID")?;
+                let funding_end = last_close.checked_add(1).ok_or("FUNDING_INVALID_RANGE")?;
+                let funding = self
+                    .sources
+                    .funding(&instruments[0], start, funding_end)
+                    .await?;
+                let bar_opens = owned.iter().map(|bar| bar.time).collect::<Vec<_>>();
+                let allocation = okx_research::economics::allocate_funding_at_bar_close(
+                    &bar_opens, ms, &funding,
+                )?;
+                for (bar, rate) in owned.iter_mut().zip(&allocation.bar_rates) {
+                    bar.funding_rate = Some(*rate);
                 }
-                for b in &mut owned {
-                    b.funding_rate = Some(
-                        funding
-                            .iter()
-                            .filter(|(t, _)| *t >= b.time && *t < b.time + ms)
-                            .map(|(_, r)| r)
-                            .sum(),
-                    );
-                }
+                let capture_hash = okx_research::canonical_sha256(&(
+                    "okx.research.realized-funding-events/v1",
+                    &instruments[0],
+                    start,
+                    funding_end,
+                    &funding,
+                ))
+                .map_err(|e| e.to_string())?;
+                economic_basis["funding_event_alignment"] = json!({
+                    "source":"okx/funding-rate-history",
+                    "rate_basis":"realized_settlement_rate",
+                    "join_semantics":"funding_event_at_preceding_closed_bar_end_no_forward_fill",
+                    "valuation_price":"candle_close_proxy_not_venue_mark_price",
+                    "observed_events":allocation.observed_events,
+                    "attributed_events":allocation.attributed_events,
+                    "pre_window_events_ignored":allocation.pre_window_events,
+                    "first_event_ms":allocation.first_event_ms,
+                    "last_event_ms":allocation.last_event_ms,
+                    "max_observed_event_gap_ms":allocation.max_observed_gap_ms,
+                    "max_allowed_gap_ms":okx_research::economics::MAX_FUNDING_EVENT_GAP_MS,
+                    "expected_events":null,
+                    "historical_cadence_verified":false,
+                    "publication_time_verified":false,
+                    "mark_price_verified":false,
+                    "normalized_source_capture_hash":capture_hash
+                });
+                funding_capture = Some(json!({
+                    "schema":"okx.research.funding-event-capture/v1",
+                    "instrument":instruments[0],
+                    "source":"okx/funding-rate-history",
+                    "start_ms":start,"end_exclusive_ms":funding_end,
+                    "rate_basis":"realized_settlement_rate",
+                    "events":funding,
+                    "normalized_capture_hash":capture_hash
+                }));
             }
             bars = Arc::new(owned);
         }
@@ -531,6 +591,10 @@ impl AnalyticsService {
                         let id = store.publish_evidence(&reference_capture).map_err(|e|e.to_string())?.0;
                         economic_basis["reference_capture_artifact"] = json!(id);
                     }
+                    if let Some(funding_capture) = funding_capture {
+                        let id = store.publish_evidence(&funding_capture).map_err(|e|e.to_string())?.0;
+                        economic_basis["funding_capture_artifact"] = json!(id);
+                    }
                     let experiment = store.publish_evidence(&json!({
                         "schema":"okx.research.experiment-inputs/v1",
                         "dataset_artifact":dataset,"instrument":instruments[0],
@@ -551,6 +615,41 @@ impl AnalyticsService {
 #[cfg(test)]
 mod t09_currency_batch_tests {
     use super::*;
+
+    #[test]
+    fn t09_t13_funding_settlement_migration_is_scoped_to_observed_research_jobs() {
+        let mut body = json!({
+            "action":"backtest","idempotency_key":"funding-v2-proof",
+            "instruments":["BTC-USDT-SWAP"],"timeframe_ms":60000,
+            "start_ms":0,"end_ms":6000000,"strategy_id":"ema_cross_v1",
+            "parameters":{"fast":2,"slow":4},
+            "costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,
+                "funding_mode":"zero_assumption"},
+            "data_mode":"counterfactual"
+        });
+        let previous: ResearchRequest = serde_json::from_value(body.clone()).unwrap();
+        assert_eq!(
+            research_job_versions(&previous),
+            ("analytics/448.1", "analytics/semantic/v1")
+        );
+        body["costs"]["funding_mode"] = json!("observed");
+        let migrated: ResearchRequest = serde_json::from_value(body.clone()).unwrap();
+        assert_eq!(
+            research_job_versions(&migrated),
+            (
+                "analytics/518.2.funding-settlement-close-v1",
+                "analytics/semantic/518.2.funding-settlement-close-v1"
+            )
+        );
+        body["action"] = json!("grid");
+        body["variants"] = json!([{"fast":2,"slow":4}]);
+        body.as_object_mut().unwrap().remove("parameters");
+        let grid: ResearchRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(
+            research_job_versions(&grid),
+            research_job_versions(&migrated)
+        );
+    }
 
     #[test]
     fn partial_batch_aggregates_only_completed_exact_same_currency_pnl() {

@@ -538,7 +538,25 @@ fn research_capabilities() -> Value {
         "result_views":["summary","trades","variants","equity","export"],
         "decisions":{"statuses":["accepted","rejected","deferred"],"single_experiment_only":true,"max_revisions":256,"max_annotation_json_bytes":6144,"trading_authority":false},
         "oos":{"grid_train_test_split":true,"selected_variant_from_train_only":true},
-        "source_evidence":{"closed_candles_only":true,"no_forward_fill":true}
+        "economics":{
+            "replay_products":["spot","linear_swap"],
+            "unsupported_products":["inverse_swap","option","unverified_contract"],
+            "linear_contract_units":"base_asset_per_contract_with_quote_settlement_verified_from_current_reference",
+            "replay_money_precision":"decimal_ledger_with_f64_price_inputs",
+            "observed_funding":{
+                "products":["linear_swap"],
+                "settlement_join":"funding_event_at_preceding_closed_bar_end_no_forward_fill",
+                "valuation_price":"candle_close_proxy_not_venue_mark_price",
+                "historical_cadence_verified":false,
+                "publication_time_verified":false,
+                "expected_events":null,
+                "max_event_gap_guard_ms":okx_research::economics::MAX_FUNDING_EVENT_GAP_MS,
+                "source_capture":"normalized_realized_events_immutable_artifact"
+            },
+            "batch_aggregation":"independent_exact_pnl_totals_grouped_by_quote_currency_no_fx_no_portfolio_risk"
+        },
+        "source_evidence":{"closed_candles_only":true,"no_forward_fill":true,
+            "linear_reference_capture":true,"funding_event_capture_when_requested":true}
     })
 }
 #[cfg(test)]

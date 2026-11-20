@@ -14,4 +14,21 @@ fn native_capabilities_do_not_advertise_unavailable_historical_mode() {
         2
     );
     assert_eq!(report["decisions"]["trading_authority"], false);
+    assert_eq!(
+        report["economics"]["replay_products"],
+        json!(["spot", "linear_swap"])
+    );
+    assert_eq!(
+        report["economics"]["observed_funding"]["settlement_join"],
+        "funding_event_at_preceding_closed_bar_end_no_forward_fill"
+    );
+    assert_eq!(
+        report["economics"]["observed_funding"]["publication_time_verified"],
+        false
+    );
+    assert!(report["economics"]["observed_funding"]["expected_events"].is_null());
+    assert_eq!(
+        report["source_evidence"]["funding_event_capture_when_requested"],
+        true
+    );
 }

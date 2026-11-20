@@ -233,6 +233,109 @@ pub struct QuotePnl {
 /// Source-compatible name for the original linear-swap oracle result.
 pub type LinearPnl = QuotePnl;
 
+/// Funding is a settlement event at `fundingTime`, not a property of the
+/// candle which opens at that instant. In a candle-close research replay,
+/// attribute it to the bar that **ends** at the event time. This is still a
+/// retrospective proxy: the actual venue mark price and publication instant
+/// have not been observed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FundingBarAllocation {
+    /// Realized rates assigned to preceding closed bars; zero means no
+    /// *observed* settlement on that boundary, never an inferred zero rate.
+    pub bar_rates: Vec<f64>,
+    pub observed_events: usize,
+    pub attributed_events: usize,
+    pub pre_window_events: usize,
+    pub first_event_ms: Option<u64>,
+    pub last_event_ms: Option<u64>,
+    pub max_observed_gap_ms: Option<u64>,
+}
+
+/// This conservative eight-hour bound is a missing-data guard, not proof of
+/// historical cadence. OKX may use shorter settlement intervals; without a
+/// historical schedule, completeness must remain unverified in the artifact.
+pub const MAX_FUNDING_EVENT_GAP_MS: u64 = 28_800_000;
+
+pub fn allocate_funding_at_bar_close(
+    bar_opens: &[u64],
+    timeframe_ms: u64,
+    realized_events: &[(u64, f64)],
+) -> Result<FundingBarAllocation, String> {
+    if timeframe_ms == 0 || bar_opens.is_empty() {
+        return Err("FUNDING_INVALID_BAR_GRID".into());
+    }
+    if bar_opens
+        .windows(2)
+        .any(|w| w[0].checked_add(timeframe_ms) != Some(w[1]))
+    {
+        return Err("FUNDING_INVALID_BAR_GRID".into());
+    }
+    let start = bar_opens[0];
+    let end = bar_opens
+        .last()
+        .and_then(|t| t.checked_add(timeframe_ms))
+        .ok_or("FUNDING_INVALID_BAR_GRID")?;
+    let mut bar_rates = vec![0.0; bar_opens.len()];
+    let mut attributed = 0usize;
+    let mut before = 0usize;
+    let mut last = None;
+    let mut max_gap = None::<u64>;
+    let mut first_applied = None;
+    let mut last_applied = None;
+    for &(time, rate) in realized_events {
+        if !rate.is_finite() {
+            return Err("FUNDING_NONFINITE_REALIZED_RATE".into());
+        }
+        if let Some(previous) = last {
+            if time <= previous {
+                return Err("FUNDING_DUPLICATE_OR_UNSORTED_EVENT".into());
+            }
+            let gap = time - previous;
+            max_gap = Some(max_gap.map_or(gap, |prior| prior.max(gap)));
+            if gap > MAX_FUNDING_EVENT_GAP_MS {
+                return Err("FUNDING_INTERIOR_RANGE_INCOMPLETE".into());
+            }
+        }
+        last = Some(time);
+        if time <= start {
+            before += 1;
+            continue;
+        }
+        if time > end {
+            return Err("FUNDING_EVENT_OUTSIDE_BAR_RANGE".into());
+        }
+        let offset = time - start;
+        if offset % timeframe_ms != 0 {
+            return Err("FUNDING_SETTLEMENT_NOT_ON_BAR_CLOSE".into());
+        }
+        let index = (offset / timeframe_ms - 1) as usize;
+        let Some(slot) = bar_rates.get_mut(index) else {
+            return Err("FUNDING_EVENT_OUTSIDE_BAR_RANGE".into());
+        };
+        *slot = rate;
+        attributed += 1;
+        first_applied.get_or_insert(time);
+        last_applied = Some(time);
+    }
+    let Some(first) = first_applied else {
+        return Err("FUNDING_RANGE_INCOMPLETE".into());
+    };
+    if first.saturating_sub(start) > MAX_FUNDING_EVENT_GAP_MS
+        || end.saturating_sub(last_applied.expect("attributed event")) > MAX_FUNDING_EVENT_GAP_MS
+    {
+        return Err("FUNDING_RANGE_INCOMPLETE".into());
+    }
+    Ok(FundingBarAllocation {
+        bar_rates,
+        observed_events: realized_events.len(),
+        attributed_events: attributed,
+        pre_window_events: before,
+        first_event_ms: realized_events.first().map(|(time, _)| *time),
+        last_event_ms: realized_events.last().map(|(time, _)| *time),
+        max_observed_gap_ms: max_gap,
+    })
+}
+
 /// Mixing quote currencies without an attested FX rate is forbidden.
 pub fn sum_quote(amounts: &[QuoteAmount]) -> Result<QuoteAmount, String> {
     let first = amounts.first().ok_or("EMPTY_PORTFOLIO")?;
@@ -280,6 +383,115 @@ pub fn group_quote_by_currency(amounts: &[QuoteAmount]) -> Result<Vec<CurrencyTo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t09_funding_settlement_belongs_to_bar_ending_at_event_not_starting_at_it() {
+        let bar_opens = [0, 60_000, 120_000, 180_000];
+        let result = allocate_funding_at_bar_close(
+            &bar_opens,
+            60_000,
+            &[(0, 0.008), (60_000, 0.001), (240_000, -0.002)],
+        )
+        .unwrap();
+        assert_eq!(result.bar_rates, [0.001, 0.0, 0.0, -0.002]);
+        assert_eq!(result.observed_events, 3);
+        assert_eq!(result.attributed_events, 2);
+        assert_eq!(result.pre_window_events, 1);
+        assert_eq!(result.first_event_ms, Some(0));
+        assert_eq!(result.last_event_ms, Some(240_000));
+        assert_eq!(result.max_observed_gap_ms, Some(180_000));
+    }
+
+    #[test]
+    fn t09_three_linear_contracts_funding_and_pnl_share_attested_quote_currency() {
+        let allocation =
+            allocate_funding_at_bar_close(&[0, 60_000], 60_000, &[(60_000, 0.01)]).unwrap();
+        assert_eq!(allocation.bar_rates, [0.01, 0.0]);
+        let contract = LinearContract::from_reference(
+            "BTC-USDT-SWAP",
+            Some("linear"),
+            Some("0.1"),
+            Some("BTC"),
+            Some("USDT"),
+        )
+        .unwrap();
+        let base = contract.contracts_to_base(Decimal::from(3)).unwrap();
+        let funding_value = base.value * Decimal::from(100) * Decimal::new(1, 2);
+        assert_eq!(funding_value, Decimal::new(3, 1));
+        let funding = QuoteAmount::exact("USDT", funding_value).unwrap();
+        let fees = QuoteAmount::exact("USDT", Decimal::ZERO).unwrap();
+        let result = contract
+            .pnl(
+                Decimal::from(3),
+                Decimal::from(100),
+                Decimal::from(110),
+                &fees,
+                &funding,
+            )
+            .unwrap();
+        assert_eq!(result.gross_quote.value, Decimal::from(3));
+        assert_eq!(result.net_quote.value, Decimal::new(27, 1));
+        assert_eq!(result.net_quote.currency, "USDT");
+        assert_eq!(
+            contract
+                .pnl(
+                    Decimal::from(3),
+                    Decimal::from(100),
+                    Decimal::from(110),
+                    &fees,
+                    &QuoteAmount::exact("BTC", funding_value).unwrap()
+                )
+                .unwrap_err(),
+            "CURRENCY_MISMATCH_FX_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn t09_funding_alignment_rejects_intra_bar_mark_proxy_and_unproven_gaps() {
+        let bar_opens = [0, 60_000, 120_000];
+        assert_eq!(
+            allocate_funding_at_bar_close(&bar_opens, 60_000, &[(90_000, 0.01)]).unwrap_err(),
+            "FUNDING_SETTLEMENT_NOT_ON_BAR_CLOSE"
+        );
+        assert_eq!(
+            allocate_funding_at_bar_close(&bar_opens, 60_000, &[(180_001, 0.01)]).unwrap_err(),
+            "FUNDING_EVENT_OUTSIDE_BAR_RANGE"
+        );
+        assert_eq!(
+            allocate_funding_at_bar_close(&bar_opens, 60_000, &[(60_000, 0.01), (60_000, 0.02)])
+                .unwrap_err(),
+            "FUNDING_DUPLICATE_OR_UNSORTED_EVENT"
+        );
+        assert_eq!(
+            allocate_funding_at_bar_close(&bar_opens, 60_000, &[(60_000, f64::NAN)]).unwrap_err(),
+            "FUNDING_NONFINITE_REALIZED_RATE"
+        );
+        assert_eq!(
+            allocate_funding_at_bar_close(&bar_opens, 60_000, &[]).unwrap_err(),
+            "FUNDING_RANGE_INCOMPLETE"
+        );
+        assert_eq!(
+            allocate_funding_at_bar_close(&[0, 120_000], 60_000, &[(60_000, 0.01)]).unwrap_err(),
+            "FUNDING_INVALID_BAR_GRID"
+        );
+        let long_grid = (0..1000).map(|i| i * 60_000).collect::<Vec<_>>();
+        assert_eq!(
+            allocate_funding_at_bar_close(
+                &long_grid,
+                60_000,
+                &[
+                    (60_000, 0.01),
+                    (60_000 + MAX_FUNDING_EVENT_GAP_MS + 60_000, 0.01)
+                ]
+            )
+            .unwrap_err(),
+            "FUNDING_INTERIOR_RANGE_INCOMPLETE"
+        );
+        assert_eq!(
+            allocate_funding_at_bar_close(&long_grid, 60_000, &[(60_000, 0.01)]).unwrap_err(),
+            "FUNDING_RANGE_INCOMPLETE"
+        );
+    }
 
     #[test]
     fn t09_three_linear_contracts_exact_oracle() {
