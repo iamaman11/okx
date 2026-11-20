@@ -71,11 +71,13 @@ def check_counts(output, required):
     return len(passed)
 
 
-def tests(package, target=("--lib",), required=(), exact=False):
+def tests(package, target=("--lib",), required=(), exact=False, show_output=False):
     cmd = ["cargo", "test", "--locked", "-p", package, *target, "--message-format=json-render-diagnostics"]
     cmd.extend(["--", "--test-threads", "2"])
     if exact:
         cmd.extend(["--exact", *required])
+    if show_output:
+        cmd.append("--show-output")
     print(shlex.join(cmd), flush=True)
     started = time.monotonic()
     run = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, text=True)
@@ -123,6 +125,7 @@ def execute(scopes):
         os.environ["OKX_RESEARCH_WORKER_TEST_EXE"] = str(worker)
         tests("okx-agent", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
         tests("okx-agent", required=("research_client::transport_tests::t11_t12_cancel_is_dispatchable_while_work_and_observation_lanes_are_full",), exact=True)
+        tests("okx-agent", required=("accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect",), exact=True, show_output=True)
     if "mcp" in scopes:
         subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=MCP, check=True)
         artifacts = [MCP / "contracts" / name for name in ("tools.schema.json", "action-fixtures.json")]
