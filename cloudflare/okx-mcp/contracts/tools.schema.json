@@ -626,6 +626,7 @@
                             "rolling_mean",
                             "rolling_max",
                             "rolling_min",
+                            "rolling_pearson",
                             "add_series",
                             "subtract_series",
                             "divide_series",

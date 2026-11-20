@@ -45,6 +45,17 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
         assert_eq!(operation["output_unit"], "ratio");
         assert_eq!(operation["numeric_policy"], "finite_only");
     }
+    let pearson = capabilities["composition"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["op"] == "rolling_pearson")
+        .unwrap();
+    assert_eq!(pearson["input_unit"], "ratio");
+    assert_eq!(pearson["other_unit"], "ratio");
+    assert_eq!(pearson["output_unit"], "coefficient");
+    assert_eq!(pearson["period_min"], 30);
+    assert_eq!(pearson["compute_cost"], "linear_in_series_length");
     assert_eq!(
         capabilities["composition"]["null_diagnostics"]["origin_step"],
         true

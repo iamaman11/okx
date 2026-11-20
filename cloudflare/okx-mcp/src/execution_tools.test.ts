@@ -64,6 +64,21 @@ const divergenceGraph={...joinedGraph,steps:[
 ],result_steps:['difference','relative']};
 fail(validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:divergenceGraph}),
  'T02/T05/T15 typed difference and division share the registered market route');
+const correlationGraph={...joinedGraph,steps:[
+ ...joinedGraph.steps.slice(0,2),
+ {id:'relationship',op:'rolling_pearson',input:'price_return',other:'oi_return',period:30},
+],result_steps:['relationship']};
+fail(validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:correlationGraph}),
+ 'T06 exact cross-source 30-pair Pearson uses the existing market screen route');
+for(const bad of [
+ {id:'relationship',op:'rolling_pearson',input:'price_return',period:30},
+ {id:'relationship',op:'rolling_pearson',input:'price_return',other:'oi_return',period:29},
+ {id:'relationship',op:'rolling_pearson',input:'price_return',other:'oi_return',period:1001},
+ {id:'relationship',op:'rolling_pearson',input:'price_return',other:'oi_return',period:30,threshold:0.9},
+]){
+ fail(!validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:{...correlationGraph,steps:[...correlationGraph.steps.slice(0,2),bad]}}),
+  'rolling_pearson rejects missing source, undersized window and unrelated parameters');
+}
 for(const op of ['subtract_series','divide_series']){
  for(const bad of [
   {id:'difference',op,input:'price_return'},

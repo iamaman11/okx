@@ -46,6 +46,7 @@ pub enum SeriesOp {
     RollingMean,
     RollingMax,
     RollingMin,
+    RollingPearson,
     AddSeries,
     SubtractSeries,
     DivideSeries,
@@ -131,6 +132,7 @@ impl CheckedComposition {
                     SeriesOp::AddSeries
                         | SeriesOp::SubtractSeries
                         | SeriesOp::DivideSeries
+                        | SeriesOp::RollingPearson
                         | SeriesOp::And
                         | SeriesOp::Or
                 )
@@ -142,6 +144,7 @@ impl CheckedComposition {
                 SeriesOp::AddSeries
                     | SeriesOp::SubtractSeries
                     | SeriesOp::DivideSeries
+                    | SeriesOp::RollingPearson
                     | SeriesOp::And
                     | SeriesOp::Or
             ) {
@@ -183,6 +186,28 @@ impl CheckedComposition {
                 return Err(format!("{path}:DEPTH_LIMIT"));
             }
             let output_unit = match step.op {
+                SeriesOp::RollingPearson => {
+                    if input_unit != Unit::Ratio {
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=ratio:actual={}",
+                            composition_unit_name(input_unit)
+                        ));
+                    }
+                    let unit = other.expect("validated second input").0;
+                    if unit != Unit::Ratio {
+                        return Err(format!(
+                            "{path}.other:UNIT_MISMATCH:expected=ratio:actual={}",
+                            composition_unit_name(unit)
+                        ));
+                    }
+                    if !matches!(step.period, Some(30..=1000)) {
+                        return Err(format!("{path}.period:INVALID:30..1000"));
+                    }
+                    if step.threshold.is_some() {
+                        return Err(format!("{path}.threshold:UNEXPECTED"));
+                    }
+                    Unit::Coefficient
+                }
                 SeriesOp::AddSeries | SeriesOp::SubtractSeries | SeriesOp::DivideSeries => {
                     if input_unit != Unit::Ratio {
                         return Err(format!(
@@ -246,7 +271,10 @@ impl CheckedComposition {
                 | SeriesOp::RollingMax
                 | SeriesOp::RollingMin
                 | SeriesOp::Lag => {
-                    let numeric = matches!(input_unit, Unit::Price | Unit::Ratio | Unit::Contracts);
+                    let numeric = matches!(
+                        input_unit,
+                        Unit::Price | Unit::Ratio | Unit::Contracts | Unit::Coefficient
+                    );
                     let lagged_discrete = step.op == SeriesOp::Lag
                         && matches!(input_unit, Unit::Boolean | Unit::Event);
                     if !(numeric || lagged_discrete) {
@@ -264,7 +292,7 @@ impl CheckedComposition {
                     input_unit
                 }
                 SeriesOp::GreaterThan => {
-                    if !matches!(input_unit, Unit::Price | Unit::Ratio) {
+                    if !matches!(input_unit, Unit::Price | Unit::Ratio | Unit::Coefficient) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
                             composition_unit_name(input_unit)
@@ -503,6 +531,15 @@ impl CheckedComposition {
             // cloning it here multiplied peak memory and source work.
             let input = &values[&checked.step.input];
             let output = match checked.step.op {
+                SeriesOp::RollingPearson => {
+                    let other =
+                        &values[checked.step.other.as_ref().expect("validated second input")];
+                    rolling_pearson(
+                        input,
+                        other,
+                        checked.step.period.expect("validated period") as usize,
+                    )
+                }
                 SeriesOp::AddSeries | SeriesOp::SubtractSeries | SeriesOp::DivideSeries => {
                     let other =
                         &values[checked.step.other.as_ref().expect("validated second input")];
@@ -713,6 +750,31 @@ impl CheckedComposition {
                 }
                 cause("NON_FINITE_RESULT")
             }
+            SeriesOp::RollingPearson => {
+                let period = step.period.expect("validated correlation window") as usize;
+                if at + 1 < period {
+                    return cause("WARMUP");
+                }
+                let other = step.other.as_deref().expect("validated second input");
+                for index in (at + 1 - period)..=at {
+                    if let Some(upstream) =
+                        trace(&step.input, index).or_else(|| trace(other, index))
+                    {
+                        return upstream;
+                    }
+                }
+                let mut stats = SlidingPearson::default();
+                for index in (at + 1 - period)..=at {
+                    stats.add(
+                        value(&step.input, index).unwrap(),
+                        value(other, index).unwrap(),
+                    );
+                }
+                if stats.m2_x <= 0.0 || stats.m2_y <= 0.0 {
+                    return cause("ZERO_VARIANCE");
+                }
+                cause("NON_FINITE_RESULT")
+            }
             SeriesOp::ReturnsSeries => {
                 if at == 0 {
                     return cause("WARMUP");
@@ -818,6 +880,7 @@ impl CheckedComposition {
 fn series_cost_per_bar(op: SeriesOp) -> u64 {
     match op {
         SeriesOp::RollingMean => 3,
+        SeriesOp::RollingPearson => 8,
         SeriesOp::AddSeries
         | SeriesOp::SubtractSeries
         | SeriesOp::DivideSeries
@@ -825,6 +888,105 @@ fn series_cost_per_bar(op: SeriesOp) -> u64 {
         | SeriesOp::Or => 2,
         _ => 1,
     }
+}
+
+/// Online centered covariance with O(1) insertion and removal. This avoids
+/// catastrophic cancellation of raw sums of squares for near-constant data.
+#[derive(Default)]
+struct SlidingPearson {
+    n: usize,
+    mean_x: f64,
+    mean_y: f64,
+    m2_x: f64,
+    m2_y: f64,
+    covariance: f64,
+}
+
+impl SlidingPearson {
+    fn add(&mut self, x: f64, y: f64) {
+        self.n += 1;
+        let n = self.n as f64;
+        let dx = x - self.mean_x;
+        let dy = y - self.mean_y;
+        self.mean_x += dx / n;
+        self.mean_y += dy / n;
+        self.m2_x += dx * (x - self.mean_x);
+        self.m2_y += dy * (y - self.mean_y);
+        self.covariance += dx * (y - self.mean_y);
+    }
+
+    fn remove(&mut self, x: f64, y: f64) {
+        if self.n <= 1 {
+            *self = Self::default();
+            return;
+        }
+        let next_n = (self.n - 1) as f64;
+        let dx = x - self.mean_x;
+        let dy = y - self.mean_y;
+        let next_mean_x = self.mean_x - dx / next_n;
+        let next_mean_y = self.mean_y - dy / next_n;
+        self.m2_x -= dx * (x - next_mean_x);
+        self.m2_y -= dy * (y - next_mean_y);
+        self.covariance -= dx * (y - next_mean_y);
+        self.n -= 1;
+        self.mean_x = next_mean_x;
+        self.mean_y = next_mean_y;
+    }
+
+    fn coefficient(&self) -> Option<f64> {
+        if self.m2_x <= 0.0 || self.m2_y <= 0.0 {
+            return None;
+        }
+        let denominator = self.m2_x.sqrt() * self.m2_y.sqrt();
+        let correlation = self.covariance / denominator;
+        if correlation.is_finite() && correlation.abs() <= 1.000_001 {
+            Some(correlation.clamp(-1.0, 1.0))
+        } else {
+            None
+        }
+    }
+}
+
+/// Exact-index join of two dimensionless return series. Every observation in
+/// the specified window must be present; no as-of filling, future values or
+/// exclusion of missing pairs. Periodic bounded rebasing limits numeric drift
+/// without making the per-bar cost depend on window size.
+fn rolling_pearson(left: &[Option<f64>], right: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
+    let mut output = vec![None; left.len()];
+    let mut stats = SlidingPearson::default();
+    let mut missing = 0usize;
+    let pair = |index: usize| match (left[index], right[index]) {
+        (Some(a), Some(b)) if a.is_finite() && b.is_finite() => Some((a, b)),
+        _ => None,
+    };
+    for i in 0..left.len() {
+        if i >= period {
+            match pair(i - period) {
+                Some((a, b)) => stats.remove(a, b),
+                None => missing -= 1,
+            }
+        }
+        // Exactly O(period) once per 4096 observations: the amortized number
+        // of operations remains bounded independently of the window size.
+        if i > 0 && i.is_multiple_of(4096) {
+            stats = SlidingPearson::default();
+            missing = 0;
+            for old in i.saturating_sub(period - 1)..i {
+                match pair(old) {
+                    Some((a, b)) => stats.add(a, b),
+                    None => missing += 1,
+                }
+            }
+        }
+        match pair(i) {
+            Some((a, b)) => stats.add(a, b),
+            None => missing += 1,
+        }
+        if i + 1 >= period && missing == 0 {
+            output[i] = stats.coefficient();
+        }
+    }
+    output
 }
 
 /// Compensated add/subtract for a sliding window, preserving small terms
@@ -2127,6 +2289,114 @@ mod t02_t06_multisource_regression {
         let label_plan = CheckedComposition::compile(label, 2).unwrap();
         let (_, unconfirmed) = label_plan.evaluate_with_diagnostics(&[100., 110.]);
         assert_eq!(unconfirmed["label"].reason, "OUTCOME_UNCONFIRMED");
+    }
+
+    #[test]
+    fn t02_t06_rolling_pearson_requires_thirty_exact_pairs_and_preserves_coefficient_type() {
+        let request: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"price_return","op":"returns_series","input":"close"},
+                {"id":"oi_return","op":"returns_series","input":"open_interest"},
+                {"id":"joined","op":"rolling_pearson","input":"price_return","other":"oi_return","period":30},
+                {"id":"strong","op":"greater_than","input":"joined","threshold":0.9}
+            ],"result_steps":["joined","strong"]
+        }))
+        .unwrap();
+        let plan = CheckedComposition::compile(request.clone(), 32).unwrap();
+        assert_eq!(plan.steps[2].unit, Unit::Coefficient);
+        assert_eq!(plan.steps[3].unit, Unit::Boolean);
+        assert_eq!(
+            plan.result_sources()["joined"],
+            BTreeSet::from([Source::Candles, Source::OpenInterest])
+        );
+        let mut prices = vec![100.0];
+        let mut oi = vec![Some(10.0)];
+        for i in 1..32 {
+            let change = (((i * 7) % 11) as f64 - 5.0) * 0.0005;
+            prices.push(prices[i - 1] * (1.0 + change));
+            oi.push(Some(oi[i - 1].unwrap() * (1.0 + 2.0 * change)));
+        }
+        let (early, warmup) = plan
+            .evaluate_with_open_interest_diagnostics(&prices[..30], &oi[..30])
+            .unwrap();
+        assert_eq!(early["joined"].0, None);
+        assert_eq!(warmup["joined"].reason, "WARMUP");
+        assert_eq!(warmup["joined"].origin_step, "price_return");
+        let full = plan
+            .evaluate_with_open_interest(&prices[..31], &oi[..31])
+            .unwrap();
+        assert!((full["joined"].0.unwrap() - 1.0).abs() < 1e-8);
+        assert_eq!(full["strong"].0, Some(1.0));
+        let later = plan.evaluate_with_open_interest(&prices, &oi).unwrap();
+        assert!((later["joined"].0.unwrap() - 1.0).abs() < 1e-8);
+
+        let mut missing = oi.clone();
+        missing[15] = None;
+        let (partial, causes) = plan
+            .evaluate_with_open_interest_diagnostics(&prices, &missing)
+            .unwrap();
+        assert_eq!(partial["joined"].0, None);
+        assert_eq!(causes["joined"].reason, "SOURCE_OBSERVATION_MISSING");
+        assert_eq!(causes["joined"].origin_step, "open_interest");
+        let (flat, causes) = plan
+            .evaluate_with_open_interest_diagnostics(&vec![100.0; 31], &oi[..31])
+            .unwrap();
+        assert_eq!(flat["joined"].0, None);
+        assert_eq!(causes["joined"].reason, "ZERO_VARIANCE");
+
+        let mut invalid = request.clone();
+        invalid.steps[2].input = "close".into();
+        assert_eq!(
+            CheckedComposition::compile(invalid, 32).unwrap_err(),
+            "composition.steps[2].input:UNIT_MISMATCH:expected=ratio:actual=price"
+        );
+        let mut invalid = request.clone();
+        invalid.steps[2].other = Some("open_interest".into());
+        assert_eq!(
+            CheckedComposition::compile(invalid, 32).unwrap_err(),
+            "composition.steps[2].other:UNIT_MISMATCH:expected=ratio:actual=contracts"
+        );
+        for period in [None, Some(29), Some(1001)] {
+            let mut invalid = request.clone();
+            invalid.steps[2].period = period;
+            assert_eq!(
+                CheckedComposition::compile(invalid, 32).unwrap_err(),
+                "composition.steps[2].period:INVALID:30..1000"
+            );
+        }
+        let mut invalid = request;
+        invalid.steps[2].other = None;
+        assert_eq!(
+            CheckedComposition::compile(invalid, 32).unwrap_err(),
+            "composition.steps[2].other:REQUIRED"
+        );
+    }
+
+    #[test]
+    fn t10_rolling_pearson_is_bounded_linear_work_and_recovers_after_old_gap() {
+        let compiled: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"returns","op":"returns_series","input":"close"},
+                {"id":"compare","op":"rolling_pearson","input":"returns","other":"returns","period":1000}
+            ],"result_steps":["compare"]
+        }))
+        .unwrap();
+        assert!(CheckedComposition::compile(compiled, 1_000_000).is_ok());
+        let left = (0..100_000)
+            .map(|i| Some(((i * 7) % 191) as f64 * 0.000_001))
+            .collect::<Vec<_>>();
+        let right = left.iter().map(|v| v.map(|x| 2.0 * x)).collect::<Vec<_>>();
+        let result = rolling_pearson(&left, &right, 1000);
+        assert!(result[..999].iter().all(Option::is_none));
+        assert!((result[999].unwrap() - 1.0).abs() < 1e-10);
+        assert!((result[99_999].unwrap() - 1.0).abs() < 1e-7);
+        let mut interrupted = left;
+        interrupted[500] = None;
+        let after = rolling_pearson(&interrupted, &right, 1000);
+        assert!(after[999].is_none());
+        assert!((after[99_999].unwrap() - 1.0).abs() < 1e-7);
     }
 
     #[test]

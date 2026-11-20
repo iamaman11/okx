@@ -386,7 +386,7 @@ impl AnalyticsService {
                     "origin_step":true,
                     "reason_codes":["SOURCE_OBSERVATION_MISSING","WARMUP",
                         "DIVISION_BY_ZERO","NON_FINITE_RESULT","NON_POSITIVE_RETURN_INPUT",
-                        "EVENT_NOT_TRIGGERED","OUTCOME_UNCONFIRMED"]},
+                        "EVENT_NOT_TRIGGERED","OUTCOME_UNCONFIRMED","ZERO_VARIANCE"]},
                 "source_alignment":{"location":"source_alignment",
                     "when":"composition_depends_on_open_interest",
                     "join_semantics":"exact_closed_bar_timestamp_no_forward_fill",
@@ -395,16 +395,17 @@ impl AnalyticsService {
                         "paired_return_observations"],
                     "publication_time_verified":false},
                 "operations":[{"op":"returns_series","input_unit":"price_or_contracts","output_unit":"ratio"},
-                    {"op":"rolling_mean","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"compute_cost":"linear_in_series_length"},
-                    {"op":"rolling_max","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
-                    {"op":"rolling_min","input_unit":"price_or_ratio_or_contracts","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
+                    {"op":"rolling_mean","input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"compute_cost":"linear_in_series_length"},
+                    {"op":"rolling_max","input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
+                    {"op":"rolling_min","input_unit":"price_or_ratio_or_contracts_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
+                    {"op":"rolling_pearson","input_unit":"ratio","other_unit":"ratio","output_unit":"coefficient","period_min":30,"period_max":1000,"null_policy":"strict_exact_pairs","compute_cost":"linear_in_series_length","minimum_pairs":30},
                     {"op":"add_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing"},
                     {"op":"subtract_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing","numeric_policy":"finite_only"},
                     {"op":"divide_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing_or_zero_denominator","numeric_policy":"finite_only"},
                     {"op":"and","input_unit":"boolean","other_unit":"boolean","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
                     {"op":"or","input_unit":"boolean","other_unit":"boolean","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
                     {"op":"lag","input_unit":"causal_series","output_unit":"same_as_input","period_min":1,"period_max":1000},
-                    {"op":"greater_than","input_unit":"price_or_ratio","output_unit":"boolean","requires":"finite_threshold"},
+                    {"op":"greater_than","input_unit":"price_or_ratio_or_coefficient","output_unit":"boolean","requires":"finite_threshold"},
                     {"op":"rising_edge","input_unit":"boolean","output_unit":"event","trigger":"false_to_true"},
                     {"op":"forward_return_label","input_unit":"price","output_unit":"outcome_ratio","requires":"prior_event_step_in_when","period_min":1,"period_max":1000,"causal_feature":false}],
                 "limits":{"max_steps":32,"max_depth":8,"max_result_steps":14,"max_cells":8000000,"max_work_units":64000000},
@@ -1054,6 +1055,7 @@ fn compute_row_planned(
                 okx_analysis::query_plan::Unit::Price => "price",
                 okx_analysis::query_plan::Unit::Contracts => "contracts",
                 okx_analysis::query_plan::Unit::Ratio => "ratio",
+                okx_analysis::query_plan::Unit::Coefficient => "coefficient",
                 okx_analysis::query_plan::Unit::Boolean => "boolean",
                 okx_analysis::query_plan::Unit::Event => "event",
                 okx_analysis::query_plan::Unit::OutcomeRatio => "outcome_ratio",
@@ -2313,6 +2315,103 @@ mod global_rank_tests {
         assert_eq!(
             zero["source_captures"]["open_interest"]["publication_time_verified"],
             false
+        );
+    }
+
+    #[test]
+    fn t06_public_rolling_pearson_uses_thirty_exact_return_pairs_without_oi_lookahead() {
+        let mut query: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT-SWAP"],"fields":["returns"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":6000000,
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"returns","op":"returns_series","input":"close"},
+                {"id":"oi_return","op":"returns_series","input":"open_interest"},
+                {"id":"relationship","op":"rolling_pearson","input":"returns","other":"oi_return","period":30}
+            ],"result_steps":["relationship"]}
+        }))
+        .unwrap();
+        let plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+        let fixture = |flat_oi: bool| {
+            let (mut price, mut oi) = (100.0, 10.0);
+            let mut bars = Vec::new();
+            let mut oi_points = Vec::new();
+            for i in 0..100 {
+                if i > 0 {
+                    let change = (((i * 7) % 11) as f64 - 5.0) * 0.0005;
+                    price *= 1.0 + change;
+                    if !flat_oi {
+                        oi *= 1.0 + 2.0 * change;
+                    }
+                }
+                bars.push(Bar {
+                    time: i * 60_000,
+                    open: price,
+                    high: price,
+                    low: price,
+                    close: price,
+                    volume: 1.0,
+                    funding_rate: None,
+                });
+                oi_points.push((i * 60_000, oi));
+            }
+            Loaded {
+                instrument: "BTC-USDT-SWAP".into(),
+                bars: Ok(Arc::new(bars)),
+                ticker: None,
+                funding: None,
+                oi: Some(Ok(oi_points)),
+                excluded: None,
+            }
+        };
+        let complete = compute_row_planned(fixture(false), &query, None, &plan, true).unwrap();
+        assert!((complete["metrics"]["relationship"].as_f64().unwrap() - 1.0).abs() < 1e-8);
+        assert_eq!(complete["units"]["relationship"], "coefficient");
+        assert_eq!(
+            complete["source_alignment"]["paired_return_observations"],
+            99
+        );
+        assert_eq!(
+            complete["composition_quality"]["relationship"]["status"],
+            "retrospective_publication_unverified"
+        );
+        let no_variance = compute_row_planned(fixture(true), &query, None, &plan, true).unwrap();
+        assert!(no_variance["metrics"]["relationship"].is_null());
+        assert_eq!(
+            no_variance["composition_quality"]["relationship"]["issues"][0]["reason"],
+            "ZERO_VARIANCE"
+        );
+        let mut missing = fixture(false);
+        missing.oi.as_mut().unwrap().as_mut().unwrap().remove(80);
+        let partial = compute_row_planned(missing, &query, None, &plan, true).unwrap();
+        assert!(partial["metrics"]["relationship"].is_null());
+        assert_eq!(
+            partial["source_alignment"]["paired_return_observations"],
+            97
+        );
+        assert_eq!(
+            partial["source_alignment"]["first_unaligned_ms"],
+            80 * 60_000
+        );
+        assert_eq!(
+            partial["composition_quality"]["relationship"]["issues"][0]["reason"],
+            "OI_RANGE_INCOMPLETE_OR_GAPPED"
+        );
+        // The same graph cannot be used to create a historical causal signal
+        // from OI publication times that have not been independently attested.
+        query.composition.as_mut().unwrap().steps.push(
+            serde_json::from_value(
+                json!({"id":"signal","op":"greater_than","input":"relationship","threshold":0.9}),
+            )
+            .unwrap(),
+        );
+        query.composition.as_mut().unwrap().result_steps = vec!["signal".into()];
+        let causal_plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+        let rejected =
+            compute_row_planned(fixture(false), &query, None, &causal_plan, true).unwrap();
+        assert!(rejected["metrics"]["signal"].is_null());
+        assert_eq!(
+            rejected["composition_quality"]["signal"]["issues"][0]["reason"],
+            "CAUSAL_PUBLICATION_TIME_UNVERIFIED"
         );
     }
 }
