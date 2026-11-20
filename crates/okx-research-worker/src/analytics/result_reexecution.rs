@@ -65,7 +65,7 @@ pub(super) fn verify(
     let work = count.checked_mul(candidates).and_then(|n| {
         n.checked_mul(if is_grid { 4 } else { 1 })
     });
-    if count > MAX_BARS || work.is_none_or(|n| n > MAX_REPLAY_WORK_UNITS) {
+    if count > MAX_BARS || candidates > 64 || work.is_none_or(|n| n > MAX_REPLAY_WORK_UNITS) {
         return Ok(unverified("REEXECUTION_BUDGET_EXCEEDED"));
     }
     if count == 0 || variants.is_empty() {

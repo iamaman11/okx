@@ -90,8 +90,8 @@ fn independent_replay_currency_totals(rows: &[Value]) -> Result<Value, String> {
 fn research_job_versions(request: &ResearchRequest) -> (&'static str, &'static str) {
     match request {
         ResearchRequest::Backtest { .. } | ResearchRequest::Grid { .. } => (
-            "analytics/518.4.reconciled-replay-cashflow-v1",
-            "analytics/semantic/518.4.reconciled-replay-cashflow-v1",
+            "analytics/518.6.lossless-float-replay-inputs-v1",
+            "analytics/semantic/518.6.lossless-float-replay-inputs-v1",
         ),
         ResearchRequest::Benchmark { .. } => (
             "analytics/518.5.resource-lease-rss-v1",
@@ -106,10 +106,10 @@ impl AnalyticsService {
         // Estimate the complete batch before SQL admission or fetching candles.
         // Large requests are rejected before any allocation or source I/O.
         let memory_mib = budget::estimated_mib(&request)?;
-        // Preserve old immutable job IDs for unaffected research requests.
-        // A funding-observed replay now attributes each settlement to its
-        // preceding closed bar, so the same old request must not replay an
-        // immutable result with the previous one-bar-shifted economics.
+        // Keep old immutable result IDs readable, but do not reuse the old
+        // computation identity after a replay semantic change. The selected
+        // namespace now also binds lossless f64 source/JSON deserialization;
+        // older best-effort-float results remain available through Result.
         let (job_version, semantic_version) = research_job_versions(&request);
         let hash =
             okx_research::canonical_sha256(&(job_version, &request)).map_err(|e| e.to_string())?;
@@ -706,7 +706,7 @@ mod t09_currency_batch_tests {
                 "funding_mode":"zero_assumption"},"data_mode":"counterfactual"
         })).unwrap();
         assert_eq!(research_job_versions(&replay).0,
-            "analytics/518.4.reconciled-replay-cashflow-v1");
+            "analytics/518.6.lossless-float-replay-inputs-v1");
     }
 
     #[test]
@@ -724,8 +724,8 @@ mod t09_currency_batch_tests {
         assert_eq!(
             research_job_versions(&previous),
             (
-                "analytics/518.4.reconciled-replay-cashflow-v1",
-                "analytics/semantic/518.4.reconciled-replay-cashflow-v1"
+                "analytics/518.6.lossless-float-replay-inputs-v1",
+                "analytics/semantic/518.6.lossless-float-replay-inputs-v1"
             )
         );
         body["costs"]["funding_mode"] = json!("observed");
@@ -733,8 +733,8 @@ mod t09_currency_batch_tests {
         assert_eq!(
             research_job_versions(&migrated),
             (
-                "analytics/518.4.reconciled-replay-cashflow-v1",
-                "analytics/semantic/518.4.reconciled-replay-cashflow-v1"
+                "analytics/518.6.lossless-float-replay-inputs-v1",
+                "analytics/semantic/518.6.lossless-float-replay-inputs-v1"
             )
         );
         body["action"] = json!("grid");

@@ -36,19 +36,20 @@ fn market_source_rate_deferred(loaded: &[Loaded]) -> bool {
 
 // Completed market jobs survive Worker releases. A changed result contract must
 // use a new job namespace, or the old immutable evidence is replayed instead
-// of being recalculated. Limit the T06 bump to funding consumers so unrelated
-// historical market jobs keep their existing cache entries.
+// of being recalculated. T13's lossless f64 parsing changes source semantics
+// across all operators, so every new Market request uses a fresh namespace.
+// Existing job IDs remain directly readable from the historical catalog.
 fn market_job_schema(fields: &[String]) -> &'static str {
     let funding = fields.iter().any(|field| field == "funding_sum");
     let correlation = fields.iter().any(|field| field == "pearson_correlation");
     if funding && correlation {
-        "market/518.2.funding-correlation-pair-diagnostics-v1"
+        "market/518.10.float-roundtrip-funding-correlation-v1"
     } else if correlation {
-        "market/518.2.correlation-pair-diagnostics-v1"
+        "market/518.10.float-roundtrip-correlation-v1"
     } else if funding {
-        "market/448.4.funding-realized-only-v1"
+        "market/518.10.float-roundtrip-funding-v1"
     } else {
-        "market/448.2"
+        "market/518.10.float-roundtrip-flat-v1"
     }
 }
 
@@ -62,7 +63,7 @@ fn market_request_schema(
     funding_composition: bool,
 ) -> &'static str {
     if has_composition || oi_composition || funding_composition {
-        "market/518.9.verified-metric-reexecution-v1"
+        "market/518.10.float-roundtrip-composition-v1"
     } else {
         market_job_schema(fields)
     }
@@ -2003,13 +2004,13 @@ mod tests {
         let oi_fields = vec!["pearson_correlation".to_owned()];
         assert_eq!(
             market_request_schema(&fields, false, false, false),
-            "market/448.2"
+            "market/518.10.float-roundtrip-flat-v1"
         );
         let composed = market_request_schema(&fields, true, false, false);
         let oi_composed = market_request_schema(&fields, true, true, false);
         let oi_correlated = market_request_schema(&oi_fields, true, true, false);
         let funding_composed = market_request_schema(&fields, true, false, true);
-        assert_eq!(composed, "market/518.9.verified-metric-reexecution-v1");
+        assert_eq!(composed, "market/518.10.float-roundtrip-composition-v1");
         assert_eq!(oi_composed, composed);
         assert_ne!(composed, "market/518.2.composition-quality-v1");
         assert_ne!(oi_composed, "market/518.2.oi-composition-quality-v1");
@@ -2020,7 +2021,7 @@ mod tests {
         assert_eq!(oi_correlated, oi_composed);
         assert_eq!(
             funding_composed,
-            "market/518.9.verified-metric-reexecution-v1"
+            "market/518.10.float-roundtrip-composition-v1"
         );
         assert_eq!(
             funding_composed,
@@ -2028,7 +2029,7 @@ mod tests {
         );
         assert_eq!(
             market_request_schema(&oi_fields, false, false, false),
-            "market/518.2.correlation-pair-diagnostics-v1"
+            "market/518.10.float-roundtrip-correlation-v1"
         );
     }
 
@@ -2043,10 +2044,10 @@ mod tests {
             market_job_schema(&funding.fields),
             market_job_schema(&mixed.fields)
         );
-        assert_eq!(market_job_schema(&returns.fields), "market/448.2");
+        assert_eq!(market_job_schema(&returns.fields), "market/518.10.float-roundtrip-flat-v1");
         assert_eq!(
             market_job_schema(&correlation.fields),
-            "market/518.2.correlation-pair-diagnostics-v1"
+            "market/518.10.float-roundtrip-correlation-v1"
         );
         assert_ne!(
             market_job_schema(&combined.fields),
@@ -2086,7 +2087,9 @@ mod tests {
         .unwrap();
         assert_ne!(previous, new);
 
-        // Non-funding research retains its original deterministic job key.
+        // Reading floats with exact round-trip precision can change any
+        // calculation, not just funding. Preserve completed old job IDs for
+        // result/status/export reads; new requests use the new namespace.
         let legacy_returns = okx_research::canonical_sha256(&(
             "market/448.2",
             &returns,
@@ -2101,7 +2104,7 @@ mod tests {
             0_i64,
         ))
         .unwrap();
-        assert_eq!(legacy_returns, current_returns);
+        assert_ne!(legacy_returns, current_returns);
     }
 
     #[test]
