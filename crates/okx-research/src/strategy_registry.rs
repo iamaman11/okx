@@ -607,23 +607,92 @@ impl Money {
     }
 }
 
+/// The original replay dataset digest, incrementally verifiable from immutable
+/// 4096-row pages. The writer and export verifier share exactly one hashing
+/// contract; verification never has to allocate the complete million-bar set.
+pub struct ChunkedDataHash {
+    hash: Sha256,
+    expected: usize,
+    observed: usize,
+}
+
+impl ChunkedDataHash {
+    pub fn new(expected: usize) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(b"okx.typed.chunks/4096/v1");
+        hash.update((expected as u64).to_le_bytes());
+        Self {
+            hash,
+            expected,
+            observed: 0,
+        }
+    }
+
+    pub fn update<T: Serialize>(&mut self, values: &[T]) -> Result<(), String> {
+        if values.is_empty()
+            || values.len() > 4096
+            || (self.observed > 0 && !self.observed.is_multiple_of(4096))
+            || self
+                .observed
+                .checked_add(values.len())
+                .is_none_or(|n| n > self.expected)
+        {
+            return Err("DATASET_CHUNK_SHAPE_INVALID".into());
+        }
+        let bytes = serde_json::to_vec(values).map_err(|e| e.to_string())?;
+        self.hash.update((bytes.len() as u64).to_le_bytes());
+        self.hash.update(&bytes);
+        self.observed += values.len();
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<String, String> {
+        if self.observed != self.expected {
+            return Err("DATASET_ROW_COUNT_MISMATCH".into());
+        }
+        Ok(format!("sha256:{:x}", self.hash.finalize()))
+    }
+}
+
 fn hash_chunks<T: Serialize>(values: &[T], cancel: &impl Fn() -> bool) -> Result<String, String> {
-    let mut hash = Sha256::new();
-    hash.update(b"okx.typed.chunks/4096/v1");
-    hash.update((values.len() as u64).to_le_bytes());
+    let mut digest = ChunkedDataHash::new(values.len());
     for chunk in values.chunks(4096) {
         if cancel() {
             return Err("CANCELLED".into());
         }
-        let bytes = serde_json::to_vec(chunk).map_err(|e| e.to_string())?;
-        hash.update((bytes.len() as u64).to_le_bytes());
-        hash.update(&bytes);
+        digest.update(chunk)?;
     }
-    Ok(format!("sha256:{:x}", hash.finalize()))
+    digest.finish()
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn t13_streaming_dataset_hash_matches_original_replay_digest_at_page_boundaries() {
+        for n in [0, 1, 4095, 4096, 4097, 8192] {
+            let values = (0..n).map(|i| i as f64 / 10.0).collect::<Vec<_>>();
+            let original = hash_chunks(&values, &|| false).unwrap();
+            let mut streaming = ChunkedDataHash::new(n);
+            for page in values.chunks(4096) {
+                streaming.update(page).unwrap();
+            }
+            assert_eq!(streaming.finish().unwrap(), original);
+        }
+        let mut missing = ChunkedDataHash::new(2);
+        missing.update(&[1u64]).unwrap();
+        assert_eq!(missing.finish().unwrap_err(), "DATASET_ROW_COUNT_MISMATCH");
+        let mut oversized = ChunkedDataHash::new(4097);
+        assert_eq!(
+            oversized.update(&vec![0u64; 4097]).unwrap_err(),
+            "DATASET_CHUNK_SHAPE_INVALID"
+        );
+        let mut early_partial = ChunkedDataHash::new(3);
+        early_partial.update(&[1u64]).unwrap();
+        assert_eq!(
+            early_partial.update(&[2u64, 3]).unwrap_err(),
+            "DATASET_CHUNK_SHAPE_INVALID"
+        );
+    }
     fn bars() -> Vec<Bar> {
         (0..100)
             .map(|i| Bar {

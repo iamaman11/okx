@@ -411,11 +411,13 @@ impl AnalyticsService {
                 self.artifact_graph(child, seen)?;
             }
         }
-        if let Some(reference) = value
-            .pointer("/economic_basis/reference_capture_artifact")
-            .and_then(Value::as_str)
-        {
-            self.artifact_graph(reference, seen)?;
+        for key in ["reference_capture_artifact", "funding_capture_artifact"] {
+            if let Some(child) = value
+                .pointer(&format!("/economic_basis/{key}"))
+                .and_then(Value::as_str)
+            {
+                self.artifact_graph(child, seen)?;
+            }
         }
         Ok(())
     }

@@ -2,7 +2,10 @@
 //! bounded paging, and signed cursors. No SQL mutation or research execution.
 use super::{AnalyticsService, cursor, jobs};
 use okx_protocol::analytics::ResearchResultView;
-use okx_research::ResearchArtifactStore;
+use okx_research::{
+    ResearchArtifactStore,
+    strategy_registry::{Bar, ChunkedDataHash},
+};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -90,6 +93,7 @@ pub(super) fn verify_export_manifest(
             {
                 return Err("EXPERIMENT_PROVENANCE_MISMATCH".into());
             }
+            let dataset = verify_experiment_dataset(store, &inputs, manifest)?;
             let basis = &inputs["economic_basis"];
             let reference_id = basis["reference_capture_artifact"].as_str();
             if basis["product"] == "linear_swap" && reference_id.is_none() {
@@ -117,9 +121,11 @@ pub(super) fn verify_export_manifest(
                     return Err("EXPERIMENT_PROVENANCE_MISMATCH".into());
                 }
             }
+            let funding_capture = verify_experiment_funding(store, &inputs)?;
             Some(
                 json!({"artifact":id,"checksum_verified":true,"references_match":true,
-                "reference_capture_verified":reference_id.is_some()}),
+                "reference_capture_verified":reference_id.is_some(),
+                "dataset":dataset,"funding_capture":funding_capture}),
             )
         }
         None => None,
@@ -136,12 +142,165 @@ pub(super) fn verify_export_manifest(
     if trades.is_none() && rows.is_none() {
         return Err("EXPORT_MANIFEST_INVALID".into());
     }
+    let dataset_verified = experiment
+        .as_ref()
+        .is_some_and(|e| e["dataset"]["quality"] == "verified");
+    let funding_verified = experiment.as_ref().is_some_and(|e| {
+        matches!(
+            e["funding_capture"]["quality"].as_str(),
+            Some("verified" | "not_applicable")
+        )
+    });
     Ok(json!({
-        "quality":"complete",
+        "quality":if dataset_verified && funding_verified {"complete"} else {"partial"},
+        "evidence_scope":if dataset_verified && funding_verified {"result_pages_and_replay_sources"} else {"result_pages_or_partial_sources"},
         "counts_verified":true,
-        "checksums_verified":true,
+        "checksums_verified":true,"dataset_verified":dataset_verified,
+        "funding_capture_verified":funding_verified,
         "trades":trades,"rows":rows,"equity":equity,"experiment":experiment
     }))
+}
+
+/// A replay's historical funding is a retrospective settlement input, not a
+/// publication-time-certified signal. Verify its normalized capture against
+/// the experiment while keeping availability and mark-price caveats explicit.
+fn verify_experiment_funding(
+    store: &ResearchArtifactStore,
+    inputs: &Value,
+) -> Result<Value, String> {
+    let basis = &inputs["economic_basis"];
+    if !basis["funding_event_alignment"].is_object() {
+        return Ok(json!({"quality":"not_applicable"}));
+    }
+    let Some(id) = basis["funding_capture_artifact"].as_str() else {
+        return Ok(json!({"quality":"unverified_legacy",
+            "reason_code":"FUNDING_CAPTURE_NOT_RETAINED"}));
+    };
+    let captured: Value = read_verified_result(store, id)?;
+    let reason = "EXPERIMENT_FUNDING_MISMATCH";
+    let end = inputs["effective_range"]["end_ms"]
+        .as_u64()
+        .and_then(|value| value.checked_add(1))
+        .ok_or(reason)?;
+    let start = inputs["requested_range"]["start_ms"]
+        .as_u64()
+        .ok_or(reason)?;
+    if captured["schema"] != "okx.research.funding-event-capture/v1"
+        || captured["instrument"] != inputs["instrument"]
+        || captured["source"] != "okx/funding-rate-history"
+        || captured["rate_basis"] != "realized_settlement_rate"
+        || captured["start_ms"] != start
+        || captured["end_exclusive_ms"] != end
+    {
+        return Err(reason.into());
+    }
+    let events: Vec<(u64, f64)> =
+        serde_json::from_value(captured["events"].clone()).map_err(|_| reason)?;
+    let mut previous = None;
+    for &(time, rate) in &events {
+        if time < start
+            || time >= end
+            || !rate.is_finite()
+            || previous.is_some_and(|prior| prior >= time)
+        {
+            return Err(reason.into());
+        }
+        previous = Some(time);
+    }
+    let hash = okx_research::canonical_sha256(&(
+        "okx.research.realized-funding-events/v1",
+        inputs["instrument"].as_str().ok_or(reason)?,
+        start,
+        end,
+        &events,
+    ))
+    .map_err(|error| error.to_string())?;
+    if captured["normalized_capture_hash"] != hash
+        || basis["funding_event_alignment"]["normalized_source_capture_hash"] != hash
+        || basis["funding_event_alignment"]["observed_events"] != events.len()
+    {
+        return Err(reason.into());
+    }
+    Ok(
+        json!({"artifact":id,"quality":"verified","observed_events":events.len(),
+        "normalized_capture_hash":hash,
+        "publication_time_verified":false,"mark_price_verified":false}),
+    )
+}
+
+/// Verify the exact input bars used by replay from the original immutable
+/// pages. Never materialize the entire dataset; the same 4096-row hashing
+/// implementation that computed ReplayResult.dataset_hash is used here.
+/// Older experiment formats stay readable but never claim verified inputs.
+fn verify_experiment_dataset(
+    store: &ResearchArtifactStore,
+    inputs: &Value,
+    result: &Value,
+) -> Result<Value, String> {
+    let id = inputs["dataset_artifact"]
+        .as_str()
+        .ok_or("EXPERIMENT_PROVENANCE_MISMATCH")?;
+    let dataset: Value = read_verified_result(store, id)?;
+    if dataset["schema"] != "okx.research.dataset/398.1" {
+        return Ok(json!({"artifact":id,"quality":"unverified_legacy",
+            "reason_code":"DATASET_SCHEMA_NOT_VERIFIABLE"}));
+    }
+    let invalid = || "EXPERIMENT_DATASET_MISMATCH".to_owned();
+    let timeframe = dataset["timeframe_ms"].as_u64().ok_or_else(invalid)?;
+    let start = dataset["start_ms"].as_u64().ok_or_else(invalid)?;
+    let end = dataset["end_ms"].as_u64().ok_or_else(invalid)?;
+    let expected = inputs["bar_count"].as_u64().ok_or_else(invalid)?;
+    if timeframe == 0
+        || end <= start
+        || expected == 0
+        || expected > 1_000_000
+        || dataset["instrument"] != inputs["instrument"]
+        || dataset["timeframe_ms"] != inputs["timeframe_ms"]
+        || dataset["start_ms"] != inputs["requested_range"]["start_ms"]
+        || dataset["end_ms"] != inputs["requested_range"]["end_ms"]
+    {
+        return Err(invalid());
+    }
+    let expected = usize::try_from(expected).map_err(|_| invalid())?;
+    let pages = dataset["chunks"].as_array().ok_or_else(invalid)?;
+    if pages.len() != expected.div_ceil(4096) {
+        return Err("DATASET_PAGE_COUNT_MISMATCH".into());
+    }
+    let mut digest = ChunkedDataHash::new(expected);
+    let mut previous = None;
+    let mut first = None;
+    for (index, reference) in pages.iter().enumerate() {
+        let reference = reference.as_str().ok_or_else(invalid)?;
+        let bars: Vec<Bar> = read_verified_result(store, reference)?;
+        if bars.is_empty() || bars.len() > 4096 || (index + 1 < pages.len() && bars.len() != 4096) {
+            return Err("DATASET_PAGE_SIZE_INVALID".into());
+        }
+        for bar in &bars {
+            if bar.time < start
+                || bar.time >= end
+                || !bar.time.is_multiple_of(timeframe)
+                || previous.is_some_and(|time: u64| time.checked_add(timeframe) != Some(bar.time))
+            {
+                return Err("DATASET_TIME_GRID_MISMATCH".into());
+            }
+            first.get_or_insert(bar.time);
+            previous = Some(bar.time);
+        }
+        digest.update(&bars)?;
+    }
+    let computed = digest.finish()?;
+    let last_closed = previous.and_then(|time| time.checked_add(timeframe));
+    if inputs["effective_range"]["start_ms"].as_u64() != first
+        || inputs["effective_range"]["end_ms"].as_u64() != last_closed
+        || result["dataset_hash"].as_str() != Some(computed.as_str())
+    {
+        return Err("EXPERIMENT_DATASET_MISMATCH".into());
+    }
+    Ok(
+        json!({"artifact":id,"quality":"verified","bar_count":expected,
+        "pages":pages.len(),"first_bar_ms":first,"last_closed_ms":last_closed,
+        "dataset_hash":computed,"hash_algorithm":"okx.typed.chunks/4096/v1"}),
+    )
 }
 
 impl AnalyticsService {

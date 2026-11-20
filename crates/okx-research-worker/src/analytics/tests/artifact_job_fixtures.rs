@@ -704,7 +704,8 @@ fn c17_verified_export_reads_all_page_checksums_and_exact_rows() {
     let receipt = service
         .result_page(job.clone(), None, 20, ResearchResultView::Export)
         .unwrap();
-    assert_eq!(receipt["integrity"]["quality"], "complete");
+    assert_eq!(receipt["integrity"]["quality"], "partial");
+    assert_eq!(receipt["integrity"]["dataset_verified"], false);
     assert_eq!(receipt["integrity"]["trades"]["rows"], 51);
     assert_eq!(receipt["integrity"]["trades"]["pages"], 2);
     assert_eq!(receipt["integrity"]["equity"]["rows"], 2);
@@ -727,27 +728,39 @@ fn c17_verified_export_reads_all_page_checksums_and_exact_rows() {
 #[test]
 fn c17_export_rejects_corrupt_or_mismatched_experiment_provenance() {
     let (root, service) = service();
+    let dataset = service
+        .artifacts
+        .publish_evidence(&json!({
+            "schema":"fixture.dataset/v1"
+        }))
+        .unwrap()
+        .0;
     let input = json!({
         "schema":"okx.research.experiment-inputs/v1",
-        "dataset_artifact":"a".repeat(64),
+        "dataset_artifact":dataset,
         "code_version":replay::CAUSAL_REPLAY_VERSION
     });
     let experiment = service.artifacts.publish_evidence(&input).unwrap().0;
     let mut manifest = json!({
         "trade_pages":[],"total_trades":0,
-        "dataset_artifact":"a".repeat(64),
+        "dataset_artifact":dataset,
         "code_version":replay::CAUSAL_REPLAY_VERSION,
         "experiment_artifact":experiment
     });
     let export = verify_export_manifest(&service.artifacts, &manifest).unwrap();
     assert_eq!(export["experiment"]["checksum_verified"], true);
     assert_eq!(export["experiment"]["references_match"], true);
+    assert_eq!(
+        export["experiment"]["dataset"]["quality"],
+        "unverified_legacy"
+    );
+    assert_eq!(export["quality"], "partial");
     manifest["dataset_artifact"] = json!("b".repeat(64));
     assert_eq!(
         verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
         "EXPERIMENT_PROVENANCE_MISMATCH"
     );
-    manifest["dataset_artifact"] = json!("a".repeat(64));
+    manifest["dataset_artifact"] = json!(dataset);
     service.artifacts.remove_evidence(&experiment).unwrap();
     assert_eq!(
         verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
@@ -758,6 +771,218 @@ fn c17_export_rejects_corrupt_or_mismatched_experiment_provenance() {
         .unwrap()
         .remove("experiment_artifact");
     assert!(verify_export_manifest(&service.artifacts, &manifest).unwrap()["experiment"].is_null());
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn t13_export_rechecks_all_replay_dataset_pages_and_exact_content_hash() {
+    let (root, service) = service();
+    let timeframe = 60_000u64;
+    let bars = (0..4097u64)
+        .map(|index| replay::Bar {
+            time: index * timeframe,
+            open: 100.0 + index as f64 / 10.0,
+            high: 101.0 + index as f64 / 10.0,
+            low: 99.0 + index as f64 / 10.0,
+            close: 100.5 + index as f64 / 10.0,
+            volume: 1.0,
+            funding_rate: Some(0.0),
+        })
+        .collect::<Vec<_>>();
+    let mut digest = replay::ChunkedDataHash::new(bars.len());
+    let mut pages = Vec::new();
+    for chunk in bars.chunks(4096) {
+        digest.update(chunk).unwrap();
+        pages.push(service.artifacts.publish_evidence(&chunk).unwrap().0);
+    }
+    let dataset_hash = digest.finish().unwrap();
+    let end = bars.len() as u64 * timeframe;
+    let make_dataset = |pages: Vec<String>| {
+        service
+            .artifacts
+            .publish_evidence(&json!({
+                "schema":"okx.research.dataset/398.1",
+                "instrument":"BTC-USDT","start_ms":0,"end_ms":end,
+                "timeframe_ms":timeframe,"chunks":pages
+            }))
+            .unwrap()
+            .0
+    };
+    let dataset = make_dataset(pages.clone());
+    let make_experiment = |dataset: String| {
+        service
+            .artifacts
+            .publish_evidence(&json!({
+                "schema":"okx.research.experiment-inputs/v1",
+                "instrument":"BTC-USDT","dataset_artifact":dataset,
+                "bar_count":bars.len(),"timeframe_ms":timeframe,
+                "requested_range":{"start_ms":0,"end_ms":end},
+                "effective_range":{"start_ms":0,"end_ms":end},
+                "code_version":replay::CAUSAL_REPLAY_VERSION,
+                "economic_basis":{"product":"spot"}
+            }))
+            .unwrap()
+            .0
+    };
+    let experiment = make_experiment(dataset.clone());
+    let mut manifest = json!({
+        "trade_pages":[],"total_trades":0,
+        "dataset_artifact":dataset,"dataset_hash":dataset_hash,
+        "experiment_artifact":experiment,
+        "code_version":replay::CAUSAL_REPLAY_VERSION
+    });
+    let verified = verify_export_manifest(&service.artifacts, &manifest).unwrap();
+    assert_eq!(verified["quality"], "complete");
+    assert_eq!(verified["dataset_verified"], true);
+    assert_eq!(verified["experiment"]["dataset"]["bar_count"], 4097);
+    assert_eq!(verified["experiment"]["dataset"]["pages"], 2);
+    assert_eq!(verified["experiment"]["dataset"]["last_closed_ms"], end);
+
+    // All page IDs can be valid yet refer to a different dataset: the replay
+    // digest must bind the exact values, not just their count and time range.
+    let mut changed = bars[4096].clone();
+    changed.close += 1.0;
+    let changed_page = service
+        .artifacts
+        .publish_evidence(&vec![changed])
+        .unwrap()
+        .0;
+    let changed_dataset = make_dataset(vec![pages[0].clone(), changed_page]);
+    manifest["dataset_artifact"] = json!(changed_dataset.clone());
+    manifest["experiment_artifact"] = json!(make_experiment(changed_dataset));
+    assert_eq!(
+        verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+        "EXPERIMENT_DATASET_MISMATCH"
+    );
+
+    let mut gap = bars[4096].clone();
+    gap.time += timeframe;
+    let gap_page = service.artifacts.publish_evidence(&vec![gap]).unwrap().0;
+    let gap_dataset = make_dataset(vec![pages[0].clone(), gap_page]);
+    manifest["dataset_artifact"] = json!(gap_dataset.clone());
+    manifest["experiment_artifact"] = json!(make_experiment(gap_dataset));
+    assert_eq!(
+        verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+        "DATASET_TIME_GRID_MISMATCH"
+    );
+
+    let missing_page_dataset = make_dataset(vec![pages[0].clone()]);
+    manifest["dataset_artifact"] = json!(missing_page_dataset.clone());
+    manifest["experiment_artifact"] = json!(make_experiment(missing_page_dataset));
+    assert_eq!(
+        verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+        "DATASET_PAGE_COUNT_MISMATCH"
+    );
+
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn t13_export_and_retention_verify_realized_funding_capture_without_lookahead_claims() {
+    let (root, service) = service();
+    let bar = replay::Bar {
+        time: 0,
+        open: 100.0,
+        high: 101.0,
+        low: 99.0,
+        close: 100.5,
+        volume: 1.0,
+        funding_rate: Some(0.01),
+    };
+    let mut hasher = replay::ChunkedDataHash::new(1);
+    hasher.update(&[bar.clone()]).unwrap();
+    let dataset_hash = hasher.finish().unwrap();
+    let chunk = service.artifacts.publish_evidence(&vec![bar]).unwrap().0;
+    let dataset = service
+        .artifacts
+        .publish_evidence(&json!({
+            "schema":"okx.research.dataset/398.1",
+            "instrument":"BTC-USDT-SWAP","start_ms":0,"end_ms":60_000,
+            "timeframe_ms":60_000,"chunks":[chunk]
+        }))
+        .unwrap()
+        .0;
+    let events = vec![(60_000u64, 0.01f64)];
+    let capture_hash = okx_research::canonical_sha256(&(
+        "okx.research.realized-funding-events/v1",
+        "BTC-USDT-SWAP",
+        0u64,
+        60_001u64,
+        &events,
+    ))
+    .unwrap();
+    let captured = json!({
+        "schema":"okx.research.funding-event-capture/v1",
+        "instrument":"BTC-USDT-SWAP","source":"okx/funding-rate-history",
+        "start_ms":0,"end_exclusive_ms":60_001,"rate_basis":"realized_settlement_rate",
+        "events":events,"normalized_capture_hash":capture_hash
+    });
+    let funding = service.artifacts.publish_evidence(&captured).unwrap().0;
+    let make_experiment = |reference: Option<String>| {
+        service
+            .artifacts
+            .publish_evidence(&json!({
+                "schema":"okx.research.experiment-inputs/v1",
+                "instrument":"BTC-USDT-SWAP","dataset_artifact":dataset,
+                "bar_count":1,"timeframe_ms":60_000,
+                "requested_range":{"start_ms":0,"end_ms":60_000},
+                "effective_range":{"start_ms":0,"end_ms":60_000},
+                "code_version":replay::CAUSAL_REPLAY_VERSION,
+                "economic_basis":{"product":"spot",
+                    "funding_capture_artifact":reference,
+                    "funding_event_alignment":{"observed_events":1,
+                        "normalized_source_capture_hash":capture_hash}}
+            }))
+            .unwrap()
+            .0
+    };
+    let experiment = make_experiment(Some(funding.clone()));
+    let mut manifest = json!({
+        "trade_pages":[],"total_trades":0,
+        "dataset_artifact":dataset,"dataset_hash":dataset_hash,
+        "experiment_artifact":experiment,"code_version":replay::CAUSAL_REPLAY_VERSION
+    });
+    let verified = verify_export_manifest(&service.artifacts, &manifest).unwrap();
+    assert_eq!(verified["quality"], "complete");
+    assert_eq!(verified["funding_capture_verified"], true);
+    assert_eq!(
+        verified["experiment"]["funding_capture"]["observed_events"],
+        1
+    );
+    assert_eq!(
+        verified["experiment"]["funding_capture"]["publication_time_verified"],
+        false
+    );
+    let mut graph = std::collections::BTreeSet::new();
+    service.artifact_graph(&experiment, &mut graph).unwrap();
+    assert!(
+        graph.contains(&funding),
+        "retention must retain its funding evidence"
+    );
+
+    let mut wrong = captured.clone();
+    wrong["events"][0][1] = json!(0.02);
+    let wrong_id = service.artifacts.publish_evidence(&wrong).unwrap().0;
+    manifest["experiment_artifact"] = json!(make_experiment(Some(wrong_id)));
+    assert_eq!(
+        verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+        "EXPERIMENT_FUNDING_MISMATCH"
+    );
+    manifest["experiment_artifact"] = json!(make_experiment(None));
+    let legacy = verify_export_manifest(&service.artifacts, &manifest).unwrap();
+    assert_eq!(legacy["quality"], "partial");
+    assert_eq!(
+        legacy["experiment"]["funding_capture"]["reason_code"],
+        "FUNDING_CAPTURE_NOT_RETAINED"
+    );
+    service.artifacts.remove_evidence(&funding).unwrap();
+    manifest["experiment_artifact"] = json!(make_experiment(Some(funding)));
+    assert_eq!(
+        verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
+        "ARTIFACT_CORRUPT"
+    );
     drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }
