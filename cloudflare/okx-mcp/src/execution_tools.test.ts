@@ -147,6 +147,28 @@ const causalSteps=[
 ];
 const causalGraph={...composed,steps:causalSteps,result_steps:['positive','event','prior','outcome']};
 fail(validTool('market',{...marketScreen,composition:causalGraph}), 'bounded event and future label graph passes strict public schema');
+const priceCrossGraph={...composed,steps:[
+ {id:'fast',op:'rolling_mean',input:'close',period:5},
+ {id:'slow',op:'rolling_mean',input:'close',period:20},
+ {id:'above',op:'greater_than_series',input:'fast',other:'slow'},
+ {id:'cross',op:'rising_edge',input:'above'},
+],result_steps:['above','cross']};
+fail(validTool('market',{...marketScreen,composition:priceCrossGraph}),
+ 'T03/T15 independently parametrized price windows compose into a crossing event');
+const ohlcGraph={...composed,steps:[
+ {id:'body',op:'greater_than_series',input:'close',other:'open'},
+ {id:'range',op:'greater_than_series',input:'high',other:'low'},
+ {id:'confirmed',op:'and',input:'body',other:'range'},
+],result_steps:['confirmed']};
+fail(validTool('market',{...marketScreen,composition:ohlcGraph}),
+ 'T02/T04 four closed-candle inputs can compose into a typed signal');
+for(const bad of [
+ {id:'above',op:'greater_than_series',input:'fast'},
+ {id:'above',op:'greater_than_series',input:'fast',other:'slow',period:2},
+ {id:'above',op:'greater_than_series',input:'fast',other:'slow',threshold:0},
+])fail(!validTool('market',{...marketScreen,composition:{...priceCrossGraph,
+ steps:[...priceCrossGraph.steps.slice(0,2),bad],result_steps:['above']}}),
+ 'T02/T03 invalid binary price comparison rejected by public schema');
 const booleanGraph={...composed,steps:[
  {id:'returns',op:'returns_series',input:'close'},
  {id:'positive',op:'greater_than',input:'returns',threshold:0},

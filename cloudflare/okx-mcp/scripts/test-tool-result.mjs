@@ -41,6 +41,19 @@ try {
   assert.deepEqual([...semantic.MARKET_OPERATORS],rustNames,
     "T01 public MCP operator IDs match the Rust registry order and names");
   console.log("T01 Rust/MCP operator catalog parity PASS",rustNames.length);
+  // The composition graph has its own finite Rust enum. Every new primitive
+  // must reach the strict public wire schema in the same slice.
+  const rustPlan=readFileSync(resolve("../../crates/okx-kernel/src/query_plan.rs"),"utf8");
+  const variants=rustPlan.match(/pub enum SeriesOp\s*\{([\s\S]*?)\}/);
+  assert.ok(variants,"T15 Rust composition enum exists");
+  const rustComposition=[...variants[1].matchAll(/^\s+([A-Z][A-Za-z]+),/gm)]
+    .map(([,name])=>name.replace(/[A-Z]/g,letter=>"_"+letter.toLowerCase()).slice(1));
+  const publicSchema=readFileSync(resolve("src/execution_tools.ts"),"utf8");
+  const publicComposition=publicSchema.match(/const compositionStep=.*?op:choice\(([^)]*)\)/);
+  assert.ok(publicComposition,"T15 public composition schema exists");
+  const publicOps=[...publicComposition[1].matchAll(/'([a-z_]+)'/g)].map(([,id])=>id);
+  assert.deepEqual(publicOps,rustComposition,"T15 every typed Rust series primitive has an MCP schema entry");
+  console.log("T15 Rust/MCP series composition parity PASS",publicOps.length);
   for(const [input,expected] of fixture.numeric.positive){
     const result=risk.normalizeDecimal(input);
     assert.equal(result.canonical,expected,"S2 positive canonical "+input);

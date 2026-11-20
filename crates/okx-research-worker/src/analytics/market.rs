@@ -409,8 +409,9 @@ impl AnalyticsService {
             "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
             "operators":operators,
             "composition":{"version":okx_analysis::query_plan::COMPOSITION_VERSION,
-                "available_for":"screen","input_sources":["close","open_interest","funding_rate"],
-                "source_units":{"close":"price","open_interest":"contracts","funding_rate":"ratio"},
+                "available_for":"screen","input_sources":["open","high","low","close","open_interest","funding_rate"],
+                "source_units":{"open":"price","high":"price","low":"price","close":"price","open_interest":"contracts","funding_rate":"ratio"},
+                "ohlc_policy":"same_instrument_closed_candle_grid_no_forward_fill",
                 "open_interest_policy":"exact_timestamps_no_forward_fill_publication_time_unverified",
                 "funding_rate_policy":"sparse_realized_settlement_events_exact_timestamp_no_forward_fill_publication_time_unverified_swap_only",
                 "funding_event_alignment":{"location":"funding_event_alignment",
@@ -448,6 +449,7 @@ impl AnalyticsService {
                     {"op":"or","input_unit":"boolean","other_unit":"boolean","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
                     {"op":"lag","input_unit":"causal_series","output_unit":"same_as_input","period_min":1,"period_max":1000},
                     {"op":"greater_than","input_unit":"price_or_ratio_or_coefficient","output_unit":"boolean","requires":"finite_threshold"},
+                    {"op":"greater_than_series","input_unit":"price_or_ratio_or_contracts_or_coefficient","other_unit":"same_as_input","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
                     {"op":"rising_edge","input_unit":"boolean","output_unit":"event","trigger":"false_to_true"},
                     {"op":"forward_return_label","input_unit":"price","output_unit":"outcome_ratio","requires":"prior_event_step_in_when","period_min":1,"period_max":1000,"causal_feature":false}],
                 "limits":{"max_steps":32,"max_depth":8,"max_result_steps":14,"max_cells":8000000,"max_work_units":64000000},
@@ -1146,17 +1148,30 @@ fn compute_row_planned(
     let mut funding_event_alignment = None;
     if let Some(composition) = composition {
         let source_dependencies = composition.result_sources();
-        let evaluated = if composition_oi || composition_funding {
+        let composition_ohlc = ["open", "high", "low"]
+            .iter()
+            .any(|name| composition.uses_source(name));
+        let evaluated = if composition_oi || composition_funding || composition_ohlc {
             let count = ((request.end_ms - request.start_ms) / request.timeframe_ms) as usize;
             let mut prices = vec![f64::NAN; count];
+            // Allocate only projected dependencies. Unused OHLC branches do
+            // not consume buffers or cause any extra source reads.
+            let mut opens = composition.uses_source("open").then(|| vec![f64::NAN; count]);
+            let mut highs = composition.uses_source("high").then(|| vec![f64::NAN; count]);
+            let mut lows = composition.uses_source("low").then(|| vec![f64::NAN; count]);
             let mut open_interest = vec![None; count];
             let mut funding_rate = vec![None; count];
             for bar in bars.iter() {
                 if let Some(offset) = bar.time.checked_sub(request.start_ms)
                     && offset % request.timeframe_ms == 0
-                    && let Some(slot) = prices.get_mut((offset / request.timeframe_ms) as usize)
                 {
-                    *slot = bar.close;
+                    let index = (offset / request.timeframe_ms) as usize;
+                    if let Some(slot) = prices.get_mut(index) {
+                        *slot = bar.close;
+                        if let Some(column) = &mut opens { column[index] = bar.open; }
+                        if let Some(column) = &mut highs { column[index] = bar.high; }
+                        if let Some(column) = &mut lows { column[index] = bar.low; }
+                    }
                 }
             }
             if let Some(Ok(points)) = &row.oi {
@@ -1228,8 +1243,11 @@ fn compute_row_planned(
                     "oi_publication_time_verified":false
                 }));
             }
-            composition.evaluate_with_sources_diagnostics(
+            composition.evaluate_with_candle_sources_diagnostics(
                 &prices,
+                okx_analysis::query_plan::CandlePriceInputs {
+                    open: opens.as_deref(), high: highs.as_deref(), low: lows.as_deref(),
+                },
                 composition_oi.then_some(open_interest.as_slice()),
                 composition_funding.then_some(funding_rate.as_slice()),
             )?
@@ -2201,6 +2219,69 @@ mod tests {
             partial["composition_quality"]["both"]["issues"][0]["first_missing_ms"],
             42 * 60_000
         );
+    }
+    #[test]
+    fn t03_t07_t15_public_rolling_price_cross_is_one_composed_market_request() {
+        let mut request = request(vec!["returns"]);
+        request.composition = Some(Box::new(serde_json::from_value(json!({
+            "version":okx_analysis::query_plan::COMPOSITION_VERSION,
+            "steps":[
+                {"id":"fast","op":"rolling_mean","input":"close","period":1},
+                {"id":"slow","op":"rolling_mean","input":"close","period":3},
+                {"id":"above","op":"greater_than_series","input":"fast","other":"slow"},
+                {"id":"cross","op":"rising_edge","input":"above"}
+            ],
+            "result_steps":["above","cross"]
+        })).unwrap()));
+        let plan = planner::AnalysisPlan::compile_market(&request).unwrap();
+        assert_eq!(plan.sources, vec![okx_analysis::query_plan::Source::Candles]);
+        let mut loaded = row();
+        let bars = Arc::make_mut(loaded.bars.as_mut().unwrap());
+        for bar in &mut bars[96..99] {
+            bar.open = 100.0;
+            bar.high = 102.0;
+            bar.low = 99.0;
+            bar.close = 100.0;
+        }
+        bars[99].open = 100.0;
+        bars[99].low = 99.0;
+        bars[99].high = 112.0;
+        bars[99].close = 110.0;
+        let result = compute_row_planned(loaded, &request, None, &plan, true).unwrap();
+        assert_eq!(result["metrics"]["above"], true);
+        assert_eq!(result["metrics"]["cross"], true);
+        assert_eq!(result["units"]["cross"], "event");
+        assert_eq!(result["composition_quality"]["cross"]["status"], "available_at_closed_bar");
+        assert!(result["source_captures"]["candles"]["capture_hash"].is_string());
+    }
+    #[test]
+    fn t02_t04_public_ohlc_graph_diagnoses_a_missing_high_without_forward_fill() {
+        let mut request = request(vec!["returns"]);
+        request.composition = Some(Box::new(serde_json::from_value(json!({
+            "version":okx_analysis::query_plan::COMPOSITION_VERSION,
+            "steps":[
+                {"id":"body","op":"greater_than_series","input":"close","other":"open"},
+                {"id":"range","op":"greater_than_series","input":"high","other":"low"},
+                {"id":"confirmed","op":"and","input":"body","other":"range"}
+            ],
+            "result_steps":["confirmed"]
+        })).unwrap()));
+        let plan = planner::AnalysisPlan::compile_market(&request).unwrap();
+        let mut loaded = row();
+        let bars = Arc::make_mut(loaded.bars.as_mut().unwrap());
+        bars[99].open = 190.0;
+        bars[99].low = 189.0;
+        bars[99].high = 201.0;
+        bars[99].close = 199.0;
+        let present = compute_row_planned(loaded.clone(), &request, None, &plan, true).unwrap();
+        assert_eq!(present["metrics"]["confirmed"], true);
+        assert_eq!(present["units"]["confirmed"], "boolean");
+        let bars = Arc::make_mut(loaded.bars.as_mut().unwrap());
+        bars[99].high = f64::NAN;
+        let missing = compute_row_planned(loaded, &request, None, &plan, true).unwrap();
+        assert!(missing["metrics"]["confirmed"].is_null());
+        assert_eq!(missing["composition_quality"]["confirmed"]["issues"][0]["origin_step"], "high");
+        assert_eq!(missing["composition_quality"]["confirmed"]["issues"][0]["reason"], "SOURCE_OBSERVATION_MISSING");
     }
     #[test]
     fn t10_unprojected_oi_and_funding_branches_never_require_sources_on_spot() {

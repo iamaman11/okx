@@ -494,7 +494,7 @@
     },
     {
       "name": "market",
-      "description": "Market data.",
+      "description": "Market.",
       "inputSchema": {
         "oneOf": [
           {
@@ -601,6 +601,7 @@
                             "or",
                             "lag",
                             "greater_than",
+                            "greater_than_series",
                             "rising_edge",
                             "forward_return_label"
                           ]
@@ -2114,7 +2115,7 @@
     },
     {
       "name": "trade.status",
-      "description": "Trade status.",
+      "description": "Status.",
       "inputSchema": {
         "properties": {
           "account": {
@@ -2230,7 +2231,7 @@
     },
     {
       "name": "trade.capabilities",
-      "description": "Permissions.",
+      "description": "Rights.",
       "inputSchema": {
         "properties": {
           "account": {
@@ -2253,7 +2254,7 @@
     },
     {
       "name": "trade.preflight",
-      "description": "Readiness; no order.",
+      "description": "Readiness check.",
       "inputSchema": {
         "properties": {
           "account": {

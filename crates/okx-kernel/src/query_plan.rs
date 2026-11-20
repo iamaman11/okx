@@ -25,8 +25,9 @@ pub struct CompositionRequest {
 pub struct SeriesStep {
     pub id: String,
     pub op: SeriesOp,
-    /// "close" (price), "open_interest" (contracts), and sparse "funding_rate"
-    /// (realized settlement ratio at event time) are sources; other names are prior steps.
+    /// "open", "high", "low", "close" (closed-candle prices), "open_interest"
+    /// (contracts), and sparse "funding_rate" (realized event-time ratio) are
+    /// sources; other names must identify previously compiled steps.
     pub input: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub period: Option<u16>,
@@ -56,6 +57,7 @@ pub enum SeriesOp {
     Or,
     Lag,
     GreaterThan,
+    GreaterThanSeries,
     RisingEdge,
     ForwardReturnLabel,
 }
@@ -83,7 +85,27 @@ pub struct CompositionNullCause {
     pub origin_step: String,
 }
 
+/// Optional aligned closed-candle columns. A missing observation is NaN;
+/// the evaluation layer turns it into an unknown, never a synthetic zero.
+/// An absent *required column* is an error before evaluation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CandlePriceInputs<'a> {
+    pub open: Option<&'a [f64]>,
+    pub high: Option<&'a [f64]>,
+    pub low: Option<&'a [f64]>,
+}
+
 impl CheckedComposition {
+    /// Inspect only the transitive projection closure: unused declarations
+    /// neither fetch sources nor allocate their columns at execution time.
+    pub fn uses_source(&self, source: &str) -> bool {
+        let reachable = self.reachable_steps();
+        self.steps.iter().any(|checked| {
+            reachable.contains(checked.step.id.as_str())
+                && (checked.step.input == source
+                    || checked.step.other.as_deref() == Some(source))
+        })
+    }
     /// Resolve the transitive dependency closure of projected results. The
     /// complete declaration is still validated, fingerprinted and budgeted;
     /// only the work actually contributing to a result is evaluated. This
@@ -139,13 +161,13 @@ impl CheckedComposition {
             {
                 return Err(format!("{path}.id:INVALID"));
             }
-            if matches!(step.id.as_str(), "close" | "open_interest" | "funding_rate")
+            if matches!(step.id.as_str(), "open" | "high" | "low" | "close" | "open_interest" | "funding_rate")
                 || known.contains_key(&step.id)
             {
                 return Err(format!("{path}.id:DUPLICATE"));
             }
             let (input_unit, parent_depth) = match step.input.as_str() {
-                "close" => (Unit::Price, 0),
+                "open" | "high" | "low" | "close" => (Unit::Price, 0),
                 "open_interest" => (Unit::Contracts, 0),
                 "funding_rate" => (Unit::Ratio, 0),
                 _ => known.get(&step.input).copied().ok_or_else(|| {
@@ -162,6 +184,7 @@ impl CheckedComposition {
                         | SeriesOp::SubtractSeries
                         | SeriesOp::DivideSeries
                         | SeriesOp::RollingPearson
+                        | SeriesOp::GreaterThanSeries
                         | SeriesOp::And
                         | SeriesOp::Or
                 )
@@ -174,6 +197,7 @@ impl CheckedComposition {
                     | SeriesOp::SubtractSeries
                     | SeriesOp::DivideSeries
                     | SeriesOp::RollingPearson
+                    | SeriesOp::GreaterThanSeries
                     | SeriesOp::And
                     | SeriesOp::Or
             ) {
@@ -182,7 +206,7 @@ impl CheckedComposition {
                     .as_deref()
                     .ok_or_else(|| format!("{path}.other:REQUIRED"))?;
                 Some(match name {
-                    "close" => (Unit::Price, 0),
+                    "open" | "high" | "low" | "close" => (Unit::Price, 0),
                     "open_interest" => (Unit::Contracts, 0),
                     "funding_rate" => (Unit::Ratio, 0),
                     _ => known
@@ -354,6 +378,28 @@ impl CheckedComposition {
                     }
                     Unit::Boolean
                 }
+                SeriesOp::GreaterThanSeries => {
+                    if !matches!(input_unit, Unit::Price | Unit::Ratio | Unit::Contracts | Unit::Coefficient) {
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
+                            composition_unit_name(input_unit)
+                        ));
+                    }
+                    let other_unit = other.expect("validated second series").0;
+                    if other_unit != input_unit {
+                        return Err(format!(
+                            "{path}.other:UNIT_MISMATCH:expected={}:actual={}",
+                            composition_unit_name(input_unit), composition_unit_name(other_unit)
+                        ));
+                    }
+                    if step.period.is_some() {
+                        return Err(format!("{path}.period:UNEXPECTED"));
+                    }
+                    if step.threshold.is_some() {
+                        return Err(format!("{path}.threshold:UNEXPECTED"));
+                    }
+                    Unit::Boolean
+                }
                 SeriesOp::RisingEdge => {
                     if input_unit != Unit::Boolean {
                         return Err(format!(
@@ -475,7 +521,7 @@ impl CheckedComposition {
     /// Causal outputs at index `at` must be invariant under changes after `at`.
     /// Outcome labels are explicitly non-causal and may use later bars.
     pub fn evaluate_at(&self, close: &[f64], at: usize) -> BTreeMap<String, (Option<f64>, Unit)> {
-        self.evaluate_at_sources(close, None, None, at, false).0
+        self.evaluate_at_sources(close, CandlePriceInputs::default(), None, None, at, false).0
     }
 
     /// Preserve the legacy value projection; add precise explanations only
@@ -487,7 +533,7 @@ impl CheckedComposition {
         BTreeMap<String, (Option<f64>, Unit)>,
         BTreeMap<String, CompositionNullCause>,
     ) {
-        self.evaluate_at_sources(close, None, None, close.len().saturating_sub(1), true)
+        self.evaluate_at_sources(close, CandlePriceInputs::default(), None, None, close.len().saturating_sub(1), true)
     }
 
     pub fn evaluate_with_open_interest(
@@ -499,6 +545,7 @@ impl CheckedComposition {
         Ok(self
             .evaluate_at_sources(
                 close,
+                CandlePriceInputs::default(),
                 Some(open_interest),
                 None,
                 close.len().saturating_sub(1),
@@ -521,6 +568,7 @@ impl CheckedComposition {
         self.check_open_interest(close, open_interest)?;
         Ok(self.evaluate_at_sources(
             close,
+            CandlePriceInputs::default(),
             Some(open_interest),
             None,
             close.len().saturating_sub(1),
@@ -543,6 +591,34 @@ impl CheckedComposition {
         ),
         String,
     > {
+        self.evaluate_with_candle_sources_diagnostics(
+            close, CandlePriceInputs::default(), open_interest, funding_rate,
+        )
+    }
+
+    /// Evaluate exact timestamp-aligned OHLC and derivative source columns.
+    /// The worker owns grid construction and source availability policy.
+    pub fn evaluate_with_candle_sources_diagnostics(
+        &self,
+        close: &[f64],
+        candles: CandlePriceInputs<'_>,
+        open_interest: Option<&[Option<f64>]>,
+        funding_rate: Option<&[Option<f64>]>,
+    ) -> Result<
+        (
+            BTreeMap<String, (Option<f64>, Unit)>,
+            BTreeMap<String, CompositionNullCause>,
+        ),
+        String,
+    > {
+        for (name, series) in [("open", candles.open), ("high", candles.high), ("low", candles.low)] {
+            if self.uses_source(name) && series.is_none() {
+                return Err(format!("composition.sources.{name}:REQUIRED"));
+            }
+            if series.is_some_and(|values| values.len() != close.len()) {
+                return Err(format!("composition.sources.{name}:ALIGNMENT_LENGTH_MISMATCH"));
+            }
+        }
         if let Some(oi) = open_interest {
             self.check_open_interest(close, oi)?;
         }
@@ -556,6 +632,7 @@ impl CheckedComposition {
         }
         Ok(self.evaluate_at_sources(
             close,
+            candles,
             open_interest,
             funding_rate,
             close.len().saturating_sub(1),
@@ -584,6 +661,7 @@ impl CheckedComposition {
     fn evaluate_at_sources(
         &self,
         close: &[f64],
+        candles: CandlePriceInputs<'_>,
         open_interest: Option<&[Option<f64>]>,
         funding_rate: Option<&[Option<f64>]>,
         at: usize,
@@ -599,6 +677,15 @@ impl CheckedComposition {
             "close".into(),
             close.iter().map(|v| v.is_finite().then_some(*v)).collect(),
         );
+        for (name, source) in [("open", candles.open), ("high", candles.high), ("low", candles.low)] {
+            if self.uses_source(name) {
+                values.insert(
+                    name.into(),
+                    source.map(|values| values.iter().map(|v| v.is_finite().then_some(*v)).collect())
+                        .unwrap_or_else(|| vec![None; close.len()]),
+                );
+            }
+        }
         if used_sources.contains(&Source::OpenInterest) {
             values.insert(
                 "open_interest".into(),
@@ -744,6 +831,13 @@ impl CheckedComposition {
                         .map(|value| value.map(|v| if v > threshold { 1.0 } else { 0.0 }))
                         .collect()
                 }
+                SeriesOp::GreaterThanSeries => {
+                    let other = &values[checked.step.other.as_ref().expect("validated comparison input")];
+                    input.iter().zip(other).map(|(a,b)| match (a,b) {
+                        (Some(a), Some(b)) => Some(f64::from(a > b)),
+                        _ => None,
+                    }).collect()
+                }
                 SeriesOp::RisingEdge => {
                     let mut result = vec![None; input.len()];
                     for i in 1..input.len() {
@@ -853,6 +947,7 @@ impl CheckedComposition {
             SeriesOp::AddSeries
             | SeriesOp::SubtractSeries
             | SeriesOp::DivideSeries
+            | SeriesOp::GreaterThanSeries
             | SeriesOp::And
             | SeriesOp::Or => {
                 let other = step.other.as_deref().expect("validated second operand");
@@ -966,6 +1061,9 @@ impl CheckedComposition {
     pub fn result_sources(&self) -> BTreeMap<String, BTreeSet<Source>> {
         let mut known = BTreeMap::<String, BTreeSet<Source>>::new();
         known.insert("close".into(), BTreeSet::from([Source::Candles]));
+        for source in ["open", "high", "low"] {
+            known.insert(source.into(), BTreeSet::from([Source::Candles]));
+        }
         known.insert(
             "open_interest".into(),
             BTreeSet::from([Source::OpenInterest]),
@@ -998,7 +1096,9 @@ fn source_buffer_count(steps: &[CheckedSeriesStep]) -> u64 {
             checked.step.input == name || checked.step.other.as_deref() == Some(name)
         })
     };
-    1 + u64::from(uses("open_interest")) + u64::from(uses("funding_rate"))
+    1 + u64::from(uses("open")) + u64::from(uses("high"))
+        + u64::from(uses("low")) + u64::from(uses("open_interest"))
+        + u64::from(uses("funding_rate"))
 }
 
 fn series_cost_per_bar(op: SeriesOp) -> u64 {
@@ -1009,6 +1109,7 @@ fn series_cost_per_bar(op: SeriesOp) -> u64 {
         SeriesOp::AddSeries
         | SeriesOp::SubtractSeries
         | SeriesOp::DivideSeries
+        | SeriesOp::GreaterThanSeries
         | SeriesOp::And
         | SeriesOp::Or => 2,
         _ => 1,
@@ -1491,6 +1592,103 @@ impl QueryPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t03_t07_t15_two_price_windows_compose_into_a_causal_crossing_event() {
+        let request: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"fast","op":"rolling_mean","input":"close","period":1},
+                {"id":"slow","op":"rolling_mean","input":"close","period":3},
+                {"id":"above","op":"greater_than_series","input":"fast","other":"slow"},
+                {"id":"cross","op":"rising_edge","input":"above"}
+            ],
+            "result_steps":["above","cross"]
+        })).unwrap();
+        let checked = CheckedComposition::compile(request, 5).unwrap();
+        assert_eq!(checked.sources(), BTreeSet::from([Source::Candles]));
+        assert_eq!(checked.steps[2].unit, Unit::Boolean);
+        assert_eq!(checked.steps[3].unit, Unit::Event);
+        let close = [3.0, 2.0, 1.0, 2.0, 4.0];
+        assert_eq!(checked.evaluate_at(&close, 2)["above"].0, Some(0.0));
+        assert_eq!(checked.evaluate_at(&close, 3)["cross"].0, Some(1.0));
+        assert_eq!(checked.evaluate(&close)["cross"].0, Some(0.0));
+        let mut future_changed = close;
+        future_changed[4] = 1000.0;
+        assert_eq!(checked.evaluate_at(&future_changed, 3), checked.evaluate_at(&close, 3));
+    }
+
+    #[test]
+    fn t02_t03_t04_ohlc_composition_has_strict_units_and_missing_source_diagnostics() {
+        let request: CompositionRequest = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"body","op":"greater_than_series","input":"close","other":"open"},
+                {"id":"spread","op":"greater_than_series","input":"high","other":"low"},
+                {"id":"signal","op":"and","input":"body","other":"spread"}
+            ],
+            "result_steps":["signal"]
+        })).unwrap();
+        let checked = CheckedComposition::compile(request.clone(), 3).unwrap();
+        assert_eq!(checked.sources(), BTreeSet::from([Source::Candles]));
+        assert!(checked.uses_source("open"));
+        assert!(checked.uses_source("high"));
+        assert!(checked.uses_source("low"));
+        let close = [100.0, 103.0, 110.0];
+        let open = [99.0, 102.0, 105.0];
+        let high = [102.0, 105.0, f64::NAN];
+        let low = [98.0, 101.0, 104.0];
+        let candles = CandlePriceInputs {
+            open: Some(&open),
+            high: Some(&high),
+            low: Some(&low),
+        };
+        let (values, causes) = checked.evaluate_with_candle_sources_diagnostics(
+            &close, candles, None, None,
+        ).unwrap();
+        assert_eq!(values["signal"].0, None);
+        assert_eq!(causes["signal"].reason, "SOURCE_OBSERVATION_MISSING");
+        assert_eq!(causes["signal"].origin_step, "high");
+        let mut valid_high = [102.0, 105.0, 111.0];
+        let valid = checked.evaluate_with_candle_sources_diagnostics(
+            &close, CandlePriceInputs { high: Some(&valid_high), ..candles }, None, None,
+        ).unwrap();
+        assert_eq!(valid.0["signal"], (Some(1.0), Unit::Boolean));
+        valid_high[2] = 104.0;
+        let invalid = checked.evaluate_with_candle_sources_diagnostics(
+            &close, CandlePriceInputs { high: Some(&valid_high), ..candles }, None, None,
+        ).unwrap();
+        assert_eq!(invalid.0["signal"].0, Some(0.0));
+        assert_eq!(checked.evaluate_with_candle_sources_diagnostics(
+            &close, CandlePriceInputs { high: None, ..candles }, None, None,
+        ).unwrap_err(), "composition.sources.high:REQUIRED");
+        assert_eq!(checked.evaluate_with_candle_sources_diagnostics(
+            &close, CandlePriceInputs { low: Some(&[1.0]), ..candles }, None, None,
+        ).unwrap_err(), "composition.sources.low:ALIGNMENT_LENGTH_MISMATCH");
+
+        let mut wrong_units = request.clone();
+        wrong_units.steps.insert(0, SeriesStep {
+            id: "r".into(), op: SeriesOp::ReturnsSeries, input: "close".into(),
+            other: None, period: None, threshold: None, when: None,
+        });
+        wrong_units.steps[1].other = Some("r".into());
+        assert_eq!(CheckedComposition::compile(wrong_units, 3).unwrap_err(),
+            "composition.steps[1].other:UNIT_MISMATCH:expected=price:actual=ratio");
+        let mut no_second = request.clone();
+        no_second.steps[0].other = None;
+        assert_eq!(CheckedComposition::compile(no_second, 3).unwrap_err(),
+            "composition.steps[0].other:REQUIRED");
+        let mut bad_threshold = request.clone();
+        bad_threshold.steps[0].threshold = Some(0.0);
+        assert_eq!(CheckedComposition::compile(bad_threshold, 3).unwrap_err(),
+            "composition.steps[0].threshold:UNEXPECTED");
+        let mut unprojected = request;
+        unprojected.result_steps = vec!["body".into()];
+        let checked = CheckedComposition::compile(unprojected, 3).unwrap();
+        assert!(checked.uses_source("open"));
+        assert!(!checked.uses_source("high"));
+        assert!(!checked.uses_source("low"));
+    }
     fn two_step_composition() -> CompositionRequest {
         CompositionRequest {
             version: COMPOSITION_VERSION.into(),

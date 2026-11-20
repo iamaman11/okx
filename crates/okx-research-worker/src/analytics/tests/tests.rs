@@ -21,6 +21,17 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
     assert_eq!(capabilities["effects"]["venue_post"], false);
     assert_eq!(capabilities["effects"]["write_finance"], false);
     assert_eq!(capabilities["effects"]["write_governance"], false);
+    assert_eq!(capabilities["composition"]["input_sources"],
+        serde_json::json!(["open", "high", "low", "close", "open_interest", "funding_rate"]));
+    for source in ["open", "high", "low", "close"] {
+        assert_eq!(capabilities["composition"]["source_units"][source], "price");
+    }
+    let comparator = capabilities["composition"]["operations"]
+        .as_array().unwrap().iter()
+        .find(|item| item["op"] == "greater_than_series").unwrap();
+    assert_eq!(comparator["other_unit"], "same_as_input");
+    assert_eq!(comparator["output_unit"], "boolean");
+    assert_eq!(comparator["causal"], true);
     for op in ["and", "or"] {
         let operation = capabilities["composition"]["operations"]
             .as_array()
