@@ -1,10 +1,12 @@
 //! Typed strategy commands on the existing installation SQL owner.
 use super::UnifiedFinanceHandle;
+use crate::graph_binding::{
+    EngineGraphBinding, EngineGraphCursor, EngineGraphProgress, GraphIdleAck,
+};
 use crate::{
     AccountStore, OperationReceipt, StoreError, StoreResult, StrategyInstance,
     StrategyPositionSnapshot,
 };
-use crate::graph_binding::{EngineGraphBinding, EngineGraphCursor, EngineGraphProgress, GraphIdleAck};
 use std::time::Instant;
 
 #[derive(Clone)]
@@ -35,10 +37,12 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
-            let result = AccountStore::graph_progress_sql(&tx, (&installation, &account), &binding)?;
+            let result =
+                AccountStore::graph_progress_sql(&tx, (&installation, &account), &binding)?;
             tx.commit()?;
             Ok(result)
-        }).await
+        })
+        .await
     }
 
     pub async fn bind_graph(
@@ -53,10 +57,19 @@ impl UnifiedFinanceHandle {
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             super::finance_authority::require_preparation_authority(&tx, &installation)?;
-            let progress = AccountStore::bind_graph_sql(&tx, (&installation, &account), &binding, &restored, now)?;
-            tx.commit().map_err(|_| StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY"))?;
+            let progress = AccountStore::bind_graph_sql(
+                &tx,
+                (&installation, &account),
+                &binding,
+                &restored,
+                now,
+            )?;
+            tx.commit().map_err(|_| {
+                StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
+            })?;
             Ok(progress)
-        }).await
+        })
+        .await
     }
 
     pub async fn acknowledge_graph_idle(
@@ -70,10 +83,19 @@ impl UnifiedFinanceHandle {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let ack = AccountStore::acknowledge_graph_idle_sql(&tx, (&installation, &account), &binding, &published, now)?;
-            tx.commit().map_err(|_| StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY"))?;
+            let ack = AccountStore::acknowledge_graph_idle_sql(
+                &tx,
+                (&installation, &account),
+                &binding,
+                &published,
+                now,
+            )?;
+            tx.commit().map_err(|_| {
+                StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
+            })?;
             Ok(ack)
-        }).await
+        })
+        .await
     }
 
     pub async fn strategy_position_snapshot(

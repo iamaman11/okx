@@ -77,9 +77,13 @@ impl GraphTargetBinding {
             TargetPosition::Short => GraphSignalIntent::SetTarget(GraphPosition::Short),
         };
         GraphPublicationCursor::from_checkpoint(
-            self.session_id.clone(), self.graph_sha256.clone(),
-            stored.closed_ms, stored.sequence, intent,
-        ).map_err(str::to_owned)
+            self.session_id.clone(),
+            self.graph_sha256.clone(),
+            stored.closed_ms,
+            stored.sequence,
+            intent,
+        )
+        .map_err(str::to_owned)
     }
 }
 
@@ -168,17 +172,25 @@ impl TradeService {
         binding: &GraphTargetBinding,
         restored: &GraphPublicationCursor,
     ) -> Result<GraphPublicationCursor, String> {
-        if !binding.valid() || !restored.matches_binding(&binding.session_id, &binding.graph_sha256) {
+        if !binding.valid() || !restored.matches_binding(&binding.session_id, &binding.graph_sha256)
+        {
             return Err("GRAPH_BINDING_RESTORE_MISMATCH".into());
         }
         let resources = self.resources(account).await?;
         if resources.configuration.account_key.wire() != binding.account_key {
             return Err("GRAPH_TARGET_ACCOUNT_MISMATCH".into());
         }
-        let progress = resources.execution.store.bind_graph(
-            super::deadline(), binding.storage_binding(),
-            GraphTargetBinding::storage_cursor(restored), super::now(),
-        ).await.map_err(super::err)?;
+        let progress = resources
+            .execution
+            .store
+            .bind_graph(
+                super::deadline(),
+                binding.storage_binding(),
+                GraphTargetBinding::storage_cursor(restored),
+                super::now(),
+            )
+            .await
+            .map_err(super::err)?;
         binding.live_cursor(&progress.cursor)
     }
 
@@ -196,9 +208,14 @@ impl TradeService {
         if resources.configuration.account_key.wire() != binding.account_key {
             return Err("GRAPH_TARGET_ACCOUNT_MISMATCH".into());
         }
-        resources.execution.store.graph_progress(super::deadline(), binding.storage_binding())
-            .await.map_err(super::err)?
-            .map(|state| binding.live_cursor(&state.cursor)).transpose()
+        resources
+            .execution
+            .store
+            .graph_progress(super::deadline(), binding.storage_binding())
+            .await
+            .map_err(super::err)?
+            .map(|state| binding.live_cursor(&state.cursor))
+            .transpose()
     }
 
     /// A durable ACK for Hold/already-satisfied targets only. The SQL writer
@@ -214,20 +231,34 @@ impl TradeService {
         if !binding.valid() || resources.configuration.account_key.wire() != binding.account_key {
             return Err("GRAPH_TARGET_BINDING_INVALID".into());
         }
-        let confirmed = self.graph_confirmed_cursor(account, binding).await?
+        let confirmed = self
+            .graph_confirmed_cursor(account, binding)
+            .await?
             .ok_or("GRAPH_FINANCE_BINDING_MISSING")?;
-        let proposed = self.preview_graph_publication(account, binding, &confirmed, publication)
+        let proposed = self
+            .preview_graph_publication(account, binding, &confirmed, publication)
             .await?;
-        if proposed.as_ref().is_some_and(|preview| preview.plan != TargetPlan::NoChange) {
+        if proposed
+            .as_ref()
+            .is_some_and(|preview| preview.plan != TargetPlan::NoChange)
+        {
             return Err("GRAPH_FINANCE_ATOMIC_INTENT_REQUIRED".into());
         }
         let next = proposed.map_or_else(
             || GraphTargetBinding::storage_cursor(&confirmed),
             |preview| GraphTargetBinding::storage_cursor(&preview.next_cursor),
         );
-        resources.execution.store.acknowledge_graph_idle(
-            super::deadline(), binding.storage_binding(), next, super::now(),
-        ).await.map_err(super::err)
+        resources
+            .execution
+            .store
+            .acknowledge_graph_idle(
+                super::deadline(),
+                binding.storage_binding(),
+                next,
+                super::now(),
+            )
+            .await
+            .map_err(super::err)
     }
 
     /// Engine's original financial owner supplies one scoped and consistent

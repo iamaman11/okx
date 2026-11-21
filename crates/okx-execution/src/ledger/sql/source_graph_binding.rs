@@ -3,7 +3,9 @@
 //! Reuses ORIGINAL immutable operation receipts in the one finance database:
 //! no side database, schema drift, or unsupervised background writer.
 use super::super::*;
-use crate::graph_binding::{EngineGraphBinding, EngineGraphCursor, EngineGraphProgress, GraphIdleAck};
+use crate::graph_binding::{
+    EngineGraphBinding, EngineGraphCursor, EngineGraphProgress, GraphIdleAck,
+};
 use crate::position_target::{TargetPlan, plan_strategy_target};
 use sha2::{Digest, Sha256};
 
@@ -37,7 +39,10 @@ fn encode<T: serde::Serialize>(value: &T) -> StoreResult<(String, String)> {
     Ok((body, digest))
 }
 
-fn decode<T: serde::de::DeserializeOwned>(receipt: &OperationReceipt, kind: &str) -> StoreResult<T> {
+fn decode<T: serde::de::DeserializeOwned>(
+    receipt: &OperationReceipt,
+    kind: &str,
+) -> StoreResult<T> {
     let digest = format!("{:x}", Sha256::digest(receipt.result_ref.as_bytes()));
     if receipt.kind != kind || receipt.request_hash != digest {
         return Err(StoreError::Invalid("GRAPH_FINANCE_RECEIPT_CORRUPT"));
@@ -103,11 +108,17 @@ impl AccountStore {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        let (operation_id, kind, request_hash, result_ref, committed_at) = row
-            .ok_or(StoreError::Invalid("GRAPH_FINANCE_CURSOR_MISSING"))?;
+        let (operation_id, kind, request_hash, result_ref, committed_at) =
+            row.ok_or(StoreError::Invalid("GRAPH_FINANCE_CURSOR_MISSING"))?;
         let cursor: EngineGraphCursor = decode(
-            &OperationReceipt { operation_id: operation_id.clone(), kind,
-                request_hash, result_ref, committed_at }, CURSOR_KIND,
+            &OperationReceipt {
+                operation_id: operation_id.clone(),
+                kind,
+                request_hash,
+                result_ref,
+                committed_at,
+            },
+            CURSOR_KIND,
         )?;
         if !cursor.valid_for(binding) || operation_id != cursor_key(binding, cursor.sequence) {
             return Err(StoreError::Invalid("GRAPH_FINANCE_CURSOR_CORRUPT"));
@@ -131,7 +142,10 @@ impl AccountStore {
             return Err(StoreError::Invalid("GRAPH_FINANCE_BINDING_CONFLICT"));
         }
         let cursor = Self::last_graph_cursor_sql(db, scope, &stored)?;
-        Ok(Some(EngineGraphProgress { binding: stored, cursor }))
+        Ok(Some(EngineGraphProgress {
+            binding: stored,
+            cursor,
+        }))
     }
 
     /// Register an existing, explicitly activated strategy and its verified
@@ -152,8 +166,18 @@ impl AccountStore {
             return Ok(existing);
         }
         insert_receipt(tx, scope, &binding_key(binding), BINDING_KIND, binding, now)?;
-        insert_receipt(tx, scope, &cursor_key(binding, restored.sequence), CURSOR_KIND, restored, now)?;
-        Ok(EngineGraphProgress { binding: binding.clone(), cursor: restored.clone() })
+        insert_receipt(
+            tx,
+            scope,
+            &cursor_key(binding, restored.sequence),
+            CURSOR_KIND,
+            restored,
+            now,
+        )?;
+        Ok(EngineGraphProgress {
+            binding: binding.clone(),
+            cursor: restored.clone(),
+        })
     }
 
     /// ACK only when an *original finance snapshot inside this same writer
@@ -186,7 +210,10 @@ impl AccountStore {
             return Err(StoreError::Invalid("GRAPH_FINANCE_NOT_MONOTONIC"));
         }
         let snapshot = Self::strategy_position_snapshot_sql(
-            tx, Some(scope), &binding.instance_id, &binding.instrument_id,
+            tx,
+            Some(scope),
+            &binding.instance_id,
+            &binding.instrument_id,
         )?;
         let plan = plan_strategy_target(
             published.intent,
@@ -194,11 +221,19 @@ impl AccountStore {
             &binding.instrument_id,
             &snapshot.lots,
             snapshot.in_flight,
-        ).map_err(|_| StoreError::Invalid("GRAPH_FINANCE_POSITION_INVALID"))?;
+        )
+        .map_err(|_| StoreError::Invalid("GRAPH_FINANCE_POSITION_INVALID"))?;
         if plan != TargetPlan::NoChange {
             return Err(StoreError::Invalid("GRAPH_FINANCE_ATOMIC_INTENT_REQUIRED"));
         }
-        insert_receipt(tx, scope, &cursor_key(binding, published.sequence), CURSOR_KIND, published, now)?;
+        insert_receipt(
+            tx,
+            scope,
+            &cursor_key(binding, published.sequence),
+            CURSOR_KIND,
+            published,
+            now,
+        )?;
         Ok(GraphIdleAck::Advanced)
     }
 }
@@ -216,11 +251,13 @@ mod tests {
             db.execute(
                 "INSERT INTO account_meta VALUES(1,?1,'installation',2,1,'test','init','test')",
                 [account],
-            ).unwrap();
+            )
+            .unwrap();
             db.execute(
                 "INSERT INTO account_policy VALUES('installation',?1,1,1,0,'campaign','20','0')",
                 [account],
-            ).unwrap();
+            )
+            .unwrap();
         }
         db
     }
@@ -250,13 +287,24 @@ mod tests {
             last_decision_key: None,
         };
         AccountStore::mutate_instance_sql(
-            tx, Some(("installation", account)),
-            "test-strategy-create", "test-create-hash", "create", &instance, None, 1,
-        ).unwrap();
+            tx,
+            Some(("installation", account)),
+            "test-strategy-create",
+            "test-create-hash",
+            "create",
+            &instance,
+            None,
+            1,
+        )
+        .unwrap();
     }
 
     fn cursor(sequence: u64, intent: TargetPosition) -> EngineGraphCursor {
-        EngineGraphCursor { sequence, closed_ms: sequence * 60_000, intent }
+        EngineGraphCursor {
+            sequence,
+            closed_ms: sequence * 60_000,
+            intent,
+        }
     }
 
     #[test]
@@ -267,30 +315,66 @@ mod tests {
         {
             let tx = db.transaction().unwrap();
             create(&tx, scope.1);
-            let stored = AccountStore::bind_graph_sql(&tx, scope, &b, &cursor(2, TargetPosition::Hold), 121_000).unwrap();
+            let stored = AccountStore::bind_graph_sql(
+                &tx,
+                scope,
+                &b,
+                &cursor(2, TargetPosition::Hold),
+                121_000,
+            )
+            .unwrap();
             assert_eq!(stored.cursor.sequence, 2);
             tx.commit().unwrap();
         }
         {
             let tx = db.transaction().unwrap();
-            assert_eq!(AccountStore::acknowledge_graph_idle_sql(
-                &tx, scope, &b, &cursor(3, TargetPosition::Hold), 181_000,
-            ).unwrap(), GraphIdleAck::Advanced);
+            assert_eq!(
+                AccountStore::acknowledge_graph_idle_sql(
+                    &tx,
+                    scope,
+                    &b,
+                    &cursor(3, TargetPosition::Hold),
+                    181_000,
+                )
+                .unwrap(),
+                GraphIdleAck::Advanced
+            );
             tx.commit().unwrap();
         }
         {
             let tx = db.transaction().unwrap();
-            let restored = AccountStore::bind_graph_sql(&tx, scope, &b, &cursor(2, TargetPosition::Hold), 241_000).unwrap();
-            assert_eq!(restored.cursor.sequence, 3, "idempotent restore must not rewind");
-            assert_eq!(AccountStore::acknowledge_graph_idle_sql(
-                &tx, scope, &b, &cursor(3, TargetPosition::Hold), 241_000,
-            ).unwrap(), GraphIdleAck::Replayed);
+            let restored = AccountStore::bind_graph_sql(
+                &tx,
+                scope,
+                &b,
+                &cursor(2, TargetPosition::Hold),
+                241_000,
+            )
+            .unwrap();
+            assert_eq!(
+                restored.cursor.sequence, 3,
+                "idempotent restore must not rewind"
+            );
+            assert_eq!(
+                AccountStore::acknowledge_graph_idle_sql(
+                    &tx,
+                    scope,
+                    &b,
+                    &cursor(3, TargetPosition::Hold),
+                    241_000,
+                )
+                .unwrap(),
+                GraphIdleAck::Replayed
+            );
             tx.commit().unwrap();
         }
-        let graph_receipts: i64 = db.query_row(
-            "SELECT COUNT(*) FROM operation_receipts WHERE kind LIKE 'graph_%'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let graph_receipts: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM operation_receipts WHERE kind LIKE 'graph_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(graph_receipts, 3, "one binding, one baseline, one ACK");
     }
 
@@ -304,27 +388,78 @@ mod tests {
         let tx = db.transaction().unwrap();
         create(&tx, scope.1);
         create(&tx, other_scope.1);
-        AccountStore::bind_graph_sql(&tx, scope, &b, &cursor(2, TargetPosition::Hold), 121_000).unwrap();
-        AccountStore::bind_graph_sql(&tx, other_scope, &foreign, &cursor(2, TargetPosition::Hold), 121_000).unwrap();
-        assert!(matches!(AccountStore::acknowledge_graph_idle_sql(
-            &tx, scope, &b, &cursor(3, TargetPosition::Long), 181_000,
-        ), Err(StoreError::Invalid("GRAPH_FINANCE_ATOMIC_INTENT_REQUIRED"))));
-        assert!(matches!(AccountStore::acknowledge_graph_idle_sql(
-            &tx, scope, &b, &cursor(4, TargetPosition::Hold), 241_000,
-        ), Err(StoreError::Invalid("GRAPH_FINANCE_SEQUENCE_GAP"))));
-        assert!(matches!(AccountStore::acknowledge_graph_idle_sql(
-            &tx, scope, &b, &cursor(2, TargetPosition::Flat), 181_000,
-        ), Err(StoreError::Invalid("GRAPH_FINANCE_CONFLICTING_REPLAY"))));
+        AccountStore::bind_graph_sql(&tx, scope, &b, &cursor(2, TargetPosition::Hold), 121_000)
+            .unwrap();
+        AccountStore::bind_graph_sql(
+            &tx,
+            other_scope,
+            &foreign,
+            &cursor(2, TargetPosition::Hold),
+            121_000,
+        )
+        .unwrap();
+        assert!(matches!(
+            AccountStore::acknowledge_graph_idle_sql(
+                &tx,
+                scope,
+                &b,
+                &cursor(3, TargetPosition::Long),
+                181_000,
+            ),
+            Err(StoreError::Invalid("GRAPH_FINANCE_ATOMIC_INTENT_REQUIRED"))
+        ));
+        assert!(matches!(
+            AccountStore::acknowledge_graph_idle_sql(
+                &tx,
+                scope,
+                &b,
+                &cursor(4, TargetPosition::Hold),
+                241_000,
+            ),
+            Err(StoreError::Invalid("GRAPH_FINANCE_SEQUENCE_GAP"))
+        ));
+        assert!(matches!(
+            AccountStore::acknowledge_graph_idle_sql(
+                &tx,
+                scope,
+                &b,
+                &cursor(2, TargetPosition::Flat),
+                181_000,
+            ),
+            Err(StoreError::Invalid("GRAPH_FINANCE_CONFLICTING_REPLAY"))
+        ));
         let mut old = cursor(3, TargetPosition::Hold);
         old.closed_ms = 60_000;
-        assert!(matches!(AccountStore::acknowledge_graph_idle_sql(
-            &tx, scope, &b, &old, 181_000,
-        ), Err(StoreError::Invalid("GRAPH_FINANCE_NOT_MONOTONIC"))));
-        assert!(matches!(AccountStore::acknowledge_graph_idle_sql(
-            &tx, scope, &foreign, &cursor(3, TargetPosition::Hold), 181_000,
-        ), Err(StoreError::Invalid("GRAPH_FINANCE_BINDING_INVALID"))));
-        assert_eq!(AccountStore::graph_progress_sql(&tx, scope, &b).unwrap().unwrap().cursor.sequence, 2);
-        assert_eq!(AccountStore::graph_progress_sql(&tx, other_scope, &foreign).unwrap().unwrap().cursor.sequence, 2);
+        assert!(matches!(
+            AccountStore::acknowledge_graph_idle_sql(&tx, scope, &b, &old, 181_000,),
+            Err(StoreError::Invalid("GRAPH_FINANCE_NOT_MONOTONIC"))
+        ));
+        assert!(matches!(
+            AccountStore::acknowledge_graph_idle_sql(
+                &tx,
+                scope,
+                &foreign,
+                &cursor(3, TargetPosition::Hold),
+                181_000,
+            ),
+            Err(StoreError::Invalid("GRAPH_FINANCE_BINDING_INVALID"))
+        ));
+        assert_eq!(
+            AccountStore::graph_progress_sql(&tx, scope, &b)
+                .unwrap()
+                .unwrap()
+                .cursor
+                .sequence,
+            2
+        );
+        assert_eq!(
+            AccountStore::graph_progress_sql(&tx, other_scope, &foreign)
+                .unwrap()
+                .unwrap()
+                .cursor
+                .sequence,
+            2
+        );
         tx.commit().unwrap();
     }
 
@@ -335,18 +470,38 @@ mod tests {
         let scope = ("installation", "account-a");
         let tx = db.transaction().unwrap();
         create(&tx, scope.1);
-        AccountStore::bind_graph_sql(&tx, scope, &b, &cursor(2, TargetPosition::Hold), 121_000).unwrap();
-        let mut instance = AccountStore::instance_sql(&tx, Some(scope), &b.instance_id).unwrap().unwrap();
+        AccountStore::bind_graph_sql(&tx, scope, &b, &cursor(2, TargetPosition::Hold), 121_000)
+            .unwrap();
+        let mut instance = AccountStore::instance_sql(&tx, Some(scope), &b.instance_id)
+            .unwrap()
+            .unwrap();
         instance.enabled = false;
         instance.policy_revision = 2;
         AccountStore::mutate_instance_sql(
-            &tx, Some(scope), "test-stop", "test-stop-hash", "stop", &instance, Some(1), 181_000,
-        ).unwrap();
-        assert!(matches!(AccountStore::graph_progress_sql(&tx, scope, &b),
-            Err(StoreError::Invalid("GRAPH_FINANCE_STRATEGY_CHANGED"))));
-        assert!(matches!(AccountStore::acknowledge_graph_idle_sql(
-            &tx, scope, &b, &cursor(3, TargetPosition::Hold), 241_000,
-        ), Err(StoreError::Invalid("GRAPH_FINANCE_STRATEGY_CHANGED"))));
+            &tx,
+            Some(scope),
+            "test-stop",
+            "test-stop-hash",
+            "stop",
+            &instance,
+            Some(1),
+            181_000,
+        )
+        .unwrap();
+        assert!(matches!(
+            AccountStore::graph_progress_sql(&tx, scope, &b),
+            Err(StoreError::Invalid("GRAPH_FINANCE_STRATEGY_CHANGED"))
+        ));
+        assert!(matches!(
+            AccountStore::acknowledge_graph_idle_sql(
+                &tx,
+                scope,
+                &b,
+                &cursor(3, TargetPosition::Hold),
+                241_000,
+            ),
+            Err(StoreError::Invalid("GRAPH_FINANCE_STRATEGY_CHANGED"))
+        ));
         tx.commit().unwrap();
     }
 
@@ -357,16 +512,27 @@ mod tests {
         let scope = ("installation", "account-a");
         let tx = db.transaction().unwrap();
         create(&tx, scope.1);
-        AccountStore::bind_graph_sql(&tx, scope, &b, &cursor(2, TargetPosition::Flat), 121_000).unwrap();
+        AccountStore::bind_graph_sql(&tx, scope, &b, &cursor(2, TargetPosition::Flat), 121_000)
+            .unwrap();
         tx.commit().unwrap();
         {
             let tx = db.transaction().unwrap();
-            assert_eq!(AccountStore::acknowledge_graph_idle_sql(
-                &tx, scope, &b, &cursor(3, TargetPosition::Flat), 181_000,
-            ).unwrap(), GraphIdleAck::Advanced);
+            assert_eq!(
+                AccountStore::acknowledge_graph_idle_sql(
+                    &tx,
+                    scope,
+                    &b,
+                    &cursor(3, TargetPosition::Flat),
+                    181_000,
+                )
+                .unwrap(),
+                GraphIdleAck::Advanced
+            );
             // Simulate the crash between the SQL write and its commit.
         }
-        let last = AccountStore::graph_progress_sql(&db, scope, &b).unwrap().unwrap();
+        let last = AccountStore::graph_progress_sql(&db, scope, &b)
+            .unwrap()
+            .unwrap();
         assert_eq!(last.cursor.sequence, 2);
     }
 }

@@ -49,22 +49,30 @@ impl EngineGraphBinding {
             && self.definition_version.len() <= 128
             && self.policy_revision > 0
             && (1..=128).contains(&self.session_id.len())
-            && self.session_id.bytes().all(|b| {
-                b.is_ascii_alphanumeric() || b"_-:.".contains(&b)
-            })
+            && self
+                .session_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-:.".contains(&b))
             && self.graph_sha256.len() == 64
             && self
                 .graph_sha256
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             && (3..=40).contains(&self.instrument_id.len())
-            && self.instrument_id.bytes().all(|b| {
-                b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-'
-            })
+            && self
+                .instrument_id
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
             && matches!(
                 self.timeframe_ms,
-                60_000 | 180_000 | 300_000 | 900_000 | 1_800_000 | 3_600_000
-                    | 14_400_000 | 86_400_000
+                60_000
+                    | 180_000
+                    | 300_000
+                    | 900_000
+                    | 1_800_000
+                    | 3_600_000
+                    | 14_400_000
+                    | 86_400_000
             )
     }
 }
