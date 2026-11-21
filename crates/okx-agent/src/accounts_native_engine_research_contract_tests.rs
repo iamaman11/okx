@@ -118,13 +118,14 @@ struct McpLoadHost {
 }
 
 impl McpLoadHost {
-    async fn start(installation_id: &str) -> Self {
+    async fn start(installation_id: &str, governance_path: &std::path::Path) -> Self {
         let mcp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../cloudflare/okx-mcp");
         let mut command = Command::new("node");
         command
             .arg("scripts/t10-mcp-load-host.mjs")
             .arg(installation_id)
+            .arg(governance_path)
             .current_dir(mcp)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -189,6 +190,19 @@ async fn mcp_request(
 
 async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_json::Value {
     let mut fixture = fixture().await;
+    // Prepare the isolated workerd/DO before the CPU jobs begin. The whole
+    // measured MCP interval must overlap real Grid compute, not fixture startup.
+    let host = if with_mcp {
+        let governance_path = fixture.root.join("t10-synthetic-native-governance.json");
+        std::fs::write(
+            &governance_path,
+            serde_json::to_vec(&fixture.authority.state).unwrap(),
+        )
+        .unwrap();
+        Some(McpLoadHost::start(fixture.owner.installation_id(), &governance_path).await)
+    } else {
+        None
+    };
     let (market, public, _socket) = raw_market();
     let api = okx_api::OkxPublicClient::with_http_transport(
         okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
@@ -271,11 +285,6 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
     let owner = fixture.owner.clone();
     let campaign = fixture.campaign.clone();
     let installation = owner.installation_id().to_owned();
-    let host = if with_mcp {
-        Some(McpLoadHost::start(&installation).await)
-    } else {
-        None
-    };
     let http_url = host.as_ref().map(|host| host.http_url.clone());
     ctx.transport = host.as_ref().map(|host| {
         CloudflareTransportConfig::isolated_loopback_fixture(host.ws_url.clone())
