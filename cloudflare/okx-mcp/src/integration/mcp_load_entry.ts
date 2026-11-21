@@ -3,6 +3,7 @@
 // replaced with a fixed test scope; this fixture does NOT attest OAuth.
 import {mcpApi} from '../mcp.js';
 import {RuntimeSession} from '../runtime_session.js';
+import {RUNTIME_OBJECT_NAME} from '../shared.js';
 
 export {RuntimeSession};
 
@@ -19,6 +20,6 @@ export default {
    return mcpApi.fetch(request,env as Parameters<typeof mcpApi.fetch>[1],{
     auth:{scope:['mcp:use']},
    });
-  return env.RUNTIME.get(env.RUNTIME.idFromName('windows-primary')).fetch(request);
+  return env.RUNTIME.get(env.RUNTIME.idFromName(RUNTIME_OBJECT_NAME)).fetch(request);
  },
 };
