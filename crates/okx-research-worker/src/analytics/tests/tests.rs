@@ -21,6 +21,8 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
     assert_eq!(capabilities["effects"]["venue_post"], false);
     assert_eq!(capabilities["effects"]["write_finance"], false);
     assert_eq!(capabilities["effects"]["write_governance"], false);
+    assert_eq!(capabilities["graph_transport"]["version"], "okx.graph/v1");
+    assert_eq!(capabilities["graph_transport"]["location"], "market.screen.graph");
     assert_eq!(
         capabilities["composition"]["input_sources"],
         serde_json::json!([

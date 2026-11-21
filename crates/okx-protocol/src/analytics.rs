@@ -1,6 +1,7 @@
 //! Public compact analytics contract. No transport or financial logic.
 pub use okx_kernel::operators::{BreakoutParameters, EmaParameters, StrategyParameters};
 use okx_kernel::query_plan::CompositionRequest;
+use crate::graph_wire::GraphEnvelope;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +36,9 @@ pub struct MarketRequest {
     /// Optional v1 typed composition; legacy fields retain their scalar meaning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composition: Option<Box<CompositionRequest>>,
+    /// Extensible graph envelope: no mathematical operator enumeration in Agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<Box<GraphEnvelope>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -357,12 +361,19 @@ impl MarketRequest {
             && !self.fields.is_empty()
             && self.fields.len() <= 14
             && self.composition.as_ref().is_none_or(|composition| {
-                matches!(self.action, MarketAction::Screen)
+                self.graph.is_none()
+                    && matches!(self.action, MarketAction::Screen)
                     && self
                         .fields
                         .len()
                         .saturating_add(composition.result_steps.len())
                         <= 14
+            })
+            && self.graph.as_ref().is_none_or(|graph| {
+                self.composition.is_none()
+                    && matches!(self.action, MarketAction::Screen)
+                    && graph.structurally_valid()
+                    && self.fields.len().saturating_add(graph.result_steps.len()) <= 14
             })
             && self.fields.iter().all(|f| {
                 !f.is_empty()

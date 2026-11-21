@@ -651,6 +651,9 @@
                 ],
                 "additionalProperties": false
               },
+              "graph": {
+                "type": "object"
+              },
               "parameters": {
                 "type": "object",
                 "properties": {

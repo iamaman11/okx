@@ -162,7 +162,7 @@ impl AnalyticsService {
         let hash = okx_research::canonical_sha256(&(
             market_request_schema(
                 &hash_request.fields,
-                hash_request.composition.is_some(),
+                hash_request.composition.is_some() || hash_request.graph.is_some(),
                 oi_composition,
                 funding_composition,
             ),
@@ -506,6 +506,20 @@ impl AnalyticsService {
                 "max_instruments_per_page":100},
             "quality":"complete"});
         capabilities["correlation_matrix"] = correlation_matrix;
+        // Full transport shape is discoverable on demand rather than copied
+        // into the size-constrained public MCP tools/list schema.
+        capabilities["graph_transport"] = json!({
+            "version":okx_protocol::graph_wire::GRAPH_WIRE_VERSION,
+            "location":"market.screen.graph",
+            "steps":{"id":"step_id","op":"operator_id","op_version":"positive_u16",
+                     "inputs":{"port":"source_or_prior_step"},
+                     "parameters":{"name":"json_scalar"}},
+            "result_steps":"step_ids",
+            "limits":{"max_steps":32,"max_results":14,"max_inputs_per_step":4,
+                      "max_parameters_per_step":8,"max_bytes":okx_protocol::graph_wire::GRAPH_WIRE_MAX_BYTES},
+            "math_semantics":"resolved_only_by_installed_research_operations",
+            "legacy_field":"composition"
+        });
         capabilities
     }
     pub(super) async fn market_rows(

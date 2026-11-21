@@ -5,6 +5,7 @@ pub mod candidate_progress;
 mod cursor;
 mod decision;
 mod economic_scenario;
+mod graph_resolver;
 pub mod executor;
 pub mod jobs;
 mod market;

@@ -54,6 +54,24 @@ const composed={version:'okx.market.composition/v1',steps:[
  {id:'w1',op:'rolling_mean',input:'r1',period:2},
 ],result_steps:['w1']};
 fail(validTool('market',{...marketScreen,composition:composed}), 'versioned market composition accepted');
+const openGraph={version:'okx.graph/v1',steps:[
+ {id:'change',op:'returns_series',op_version:1,inputs:{input:'close'}},
+ {id:'smooth',op:'future_mathematical_primitive',op_version:2,inputs:{input:'change'},parameters:{period:3}},
+],result_steps:['smooth']};
+fail(validTool('market',{...marketScreen,graph:openGraph}),
+ 'graph transport accepts unknown mathematical operations for Research to resolve');
+for(const invalid of [
+ {...openGraph,version:'okx.graph/v2'},
+ {...openGraph,steps:[...openGraph.steps,openGraph.steps[0]]},
+ {...openGraph,steps:[{...openGraph.steps[0],parameters:{script:['not_executable']}}]},
+ {...openGraph,result_steps:['missing']},
+ {...openGraph,steps:[{...openGraph.steps[0],op_version:0}]},
+])fail(!validTool('market',{...marketScreen,graph:invalid}),
+ 'untrusted graph must fail structural validation at MCP');
+fail(!validTool('market',{...marketScreen,action:'compare',graph:openGraph}),
+ 'graph only available on screen');
+fail(!validTool('market',{...marketScreen,composition:composed,graph:openGraph}),
+ 'legacy and graph formats are mutually exclusive');
 fail(!validTool('market',{...marketScreen,action:'compare',composition:composed}), 'composition limited to screen');
 fail(!validTool('market',{...marketScreen,composition:{...composed,version:'unknown'}}), 'composition version rejected');
 fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'rolling_mean',input:'close'}]}}), 'window must specify period');

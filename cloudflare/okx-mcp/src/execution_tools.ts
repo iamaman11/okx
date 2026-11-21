@@ -49,8 +49,16 @@ const marketParameters=object({ema_period:integer(1,1000),atr_period:integer(1,1
 const stepId={type:'string',pattern:'^[a-z0-9_]{1,32}$'};
 const compositionStep=object({id:stepId,op:choice('returns_series','rolling_mean','rolling_max','rolling_min','rolling_range','rolling_pearson','rolling_zscore','rolling_stddev','add_series','subtract_series','divide_series','and','or','lag','greater_than','greater_than_series','less_than','less_than_series','rising_edge','falling_edge','forward_return_label'),input:stepId,other:stepId,period:integer(1,1000),threshold:{type:'number'},when:stepId},['id','op','input']);
 const composition=object({version:choice('okx.market.composition/v1'),steps:{type:'array',items:compositionStep,minItems:1,maxItems:32},result_steps:{type:'array',items:stepId,minItems:1,maxItems:14}});
+// Open mathematical IDs belong to Research. This schema constrains only
+// transport shape and size; it is not a second mathematical operator catalog.
+const graphInputMap={type:'object',propertyNames:stepId,additionalProperties:stepId,minProperties:1,maxProperties:4};
+const graphParameterMap={type:'object',propertyNames:stepId,additionalProperties:{anyOf:[{type:'null'},{type:'boolean'},{type:'number'},text(128)]},maxProperties:8};
+const graphStep=object({id:stepId,op:stepId,op_version:integer(1,65535),inputs:graphInputMap,parameters:graphParameterMap},['id','op','op_version','inputs']);
+const graph=object({version:choice('okx.graph/v1'),steps:{type:'array',items:graphStep,minItems:1,maxItems:32},result_steps:{type:'array',items:stepId,minItems:1,maxItems:14}});
 const universe=object({instrument_type:choice('SPOT','SWAP','FUTURES'),settle_currency:text(16),after_instrument:text(64),reference_generation:text(128),limit:integer(1,100),rank_globally:{type:'boolean'}},['instrument_type']);
-const screenCompare=action('screen',{...range,universe,fields:{...array(text(64),14),minItems:1},composition,parameters:marketParameters,filters:array(object({field:text(64),min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:text(64),descending:{type:'boolean'}},['field']),limit:integer(1,50),cursor:text(512)},['fields','timeframe_ms','start_ms','end_ms','limit']);
+// The strict graph structure is validated in validGraphWire on every call.
+// Keep the model-visible tool compact; mathematical descriptors are on-demand.
+const screenCompare=action('screen',{...range,universe,fields:{...array(text(64),14),minItems:1},composition,graph:{type:'object'},parameters:marketParameters,filters:array(object({field:text(64),min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:text(64),descending:{type:'boolean'}},['field']),limit:integer(1,50),cursor:text(512)},['fields','timeframe_ms','start_ms','end_ms','limit']);
 screenCompare.properties.action=choice('screen','compare');
 screenCompare.allOf=[{oneOf:[{required:['instruments']},{required:['universe']}]},
  {if:{properties:{action:{const:'compare'}}},then:{required:['instruments']}}];
@@ -182,7 +190,8 @@ export function matches(s:Schema,v:unknown):boolean {
  if('const'in s&&v!==s.const)return false;
  if(s.enum&&!s.enum.includes(v))return false;
  if(s.type==='null')return v===null;
- if(s.type==='object')return isObject(v)&&Object.keys(v).every(k=>k in s.properties)&&s.required.every((k:string)=>k in v)&&Object.entries(v).every(([k,x])=>matches(s.properties[k],x));
+ if(s.type==='object')return isObject(v)&&Object.keys(v).length>=(s.minProperties??0)&&Object.keys(v).length<=(s.maxProperties??Infinity)&&(s.required??[]).every((k:string)=>k in v)&&Object.entries(v).every(([k,x])=>
+   (!s.propertyNames||matches(s.propertyNames,k))&&(s.properties&&k in s.properties?matches(s.properties[k],x):s.additionalProperties===false?false:typeof s.additionalProperties==='object'?matches(s.additionalProperties,x):true));
  if(s.type==='array')return Array.isArray(v)&&v.length>=(s.minItems??0)&&v.length<=(s.maxItems??100)&&(!s.uniqueItems||new Set(v.map(x=>JSON.stringify(x))).size===v.length)&&v.every(x=>matches(s.items,x));
  if(s.type==='string')return typeof v==='string'&&v.length>=(s.minLength??0)&&v.length<=(s.maxLength??Infinity)&&(!s.pattern||new RegExp(s.pattern).test(v));
  if(s.type==='integer'||s.type==='number')return typeof v==='number'&&Number.isFinite(v)&&(s.type!=='integer'||Number.isSafeInteger(v))&&v>=(s.minimum??-Infinity)&&v<=(s.maximum??Infinity);
@@ -220,6 +229,16 @@ function validCompositionStep(s:unknown):boolean {
  }else if('when'in s)return false;
  return true;
 }
+function validGraphWire(value:unknown):boolean {
+ if(!isObject(value)||!matches(graph,value)||new TextEncoder().encode(JSON.stringify(value)).byteLength>16384)return false;
+ const ids=new Set<string>();
+ for(const step of value.steps as Record<string,unknown>[]){
+  if(ids.has(String(step.id)))return false;
+  ids.add(String(step.id));
+ }
+ const results=value.result_steps as string[];
+ return new Set(results).size===results.length&&results.every(id=>ids.has(id));
+}
 function validResearchStrategy(args:Record<string,unknown>):boolean {
  if(!['validate','backtest','grid'].includes(String(args.action)))return true;
  const breakout=args.strategy_id==='close_breakout_v1';
@@ -227,7 +246,26 @@ function validResearchStrategy(args:Record<string,unknown>):boolean {
  return Array.isArray(parameters)&&parameters.every(p=>isObject(p)&&
    (breakout?'lookback'in p:'fast'in p&&'slow'in p));
 }
-export function validTool(name:string,args:unknown):boolean {if(name==='market'&&isObject(args)&&!validMarketOperatorRefs(args))return false;if(name==='research'&&isObject(args)&&!validResearchStrategy(args))return false;if(name==='research'&&isObject(args)&&args.action==='record_decision'){for(const [field,max]of [['name',128],['hypothesis',4096],['reason',2048]]as const){const value=args[field];if(typeof value!=='string'||!value.trim()||new TextEncoder().encode(value).byteLength>max)return false;}if(new TextEncoder().encode(JSON.stringify([args.name,args.hypothesis,args.reason])).byteLength>6144)return false;}if(name==='market'&&isObject(args)&&isObject(args.composition)){if(args.action!=='screen'||!Array.isArray(args.fields)||!Array.isArray(args.composition.result_steps)||args.fields.length+args.composition.result_steps.length>14)return false;if(Array.isArray(args.composition.steps)&&!args.composition.steps.every(validCompositionStep))return false;}if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);}
+export function validTool(name:string,args:unknown):boolean {
+ if(name==='market'&&isObject(args)&&!validMarketOperatorRefs(args))return false;
+ if(name==='research'&&isObject(args)&&!validResearchStrategy(args))return false;
+ if(name==='research'&&isObject(args)&&args.action==='record_decision'){
+  for(const [field,max]of [['name',128],['hypothesis',4096],['reason',2048]]as const){const value=args[field];if(typeof value!=='string'||!value.trim()||new TextEncoder().encode(value).byteLength>max)return false;}
+  if(new TextEncoder().encode(JSON.stringify([args.name,args.hypothesis,args.reason])).byteLength>6144)return false;
+ }
+ if(name==='market'&&isObject(args)){
+  if('graph'in args){
+   if(args.action!=='screen'||'composition'in args||!Array.isArray(args.fields)||
+      !validGraphWire(args.graph)||args.fields.length+(args.graph as {result_steps:string[]}).result_steps.length>14)return false;
+  }
+  if(isObject(args.composition)){
+   if(args.action!=='screen'||!Array.isArray(args.fields)||!Array.isArray(args.composition.result_steps)||args.fields.length+args.composition.result_steps.length>14)return false;
+   if(Array.isArray(args.composition.steps)&&!args.composition.steps.every(validCompositionStep))return false;
+  }
+ }
+ if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;
+ return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);
+}
 export function isExecutionMutation(type:unknown,action?:unknown):boolean{return type==='connect_account'||(type==='trade'&&action!=='preview'&&action!=='status')||(type==='strategies'&&!['list','status'].includes(String(action)))||(type==='research'&&['backtest','grid','cancel','record_decision'].includes(String(action)));}
 export function executionProfilePermitsOperation(profile:unknown,_type:unknown):boolean{return profile==='engine';}
 

@@ -471,6 +471,7 @@ async fn market_artifact_publication_and_cached_result_roundtrip() {
         filters: vec![],
         sort: None,
         composition: None,
+        graph: None,
     };
     // Reproduce the valid queued response deterministically: the REAL CPU
     // owner has no worker available until after market's synchronous budget.
@@ -676,6 +677,7 @@ async fn ordinary_market_cursors_resume_one_job_and_reject_other_queries() {
         filters: vec![],
         sort: None,
         composition: None,
+        graph: None,
     };
     let response = service.market(query.clone(), None, None).await.unwrap();
     let first = completed_market(&service, query.clone(), response).await;
