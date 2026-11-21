@@ -581,7 +581,8 @@ mod tests {
             "version": COMPOSITION_VERSION,
             "steps": [
                 {"id":"condition", "op":"greater_than", "input":"close", "threshold":0.0},
-                {"id":"label", "op":"forward_return_label", "input":"close", "when":"condition", "period":2}
+                {"id":"event", "op":"rising_edge", "input":"condition"},
+                {"id":"label", "op":"forward_return_label", "input":"close", "when":"event", "period":2}
             ],
             "result_steps": ["label"]
         }))
