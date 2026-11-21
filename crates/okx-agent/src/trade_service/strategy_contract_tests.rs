@@ -245,8 +245,8 @@ async fn graph_target_preview_reads_the_original_account_owner_without_any_order
 async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_post() {
     use super::graph_consumer::{EngineGraphConsumer, GraphConsumeOutcome};
     use okx_protocol::research_ipc::{
-        GraphClosedBar, GraphPosition, GraphPublicationCursor, GraphSessionId,
-        GraphSessionReply, GraphSessionRequest, GraphSignalDefinition, GraphSignalIntent,
+        GraphClosedBar, GraphPosition, GraphPublicationCursor, GraphSessionId, GraphSessionReply,
+        GraphSessionRequest, GraphSignalDefinition, GraphSignalIntent,
     };
     let fixture = Fixture::new().await;
     let _capture = fixture.owner.recorded_capture_gate.write().await;
@@ -288,8 +288,14 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
             definition: Box::new(definition),
             capacity: 64,
             history: vec![
-                GraphClosedBar { time_ms: 60_000, close: Some(100.) },
-                GraphClosedBar { time_ms: 120_000, close: Some(110.) },
+                GraphClosedBar {
+                    time_ms: 60_000,
+                    close: Some(100.),
+                },
+                GraphClosedBar {
+                    time_ms: 120_000,
+                    close: Some(110.),
+                },
             ],
         })
         .await
@@ -315,12 +321,8 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
         .bind_graph_strategy(&account, &binding, &original)
         .await
         .unwrap();
-    let consumer = EngineGraphConsumer::new(
-        &fixture.ctx.research,
-        account.clone(),
-        binding.clone(),
-    )
-    .unwrap();
+    let consumer =
+        EngineGraphConsumer::new(&fixture.ctx.research, account.clone(), binding.clone()).unwrap();
     let before = money(&fixture).await;
     let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
 
@@ -332,17 +334,33 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
             session_id: session_id.clone(),
             graph_sha256: graph_sha256.clone(),
             expected_bars: 3,
-            bar: GraphClosedBar { time_ms: 180_000, close: Some(90.) },
+            bar: GraphClosedBar {
+                time_ms: 180_000,
+                close: Some(90.),
+            },
         })
         .await
         .unwrap();
     assert!(matches!(
-        consumer.replay_one_page(&fixture.native.trade, &fixture.ctx.research).await.unwrap(),
-        GraphConsumeOutcome::Idle { accepted: 1, confirmed_sequence: 3, has_more: false }
+        consumer
+            .replay_one_page(&fixture.native.trade, &fixture.ctx.research)
+            .await
+            .unwrap(),
+        GraphConsumeOutcome::Idle {
+            accepted: 1,
+            confirmed_sequence: 3,
+            has_more: false
+        }
     ));
     assert_eq!(
-        fixture.native.trade.graph_confirmed_cursor(&account, &binding)
-            .await.unwrap().unwrap().last_sequence(),
+        fixture
+            .native
+            .trade
+            .graph_confirmed_cursor(&account, &binding)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_sequence(),
         3
     );
     fixture
@@ -352,17 +370,25 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
             session_id,
             graph_sha256,
             expected_bars: 4,
-            bar: GraphClosedBar { time_ms: 240_000, close: Some(100.) },
+            bar: GraphClosedBar {
+                time_ms: 240_000,
+                close: Some(100.),
+            },
         })
         .await
         .unwrap();
-    let outcome = consumer.replay_one_page(&fixture.native.trade, &fixture.ctx.research)
-        .await.unwrap();
+    let outcome = consumer
+        .replay_one_page(&fixture.native.trade, &fixture.ctx.research)
+        .await
+        .unwrap();
     let GraphConsumeOutcome::Blocked { publication, plan } = outcome else {
         panic!("actionable Research publication may not be ACKed");
     };
     assert_eq!(publication.sequence, 4);
-    assert_eq!(publication.intent, GraphSignalIntent::SetTarget(GraphPosition::Long));
+    assert_eq!(
+        publication.intent,
+        GraphSignalIntent::SetTarget(GraphPosition::Long)
+    );
     assert_eq!(
         plan,
         okx_execution::position_target::TargetPlan::Open(
@@ -370,8 +396,14 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
         )
     );
     assert_eq!(
-        fixture.native.trade.graph_confirmed_cursor(&account, &binding)
-            .await.unwrap().unwrap().last_sequence(),
+        fixture
+            .native
+            .trade
+            .graph_confirmed_cursor(&account, &binding)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_sequence(),
         3,
         "first actionable event remains unacknowledged after idle replay"
     );

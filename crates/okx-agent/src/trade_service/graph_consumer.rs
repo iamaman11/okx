@@ -88,12 +88,7 @@ impl EngineGraphConsumer {
         let mut accepted = 0_u16;
         for publication in page.publications {
             let preview = engine
-                .preview_graph_publication(
-                    &self.account,
-                    &self.binding,
-                    &last,
-                    &publication,
-                )
+                .preview_graph_publication(&self.account, &self.binding, &last, &publication)
                 .await?
                 .ok_or("GRAPH_CONSUMER_JOURNAL_DUPLICATE")?;
             if preview.plan != TargetPlan::NoChange {
@@ -179,8 +174,7 @@ impl EngineGraphConsumer {
         let result = self.replay_one_page(engine, research).await?;
         self.needs_replay = matches!(
             result,
-            GraphConsumeOutcome::Blocked { .. }
-                | GraphConsumeOutcome::Idle { has_more: true, .. }
+            GraphConsumeOutcome::Blocked { .. } | GraphConsumeOutcome::Idle { has_more: true, .. }
         );
         Ok(result)
     }
