@@ -7,6 +7,7 @@ mod decision;
 mod economic_scenario;
 pub mod executor;
 mod graph_resolver;
+mod graph_sessions;
 pub mod jobs;
 mod market;
 pub mod planner;
@@ -19,7 +20,9 @@ pub mod sources;
 
 use futures_util::{StreamExt, stream};
 use okx_protocol::analytics::*;
-use okx_protocol::research_ipc::{SignalDecision, SignalPosition, SignalRequest};
+use okx_protocol::research_ipc::{
+    GraphSessionReply, GraphSessionRequest, SignalDecision, SignalPosition, SignalRequest,
+};
 use okx_research::{
     ResearchArtifactStore,
     strategy_registry::{self as replay, Costs, Mechanics, ReplaySpec},
@@ -55,6 +58,7 @@ fn drain_count(durable: u64, runners: &AtomicUsize) -> u64 {
 pub struct AnalyticsService {
     sources: sources::Sources,
     cpu: executor::CpuExecutor,
+    graph_sessions: graph_sessions::GraphSessions,
     jobs: jobs::Jobs,
     producer: Option<crate::producer::Producer>,
     artifacts: ResearchArtifactStore,
@@ -63,6 +67,10 @@ pub struct AnalyticsService {
     runners: Arc<AtomicUsize>,
 }
 impl AnalyticsService {
+    /// Isolated incremental graph state. No financial actions are available.
+    pub async fn graph_signal(&self, request: GraphSessionRequest) -> Result<GraphSessionReply, String> {
+        self.graph_sessions.execute(&self.cpu, request).await
+    }
     /// Same causal kernel as replay, isolated behind the Research process and
     /// scheduled on the existing bounded CPU executor (never on Tokio I/O).
     pub async fn evaluate_signal(&self, request: SignalRequest) -> Result<SignalDecision, String> {
@@ -143,6 +151,7 @@ impl AnalyticsService {
                 bootstrap: bootstrapper,
             },
             cpu: Default::default(),
+            graph_sessions: Default::default(),
             jobs,
             producer: None,
             runners: Arc::new(AtomicUsize::new(0)),

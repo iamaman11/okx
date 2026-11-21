@@ -2,9 +2,10 @@ use crate::research_client::{ResearchClient, ResearchClientConfig, SourceHandler
 use okx_protocol::{
     analytics::*,
     research_ipc::{
-        ClosedPrice, FundingHistoryEvent, HistoryCandle, PublicCandleCapture, PublicFundingCapture,
-        PublicSourceReply, PublicSourceRequest, ResearchOpenInterest, ResearchScope,
-        SignalPosition, SignalRequest,
+        ClosedPrice, FundingHistoryEvent, GraphClosedBar, GraphPosition, GraphSessionId,
+        GraphSessionReply, GraphSessionRequest, GraphSignalDefinition, GraphSignalIntent,
+        HistoryCandle, PublicCandleCapture, PublicFundingCapture, PublicSourceReply,
+        PublicSourceRequest, ResearchOpenInterest, ResearchScope, SignalPosition, SignalRequest,
     },
 };
 use serde_json::Value;
@@ -161,6 +162,62 @@ async fn real_worker_live_signal_ipc_is_causal_and_has_no_source_or_finance_acce
         "UNSUPPORTED_STRATEGY"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    client.shutdown().await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_only() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (root, client) = fixture(candle_source(calls.clone()));
+    let session_id = GraphSessionId::new("research:graph:btc".into()).unwrap();
+    let definition: GraphSignalDefinition = serde_json::from_value(serde_json::json!({
+        "version":"okx.graph-signal/v1",
+        "graph":{"version":"okx.graph/v1","steps":[
+            {"id":"return","op":"returns_series","op_version":1,"inputs":{"input":"close"}},
+            {"id":"positive","op":"greater_than","op_version":1,
+             "inputs":{"input":"return"},"parameters":{"threshold":0.0}}
+        ],"result_steps":["positive"]},
+        "signal_step":"positive","target_if_true":1,"target_if_false":0,"missing":"hold"
+    })).unwrap();
+    let restore = GraphSessionRequest::Restore {
+        session_id: session_id.clone(),
+        definition: Box::new(definition),
+        capacity: 64,
+        history: vec![
+            GraphClosedBar {time_ms:60_000,close:Some(100.)},
+            GraphClosedBar {time_ms:120_000,close:Some(110.)},
+        ],
+    };
+    let first = client.graph_signal(restore.clone()).await.unwrap();
+    assert!(first.matches_request(&restore));
+    assert_eq!(first, client.graph_signal(restore).await.unwrap());
+    let GraphSessionReply::Evaluated {graph_sha256, intent, ..} = first else {panic!("expected decision")};
+    assert_eq!(intent, GraphSignalIntent::SetTarget(GraphPosition::Long));
+    let next = GraphSessionRequest::Advance {
+        session_id: session_id.clone(), graph_sha256: graph_sha256.clone(), expected_bars:3,
+        bar: GraphClosedBar {time_ms:180_000,close:Some(90.)},
+    };
+    let flat = client.graph_signal(next.clone()).await.unwrap();
+    assert_eq!(flat, client.graph_signal(next).await.unwrap());
+    assert!(matches!(flat, GraphSessionReply::Evaluated {
+        observed_bars:3,intent:GraphSignalIntent::SetTarget(GraphPosition::Flat),..
+    }));
+    let gap = GraphSessionRequest::Advance {
+        session_id: session_id.clone(), graph_sha256: graph_sha256.clone(), expected_bars:4,
+        bar: GraphClosedBar {time_ms:240_000,close:None},
+    };
+    assert!(matches!(client.graph_signal(gap).await.unwrap(), GraphSessionReply::Evaluated {
+        observed_bars:4,intent:GraphSignalIntent::Hold,..
+    }));
+    let old = GraphSessionRequest::Advance {
+        session_id: session_id.clone(),graph_sha256:graph_sha256.clone(),expected_bars:5,
+        bar: GraphClosedBar {time_ms:60_000,close:Some(100.)},
+    };
+    assert_eq!(client.graph_signal(old).await.unwrap_err(), "composition.stream:CLOSED_BAR_NOT_MONOTONIC");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let release = GraphSessionRequest::Release {session_id,graph_sha256};
+    assert!(matches!(client.graph_signal(release).await.unwrap(), GraphSessionReply::Released { .. }));
     client.shutdown().await;
     let _ = std::fs::remove_dir_all(root);
 }

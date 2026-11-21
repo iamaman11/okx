@@ -1,5 +1,6 @@
 //! Local research IPC data only; no financial commands or credentials.
 use crate::analytics::{MarketRequest, ResearchRequest};
+use crate::graph_wire::GraphEnvelope;
 pub use okx_kernel::observation_model::{FundingHistoryEvent, HistoryCandle};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -48,6 +49,7 @@ id!(WorkerSession);
 id!(ResearchScope);
 id!(JobId);
 id!(InvocationId);
+id!(GraphSessionId);
 /// Public research keys accept any nonempty UTF-8 string up to 128 bytes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
@@ -83,6 +85,10 @@ pub enum ResearchCommand {
     /// Internal read-only signal calculation. No finance or order authority.
     EvaluateSignal {
         request: SignalRequest,
+    },
+    /// Isolated, bounded, read-only incremental graph session.
+    GraphSignal {
+        request: GraphSessionRequest,
     },
     Capabilities,
     Drain,
@@ -232,6 +238,7 @@ pub enum WorkerFrame {
 pub enum WorkerReply {
     Product(Value),
     Signal(SignalDecision),
+    GraphSignal(GraphSessionReply),
     Draining(DrainStatus),
     Shutdown,
 }
@@ -251,6 +258,221 @@ pub struct SignalRequest {
 pub struct ClosedPrice {
     pub time_ms: u64,
     pub close: f64,
+}
+
+/// An exact closed-bar observation; an absent close is unknown, never zero.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphClosedBar {
+    pub time_ms: u64,
+    pub close: Option<f64>,
+}
+
+impl GraphClosedBar {
+    pub fn valid(self) -> bool {
+        self.time_ms > 0
+            && self.time_ms <= i64::MAX as u64
+            && self.close.is_none_or(|value| value.is_finite() && value > 0.0)
+    }
+}
+
+/// Stable wire contract. Operator semantics, units and graph compilation are
+/// deliberately NOT owned by Protocol or Agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphSignalDefinition {
+    pub version: String,
+    pub graph: GraphEnvelope,
+    pub signal_step: String,
+    pub target_if_true: i8,
+    pub target_if_false: i8,
+    pub missing: GraphMissingPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphMissingPolicy {
+    Hold,
+    Flat,
+}
+
+/// Restore is a one-time prefix replay, then Advance sends exactly one new
+/// candle per call. No order controls or financial state cross this boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GraphSessionRequest {
+    Restore {
+        session_id: GraphSessionId,
+        definition: Box<GraphSignalDefinition>,
+        capacity: u64,
+        history: Vec<GraphClosedBar>,
+    },
+    Advance {
+        session_id: GraphSessionId,
+        graph_sha256: String,
+        expected_bars: u64,
+        bar: GraphClosedBar,
+    },
+    Release {
+        session_id: GraphSessionId,
+        graph_sha256: String,
+    },
+}
+
+impl GraphSessionRequest {
+    pub fn valid(&self) -> bool {
+        fn digest_valid(hash: &str) -> bool {
+            hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        }
+        match self {
+            Self::Restore { definition, capacity, history, .. } => {
+                definition.version == "okx.graph-signal/v1"
+                    && definition.graph.structurally_valid()
+                    && definition.graph.result_steps.contains(&definition.signal_step)
+                    && (-1..=1).contains(&definition.target_if_true)
+                    && (-1..=1).contains(&definition.target_if_false)
+                    && (1..=10_000).contains(&history.len())
+                    && *capacity >= history.len() as u64
+                    && *capacity <= 100_000
+                    && history.iter().all(|bar| bar.valid())
+                    && history.windows(2).all(|pair| pair[0].time_ms < pair[1].time_ms)
+            }
+            Self::Advance { graph_sha256, expected_bars, bar, .. } => {
+                digest_valid(graph_sha256) && *expected_bars > 0 && bar.valid()
+            }
+            Self::Release { graph_sha256, .. } => digest_valid(graph_sha256),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphPosition {
+    Flat,
+    Long,
+    Short,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphSignalIntent {
+    Hold,
+    SetTarget(GraphPosition),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GraphSessionReply {
+    Evaluated {
+        schema: String,
+        session_id: GraphSessionId,
+        graph_sha256: String,
+        last_closed_ms: u64,
+        observed_bars: u64,
+        intent: GraphSignalIntent,
+    },
+    Released {
+        session_id: GraphSessionId,
+    },
+}
+
+impl GraphSessionReply {
+    pub const SCHEMA: &'static str = "okx.research.graph-signal/v1";
+
+    pub fn matches_request(&self, request: &GraphSessionRequest) -> bool {
+        match (self, request) {
+            (
+                Self::Evaluated { schema, session_id: response_id, graph_sha256, last_closed_ms, observed_bars, .. },
+                GraphSessionRequest::Restore { session_id, history, .. },
+            ) => schema == Self::SCHEMA && response_id == session_id
+                && graph_sha256.len() == 64
+                && *last_closed_ms == history.last().map_or(0, |bar| bar.time_ms)
+                && *observed_bars == history.len() as u64,
+            (
+                Self::Evaluated { schema, session_id: response_id, graph_sha256: response_sha, last_closed_ms, observed_bars, .. },
+                GraphSessionRequest::Advance { session_id, graph_sha256, expected_bars, bar },
+            ) => schema == Self::SCHEMA && response_id == session_id
+                && response_sha == graph_sha256 && *last_closed_ms == bar.time_ms
+                && *observed_bars == *expected_bars,
+            (Self::Released { session_id: response_id }, GraphSessionRequest::Release { session_id, .. }) => response_id == session_id,
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod graph_signal_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sample() -> GraphSessionRequest {
+        serde_json::from_value(json!({
+            "type":"restore", "session_id":"instance:btc", "capacity":100,
+            "definition":{
+                "version":"okx.graph-signal/v1",
+                "graph":{"version":"okx.graph/v1","steps":[
+                    {"id":"return","op":"returns_series","op_version":1,"inputs":{"input":"close"}},
+                    {"id":"positive","op":"greater_than","op_version":1,
+                     "inputs":{"input":"return"},"parameters":{"threshold":0.0}}
+                ],"result_steps":["positive"]},
+                "signal_step":"positive", "target_if_true":1,"target_if_false":0,
+                "missing":"hold"
+            },
+            "history":[{"time_ms":60000,"close":100.0},{"time_ms":120000,"close":110.0}]
+        })).unwrap()
+    }
+
+    #[test]
+    fn typed_graph_session_admission_limits_history_versions_and_replays() {
+        let good = sample();
+        assert!(good.valid());
+        let roundtrip: GraphSessionRequest = serde_json::from_value(
+            serde_json::to_value(&good).unwrap()
+        ).unwrap();
+        assert_eq!(good, roundtrip);
+
+        let mut out_of_order = good.clone();
+        let GraphSessionRequest::Restore { history, .. } = &mut out_of_order else {unreachable!()};
+        history[1].time_ms = 60000;
+        assert!(!out_of_order.valid());
+
+        let mut forged_graph = good.clone();
+        let GraphSessionRequest::Restore { definition, .. } = &mut forged_graph else {unreachable!()};
+        definition.graph.version = "future-contract".into();
+        assert!(!forged_graph.valid());
+
+        let mut too_many = good.clone();
+        let GraphSessionRequest::Restore { capacity, .. } = &mut too_many else {unreachable!()};
+        *capacity = u64::MAX;
+        assert!(!too_many.valid());
+
+        let mut unknown = serde_json::to_value(good).unwrap();
+        unknown["unexpected"] = json!("not-a-financial-command");
+        assert!(serde_json::from_value::<GraphSessionRequest>(unknown).is_err());
+    }
+
+    #[test]
+    fn flat_is_an_explicit_target_and_reply_must_match_admitted_sequence() {
+        let restore = sample();
+        let GraphSessionRequest::Restore { session_id, history, .. } = &restore else {unreachable!()};
+        let response = GraphSessionReply::Evaluated {
+            schema: GraphSessionReply::SCHEMA.into(),
+            session_id: session_id.clone(), graph_sha256: "a".repeat(64),
+            last_closed_ms: history[1].time_ms, observed_bars:2,
+            intent:GraphSignalIntent::SetTarget(GraphPosition::Flat),
+        };
+        assert!(response.matches_request(&restore));
+        let advance = GraphSessionRequest::Advance {
+            session_id:session_id.clone(),graph_sha256:"a".repeat(64),expected_bars:3,
+            bar:GraphClosedBar {time_ms:180000,close:None}
+        };
+        assert!(!response.matches_request(&advance));
+        assert_eq!(
+            serde_json::to_value(GraphSignalIntent::SetTarget(GraphPosition::Flat)).unwrap(),
+            json!({"set_target":"flat"})
+        );
+        assert_eq!(serde_json::to_value(GraphSignalIntent::Hold).unwrap(), "hold");
+    }
 }
 
 impl SignalRequest {
@@ -316,6 +538,12 @@ impl WorkerReply {
     pub fn signal(self) -> Result<SignalDecision, String> {
         match self {
             Self::Signal(decision) => Ok(decision),
+            _ => Err("WORKER_REPLY_KIND_MISMATCH".into()),
+        }
+    }
+    pub fn graph_signal(self) -> Result<GraphSessionReply, String> {
+        match self {
+            Self::GraphSignal(reply) => Ok(reply),
             _ => Err("WORKER_REPLY_KIND_MISMATCH".into()),
         }
     }

@@ -66,6 +66,7 @@ impl TargetPosition {
     }
 }
 
+#[derive(Clone)]
 pub struct CheckedGraphSignal {
     graph: CheckedComposition,
     signal_step: String,
@@ -75,8 +76,8 @@ pub struct CheckedGraphSignal {
 
 /// The same compiled, typed policy for replay and a future closed-bar live
 /// adapter. It holds bounded operator state and cannot execute any order.
-pub struct GraphSignalStream<'a> {
-    checked: &'a CheckedGraphSignal,
+pub struct GraphSignalStream {
+    checked: CheckedGraphSignal,
     runtime: CausalGraphStream,
 }
 
@@ -125,9 +126,9 @@ impl CheckedGraphSignal {
         &self.graph
     }
 
-    pub fn stream(&self) -> Result<GraphSignalStream<'_>, String> {
+    pub fn stream(&self) -> Result<GraphSignalStream, String> {
         Ok(GraphSignalStream {
-            checked: self,
+            checked: self.clone(),
             runtime: CausalGraphStream::new(&self.graph)?,
         })
     }
@@ -137,9 +138,9 @@ impl CheckedGraphSignal {
     pub fn restore_stream(
         &self,
         bars: impl IntoIterator<Item = ClosedBar>,
-    ) -> Result<GraphSignalStream<'_>, String> {
+    ) -> Result<GraphSignalStream, String> {
         Ok(GraphSignalStream {
-            checked: self,
+            checked: self.clone(),
             runtime: CausalGraphStream::restore_from_history(&self.graph, bars)?,
         })
     }
@@ -177,7 +178,7 @@ impl CheckedGraphSignal {
     }
 }
 
-impl GraphSignalStream<'_> {
+impl GraphSignalStream {
     pub fn on_closed_bar(&mut self, bar: ClosedBar) -> Result<GraphIntent, String> {
         self.checked.intent(&self.runtime.on_closed_bar(bar)?)
     }
