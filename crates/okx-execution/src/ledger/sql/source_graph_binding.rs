@@ -41,10 +41,17 @@ fn cursor_key(binding: &EngineGraphBinding, sequence: u64) -> String {
 }
 
 fn open_key(binding: &EngineGraphBinding, sequence: u64) -> String {
-    format!("graph-open:{:x}:{}:{sequence:020}", Sha256::digest(binding.instance_id.as_bytes()), binding.policy_revision)
+    format!(
+        "graph-open:{:x}:{}:{sequence:020}",
+        Sha256::digest(binding.instance_id.as_bytes()),
+        binding.policy_revision
+    )
 }
 
-fn decision_key(binding: &EngineGraphBinding, published: &EngineGraphCursor) -> StoreResult<String> {
+fn decision_key(
+    binding: &EngineGraphBinding,
+    published: &EngineGraphCursor,
+) -> StoreResult<String> {
     let (_, digest) = encode(&(binding, published))?;
     Ok(format!("graph_{}", &digest[..32]))
 }
@@ -258,7 +265,10 @@ impl AccountStore {
     /// PREPARED intent and graph cursor are committed in a SINGLE finance
     /// writer transaction. No new financial admission, exchange send or
     /// second SQL owner is introduced. Close/flip/settlement remain denied.
-    #[expect(clippy::too_many_arguments, reason = "One original SQL owner requires explicit scoped evidence and CAS data.")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "One original SQL owner requires explicit scoped evidence and CAS data."
+    )]
     pub(crate) fn prepare_graph_open_sql(
         tx: &rusqlite::Transaction<'_>,
         scope: (&str, &str),
@@ -288,7 +298,10 @@ impl AccountStore {
         }
     }
 
-    #[expect(clippy::too_many_arguments, reason = "Keep scoped original financial claim data together.")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep scoped original financial claim data together."
+    )]
     fn prepare_graph_open_inner_sql(
         tx: &rusqlite::Transaction<'_>,
         scope: (&str, &str),
@@ -326,8 +339,9 @@ impl AccountStore {
             if *published != prior {
                 return Err(StoreError::Invalid("GRAPH_FINANCE_CONFLICTING_REPLAY"));
             }
-            let receipt = Self::operation_sql(tx, Some(scope), &open_key(binding, published.sequence))?
-                .ok_or(StoreError::Invalid("GRAPH_FINANCE_OPEN_RECEIPT_MISSING"))?;
+            let receipt =
+                Self::operation_sql(tx, Some(scope), &open_key(binding, published.sequence))?
+                    .ok_or(StoreError::Invalid("GRAPH_FINANCE_OPEN_RECEIPT_MISSING"))?;
             let recorded: PreparedGraphOpen = decode(&receipt, OPEN_KIND)?;
             if recorded.input_fingerprint != fingerprint || recorded.intent_id != intent.intent_id {
                 return Err(StoreError::Invalid("GRAPH_FINANCE_CONFLICTING_REPLAY"));
@@ -337,7 +351,9 @@ impl AccountStore {
             if existing.idempotency_key != key || existing.request_hash != intent.request_hash {
                 return Err(StoreError::Invalid("GRAPH_FINANCE_OPEN_RECEIPT_CORRUPT"));
             }
-            return Ok(GraphOpenClaim::Replayed { intent_id: intent.intent_id.clone() });
+            return Ok(GraphOpenClaim::Replayed {
+                intent_id: intent.intent_id.clone(),
+            });
         }
         if prior.sequence.checked_add(1) != Some(published.sequence) {
             return Err(StoreError::Invalid("GRAPH_FINANCE_SEQUENCE_GAP"));
@@ -346,26 +362,47 @@ impl AccountStore {
             return Err(StoreError::Invalid("GRAPH_FINANCE_NOT_MONOTONIC"));
         }
         if decision.decision_at != now {
-            return Err(StoreError::Invalid("GRAPH_FINANCE_OPEN_DECISION_TIME_INVALID"));
+            return Err(StoreError::Invalid(
+                "GRAPH_FINANCE_OPEN_DECISION_TIME_INVALID",
+            ));
         }
         let snapshot = Self::strategy_position_snapshot_sql(
-            tx, Some(scope), &binding.instance_id, &binding.instrument_id
+            tx,
+            Some(scope),
+            &binding.instance_id,
+            &binding.instrument_id,
         )?;
         let plan = plan_strategy_target(
-            published.intent, &binding.instance_id, &binding.instrument_id,
-            &snapshot.lots, snapshot.in_flight,
-        ).map_err(|_| StoreError::Invalid("GRAPH_FINANCE_POSITION_INVALID"))?;
+            published.intent,
+            &binding.instance_id,
+            &binding.instrument_id,
+            &snapshot.lots,
+            snapshot.in_flight,
+        )
+        .map_err(|_| StoreError::Invalid("GRAPH_FINANCE_POSITION_INVALID"))?;
         let side_matches = match plan {
-            TargetPlan::Open(ExposureSide::Long) => intent.plan.position_side == "long" && intent.plan.side == "buy",
-            TargetPlan::Open(ExposureSide::Short) => intent.plan.position_side == "short" && intent.plan.side == "sell",
+            TargetPlan::Open(ExposureSide::Long) => {
+                intent.plan.position_side == "long" && intent.plan.side == "buy"
+            }
+            TargetPlan::Open(ExposureSide::Short) => {
+                intent.plan.position_side == "short" && intent.plan.side == "sell"
+            }
             _ => false,
         };
         if !side_matches || intent.plan.operation != "open" || !intent.risk_increase {
-            return Err(StoreError::Invalid("GRAPH_FINANCE_OPEN_REQUIRES_EMPTY_EXPOSURE"));
+            return Err(StoreError::Invalid(
+                "GRAPH_FINANCE_OPEN_REQUIRES_EMPTY_EXPOSURE",
+            ));
         }
         let claimed = Self::claim_strategy_decision_sql(
-            tx, Some(scope), &binding.instance_id, &key, &expected_input_digest,
-            decision.policy_revision, Some(&binding.definition_version), now,
+            tx,
+            Some(scope),
+            &binding.instance_id,
+            &key,
+            &expected_input_digest,
+            decision.policy_revision,
+            Some(&binding.definition_version),
+            now,
         )?;
         if claimed.as_deref() != Some(decision.decision_id.as_str()) {
             return Err(StoreError::Invalid("GRAPH_FINANCE_OPEN_CLAIM_CONFLICT"));
@@ -373,12 +410,28 @@ impl AccountStore {
         if !Self::prepare_sql_transaction(tx, Some(scope), decision, intent)? {
             return Err(StoreError::Invalid("GRAPH_FINANCE_OPEN_ALREADY_PREPARED"));
         }
-        insert_receipt(tx, scope, &cursor_key(binding, published.sequence), CURSOR_KIND, published, now)?;
         insert_receipt(
-            tx, scope, &open_key(binding, published.sequence), OPEN_KIND,
-            &PreparedGraphOpen { input_fingerprint: fingerprint, intent_id: intent.intent_id.clone() }, now,
+            tx,
+            scope,
+            &cursor_key(binding, published.sequence),
+            CURSOR_KIND,
+            published,
+            now,
         )?;
-        Ok(GraphOpenClaim::Prepared { intent_id: intent.intent_id.clone() })
+        insert_receipt(
+            tx,
+            scope,
+            &open_key(binding, published.sequence),
+            OPEN_KIND,
+            &PreparedGraphOpen {
+                input_fingerprint: fingerprint,
+                intent_id: intent.intent_id.clone(),
+            },
+            now,
+        )?;
+        Ok(GraphOpenClaim::Prepared {
+            intent_id: intent.intent_id.clone(),
+        })
     }
 }
 
@@ -465,8 +518,8 @@ mod tests {
         binding: &EngineGraphBinding,
         publication: &EngineGraphCursor,
     ) -> (Decision, NewIntent) {
-        let definition = AccountStore::strategy_definition_sql(db, Some(scope), &binding.instance_id)
-            .unwrap();
+        let definition =
+            AccountStore::strategy_definition_sql(db, Some(scope), &binding.instance_id).unwrap();
         let key = decision_key(binding, publication).unwrap();
         let (_, input_digest) = encode(&(binding, publication)).unwrap();
         let side = match publication.intent {
@@ -532,22 +585,33 @@ mod tests {
             let (decision, intent) = opening(&tx, scope, &b, &publication);
             assert_eq!(
                 AccountStore::prepare_graph_open_sql(
-                    &tx, scope, &b, &publication, &decision, &intent, 181_000
+                    &tx,
+                    scope,
+                    &b,
+                    &publication,
+                    &decision,
+                    &intent,
+                    181_000
                 )
                 .unwrap(),
-                GraphOpenClaim::Prepared { intent_id: intent.intent_id.clone() }
+                GraphOpenClaim::Prepared {
+                    intent_id: intent.intent_id.clone()
+                }
             );
             tx.commit().unwrap();
             (b, publication, decision, intent)
         };
         assert_eq!(
             AccountStore::graph_progress_sql(&db, scope, &binding)
-                .unwrap().unwrap().cursor,
+                .unwrap()
+                .unwrap()
+                .cursor,
             publication
         );
-        let stored = AccountStore::find_intent_sql(
-            &db, Some(scope), "intent_id", &intent.intent_id
-        ).unwrap().unwrap();
+        let stored =
+            AccountStore::find_intent_sql(&db, Some(scope), "intent_id", &intent.intent_id)
+                .unwrap()
+                .unwrap();
         assert_eq!(stored.state, IntentState::Prepared);
         assert_eq!(stored.idempotency_key, intent.idempotency_key);
         assert_eq!(stored.plan, intent.plan);
@@ -555,13 +619,25 @@ mod tests {
             "SELECT COUNT(*) FROM risk_entries WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
             params![scope.0, scope.1, intent.intent_id], |r| r.get(0)
         ).unwrap();
-        assert_eq!(risk_rows, 0, "PREPARED graph intent is not a risk reservation");
+        assert_eq!(
+            risk_rows, 0,
+            "PREPARED graph intent is not a risk reservation"
+        );
         let tx = db.transaction().unwrap();
         assert_eq!(
             AccountStore::prepare_graph_open_sql(
-                &tx, scope, &binding, &publication, &decision, &intent, 241_000
-            ).unwrap(),
-            GraphOpenClaim::Replayed { intent_id: intent.intent_id.clone() }
+                &tx,
+                scope,
+                &binding,
+                &publication,
+                &decision,
+                &intent,
+                241_000
+            )
+            .unwrap(),
+            GraphOpenClaim::Replayed {
+                intent_id: intent.intent_id.clone()
+            }
         );
         tx.commit().unwrap();
         let decisions: i64 = db.query_row(
@@ -591,23 +667,45 @@ mod tests {
         wrong_side.plan.side = "buy".into();
         assert!(matches!(
             AccountStore::prepare_graph_open_sql(
-                &tx, scope, &b, &open, &decision, &wrong_side, 181_000
+                &tx,
+                scope,
+                &b,
+                &open,
+                &decision,
+                &wrong_side,
+                181_000
             ),
-            Err(StoreError::Invalid("GRAPH_FINANCE_OPEN_REQUIRES_EMPTY_EXPOSURE"))
+            Err(StoreError::Invalid(
+                "GRAPH_FINANCE_OPEN_REQUIRES_EMPTY_EXPOSURE"
+            ))
         ));
         let flat = cursor(3, TargetPosition::Flat);
         let (flat_decision, flat_intent) = opening(&tx, scope, &b, &flat);
         assert!(matches!(
             AccountStore::prepare_graph_open_sql(
-                &tx, scope, &b, &flat, &flat_decision, &flat_intent, 181_000
+                &tx,
+                scope,
+                &b,
+                &flat,
+                &flat_decision,
+                &flat_intent,
+                181_000
             ),
-            Err(StoreError::Invalid("GRAPH_FINANCE_OPEN_REQUIRES_EMPTY_EXPOSURE"))
+            Err(StoreError::Invalid(
+                "GRAPH_FINANCE_OPEN_REQUIRES_EMPTY_EXPOSURE"
+            ))
         ));
         let gap = cursor(4, TargetPosition::Short);
         let (gap_decision, gap_intent) = opening(&tx, scope, &b, &gap);
         assert!(matches!(
             AccountStore::prepare_graph_open_sql(
-                &tx, scope, &b, &gap, &gap_decision, &gap_intent, 241_000
+                &tx,
+                scope,
+                &b,
+                &gap,
+                &gap_decision,
+                &gap_intent,
+                241_000
             ),
             Err(StoreError::Invalid("GRAPH_FINANCE_SEQUENCE_GAP"))
         ));
@@ -617,19 +715,36 @@ mod tests {
         conflicting.plan_hash = "changed-plan-hash".into();
         assert!(matches!(
             AccountStore::prepare_graph_open_sql(
-                &tx, scope, &b, &open, &decision, &conflicting, 241_000
+                &tx,
+                scope,
+                &b,
+                &open,
+                &decision,
+                &conflicting,
+                241_000
             ),
             Err(StoreError::Invalid("GRAPH_FINANCE_CONFLICTING_REPLAY"))
         ));
         let next = cursor(4, TargetPosition::Long);
         let (mut next_decision, next_intent) = opening(&tx, scope, &b, &next);
         next_decision.decision_at = 241_000;
-        assert!(matches!(
-            AccountStore::prepare_graph_open_sql(
-                &tx, scope, &b, &next, &next_decision, &next_intent, 241_000
+        assert!(
+            matches!(
+                AccountStore::prepare_graph_open_sql(
+                    &tx,
+                    scope,
+                    &b,
+                    &next,
+                    &next_decision,
+                    &next_intent,
+                    241_000
+                ),
+                Err(StoreError::Invalid(
+                    "GRAPH_FINANCE_OPEN_REQUIRES_EMPTY_EXPOSURE"
+                ))
             ),
-            Err(StoreError::Invalid("GRAPH_FINANCE_OPEN_REQUIRES_EMPTY_EXPOSURE"))
-        ), "unsettled PREPARED opening must block the next graph open");
+            "unsettled PREPARED opening must block the next graph open"
+        );
         tx.commit().unwrap();
     }
 
@@ -651,16 +766,31 @@ mod tests {
             let tx = db.transaction().unwrap();
             let (decision, intent) = opening(&tx, scope, &b, &publication);
             AccountStore::prepare_graph_open_sql(
-                &tx, scope, &b, &publication, &decision, &intent, 181_000
-            ).unwrap();
+                &tx,
+                scope,
+                &b,
+                &publication,
+                &decision,
+                &intent,
+                181_000,
+            )
+            .unwrap();
             (decision, intent)
             // Dropping the transaction emulates a crash before COMMIT.
         };
-        assert_eq!(AccountStore::graph_progress_sql(&db, scope, &b)
-            .unwrap().unwrap().cursor.sequence, 2);
-        assert!(AccountStore::find_intent_sql(
-            &db, Some(scope), "intent_id", &intent.intent_id
-        ).unwrap().is_none());
+        assert_eq!(
+            AccountStore::graph_progress_sql(&db, scope, &b)
+                .unwrap()
+                .unwrap()
+                .cursor
+                .sequence,
+            2
+        );
+        assert!(
+            AccountStore::find_intent_sql(&db, Some(scope), "intent_id", &intent.intent_id)
+                .unwrap()
+                .is_none()
+        );
         let claimed: i64 = db.query_row(
             "SELECT COUNT(*) FROM decisions WHERE installation_id=?1 AND account_key=?2 AND decision_id=?3",
             params![scope.0, scope.1, decision.decision_id], |r| r.get(0)
@@ -684,19 +814,32 @@ mod tests {
             intent.deadline = decision.decision_at;
             assert!(matches!(
                 AccountStore::prepare_graph_open_sql(
-                    &tx, scope, &b, &cursor(3, TargetPosition::Long),
-                    &decision, &intent, 181_000
+                    &tx,
+                    scope,
+                    &b,
+                    &cursor(3, TargetPosition::Long),
+                    &decision,
+                    &intent,
+                    181_000
                 ),
                 Err(StoreError::Invalid("INVALID_INTENT_DEADLINE_OR_POLICY"))
             ));
             tx.commit().unwrap(); // Deliberate mis-use of an Err result.
             (b, decision, intent)
         };
-        assert_eq!(AccountStore::graph_progress_sql(&db, scope, &b)
-            .unwrap().unwrap().cursor.sequence, 2);
-        assert!(AccountStore::find_intent_sql(
-            &db, Some(scope), "intent_id", &intent.intent_id
-        ).unwrap().is_none());
+        assert_eq!(
+            AccountStore::graph_progress_sql(&db, scope, &b)
+                .unwrap()
+                .unwrap()
+                .cursor
+                .sequence,
+            2
+        );
+        assert!(
+            AccountStore::find_intent_sql(&db, Some(scope), "intent_id", &intent.intent_id)
+                .unwrap()
+                .is_none()
+        );
         let claims: i64 = db.query_row(
             "SELECT COUNT(*) FROM decisions WHERE installation_id=?1 AND account_key=?2 AND decision_id=?3",
             params![scope.0, scope.1, decision.decision_id], |r| r.get(0)

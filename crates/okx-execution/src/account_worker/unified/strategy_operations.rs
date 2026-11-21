@@ -30,7 +30,10 @@ pub struct StrategyDecisionClaimCommand {
 impl UnifiedFinanceHandle {
     /// Original finance FIFO: graph checkpoint, strategy decision and one
     /// PREPARED opening order are inseparable. Risk admission/POST are later.
-    #[expect(clippy::too_many_arguments, reason = "Original finance owner requires all atomic evidence explicitly.")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Original finance owner requires all atomic evidence explicitly."
+    )]
     pub async fn prepare_graph_open(
         &self,
         deadline: Instant,
@@ -46,7 +49,13 @@ impl UnifiedFinanceHandle {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             super::finance_authority::require_preparation_authority(&tx, &installation)?;
             let claim = AccountStore::prepare_graph_open_sql(
-                &tx, (&installation, &account), &binding, &published, &decision, &intent, now,
+                &tx,
+                (&installation, &account),
+                &binding,
+                &published,
+                &decision,
+                &intent,
+                now,
             )?;
             tx.commit().map_err(|_| {
                 StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
