@@ -1,15 +1,15 @@
 # #518 — T01–T15 evidence matrix (CODE, not release acceptance)
 
 **Evidence cutoff:** 21 November 2026 (Europe/Minsk). Canonical repository:
-[`iamaman11/okx`](https://github.com/iamaman11/okx). Reviewed executable HEAD
-[`91033e0f235b2e0fdd22c9b9f26a2525766e48a0`](https://github.com/iamaman11/okx/commit/91033e0f235b2e0fdd22c9b9f26a2525766e48a0),
-tree `33533f65e6de395706b1d22848331fd19f8dedd6`, against `main`
-`db8522a2c6d98885b41cb2b38b01166df2c17189`. [Draft PR #529](https://github.com/iamaman11/okx/pull/529)
-is open and unmerged. [CI #4721](https://github.com/iamaman11/okx/actions/runs/44845507367)
-**SUCCESS**: classify, dependency-policy and selected Draft feedback (Kernel 82,
-Analysis 89, Research 37, Protocol 47 with one ignored, Worker 163 with one
-ignored, 8 IPC process tests, 6 focused Agent tests, MCP contract/TS checks).
-The final Native Windows matrix was intentionally **SKIPPED** for Draft.
+[`iamaman11/okx`](https://github.com/iamaman11/okx). Last completed integrated
+Draft baseline: [`92bf749c9cf9e243a97c6aebe1b8f78a489110a0`](https://github.com/iamaman11/okx/commit/92bf749c9cf9e243a97c6aebe1b8f78a489110a0),
+tree `d3768cdaf4e7fb840375683131ab2c68c3b5a380`,
+[CI #4727](https://github.com/iamaman11/okx/actions/runs/44849592196)
+**SUCCESS**: classify, dependency-policy and selected Draft feedback, including
+100 real loopback MCP HTTP → SQLite Durable Object → authenticated WebSocket →
+Native Finance calls under two real CPU Grid jobs (p95 44.001 ms). The next
+tree adds resource/source instrumentation; use the current [Draft PR #529](https://github.com/iamaman11/okx/pull/529)
+for its exact-tree CI result. Full Native Windows remained **SKIPPED** for Draft.
 
 ## How to interpret a row
 
@@ -38,7 +38,7 @@ table records the narrower, reproducible CODE state and the exact next proof.
 | **T07 — event / label** | **PASS** | `okx-kernel::query_plan::t07_outcome_cannot_be_a_feature_or_event_condition`, prefix-invariance / historical `evaluate_at` checks; Worker `t07_event_graph_exposes_boolean_metrics_but_not_unconfirmed_future_outcomes`; Agent child `t07_t08_real_worker_intraday_event_and_holdout_stay_separate` on 1,440 bars. | Public `market.screen` projects the **last closed bar**; its unconfirmed future label is `null`. Historical `evaluate_at` is a pure Rust operation, not a live trading signal or a public batch-label export. |
 | **T08 — strategy / OOS** | **PASS** | `okx-research::strategy_registry::breakout_grid_sixty_four_train_only_candidates_and_oos_isolation`; Worker `t08_public_breakout_grid_persists_typed_selection_and_rejects_65_before_sources`; Agent child 1,440-bar Grid: identical 1,008-bar train, changed 432-bar holdout, stable selected variant and candidate train hashes. | `close_breakout_v1` is a counterfactual Research definition; do not infer live strategy activation, authority or profitability. |
 | **T09 — economics** | **PASS** | `okx-research::economics::t09_three_linear_contracts_exact_oracle`; `economic_audit` replays fills/fees/funding/equity, cross-currency cashflow buckets remain separate; Agent child `t06_t09_real_worker_causality_and_economics_are_isolated`: +3 USDT and +2 USD, no FX/joint risk. | **Data/model capability unavailable:** `historical_observed` refuses with `HISTORICAL_RULES_AND_FEES_UNAVAILABLE`; no historical fees, rule schedule, dated FX portfolio valuation, venue mark or option model is implied. |
-| **T10 — resource limits** | **BLOCKED** | Typed plan bounds, 1M bars / 8 instruments / 64 public variants, graph cells/depth, 4,096 MiB shared *estimated* permit and two heavy slots have direct tests (`resource_gate`, `budget`, Kernel query plan). Process RSS is observable on Linux/Windows, not an enforcement guarantee. | Need one **measured** fixed-machine campaign on the final tree: wall time excluding build, peak process RSS, page/source reads, cancel latency, 1M/1M+1 and 8/9, 64/65 boundaries, saturated Research with MCP/Finance SLO. Capabilities currently state `mcp_and_finance_under_load=not_evaluated`. |
+| **T10 — resource limits** | **BLOCKED** | Direct bounds tests cover 1M/1M+1 bars, 8/9 instruments, 64/65 variants, graph cells/depth, 4,096 MiB shared *estimated* permit and two heavy slots. Draft #4727 measured 100 end-to-end MCP→DO→WSS→Native Finance calls under two CPU Grid jobs (p95 44.001 ms), plus direct Native Finance and cancel timing. The expanded `mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research` fixture counts real synthetic-source IPC requests/returned rows and samples Linux RSS of the Agent+MCP+Research process tree every 20 ms, separate from build time. | Source requests are to an isolated synthetic handler, **not** venue HTTP or observed storage-page reads. Sampled summed RSS double-counts shared pages, may miss spikes, and is **not** a hard memory limit; Windows Job Object measures peak committed job memory, not RSS. Need final fixed-machine campaign on exact release tree with full source/page I/O, actual peak/limit, hardware and resource saturation, true OAuth/network, physical installed Windows and complete T10 SLO. |
 | **T11 — effects / rights** | **PASS** | `scripts/check_architecture.py` isolates Worker from financial dependencies; worker capabilities declare no venue POST/finance/governance writes; IPC child tests cover research metadata, no-effect economics, read-only diagnostics and cancellation under saturated command lanes. | This is CODE/process-fixture evidence; no right to execute a real TradeService command is transferred by an artifact or `RecordDecision`. |
 | **T12 — financial invariants** | **NOT_RUN** | Existing accepted Finance/RiskBook property suite and prior [full four-component #527 matrix](https://github.com/iamaman11/okx/actions/runs/44638604558) give a historical baseline; targeted Engine-under-Research-load child regression passes in Draft. | Shared `okx-kernel`/`okx-protocol` changed in #529: a **fresh exact-tree** full Native/Finance Windows matrix, including preview/UNKNOWN reconciliation and 61/61 property gate, remains mandatory before release. No exchange POST or financial operation is authorized here. |
 | **T13 — repeatability** | **PASS** | Worker `t13_composed_market_route_persists_input_evidence_and_replays_same_job`, `t13_export_rechecks_all_replay_dataset_pages_and_exact_content_hash`, source-page reconstruction and bounded independent reexecution; Agent child immutable cursor paging, changed OOS dataset hash, old typed result reads. | Unverified publication time is never upgraded by a matching hash; large/unsupported replay explicitly says `not_verified`. |

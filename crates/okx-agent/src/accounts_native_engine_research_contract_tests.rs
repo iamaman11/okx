@@ -12,6 +12,7 @@ use crate::{
     runtime::{EngineContext, EngineDrainOutcome, run_engine_until},
 };
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering as CounterOrdering};
 use tokio::{io::{AsyncBufReadExt, BufReader}, process::{Child, Command}};
 use okx_protocol::research_ipc::HistoryCandle;
 use okx_protocol::{
@@ -20,12 +21,19 @@ use okx_protocol::{
     research_ipc::{PublicCandleCapture, PublicSourceReply, PublicSourceRequest, ResearchScope},
 };
 
-fn heavy_research(root: std::path::PathBuf) -> ResearchClient {
+#[derive(Default)]
+struct SourceReadWitness {
+    successful_requests: AtomicU64,
+    returned_rows: AtomicU64,
+}
+
+fn heavy_research(root: std::path::PathBuf, reads: Arc<SourceReadWitness>) -> ResearchClient {
     let executable = std::path::PathBuf::from(
         std::env::var_os("OKX_RESEARCH_WORKER_TEST_EXE").expect("set OKX_RESEARCH_WORKER_TEST_EXE"),
     );
     assert!(executable.is_file());
-    let source: SourceHandler = Arc::new(|request| {
+    let source: SourceHandler = Arc::new(move |request| {
+        let reads = reads.clone();
         Box::pin(async move {
             let PublicSourceRequest::Candles { after, .. } = request else {
                 return Err("UNEXPECTED_SOURCE".into());
@@ -50,7 +58,13 @@ fn heavy_research(root: std::path::PathBuf) -> ResearchClient {
                     volume_quote: None,
                     confirmed: true,
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            reads
+                .returned_rows
+                .fetch_add(rows.len() as u64, CounterOrdering::Relaxed);
+            reads
+                .successful_requests
+                .fetch_add(1, CounterOrdering::Relaxed);
             Ok(PublicSourceReply::Candles(PublicCandleCapture {
                 rows,
                 raw_body: b"synthetic closed candles".to_vec(),
@@ -211,7 +225,11 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
     )
     .unwrap();
     let bootstrap = MarketBootstrapper::new(api);
-    let research = heavy_research(fixture.root.join("heavy-research"));
+    let reads = Arc::new(SourceReadWitness::default());
+    let research = heavy_research(fixture.root.join("heavy-research"), reads.clone());
+    // Wall clock begins after fixture start, before the first actual source
+    // fetch. Cargo build and MCP host startup are outside this interval.
+    let phase_started = std::time::Instant::now();
     let first = research.research(heavy_grid("heavy-one")).await.unwrap()["id"]
         .as_str()
         .unwrap()
@@ -293,6 +311,7 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
     let trade = fixture.trade.clone();
     let authority = fixture.authority.clone();
     let child = research.clone();
+    let source_reads = reads.clone();
     let (evidence_tx, evidence_rx) = tokio::sync::oneshot::channel();
     let until = async move {
         let mcp_client = reqwest::Client::new();
@@ -415,6 +434,14 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
             assert!(a["state"] == "running" || b["state"] == "running",
                 "real Grid must overlap entire MCP Finance measurement: {a} {b}");
         }
+        let successful_requests = source_reads
+            .successful_requests
+            .load(CounterOrdering::Relaxed);
+        let returned_rows = source_reads.returned_rows.load(CounterOrdering::Relaxed);
+        assert!(
+            successful_requests > 0 && returned_rows > 0,
+            "real Research child must have fetched typed fixture source pages"
+        );
         evidence_tx.send(serde_json::json!({
             "schema":"okx.518.t11-t12-native-concurrent-isolation/v1",
             "phase":if disconnect_before_opening {"worker_disconnected"} else {"two_heavy_grids_running"},
@@ -425,6 +452,15 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
             "reserved_entry_usd":"0","consumed_entry_usd":"0",
             "financial_owner":"native_sqlite_original_owner",
             "synthetic_public_source":true,
+            "source_reads":{
+                "kind":"actual_research_ipc_public_candles_requests_to_synthetic_handler",
+                "successful_requests":successful_requests,
+                "returned_candle_rows":returned_rows,
+                "venue_http_reads":0,
+                "source_storage_page_reads":"not_measured",
+                "observation_scope":"request_and_rows_counted_in_native_source_handler"
+            },
+            "phase_wall_ms_excluding_build":phase_started.elapsed().as_secs_f64() * 1000.0,
             "trading_requests_sent":0,
         })).expect("native proof receiver dropped");
         Some(NativeChildRequest {
@@ -467,8 +503,10 @@ async fn engine_maintenance_and_stop_remain_independent_of_heavy_research_and_di
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research() {
+    let measurement = process_tree::ResearchProcessTree::begin();
     let under_load = run_phase(false, true).await;
     let worker_disconnected = run_phase(true, true).await;
+    let process_tree = measurement.finish();
     println!("T10_MCP_NATIVE_LOAD_JSON:{}", serde_json::json!({
         "schema":"okx.518.t10-mcp-do-wss-native-finance/v1",
         "under_load":under_load,"worker_disconnected":worker_disconnected,
@@ -477,6 +515,7 @@ async fn mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_r
         "production_network":"not_evaluated",
         "research":"two_cpu_grids_in_separate_native_worker_child",
         "financial_owner":"existing_native_sqlite",
+        "process_tree":process_tree,
         "exchange_trade_post":false,
     }));
 }

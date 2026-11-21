@@ -131,6 +131,22 @@ def report_t10(value):
            "This does NOT measure Finance/MCP under load or enforce a hard RSS ceiling.")
 
 
+def check_source_witness(phase):
+    source = phase.get("source_reads", {})
+    requests = source.get("successful_requests")
+    rows = source.get("returned_candle_rows")
+    elapsed = phase.get("phase_wall_ms_excluding_build")
+    if (source.get("kind") != "actual_research_ipc_public_candles_requests_to_synthetic_handler"
+            or type(requests) is not int or requests <= 0
+            or type(rows) is not int or rows < requests
+            or source.get("venue_http_reads") != 0
+            or source.get("source_storage_page_reads") != "not_measured"
+            or source.get("observation_scope") != "request_and_rows_counted_in_native_source_handler"
+            or not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed)
+            or elapsed <= 0):
+        raise ValueError("T10 missing actual typed synthetic-source reads or build-excluded phase timing")
+
+
 def measured_native_under_research(output):
     records = re.findall(r"T11_T12_NATIVE_ISOLATION_JSON:(\{[^\n]+\})", output)
     if len(records) != 1:
@@ -154,6 +170,7 @@ def measured_native_under_research(output):
                 or phase.get("reserved_entry_usd") != "0"
                 or phase.get("consumed_entry_usd") != "0"):
             raise ValueError(f"Native-under-Research invalid {phase_name} phase")
+        check_source_witness(phase)
         for lane in ("native_finance_read_only", "research_explain"):
             proof = phase.get(lane)
             if phase_name == "without_worker" and lane == "research_explain":
@@ -181,10 +198,14 @@ def report_native_under_research(value):
     for name in ("under_load", "without_worker"):
         phase = value[name]
         finance = phase["native_finance_read_only"]
+        source = phase["source_reads"]
         report(f"T10/T11/T12 observed Native Finance with {phase['phase']}: 100 read-only "
                f"SQLite owner samples; p95={finance['p95_ms']:.3f} ms, "
                f"max={finance['max_ms']:.3f} ms. Native installation identity preserved, "
-               "zero reservations/consumption/trade POSTs.")
+               f"zero reservations/consumption/trade POSTs. "
+               f"Real synthetic-source IPC requests={source['successful_requests']}, "
+               f"returned candle rows={source['returned_candle_rows']}, "
+               f"phase wall excluding build={phase['phase_wall_ms_excluding_build']:.1f} ms.")
         if name == "under_load":
             explain = phase["research_explain"]
             report(f"T10 observed child Research Explain alongside Finance and two running "
@@ -216,6 +237,7 @@ def measured_mcp_native_under_research(output):
                 or phase.get("reserved_entry_usd") != "0"
                 or phase.get("consumed_entry_usd") != "0"):
             raise ValueError(f"T10 invalid finance identity/side effects in {phase_key}")
+        check_source_witness(phase)
         sample = phase.get("mcp_native_finance_read_only")
         if not isinstance(sample, dict):
             raise ValueError(f"T10 missing {phase_key} real MCP native latency")
@@ -231,17 +253,44 @@ def measured_mcp_native_under_research(output):
                 or sample.get("max_ms") != ordered[99]
                 or ordered[94] > 100.0):
             raise ValueError("T10 MCP p95 exceeded SLO or statistics not from raw data")
+    memory = value.get("process_tree", {})
+    if sys.platform == "linux":
+        if (memory.get("status") != "MEASURED_SAMPLED"
+                or memory.get("scope") != "collector_and_current_descendants"
+                or memory.get("descendants_included") is not True
+                or memory.get("max_active_descendants", 0) < 2
+                or memory.get("samples", 0) < 2
+                or memory.get("peak_sampled_sum_rss_bytes", 0) <= 0
+                or memory.get("source") != "linux_procfs_task_children_and_status"
+                or memory.get("budget_status") != "NOT_PROVEN"
+                or memory.get("rss_hard_limit_enforced") is not False):
+            raise ValueError("T10 Linux MCP/Worker/Agent process tree RSS was not sampled")
     return value
 
 
 def report_mcp_native_under_research(value):
+    memory = value["process_tree"]
     for name in ("under_load", "worker_disconnected"):
-        proof = value[name]["mcp_native_finance_read_only"]
+        phase = value[name]
+        proof = phase["mcp_native_finance_read_only"]
+        source = phase["source_reads"]
         report(f"T10 observed {name} genuine loopback MCP HTTP -> Miniflare SQLite DO -> "
                f"authenticated WSS -> native Finance: 100 calls, p95={proof['p95_ms']:.3f} ms, "
-               f"max={proof['max_ms']:.3f} ms, no trade POST. "
+               f"max={proof['max_ms']:.3f} ms, no trade POST; "
+               f"synthetic source IPC reads={source['successful_requests']} "
+               f"({source['returned_candle_rows']} candle rows), "
+               f"phase wall excluding build={phase['phase_wall_ms_excluding_build']:.1f} ms. "
                "Fixture OAuth replaced with test scope; production network, "
                "physical Windows and overall memory budget NOT evaluated.")
+    if memory.get("status") == "MEASURED_SAMPLED":
+        report(f"T10 observed Linux MCP+Native+Research sampled process tree: "
+               f"{memory['samples']} x 20ms /proc observations; max active descendants="
+               f"{memory['max_active_descendants']}; max summed current RSS="
+               f"{memory['peak_sampled_sum_rss_bytes']} bytes (shared pages double-counted; "
+               "between-sample spikes may be missed). No hard RSS budget claim.")
+    else:
+        report(f"T10 process-tree resource witness: {memory.get('status', 'NOT_PROVEN')}; "
+               "not a physical memory acceptance.")
 
 
 def execute(scopes):

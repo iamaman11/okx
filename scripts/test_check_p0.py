@@ -5,6 +5,15 @@ from check_p0 import (check_counts, measured_mcp_native_under_research,
 
 
 class FeedbackTests(unittest.TestCase):
+    @staticmethod
+    def source_witness():
+        return {"source_reads": {
+            "kind": "actual_research_ipc_public_candles_requests_to_synthetic_handler",
+            "successful_requests": 120, "returned_candle_rows": 12000,
+            "venue_http_reads": 0, "source_storage_page_reads": "not_measured",
+            "observation_scope": "request_and_rows_counted_in_native_source_handler",
+        }, "phase_wall_ms_excluding_build": 1453.0}
+
     def test_kernel_and_boundaries(self):
         self.assertEqual(select("M", "crates/okx-kernel/src/operators.rs"), {"kernel"})
         self.assertEqual(select("M", "crates/okx-research-worker/src/analytics/jobs.rs"), {"worker"})
@@ -61,6 +70,7 @@ class FeedbackTests(unittest.TestCase):
                     "native_installation_identity_preserved": True,
                     "financial_owner": "native_sqlite_original_owner",
                     "synthetic_public_source": True, "trading_requests_sent": 0,
+                    **self.source_witness(),
                     "reserved_entry_usd": "0", "consumed_entry_usd": "0"}
 
         value = {"schema": "okx.518.t11-t12-native-isolation-campaign/v1",
@@ -82,6 +92,9 @@ class FeedbackTests(unittest.TestCase):
             (("under_load", "native_finance_read_only", "raw_ms"), [float("nan")] * 100),
             (("without_worker", "research_explain"), timing()),
             (("under_load", "trading_requests_sent"), 1),
+            (("under_load", "source_reads", "successful_requests"), 0),
+            (("under_load", "source_reads", "source_storage_page_reads"), 100),
+            (("without_worker", "phase_wall_ms_excluding_build"), 0),
             (("mcp_transport",), "fully_measured"),
         ):
             bad = json.loads(json.dumps(value))
@@ -103,13 +116,20 @@ class FeedbackTests(unittest.TestCase):
                  "native_installation_identity_preserved":True,
                  "financial_owner":"native_sqlite_original_owner",
                  "trading_requests_sent":0,"reserved_entry_usd":"0",
-                 "consumed_entry_usd":"0","mcp_native_finance_read_only":sample}
+                 "consumed_entry_usd":"0","mcp_native_finance_read_only":sample,
+                 **self.source_witness()}
+        tree = {"status":"MEASURED_SAMPLED", "scope":"collector_and_current_descendants",
+                "descendants_included":True,"max_active_descendants":3,
+                "samples":30,"peak_sampled_sum_rss_bytes":1234567,
+                "source":"linux_procfs_task_children_and_status",
+                "budget_status":"NOT_PROVEN","rss_hard_limit_enforced":False}
         value = {"schema":"okx.518.t10-mcp-do-wss-native-finance/v1",
                  "mcp_transport":"real_loopback_http_miniflare_sqlite_do_websocket_native",
                  "oauth":"test_scope_only_not_evaluated",
                  "production_network":"not_evaluated",
                  "research":"two_cpu_grids_in_separate_native_worker_child",
                  "financial_owner":"existing_native_sqlite","exchange_trade_post":False,
+                 "process_tree":tree,
                  "under_load":phase,
                  "worker_disconnected":{**phase,"phase":"worker_disconnected"}}
 
@@ -122,6 +142,10 @@ class FeedbackTests(unittest.TestCase):
             lambda x: x["under_load"]["mcp_native_finance_read_only"].update(samples=99),
             lambda x: x["under_load"]["mcp_native_finance_read_only"].update(p95_ms=101.0),
             lambda x: x["worker_disconnected"].update(trading_requests_sent=1),
+            lambda x: x["under_load"]["source_reads"].update(successful_requests=0),
+            lambda x: x["under_load"].update(phase_wall_ms_excluding_build=0),
+            lambda x: x["process_tree"].update(budget_status="PASS"),
+            lambda x: x["process_tree"].update(max_active_descendants=0),
             lambda x: x.update(production_network="accepted"),
             lambda x: x.update(oauth="production_oauth"),
         ):
