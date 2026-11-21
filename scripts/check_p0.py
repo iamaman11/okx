@@ -336,6 +336,13 @@ def execute(scopes):
         # Check the local platform and changed build inputs. Ready covers Windows and the release.
         subprocess.run(["cargo", "fmt", "--all", "--", "--check"], cwd=ROOT, check=True)
         subprocess.run(["cargo", "check", "--locked", "--workspace", "--all-targets"], cwd=ROOT, check=True)
+        # A target signal is never an order. Exercise the pure Engine decision
+        # boundary, including Hold/Flat, flips and in-flight idempotence.
+        subprocess.run(
+            ["cargo", "test", "--locked", "-p", "okx-execution", "--lib",
+             "position_target::tests::", "--", "--test-threads", "2"],
+            cwd=ROOT, check=True,
+        )
         subprocess.run([sys.executable, "scripts/check_architecture.py"], cwd=ROOT, check=True)
         scopes = SCOPES
     if "kernel" in scopes:
