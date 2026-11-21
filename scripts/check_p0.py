@@ -343,6 +343,21 @@ def execute(scopes):
              "position_target::tests::", "--", "--test-threads", "2"],
             cwd=ROOT, check=True,
         )
+        # `cargo check --all-targets` compiles test sources but does not run
+        # the graph journal's actual SQLite crash/replay assertions.
+        graph_sql = subprocess.run(
+            ["cargo", "test", "--locked", "-p", "okx-execution", "--lib",
+             "source_graph_binding::tests::", "--", "--test-threads", "2"],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        print(graph_sql.stdout, flush=True)
+        graph_sql.check_returncode()
+        check_counts(graph_sql.stdout, {
+            "account_store::sql::source_graph_binding::tests::owner_replay_and_sql_reopen_preserve_exact_cursor_without_rewind",
+            "account_store::sql::source_graph_binding::tests::never_ack_actionable_gap_conflict_stale_or_foreign_events",
+            "account_store::sql::source_graph_binding::tests::stopped_or_revised_strategy_invalidates_binding_without_deleting_money",
+            "account_store::sql::source_graph_binding::tests::failed_transaction_never_persists_a_phantom_ack",
+        })
         subprocess.run(
             ["cargo", "test", "--locked", "-p", "okx-execution", "--lib",
              "graph_target_snapshot_reads_strategy_lots_and_pending", "--", "--test-threads", "2"],

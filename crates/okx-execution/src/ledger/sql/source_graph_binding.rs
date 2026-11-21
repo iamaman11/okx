@@ -243,8 +243,7 @@ mod tests {
     use super::*;
     use crate::position_target::TargetPosition;
 
-    fn database() -> Connection {
-        let db = Connection::open_in_memory().unwrap();
+    fn initialized(db: Connection) -> Connection {
         db.execute_batch(include_str!("../../../schema/finance-unified-v1.sql"))
             .unwrap();
         db.pragma_update(None, "foreign_keys", "ON").unwrap();
@@ -261,6 +260,10 @@ mod tests {
             .unwrap();
         }
         db
+    }
+
+    fn database() -> Connection {
+        initialized(Connection::open_in_memory().unwrap())
     }
 
     fn binding(account: &str) -> EngineGraphBinding {
@@ -310,7 +313,15 @@ mod tests {
 
     #[test]
     fn owner_replay_and_sql_reopen_preserve_exact_cursor_without_rewind() {
-        let mut db = database();
+        let path = std::env::temp_dir().join(format!(
+            "okx-graph-cursor-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let mut db = initialized(Connection::open(&path).unwrap());
         let b = binding("account-a");
         let scope = ("installation", "account-a");
         {
@@ -342,8 +353,11 @@ mod tests {
             );
             tx.commit().unwrap();
         }
+        drop(db);
+        let mut reopened = Connection::open(&path).unwrap();
+        reopened.pragma_update(None, "foreign_keys", "ON").unwrap();
         {
-            let tx = db.transaction().unwrap();
+            let tx = reopened.transaction().unwrap();
             let restored = AccountStore::bind_graph_sql(
                 &tx,
                 scope,
@@ -369,7 +383,7 @@ mod tests {
             );
             tx.commit().unwrap();
         }
-        let graph_receipts: i64 = db
+        let graph_receipts: i64 = reopened
             .query_row(
                 "SELECT COUNT(*) FROM operation_receipts WHERE kind LIKE 'graph_%'",
                 [],
@@ -377,6 +391,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(graph_receipts, 3, "one binding, one baseline, one ACK");
+        drop(reopened);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
