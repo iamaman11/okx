@@ -38,7 +38,8 @@ function check(metadata, changed) {
   let touchedResearch = false;
   for (const file of changed) {
     if (!safe(file)) throw Error('INVALID_DIFF_PATH');
-    if (file === '.github/research-release-base.json') continue;
+    // Release selector is outside the Research tree and never exempted in a
+    // new PR. The baseline itself is now a permanent GitHub Release.
     if (file === 'Cargo.lock' || file.endsWith('/Cargo.toml') || file === 'Cargo.toml' || file.startsWith('.cargo/')) throw Error('DEPENDENCY_CONFIGURATION_CHANGED');
     if (protectedDirs.some(dir => file.startsWith(dir))) throw Error('PRODUCTION_DEPENDENCY_CHANGED');
     if (file.startsWith('crates/okx-research-worker/') || file.startsWith('crates/okx-research/')) {

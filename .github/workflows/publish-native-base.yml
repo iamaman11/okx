@@ -1,0 +1,156 @@
+name: Publish accepted Native base
+
+# Runs automatically after a successful protected main CI. Never compiles,
+# deploys or modifies an installed Windows application.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: native-base-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ACCEPTED_MAIN: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Select exact successful full Native PR release
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ACCEPTED_MAIN" =~ ^[0-9a-f]{40}$ ]]
+          current="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
+          if [[ "$current" != "$ACCEPTED_MAIN" ]]; then
+            echo "Main advanced; a newer successful CI will publish the base."
+            exit 0
+          fi
+          prs="$(gh api "/repos/$GITHUB_REPOSITORY/commits/$ACCEPTED_MAIN/pulls")"
+          head="$(jq -r --arg main "$ACCEPTED_MAIN" '[.[] | select(.merged_at != null and .merge_commit_sha == $main and .base.ref == "main")] | first | .head.sha // empty' <<<"$prs")"
+          [[ "$head" =~ ^[0-9a-f]{40}$ ]] || exit 0
+          main_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$ACCEPTED_MAIN" --jq .tree.sha)"
+          head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head" --jq .tree.sha)"
+          test "$main_tree" = "$head_tree"
+          runs="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" -f head_sha="$head" -f event=pull_request -f status=completed -f per_page=100)"
+          run_id=""
+          artifact_id=""
+          artifact_digest=""
+          while read -r candidate; do
+            [[ -n "$candidate" ]] || continue
+            jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/jobs?per_page=100")"
+            # Require the *fresh* 4-EXE financial gate, never an aggregate
+            # that reused older proof or the isolated Research-only worker.
+            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["windows-native-full","windows-b1-native-prerequisite","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
+              continue
+            fi
+            artifacts="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts?per_page=100")"
+            candidate_artifact="$(jq -r --arg name "okx-windows-bundle-$head" '[.artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0].id else empty end' <<<"$artifacts")"
+            candidate_digest="$(jq -r --arg name "okx-windows-bundle-$head" '[.artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0].digest else empty end' <<<"$artifacts")"
+            if [[ "$candidate_artifact" =~ ^[1-9][0-9]*$ && "$candidate_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              run_id="$candidate"
+              artifact_id="$candidate_artifact"
+              artifact_digest="$candidate_digest"
+              break
+            fi
+          done < <(jq -r '[.workflow_runs[] | select(.name == "CI" and .conclusion == "success" and .event == "pull_request")] | .[].id' <<<"$runs")
+          if [[ -z "$run_id" ]]; then
+            echo "No fresh accepted full Windows bundle: non-Native merge, no new release."
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "tree=$head_tree" >> "$GITHUB_OUTPUT"
+          echo "run=$run_id" >> "$GITHUB_OUTPUT"
+          echo "artifact=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "digest=$artifact_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Verify complete four-component source and archive
+        if: steps.select.outputs.publish == 'true'
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip="$RUNNER_TEMP/okx-windows-base.zip"
+          extract="$RUNNER_TEMP/native-base"
+          mkdir -p "$extract"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/${{ steps.select.outputs.artifact }}/zip" > "$zip"
+          digest="$(sha256sum "$zip" | cut -d' ' -f1)"
+          test "sha256:$digest" = "${{ steps.select.outputs.digest }}"
+          test "$(unzip -Z1 "$zip" | sort | paste -sd'|' -)" = 'Cargo.lock|manifest.json|okx-agent.exe|okx-host-control.exe|okx-host-launcher.exe|okx-research-worker.exe'
+          unzip -q "$zip" -d "$extract"
+          jq -e --arg head '${{ steps.select.outputs.head }}' --arg tree '${{ steps.select.outputs.tree }}' '
+            .schema == "okx.windows.bundle/v2" and .repository_id == 1388071566 and
+            .source_head_sha == $head and .source_tree == $tree and
+            (.components | length == 4) and (.rust_version | type == "string" and length > 0)
+          ' "$extract/manifest.json" >/dev/null
+          for file in okx-agent.exe okx-host-control.exe okx-host-launcher.exe okx-research-worker.exe; do
+            jq -e --arg f "$file" --arg head '${{ steps.select.outputs.head }}' --arg tree '${{ steps.select.outputs.tree }}' '
+              .components[$f] | .source_head_sha == $head and .source_tree == $tree and .run_id == 0 and
+              .artifact_id == 0 and .protocol_version == 1 and .storage_version == 1
+            ' "$extract/manifest.json" >/dev/null
+            test "$(sha256sum "$extract/$file" | cut -d' ' -f1)" = "$(jq -r --arg f "$file" '.components[$f].sha256' "$extract/manifest.json")"
+            test "$(stat -c %s "$extract/$file")" = "$(jq -r --arg f "$file" '.components[$f].size' "$extract/manifest.json")"
+          done
+          input="$RUNNER_TEMP/native-base-origin-input.json"
+          jq -n --arg head '${{ steps.select.outputs.head }}' --arg tree '${{ steps.select.outputs.tree }}' \
+            --arg merge "$ACCEPTED_MAIN" --argjson run '${{ steps.select.outputs.run }}' \
+            --argjson artifact '${{ steps.select.outputs.artifact }}' --arg digest "$digest" \
+            '{repository_id:1388071566,source_head_sha:$head,source_tree:$tree,merged_main_sha:$merge,run_id:$run,artifact_id:$artifact,artifact_sha256:$digest}' > "$input"
+          node scripts/test-published-release-origin.cjs
+          node scripts/published-release-origin.cjs "$input" "$extract/manifest.json" "$zip" "$RUNNER_TEMP/published-origin.json"
+          {
+            (cd "$RUNNER_TEMP" && sha256sum okx-windows-base.zip published-origin.json)
+            (cd "$extract" && sha256sum Cargo.lock manifest.json okx-agent.exe okx-host-control.exe okx-host-launcher.exe okx-research-worker.exe)
+          } > "$RUNNER_TEMP/SHA256SUMS.txt"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+
+      - name: Publish current base and prune only superseded Native bases
+        if: steps.select.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Each tag has immutable commit identity; only one *native-base-*
+          # release remains after a new complete release was verified.
+          tag="native-base-$ACCEPTED_MAIN"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              '${{ steps.verify.outputs.zip }}' \
+              "$RUNNER_TEMP/published-origin.json" \
+              "$RUNNER_TEMP/SHA256SUMS.txt" \
+              --target "$ACCEPTED_MAIN" --title "OKX accepted Native base $ACCEPTED_MAIN" \
+              --notes "Automatically accepted after full financial/Windows CI. Download assets with checked SHA256; this is not a production deployment."
+          fi
+          release="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+          jq -e --arg tag "$tag" --arg main "$ACCEPTED_MAIN" '
+            .tag_name == $tag and .target_commitish == $main and .draft == false and .prerelease == false and
+            ([.assets[].name] | sort) == ["SHA256SUMS.txt","okx-windows-base.zip","published-origin.json"]
+          ' <<<"$release" >/dev/null
+          for name in okx-windows-base.zip published-origin.json SHA256SUMS.txt; do
+            expected="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest' <<<"$release")"
+            actual="$(sha256sum "$RUNNER_TEMP/$name" | cut -d' ' -f1)"
+            test "$expected" = "sha256:$actual"
+          done
+          current="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
+          test "$current" = "$ACCEPTED_MAIN"
+          gh api --paginate "/repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | [.tag_name,.immutable] | @tsv' |
+          while IFS=$'\t' read -r old immutable; do
+            if [[ "$old" =~ ^native-base-[0-9a-f]{40}$ && "$old" != "$tag" ]]; then
+              test "$immutable" = "false"
+              gh release delete "$old" --cleanup-tag --yes
+            fi
+          done
