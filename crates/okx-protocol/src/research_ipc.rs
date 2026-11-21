@@ -604,14 +604,35 @@ impl GraphFeedRequest {
         let hash = match self {
             Self::Start { graph_sha256, .. } | Self::Stop { graph_sha256, .. } => graph_sha256,
         };
-        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
             return false;
         }
         match self {
-            Self::Start { instrument, timeframe_ms, poll_every_ms, .. } => {
+            Self::Start {
+                instrument,
+                timeframe_ms,
+                poll_every_ms,
+                ..
+            } => {
                 (3..=40).contains(&instrument.len())
-                    && instrument.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
-                    && matches!(*timeframe_ms, 60_000 | 180_000 | 300_000 | 900_000 | 1_800_000 | 3_600_000 | 14_400_000 | 86_400_000)
+                    && instrument
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
+                    && matches!(
+                        *timeframe_ms,
+                        60_000
+                            | 180_000
+                            | 300_000
+                            | 900_000
+                            | 1_800_000
+                            | 3_600_000
+                            | 14_400_000
+                            | 86_400_000
+                    )
                     && (1_000..=300_000).contains(poll_every_ms)
             }
             Self::Stop { .. } => true,
@@ -636,10 +657,35 @@ pub enum GraphFeedReply {
 impl GraphFeedReply {
     pub fn matches_request(&self, request: &GraphFeedRequest) -> bool {
         match (self, request) {
-            (Self::Started { session_id: a, graph_sha256: h, last_closed_ms }, GraphFeedRequest::Start { session_id: b, graph_sha256, timeframe_ms, .. }) => {
-                request.valid() && a == b && h == graph_sha256 && *last_closed_ms > 0 && *last_closed_ms % timeframe_ms == 0
+            (
+                Self::Started {
+                    session_id: a,
+                    graph_sha256: h,
+                    last_closed_ms,
+                },
+                GraphFeedRequest::Start {
+                    session_id: b,
+                    graph_sha256,
+                    timeframe_ms,
+                    ..
+                },
+            ) => {
+                request.valid()
+                    && a == b
+                    && h == graph_sha256
+                    && *last_closed_ms > 0
+                    && *last_closed_ms % timeframe_ms == 0
             }
-            (Self::Stopped { session_id: a, graph_sha256: h }, GraphFeedRequest::Stop { session_id: b, graph_sha256 }) => request.valid() && a == b && h == graph_sha256,
+            (
+                Self::Stopped {
+                    session_id: a,
+                    graph_sha256: h,
+                },
+                GraphFeedRequest::Stop {
+                    session_id: b,
+                    graph_sha256,
+                },
+            ) => request.valid() && a == b && h == graph_sha256,
             _ => false,
         }
     }
@@ -666,7 +712,10 @@ pub struct GraphFeedFault {
 impl GraphFeedFault {
     pub fn valid(&self) -> bool {
         self.graph_sha256.len() == 64
-            && self.graph_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && self
+                .graph_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     }
 }
 
@@ -933,28 +982,49 @@ mod graph_signal_contract_tests {
             poll_every_ms: 1_000,
         };
         assert!(start.valid());
-        let GraphFeedRequest::Start { session_id, graph_sha256, timeframe_ms, .. } = start.clone() else { unreachable!() };
-        assert!(GraphFeedReply::Started {
-            session_id: session_id.clone(), graph_sha256: graph_sha256.clone(),
-            last_closed_ms: 2 * timeframe_ms,
-        }.matches_request(&start));
+        let GraphFeedRequest::Start {
+            session_id,
+            graph_sha256,
+            timeframe_ms,
+            ..
+        } = start.clone()
+        else {
+            unreachable!()
+        };
+        assert!(
+            GraphFeedReply::Started {
+                session_id: session_id.clone(),
+                graph_sha256: graph_sha256.clone(),
+                last_closed_ms: 2 * timeframe_ms,
+            }
+            .matches_request(&start)
+        );
         let mut forged = start.clone();
-        if let GraphFeedRequest::Start { poll_every_ms, .. } = &mut forged { *poll_every_ms = 10; }
+        if let GraphFeedRequest::Start { poll_every_ms, .. } = &mut forged {
+            *poll_every_ms = 10;
+        }
         assert!(!forged.valid());
         forged = start.clone();
-        if let GraphFeedRequest::Start { instrument, .. } = &mut forged { *instrument = "account/private".into(); }
+        if let GraphFeedRequest::Start { instrument, .. } = &mut forged {
+            *instrument = "account/private".into();
+        }
         assert!(!forged.valid());
         forged = start.clone();
-        if let GraphFeedRequest::Start { timeframe_ms, .. } = &mut forged { *timeframe_ms = 7_000; }
+        if let GraphFeedRequest::Start { timeframe_ms, .. } = &mut forged {
+            *timeframe_ms = 7_000;
+        }
         assert!(!forged.valid());
         let wire = serde_json::to_value(ResearchCommand::GraphFeed { request: start }).unwrap();
         assert_eq!(wire["type"], "graph_feed");
         assert!(serde_json::from_value::<ResearchCommand>(wire).is_ok());
-        assert!(GraphFeedFault {
-            session_id,
-            graph_sha256,
-            reason: GraphFeedFaultReason::MissingClosedBar,
-        }.valid());
+        assert!(
+            GraphFeedFault {
+                session_id,
+                graph_sha256,
+                reason: GraphFeedFaultReason::MissingClosedBar,
+            }
+            .valid()
+        );
     }
 }
 

@@ -23,8 +23,7 @@ use futures_util::{StreamExt, stream};
 use okx_protocol::analytics::*;
 use okx_protocol::research_ipc::{
     GraphClosedBar, GraphPublicationPage, GraphPublicationRequest, GraphSessionId,
-    GraphSessionReply, GraphSessionRequest,
-    SignalDecision, SignalPosition, SignalRequest,
+    GraphSessionReply, GraphSessionRequest, SignalDecision, SignalPosition, SignalRequest,
 };
 use okx_research::{
     ResearchArtifactStore,
@@ -95,7 +94,9 @@ impl AnalyticsService {
         graph_sha256: String,
         timeframe_ms: u64,
     ) -> Result<graph_sessions::FeedCursor, String> {
-        self.graph_sessions.claim_feed(&self.cpu, session_id, graph_sha256, timeframe_ms).await
+        self.graph_sessions
+            .claim_feed(&self.cpu, session_id, graph_sha256, timeframe_ms)
+            .await
     }
 
     pub(crate) async fn graph_feed_cursor(
@@ -103,7 +104,9 @@ impl AnalyticsService {
         session_id: GraphSessionId,
         graph_sha256: String,
     ) -> Result<graph_sessions::FeedCursor, String> {
-        self.graph_sessions.feed_cursor(&self.cpu, session_id, graph_sha256).await
+        self.graph_sessions
+            .feed_cursor(&self.cpu, session_id, graph_sha256)
+            .await
     }
 
     pub(crate) async fn release_graph_feed(
@@ -112,7 +115,9 @@ impl AnalyticsService {
         graph_sha256: String,
         poison: bool,
     ) -> Result<(), String> {
-        self.graph_sessions.release_feed(&self.cpu, session_id, graph_sha256, poison).await
+        self.graph_sessions
+            .release_feed(&self.cpu, session_id, graph_sha256, poison)
+            .await
     }
 
     pub(crate) async fn advance_graph_feed(
@@ -122,9 +127,17 @@ impl AnalyticsService {
         expected_bars: u64,
         bar: GraphClosedBar,
     ) -> Result<(GraphSessionReply, bool), String> {
-        self.graph_sessions.advance_from_feed(&self.cpu, GraphSessionRequest::Advance {
-            session_id, graph_sha256, expected_bars, bar,
-        }).await
+        self.graph_sessions
+            .advance_from_feed(
+                &self.cpu,
+                GraphSessionRequest::Advance {
+                    session_id,
+                    graph_sha256,
+                    expected_bars,
+                    bar,
+                },
+            )
+            .await
     }
 
     pub(crate) async fn graph_feed_candles(
@@ -134,7 +147,9 @@ impl AnalyticsService {
         start_ms: u64,
         end_ms: u64,
     ) -> Result<Arc<Vec<okx_research::strategy_registry::Bar>>, String> {
-        self.sources.candles(instrument, timeframe_ms, start_ms, end_ms, false).await
+        self.sources
+            .candles(instrument, timeframe_ms, start_ms, end_ms, false)
+            .await
     }
     /// Same causal kernel as replay, isolated behind the Research process and
     /// scheduled on the existing bounded CPU executor (never on Tokio I/O).

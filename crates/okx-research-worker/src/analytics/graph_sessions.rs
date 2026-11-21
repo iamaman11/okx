@@ -29,6 +29,7 @@ struct GraphSlot {
     digest: String,
     history_digest: String,
     capacity: u64,
+    restored_interval_ms: Option<u64>,
     runner: GraphSignalStream,
     last_bar: GraphClosedBar,
     last_intent: GraphSignalIntent,
@@ -57,6 +58,19 @@ fn convert(bar: GraphClosedBar) -> ClosedBar {
         timestamp_ms: i64::try_from(bar.time_ms).expect("validated timestamp"),
         close: bar.close,
     }
+}
+
+fn verified_history_interval(history: &[GraphClosedBar]) -> Option<u64> {
+    let period = history.get(1)?.time_ms.checked_sub(history[0].time_ms)?;
+    if period == 0
+        || history.iter().any(|bar| bar.time_ms % period != 0)
+        || history
+            .windows(2)
+            .any(|pair| pair[1].time_ms - pair[0].time_ms != period)
+    {
+        return None;
+    }
+    Some(period)
 }
 
 fn intent(value: GraphIntent) -> GraphSignalIntent {
@@ -119,17 +133,35 @@ impl GraphSessions {
     ) -> Result<FeedCursor, String> {
         let slots = self.slots.clone();
         cpu.run(Default::default(), move |_| {
-            let active = slots.lock().map_err(|_| "GRAPH_SESSION_REGISTRY_POISONED")?
-                .get(&session_id).cloned().ok_or("GRAPH_SESSION_RESTORE_REQUIRED")?;
+            let active = slots
+                .lock()
+                .map_err(|_| "GRAPH_SESSION_REGISTRY_POISONED")?
+                .get(&session_id)
+                .cloned()
+                .ok_or("GRAPH_SESSION_RESTORE_REQUIRED")?;
             let mut active = active.lock().map_err(|_| "GRAPH_SESSION_POISONED")?;
-            if active.digest != graph_sha256 { return Err("GRAPH_SESSION_DEFINITION_MISMATCH".into()); }
-            if active.needs_restore { return Err("GRAPH_SESSION_RESTORE_REQUIRED".into()); }
-            if active.feed_active { return Err("GRAPH_FEED_ALREADY_ACTIVE".into()); }
-            if active.last_bar.time_ms % timeframe_ms != 0 { return Err("GRAPH_FEED_TIMEFRAME_MISMATCH".into()); }
-            if active.runner.processed_bars() >= active.capacity { return Err("GRAPH_FEED_CAPACITY_EXHAUSTED".into()); }
+            if active.digest != graph_sha256 {
+                return Err("GRAPH_SESSION_DEFINITION_MISMATCH".into());
+            }
+            if active.needs_restore {
+                return Err("GRAPH_SESSION_RESTORE_REQUIRED".into());
+            }
+            if active.feed_active {
+                return Err("GRAPH_FEED_ALREADY_ACTIVE".into());
+            }
+            if timeframe_ms == 0 || active.restored_interval_ms != Some(timeframe_ms) {
+                return Err("GRAPH_FEED_TIMEFRAME_MISMATCH".into());
+            }
+            if active.runner.processed_bars() >= active.capacity {
+                return Err("GRAPH_FEED_CAPACITY_EXHAUSTED".into());
+            }
             active.feed_active = true;
-            Ok(FeedCursor { last_closed_ms: active.last_bar.time_ms, observed_bars: active.runner.processed_bars() })
-        }).await
+            Ok(FeedCursor {
+                last_closed_ms: active.last_bar.time_ms,
+                observed_bars: active.runner.processed_bars(),
+            })
+        })
+        .await
     }
 
     pub(super) async fn feed_cursor(
@@ -140,13 +172,25 @@ impl GraphSessions {
     ) -> Result<FeedCursor, String> {
         let slots = self.slots.clone();
         cpu.run(Default::default(), move |_| {
-            let active = slots.lock().map_err(|_| "GRAPH_SESSION_REGISTRY_POISONED")?
-                .get(&session_id).cloned().ok_or("GRAPH_SESSION_RESTORE_REQUIRED")?;
+            let active = slots
+                .lock()
+                .map_err(|_| "GRAPH_SESSION_REGISTRY_POISONED")?
+                .get(&session_id)
+                .cloned()
+                .ok_or("GRAPH_SESSION_RESTORE_REQUIRED")?;
             let active = active.lock().map_err(|_| "GRAPH_SESSION_POISONED")?;
-            if active.digest != graph_sha256 { return Err("GRAPH_SESSION_DEFINITION_MISMATCH".into()); }
-            if active.needs_restore || !active.feed_active { return Err("GRAPH_FEED_NOT_ACTIVE".into()); }
-            Ok(FeedCursor { last_closed_ms: active.last_bar.time_ms, observed_bars: active.runner.processed_bars() })
-        }).await
+            if active.digest != graph_sha256 {
+                return Err("GRAPH_SESSION_DEFINITION_MISMATCH".into());
+            }
+            if active.needs_restore || !active.feed_active {
+                return Err("GRAPH_FEED_NOT_ACTIVE".into());
+            }
+            Ok(FeedCursor {
+                last_closed_ms: active.last_bar.time_ms,
+                observed_bars: active.runner.processed_bars(),
+            })
+        })
+        .await
     }
 
     pub(super) async fn release_feed(
@@ -158,14 +202,23 @@ impl GraphSessions {
     ) -> Result<(), String> {
         let slots = self.slots.clone();
         cpu.run(Default::default(), move |_| {
-            let active = slots.lock().map_err(|_| "GRAPH_SESSION_REGISTRY_POISONED")?
-                .get(&session_id).cloned().ok_or("GRAPH_SESSION_RESTORE_REQUIRED")?;
+            let active = slots
+                .lock()
+                .map_err(|_| "GRAPH_SESSION_REGISTRY_POISONED")?
+                .get(&session_id)
+                .cloned()
+                .ok_or("GRAPH_SESSION_RESTORE_REQUIRED")?;
             let mut active = active.lock().map_err(|_| "GRAPH_SESSION_POISONED")?;
-            if active.digest != graph_sha256 { return Err("GRAPH_SESSION_DEFINITION_MISMATCH".into()); }
+            if active.digest != graph_sha256 {
+                return Err("GRAPH_SESSION_DEFINITION_MISMATCH".into());
+            }
             active.feed_active = false;
-            if poison { active.needs_restore = true; }
+            if poison {
+                active.needs_restore = true;
+            }
             Ok(())
-        }).await
+        })
+        .await
     }
 
     pub(super) async fn advance_from_feed(
@@ -239,6 +292,7 @@ impl GraphSessions {
                         digest,
                         history_digest,
                         capacity,
+                        restored_interval_ms: verified_history_interval(&history),
                         runner,
                         last_bar: *history.last().expect("validated nonempty"),
                         last_intent: latest,
@@ -300,7 +354,8 @@ impl GraphSessions {
                             "GRAPH_FEED_OWNS_SESSION"
                         } else {
                             "GRAPH_FEED_NOT_ACTIVE"
-                        }.into());
+                        }
+                        .into());
                     }
                     let seen = active.runner.processed_bars();
                     if expected_bars == seen && bar == active.last_bar {
@@ -340,7 +395,9 @@ impl GraphSessions {
                         if active.digest != graph_sha256 {
                             return Err("GRAPH_SESSION_DEFINITION_MISMATCH".into());
                         }
-                        if active.feed_active { return Err("GRAPH_FEED_OWNS_SESSION".into()); }
+                        if active.feed_active {
+                            return Err("GRAPH_FEED_OWNS_SESSION".into());
+                        }
                     }
                     registry.remove(&session_id);
                     Ok((GraphSessionReply::Released { session_id }, false))
@@ -399,6 +456,27 @@ mod tests {
             time_ms: time,
             close,
         }
+    }
+
+    #[test]
+    fn autonomous_feed_requires_contiguous_aligned_restored_prefix() {
+        assert_eq!(
+            verified_history_interval(&[
+                bar(60_000, Some(100.)),
+                bar(120_000, Some(110.)),
+                bar(180_000, None),
+            ]),
+            Some(60_000)
+        );
+        assert_eq!(
+            verified_history_interval(&[
+                bar(60_000, Some(100.)),
+                bar(120_000, Some(110.)),
+                bar(240_000, None),
+            ]),
+            None
+        );
+        assert_eq!(verified_history_interval(&[bar(60_000, Some(100.))]), None);
     }
 
     #[tokio::test]

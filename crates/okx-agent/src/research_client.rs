@@ -635,8 +635,15 @@ impl ResearchClient {
         if !request.valid() {
             return Err("GRAPH_FEED_REQUEST_INVALID".into());
         }
-        let reply = self.call(ResearchCommand::GraphFeed { request: request.clone() }, true)
-            .await?.graph_feed()?;
+        let reply = self
+            .call(
+                ResearchCommand::GraphFeed {
+                    request: request.clone(),
+                },
+                true,
+            )
+            .await?
+            .graph_feed()?;
         if !reply.matches_request(&request) {
             return Err("GRAPH_FEED_RESPONSE_MISMATCH".into());
         }
