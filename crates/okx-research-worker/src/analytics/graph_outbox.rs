@@ -70,7 +70,7 @@ impl GraphOutbox {
                 params![
                     event.session_id.as_str(),
                     event.graph_sha256,
-                    event.sequence
+                    i64::try_from(event.sequence).expect("validated sequence")
                 ],
                 |row| row.get(0),
             )
@@ -102,7 +102,7 @@ impl GraphOutbox {
             params![
                 event.session_id.as_str(),
                 event.graph_sha256,
-                event.sequence,
+                i64::try_from(event.sequence).expect("validated sequence"),
                 encoded
             ],
         )
@@ -127,7 +127,7 @@ impl GraphOutbox {
                 params![
                     event.session_id.as_str(),
                     event.graph_sha256,
-                    event.sequence
+                    i64::try_from(event.sequence).expect("validated sequence")
                 ],
                 |row| row.get(0),
             )
@@ -164,7 +164,7 @@ impl GraphOutbox {
                 params![
                     request.session_id.as_str(),
                     request.graph_sha256,
-                    request.after_sequence,
+                    i64::try_from(request.after_sequence).expect("validated cursor"),
                     i64::from(request.limit) + 1
                 ],
                 |row| row.get::<_, String>(0),
