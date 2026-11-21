@@ -4,6 +4,7 @@ use crate::{
     AccountStore, OperationReceipt, StoreError, StoreResult, StrategyInstance,
     StrategyPositionSnapshot,
 };
+use crate::graph_binding::{EngineGraphBinding, EngineGraphCursor, EngineGraphProgress, GraphIdleAck};
 use std::time::Instant;
 
 #[derive(Clone)]
@@ -25,6 +26,56 @@ pub struct StrategyDecisionClaimCommand {
     pub time: i64,
 }
 impl UnifiedFinanceHandle {
+    pub async fn graph_progress(
+        &self,
+        deadline: Instant,
+        account: String,
+        binding: EngineGraphBinding,
+    ) -> StoreResult<Option<EngineGraphProgress>> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let result = AccountStore::graph_progress_sql(&tx, (&installation, &account), &binding)?;
+            tx.commit()?;
+            Ok(result)
+        }).await
+    }
+
+    pub async fn bind_graph(
+        &self,
+        deadline: Instant,
+        account: String,
+        binding: EngineGraphBinding,
+        restored: EngineGraphCursor,
+        now: i64,
+    ) -> StoreResult<EngineGraphProgress> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            super::finance_authority::require_preparation_authority(&tx, &installation)?;
+            let progress = AccountStore::bind_graph_sql(&tx, (&installation, &account), &binding, &restored, now)?;
+            tx.commit().map_err(|_| StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY"))?;
+            Ok(progress)
+        }).await
+    }
+
+    pub async fn acknowledge_graph_idle(
+        &self,
+        deadline: Instant,
+        account: String,
+        binding: EngineGraphBinding,
+        published: EngineGraphCursor,
+        now: i64,
+    ) -> StoreResult<GraphIdleAck> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let ack = AccountStore::acknowledge_graph_idle_sql(&tx, (&installation, &account), &binding, &published, now)?;
+            tx.commit().map_err(|_| StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY"))?;
+            Ok(ack)
+        }).await
+    }
+
     pub async fn strategy_position_snapshot(
         &self,
         deadline: Instant,

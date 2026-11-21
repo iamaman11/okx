@@ -729,6 +729,35 @@ pub struct GraphPublicationCursor {
 }
 
 impl GraphPublicationCursor {
+    /// Rebuild only from an Engine-owned, already committed SQL checkpoint.
+    /// A caller must first verify it against the active strategy binding.
+    pub fn from_checkpoint(
+        session_id: GraphSessionId,
+        graph_sha256: String,
+        closed_ms: u64,
+        sequence: u64,
+        intent: GraphSignalIntent,
+    ) -> Result<Self, &'static str> {
+        let event = GraphSignalPublication {
+            schema: GraphSessionReply::SCHEMA.into(),
+            session_id,
+            graph_sha256,
+            closed_ms,
+            sequence,
+            intent,
+        };
+        if !event.valid() {
+            return Err("GRAPH_CURSOR_CHECKPOINT_INVALID");
+        }
+        Ok(Self {
+            session_id: event.session_id,
+            graph_sha256: event.graph_sha256,
+            closed_ms: event.closed_ms,
+            sequence: event.sequence,
+            intent: event.intent,
+        })
+    }
+
     pub fn from_restored(reply: &GraphSessionReply) -> Result<Self, &'static str> {
         let Some(event) = GraphSignalPublication::from_decision(reply) else {
             return Err("GRAPH_CURSOR_RESTORE_REQUIRED");
@@ -775,6 +804,18 @@ impl GraphPublicationCursor {
 
     pub fn last_sequence(&self) -> u64 {
         self.sequence
+    }
+
+    pub fn last_closed_ms(&self) -> u64 {
+        self.closed_ms
+    }
+
+    pub fn last_intent(&self) -> GraphSignalIntent {
+        self.intent
+    }
+
+    pub fn matches_binding(&self, session_id: &GraphSessionId, graph_sha256: &str) -> bool {
+        &self.session_id == session_id && self.graph_sha256 == graph_sha256
     }
 }
 

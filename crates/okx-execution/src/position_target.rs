@@ -6,9 +6,11 @@
 //! admission and execution idempotency before any venue mutation.
 
 use crate::account_store::StoredLot;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TargetPosition {
     /// No new decision. In particular, this must never close a position.
     Hold,

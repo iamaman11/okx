@@ -7,6 +7,7 @@
 use super::TradeService;
 use okx_execution::{
     StrategyPositionSnapshot,
+    graph_binding::{EngineGraphBinding, EngineGraphCursor, GraphIdleAck},
     position_target::{TargetPlan, TargetPlanError, TargetPosition, plan_strategy_target},
 };
 use okx_protocol::research_ipc::{
@@ -40,6 +41,45 @@ impl GraphTargetBinding {
                 poll_every_ms: 1_000,
             })
             .valid()
+    }
+
+    fn storage_binding(&self) -> EngineGraphBinding {
+        EngineGraphBinding {
+            account_key: self.account_key.clone(),
+            instance_id: self.instance_id.clone(),
+            definition_version: self.definition_version.clone(),
+            policy_revision: self.policy_revision,
+            session_id: self.session_id.as_str().into(),
+            graph_sha256: self.graph_sha256.clone(),
+            instrument_id: self.instrument_id.clone(),
+            timeframe_ms: self.timeframe_ms,
+        }
+    }
+
+    fn storage_cursor(cursor: &GraphPublicationCursor) -> EngineGraphCursor {
+        EngineGraphCursor {
+            sequence: cursor.last_sequence(),
+            closed_ms: cursor.last_closed_ms(),
+            intent: match cursor.last_intent() {
+                GraphSignalIntent::Hold => TargetPosition::Hold,
+                GraphSignalIntent::SetTarget(GraphPosition::Flat) => TargetPosition::Flat,
+                GraphSignalIntent::SetTarget(GraphPosition::Long) => TargetPosition::Long,
+                GraphSignalIntent::SetTarget(GraphPosition::Short) => TargetPosition::Short,
+            },
+        }
+    }
+
+    fn live_cursor(&self, stored: &EngineGraphCursor) -> Result<GraphPublicationCursor, String> {
+        let intent = match stored.intent {
+            TargetPosition::Hold => GraphSignalIntent::Hold,
+            TargetPosition::Flat => GraphSignalIntent::SetTarget(GraphPosition::Flat),
+            TargetPosition::Long => GraphSignalIntent::SetTarget(GraphPosition::Long),
+            TargetPosition::Short => GraphSignalIntent::SetTarget(GraphPosition::Short),
+        };
+        GraphPublicationCursor::from_checkpoint(
+            self.session_id.clone(), self.graph_sha256.clone(),
+            stored.closed_ms, stored.sequence, intent,
+        ).map_err(str::to_owned)
     }
 }
 
@@ -119,6 +159,77 @@ impl GraphTargetBinding {
 }
 
 impl TradeService {
+    /// Persist one exact Engine activation identity after Research Restore.
+    /// Repeated calls recover the confirmed SQL cursor, never rewind it.
+    /// This is an internal Engine stage, not a new public trade command.
+    pub async fn bind_graph_strategy(
+        &self,
+        account: &str,
+        binding: &GraphTargetBinding,
+        restored: &GraphPublicationCursor,
+    ) -> Result<GraphPublicationCursor, String> {
+        if !binding.valid() || !restored.matches_binding(&binding.session_id, &binding.graph_sha256) {
+            return Err("GRAPH_BINDING_RESTORE_MISMATCH".into());
+        }
+        let resources = self.resources(account).await?;
+        if resources.configuration.account_key.wire() != binding.account_key {
+            return Err("GRAPH_TARGET_ACCOUNT_MISMATCH".into());
+        }
+        let progress = resources.execution.store.bind_graph(
+            super::deadline(), binding.storage_binding(),
+            GraphTargetBinding::storage_cursor(restored), super::now(),
+        ).await.map_err(super::err)?;
+        binding.live_cursor(&progress.cursor)
+    }
+
+    /// Recover from the original finance owner after Engine or Research
+    /// restarts. An absent or stale binding cannot synthesize a fresh signal.
+    pub async fn graph_confirmed_cursor(
+        &self,
+        account: &str,
+        binding: &GraphTargetBinding,
+    ) -> Result<Option<GraphPublicationCursor>, String> {
+        if !binding.valid() {
+            return Err("GRAPH_TARGET_BINDING_INVALID".into());
+        }
+        let resources = self.resources(account).await?;
+        if resources.configuration.account_key.wire() != binding.account_key {
+            return Err("GRAPH_TARGET_ACCOUNT_MISMATCH".into());
+        }
+        resources.execution.store.graph_progress(super::deadline(), binding.storage_binding())
+            .await.map_err(super::err)?
+            .map(|state| binding.live_cursor(&state.cursor)).transpose()
+    }
+
+    /// A durable ACK for Hold/already-satisfied targets only. The SQL writer
+    /// rechecks the active strategy and original position snapshot atomically.
+    /// Financially actionable events are never ACKed on this route.
+    pub async fn acknowledge_graph_idle(
+        &self,
+        account: &str,
+        binding: &GraphTargetBinding,
+        publication: &GraphSignalPublication,
+    ) -> Result<GraphIdleAck, String> {
+        let resources = self.resources(account).await?;
+        if !binding.valid() || resources.configuration.account_key.wire() != binding.account_key {
+            return Err("GRAPH_TARGET_BINDING_INVALID".into());
+        }
+        let confirmed = self.graph_confirmed_cursor(account, binding).await?
+            .ok_or("GRAPH_FINANCE_BINDING_MISSING")?;
+        let proposed = self.preview_graph_publication(account, binding, &confirmed, publication)
+            .await?;
+        if proposed.as_ref().is_some_and(|preview| preview.plan != TargetPlan::NoChange) {
+            return Err("GRAPH_FINANCE_ATOMIC_INTENT_REQUIRED".into());
+        }
+        let next = proposed.map_or_else(
+            || GraphTargetBinding::storage_cursor(&confirmed),
+            |preview| GraphTargetBinding::storage_cursor(&preview.next_cursor),
+        );
+        resources.execution.store.acknowledge_graph_idle(
+            super::deadline(), binding.storage_binding(), next, super::now(),
+        ).await.map_err(super::err)
+    }
+
     /// Engine's original financial owner supplies one scoped and consistent
     /// strategy/lots/in-flight read. This API is diagnostic and cannot place
     /// orders or advance the confirmed cursor.

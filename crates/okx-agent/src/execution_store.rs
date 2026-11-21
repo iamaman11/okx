@@ -79,6 +79,37 @@ pub struct ExecutionStore {
 }
 
 impl ExecutionStore {
+    pub async fn graph_progress(
+        &self,
+        deadline: Instant,
+        binding: okx_execution::graph_binding::EngineGraphBinding,
+    ) -> StoreResult<Option<okx_execution::graph_binding::EngineGraphProgress>> {
+        let Self { owner, account } = self;
+        owner.graph_progress(deadline, account.wire.clone(), binding).await
+    }
+
+    pub async fn bind_graph(
+        &self,
+        deadline: Instant,
+        binding: okx_execution::graph_binding::EngineGraphBinding,
+        restored: okx_execution::graph_binding::EngineGraphCursor,
+        now: i64,
+    ) -> StoreResult<okx_execution::graph_binding::EngineGraphProgress> {
+        let Self { owner, account } = self;
+        owner.bind_graph(deadline, account.wire.clone(), binding, restored, now).await
+    }
+
+    pub async fn acknowledge_graph_idle(
+        &self,
+        deadline: Instant,
+        binding: okx_execution::graph_binding::EngineGraphBinding,
+        published: okx_execution::graph_binding::EngineGraphCursor,
+        now: i64,
+    ) -> StoreResult<okx_execution::graph_binding::GraphIdleAck> {
+        let Self { owner, account } = self;
+        owner.acknowledge_graph_idle(deadline, account.wire.clone(), binding, published, now).await
+    }
+
     pub async fn strategy_position_snapshot(
         &self,
         deadline: Instant,
