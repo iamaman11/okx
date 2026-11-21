@@ -38,7 +38,7 @@ struct GraphSlot {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct FeedCursor {
+pub(crate) struct FeedCursor {
     pub last_closed_ms: u64,
     pub observed_bars: u64,
 }
