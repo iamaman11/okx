@@ -284,17 +284,22 @@ impl ResearchClient {
             }
             None => self.config.executable.clone(),
         };
-        let mut child = Command::new(&executable)
-            .arg("--root")
+        let mut command = Command::new(&executable);
+        command.arg("--root")
             .arg(&self.config.root)
             .arg("--scope")
             .arg(self.config.scope.as_str())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|_| "WORKER_START")?;
+            .kill_on_drop(true);
+        // Research executes CPU-heavy grids in its own child process. On
+        // Windows, keep it below the Normal-priority native Finance/Engine
+        // process so that an overloaded host cannot starve bounded financial
+        // reads. The Worker still owns its two heavy slots and safety limits.
+        #[cfg(windows)]
+        command.creation_flags(0x0000_4000); // BELOW_NORMAL_PRIORITY_CLASS
+        let mut child = command.spawn().map_err(|_| "WORKER_START")?;
         let stdin = child.stdin.take().ok_or("WORKER_STDIN")?;
         let stdout = child.stdout.take().ok_or("WORKER_STDOUT")?;
         let mut writer = FramedWrite::new(stdin, codec());
