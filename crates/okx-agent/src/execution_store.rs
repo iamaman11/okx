@@ -92,7 +92,7 @@ impl ExecutionStore {
         decision: okx_execution::Decision,
         intent: okx_execution::NewIntent,
         now: i64,
-    ) -> StoreResult<okx_execution::graph_binding::GraphOpenClaim> {
+    ) -> StoreResult<okx_execution::graph_binding::GraphOpenAdmission> {
         let Self { owner, account } = self;
         owner
             .prepare_graph_open(

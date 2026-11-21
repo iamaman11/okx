@@ -5,6 +5,7 @@
 //! action is required. Opening/closing requires a separate atomic intent claim.
 use crate::position_target::TargetPosition;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,7 +48,42 @@ pub enum GraphOpenClaim {
     Replayed { intent_id: String },
 }
 
+/// Shared exact graph-derived identity for TradeService and its finance SQL
+/// owner. Neither layer independently invents a second idempotency rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphOpenIdentity {
+    pub decision_key: String,
+    pub decision_id: String,
+    pub input_digest: String,
+}
+
+/// A real original PREPARED intent fetched in the SAME finance transaction as
+/// the graph cursor. No additional read RPC or RiskBook/POST grant.
+#[derive(Debug, Clone)]
+pub struct GraphOpenAdmission {
+    pub claim: GraphOpenClaim,
+    pub intent: crate::StoredIntent,
+}
+
 impl EngineGraphBinding {
+    pub fn open_identity(&self, publication: &EngineGraphCursor) -> Option<GraphOpenIdentity> {
+        if !self.valid() || !publication.valid_for(self) {
+            return None;
+        }
+        let body = serde_json::to_string(&(self, publication)).ok()?;
+        let input_digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+        let decision_key = format!("graph_{}", &input_digest[..32]);
+        let decision_id = format!(
+            "strategy:{}:{}:{}",
+            self.instance_id, self.definition_version, decision_key
+        );
+        Some(GraphOpenIdentity {
+            decision_key,
+            decision_id,
+            input_digest,
+        })
+    }
+
     pub fn valid(&self) -> bool {
         !self.account_key.is_empty()
             && self.account_key.len() <= 128

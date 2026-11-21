@@ -5,6 +5,15 @@ use okx_api::{
     AttachedAlgoOrderRequest, PlaceOrderRequest,
 };
 use std::str::FromStr;
+use okx_execution::graph_binding::{EngineGraphBinding, EngineGraphCursor, GraphOpenClaim};
+
+/// A prevalidated Research publication bound to an Engine-owned strategy.
+/// The original SQL writer rechecks all financial and cursor invariants.
+#[derive(Debug, Clone)]
+pub(super) struct GraphOpenContext {
+    pub binding: EngineGraphBinding,
+    pub publication: EngineGraphCursor,
+}
 /// Immutable provenance for checking the fresh post-HELD FX rate against the
 /// exact native account that owns the central reservation.
 // A legacy SQL intent stores its original RAW request hash but not the
@@ -697,7 +706,7 @@ impl TradeService {
         supplied: Option<&CentralGovernanceSnapshot>,
         bound_hash: Option<String>,
     ) -> Result<Value, String> {
-        self.execute_inner(r, request, supplied, bound_hash, None, None)
+        self.execute_inner(r, request, supplied, bound_hash, None, None, None)
             .await
     }
     pub(super) async fn execute_for_definition(
@@ -716,8 +725,21 @@ impl TradeService {
             None,
             Some(version),
             Some((decision_digest, claimed_decision_id)),
+            None,
         )
         .await
+    }
+    /// The same original risk, admission and venue route as ordinary Execute;
+    /// only its first SQL PREPARE is graph-cursor-atomic. Internal staging API.
+    pub(super) async fn execute_for_graph_open(
+        &self,
+        r: &Arc<AccountResources>,
+        request: &TradeRequest,
+        context: GraphOpenContext,
+    ) -> Result<Value, String> {
+        let version = context.binding.definition_version.clone();
+        self.execute_inner(r, request, None, None, Some(version), None, Some(context))
+            .await
     }
     async fn execute_inner(
         &self,
@@ -727,6 +749,7 @@ impl TradeService {
         bound_hash: Option<String>,
         expected_definition: Option<String>,
         claimed_decision: Option<(String, String)>,
+        graph_open: Option<GraphOpenContext>,
     ) -> Result<Value, String> {
         let TradeRequest::Execute {
             idempotency_key,
@@ -741,6 +764,24 @@ impl TradeService {
         } = request
         else {
             return Err("EXECUTE_REQUIRED".into());
+        };
+        let graph_identity = if let Some(graph) = &graph_open {
+            if *operation != TradeOperation::Open
+                || graph.binding.instance_id != *strategy_instance
+                || graph.binding.instrument_id != *instrument
+            {
+                return Err("GRAPH_OPEN_REQUEST_SCOPE_MISMATCH".into());
+            }
+            let identity = graph
+                .binding
+                .open_identity(&graph.publication)
+                .ok_or("GRAPH_OPEN_IDENTITY_INVALID")?;
+            if *idempotency_key != identity.decision_key {
+                return Err("GRAPH_OPEN_IDEMPOTENCY_MISMATCH".into());
+            }
+            Some(identity)
+        } else {
+            None
         };
         let started = Instant::now();
         self.verify_runtime_finance_route(r)?;
@@ -904,16 +945,19 @@ impl TradeService {
         };
         let id = format!("intent_{}", &body_hash[..32]);
         let client_id = body_hash[..32].to_owned();
+        let decision_at = now();
         let decision = Decision {
-            decision_id: claimed_decision
-                .as_ref()
-                .map(|(_, id)| id.clone())
-                .unwrap_or_else(|| format!("decision_{}", &body_hash[..32])),
+            decision_id: graph_identity.as_ref().map(|i| i.decision_id.clone()).or_else(|| {
+                claimed_decision.as_ref().map(|(_, id)| id.clone())
+            }).unwrap_or_else(|| format!("decision_{}", &body_hash[..32])),
             instance_id: Some(strategy_instance.clone()),
-            decision_at: now(),
-            input_digest: match claimed_decision {
-                Some((digest, _)) => digest,
-                None => digest(&(body_hash.clone(), &plan))?,
+            decision_at,
+            input_digest: if let Some(identity) = &graph_identity {
+                identity.input_digest.clone()
+            } else if let Some((digest, _)) = &claimed_decision {
+                digest.clone()
+            } else {
+                digest(&(body_hash.clone(), &plan))?
             },
             policy_revision: state.state.revision as i64,
             code_version: crate::accounts::build_release().into(),
@@ -937,15 +981,30 @@ impl TradeService {
             return Err("STRATEGY_VERSION_CHANGED".into());
         }
 
-        let prepared = {
-            {
-                let (owner, account) = r.execution.store.scope();
-
-                owner
-                    .prepare_admission(until, account.to_owned(), decision, intent)
-                    .await
-                    .map_err(err)?
+        let prepared = if let Some(graph) = graph_open {
+            let admitted = r
+                .execution
+                .store
+                .prepare_graph_open(
+                    until,
+                    graph.binding,
+                    graph.publication,
+                    decision,
+                    intent,
+                    decision_at,
+                )
+                .await
+                .map_err(err)?;
+            if !matches!(admitted.claim, GraphOpenClaim::Prepared { .. }) {
+                return Err("GRAPH_OPEN_REPLAY_STATUS_REQUIRED".into());
             }
+            admitted.intent
+        } else {
+            let (owner, account) = r.execution.store.scope();
+            owner
+                .prepare_admission(until, account.to_owned(), decision, intent)
+                .await
+                .map_err(err)?
         };
         tracing::Span::current().record("intent_id", prepared.intent_id.as_str());
         if Instant::now() >= until {

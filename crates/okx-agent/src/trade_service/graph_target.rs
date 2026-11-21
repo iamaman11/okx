@@ -4,7 +4,8 @@
 //! publication cursor and atomic decision claim are prerequisites to routing
 //! any candidate to `TradeService::execute_for_definition` or `close`.
 
-use super::TradeService;
+use super::execute::GraphOpenContext;
+use super::{TradeRequest, TradeService};
 use okx_execution::{
     StrategyPositionSnapshot,
     graph_binding::{EngineGraphBinding, EngineGraphCursor, GraphIdleAck},
@@ -14,6 +15,7 @@ use okx_protocol::research_ipc::{
     GraphFeedRequest, GraphPosition, GraphPublicationCursor, GraphSessionId, GraphSignalIntent,
     GraphSignalPublication,
 };
+use okx_protocol::trading::{PositionSide, TradeOperation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphTargetBinding {
@@ -84,6 +86,68 @@ impl GraphTargetBinding {
             intent,
         )
         .map_err(str::to_owned)
+    }
+
+    /// Only a correctly scoped Exchange Execute can be linked to a graph
+    /// publication. This check is repeated atomically at the finance owner.
+    fn open_context(
+        &self,
+        publication: &GraphSignalPublication,
+        request: &TradeRequest,
+    ) -> Result<GraphOpenContext, String> {
+        if !self.valid()
+            || !publication.valid()
+            || publication.session_id != self.session_id
+            || publication.graph_sha256 != self.graph_sha256
+            || publication.closed_ms % self.timeframe_ms != 0
+        {
+            return Err("GRAPH_OPEN_PUBLICATION_MISMATCH".into());
+        }
+        let (target, expected_side) = match publication.intent {
+            GraphSignalIntent::SetTarget(GraphPosition::Long) => {
+                (TargetPosition::Long, PositionSide::Long)
+            }
+            GraphSignalIntent::SetTarget(GraphPosition::Short) => {
+                (TargetPosition::Short, PositionSide::Short)
+            }
+            GraphSignalIntent::Hold | GraphSignalIntent::SetTarget(GraphPosition::Flat) => {
+                return Err("GRAPH_OPEN_ACTION_REQUIRED".into());
+            }
+        };
+        let TradeRequest::Execute {
+            idempotency_key,
+            operation,
+            strategy_instance,
+            instrument,
+            side,
+            ..
+        } = request
+        else {
+            return Err("GRAPH_OPEN_EXECUTE_REQUIRED".into());
+        };
+        if *operation != TradeOperation::Open
+            || *side != expected_side
+            || *strategy_instance != self.instance_id
+            || *instrument != self.instrument_id
+        {
+            return Err("GRAPH_OPEN_REQUEST_SCOPE_MISMATCH".into());
+        }
+        let binding = self.storage_binding();
+        let published = EngineGraphCursor {
+            sequence: publication.sequence,
+            closed_ms: publication.closed_ms,
+            intent: target,
+        };
+        let identity = binding
+            .open_identity(&published)
+            .ok_or("GRAPH_OPEN_IDENTITY_INVALID")?;
+        if *idempotency_key != identity.decision_key {
+            return Err("GRAPH_OPEN_IDEMPOTENCY_MISMATCH".into());
+        }
+        Ok(GraphOpenContext {
+            binding,
+            publication: published,
+        })
     }
 }
 
@@ -163,6 +227,35 @@ impl GraphTargetBinding {
 }
 
 impl TradeService {
+    /// Staging-only execution entry: the original TradeService risk/venue
+    /// pipeline is reused, but its first finance PREPARE is graph-atomic.
+    /// The background Research consumer is not wired in this change.
+    pub(crate) async fn execute_graph_open(
+        &self,
+        account: &str,
+        binding: &GraphTargetBinding,
+        publication: &GraphSignalPublication,
+        request: &TradeRequest,
+    ) -> Result<serde_json::Value, String> {
+        let context = binding.open_context(publication, request)?;
+        let confirmed = self
+            .graph_confirmed_cursor(account, binding)
+            .await?
+            .ok_or("GRAPH_FINANCE_BINDING_MISSING")?;
+        let preview = self
+            .preview_graph_publication(account, binding, &confirmed, publication)
+            .await?
+            .ok_or("GRAPH_OPEN_ALREADY_CONFIRMED")?;
+        if !matches!(preview.plan, TargetPlan::Open(_)) {
+            return Err("GRAPH_OPEN_REQUIRES_EMPTY_EXPOSURE".into());
+        }
+        let resources = self.resources(account).await?;
+        if resources.configuration.account_key.wire() != binding.account_key {
+            return Err("GRAPH_OPEN_ACCOUNT_MISMATCH".into());
+        }
+        self.execute_for_graph_open(&resources, request, context).await
+    }
+
     /// Persist one exact Engine activation identity after Research Restore.
     /// Repeated calls recover the confirmed SQL cursor, never rewind it.
     /// This is an internal Engine stage, not a new public trade command.
@@ -300,6 +393,7 @@ mod tests {
     use okx_execution::position_target::ExposureSide;
     use okx_execution::{StoredLot, StrategyInstance};
     use okx_protocol::research_ipc::{GraphSessionReply, GraphSignalPublication};
+    use okx_protocol::trading::{OrderConstraints, Sizing};
     use rust_decimal::Decimal;
 
     fn fixture() -> (
@@ -366,6 +460,60 @@ mod tests {
             cost: Decimal::from(100),
             opened_at: 100_000,
         }
+    }
+
+    #[test]
+    fn graph_open_request_identity_and_direction_are_bound_before_financial_preparation() {
+        let (binding, _, _, mut event) = fixture();
+        event.intent = GraphSignalIntent::SetTarget(GraphPosition::Long);
+        let storage = binding.storage_binding();
+        let publication = EngineGraphCursor {
+            sequence: event.sequence,
+            closed_ms: event.closed_ms,
+            intent: TargetPosition::Long,
+        };
+        let identity = storage.open_identity(&publication).unwrap();
+        let request = TradeRequest::Execute {
+            idempotency_key: identity.decision_key.clone(),
+            operation: TradeOperation::Open,
+            strategy_instance: binding.instance_id.clone(),
+            instrument: binding.instrument_id.clone(),
+            side: PositionSide::Long,
+            sizing: Sizing::MaxLossUsd { max_loss_usd: "1".into() },
+            order: OrderConstraints {
+                order_type: "fok".into(),
+                limit_price: None,
+                reference: None,
+                max_entry_usd: None,
+                max_slippage_bps: 5,
+            },
+            protection: None,
+            expires_in_ms: 10_000,
+        };
+        let accepted = binding.open_context(&event, &request).unwrap();
+        assert_eq!(accepted.binding, storage);
+        assert_eq!(accepted.publication, publication);
+        let mut wrong_key = request.clone();
+        if let TradeRequest::Execute { idempotency_key, .. } = &mut wrong_key {
+            *idempotency_key = "foreign-graph-key".into();
+        }
+        assert_eq!(
+            binding.open_context(&event, &wrong_key).unwrap_err(),
+            "GRAPH_OPEN_IDEMPOTENCY_MISMATCH"
+        );
+        let mut wrong_side = request.clone();
+        if let TradeRequest::Execute { side, .. } = &mut wrong_side {
+            *side = PositionSide::Short;
+        }
+        assert_eq!(
+            binding.open_context(&event, &wrong_side).unwrap_err(),
+            "GRAPH_OPEN_REQUEST_SCOPE_MISMATCH"
+        );
+        event.intent = GraphSignalIntent::SetTarget(GraphPosition::Flat);
+        assert_eq!(
+            binding.open_context(&event, &request).unwrap_err(),
+            "GRAPH_OPEN_ACTION_REQUIRED"
+        );
     }
 
     #[test]

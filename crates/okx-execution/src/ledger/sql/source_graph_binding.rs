@@ -48,14 +48,6 @@ fn open_key(binding: &EngineGraphBinding, sequence: u64) -> String {
     )
 }
 
-fn decision_key(
-    binding: &EngineGraphBinding,
-    published: &EngineGraphCursor,
-) -> StoreResult<String> {
-    let (_, digest) = encode(&(binding, published))?;
-    Ok(format!("graph_{}", &digest[..32]))
-}
-
 fn encode<T: serde::Serialize>(value: &T) -> StoreResult<(String, String)> {
     let body = serde_json::to_string(value)
         .map_err(|_| StoreError::Invalid("GRAPH_FINANCE_RECEIPT_ENCODING_FAILED"))?;
@@ -316,18 +308,17 @@ impl AccountStore {
         }
         let state = Self::graph_progress_sql(tx, scope, binding)?
             .ok_or(StoreError::Invalid("GRAPH_FINANCE_BINDING_MISSING"))?;
-        let key = decision_key(binding, published)?;
-        let (_, expected_input_digest) = encode(&(binding, published))?;
+        let identity = binding
+            .open_identity(published)
+            .ok_or(StoreError::Invalid("GRAPH_FINANCE_OPEN_IDENTITY_INVALID"))?;
+        let key = identity.decision_key;
+        let expected_input_digest = identity.input_digest;
         let (_, fingerprint) = encode(&(binding, published, decision, intent))?;
-        let expected_decision_id = format!(
-            "strategy:{}:{}:{}",
-            binding.instance_id, binding.definition_version, key
-        );
         if intent.idempotency_key != key
             || intent.plan.strategy_instance != binding.instance_id
             || intent.instrument_id != binding.instrument_id
             || decision.instance_id.as_deref() != Some(binding.instance_id.as_str())
-            || decision.decision_id != expected_decision_id
+            || decision.decision_id != identity.decision_id
             || decision.input_digest != expected_input_digest
             || decision.policy_revision < 1
             || decision.policy_revision != intent.policy_revision
@@ -520,8 +511,7 @@ mod tests {
     ) -> (Decision, NewIntent) {
         let definition =
             AccountStore::strategy_definition_sql(db, Some(scope), &binding.instance_id).unwrap();
-        let key = decision_key(binding, publication).unwrap();
-        let (_, input_digest) = encode(&(binding, publication)).unwrap();
+        let identity = binding.open_identity(publication).unwrap();
         let side = match publication.intent {
             TargetPosition::Long => ("long", "buy"),
             TargetPosition::Short => ("short", "sell"),
@@ -529,13 +519,10 @@ mod tests {
         };
         (
             Decision {
-                decision_id: format!(
-                    "strategy:{}:{}:{}",
-                    binding.instance_id, binding.definition_version, key
-                ),
+                decision_id: identity.decision_id,
                 instance_id: Some(binding.instance_id.clone()),
                 decision_at: 181_000,
-                input_digest,
+                input_digest: identity.input_digest,
                 policy_revision: 1,
                 code_version: "graph-open/v1".into(),
             },
@@ -559,7 +546,7 @@ mod tests {
                     source_generation: 1,
                 },
                 intent_id: "graph-test-intent".into(),
-                idempotency_key: key,
+                idempotency_key: identity.decision_key,
                 request_hash: "graph-test-request-hash".into(),
                 client_order_id: "graph-test-client".into(),
                 deadline: 300_000,

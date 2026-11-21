@@ -1,7 +1,7 @@
 //! Typed strategy commands on the existing installation SQL owner.
 use super::UnifiedFinanceHandle;
 use crate::graph_binding::{
-    EngineGraphBinding, EngineGraphCursor, EngineGraphProgress, GraphIdleAck, GraphOpenClaim,
+    EngineGraphBinding, EngineGraphCursor, EngineGraphProgress, GraphIdleAck, GraphOpenAdmission,
 };
 use crate::{
     AccountStore, Decision, NewIntent, OperationReceipt, StoreError, StoreResult, StrategyInstance,
@@ -43,7 +43,7 @@ impl UnifiedFinanceHandle {
         decision: Decision,
         intent: NewIntent,
         now: i64,
-    ) -> StoreResult<GraphOpenClaim> {
+    ) -> StoreResult<GraphOpenAdmission> {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -57,10 +57,24 @@ impl UnifiedFinanceHandle {
                 &intent,
                 now,
             )?;
+            let intent_id = match &claim {
+                crate::graph_binding::GraphOpenClaim::Prepared { intent_id }
+                | crate::graph_binding::GraphOpenClaim::Replayed { intent_id } => intent_id,
+            };
+            let prepared = AccountStore::find_intent_sql(
+                &tx,
+                Some((&installation, &account)),
+                "intent_id",
+                intent_id,
+            )?
+            .ok_or(StoreError::Invalid("GRAPH_FINANCE_PREPARED_INTENT_MISSING"))?;
             tx.commit().map_err(|_| {
                 StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
             })?;
-            Ok(claim)
+            Ok(GraphOpenAdmission {
+                claim,
+                intent: prepared,
+            })
         })
         .await
     }
