@@ -154,22 +154,35 @@ mod tests {
                 ],
                 "result_steps":["w1"]
             }
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(request.valid());
-        assert!(AnalysisPlan::compile_market(&request).unwrap().composition.is_some());
+        assert!(
+            AnalysisPlan::compile_market(&request)
+                .unwrap()
+                .composition
+                .is_some()
+        );
         request.graph.as_mut().unwrap().steps[0].op = "new_primitive".into();
         // Agent can forward the structurally valid graph without knowing op IDs.
         assert!(request.valid());
-        assert_eq!(AnalysisPlan::compile_market(&request).unwrap_err(),
-                   "graph.r1:UNKNOWN_OPERATOR");
+        assert_eq!(
+            AnalysisPlan::compile_market(&request).unwrap_err(),
+            "graph.r1:UNKNOWN_OPERATOR"
+        );
         request.graph.as_mut().unwrap().steps[0].op = "returns_series".into();
-        request.composition = Some(Box::new(serde_json::from_value(serde_json::json!({
-            "version":"okx.market.composition/v1",
-            "steps":[{"id":"old","op":"returns_series","input":"close"}],
-            "result_steps":["old"]
-        })).unwrap()));
+        request.composition = Some(Box::new(
+            serde_json::from_value(serde_json::json!({
+                "version":"okx.market.composition/v1",
+                "steps":[{"id":"old","op":"returns_series","input":"close"}],
+                "result_steps":["old"]
+            }))
+            .unwrap(),
+        ));
         assert!(!request.valid());
-        assert_eq!(AnalysisPlan::compile_market(&request).unwrap_err(),
-                   "graph:AMBIGUOUS_REQUEST");
+        assert_eq!(
+            AnalysisPlan::compile_market(&request).unwrap_err(),
+            "graph:AMBIGUOUS_REQUEST"
+        );
     }
 }

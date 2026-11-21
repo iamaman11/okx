@@ -1,7 +1,7 @@
 //! Mathematical graph resolution lives in Research, never Agent or MCP.
 //! This adapter accepts old v1 operations while the independent evaluator is
 //! extracted. New operators are registered here with their implementation.
-use okx_analysis::query_plan::{CompositionRequest, SeriesOp, SeriesStep, COMPOSITION_VERSION};
+use okx_analysis::query_plan::{COMPOSITION_VERSION, CompositionRequest, SeriesOp, SeriesStep};
 use okx_protocol::graph_wire::GraphEnvelope;
 use serde_json::Value;
 
@@ -108,16 +108,29 @@ mod tests {
         let mut candidate = graph();
         candidate.steps[0].op = "future_primitive".into();
         assert!(candidate.structurally_valid());
-        assert_eq!(resolve(&candidate).unwrap_err(), "graph.change:UNKNOWN_OPERATOR");
+        assert_eq!(
+            resolve(&candidate).unwrap_err(),
+            "graph.change:UNKNOWN_OPERATOR"
+        );
         let mut candidate = graph();
         candidate.steps[0].op_version = 2;
         assert!(candidate.structurally_valid());
-        assert_eq!(resolve(&candidate).unwrap_err(), "graph.change:UNSUPPORTED_OPERATOR_VERSION");
+        assert_eq!(
+            resolve(&candidate).unwrap_err(),
+            "graph.change:UNSUPPORTED_OPERATOR_VERSION"
+        );
         let mut candidate = graph();
-        candidate.steps[1].parameters.insert("period".into(), json!("two"));
-        assert_eq!(resolve(&candidate).unwrap_err(), "graph.smooth:INVALID_PERIOD_TYPE");
+        candidate.steps[1]
+            .parameters
+            .insert("period".into(), json!("two"));
+        assert_eq!(
+            resolve(&candidate).unwrap_err(),
+            "graph.smooth:INVALID_PERIOD_TYPE"
+        );
         let mut candidate = graph();
-        candidate.steps[1].parameters.insert("period".into(), json!(0));
+        candidate.steps[1]
+            .parameters
+            .insert("period".into(), json!(0));
         assert!(CheckedComposition::compile(resolve(&candidate).unwrap(), 4).is_err());
     }
 }

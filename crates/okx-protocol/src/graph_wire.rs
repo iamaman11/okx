@@ -45,8 +45,7 @@ impl GraphEnvelope {
         if self.version != GRAPH_WIRE_VERSION
             || !(1..=32).contains(&self.steps.len())
             || !(1..=14).contains(&self.result_steps.len())
-            || !serde_json::to_vec(self)
-                .is_ok_and(|bytes| bytes.len() <= GRAPH_WIRE_MAX_BYTES)
+            || !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= GRAPH_WIRE_MAX_BYTES)
         {
             return false;
         }
@@ -58,9 +57,10 @@ impl GraphEnvelope {
                 || step.op_version == 0
                 || !(1..=4).contains(&step.inputs.len())
                 || step.parameters.len() > 8
-                || !step.inputs.iter().all(|(port, source)| {
-                    identifier(port) && identifier(source)
-                })
+                || !step
+                    .inputs
+                    .iter()
+                    .all(|(port, source)| identifier(port) && identifier(source))
                 || !step.parameters.iter().all(|(name, value)| {
                     identifier(name)
                         && match value {
@@ -76,8 +76,7 @@ impl GraphEnvelope {
         self.result_steps
             .iter()
             .all(|id| identifier(id) && ids.contains(id.as_str()))
-            && self.result_steps.iter().collect::<BTreeSet<_>>().len()
-                == self.result_steps.len()
+            && self.result_steps.iter().collect::<BTreeSet<_>>().len() == self.result_steps.len()
     }
 }
 
@@ -107,9 +106,14 @@ mod tests {
         graph.steps[0].op = "brand_new_math".into();
         graph.steps[0].op_version = 2;
         assert!(graph.structurally_valid());
-        assert_eq!(serde_json::from_value::<GraphEnvelope>(json!({
-            "version":GRAPH_WIRE_VERSION,"steps":[],"result_steps":[],"unexpected":1
-        })).unwrap_err().classify(), serde_json::error::Category::Data);
+        assert_eq!(
+            serde_json::from_value::<GraphEnvelope>(json!({
+                "version":GRAPH_WIRE_VERSION,"steps":[],"result_steps":[],"unexpected":1
+            }))
+            .unwrap_err()
+            .classify(),
+            serde_json::error::Category::Data
+        );
     }
 
     #[test]
@@ -118,7 +122,9 @@ mod tests {
         graph.steps[1].id = "change".into();
         assert!(!graph.structurally_valid());
         let mut graph = example();
-        graph.steps[1].parameters.insert("script".into(), json!(["execute"]));
+        graph.steps[1]
+            .parameters
+            .insert("script".into(), json!(["execute"]));
         assert!(!graph.structurally_valid());
         let mut graph = example();
         graph.result_steps.push("absent".into());

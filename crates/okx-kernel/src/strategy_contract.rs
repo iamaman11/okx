@@ -150,10 +150,12 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(request.steps[0].op, SeriesOp::ReturnsSeries);
-        assert_eq!(serde_json::to_value(request).unwrap()["steps"][0]["op"], "returns_series");
         assert_eq!(
-            StrategyParameters::Ema(EmaParameters { fast: 2, slow: 5 })
-                .warmup_for("ema_cross_v1"),
+            serde_json::to_value(request).unwrap()["steps"][0]["op"],
+            "returns_series"
+        );
+        assert_eq!(
+            StrategyParameters::Ema(EmaParameters { fast: 2, slow: 5 }).warmup_for("ema_cross_v1"),
             Ok(5)
         );
     }

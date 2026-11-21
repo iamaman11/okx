@@ -260,10 +260,14 @@ impl SignalRequest {
             && self.parameters.validate().is_ok()
             && !self.strategy_id.is_empty()
             && self.strategy_id.len() <= 128
-            && self.closes.iter().all(|bar| {
-                bar.close.is_finite() && bar.close > 0.0 && bar.time_ms > 0
-            })
-            && self.closes.windows(2).all(|pair| pair[0].time_ms < pair[1].time_ms)
+            && self
+                .closes
+                .iter()
+                .all(|bar| bar.close.is_finite() && bar.close > 0.0 && bar.time_ms > 0)
+            && self
+                .closes
+                .windows(2)
+                .all(|pair| pair[0].time_ms < pair[1].time_ms)
     }
 }
 
@@ -371,7 +375,10 @@ mod reply_contract_tests {
             strategy_id: "ema_cross_v1".into(),
             parameters: crate::analytics::EmaParameters { fast: 2, slow: 4 },
             closes: (1..=4)
-                .map(|time_ms| ClosedPrice { time_ms, close: 100.0 })
+                .map(|time_ms| ClosedPrice {
+                    time_ms,
+                    close: 100.0,
+                })
                 .collect(),
         };
         assert!(request.valid());
@@ -383,7 +390,10 @@ mod reply_contract_tests {
         };
         assert!(outcome.matches_request(&request));
         let wire = serde_json::to_vec(&WorkerReply::Signal(outcome)).unwrap();
-        let decoded = serde_json::from_slice::<WorkerReply>(&wire).unwrap().signal().unwrap();
+        let decoded = serde_json::from_slice::<WorkerReply>(&wire)
+            .unwrap()
+            .signal()
+            .unwrap();
         assert_eq!(decoded.position, SignalPosition::Flat);
         let mut invalid = request.clone();
         invalid.closes[1].time_ms = invalid.closes[0].time_ms;
@@ -391,7 +401,11 @@ mod reply_contract_tests {
         invalid = request;
         invalid.closes[0].close = f64::INFINITY;
         assert!(!invalid.valid());
-        assert!(WorkerReply::Product(serde_json::json!({"position":"long"})).signal().is_err());
+        assert!(
+            WorkerReply::Product(serde_json::json!({"position":"long"}))
+                .signal()
+                .is_err()
+        );
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

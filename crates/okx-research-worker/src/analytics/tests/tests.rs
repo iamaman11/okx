@@ -7,37 +7,53 @@ async fn engine_live_signal_runs_in_research_cpu_lane_with_causal_replay_parity(
     let request = SignalRequest {
         strategy_id: "ema_cross_v1".into(),
         parameters: EmaParameters { fast: 2, slow: 4 },
-        closes: closes.iter().enumerate().map(|(i, close)| {
-            okx_protocol::research_ipc::ClosedPrice {
+        closes: closes
+            .iter()
+            .enumerate()
+            .map(|(i, close)| okx_protocol::research_ipc::ClosedPrice {
                 time_ms: (i as u64 + 1) * 60_000,
                 close: *close,
-            }
-        }).collect(),
+            })
+            .collect(),
     };
-    let mut kernel = okx_analysis::operators::StrategyKernel::from_id(
-        &request.strategy_id,
-        request.parameters,
-    ).unwrap();
+    let mut kernel =
+        okx_analysis::operators::StrategyKernel::from_id(&request.strategy_id, request.parameters)
+            .unwrap();
     let mut expected = None;
     for close in closes {
         expected = kernel.push_closed(close).unwrap();
     }
     let result = service.evaluate_signal(request.clone()).await.unwrap();
     assert!(result.matches_request(&request));
-    assert_eq!(result.position, match expected {
-        Some(1) => SignalPosition::Long,
-        Some(-1) => SignalPosition::Short,
-        Some(0) => SignalPosition::Flat,
-        _ => panic!("unexpected replay signal"),
-    });
-    assert_eq!(service.evaluate_signal(request.clone()).await.unwrap(), result);
-    assert_eq!(service.evaluate_signal(SignalRequest {
-        strategy_id: "new_uninstalled_operator".into(),
-        ..request.clone()
-    }).await.unwrap_err(), "UNSUPPORTED_STRATEGY");
+    assert_eq!(
+        result.position,
+        match expected {
+            Some(1) => SignalPosition::Long,
+            Some(-1) => SignalPosition::Short,
+            Some(0) => SignalPosition::Flat,
+            _ => panic!("unexpected replay signal"),
+        }
+    );
+    assert_eq!(
+        service.evaluate_signal(request.clone()).await.unwrap(),
+        result
+    );
+    assert_eq!(
+        service
+            .evaluate_signal(SignalRequest {
+                strategy_id: "new_uninstalled_operator".into(),
+                ..request.clone()
+            })
+            .await
+            .unwrap_err(),
+        "UNSUPPORTED_STRATEGY"
+    );
     let mut invalid = request;
     invalid.closes[2].time_ms = invalid.closes[1].time_ms;
-    assert_eq!(service.evaluate_signal(invalid).await.unwrap_err(), "INVALID_SIGNAL_REQUEST");
+    assert_eq!(
+        service.evaluate_signal(invalid).await.unwrap_err(),
+        "INVALID_SIGNAL_REQUEST"
+    );
 }
 #[test]
 fn market_capabilities_discloses_supported_operator_names_and_units() {
@@ -62,7 +78,10 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
     assert_eq!(capabilities["effects"]["write_finance"], false);
     assert_eq!(capabilities["effects"]["write_governance"], false);
     assert_eq!(capabilities["graph_transport"]["version"], "okx.graph/v1");
-    assert_eq!(capabilities["graph_transport"]["location"], "market.screen.graph");
+    assert_eq!(
+        capabilities["graph_transport"]["location"],
+        "market.screen.graph"
+    );
     assert_eq!(
         capabilities["composition"]["input_sources"],
         serde_json::json!([
@@ -112,7 +131,10 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
         extension,
         &serde_json::to_value(okx_analysis::query_plan::ROLLING_RANGE_DESCRIPTOR).unwrap()
     );
-    assert_eq!(extension["owner"], "okx-strategy-core::query_plan::rolling_range");
+    assert_eq!(
+        extension["owner"],
+        "okx-strategy-core::query_plan::rolling_range"
+    );
     assert_eq!(extension["effects"], "pure_no_io");
     assert_eq!(extension["version"], 1);
     let stddev = operations

@@ -5,8 +5,8 @@ pub mod candidate_progress;
 mod cursor;
 mod decision;
 mod economic_scenario;
-mod graph_resolver;
 pub mod executor;
+mod graph_resolver;
 pub mod jobs;
 mod market;
 pub mod planner;
@@ -88,7 +88,11 @@ impl AnalyticsService {
                 };
                 Ok(SignalDecision {
                     schema: SignalDecision::SCHEMA.into(),
-                    last_closed_ms: request.closes.last().expect("validated nonempty history").time_ms,
+                    last_closed_ms: request
+                        .closes
+                        .last()
+                        .expect("validated nonempty history")
+                        .time_ms,
                     observed_bars: request.closes.len(),
                     position,
                 })

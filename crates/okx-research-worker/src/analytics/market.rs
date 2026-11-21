@@ -2722,31 +2722,40 @@ mod tests {
     #[test]
     fn graph_v1_public_market_row_matches_legacy_numerical_evidence() {
         let mut open = request(vec!["returns"]);
-        open.graph = Some(Box::new(serde_json::from_value(json!({
-            "version":"okx.graph/v1",
-            "steps":[
-                {"id":"r1","op":"returns_series","op_version":1,
-                 "inputs":{"input":"close"}},
-                {"id":"mean","op":"rolling_mean","op_version":1,
-                 "inputs":{"input":"r1"},"parameters":{"period":3}}
-            ],
-            "result_steps":["mean"]
-        })).unwrap()));
+        open.graph = Some(Box::new(
+            serde_json::from_value(json!({
+                "version":"okx.graph/v1",
+                "steps":[
+                    {"id":"r1","op":"returns_series","op_version":1,
+                     "inputs":{"input":"close"}},
+                    {"id":"mean","op":"rolling_mean","op_version":1,
+                     "inputs":{"input":"r1"},"parameters":{"period":3}}
+                ],
+                "result_steps":["mean"]
+            }))
+            .unwrap(),
+        ));
         let mut legacy = open.clone();
         legacy.graph = None;
-        legacy.composition = Some(Box::new(serde_json::from_value(json!({
-            "version":okx_analysis::query_plan::COMPOSITION_VERSION,
-            "steps":[
-                {"id":"r1","op":"returns_series","input":"close"},
-                {"id":"mean","op":"rolling_mean","input":"r1","period":3}
-            ],
-            "result_steps":["mean"]
-        })).unwrap()));
+        legacy.composition = Some(Box::new(
+            serde_json::from_value(json!({
+                "version":okx_analysis::query_plan::COMPOSITION_VERSION,
+                "steps":[
+                    {"id":"r1","op":"returns_series","input":"close"},
+                    {"id":"mean","op":"rolling_mean","input":"r1","period":3}
+                ],
+                "result_steps":["mean"]
+            }))
+            .unwrap(),
+        ));
         let open_plan = planner::AnalysisPlan::compile_market(&open).unwrap();
         let legacy_plan = planner::AnalysisPlan::compile_market(&legacy).unwrap();
         let open_result = compute_row_planned(row(), &open, None, &open_plan, true).unwrap();
         let legacy_result = compute_row_planned(row(), &legacy, None, &legacy_plan, true).unwrap();
-        assert_eq!(open_result["metrics"]["mean"], legacy_result["metrics"]["mean"]);
+        assert_eq!(
+            open_result["metrics"]["mean"],
+            legacy_result["metrics"]["mean"]
+        );
         assert_eq!(open_result["units"]["mean"], legacy_result["units"]["mean"]);
         assert_eq!(
             open_result["composition_quality"]["mean"],

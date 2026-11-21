@@ -41,9 +41,7 @@ impl GraphSignalSpec {
         if self.version != GRAPH_SIGNAL_VERSION {
             return Err("graph_signal.version:UNSUPPORTED".into());
         }
-        if !(-1..=1).contains(&self.target_if_true)
-            || !(-1..=1).contains(&self.target_if_false)
-        {
+        if !(-1..=1).contains(&self.target_if_true) || !(-1..=1).contains(&self.target_if_false) {
             return Err("graph_signal:INVALID_TARGET_POSITION".into());
         }
         // A future-return label is an outcome, not a causal decision input.
@@ -140,7 +138,9 @@ mod tests {
         prices[3..].fill(1_000_000.0);
         assert_eq!(past, graph.graph().evaluate_at(&prices, 2));
         assert_eq!(
-            graph.target(&graph.graph().evaluate_at(&prices, 0)).unwrap(),
+            graph
+                .target(&graph.graph().evaluate_at(&prices, 0))
+                .unwrap(),
             None
         );
     }
