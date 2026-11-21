@@ -121,15 +121,21 @@ mod linux_proc {
             self.storage_read_bytes = self.storage_read_bytes.max(other.storage_read_bytes);
         }
         fn add_since(&mut self, observed: Self, baseline: Self) {
-            self.read_char_bytes = self
-                .read_char_bytes
-                .saturating_add(observed.read_char_bytes.saturating_sub(baseline.read_char_bytes));
-            self.read_syscalls = self
-                .read_syscalls
-                .saturating_add(observed.read_syscalls.saturating_sub(baseline.read_syscalls));
-            self.storage_read_bytes = self
-                .storage_read_bytes
-                .saturating_add(observed.storage_read_bytes.saturating_sub(baseline.storage_read_bytes));
+            self.read_char_bytes = self.read_char_bytes.saturating_add(
+                observed
+                    .read_char_bytes
+                    .saturating_sub(baseline.read_char_bytes),
+            );
+            self.read_syscalls = self.read_syscalls.saturating_add(
+                observed
+                    .read_syscalls
+                    .saturating_sub(baseline.read_syscalls),
+            );
+            self.storage_read_bytes = self.storage_read_bytes.saturating_add(
+                observed
+                    .storage_read_bytes
+                    .saturating_sub(baseline.storage_read_bytes),
+            );
         }
     }
 
@@ -207,7 +213,12 @@ mod linux_proc {
                 }
                 samples
             });
-            Self { pid, initial_io, stop, sampler }
+            Self {
+                pid,
+                initial_io,
+                stop,
+                sampler,
+            }
         }
         pub(super) fn finish(self) -> Value {
             let _ = self.stop.send(());
@@ -226,7 +237,8 @@ mod linux_proc {
                 };
                 io_total.add_since(*observed, baseline);
             }
-            let io_measured = self.initial_io.is_some() && samples.io_by_pid.contains_key(&self.pid);
+            let io_measured =
+                self.initial_io.is_some() && samples.io_by_pid.contains_key(&self.pid);
             json!({
                 "schema":"okx.research-process-tree-resources/v1",
                 "status":"MEASURED_SAMPLED",

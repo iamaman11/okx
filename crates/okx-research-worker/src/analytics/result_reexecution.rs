@@ -62,19 +62,19 @@ pub(super) fn verify(
     let candidates = if is_grid { variants.len() as u64 } else { 1 };
     // Grid scores train, holdout, and double-fee sensitivity separately.
     // Check multiplication before allocating or opening dataset pages.
-    let work = count.checked_mul(candidates).and_then(|n| {
-        n.checked_mul(if is_grid { 4 } else { 1 })
-    });
+    let work = count
+        .checked_mul(candidates)
+        .and_then(|n| n.checked_mul(if is_grid { 4 } else { 1 }));
     if count > MAX_BARS || candidates > 64 || work.is_none_or(|n| n > MAX_REPLAY_WORK_UNITS) {
         return Ok(unverified("REEXECUTION_BUDGET_EXCEEDED"));
     }
     if count == 0 || variants.is_empty() {
         return Err(mismatch());
     }
-    let spec: ReplaySpec = serde_json::from_value(inputs["spec"].clone())
-        .map_err(|_| mismatch())?;
-    let parameters: Vec<StrategyParameters> = serde_json::from_value(inputs["variants"].clone())
-        .map_err(|_| mismatch())?;
+    let spec: ReplaySpec =
+        serde_json::from_value(inputs["spec"].clone()).map_err(|_| mismatch())?;
+    let parameters: Vec<StrategyParameters> =
+        serde_json::from_value(inputs["variants"].clone()).map_err(|_| mismatch())?;
     if spec.parameters != parameters[0] {
         return Err(mismatch());
     }
@@ -102,18 +102,19 @@ pub(super) fn verify(
         if parameters.len() != 1 || !manifest["grid"].is_null() {
             return Err(mismatch());
         }
-        let start = spec.parameters.warmup_for(&spec.strategy_id).map_err(|_| mismatch())?;
-        let result = replay::replay(&bars, &spec, start, bars.len(), &|| false)
+        let start = spec
+            .parameters
+            .warmup_for(&spec.strategy_id)
             .map_err(|_| mismatch())?;
+        let result =
+            replay::replay(&bars, &spec, start, bars.len(), &|| false).map_err(|_| mismatch())?;
         (result, start)
     };
     if manifest["hash"] != result.hash
         || manifest["dataset_hash"] != result.dataset_hash
         || manifest["summary"] != json!(result.summary)
-        || json!(recorded_pages::<Value>(store, manifest, "trade_pages")?)
-            != json!(result.trades)
-        || recorded_pages::<(u64, f64)>(store, manifest, "equity_curve_pages")?
-            != result.equity
+        || json!(recorded_pages::<Value>(store, manifest, "trade_pages")?) != json!(result.trades)
+        || recorded_pages::<(u64, f64)>(store, manifest, "equity_curve_pages")? != result.equity
     {
         return Err(mismatch());
     }
@@ -121,7 +122,13 @@ pub(super) fn verify(
         .as_str()
         .ok_or_else(mismatch)?;
     let recalculated = audit_replay(
-        &bars, &spec, &result, currency, score_start, bars.len(), &|| false,
+        &bars,
+        &spec,
+        &result,
+        currency,
+        score_start,
+        bars.len(),
+        &|| false,
     )
     .map_err(|_| mismatch())?;
     if json!(recalculated) != *audit {

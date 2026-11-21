@@ -136,7 +136,7 @@ fn replay_with_hash(
     let (mut peak, mut maxdd) = (10000.0f64, 0.0f64);
     let mut previous = None;
     for (i, b) in bars.iter().take(score_end).enumerate() {
-        if i % 4096 == 0 && cancel() {
+        if i.is_multiple_of(4096) && cancel() {
             return Err("CANCELLED".into());
         }
         if [b.open, b.high, b.low, b.close]

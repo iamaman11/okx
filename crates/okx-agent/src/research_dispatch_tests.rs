@@ -359,7 +359,10 @@ async fn t06_t09_real_worker_causality_and_economics_are_isolated() {
         ],"result_steps":["price_signal","oi_change","oi_signal","funding_observed","funding_signal"]}
     })).unwrap();
     assert!(market_request.valid());
-    let mut market = client.market(market_request.clone(), None, None).await.unwrap();
+    let mut market = client
+        .market(market_request.clone(), None, None)
+        .await
+        .unwrap();
     if market["rows"].is_null() {
         let job_id = market["id"].as_str().expect("queued market job ID");
         assert_eq!(terminal(&client, job_id).await["state"], "completed");
@@ -367,21 +370,45 @@ async fn t06_t09_real_worker_causality_and_economics_are_isolated() {
     }
     let row = &market["rows"][0];
     assert_eq!(row["metrics"]["price_signal"], true);
-    assert_eq!(row["composition_quality"]["price_signal"]["status"], "available_at_closed_bar");
+    assert_eq!(
+        row["composition_quality"]["price_signal"]["status"],
+        "available_at_closed_bar"
+    );
     assert!(row["metrics"]["oi_change"].is_number());
-    assert_eq!(row["composition_quality"]["oi_change"]["status"], "retrospective_publication_unverified");
-    assert!((row["metrics"]["funding_observed"].as_f64().unwrap() - 0.001).abs() < 1e-12,
-        "funding uses realized_rate, never the conflicting 0.002 forecast");
-    assert_eq!(row["composition_quality"]["funding_observed"]["status"],
-        "retrospective_publication_unverified");
+    assert_eq!(
+        row["composition_quality"]["oi_change"]["status"],
+        "retrospective_publication_unverified"
+    );
+    assert!(
+        (row["metrics"]["funding_observed"].as_f64().unwrap() - 0.001).abs() < 1e-12,
+        "funding uses realized_rate, never the conflicting 0.002 forecast"
+    );
+    assert_eq!(
+        row["composition_quality"]["funding_observed"]["status"],
+        "retrospective_publication_unverified"
+    );
     for signal in ["oi_signal", "funding_signal"] {
-        assert!(row["metrics"][signal].is_null(), "{signal} cannot be a causal signal");
-        assert_eq!(row["composition_quality"][signal]["issues"][0]["reason"],
-            "CAUSAL_PUBLICATION_TIME_UNVERIFIED");
+        assert!(
+            row["metrics"][signal].is_null(),
+            "{signal} cannot be a causal signal"
+        );
+        assert_eq!(
+            row["composition_quality"][signal]["issues"][0]["reason"],
+            "CAUSAL_PUBLICATION_TIME_UNVERIFIED"
+        );
     }
-    assert_eq!(row["source_integrity"]["quality"], "verified_normalized_sources");
-    assert_eq!(row["source_integrity"]["historical_publication_time_verified"], false);
-    assert_eq!(row["source_integrity"]["metric_reexecution"]["quality"], "verified_reexecution");
+    assert_eq!(
+        row["source_integrity"]["quality"],
+        "verified_normalized_sources"
+    );
+    assert_eq!(
+        row["source_integrity"]["historical_publication_time_verified"],
+        false
+    );
+    assert_eq!(
+        row["source_integrity"]["metric_reexecution"]["quality"],
+        "verified_reexecution"
+    );
     let source_reads = reads.load(Ordering::SeqCst);
     assert!(source_reads >= 3);
 
@@ -400,7 +427,8 @@ async fn t06_t09_real_worker_causality_and_economics_are_isolated() {
     }]);
     let counterfactual: ResearchRequest = serde_json::from_value(serde_json::json!({
         "action":"economics","cases":cases,"data_mode":"counterfactual"
-    })).unwrap();
+    }))
+    .unwrap();
     assert!(counterfactual.valid());
     let economy = client.research(counterfactual).await.unwrap();
     assert_eq!(economy["rows"][0]["net"]["amount_exact"], "3");
@@ -409,19 +437,29 @@ async fn t06_t09_real_worker_causality_and_economics_are_isolated() {
     assert_eq!(economy["rows"][1]["net"]["currency"], "USD");
     assert!(economy["portfolio_equity"].is_null());
     assert!(economy["joint_portfolio_risk"].is_null());
-    assert_eq!(economy["summary"]["aggregation"], "independent_positions_no_fx_no_joint_risk");
+    assert_eq!(
+        economy["summary"]["aggregation"],
+        "independent_positions_no_fx_no_joint_risk"
+    );
     assert_eq!(economy["effects"]["venue_posts"], 0);
     assert_eq!(economy["effects"]["finance_writes"], 0);
 
     let historical: ResearchRequest = serde_json::from_value(serde_json::json!({
         "action":"economics","cases":cases,"data_mode":"historical_observed"
-    })).unwrap();
+    }))
+    .unwrap();
     let blocked = client.research(historical).await.unwrap();
     assert_eq!(blocked["status"], "blocked");
-    assert_eq!(blocked["reason_code"], "HISTORICAL_RULES_AND_FEES_UNAVAILABLE");
+    assert_eq!(
+        blocked["reason_code"],
+        "HISTORICAL_RULES_AND_FEES_UNAVAILABLE"
+    );
     assert_eq!(blocked["effects"]["job_created"], false);
-    assert_eq!(reads.load(Ordering::SeqCst), source_reads,
-        "economic scenario must not read venues or create hidden sources");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        source_reads,
+        "economic scenario must not read venues or create hidden sources"
+    );
     client.shutdown().await;
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -471,9 +509,8 @@ async fn t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated() 
                         Ok(PublicSourceReply::OpenInterest(
                             (0..100u64)
                                 .map(|index| ResearchOpenInterest {
-                                    ts: (index * 60_000
-                                        + u64::from(shifted && index == 42))
-                                    .to_string(),
+                                    ts: (index * 60_000 + u64::from(shifted && index == 42))
+                                        .to_string(),
                                     oi: (100 + index).to_string(),
                                     oi_currency: (100 + index).to_string(),
                                 })
@@ -514,7 +551,13 @@ async fn t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated() 
     );
     let mut rows = Vec::new();
     loop {
-        rows.extend(result["rows"].as_array().expect("market result rows").iter().cloned());
+        rows.extend(
+            result["rows"]
+                .as_array()
+                .expect("market result rows")
+                .iter()
+                .cloned(),
+        );
         let Some(cursor) = result["next_cursor"].as_str() else {
             break;
         };
@@ -523,7 +566,10 @@ async fn t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated() 
         result = client.market(next, None, None).await.unwrap();
     }
     assert_eq!(
-        (candle_reads.load(Ordering::SeqCst), oi_reads.load(Ordering::SeqCst)),
+        (
+            candle_reads.load(Ordering::SeqCst),
+            oi_reads.load(Ordering::SeqCst)
+        ),
         source_read_count,
         "cursor pages must read immutable evidence without refetching venues"
     );
@@ -537,33 +583,58 @@ async fn t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated() 
     let shifted = row("ETH-USDT-SWAP");
     for observed in [aligned, shifted] {
         assert_eq!(observed["metrics"]["price_signal"], true);
-        assert_eq!(observed["composition_quality"]["price_signal"]["status"],
-            "available_at_closed_bar");
+        assert_eq!(
+            observed["composition_quality"]["price_signal"]["status"],
+            "available_at_closed_bar"
+        );
         assert!(observed["metrics"]["oi_signal"].is_null());
-        assert_eq!(observed["source_integrity"]["historical_publication_time_verified"], false);
-        assert_eq!(observed["source_integrity"]["metric_reexecution"]["quality"],
-            "verified_reexecution");
+        assert_eq!(
+            observed["source_integrity"]["historical_publication_time_verified"],
+            false
+        );
+        assert_eq!(
+            observed["source_integrity"]["metric_reexecution"]["quality"],
+            "verified_reexecution"
+        );
     }
     assert!(aligned["metrics"]["oi_return"].is_number());
     assert_eq!(aligned["source_alignment"]["aligned_observations"], 100);
     assert_eq!(aligned["source_alignment"]["oi_off_grid_events"], 0);
-    assert_eq!(aligned["composition_quality"]["oi_signal"]["issues"][0]["reason"],
-        "CAUSAL_PUBLICATION_TIME_UNVERIFIED");
+    assert_eq!(
+        aligned["composition_quality"]["oi_signal"]["issues"][0]["reason"],
+        "CAUSAL_PUBLICATION_TIME_UNVERIFIED"
+    );
 
     assert!(shifted["metrics"]["oi_return"].is_null());
     assert_eq!(shifted["source_alignment"]["aligned_observations"], 99);
     assert_eq!(shifted["source_alignment"]["oi_off_grid_events"], 1);
-    assert_eq!(shifted["source_alignment"]["oi_first_off_grid_ms"], 42 * 60_000 + 1);
-    assert_eq!(shifted["source_alignment"]["first_unaligned_ms"], 42 * 60_000);
+    assert_eq!(
+        shifted["source_alignment"]["oi_first_off_grid_ms"],
+        42 * 60_000 + 1
+    );
+    assert_eq!(
+        shifted["source_alignment"]["first_unaligned_ms"],
+        42 * 60_000
+    );
     assert_eq!(shifted["oi_coverage"]["first_missing_ms"], 42 * 60_000);
-    assert_eq!(shifted["composition_quality"]["oi_return"]["issues"][0]["reason"],
-        "OI_RANGE_INCOMPLETE_OR_GAPPED");
-    assert_ne!(aligned["source_captures"]["open_interest"]["capture_hash"],
-        shifted["source_captures"]["open_interest"]["capture_hash"]);
-    assert_eq!(candle_reads.load(Ordering::SeqCst), 2,
-        "each instrument reads its candles once");
-    assert_eq!(oi_reads.load(Ordering::SeqCst), 2,
-        "each instrument reads its OI once");
+    assert_eq!(
+        shifted["composition_quality"]["oi_return"]["issues"][0]["reason"],
+        "OI_RANGE_INCOMPLETE_OR_GAPPED"
+    );
+    assert_ne!(
+        aligned["source_captures"]["open_interest"]["capture_hash"],
+        shifted["source_captures"]["open_interest"]["capture_hash"]
+    );
+    assert_eq!(
+        candle_reads.load(Ordering::SeqCst),
+        2,
+        "each instrument reads its candles once"
+    );
+    assert_eq!(
+        oi_reads.load(Ordering::SeqCst),
+        2,
+        "each instrument reads its OI once"
+    );
     client.shutdown().await;
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -584,7 +655,8 @@ async fn t07_t08_real_worker_intraday_event_and_holdout_stay_separate() {
             Box::pin(async move {
                 let PublicSourceRequest::Candles {
                     instrument, after, ..
-                } = request else {
+                } = request
+                else {
                     return Err("UNEXPECTED_SOURCE".into());
                 };
                 let altered_holdout = instrument == "ETH-USDT";
@@ -594,9 +666,8 @@ async fn t07_t08_real_worker_intraday_event_and_holdout_stay_separate() {
                     .filter(|index| index * 60_000 < cursor)
                     .take(100)
                     .map(|index| {
-                        let mut close = 100.0
-                            + index as f64 * 0.03
-                            + ((index % 13) as f64 - 6.0) * 0.8;
+                        let mut close =
+                            100.0 + index as f64 * 0.03 + ((index % 13) as f64 - 6.0) * 0.8;
                         if altered_holdout && index >= SPLIT {
                             close += 30.0 + (index % 17) as f64 * 0.2;
                         }
@@ -636,9 +707,13 @@ async fn t07_t08_real_worker_intraday_event_and_holdout_stay_separate() {
             {"id":"event","op":"rising_edge","input":"jump"},
             {"id":"label","op":"forward_return_label","input":"close","when":"event","period":2}
         ],"result_steps":["jump","event","label"]}
-    })).unwrap();
+    }))
+    .unwrap();
     assert!(market_request.valid());
-    let mut market = client.market(market_request.clone(), None, None).await.unwrap();
+    let mut market = client
+        .market(market_request.clone(), None, None)
+        .await
+        .unwrap();
     if market["rows"].is_null() {
         let job_id = market["id"].as_str().expect("queued market job ID");
         assert_eq!(terminal(&client, job_id).await["state"], "completed");
@@ -649,14 +724,22 @@ async fn t07_t08_real_worker_intraday_event_and_holdout_stay_separate() {
     assert_eq!(event["candle_coverage"]["observed_unique_bars"], BARS);
     assert_eq!(event["metrics"]["jump"], true);
     assert_eq!(event["metrics"]["event"], true);
-    assert_eq!(event["composition_quality"]["event"]["status"],
-        "available_at_closed_bar");
+    assert_eq!(
+        event["composition_quality"]["event"]["status"],
+        "available_at_closed_bar"
+    );
     assert!(event["metrics"]["label"].is_null());
     assert_eq!(event["units"]["label"], "outcome_ratio");
-    assert!(event["gaps"].as_array().unwrap().contains(&serde_json::json!(
-        "OUTCOME_UNCONFIRMED:label")));
-    assert_eq!(event["source_integrity"]["metric_reexecution"]["quality"],
-        "verified_reexecution");
+    assert!(
+        event["gaps"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("OUTCOME_UNCONFIRMED:label"))
+    );
+    assert_eq!(
+        event["source_integrity"]["metric_reexecution"]["quality"],
+        "verified_reexecution"
+    );
 
     let submit = |instrument: &str, key: &str| -> ResearchRequest {
         serde_json::from_value(serde_json::json!({
@@ -668,7 +751,8 @@ async fn t07_t08_real_worker_intraday_event_and_holdout_stay_separate() {
             "costs":{"maker_fee_bps":0,"taker_fee_bps":0,
                 "slippage_bps":0,"funding_mode":"zero_assumption"},
             "data_mode":"counterfactual","seed":17
-        })).unwrap()
+        }))
+        .unwrap()
     };
     let baseline_request = submit("BTC-USDT", "ipc-intraday-oos-baseline");
     let altered_request = submit("ETH-USDT", "ipc-intraday-oos-altered");
@@ -680,21 +764,41 @@ async fn t07_t08_real_worker_intraday_event_and_holdout_stay_separate() {
     assert_eq!(terminal(&client, baseline_id).await["state"], "completed");
     assert_eq!(terminal(&client, altered_id).await["state"], "completed");
     let view = |job_id: &str, kind: ResearchResultView| ResearchRequest::Result {
-        job_id: job_id.into(), cursor: None, limit: 50, view: kind,
+        job_id: job_id.into(),
+        cursor: None,
+        limit: 50,
+        view: kind,
     };
-    let baseline_summary = client.research(view(baseline_id, ResearchResultView::Summary)).await.unwrap();
-    let altered_summary = client.research(view(altered_id, ResearchResultView::Summary)).await.unwrap();
+    let baseline_summary = client
+        .research(view(baseline_id, ResearchResultView::Summary))
+        .await
+        .unwrap();
+    let altered_summary = client
+        .research(view(altered_id, ResearchResultView::Summary))
+        .await
+        .unwrap();
     let before = &baseline_summary["metadata"];
     let after = &altered_summary["metadata"];
     assert_eq!(before["grid"]["split_index"], SPLIT);
     assert_eq!(after["grid"]["split_index"], SPLIT);
     assert_eq!(before["grid"]["selected"], after["grid"]["selected"]);
-    assert_eq!(before["grid"]["train_dataset_hash"], after["grid"]["train_dataset_hash"]);
+    assert_eq!(
+        before["grid"]["train_dataset_hash"],
+        after["grid"]["train_dataset_hash"]
+    );
     assert_eq!(before["grid"]["train"], after["grid"]["train"]);
-    assert_ne!(before["dataset_hash"], after["dataset_hash"],
-        "only holdout observations changed");
-    let baseline_variants = client.research(view(baseline_id, ResearchResultView::Variants)).await.unwrap();
-    let altered_variants = client.research(view(altered_id, ResearchResultView::Variants)).await.unwrap();
+    assert_ne!(
+        before["dataset_hash"], after["dataset_hash"],
+        "only holdout observations changed"
+    );
+    let baseline_variants = client
+        .research(view(baseline_id, ResearchResultView::Variants))
+        .await
+        .unwrap();
+    let altered_variants = client
+        .research(view(altered_id, ResearchResultView::Variants))
+        .await
+        .unwrap();
     assert_eq!(baseline_variants["total_rows"], 3);
     assert_eq!(altered_variants["total_rows"], 3);
     for index in 0..3 {
@@ -704,12 +808,17 @@ async fn t07_t08_real_worker_intraday_event_and_holdout_stay_separate() {
         assert_eq!(first["train_result_hash"], second["train_result_hash"]);
         assert_eq!(first["train"], second["train"]);
     }
-    let exported = client.research(view(baseline_id, ResearchResultView::Export)).await.unwrap();
+    let exported = client
+        .research(view(baseline_id, ResearchResultView::Export))
+        .await
+        .unwrap();
     assert_eq!(exported["side_effects"], "none");
     assert!(exported["experiment_artifact"].is_string());
     assert!(exported["economic_audit"].is_object());
-    assert!(reads.load(Ordering::SeqCst) >= 30,
-        "both 1,440-bar datasets must be acquired through real paged IPC");
+    assert!(
+        reads.load(Ordering::SeqCst) >= 30,
+        "both 1,440-bar datasets must be acquired through real paged IPC"
+    );
     client.shutdown().await;
     std::fs::remove_dir_all(root).unwrap();
 }

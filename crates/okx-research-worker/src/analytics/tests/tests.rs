@@ -21,39 +21,76 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
     assert_eq!(capabilities["effects"]["venue_post"], false);
     assert_eq!(capabilities["effects"]["write_finance"], false);
     assert_eq!(capabilities["effects"]["write_governance"], false);
-    assert_eq!(capabilities["composition"]["input_sources"],
-        serde_json::json!(["open", "high", "low", "close", "volume", "open_interest", "funding_rate"]));
+    assert_eq!(
+        capabilities["composition"]["input_sources"],
+        serde_json::json!([
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "open_interest",
+            "funding_rate"
+        ])
+    );
     for source in ["open", "high", "low", "close"] {
         assert_eq!(capabilities["composition"]["source_units"][source], "price");
     }
-    assert_eq!(capabilities["composition"]["source_units"]["volume"], "native_volume");
-    assert_eq!(capabilities["composition"]["ohlc_policy"],
-        "same_instrument_closed_candle_grid_no_forward_fill");
-    let volume_change = operators.iter().find(|item| item["name"] == "volume_change").unwrap();
+    assert_eq!(
+        capabilities["composition"]["source_units"]["volume"],
+        "native_volume"
+    );
+    assert_eq!(
+        capabilities["composition"]["ohlc_policy"],
+        "same_instrument_closed_candle_grid_no_forward_fill"
+    );
+    let volume_change = operators
+        .iter()
+        .find(|item| item["name"] == "volume_change")
+        .unwrap();
     assert_eq!(volume_change["typed_inputs"][0]["unit"], "native_volume");
     assert_eq!(volume_change["typed_inputs"][0]["source"], "candles");
     let comparator = capabilities["composition"]["operations"]
-        .as_array().unwrap().iter()
-        .find(|item| item["op"] == "greater_than_series").unwrap();
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["op"] == "greater_than_series")
+        .unwrap();
     assert_eq!(comparator["other_unit"], "same_as_input");
     assert_eq!(comparator["output_unit"], "boolean");
     assert_eq!(comparator["causal"], true);
-    let operations = capabilities["composition"]["operations"].as_array().unwrap();
-    let extension = operations.iter().find(|item| item["op"] == "rolling_range").unwrap();
-    assert_eq!(extension, &serde_json::to_value(
-        okx_analysis::query_plan::ROLLING_RANGE_DESCRIPTOR).unwrap());
+    let operations = capabilities["composition"]["operations"]
+        .as_array()
+        .unwrap();
+    let extension = operations
+        .iter()
+        .find(|item| item["op"] == "rolling_range")
+        .unwrap();
+    assert_eq!(
+        extension,
+        &serde_json::to_value(okx_analysis::query_plan::ROLLING_RANGE_DESCRIPTOR).unwrap()
+    );
     assert_eq!(extension["owner"], "okx-kernel::query_plan::rolling_range");
     assert_eq!(extension["effects"], "pure_no_io");
     assert_eq!(extension["version"], 1);
-    let stddev = operations.iter().find(|item| item["op"] == "rolling_stddev").unwrap();
+    let stddev = operations
+        .iter()
+        .find(|item| item["op"] == "rolling_stddev")
+        .unwrap();
     assert_eq!(stddev["output_unit"], "same_as_input");
     assert_eq!(stddev["variance"], "population_inclusive_window");
     assert_eq!(stddev["period_min"], 2);
     assert_eq!(stddev["null_policy"], "strict_window_zero_for_constant");
-    let lower = operations.iter().find(|item| item["op"] == "less_than_series").unwrap();
+    let lower = operations
+        .iter()
+        .find(|item| item["op"] == "less_than_series")
+        .unwrap();
     assert_eq!(lower["other_unit"], "same_as_input");
     assert_eq!(lower["null_policy"], "propagate_unknown");
-    let falling = operations.iter().find(|item| item["op"] == "falling_edge").unwrap();
+    let falling = operations
+        .iter()
+        .find(|item| item["op"] == "falling_edge")
+        .unwrap();
     assert_eq!(falling["input_unit"], "boolean");
     assert_eq!(falling["trigger"], "true_to_false");
     for op in ["and", "or"] {
@@ -214,10 +251,12 @@ async fn grid_result_includes_selected_train_test_and_equity() {
         &service.artifacts,
         &result,
         &dataset,
-        Some(grid),
-        None,
-        None,
-        None,
+        ReplayPublication {
+            grid: Some(grid),
+            experiment: None,
+            economic_audit: None,
+            producer: None,
+        },
         &|| false,
     )
     .unwrap();

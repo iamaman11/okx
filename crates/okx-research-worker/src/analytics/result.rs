@@ -124,12 +124,8 @@ pub(super) fn verify_export_manifest(
             // then compare it to every replay input bar as it is streamed and
             // hash-verified. A valid capture alone is not proof of attribution.
             let (funding_capture, expected_funding) = verify_experiment_funding(store, &inputs)?;
-            let dataset = verify_experiment_dataset(
-                store,
-                &inputs,
-                manifest,
-                expected_funding.as_deref(),
-            )?;
+            let dataset =
+                verify_experiment_dataset(store, &inputs, manifest, expected_funding.as_deref())?;
             Some(
                 json!({"artifact":id,"checksum_verified":true,"references_match":true,
                 "reference_capture_verified":reference_id.is_some(),
@@ -181,16 +177,16 @@ pub(super) fn verify_export_manifest(
 /// A replay's historical funding is a retrospective settlement input, not a
 /// publication-time-certified signal. Verify its normalized capture against
 /// the experiment while keeping availability and mark-price caveats explicit.
-fn verify_experiment_funding(
-    store: &ResearchArtifactStore,
-    inputs: &Value,
-) -> Result<(Value, Option<Vec<Option<f64>>>), String> {
+type FundingVerification = Result<(Value, Option<Vec<Option<f64>>>), String>;
+
+fn verify_experiment_funding(store: &ResearchArtifactStore, inputs: &Value) -> FundingVerification {
     let basis = &inputs["economic_basis"];
     if !basis["funding_event_alignment"].is_object() {
         return Ok((json!({"quality":"not_applicable"}), None));
     }
     let alignment = &basis["funding_event_alignment"];
-    let attribution_v1 = alignment["allocation_schema"] == "okx.research.funding-bar-observation/v1";
+    let attribution_v1 =
+        alignment["allocation_schema"] == "okx.research.funding-bar-observation/v1";
     if !alignment["allocation_schema"].is_null() && !attribution_v1 {
         return Err("EXPERIMENT_FUNDING_MISMATCH".into());
     }
@@ -198,8 +194,11 @@ fn verify_experiment_funding(
         if attribution_v1 {
             return Err("EXPERIMENT_FUNDING_MISMATCH".into());
         }
-        return Ok((json!({"quality":"unverified_legacy",
-            "reason_code":"FUNDING_CAPTURE_NOT_RETAINED"}), None));
+        return Ok((
+            json!({"quality":"unverified_legacy",
+            "reason_code":"FUNDING_CAPTURE_NOT_RETAINED"}),
+            None,
+        ));
     };
     let captured: Value = read_verified_result(store, id)?;
     let reason = "EXPERIMENT_FUNDING_MISMATCH";
@@ -249,27 +248,34 @@ fn verify_experiment_funding(
     if !attribution_v1 {
         // Older immutable experiments can prove event capture only, never
         // claim to have passed the newer bar-by-bar attribution check.
-        return Ok((json!({"artifact":id,"quality":"verified",
+        return Ok((
+            json!({"artifact":id,"quality":"verified",
             "observed_events":events.len(),"normalized_capture_hash":hash,
             "replay_attribution_verified":false,
-            "publication_time_verified":false,"mark_price_verified":false}), None));
+            "publication_time_verified":false,"mark_price_verified":false}),
+            None,
+        ));
     }
     let bar_count = inputs["bar_count"].as_u64().ok_or(reason)?;
     let bar_count = usize::try_from(bar_count).map_err(|_| reason)?;
     let timeframe = inputs["timeframe_ms"].as_u64().ok_or(reason)?;
-    let first_bar = inputs["effective_range"]["start_ms"].as_u64().ok_or(reason)?;
+    let first_bar = inputs["effective_range"]["start_ms"]
+        .as_u64()
+        .ok_or(reason)?;
     let last_close = inputs["effective_range"]["end_ms"].as_u64().ok_or(reason)?;
     if bar_count == 0
         || bar_count > okx_research::economics::MAX_FUNDING_ALLOCATION_BARS
         || timeframe == 0
         || first_bar.checked_add((bar_count as u64).checked_mul(timeframe).ok_or(reason)?)
             != Some(last_close)
-        || alignment["join_semantics"] != "funding_event_at_preceding_closed_bar_end_no_forward_fill"
+        || alignment["join_semantics"]
+            != "funding_event_at_preceding_closed_bar_end_no_forward_fill"
         || alignment["source"] != "okx/funding-rate-history"
         || alignment["rate_basis"] != "realized_settlement_rate"
         || alignment["valuation_price"] != "candle_close_proxy_not_venue_mark_price"
         || alignment["absence_semantics"] != "no_observed_settlement_event_not_observed_zero_rate"
-        || alignment["arithmetic_projection"] != "unobserved_settlement_contributes_zero_cashflow_not_zero_rate_evidence"
+        || alignment["arithmetic_projection"]
+            != "unobserved_settlement_contributes_zero_cashflow_not_zero_rate_evidence"
         || !alignment["expected_events"].is_null()
         || alignment["publication_time_verified"] != false
         || alignment["mark_price_verified"] != false
@@ -280,10 +286,9 @@ fn verify_experiment_funding(
     let bar_opens = (0..bar_count)
         .map(|index| first_bar + index as u64 * timeframe)
         .collect::<Vec<_>>();
-    let allocation = okx_research::economics::allocate_funding_at_bar_close(
-        &bar_opens, timeframe, &events,
-    )
-    .map_err(|_| reason)?;
+    let allocation =
+        okx_research::economics::allocate_funding_at_bar_close(&bar_opens, timeframe, &events)
+            .map_err(|_| reason)?;
     if alignment["attributed_events"] != allocation.attributed_events
         || alignment["pre_window_events_ignored"] != allocation.pre_window_events
         || alignment["observed_zero_rate_events"] != allocation.observed_zero_rate_events
@@ -295,14 +300,16 @@ fn verify_experiment_funding(
     {
         return Err(reason.into());
     }
-    Ok((json!({"artifact":id,"quality":"verified",
+    Ok((
+        json!({"artifact":id,"quality":"verified",
         "observed_events":events.len(),"normalized_capture_hash":hash,
         "replay_attribution_verified":true,
         "attributed_events":allocation.attributed_events,
         "observed_zero_rate_events":allocation.observed_zero_rate_events,
         "bars_without_settlement":allocation.bars_without_settlement,
         "publication_time_verified":false,"mark_price_verified":false}),
-        Some(allocation.observed_bar_rates)))
+        Some(allocation.observed_bar_rates),
+    ))
 }
 
 /// Verify the exact input bars used by replay from the original immutable
@@ -371,10 +378,11 @@ fn verify_experiment_dataset(
             if let Some(projection) = expected_funding {
                 // A missing event is an arithmetic zero, but the event's
                 // presence is retained in `projection` for evidence.
-                if bar.funding_rate != projection
-                    .get(observed_bars)
-                    .map(|rate| Some(rate.unwrap_or(0.0)))
-                    .unwrap_or(None)
+                if bar.funding_rate
+                    != projection
+                        .get(observed_bars)
+                        .map(|rate| Some(rate.unwrap_or(0.0)))
+                        .unwrap_or(None)
                 {
                     return Err("EXPERIMENT_FUNDING_BAR_MISMATCH".into());
                 }

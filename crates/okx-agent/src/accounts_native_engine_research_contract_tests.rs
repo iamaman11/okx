@@ -11,14 +11,17 @@ use crate::{
     research_client::{ResearchClient, ResearchClientConfig, SourceHandler},
     runtime::{EngineContext, EngineDrainOutcome, run_engine_until},
 };
-use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering as CounterOrdering};
-use tokio::{io::{AsyncBufReadExt, BufReader}, process::{Child, Command}};
 use okx_protocol::research_ipc::HistoryCandle;
 use okx_protocol::{
     NATIVE_CHILD_CONTROL_SCHEMA_V1, NativeChildOperation, NativeChildRequest,
     analytics::*,
     research_ipc::{PublicCandleCapture, PublicSourceReply, PublicSourceRequest, ResearchScope},
+};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering as CounterOrdering};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::{Child, Command},
 };
 
 #[derive(Default)]
@@ -103,7 +106,12 @@ fn heavy_grid(key: &str) -> ResearchRequest {
     }
 }
 
-fn boundary_grid(key: &str, instruments: usize, bars_per_instrument: u64, variants: usize) -> ResearchRequest {
+fn boundary_grid(
+    key: &str,
+    instruments: usize,
+    bars_per_instrument: u64,
+    variants: usize,
+) -> ResearchRequest {
     ResearchRequest::Grid {
         idempotency_key: key.into(),
         instruments: (0..instruments).map(|i| format!("TEST-{i}")).collect(),
@@ -112,7 +120,13 @@ fn boundary_grid(key: &str, instruments: usize, bars_per_instrument: u64, varian
         end_ms: 60_000 * bars_per_instrument,
         strategy_id: "ema_cross_v1".into(),
         variants: (0..variants)
-            .map(|i| EmaParameters { fast: 2, slow: 90 + i }.into())
+            .map(|i| {
+                EmaParameters {
+                    fast: 2,
+                    slow: 90 + i,
+                }
+                .into()
+            })
             .collect(),
         costs: ResearchCosts {
             maker_fee_bps: 1.,
@@ -137,16 +151,31 @@ async fn t10_real_worker_boundary_proof(
     assert_eq!(before, 0, "no source page may precede the boundary check");
     assert_eq!(rows_before, 0);
     for (name, request) in [
-        ("one_million_bars_one_instrument_64", boundary_grid("t10-max-bars", 1, 1_000_000, 64)),
-        ("eight_instruments_one_million_bars_64", boundary_grid("t10-max-eight", 8, 125_000, 64)),
+        (
+            "one_million_bars_one_instrument_64",
+            boundary_grid("t10-max-bars", 1, 1_000_000, 64),
+        ),
+        (
+            "eight_instruments_one_million_bars_64",
+            boundary_grid("t10-max-eight", 8, 125_000, 64),
+        ),
     ] {
         assert!(request.valid(), "{name}: exact boundary must admit");
     }
     let mut rejected = serde_json::Map::new();
     for (name, request) in [
-        ("one_million_plus_one_bars", boundary_grid("t10-over-bars", 1, 1_000_001, 64)),
-        ("nine_instruments", boundary_grid("t10-over-instruments", 9, 125_000, 64)),
-        ("sixty_five_variants", boundary_grid("t10-over-variants", 8, 125_000, 65)),
+        (
+            "one_million_plus_one_bars",
+            boundary_grid("t10-over-bars", 1, 1_000_001, 64),
+        ),
+        (
+            "nine_instruments",
+            boundary_grid("t10-over-instruments", 9, 125_000, 64),
+        ),
+        (
+            "sixty_five_variants",
+            boundary_grid("t10-over-variants", 8, 125_000, 65),
+        ),
     ] {
         assert!(!request.valid(), "{name}: exceeding boundary must reject");
         let error = tokio::time::timeout(Duration::from_secs(5), research.research(request))
@@ -154,8 +183,14 @@ async fn t10_real_worker_boundary_proof(
             .expect("pre-source real Worker IPC rejection deadline")
             .expect_err("invalid request must not create a Research job");
         assert_eq!(error, "INVALID_RESEARCH_REQUEST", "{name}");
-        assert_eq!(reads.successful_requests.load(CounterOrdering::SeqCst), before);
-        assert_eq!(reads.returned_rows.load(CounterOrdering::SeqCst), rows_before);
+        assert_eq!(
+            reads.successful_requests.load(CounterOrdering::SeqCst),
+            before
+        );
+        assert_eq!(
+            reads.returned_rows.load(CounterOrdering::SeqCst),
+            rows_before
+        );
         rejected.insert(name.into(), serde_json::Value::String(error));
     }
     serde_json::json!({
@@ -202,8 +237,7 @@ struct McpLoadHost {
 
 impl McpLoadHost {
     async fn start(installation_id: &str, governance_path: &std::path::Path) -> Self {
-        let mcp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cloudflare/okx-mcp");
+        let mcp = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cloudflare/okx-mcp");
         let mut command = Command::new("node");
         command
             .arg("scripts/t10-mcp-load-host.mjs")
@@ -214,7 +248,9 @@ impl McpLoadHost {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
-        let mut child = command.spawn().expect("isolated MCP fixture host must start");
+        let mut child = command
+            .spawn()
+            .expect("isolated MCP fixture host must start");
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         tokio::time::timeout(Duration::from_secs(30), stdout.read_line(&mut line))
@@ -231,7 +267,11 @@ impl McpLoadHost {
         let http_url = proof["http_url"].as_str().unwrap().to_owned();
         let ws_url = proof["ws_url"].as_str().unwrap().to_owned();
         assert!(http_url.starts_with("http://127.0.0.1:"));
-        Self { child, http_url, ws_url }
+        Self {
+            child,
+            http_url,
+            ws_url,
+        }
     }
 
     async fn close(mut self) {
@@ -240,7 +280,10 @@ impl McpLoadHost {
             .await
             .expect("MCP fixture host drain deadline")
             .expect("MCP fixture host wait");
-        assert!(status.success(), "MCP fixture host must close and erase its isolated DO");
+        assert!(
+            status.success(),
+            "MCP fixture host must close and erase its isolated DO"
+        );
     }
 }
 
@@ -260,8 +303,11 @@ async fn mcp_request(
         "params":{"name":"diagnostics","arguments":arguments}});
     let response = tokio::time::timeout(
         Duration::from_secs(5),
-        client.post(url).header("content-type", "application/json")
-            .body(request.to_string()).send(),
+        client
+            .post(url)
+            .header("content-type", "application/json")
+            .body(request.to_string())
+            .send(),
     )
     .await
     .expect("MCP HTTP/DO/WSS request timeout")
@@ -374,9 +420,9 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
     let campaign = fixture.campaign.clone();
     let installation = owner.installation_id().to_owned();
     let http_url = host.as_ref().map(|host| host.http_url.clone());
-    ctx.transport = host.as_ref().map(|host| {
-        CloudflareTransportConfig::isolated_loopback_fixture(host.ws_url.clone())
-    });
+    ctx.transport = host
+        .as_ref()
+        .map(|host| CloudflareTransportConfig::isolated_loopback_fixture(host.ws_url.clone()));
     let account = fixture.config.account_key.wire();
     let trade = fixture.trade.clone();
     let authority = fixture.authority.clone();
@@ -426,8 +472,10 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
         if disconnect_before_opening {
             let restarted = state(&child, &first).await;
             assert_eq!(restarted["id"], first);
-            assert_eq!(restarted["state"], "interrupted",
-                "a restarted CPU job must never be represented as successful");
+            assert_eq!(
+                restarted["state"], "interrupted",
+                "a restarted CPU job must never be represented as successful"
+            );
         } else {
             assert_eq!(
                 state(&child, &first).await["state"],
@@ -449,8 +497,12 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
         for _ in 0..100 {
             let began = std::time::Instant::now();
             let summary = tokio::time::timeout(
-                Duration::from_secs(2), owner.campaign_summary(campaign.clone()),
-            ).await.expect("Native Finance read blocked by Research").unwrap();
+                Duration::from_secs(2),
+                owner.campaign_summary(campaign.clone()),
+            )
+            .await
+            .expect("Native Finance read blocked by Research")
+            .unwrap();
             native_finance_ms.push(began.elapsed().as_secs_f64() * 1000.0);
             assert!(summary.opening.is_some(), "Engine opening was lost");
             assert_eq!(summary.reserved_entry_usd, "0");
@@ -458,14 +510,20 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
             assert_eq!(owner.installation_id(), installation);
             if !disconnect_before_opening {
                 let began = std::time::Instant::now();
-                let snapshot = tokio::time::timeout(
-                    Duration::from_secs(2), child.diagnostic_job(&first),
-                ).await.expect("read-only Research IPC blocked by CPU").unwrap();
+                let snapshot =
+                    tokio::time::timeout(Duration::from_secs(2), child.diagnostic_job(&first))
+                        .await
+                        .expect("read-only Research IPC blocked by CPU")
+                        .unwrap();
                 research_explain_ms.push(began.elapsed().as_secs_f64() * 1000.0);
                 assert_eq!(snapshot["job"]["id"], first);
-                assert!(matches!(snapshot["job"]["state"].as_str(),
-                    Some("queued" | "running" | "completed")),
-                    "diagnostic must be an authentic bounded job snapshot: {snapshot}");
+                assert!(
+                    matches!(
+                        snapshot["job"]["state"].as_str(),
+                        Some("queued" | "running" | "completed")
+                    ),
+                    "diagnostic must be an authentic bounded job snapshot: {snapshot}"
+                );
             }
         }
         if !disconnect_before_opening {
@@ -473,8 +531,10 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
             // Finance measurement interval, not just a startup observation.
             let a = state(&child, &first).await;
             let b = state(&child, &second).await;
-            assert!(a["state"] == "running" || b["state"] == "running",
-                "research completed before the native finance samples: {a} {b}");
+            assert!(
+                a["state"] == "running" || b["state"] == "running",
+                "research completed before the native finance samples: {a} {b}"
+            );
         }
         let finance = latency_proof(native_finance_ms, "native_finance_campaign_summary");
         let explain = if disconnect_before_opening {
@@ -488,12 +548,17 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
                 let began = std::time::Instant::now();
                 let reply = mcp_request(&mcp_client, url, "finance", Some(&account)).await;
                 samples.push(began.elapsed().as_secs_f64() * 1000.0);
-                assert!(reply.get("error").is_none(), "MCP schema must accept Finance read");
+                assert!(
+                    reply.get("error").is_none(),
+                    "MCP schema must accept Finance read"
+                );
                 let data = &reply["result"]["structuredContent"]["data"];
                 assert_eq!(data["schema"], "okx.finance-diagnostics/v1");
                 assert_eq!(data["account"], account);
-                assert_eq!(data["central_budget"]["state"], "NOT_EVALUATED",
-                    "MCP diagnostics must not fabricate a central financial permit");
+                assert_eq!(
+                    data["central_budget"]["state"], "NOT_EVALUATED",
+                    "MCP diagnostics must not fabricate a central financial permit"
+                );
             }
             latency_proof(samples, "mcp_http_sqlite_do_wss_native_finance")
         } else {
@@ -502,8 +567,10 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
         if with_mcp && !disconnect_before_opening {
             let a = state(&child, &first).await;
             let b = state(&child, &second).await;
-            assert!(a["state"] == "running" || b["state"] == "running",
-                "real Grid must overlap entire MCP Finance measurement: {a} {b}");
+            assert!(
+                a["state"] == "running" || b["state"] == "running",
+                "real Grid must overlap entire MCP Finance measurement: {a} {b}"
+            );
         }
         let successful_requests = source_reads
             .successful_requests
@@ -549,8 +616,12 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
         .unwrap();
     assert_eq!(outcome, EngineDrainOutcome::Drained);
     assert!(fixture.feed.outbound_posts.lock().unwrap().is_empty());
-    let proof = evidence_rx.await.expect("Native isolation proof not recorded");
-    if let Some(host) = host { host.close().await; }
+    let proof = evidence_rx
+        .await
+        .expect("Native isolation proof not recorded");
+    if let Some(host) = host {
+        host.close().await;
+    }
     research.shutdown().await;
     fixture.finish().await;
     proof
@@ -562,15 +633,18 @@ async fn engine_maintenance_and_stop_remain_independent_of_heavy_research_and_di
     let disconnected = run_phase(true, false).await;
     let evidence = measurement.finish();
     println!("RESEARCH_PROCESS_TREE={evidence}");
-    println!("T11_T12_NATIVE_ISOLATION_JSON:{}", serde_json::json!({
-        "schema":"okx.518.t11-t12-native-isolation-campaign/v1",
-        "under_load":working,"without_worker":disconnected,
-        "native_engine":"run_engine_until_real_tasks",
-        "research":"separate_child_process_two_real_grids",
-        "mcp_transport":"not_evaluated_in_native_test",
-        "windows_process_tree":evidence,
-        "exchange_trade_post":false,
-    }));
+    println!(
+        "T11_T12_NATIVE_ISOLATION_JSON:{}",
+        serde_json::json!({
+            "schema":"okx.518.t11-t12-native-isolation-campaign/v1",
+            "under_load":working,"without_worker":disconnected,
+            "native_engine":"run_engine_until_real_tasks",
+            "research":"separate_child_process_two_real_grids",
+            "mcp_transport":"not_evaluated_in_native_test",
+            "windows_process_tree":evidence,
+            "exchange_trade_post":false,
+        })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -579,15 +653,18 @@ async fn mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_r
     let under_load = run_phase(false, true).await;
     let worker_disconnected = run_phase(true, true).await;
     let process_tree = measurement.finish();
-    println!("T10_MCP_NATIVE_LOAD_JSON:{}", serde_json::json!({
-        "schema":"okx.518.t10-mcp-do-wss-native-finance/v1",
-        "under_load":under_load,"worker_disconnected":worker_disconnected,
-        "mcp_transport":"real_loopback_http_miniflare_sqlite_do_websocket_native",
-        "oauth":"test_scope_only_not_evaluated",
-        "production_network":"not_evaluated",
-        "research":"two_cpu_grids_in_separate_native_worker_child",
-        "financial_owner":"existing_native_sqlite",
-        "process_tree":process_tree,
-        "exchange_trade_post":false,
-    }));
+    println!(
+        "T10_MCP_NATIVE_LOAD_JSON:{}",
+        serde_json::json!({
+            "schema":"okx.518.t10-mcp-do-wss-native-finance/v1",
+            "under_load":under_load,"worker_disconnected":worker_disconnected,
+            "mcp_transport":"real_loopback_http_miniflare_sqlite_do_websocket_native",
+            "oauth":"test_scope_only_not_evaluated",
+            "production_network":"not_evaluated",
+            "research":"two_cpu_grids_in_separate_native_worker_child",
+            "financial_owner":"existing_native_sqlite",
+            "process_tree":process_tree,
+            "exchange_trade_post":false,
+        })
+    );
 }

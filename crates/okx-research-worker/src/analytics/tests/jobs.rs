@@ -311,13 +311,19 @@ fn c17_actual_child_os_kill_recovers_wal_and_blocks_false_success() {
             );
         } else if phase == "cancelled" {
             assert_eq!(job.state, State::Cancelled);
-            assert!(job.artifact.is_some(), "cancelled partial evidence retained");
+            assert!(
+                job.artifact.is_some(),
+                "cancelled partial evidence retained"
+            );
             restarted
                 .update(&id, State::Completed, Some("forged".into()), None)
                 .unwrap();
             assert_eq!(restarted.get(&id).unwrap().state, State::Cancelled);
             assert!(!restarted.enqueue(id.clone(), id.clone()).unwrap().1);
-            assert_eq!(restarted.cancel(&id, "os-kill-cancel-key").unwrap().state, State::Cancelled);
+            assert_eq!(
+                restarted.cancel(&id, "os-kill-cancel-key").unwrap().state,
+                State::Cancelled
+            );
         } else {
             assert_eq!(job.state, State::Interrupted);
             assert_eq!(

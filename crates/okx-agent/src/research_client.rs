@@ -427,11 +427,14 @@ impl ResearchClient {
         let _permit = if matches!(command, ResearchCommand::Shutdown) {
             None
         } else {
-            Some(match command.lane() {
-                ResearchLane::Critical => c.control_permits.acquire().await,
-                ResearchLane::Observation => c.observation_permits.acquire().await,
-                ResearchLane::Work => c.permits.acquire().await,
-            }.map_err(|_| "WORKER_CLOSED")?)
+            Some(
+                match command.lane() {
+                    ResearchLane::Critical => c.control_permits.acquire().await,
+                    ResearchLane::Observation => c.observation_permits.acquire().await,
+                    ResearchLane::Work => c.permits.acquire().await,
+                }
+                .map_err(|_| "WORKER_CLOSED")?,
+            )
         };
         if !c.live.load(Ordering::Acquire) {
             return Err("WORKER_DISCONNECTED".into());
@@ -735,27 +738,63 @@ mod transport_tests {
         let owner = c.clone();
         let task = tokio::spawn(async move { ResearchClient::send(&owner, cancel, None).await });
         let frame = tokio::time::timeout(Duration::from_millis(100), rx.recv())
-            .await.unwrap().unwrap();
-        let HostFrame::Request { id, command, .. } = frame else { panic!("missing cancel"); };
-        assert_eq!(command.lane(), ResearchLane::Critical);
-        c.pending.lock().unwrap().remove(id.as_str()).unwrap()
-            .send(Ok(WorkerReply::Product(serde_json::json!({"state":"cancelled"}))))
+            .await
+            .unwrap()
             .unwrap();
-        assert!(tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap().is_ok());
+        let HostFrame::Request { id, command, .. } = frame else {
+            panic!("missing cancel");
+        };
+        assert_eq!(command.lane(), ResearchLane::Critical);
+        c.pending
+            .lock()
+            .unwrap()
+            .remove(id.as_str())
+            .unwrap()
+            .send(Ok(WorkerReply::Product(
+                serde_json::json!({"state":"cancelled"}),
+            )))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
 
         let owner = c.clone();
         let observed = tokio::spawn(async move {
             ResearchClient::send(&owner, ResearchCommand::Capabilities, None).await
         });
-        assert!(tokio::time::timeout(Duration::from_millis(30), rx.recv()).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), rx.recv())
+                .await
+                .is_err()
+        );
         drop(observations);
         let frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-            .await.unwrap().unwrap();
-        let HostFrame::Request { id, command, .. } = frame else { panic!("missing observation"); };
-        assert_eq!(command.lane(), ResearchLane::Observation);
-        c.pending.lock().unwrap().remove(id.as_str()).unwrap()
-            .send(Ok(WorkerReply::Product(serde_json::json!({"quality":"fresh"}))))
+            .await
+            .unwrap()
             .unwrap();
-        assert!(tokio::time::timeout(Duration::from_secs(1), observed).await.unwrap().unwrap().is_ok());
+        let HostFrame::Request { id, command, .. } = frame else {
+            panic!("missing observation");
+        };
+        assert_eq!(command.lane(), ResearchLane::Observation);
+        c.pending
+            .lock()
+            .unwrap()
+            .remove(id.as_str())
+            .unwrap()
+            .send(Ok(WorkerReply::Product(
+                serde_json::json!({"quality":"fresh"}),
+            )))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), observed)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
     }
 }

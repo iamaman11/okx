@@ -16,11 +16,11 @@ struct Loaded {
     excluded: Option<usize>,
 }
 
+#[path = "market_replay_proof.rs"]
+mod replay_proof;
 #[cfg(test)]
 #[path = "tests/market_source_evidence_tests.rs"]
 mod source_evidence_tests;
-#[path = "market_replay_proof.rs"]
-mod replay_proof;
 
 /// A public rate defer is transient source capacity, not durable analytical evidence.
 fn market_source_rate_deferred(loaded: &[Loaded]) -> bool {
@@ -737,7 +737,12 @@ impl AnalyticsService {
                             &store, &linked, &request, &plan, &cancel,
                         )?;
                         let proof = replay_proof::verify_persisted_market_metrics(
-                            &store, &linked, &request, &plan, need_candles, &cancel,
+                            &store,
+                            &linked,
+                            &request,
+                            &plan,
+                            need_candles,
+                            &cancel,
                         )?;
                         linked["source_integrity"]["replay_metric_reexecution_verified"] =
                             json!(proof["quality"] == "verified_reexecution");
@@ -786,20 +791,26 @@ impl<T: Serialize + DeserializeOwned> Serialize for VerifiedSourcePages<'_, T> {
                 || rows.len() > MARKET_SOURCE_EVIDENCE_CHUNK
                 || (index + 1 < self.chunks.len() && rows.len() != MARKET_SOURCE_EVIDENCE_CHUNK)
             {
-                return Err(serde::ser::Error::custom("COMPOSITION_SOURCE_PAGE_SIZE_INVALID"));
+                return Err(serde::ser::Error::custom(
+                    "COMPOSITION_SOURCE_PAGE_SIZE_INVALID",
+                ));
             }
             observed = observed
                 .checked_add(rows.len())
                 .ok_or_else(|| serde::ser::Error::custom("COMPOSITION_SOURCE_COUNT_OVERFLOW"))?;
             if observed > self.expected {
-                return Err(serde::ser::Error::custom("COMPOSITION_SOURCE_COUNT_MISMATCH"));
+                return Err(serde::ser::Error::custom(
+                    "COMPOSITION_SOURCE_COUNT_MISMATCH",
+                ));
             }
             for row in &rows {
                 sequence.serialize_element(row)?;
             }
         }
         if observed != self.expected {
-            return Err(serde::ser::Error::custom("COMPOSITION_SOURCE_COUNT_MISMATCH"));
+            return Err(serde::ser::Error::custom(
+                "COMPOSITION_SOURCE_COUNT_MISMATCH",
+            ));
         }
         sequence.end()
     }
@@ -823,14 +834,15 @@ fn verify_one_source_pages<T: Serialize + DeserializeOwned>(
     request: &MarketRequest,
     instrument: &str,
     capture: &Value,
-    source: &str,
-    hash_domain: &str,
-    time_basis: &str,
+    source_spec: (&str, &str, &str),
     cancel: &super::executor::Cancel,
 ) -> Result<Value, String> {
+    let (source, hash_domain, time_basis) = source_spec;
     let invalid = || "COMPOSITION_SOURCE_EVIDENCE_MISMATCH".to_owned();
     let manifest_id = capture["evidence_artifact"].as_str().ok_or_else(invalid)?;
-    let manifest: Value = store.read_evidence_json(manifest_id).map_err(|_| invalid())?;
+    let manifest: Value = store
+        .read_evidence_json(manifest_id)
+        .map_err(|_| invalid())?;
     let expected = manifest["observed_points"].as_u64().ok_or_else(invalid)?;
     if expected > 1_000_000
         || manifest["schema"] != "okx.market.normalized-source/v1"
@@ -904,9 +916,11 @@ fn verify_one_source_pages<T: Serialize + DeserializeOwned>(
     {
         return Err(invalid());
     }
-    Ok(json!({"source":source,"quality":"verified_normalized_capture",
+    Ok(
+        json!({"source":source,"quality":"verified_normalized_capture",
         "pages":ids.len(),"observed_points":expected,"capture_hash":reconstructed_hash,
-        "publication_time_verified":false}))
+        "publication_time_verified":false}),
+    )
 }
 
 fn verify_composition_source_pages(
@@ -959,19 +973,31 @@ fn verify_composition_source_pages(
         }
         verified.push(match kind {
             Source::Candles => verify_one_source_pages::<Bar>(
-                store, request, instrument, capture, name, domain, time_basis, cancel,
+                store,
+                request,
+                instrument,
+                capture,
+                (name, domain, time_basis),
+                cancel,
             )?,
             _ => verify_one_source_pages::<(u64, f64)>(
-                store, request, instrument, capture, name, domain, time_basis, cancel,
+                store,
+                request,
+                instrument,
+                capture,
+                (name, domain, time_basis),
+                cancel,
             )?,
         });
     }
-    Ok(json!({"schema":"okx.market.composition-source-integrity/v1",
+    Ok(
+        json!({"schema":"okx.market.composition-source-integrity/v1",
         "quality":if unavailable.is_empty(){"verified_normalized_sources"}else{"partial_source_unavailable"},
         "verified_sources":verified,"unavailable_sources":unavailable,
         "replay_metric_reexecution_verified":false,
         "historical_publication_time_verified":false,
-        "proof":"bounded_chunk_read_identity_and_reconstructed_canonical_capture_hash"}))
+        "proof":"bounded_chunk_read_identity_and_reconstructed_canonical_capture_hash"}),
+    )
 }
 
 fn attach_composition_source_evidence(
@@ -1062,44 +1088,44 @@ fn publish_composition_source_evidence(
         .as_ref()
         .ok_or("COMPOSITION_EVIDENCE_WITHOUT_PLAN")?;
     let mut evidence = Vec::with_capacity(3);
-    if plan.sources.contains(&Source::Candles) {
-        if let Ok(bars) = &row.bars {
-            evidence.push(publish_normalized_source(
-                store,
-                request,
-                &row.instrument,
-                "candles",
-                "okx.market.candle-source-capture/v1",
-                bars,
-                cancel,
-            )?);
-        }
+    if plan.sources.contains(&Source::Candles)
+        && let Ok(bars) = &row.bars
+    {
+        evidence.push(publish_normalized_source(
+            store,
+            request,
+            &row.instrument,
+            "candles",
+            "okx.market.candle-source-capture/v1",
+            bars,
+            cancel,
+        )?);
     }
-    if plan.sources.contains(&Source::OpenInterest) {
-        if let Some(Ok(points)) = &row.oi {
-            evidence.push(publish_normalized_source(
-                store,
-                request,
-                &row.instrument,
-                "open_interest",
-                "okx.market.oi-source-capture/v1",
-                points,
-                cancel,
-            )?);
-        }
+    if plan.sources.contains(&Source::OpenInterest)
+        && let Some(Ok(points)) = &row.oi
+    {
+        evidence.push(publish_normalized_source(
+            store,
+            request,
+            &row.instrument,
+            "open_interest",
+            "okx.market.oi-source-capture/v1",
+            points,
+            cancel,
+        )?);
     }
-    if plan.sources.contains(&Source::Funding) {
-        if let Some(Ok(events)) = &row.funding {
-            evidence.push(publish_normalized_source(
-                store,
-                request,
-                &row.instrument,
-                "funding_rate",
-                "okx.market.funding-realized-event-source-capture/v1",
-                events,
-                cancel,
-            )?);
-        }
+    if plan.sources.contains(&Source::Funding)
+        && let Some(Ok(events)) = &row.funding
+    {
+        evidence.push(publish_normalized_source(
+            store,
+            request,
+            &row.instrument,
+            "funding_rate",
+            "okx.market.funding-realized-event-source-capture/v1",
+            events,
+            cancel,
+        )?);
     }
     Ok(evidence)
 }
@@ -1267,9 +1293,13 @@ fn compute_row_planned(
             .contains(&okx_analysis::query_plan::Source::Funding)
     });
     let capture_oi = composition.is_some()
-        && plan.sources.contains(&okx_analysis::query_plan::Source::OpenInterest);
+        && plan
+            .sources
+            .contains(&okx_analysis::query_plan::Source::OpenInterest);
     let capture_funding = composition.is_some()
-        && plan.sources.contains(&okx_analysis::query_plan::Source::Funding);
+        && plan
+            .sources
+            .contains(&okx_analysis::query_plan::Source::Funding);
     if request.fields.iter().any(|field| field == "oi_change") || composition_oi {
         if let Some(Err(_)) = &row.oi {
             gaps.push("OI_SOURCE_UNAVAILABLE".into());
@@ -1432,10 +1462,18 @@ fn compute_row_planned(
             let mut prices = vec![f64::NAN; count];
             // Allocate only projected dependencies. Unused OHLC branches do
             // not consume buffers or cause any extra source reads.
-            let mut opens = composition.uses_source("open").then(|| vec![f64::NAN; count]);
-            let mut highs = composition.uses_source("high").then(|| vec![f64::NAN; count]);
-            let mut lows = composition.uses_source("low").then(|| vec![f64::NAN; count]);
-            let mut volumes = composition.uses_source("volume").then(|| vec![f64::NAN; count]);
+            let mut opens = composition
+                .uses_source("open")
+                .then(|| vec![f64::NAN; count]);
+            let mut highs = composition
+                .uses_source("high")
+                .then(|| vec![f64::NAN; count]);
+            let mut lows = composition
+                .uses_source("low")
+                .then(|| vec![f64::NAN; count]);
+            let mut volumes = composition
+                .uses_source("volume")
+                .then(|| vec![f64::NAN; count]);
             let range = okx_analysis::time_series::ClosedRange::strict(
                 request.start_ms,
                 request.end_ms,
@@ -1443,7 +1481,7 @@ fn compute_row_planned(
             )?;
             for bar in bars.iter() {
                 if let Some(offset) = bar.time.checked_sub(request.start_ms)
-                    && offset % request.timeframe_ms == 0
+                    && offset.is_multiple_of(request.timeframe_ms)
                 {
                     let index = (offset / request.timeframe_ms) as usize;
                     if let Some(slot) = prices.get_mut(index) {
@@ -2025,7 +2063,10 @@ mod tests {
         // artifact.is_some() and would serve it as a completed query.
         let row_page = service
             .artifacts
-            .publish_evidence(&vec![json!({"instrument":"UNCOMMITTED"}), json!({"instrument":"UNCOMMITTED_2"})])
+            .publish_evidence(&vec![
+                json!({"instrument":"UNCOMMITTED"}),
+                json!({"instrument":"UNCOMMITTED_2"}),
+            ])
             .unwrap()
             .0;
         let manifest = service
@@ -2048,24 +2089,64 @@ mod tests {
             .enqueue(format!("market-{cancelled_id}"), cancelled_id.clone())
             .unwrap();
         assert!(fresh);
-        assert!(service.jobs.update(&created.id, jobs::State::Running, Some(partial.clone()), None).unwrap());
-        service.jobs.cancel(&cancelled_id, "t14-cancel-key").unwrap();
-        assert_eq!(service.jobs.get(&cancelled_id).unwrap().state, jobs::State::Cancelled);
-        let retry = service.market(cancelled_request.clone(), None, None).await.unwrap();
+        assert!(
+            service
+                .jobs
+                .update(
+                    &created.id,
+                    jobs::State::Running,
+                    Some(partial.clone()),
+                    None
+                )
+                .unwrap()
+        );
+        service
+            .jobs
+            .cancel(&cancelled_id, "t14-cancel-key")
+            .unwrap();
+        assert_eq!(
+            service.jobs.get(&cancelled_id).unwrap().state,
+            jobs::State::Cancelled
+        );
+        let retry = service
+            .market(cancelled_request.clone(), None, None)
+            .await
+            .unwrap();
         assert_eq!(retry["state"], "cancelled");
-        assert!(retry["rows"].is_null(), "cancelled job cannot claim published market rows");
+        assert!(
+            retry["rows"].is_null(),
+            "cancelled job cannot claim published market rows"
+        );
         let mut cancelled_cursor = cancelled_request.clone();
         cancelled_cursor.cursor = Some(format!("{cancelled_id}:1"));
         assert_eq!(
-            service.market(cancelled_cursor, None, None).await.unwrap_err(),
+            service
+                .market(cancelled_cursor, None, None)
+                .await
+                .unwrap_err(),
             "MARKET_CURSOR_NOT_READY"
         );
         assert_eq!(
-            service.result_page(cancelled_id.clone(), None, 1, ResearchResultView::Trades).unwrap_err(),
+            service
+                .result_page(cancelled_id.clone(), None, 1, ResearchResultView::Trades)
+                .unwrap_err(),
             "RESULT_NOT_READY"
         );
-        assert!(!service.jobs.update(&cancelled_id, jobs::State::Completed, Some(partial.clone()), None).unwrap());
-        assert_eq!(service.jobs.get(&cancelled_id).unwrap().state, jobs::State::Cancelled);
+        assert!(
+            !service
+                .jobs
+                .update(
+                    &cancelled_id,
+                    jobs::State::Completed,
+                    Some(partial.clone()),
+                    None
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            service.jobs.get(&cancelled_id).unwrap().state,
+            jobs::State::Cancelled
+        );
 
         // The second job is interrupted by reopening the same durable owner.
         let interrupted_request = request(vec!["rolling_mean"]);
@@ -2075,22 +2156,45 @@ mod tests {
             .enqueue(format!("market-{interrupted_id}"), interrupted_id.clone())
             .unwrap();
         assert!(fresh);
-        assert!(service.jobs.update(&created.id, jobs::State::Running, Some(partial), None).unwrap());
+        assert!(
+            service
+                .jobs
+                .update(&created.id, jobs::State::Running, Some(partial), None)
+                .unwrap()
+        );
         let bootstrap = service.sources.bootstrap.clone();
         drop(service);
         let reopened = AnalyticsService::new(root.clone(), bootstrap).unwrap();
-        assert_eq!(reopened.jobs.get(&interrupted_id).unwrap().state, jobs::State::Interrupted);
-        let retry = reopened.market(interrupted_request.clone(), None, None).await.unwrap();
+        assert_eq!(
+            reopened.jobs.get(&interrupted_id).unwrap().state,
+            jobs::State::Interrupted
+        );
+        let retry = reopened
+            .market(interrupted_request.clone(), None, None)
+            .await
+            .unwrap();
         assert_eq!(retry["state"], "interrupted");
-        assert!(retry["rows"].is_null(), "interrupted job cannot claim completed rows");
+        assert!(
+            retry["rows"].is_null(),
+            "interrupted job cannot claim completed rows"
+        );
         let mut interrupted_cursor = interrupted_request;
         interrupted_cursor.cursor = Some(format!("{interrupted_id}:1"));
         assert_eq!(
-            reopened.market(interrupted_cursor, None, None).await.unwrap_err(),
+            reopened
+                .market(interrupted_cursor, None, None)
+                .await
+                .unwrap_err(),
             "MARKET_CURSOR_NOT_READY"
         );
-        assert_eq!(reopened.diagnostic_job(&interrupted_id)["job"]["result_ref"], Value::Null);
-        assert_eq!(reopened.diagnostic_job(&interrupted_id)["job"]["error_code"], "RESEARCH_INTERRUPTED");
+        assert_eq!(
+            reopened.diagnostic_job(&interrupted_id)["job"]["result_ref"],
+            Value::Null
+        );
+        assert_eq!(
+            reopened.diagnostic_job(&interrupted_id)["job"]["error_code"],
+            "RESEARCH_INTERRUPTED"
+        );
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2158,7 +2262,10 @@ mod tests {
             market_job_schema(&funding.fields),
             market_job_schema(&mixed.fields)
         );
-        assert_eq!(market_job_schema(&returns.fields), "market/518.10.float-roundtrip-flat-v1");
+        assert_eq!(
+            market_job_schema(&returns.fields),
+            "market/518.10.float-roundtrip-flat-v1"
+        );
         assert_eq!(
             market_job_schema(&correlation.fields),
             "market/518.10.float-roundtrip-correlation-v1"
@@ -2641,18 +2748,24 @@ mod tests {
     #[test]
     fn t03_t07_t15_public_rolling_price_cross_is_one_composed_market_request() {
         let mut request = request(vec!["returns"]);
-        request.composition = Some(Box::new(serde_json::from_value(json!({
-            "version":okx_analysis::query_plan::COMPOSITION_VERSION,
-            "steps":[
-                {"id":"fast","op":"rolling_mean","input":"close","period":1},
-                {"id":"slow","op":"rolling_mean","input":"close","period":3},
-                {"id":"above","op":"greater_than_series","input":"fast","other":"slow"},
-                {"id":"cross","op":"rising_edge","input":"above"}
-            ],
-            "result_steps":["above","cross"]
-        })).unwrap()));
+        request.composition = Some(Box::new(
+            serde_json::from_value(json!({
+                "version":okx_analysis::query_plan::COMPOSITION_VERSION,
+                "steps":[
+                    {"id":"fast","op":"rolling_mean","input":"close","period":1},
+                    {"id":"slow","op":"rolling_mean","input":"close","period":3},
+                    {"id":"above","op":"greater_than_series","input":"fast","other":"slow"},
+                    {"id":"cross","op":"rising_edge","input":"above"}
+                ],
+                "result_steps":["above","cross"]
+            }))
+            .unwrap(),
+        ));
         let plan = planner::AnalysisPlan::compile_market(&request).unwrap();
-        assert_eq!(plan.sources, vec![okx_analysis::query_plan::Source::Candles]);
+        assert_eq!(
+            plan.sources,
+            vec![okx_analysis::query_plan::Source::Candles]
+        );
         let mut loaded = row();
         let bars = Arc::make_mut(loaded.bars.as_mut().unwrap());
         for bar in &mut bars[96..99] {
@@ -2669,26 +2782,35 @@ mod tests {
         assert_eq!(result["metrics"]["above"], true);
         assert_eq!(result["metrics"]["cross"], true);
         assert_eq!(result["units"]["cross"], "event");
-        assert_eq!(result["composition_quality"]["cross"]["status"], "available_at_closed_bar");
+        assert_eq!(
+            result["composition_quality"]["cross"]["status"],
+            "available_at_closed_bar"
+        );
         assert!(result["source_captures"]["candles"]["capture_hash"].is_string());
     }
     #[test]
     fn t07_t15_public_bidirectional_exit_and_population_risk_share_the_checked_market_route() {
         let mut request = request(vec!["returns"]);
-        request.composition = Some(Box::new(serde_json::from_value(json!({
-            "version":okx_analysis::query_plan::COMPOSITION_VERSION,
-            "steps":[
-                {"id":"fast","op":"rolling_mean","input":"close","period":2},
-                {"id":"slow","op":"rolling_mean","input":"close","period":3},
-                {"id":"below","op":"less_than_series","input":"fast","other":"slow"},
-                {"id":"exit","op":"falling_edge","input":"below"},
-                {"id":"risk","op":"rolling_stddev","input":"close","period":2},
-                {"id":"quiet","op":"less_than","input":"risk","threshold":4.0}
-            ],
-            "result_steps":["below","exit","risk","quiet"]
-        })).unwrap()));
+        request.composition = Some(Box::new(
+            serde_json::from_value(json!({
+                "version":okx_analysis::query_plan::COMPOSITION_VERSION,
+                "steps":[
+                    {"id":"fast","op":"rolling_mean","input":"close","period":2},
+                    {"id":"slow","op":"rolling_mean","input":"close","period":3},
+                    {"id":"below","op":"less_than_series","input":"fast","other":"slow"},
+                    {"id":"exit","op":"falling_edge","input":"below"},
+                    {"id":"risk","op":"rolling_stddev","input":"close","period":2},
+                    {"id":"quiet","op":"less_than","input":"risk","threshold":4.0}
+                ],
+                "result_steps":["below","exit","risk","quiet"]
+            }))
+            .unwrap(),
+        ));
         let plan = planner::AnalysisPlan::compile_market(&request).unwrap();
-        assert_eq!(plan.sources, vec![okx_analysis::query_plan::Source::Candles]);
+        assert_eq!(
+            plan.sources,
+            vec![okx_analysis::query_plan::Source::Candles]
+        );
         let mut loaded = row();
         let bars = Arc::make_mut(loaded.bars.as_mut().unwrap());
         for (index, close) in [(95, 100.0), (96, 99.0), (97, 97.0), (98, 95.0), (99, 102.0)] {
@@ -2704,31 +2826,55 @@ mod tests {
         assert_eq!(result["metrics"]["quiet"], true);
         assert_eq!(result["units"]["risk"], "price");
         assert_eq!(result["units"]["exit"], "event");
-        assert_eq!(result["composition_quality"]["risk"]["status"], "available_at_closed_bar");
+        assert_eq!(
+            result["composition_quality"]["risk"]["status"],
+            "available_at_closed_bar"
+        );
         assert!(result["source_captures"]["candles"]["capture_hash"].is_string());
         Arc::make_mut(loaded.bars.as_mut().unwrap()).remove(98);
         let missing = compute_row_planned(loaded, &request, None, &plan, true).unwrap();
         assert!(missing["metrics"]["risk"].is_null());
         assert!(missing["metrics"]["exit"].is_null());
-        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["reason"], "CANDLE_RANGE_INCOMPLETE_OR_GAPPED");
-        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["source"], "candles");
-        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["causal_null_reason"], "SOURCE_OBSERVATION_MISSING");
-        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["origin_step"], "close");
-        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["origin_event_ms"], 98 * 60_000);
-        assert_eq!(missing["composition_quality"]["risk"]["issues"][0]["first_missing_ms"], 98 * 60_000);
+        assert_eq!(
+            missing["composition_quality"]["risk"]["issues"][0]["reason"],
+            "CANDLE_RANGE_INCOMPLETE_OR_GAPPED"
+        );
+        assert_eq!(
+            missing["composition_quality"]["risk"]["issues"][0]["source"],
+            "candles"
+        );
+        assert_eq!(
+            missing["composition_quality"]["risk"]["issues"][0]["causal_null_reason"],
+            "SOURCE_OBSERVATION_MISSING"
+        );
+        assert_eq!(
+            missing["composition_quality"]["risk"]["issues"][0]["origin_step"],
+            "close"
+        );
+        assert_eq!(
+            missing["composition_quality"]["risk"]["issues"][0]["origin_event_ms"],
+            98 * 60_000
+        );
+        assert_eq!(
+            missing["composition_quality"]["risk"]["issues"][0]["first_missing_ms"],
+            98 * 60_000
+        );
     }
     #[test]
     fn t02_t04_public_ohlc_graph_diagnoses_a_missing_high_without_forward_fill() {
         let mut request = request(vec!["returns"]);
-        request.composition = Some(Box::new(serde_json::from_value(json!({
-            "version":okx_analysis::query_plan::COMPOSITION_VERSION,
-            "steps":[
-                {"id":"body","op":"greater_than_series","input":"close","other":"open"},
-                {"id":"range","op":"greater_than_series","input":"high","other":"low"},
-                {"id":"confirmed","op":"and","input":"body","other":"range"}
-            ],
-            "result_steps":["confirmed"]
-        })).unwrap()));
+        request.composition = Some(Box::new(
+            serde_json::from_value(json!({
+                "version":okx_analysis::query_plan::COMPOSITION_VERSION,
+                "steps":[
+                    {"id":"body","op":"greater_than_series","input":"close","other":"open"},
+                    {"id":"range","op":"greater_than_series","input":"high","other":"low"},
+                    {"id":"confirmed","op":"and","input":"body","other":"range"}
+                ],
+                "result_steps":["confirmed"]
+            }))
+            .unwrap(),
+        ));
         let plan = planner::AnalysisPlan::compile_market(&request).unwrap();
         let mut loaded = row();
         let bars = Arc::make_mut(loaded.bars.as_mut().unwrap());
@@ -2743,25 +2889,40 @@ mod tests {
         bars[99].high = f64::NAN;
         let missing = compute_row_planned(loaded, &request, None, &plan, true).unwrap();
         assert!(missing["metrics"]["confirmed"].is_null());
-        assert_eq!(missing["composition_quality"]["confirmed"]["issues"][0]["origin_step"], "high");
-        assert_eq!(missing["composition_quality"]["confirmed"]["issues"][0]["origin_event_ms"], 99 * 60_000);
-        assert_eq!(missing["composition_quality"]["confirmed"]["issues"][0]["reason"], "SOURCE_OBSERVATION_MISSING");
+        assert_eq!(
+            missing["composition_quality"]["confirmed"]["issues"][0]["origin_step"],
+            "high"
+        );
+        assert_eq!(
+            missing["composition_quality"]["confirmed"]["issues"][0]["origin_event_ms"],
+            99 * 60_000
+        );
+        assert_eq!(
+            missing["composition_quality"]["confirmed"]["issues"][0]["reason"],
+            "SOURCE_OBSERVATION_MISSING"
+        );
     }
     #[test]
     fn t02_t04_t07_t13_native_volume_composition_preserves_units_and_source_capture() {
         let mut request = request(vec!["returns"]);
-        request.composition = Some(Box::new(serde_json::from_value(json!({
-            "version":okx_analysis::query_plan::COMPOSITION_VERSION,
-            "steps":[
-                {"id":"fast","op":"rolling_mean","input":"volume","period":2},
-                {"id":"slow","op":"rolling_mean","input":"volume","period":3},
-                {"id":"lift","op":"greater_than_series","input":"fast","other":"slow"},
-                {"id":"entry","op":"rising_edge","input":"lift"}
-            ],
-            "result_steps":["fast","lift","entry"]
-        })).unwrap()));
+        request.composition = Some(Box::new(
+            serde_json::from_value(json!({
+                "version":okx_analysis::query_plan::COMPOSITION_VERSION,
+                "steps":[
+                    {"id":"fast","op":"rolling_mean","input":"volume","period":2},
+                    {"id":"slow","op":"rolling_mean","input":"volume","period":3},
+                    {"id":"lift","op":"greater_than_series","input":"fast","other":"slow"},
+                    {"id":"entry","op":"rising_edge","input":"lift"}
+                ],
+                "result_steps":["fast","lift","entry"]
+            }))
+            .unwrap(),
+        ));
         let plan = planner::AnalysisPlan::compile_market(&request).unwrap();
-        assert_eq!(plan.sources, vec![okx_analysis::query_plan::Source::Candles]);
+        assert_eq!(
+            plan.sources,
+            vec![okx_analysis::query_plan::Source::Candles]
+        );
         let mut loaded = row();
         let bars = Arc::make_mut(loaded.bars.as_mut().unwrap());
         for bar in &mut bars[95..99] {
@@ -2773,15 +2934,23 @@ mod tests {
         assert_eq!(result["units"]["fast"], "native_volume");
         assert_eq!(result["metrics"]["lift"], true);
         assert_eq!(result["metrics"]["entry"], true);
-        assert_eq!(result["composition_quality"]["entry"]["status"], "available_at_closed_bar");
+        assert_eq!(
+            result["composition_quality"]["entry"]["status"],
+            "available_at_closed_bar"
+        );
         let capture = result["source_captures"]["candles"]["capture_hash"].clone();
         assert!(capture.is_string());
         Arc::make_mut(loaded.bars.as_mut().unwrap())[99].volume = 31.0;
         let revised = compute_row_planned(loaded.clone(), &request, None, &plan, true).unwrap();
-        assert_ne!(revised["source_captures"]["candles"]["capture_hash"], capture);
+        assert_ne!(
+            revised["source_captures"]["candles"]["capture_hash"],
+            capture
+        );
         Arc::make_mut(loaded.bars.as_mut().unwrap())[99].volume = -1.0;
-        assert_eq!(compute_row_planned(loaded, &request, None, &plan, true).unwrap_err(),
-            "composition.sources.volume:INVALID_NON_NEGATIVE_VOLUME");
+        assert_eq!(
+            compute_row_planned(loaded, &request, None, &plan, true).unwrap_err(),
+            "composition.sources.volume:INVALID_NON_NEGATIVE_VOLUME"
+        );
     }
     #[test]
     fn t10_unprojected_oi_and_funding_branches_never_require_sources_on_spot() {
@@ -3320,7 +3489,10 @@ mod global_rank_tests {
         assert_eq!(first["funding_event_alignment"]["observed_events"], 3);
         assert_eq!(first["funding_event_alignment"]["aligned_events"], 2);
         assert_eq!(first["funding_event_alignment"]["off_grid_events"], 1);
-        assert_eq!(first["funding_event_alignment"]["first_off_grid_ms"], 60_001);
+        assert_eq!(
+            first["funding_event_alignment"]["first_off_grid_ms"],
+            60_001
+        );
         assert_eq!(first["funding_event_alignment"]["first_empty_grid_ms"], 0);
         assert_eq!(
             first["funding_event_alignment"]["expected_events"],
@@ -3390,14 +3562,17 @@ mod global_rank_tests {
             "end_ms":6000000
         }))
         .unwrap();
-        request.composition = Some(Box::new(serde_json::from_value(json!({
-            "version":okx_analysis::query_plan::COMPOSITION_VERSION,
-            "steps":[
-                {"id":"oi_change","op":"returns_series","input":"open_interest"},
-                {"id":"positive","op":"greater_than","input":"oi_change","threshold":0.0}
-            ],
-            "result_steps":["oi_change","positive"]
-        })).unwrap()));
+        request.composition = Some(Box::new(
+            serde_json::from_value(json!({
+                "version":okx_analysis::query_plan::COMPOSITION_VERSION,
+                "steps":[
+                    {"id":"oi_change","op":"returns_series","input":"open_interest"},
+                    {"id":"positive","op":"greater_than","input":"oi_change","threshold":0.0}
+                ],
+                "result_steps":["oi_change","positive"]
+            }))
+            .unwrap(),
+        ));
         let plan = planner::AnalysisPlan::compile_market(&request).unwrap();
         let mut loaded = Loaded {
             instrument: "BTC-USDT-SWAP".into(),
@@ -3419,7 +3594,8 @@ mod global_rank_tests {
             oi: None,
             excluded: None,
         };
-        let mut oi = (0..100).map(|index| (index * 60_000, 20.0 + index as f64))
+        let mut oi = (0..100)
+            .map(|index| (index * 60_000, 20.0 + index as f64))
             .collect::<Vec<_>>();
         // A one-millisecond shift is not the closed-bar event at 42 * 60,000.
         // A nearest/as-of join would fabricate a usable point here.
@@ -3429,17 +3605,29 @@ mod global_rank_tests {
         assert_eq!(result["source_alignment"]["observed_oi_observations"], 99);
         assert_eq!(result["source_alignment"]["aligned_observations"], 99);
         assert_eq!(result["source_alignment"]["oi_off_grid_events"], 1);
-        assert_eq!(result["source_alignment"]["oi_first_off_grid_ms"], 42 * 60_000 + 1);
-        assert_eq!(result["source_alignment"]["first_unaligned_ms"], 42 * 60_000);
+        assert_eq!(
+            result["source_alignment"]["oi_first_off_grid_ms"],
+            42 * 60_000 + 1
+        );
+        assert_eq!(
+            result["source_alignment"]["first_unaligned_ms"],
+            42 * 60_000
+        );
         assert_eq!(result["oi_coverage"]["first_missing_ms"], 42 * 60_000);
         assert!(result["metrics"]["oi_change"].is_null());
         assert!(result["metrics"]["positive"].is_null());
-        assert_eq!(result["composition_quality"]["oi_change"]["issues"][0]["reason"],
-            "OI_RANGE_INCOMPLETE_OR_GAPPED");
-        assert_eq!(result["composition_quality"]["positive"]["issues"][1]["reason"],
-            "CAUSAL_PUBLICATION_TIME_UNVERIFIED");
-        assert_eq!(result["source_captures"]["open_interest"]["publication_time_verified"],
-            false);
+        assert_eq!(
+            result["composition_quality"]["oi_change"]["issues"][0]["reason"],
+            "OI_RANGE_INCOMPLETE_OR_GAPPED"
+        );
+        assert_eq!(
+            result["composition_quality"]["positive"]["issues"][1]["reason"],
+            "CAUSAL_PUBLICATION_TIME_UNVERIFIED"
+        );
+        assert_eq!(
+            result["source_captures"]["open_interest"]["publication_time_verified"],
+            false
+        );
     }
 
     #[test]
@@ -3490,16 +3678,33 @@ mod global_rank_tests {
                 {"id":"returns","op":"returns_series","input":"close"},
                 {"id":"range_return","op":"rolling_range","input":"returns","period":2}
             ],"result_steps":["range_price","wide","entry","smooth","range_return"]}
-        })).unwrap();
+        }))
+        .unwrap();
         let loaded = || Loaded {
             instrument: "BTC-USDT".into(),
-            bars: Ok(Arc::new((0..100).map(|i| Bar {
-                time:(i + 1) * 60_000,
-                open:100.0, high:115.0, low:99.0,
-                close:if i == 99 {110.0} else if i == 98 {101.0} else {100.0},
-                volume:1.0, funding_rate:None,
-            }).collect())),
-            ticker: None, funding: None, oi: None, excluded: None,
+            bars: Ok(Arc::new(
+                (0..100)
+                    .map(|i| Bar {
+                        time: (i + 1) * 60_000,
+                        open: 100.0,
+                        high: 115.0,
+                        low: 99.0,
+                        close: if i == 99 {
+                            110.0
+                        } else if i == 98 {
+                            101.0
+                        } else {
+                            100.0
+                        },
+                        volume: 1.0,
+                        funding_rate: None,
+                    })
+                    .collect(),
+            )),
+            ticker: None,
+            funding: None,
+            oi: None,
+            excluded: None,
         };
         let plan = planner::AnalysisPlan::compile_market(&query).unwrap();
         let result = compute_row_planned(loaded(), &query, None, &plan, true).unwrap();
@@ -3511,7 +3716,10 @@ mod global_rank_tests {
         assert!((result["metrics"]["range_return"].as_f64().unwrap() - return_range).abs() < 1e-12);
         assert_eq!(result["units"]["range_price"], "price");
         assert_eq!(result["units"]["range_return"], "ratio");
-        assert_eq!(result["composition_quality"]["entry"]["status"], "available_at_closed_bar");
+        assert_eq!(
+            result["composition_quality"]["entry"]["status"],
+            "available_at_closed_bar"
+        );
         assert_eq!(result["quality"], "complete");
 
         // Another user graph: same Worker build, unchanged source/route and
@@ -3519,7 +3727,10 @@ mod global_rank_tests {
         query.composition.as_mut().unwrap().steps[1].threshold = Some(20.0);
         let changed_plan = planner::AnalysisPlan::compile_market(&query).unwrap();
         let changed = compute_row_planned(loaded(), &query, None, &changed_plan, true).unwrap();
-        assert_eq!(changed["metrics"]["range_price"], result["metrics"]["range_price"]);
+        assert_eq!(
+            changed["metrics"]["range_price"],
+            result["metrics"]["range_price"]
+        );
         assert_eq!(changed["metrics"]["wide"], false);
         assert_eq!(changed["metrics"]["entry"], false);
     }

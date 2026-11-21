@@ -446,7 +446,7 @@ pub fn allocate_funding_at_bar_close(
             return Err("FUNDING_EVENT_OUTSIDE_BAR_RANGE".into());
         }
         let offset = time - start;
-        if offset % timeframe_ms != 0 {
+        if !offset.is_multiple_of(timeframe_ms) {
             return Err("FUNDING_SETTLEMENT_NOT_ON_BAR_CLOSE".into());
         }
         let index = (offset / timeframe_ms - 1) as usize;
@@ -472,7 +472,10 @@ pub fn allocate_funding_at_bar_close(
     {
         return Err("FUNDING_RANGE_INCOMPLETE".into());
     }
-    let bar_rates = observed_bar_rates.iter().map(|rate| rate.unwrap_or(0.0)).collect();
+    let bar_rates = observed_bar_rates
+        .iter()
+        .map(|rate| rate.unwrap_or(0.0))
+        .collect();
     Ok(FundingBarAllocation {
         bar_rates,
         observed_bar_rates,
@@ -835,7 +838,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.bar_rates, [0.001, 0.0, 0.0, -0.002]);
-        assert_eq!(result.observed_bar_rates, [Some(0.001), None, None, Some(-0.002)]);
+        assert_eq!(
+            result.observed_bar_rates,
+            [Some(0.001), None, None, Some(-0.002)]
+        );
         assert_eq!(result.observed_zero_rate_events, 0);
         assert_eq!(result.bars_without_settlement, 2);
         assert_eq!(result.observed_events, 3);
@@ -1239,27 +1245,43 @@ mod tests {
     fn t09_checked_settlement_cashflow_rejects_fx_mismatch_and_false_net() {
         let money = |currency, value| QuoteAmount::exact(currency, Decimal::from(value)).unwrap();
         let valid = SettlementCashflow::checked(
-            money("USDT", -3), money("USDT", 1), money("USDT", -2), money("USDT", -2),
-        ).unwrap();
+            money("USDT", -3),
+            money("USDT", 1),
+            money("USDT", -2),
+            money("USDT", -2),
+        )
+        .unwrap();
         assert_eq!(valid.gross().value, Decimal::from(-3));
         assert_eq!(valid.funding().value, Decimal::from(-2));
         assert_eq!(valid.net().value, Decimal::from(-2));
         assert_eq!(
             SettlementCashflow::checked(
-                money("USDT", 10), money("USD", 1), money("USDT", 0), money("USDT", 9),
-            ).unwrap_err(),
+                money("USDT", 10),
+                money("USD", 1),
+                money("USDT", 0),
+                money("USDT", 9),
+            )
+            .unwrap_err(),
             "CURRENCY_MISMATCH_FX_REQUIRED"
         );
         assert_eq!(
             SettlementCashflow::checked(
-                money("USDT", 10), money("USDT", -1), money("USDT", 0), money("USDT", 11),
-            ).unwrap_err(),
+                money("USDT", 10),
+                money("USDT", -1),
+                money("USDT", 0),
+                money("USDT", 11),
+            )
+            .unwrap_err(),
             "INVALID_FEE"
         );
         assert_eq!(
             SettlementCashflow::checked(
-                money("USDT", 10), money("USDT", 1), money("USDT", 2), money("USDT", 8),
-            ).unwrap_err(),
+                money("USDT", 10),
+                money("USDT", 1),
+                money("USDT", 2),
+                money("USDT", 8),
+            )
+            .unwrap_err(),
             "ECONOMIC_CASHFLOW_NOT_RECONCILED"
         );
     }
@@ -1272,27 +1294,43 @@ mod tests {
                 QuoteAmount::parse_exact(currency, fees).unwrap(),
                 QuoteAmount::parse_exact(currency, funding).unwrap(),
                 QuoteAmount::parse_exact(currency, net).unwrap(),
-            ).unwrap()
+            )
+            .unwrap()
         };
         let values = [
             flow("USDT", "20", "1.25", "0", "18.75"),
             flow("BTC", "0.1", "0.001", "-0.002", "0.101"),
             flow("USDT", "-3", "0.25", "-0.5", "-2.75"),
         ];
-        assert_eq!(group_settlement_cashflows(&values).unwrap(), vec![
-            CurrencyCashflowTotal {
-                currency: "BTC".into(), gross: Decimal::new(1,1),
-                fees: Decimal::new(1,3), funding: Decimal::new(-2,3),
-                net: Decimal::new(101,3), contributors: 1,
-            },
-            CurrencyCashflowTotal {
-                currency: "USDT".into(), gross: Decimal::from(17),
-                fees: Decimal::new(15,1), funding: Decimal::new(-5,1),
-                net: Decimal::from(16), contributors: 2,
-            },
-        ]);
+        assert_eq!(
+            group_settlement_cashflows(&values).unwrap(),
+            vec![
+                CurrencyCashflowTotal {
+                    currency: "BTC".into(),
+                    gross: Decimal::new(1, 1),
+                    fees: Decimal::new(1, 3),
+                    funding: Decimal::new(-2, 3),
+                    net: Decimal::new(101, 3),
+                    contributors: 1,
+                },
+                CurrencyCashflowTotal {
+                    currency: "USDT".into(),
+                    gross: Decimal::from(17),
+                    fees: Decimal::new(15, 1),
+                    funding: Decimal::new(-5, 1),
+                    net: Decimal::from(16),
+                    contributors: 2,
+                },
+            ]
+        );
         assert!(group_settlement_cashflows(&[]).unwrap().is_empty());
-        let near_limit = flow("USDT", &Decimal::MAX.to_string(), "0", "0", &Decimal::MAX.to_string());
+        let near_limit = flow(
+            "USDT",
+            &Decimal::MAX.to_string(),
+            "0",
+            "0",
+            &Decimal::MAX.to_string(),
+        );
         assert_eq!(
             group_settlement_cashflows(&[near_limit.clone(), near_limit]).unwrap_err(),
             "MONEY_OVERFLOW"

@@ -228,9 +228,7 @@
           "z": {
             "anyOf": [
               {
-                "type": "string",
-                "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
-                "maxLength": 29
+                "$ref": "#/$defs/d"
               },
               {
                 "type": "null"
@@ -241,7 +239,8 @@
       },
       "annotations": {
         "readOnlyHint": false,
-        "destructiveHint": true
+        "destructiveHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -489,7 +488,8 @@
       },
       "annotations": {
         "readOnlyHint": false,
-        "destructiveHint": true
+        "destructiveHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -884,7 +884,8 @@
       },
       "annotations": {
         "readOnlyHint": true,
-        "destructiveHint": false
+        "destructiveHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -1422,9 +1423,7 @@
             "type": "object",
             "properties": {
               "currency": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 16
+                "$ref": "#/$defs/b"
               },
               "amount": {
                 "type": "string",
@@ -1459,7 +1458,8 @@
       },
       "annotations": {
         "readOnlyHint": false,
-        "destructiveHint": true
+        "destructiveHint": true,
+        "openWorldHint": false
       }
     },
     {
@@ -1642,7 +1642,8 @@
       },
       "annotations": {
         "readOnlyHint": true,
-        "destructiveHint": false
+        "destructiveHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -1723,7 +1724,8 @@
       },
       "annotations": {
         "readOnlyHint": true,
-        "destructiveHint": false
+        "destructiveHint": false,
+        "openWorldHint": false
       }
     },
     {

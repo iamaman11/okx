@@ -10,10 +10,10 @@ pub mod jobs;
 mod market;
 pub mod planner;
 mod research;
-mod result_reexecution;
 mod resource_gate;
 mod resource_observation;
 mod result;
+mod result_reexecution;
 pub mod sources;
 
 use futures_util::{StreamExt, stream};
@@ -262,16 +262,26 @@ impl AnalyticsService {
     }
 }
 
+struct ReplayPublication<'a> {
+    grid: Option<Value>,
+    experiment: Option<&'a str>,
+    economic_audit: Option<Value>,
+    producer: Option<&'a crate::producer::Producer>,
+}
+
 fn publish_replay(
     store: &ResearchArtifactStore,
     result: &replay::ReplayResult,
     dataset: &str,
-    grid: Option<Value>,
-    experiment: Option<&str>,
-    economic_audit: Option<Value>,
-    producer: Option<&crate::producer::Producer>,
+    publication: ReplayPublication<'_>,
     cancel: &impl Fn() -> bool,
 ) -> Result<String, String> {
+    let ReplayPublication {
+        grid,
+        experiment,
+        economic_audit,
+        producer,
+    } = publication;
     let mut trade_pages = Vec::new();
     let mut curve_pages = Vec::new();
     for chunk in result.trades.chunks(50) {

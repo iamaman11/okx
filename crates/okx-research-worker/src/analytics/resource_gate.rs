@@ -74,7 +74,9 @@ mod tests {
             while heavy.available_permits() != 0 || memory.available_permits() != 0 {
                 tokio::task::yield_now().await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         // Tokio acquire_many reserves the 1024 spare permits while queued.
         // They do not authorize execution and must be returned on cancel.
         assert_eq!(memory.available_permits(), 0);
@@ -86,15 +88,41 @@ mod tests {
         let token = c.clone();
         let third = tokio::spawn(async move { acquire(&h, &m, 3072, &token).await });
         c.store(true, Ordering::Release);
-        assert_eq!(timeout(Duration::from_secs(1), third).await.unwrap().unwrap().err().as_deref(), Some("CANCELLED"));
+        assert_eq!(
+            timeout(Duration::from_secs(1), third)
+                .await
+                .unwrap()
+                .unwrap()
+                .err()
+                .as_deref(),
+            Some("CANCELLED")
+        );
         b.store(true, Ordering::Release);
-        assert_eq!(timeout(Duration::from_secs(1), second).await.unwrap().unwrap().err().as_deref(), Some("CANCELLED"));
+        assert_eq!(
+            timeout(Duration::from_secs(1), second)
+                .await
+                .unwrap()
+                .unwrap()
+                .err()
+                .as_deref(),
+            Some("CANCELLED")
+        );
         assert_eq!(heavy.available_permits(), 1);
         assert_eq!(memory.available_permits(), 1024);
         drop(first);
         assert_eq!(heavy.available_permits(), 2);
-        assert_eq!(memory.available_permits(), budget::MEMORY_TOTAL_MIB as usize);
-        let fresh = acquire(&heavy, &memory, 3072, &Arc::new(executor::Cancel::default())).await.unwrap();
+        assert_eq!(
+            memory.available_permits(),
+            budget::MEMORY_TOTAL_MIB as usize
+        );
+        let fresh = acquire(
+            &heavy,
+            &memory,
+            3072,
+            &Arc::new(executor::Cancel::default()),
+        )
+        .await
+        .unwrap();
         assert_eq!(fresh.reserved_mib, 3072);
     }
 
@@ -114,8 +142,17 @@ mod tests {
         drop(lease);
         assert_eq!(heavy.available_permits(), 2);
         assert_eq!(memory.available_permits(), 4096);
-        assert_eq!(acquire(&heavy, &memory, 0, &token).await.err().as_deref(), Some("LIMIT_EXCEEDED:RESEARCH_MEMORY"));
-        assert_eq!(acquire(&heavy, &memory, 4097, &token).await.err().as_deref(), Some("LIMIT_EXCEEDED:RESEARCH_MEMORY"));
+        assert_eq!(
+            acquire(&heavy, &memory, 0, &token).await.err().as_deref(),
+            Some("LIMIT_EXCEEDED:RESEARCH_MEMORY")
+        );
+        assert_eq!(
+            acquire(&heavy, &memory, 4097, &token)
+                .await
+                .err()
+                .as_deref(),
+            Some("LIMIT_EXCEEDED:RESEARCH_MEMORY")
+        );
     }
 
     #[tokio::test]
@@ -128,25 +165,39 @@ mod tests {
         assert_eq!(memory.available_permits(), 1024);
         let (h, m, c) = (heavy.clone(), memory.clone(), token.clone());
         let mut third = tokio::spawn(async move { acquire(&h, &m, 1536, &c).await });
-        assert!(timeout(Duration::from_millis(30), &mut third).await.is_err());
+        assert!(
+            timeout(Duration::from_millis(30), &mut third)
+                .await
+                .is_err()
+        );
         // A pending acquire_many hides the 1024 otherwise free permits until
         // enough permits arrive; it is not a third granted resource lease.
         assert_eq!(memory.available_permits(), 0);
         drop(first);
-        let third_lease = timeout(Duration::from_secs(1), third).await.unwrap().unwrap().unwrap();
+        let third_lease = timeout(Duration::from_secs(1), third)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         assert_eq!(third_lease.reserved_mib, 1536);
         assert_eq!(memory.available_permits(), 1024);
         drop(second);
         drop(third_lease);
-        assert_eq!(memory.available_permits(), budget::MEMORY_TOTAL_MIB as usize);
+        assert_eq!(
+            memory.available_permits(),
+            budget::MEMORY_TOTAL_MIB as usize
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn t14_cancel_while_waiting_for_ram_is_durable_and_never_resurrected() {
         use super::super::jobs::{Jobs, State};
         let path = std::env::temp_dir()
-            .join(format!("okx-t14-resource-{}-{}", std::process::id(),
-                jiff::Timestamp::now().as_nanosecond()))
+            .join(format!(
+                "okx-t14-resource-{}-{}",
+                std::process::id(),
+                jiff::Timestamp::now().as_nanosecond()
+            ))
             .join("catalog.sqlite");
         let jobs = Jobs::open(path.clone()).unwrap();
         let heavy = Arc::new(Semaphore::new(2));
@@ -154,7 +205,8 @@ mod tests {
         let (running, _, run_token) = jobs.enqueue("t14-running".into(), "run".into()).unwrap();
         let (queued, _, queue_token) = jobs.enqueue("t14-queued".into(), "queue".into()).unwrap();
         let owned = acquire(&heavy, &memory, 3072, &run_token).await.unwrap();
-        jobs.update(&running.id, State::Running, None, None).unwrap();
+        jobs.update(&running.id, State::Running, None, None)
+            .unwrap();
         let blocked = {
             let heavy = heavy.clone();
             let memory = memory.clone();
@@ -165,20 +217,35 @@ mod tests {
             while heavy.available_permits() != 0 {
                 tokio::task::yield_now().await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(jobs.begin_drain().unwrap(), 2);
-        assert_eq!(jobs.enqueue("t14-new".into(), "new".into()).unwrap_err(), "RESEARCH_UPDATING");
+        assert_eq!(
+            jobs.enqueue("t14-new".into(), "new".into()).unwrap_err(),
+            "RESEARCH_UPDATING"
+        );
         let cancelled = jobs.cancel(&queued.id, "cancel-on-memory-wait").unwrap();
         assert_eq!(cancelled.state, State::Cancelled);
         assert!(queue_token.load(Ordering::Acquire));
-        assert_eq!(timeout(Duration::from_secs(1), blocked).await.unwrap().unwrap().err().as_deref(), Some("CANCELLED"));
+        assert_eq!(
+            timeout(Duration::from_secs(1), blocked)
+                .await
+                .unwrap()
+                .unwrap()
+                .err()
+                .as_deref(),
+            Some("CANCELLED")
+        );
         assert_eq!(memory.available_permits(), 1024);
         assert_eq!(heavy.available_permits(), 1);
 
         // A stale callback must not make a cancelled queued job successful.
-        jobs.update(&queued.id, State::Completed, Some("late".into()), None).unwrap();
+        jobs.update(&queued.id, State::Completed, Some("late".into()), None)
+            .unwrap();
         assert_eq!(jobs.get(&queued.id).unwrap().state, State::Cancelled);
-        jobs.update(&running.id, State::Completed, Some("proof".into()), None).unwrap();
+        jobs.update(&running.id, State::Completed, Some("proof".into()), None)
+            .unwrap();
         assert_eq!(jobs.begin_drain().unwrap(), 0);
         drop(owned);
         assert_eq!(memory.available_permits(), 4096);
@@ -188,10 +255,19 @@ mod tests {
         let reopened = Jobs::open(path).unwrap();
         assert_eq!(reopened.get(&queued.id).unwrap().state, State::Cancelled);
         assert_eq!(reopened.get(&running.id).unwrap().state, State::Completed);
-        assert_eq!(reopened.get(&running.id).unwrap().artifact.as_deref(), Some("proof"));
-        let (_, duplicate, _) = reopened.enqueue("t14-queued".into(), "queue".into()).unwrap();
+        assert_eq!(
+            reopened.get(&running.id).unwrap().artifact.as_deref(),
+            Some("proof")
+        );
+        let (_, duplicate, _) = reopened
+            .enqueue("t14-queued".into(), "queue".into())
+            .unwrap();
         assert!(!duplicate);
-        assert!(!reopened.update(&queued.id, State::Completed, Some("forged".into()), None).unwrap());
+        assert!(
+            !reopened
+                .update(&queued.id, State::Completed, Some("forged".into()), None)
+                .unwrap()
+        );
         assert!(reopened.get(&queued.id).unwrap().artifact.is_none());
     }
 }

@@ -104,12 +104,8 @@ const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destruc
 const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
  readOnlyHint:meta.readOnlyHint,destructiveHint:meta.destructiveHint,openWorldHint:false
 });
-// Multi-action public tools retain their exact read/write danger hints. The
-// optional open-world hint is not a permission boundary; keep that extra
-// annotation on separate financial tools where the risk distinction matters.
-const actionAnnotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
- readOnlyHint:meta.readOnlyHint,destructiveHint:meta.destructiveHint
-});
+// Every public tool states all three risk hints, including the multi-action
+// tools. Financial hosts must not infer a permissive open-world default.
 // Factor identical bounded scalar schemas only; internal validation keeps every
 // expanded constraint. Standard JSON Schema references preserve tools/list bounds.
 function publicSchema(schema:Schema):Schema {
@@ -127,7 +123,13 @@ const definitions:Record<string,Schema>={d:money,t:text(),s:text(64),b:text(16),
   if(node&&typeof node==='object'){const k=key(node);if(k&&k in used)return {$ref:'#/$defs/'+k};return Object.fromEntries(Object.entries(node).map(([k,v])=>[k,factor(v)]));}
   return node;
  };
- return Object.keys(used).length?{...factor(schema),$defs:used}:schema;
+ // Definitions can reuse other definitions too (e.g. the nullable amount
+ // contains the same bounded decimal as the non-null amount). Preserve the
+ // exact constraints without duplicating wire bytes inside $defs.
+ const nested=(node:any):any=>Array.isArray(node)?node.map(factor):
+   node&&typeof node==='object'?Object.fromEntries(Object.entries(node).map(([k,v])=>[k,factor(v)])):node;
+ const shared=Object.fromEntries(Object.entries(used).map(([k,v])=>[k,nested(v)]));
+ return Object.keys(used).length?{...factor(schema),$defs:shared}:schema;
 }
 
 // Multi-action accounts is an object tool with a strict server-side oneOf.
@@ -158,7 +160,7 @@ export const PUBLIC_TOOLS:Json[]=[
  ...Object.entries(ACTION_SCHEMAS).filter(([name])=>name!=='trade')
    .map(([name,schemas])=>({name,description:TOOL_NOTES[name].description,
      inputSchema:name==='accounts'?publicAccountsSchema():publicSchema({oneOf:schemas}),
-     annotations:actionAnnotation(TOOL_NOTES[name])})),
+     annotations:annotation(TOOL_NOTES[name])})),
  ...ACTION_SCHEMAS.trade.map(schema=>{
    const scopedAction=String(schema.properties.action.const);
    const {action:_action,...properties}=schema.properties;

@@ -352,9 +352,15 @@ async fn t13_replay_reexecution_restarts_preserves_old_reads_and_tracks_changed_
             })
             .await
             .unwrap();
-        assert_eq!(export["integrity"]["reexecution"]["quality"], "verified_reexecution");
+        assert_eq!(
+            export["integrity"]["reexecution"]["quality"],
+            "verified_reexecution"
+        );
         assert_eq!(export["integrity"]["reexecution"]["bars_rehydrated"], 240);
-        assert_eq!(export["integrity"]["reexecution"]["exact_cashflow_reaudited"], true);
+        assert_eq!(
+            export["integrity"]["reexecution"]["exact_cashflow_reaudited"],
+            true
+        );
         recorded.push((id, export));
     }
     assert_ne!(recorded[0].0, recorded[1].0);
@@ -376,7 +382,10 @@ async fn t13_replay_reexecution_restarts_preserves_old_reads_and_tracks_changed_
             })
             .await
             .unwrap();
-        assert_eq!(&repeated, original, "immutable export survives owner restart");
+        assert_eq!(
+            &repeated, original,
+            "immutable export survives owner restart"
+        );
         let summary = reopened
             .research(ResearchRequest::Result {
                 job_id: id.clone(),
@@ -396,7 +405,10 @@ async fn t13_replay_reexecution_restarts_preserves_old_reads_and_tracks_changed_
             })
             .await
             .unwrap();
-        assert_eq!(first_page["metadata"]["result_hash"], original["result_hash"]);
+        assert_eq!(
+            first_page["metadata"]["result_hash"],
+            original["result_hash"]
+        );
         if let Some(cursor) = first_page["next_cursor"].as_str() {
             assert_eq!(
                 reopened
@@ -823,8 +835,13 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
     assert_eq!(cashflows.len(), 2);
     for row in cashflows {
         use std::str::FromStr;
-        let money = ["gross_exact", "fees_exact", "funding_cost_exact", "net_exact"]
-            .map(|field| rust_decimal::Decimal::from_str(row[field].as_str().unwrap()).unwrap());
+        let money = [
+            "gross_exact",
+            "fees_exact",
+            "funding_cost_exact",
+            "net_exact",
+        ]
+        .map(|field| rust_decimal::Decimal::from_str(row[field].as_str().unwrap()).unwrap());
         assert_eq!(money[0] - money[1] - money[2], money[3]);
     }
     let summary = s
@@ -842,8 +859,14 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
     );
     assert_eq!(summary["rows"][0]["quote_currency"], "USDT");
     assert_eq!(summary["rows"][1]["quote_currency"], "USD");
-    assert_eq!(summary["rows"][0]["economic_audit"]["settlement_currency"], "USDT");
-    assert_eq!(summary["rows"][1]["economic_audit"]["settlement_currency"], "USD");
+    assert_eq!(
+        summary["rows"][0]["economic_audit"]["settlement_currency"],
+        "USDT"
+    );
+    assert_eq!(
+        summary["rows"][1]["economic_audit"]["settlement_currency"],
+        "USD"
+    );
     assert_eq!(summary["rows"][0]["product"], "spot");
     assert_eq!(
         summary["rows"][1]["net_pnl_exact"],
@@ -1134,7 +1157,7 @@ fn t13_export_and_retention_verify_realized_funding_capture_without_lookahead_cl
         funding_rate: Some(0.01),
     };
     let mut hasher = replay::ChunkedDataHash::new(1);
-    hasher.update(&[bar.clone()]).unwrap();
+    hasher.update(std::slice::from_ref(&bar)).unwrap();
     let dataset_hash = hasher.finish().unwrap();
     let chunk = service.artifacts.publish_evidence(&vec![bar]).unwrap().0;
     let dataset = service
@@ -1189,7 +1212,10 @@ fn t13_export_and_retention_verify_realized_funding_capture_without_lookahead_cl
     let verified = verify_export_manifest(&service.artifacts, &manifest).unwrap();
     assert_eq!(verified["quality"], "complete");
     assert_eq!(verified["funding_capture_verified"], true);
-    assert_eq!(verified["experiment"]["funding_replay_attribution_verified"], false);
+    assert_eq!(
+        verified["experiment"]["funding_replay_attribution_verified"],
+        false
+    );
     assert_eq!(
         verified["experiment"]["funding_capture"]["observed_events"],
         1
@@ -1288,28 +1314,34 @@ fn t09_t13_export_proves_funding_presence_and_every_replay_bar_from_source_event
         hasher.update(&bars).unwrap();
         let hash = hasher.finish().unwrap();
         let chunk = service.artifacts.publish_evidence(&bars).unwrap().0;
-        let dataset = service.artifacts.publish_evidence(&json!({
-            "schema":"okx.research.dataset/398.1",
-            "instrument":"BTC-USDT-SWAP","start_ms":0,"end_ms":240_000,
-            "timeframe_ms":60_000,"chunks":[chunk]
-        })).unwrap().0;
+        let dataset = service
+            .artifacts
+            .publish_evidence(&json!({
+                "schema":"okx.research.dataset/398.1",
+                "instrument":"BTC-USDT-SWAP","start_ms":0,"end_ms":240_000,
+                "timeframe_ms":60_000,"chunks":[chunk]
+            }))
+            .unwrap()
+            .0;
         (dataset, hash)
     };
     let publish_experiment = |dataset: &str, capture: Option<&str>, alignment: &Value| {
-        service.artifacts.publish_evidence(&json!({
-            "schema":"okx.research.experiment-inputs/v1",
-            "instrument":"BTC-USDT-SWAP","dataset_artifact":dataset,
-            "bar_count":4,"timeframe_ms":60_000,
-            "requested_range":{"start_ms":0,"end_ms":240_000},
-            "effective_range":{"start_ms":0,"end_ms":240_000},
-            "code_version":replay::CAUSAL_REPLAY_VERSION,
-            "economic_basis":{"product":"funding_attribution_test_fixture",
-                "funding_capture_artifact":capture,"funding_event_alignment":alignment}
-        })).unwrap().0
+        service
+            .artifacts
+            .publish_evidence(&json!({
+                "schema":"okx.research.experiment-inputs/v1",
+                "instrument":"BTC-USDT-SWAP","dataset_artifact":dataset,
+                "bar_count":4,"timeframe_ms":60_000,
+                "requested_range":{"start_ms":0,"end_ms":240_000},
+                "effective_range":{"start_ms":0,"end_ms":240_000},
+                "code_version":replay::CAUSAL_REPLAY_VERSION,
+                "economic_basis":{"product":"funding_attribution_test_fixture",
+                    "funding_capture_artifact":capture,"funding_event_alignment":alignment}
+            }))
+            .unwrap()
+            .0
     };
-    let (dataset, dataset_hash) = publish_dataset([
-        Some(0.0), Some(0.0), Some(-0.01), Some(0.0),
-    ]);
+    let (dataset, dataset_hash) = publish_dataset([Some(0.0), Some(0.0), Some(-0.01), Some(0.0)]);
     let experiment = publish_experiment(&dataset, Some(&capture), &alignment);
     let mut manifest = json!({
         "trade_pages":[],"total_trades":0,
@@ -1318,11 +1350,26 @@ fn t09_t13_export_proves_funding_presence_and_every_replay_bar_from_source_event
     });
     let result = verify_export_manifest(&service.artifacts, &manifest).unwrap();
     assert_eq!(result["quality"], "complete");
-    assert_eq!(result["experiment"]["funding_replay_attribution_verified"], true);
-    assert_eq!(result["experiment"]["dataset"]["funding_bar_projection_verified"], true);
-    assert_eq!(result["experiment"]["funding_capture"]["observed_zero_rate_events"], 1);
-    assert_eq!(result["experiment"]["funding_capture"]["bars_without_settlement"], 2);
-    assert_eq!(result["experiment"]["funding_capture"]["publication_time_verified"], false);
+    assert_eq!(
+        result["experiment"]["funding_replay_attribution_verified"],
+        true
+    );
+    assert_eq!(
+        result["experiment"]["dataset"]["funding_bar_projection_verified"],
+        true
+    );
+    assert_eq!(
+        result["experiment"]["funding_capture"]["observed_zero_rate_events"],
+        1
+    );
+    assert_eq!(
+        result["experiment"]["funding_capture"]["bars_without_settlement"],
+        2
+    );
+    assert_eq!(
+        result["experiment"]["funding_capture"]["publication_time_verified"],
+        false
+    );
 
     // A malicious or buggy producer can write an internally consistent
     // dataset and result hash with the settlement applied one bar too late.
@@ -1335,9 +1382,8 @@ fn t09_t13_export_proves_funding_presence_and_every_replay_bar_from_source_event
         let (bad_dataset, bad_hash) = publish_dataset(bad_rates);
         manifest["dataset_artifact"] = json!(bad_dataset);
         manifest["dataset_hash"] = json!(bad_hash);
-        manifest["experiment_artifact"] = json!(publish_experiment(
-            &bad_dataset, Some(&capture), &alignment,
-        ));
+        manifest["experiment_artifact"] =
+            json!(publish_experiment(&bad_dataset, Some(&capture), &alignment,));
         assert_eq!(
             verify_export_manifest(&service.artifacts, &manifest).unwrap_err(),
             "EXPERIMENT_FUNDING_BAR_MISMATCH"
@@ -1685,8 +1731,19 @@ async fn immutable_result_pages_and_restart_catalog() {
             })
             .collect(),
     };
-    let artifact =
-        publish_replay(&s.artifacts, &result, &data, None, None, None, None, &|| false).unwrap();
+    let artifact = publish_replay(
+        &s.artifacts,
+        &result,
+        &data,
+        ReplayPublication {
+            grid: None,
+            experiment: None,
+            economic_audit: None,
+            producer: None,
+        },
+        &|| false,
+    )
+    .unwrap();
     let id = "a".repeat(64);
     s.jobs
         .enqueue("fixture-request".into(), id.clone())
@@ -1729,7 +1786,10 @@ async fn immutable_result_pages_and_restart_catalog() {
         .result_page(id.clone(), None, 1, ResearchResultView::Export)
         .unwrap();
     assert_eq!(legacy["integrity"]["quality"], "partial");
-    assert_eq!(legacy["integrity"]["reexecution"]["quality"], "not_verified");
+    assert_eq!(
+        legacy["integrity"]["reexecution"]["quality"],
+        "not_verified"
+    );
     assert_eq!(
         legacy["integrity"]["reexecution"]["reason_code"],
         "LEGACY_EXPERIMENT_INPUTS_NOT_RETAINED"

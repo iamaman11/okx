@@ -71,16 +71,24 @@ mod t07_t10_projected_prefix_evaluation {
         let plan = graph();
         let mut closes = vec![100.0; 1000];
         closes[..7].copy_from_slice(&[100.0, 90.0, 95.0, 99.0, 120.0, 110.0, 108.0]);
-        let oi = (0..closes.len()).map(|i| Some(10.0 + i as f64)).collect::<Vec<_>>();
-        let volume = (0..closes.len()).map(|i| 1.0 + i as f64).collect::<Vec<_>>();
+        let oi = (0..closes.len())
+            .map(|i| Some(10.0 + i as f64))
+            .collect::<Vec<_>>();
+        let volume = (0..closes.len())
+            .map(|i| 1.0 + i as f64)
+            .collect::<Vec<_>>();
         let evaluate = |close: &[f64], observations: &[Option<f64>], volumes: &[f64]| {
             plan.evaluate_at_with_candle_sources_diagnostics(
                 close,
-                CandlePriceInputs { volume: Some(volumes), ..Default::default() },
+                CandlePriceInputs {
+                    volume: Some(volumes),
+                    ..Default::default()
+                },
                 Some(observations),
                 None,
                 2,
-            ).unwrap()
+            )
+            .unwrap()
         };
         let (first, causes) = evaluate(&closes, &oi, &volume);
         assert!(causes.is_empty());
@@ -95,7 +103,10 @@ mod t07_t10_projected_prefix_evaluation {
         changed_oi[3..].fill(None);
         let mut changed_volume = volume.clone();
         changed_volume[3..].fill(999.0);
-        assert_eq!(first, evaluate(&changed_tail, &changed_oi, &changed_volume).0);
+        assert_eq!(
+            first,
+            evaluate(&changed_tail, &changed_oi, &changed_volume).0
+        );
 
         // Validation is causal as well: corrupt later OI/volume must not
         // invalidate a historical decision, but latest-bar validation must
@@ -104,21 +115,34 @@ mod t07_t10_projected_prefix_evaluation {
         future_invalid_oi[500] = Some(-1.0);
         let mut future_invalid_volume = volume.clone();
         future_invalid_volume[500] = -1.0;
-        assert_eq!(first, evaluate(&closes, &future_invalid_oi, &future_invalid_volume).0);
+        assert_eq!(
+            first,
+            evaluate(&closes, &future_invalid_oi, &future_invalid_volume).0
+        );
         assert_eq!(
             plan.evaluate_with_candle_sources_diagnostics(
                 &closes,
-                CandlePriceInputs { volume: Some(&volume), ..Default::default() },
-                Some(&future_invalid_oi), None,
-            ).unwrap_err(),
+                CandlePriceInputs {
+                    volume: Some(&volume),
+                    ..Default::default()
+                },
+                Some(&future_invalid_oi),
+                None,
+            )
+            .unwrap_err(),
             "composition.sources.open_interest:INVALID_CONTRACT_COUNT"
         );
         assert_eq!(
             plan.evaluate_with_candle_sources_diagnostics(
                 &closes,
-                CandlePriceInputs { volume: Some(&future_invalid_volume), ..Default::default() },
-                Some(&oi), None,
-            ).unwrap_err(),
+                CandlePriceInputs {
+                    volume: Some(&future_invalid_volume),
+                    ..Default::default()
+                },
+                Some(&oi),
+                None,
+            )
+            .unwrap_err(),
             "composition.sources.volume:INVALID_NON_NEGATIVE_VOLUME"
         );
 
@@ -126,7 +150,10 @@ mod t07_t10_projected_prefix_evaluation {
         changed_outcome[4] = 200.0;
         let after = evaluate(&changed_outcome, &oi, &volume).0;
         for feature in ["entry", "risk", "divergence", "volume_window"] {
-            assert_eq!(first[feature], after[feature], "future leaked into {feature}");
+            assert_eq!(
+                first[feature], after[feature],
+                "future leaked into {feature}"
+            );
         }
         assert_ne!(first["outcome"], after["outcome"]);
 
@@ -137,11 +164,20 @@ mod t07_t10_projected_prefix_evaluation {
         assert_eq!(causes["divergence"].origin_step, "open_interest");
         assert_eq!(causes["divergence"].origin_index, 2);
         assert_eq!(missing["outcome"], first["outcome"]);
-        assert_eq!(plan.evaluate_at_with_candle_sources_diagnostics(
-            &closes,
-            CandlePriceInputs { volume: Some(&volume), ..Default::default() },
-            Some(&oi[..999]), None, 2,
-        ).unwrap_err(), "composition.sources:ALIGNMENT_LENGTH_MISMATCH");
+        assert_eq!(
+            plan.evaluate_at_with_candle_sources_diagnostics(
+                &closes,
+                CandlePriceInputs {
+                    volume: Some(&volume),
+                    ..Default::default()
+                },
+                Some(&oi[..999]),
+                None,
+                2,
+            )
+            .unwrap_err(),
+            "composition.sources:ALIGNMENT_LENGTH_MISMATCH"
+        );
     }
 
     #[test]
@@ -150,27 +186,48 @@ mod t07_t10_projected_prefix_evaluation {
         let closes = [100.0, 90.0, 95.0, 99.0, 120.0];
         let oi = [Some(10.0), Some(11.0), Some(12.0), Some(13.0), Some(14.0)];
         let volumes = [1.0, 2.0, 3.0, 4.0, 5.0];
-        let evaluate = |len| plan.evaluate_at_with_candle_sources_diagnostics(
-            &closes[..len],
-            CandlePriceInputs { volume: Some(&volumes[..len]), ..Default::default() },
-            Some(&oi[..len]), None, 2,
-        ).unwrap();
+        let evaluate = |len| {
+            plan.evaluate_at_with_candle_sources_diagnostics(
+                &closes[..len],
+                CandlePriceInputs {
+                    volume: Some(&volumes[..len]),
+                    ..Default::default()
+                },
+                Some(&oi[..len]),
+                None,
+                2,
+            )
+            .unwrap()
+        };
         let (short, cause) = evaluate(4);
         assert_eq!(short["entry"].0, Some(1.0));
         assert_eq!(short["outcome"].0, None);
         assert_eq!(cause["outcome"].reason, "OUTCOME_UNCONFIRMED");
         let (confirmed, _) = evaluate(5);
         assert!(confirmed["outcome"].0.is_some());
-        let latest = plan.evaluate_with_candle_sources_diagnostics(
-            &closes,
-            CandlePriceInputs { volume: Some(&volumes), ..Default::default() },
-            Some(&oi), None,
-        ).unwrap();
-        let explicit = plan.evaluate_at_with_candle_sources_diagnostics(
-            &closes,
-            CandlePriceInputs { volume: Some(&volumes), ..Default::default() },
-            Some(&oi), None, 4,
-        ).unwrap();
+        let latest = plan
+            .evaluate_with_candle_sources_diagnostics(
+                &closes,
+                CandlePriceInputs {
+                    volume: Some(&volumes),
+                    ..Default::default()
+                },
+                Some(&oi),
+                None,
+            )
+            .unwrap();
+        let explicit = plan
+            .evaluate_at_with_candle_sources_diagnostics(
+                &closes,
+                CandlePriceInputs {
+                    volume: Some(&volumes),
+                    ..Default::default()
+                },
+                Some(&oi),
+                None,
+                4,
+            )
+            .unwrap();
         assert_eq!(latest, explicit);
     }
 
@@ -180,30 +237,56 @@ mod t07_t10_projected_prefix_evaluation {
             "version":COMPOSITION_VERSION,
             "steps":[{"id":"mean_rate","op":"rolling_mean","input":"funding_rate","period":2}],
             "result_steps":["mean_rate"]
-        })).unwrap();
+        }))
+        .unwrap();
         let plan = CheckedComposition::compile(request, 1000).unwrap();
         let close = vec![f64::NAN; 1000];
         let mut rates = vec![None; 1000];
         rates[1] = Some(0.01);
         rates[2] = Some(-0.01);
-        let (historical, causes) = plan.evaluate_at_with_candle_sources_diagnostics(
-            &close, CandlePriceInputs::default(), None, Some(&rates), 2,
-        ).unwrap();
+        let (historical, causes) = plan
+            .evaluate_at_with_candle_sources_diagnostics(
+                &close,
+                CandlePriceInputs::default(),
+                None,
+                Some(&rates),
+                2,
+            )
+            .unwrap();
         assert_eq!(historical["mean_rate"].0, Some(0.0));
         assert!(causes.is_empty());
         rates[900] = Some(f64::INFINITY);
-        let after = plan.evaluate_at_with_candle_sources_diagnostics(
-            &close, CandlePriceInputs::default(), None, Some(&rates), 2,
-        ).unwrap();
+        let after = plan
+            .evaluate_at_with_candle_sources_diagnostics(
+                &close,
+                CandlePriceInputs::default(),
+                None,
+                Some(&rates),
+                2,
+            )
+            .unwrap();
         assert_eq!(historical, after.0);
-        assert_eq!(plan.evaluate_with_candle_sources_diagnostics(
-            &close, CandlePriceInputs::default(), None, Some(&rates),
-        ).unwrap_err(), "composition.sources.funding_rate:NONFINITE_RATE");
+        assert_eq!(
+            plan.evaluate_with_candle_sources_diagnostics(
+                &close,
+                CandlePriceInputs::default(),
+                None,
+                Some(&rates),
+            )
+            .unwrap_err(),
+            "composition.sources.funding_rate:NONFINITE_RATE"
+        );
         // Sparse gaps remain unknown rather than becoming synthetic zeros.
         rates[2] = None;
-        let (missing, cause) = plan.evaluate_at_with_candle_sources_diagnostics(
-            &close, CandlePriceInputs::default(), None, Some(&rates), 2,
-        ).unwrap();
+        let (missing, cause) = plan
+            .evaluate_at_with_candle_sources_diagnostics(
+                &close,
+                CandlePriceInputs::default(),
+                None,
+                Some(&rates),
+                2,
+            )
+            .unwrap();
         assert_eq!(missing["mean_rate"].0, None);
         assert_eq!(cause["mean_rate"].origin_step, "funding_rate");
         assert_eq!(cause["mean_rate"].origin_index, 2);
@@ -337,7 +420,7 @@ impl TryFrom<StoredCheckedComposition> for CheckedComposition {
             return Err("composition.checked:INVALID_STEP_COUNT".into());
         }
         let step_count = stored.steps.len() as u64;
-        if stored.estimated_cells % step_count != 0 {
+        if !stored.estimated_cells.is_multiple_of(step_count) {
             return Err("composition.checked:INVALID_ESTIMATED_CELLS".into());
         }
         let total_bars = stored.estimated_cells / step_count;
@@ -366,6 +449,10 @@ pub struct CompositionNullCause {
     /// operation originated. This is an event index, not a publication time.
     pub origin_index: usize,
 }
+
+/// Stable public projections; aliases keep the diagnostic API readable.
+pub type CompositionValues = BTreeMap<String, (Option<f64>, Unit)>;
+pub type CompositionDiagnostics = (CompositionValues, BTreeMap<String, CompositionNullCause>);
 
 /// Optional aligned closed-candle columns (OHLCV). A missing observation is NaN;
 /// the evaluation layer turns it into an unknown, never a synthetic zero.
@@ -403,8 +490,7 @@ impl CheckedComposition {
         let reachable = self.reachable_steps();
         self.steps.iter().any(|checked| {
             reachable.contains(checked.step.id.as_str())
-                && (checked.step.input == source
-                    || checked.step.other.as_deref() == Some(source))
+                && (checked.step.input == source || checked.step.other.as_deref() == Some(source))
         })
     }
     /// Resolve the transitive dependency closure of projected results. The
@@ -502,8 +588,10 @@ impl CheckedComposition {
             {
                 return Err(format!("{path}.id:INVALID"));
             }
-            if matches!(step.id.as_str(), "open" | "high" | "low" | "close" | "volume" | "open_interest" | "funding_rate")
-                || known.contains_key(&step.id)
+            if matches!(
+                step.id.as_str(),
+                "open" | "high" | "low" | "close" | "volume" | "open_interest" | "funding_rate"
+            ) || known.contains_key(&step.id)
             {
                 return Err(format!("{path}.id:DUPLICATE"));
             }
@@ -588,7 +676,11 @@ impl CheckedComposition {
                 SeriesOp::RollingZscore | SeriesOp::RollingStddev | SeriesOp::RollingRange => {
                     if !matches!(
                         input_unit,
-                        Unit::Price | Unit::Ratio | Unit::Contracts | Unit::NativeVolume | Unit::Coefficient
+                        Unit::Price
+                            | Unit::Ratio
+                            | Unit::Contracts
+                            | Unit::NativeVolume
+                            | Unit::Coefficient
                     ) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
@@ -597,8 +689,9 @@ impl CheckedComposition {
                     }
                     let valid_period = if step.op == SeriesOp::RollingRange {
                         step.period.is_some_and(|period| {
-                            period >= ROLLING_RANGE_DESCRIPTOR.period_min
-                                && period <= ROLLING_RANGE_DESCRIPTOR.period_max
+                            (ROLLING_RANGE_DESCRIPTOR.period_min
+                                ..=ROLLING_RANGE_DESCRIPTOR.period_max)
+                                .contains(&period)
                         })
                     } else {
                         matches!(step.period, Some(2..=1000))
@@ -682,7 +775,10 @@ impl CheckedComposition {
                     Unit::Boolean
                 }
                 SeriesOp::ReturnsSeries => {
-                    if !matches!(input_unit, Unit::Price | Unit::Contracts | Unit::NativeVolume) {
+                    if !matches!(
+                        input_unit,
+                        Unit::Price | Unit::Contracts | Unit::NativeVolume
+                    ) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=price:actual={}",
                             composition_unit_name(input_unit)
@@ -702,7 +798,11 @@ impl CheckedComposition {
                 | SeriesOp::Lag => {
                     let numeric = matches!(
                         input_unit,
-                        Unit::Price | Unit::Ratio | Unit::Contracts | Unit::NativeVolume | Unit::Coefficient
+                        Unit::Price
+                            | Unit::Ratio
+                            | Unit::Contracts
+                            | Unit::NativeVolume
+                            | Unit::Coefficient
                     );
                     let lagged_discrete = step.op == SeriesOp::Lag
                         && matches!(input_unit, Unit::Boolean | Unit::Event);
@@ -721,7 +821,10 @@ impl CheckedComposition {
                     input_unit
                 }
                 SeriesOp::GreaterThan | SeriesOp::LessThan => {
-                    if !matches!(input_unit, Unit::Price | Unit::Ratio | Unit::NativeVolume | Unit::Coefficient) {
+                    if !matches!(
+                        input_unit,
+                        Unit::Price | Unit::Ratio | Unit::NativeVolume | Unit::Coefficient
+                    ) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
                             composition_unit_name(input_unit)
@@ -736,7 +839,14 @@ impl CheckedComposition {
                     Unit::Boolean
                 }
                 SeriesOp::GreaterThanSeries | SeriesOp::LessThanSeries => {
-                    if !matches!(input_unit, Unit::Price | Unit::Ratio | Unit::Contracts | Unit::NativeVolume | Unit::Coefficient) {
+                    if !matches!(
+                        input_unit,
+                        Unit::Price
+                            | Unit::Ratio
+                            | Unit::Contracts
+                            | Unit::NativeVolume
+                            | Unit::Coefficient
+                    ) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
                             composition_unit_name(input_unit)
@@ -746,7 +856,8 @@ impl CheckedComposition {
                     if other_unit != input_unit {
                         return Err(format!(
                             "{path}.other:UNIT_MISMATCH:expected={}:actual={}",
-                            composition_unit_name(input_unit), composition_unit_name(other_unit)
+                            composition_unit_name(input_unit),
+                            composition_unit_name(other_unit)
                         ));
                     }
                     if step.period.is_some() {
@@ -878,19 +989,21 @@ impl CheckedComposition {
     /// Causal outputs at index `at` must be invariant under changes after `at`.
     /// Outcome labels are explicitly non-causal and may use later bars.
     pub fn evaluate_at(&self, close: &[f64], at: usize) -> BTreeMap<String, (Option<f64>, Unit)> {
-        self.evaluate_at_sources(close, CandlePriceInputs::default(), None, None, at, false).0
+        self.evaluate_at_sources(close, CandlePriceInputs::default(), None, None, at, false)
+            .0
     }
 
     /// Preserve the legacy value projection; add precise explanations only
     /// for projected nulls, calculated once at the requested closed index.
-    pub fn evaluate_with_diagnostics(
-        &self,
-        close: &[f64],
-    ) -> (
-        BTreeMap<String, (Option<f64>, Unit)>,
-        BTreeMap<String, CompositionNullCause>,
-    ) {
-        self.evaluate_at_sources(close, CandlePriceInputs::default(), None, None, close.len().saturating_sub(1), true)
+    pub fn evaluate_with_diagnostics(&self, close: &[f64]) -> CompositionDiagnostics {
+        self.evaluate_at_sources(
+            close,
+            CandlePriceInputs::default(),
+            None,
+            None,
+            close.len().saturating_sub(1),
+            true,
+        )
     }
 
     pub fn evaluate_with_open_interest(
@@ -915,13 +1028,7 @@ impl CheckedComposition {
         &self,
         close: &[f64],
         open_interest: &[Option<f64>],
-    ) -> Result<
-        (
-            BTreeMap<String, (Option<f64>, Unit)>,
-            BTreeMap<String, CompositionNullCause>,
-        ),
-        String,
-    > {
+    ) -> Result<CompositionDiagnostics, String> {
         self.check_open_interest(close, open_interest)?;
         Ok(self.evaluate_at_sources(
             close,
@@ -941,15 +1048,12 @@ impl CheckedComposition {
         close: &[f64],
         open_interest: Option<&[Option<f64>]>,
         funding_rate: Option<&[Option<f64>]>,
-    ) -> Result<
-        (
-            BTreeMap<String, (Option<f64>, Unit)>,
-            BTreeMap<String, CompositionNullCause>,
-        ),
-        String,
-    > {
+    ) -> Result<CompositionDiagnostics, String> {
         self.evaluate_with_candle_sources_diagnostics(
-            close, CandlePriceInputs::default(), open_interest, funding_rate,
+            close,
+            CandlePriceInputs::default(),
+            open_interest,
+            funding_rate,
         )
     }
 
@@ -961,13 +1065,7 @@ impl CheckedComposition {
         candles: CandlePriceInputs<'_>,
         open_interest: Option<&[Option<f64>]>,
         funding_rate: Option<&[Option<f64>]>,
-    ) -> Result<
-        (
-            BTreeMap<String, (Option<f64>, Unit)>,
-            BTreeMap<String, CompositionNullCause>,
-        ),
-        String,
-    > {
+    ) -> Result<CompositionDiagnostics, String> {
         self.evaluate_at_with_candle_sources_diagnostics(
             close,
             candles,
@@ -988,13 +1086,7 @@ impl CheckedComposition {
         open_interest: Option<&[Option<f64>]>,
         funding_rate: Option<&[Option<f64>]>,
         at: usize,
-    ) -> Result<
-        (
-            BTreeMap<String, (Option<f64>, Unit)>,
-            BTreeMap<String, CompositionNullCause>,
-        ),
-        String,
-    > {
+    ) -> Result<CompositionDiagnostics, String> {
         let required = self.required_prefixes(close.len(), at);
         // Preserve the full legacy validation for a latest-bar projection.
         // Historical feature checks must not inspect a future source value:
@@ -1007,12 +1099,19 @@ impl CheckedComposition {
                 required.get(name).copied().unwrap_or(0)
             }
         };
-        for (name, series) in [("open", candles.open), ("high", candles.high), ("low", candles.low), ("volume", candles.volume)] {
+        for (name, series) in [
+            ("open", candles.open),
+            ("high", candles.high),
+            ("low", candles.low),
+            ("volume", candles.volume),
+        ] {
             if self.uses_source(name) && series.is_none() {
                 return Err(format!("composition.sources.{name}:REQUIRED"));
             }
             if series.is_some_and(|values| values.len() != close.len()) {
-                return Err(format!("composition.sources.{name}:ALIGNMENT_LENGTH_MISMATCH"));
+                return Err(format!(
+                    "composition.sources.{name}:ALIGNMENT_LENGTH_MISMATCH"
+                ));
             }
         }
         if candles.volume.is_some_and(|values| {
@@ -1037,14 +1136,7 @@ impl CheckedComposition {
                 return Err("composition.sources.funding_rate:NONFINITE_RATE".into());
             }
         }
-        Ok(self.evaluate_at_sources(
-            close,
-            candles,
-            open_interest,
-            funding_rate,
-            at,
-            true,
-        ))
+        Ok(self.evaluate_at_sources(close, candles, open_interest, funding_rate, at, true))
     }
 
     fn check_open_interest(
@@ -1082,10 +1174,7 @@ impl CheckedComposition {
         funding_rate: Option<&[Option<f64>]>,
         at: usize,
         explain_nulls: bool,
-    ) -> (
-        BTreeMap<String, (Option<f64>, Unit)>,
-        BTreeMap<String, CompositionNullCause>,
-    ) {
+    ) -> CompositionDiagnostics {
         let required = self.required_prefixes(close.len(), at);
         let mut values = BTreeMap::<String, Vec<Option<f64>>>::new();
         let close_end = required.get("close").copied().unwrap_or(0);
@@ -1096,11 +1185,22 @@ impl CheckedComposition {
                 .map(|v| v.is_finite().then_some(*v))
                 .collect(),
         );
-        for (name, source) in [("open", candles.open), ("high", candles.high), ("low", candles.low), ("volume", candles.volume)] {
+        for (name, source) in [
+            ("open", candles.open),
+            ("high", candles.high),
+            ("low", candles.low),
+            ("volume", candles.volume),
+        ] {
             if let Some(&end) = required.get(name) {
                 values.insert(
                     name.into(),
-                    source.map(|values| values[..end].iter().map(|v| v.is_finite().then_some(*v)).collect())
+                    source
+                        .map(|values| {
+                            values[..end]
+                                .iter()
+                                .map(|v| v.is_finite().then_some(*v))
+                                .collect()
+                        })
                         .unwrap_or_else(|| vec![None; end]),
                 );
             }
@@ -1244,7 +1344,7 @@ impl CheckedComposition {
                     result
                 }
                 SeriesOp::RollingMax | SeriesOp::RollingMin => rolling_extremum(
-                    &input,
+                    input,
                     checked.step.period.expect("validated extrema period") as usize,
                     checked.step.op == SeriesOp::RollingMax,
                 ),
@@ -1272,8 +1372,11 @@ impl CheckedComposition {
                         .collect()
                 }
                 SeriesOp::GreaterThanSeries | SeriesOp::LessThanSeries => {
-                    let other =
-                        &values[checked.step.other.as_ref().expect("validated comparison input")];
+                    let other = &values[checked
+                        .step
+                        .other
+                        .as_ref()
+                        .expect("validated comparison input")];
                     input
                         .iter()
                         .zip(other)
@@ -1293,11 +1396,12 @@ impl CheckedComposition {
                     let mut result = vec![None; input.len()];
                     for i in 1..input.len() {
                         if let (Some(previous), Some(current)) = (input[i - 1], input[i]) {
-                            result[i] = Some(f64::from(if checked.step.op == SeriesOp::RisingEdge {
-                                previous == 0.0 && current == 1.0
-                            } else {
-                                previous == 1.0 && current == 0.0
-                            }));
+                            result[i] =
+                                Some(f64::from(if checked.step.op == SeriesOp::RisingEdge {
+                                    previous == 0.0 && current == 1.0
+                                } else {
+                                    previous == 1.0 && current == 0.0
+                                }));
                         }
                     }
                     result
@@ -1453,7 +1557,10 @@ impl CheckedComposition {
                 }
                 cause("NON_FINITE_RESULT")
             }
-            SeriesOp::RollingMean | SeriesOp::RollingMax | SeriesOp::RollingMin | SeriesOp::RollingRange => {
+            SeriesOp::RollingMean
+            | SeriesOp::RollingMax
+            | SeriesOp::RollingMin
+            | SeriesOp::RollingRange => {
                 let period = step.period.expect("validated window") as usize;
                 if at + 1 < period {
                     return cause("WARMUP");
@@ -1549,8 +1656,11 @@ fn source_buffer_count(steps: &[CheckedSeriesStep]) -> u64 {
             checked.step.input == name || checked.step.other.as_deref() == Some(name)
         })
     };
-    1 + u64::from(uses("open")) + u64::from(uses("high"))
-        + u64::from(uses("low")) + u64::from(uses("volume")) + u64::from(uses("open_interest"))
+    1 + u64::from(uses("open"))
+        + u64::from(uses("high"))
+        + u64::from(uses("low"))
+        + u64::from(uses("volume"))
+        + u64::from(uses("open_interest"))
         + u64::from(uses("funding_rate"))
 }
 
@@ -1641,7 +1751,7 @@ fn rolling_pearson(left: &[Option<f64>], right: &[Option<f64>], period: usize) -
         (Some(a), Some(b)) if a.is_finite() && b.is_finite() => Some((a, b)),
         _ => None,
     };
-    for i in 0..left.len() {
+    for (i, projected) in output.iter_mut().enumerate() {
         if i >= period {
             match pair(i - period) {
                 Some((a, b)) => stats.remove(a, b),
@@ -1665,7 +1775,7 @@ fn rolling_pearson(left: &[Option<f64>], right: &[Option<f64>], period: usize) -
             None => missing += 1,
         }
         if i + 1 >= period && missing == 0 {
-            output[i] = stats.coefficient();
+            *projected = stats.coefficient();
         }
     }
     output
@@ -1700,8 +1810,8 @@ fn rolling_dispersion(input: &[Option<f64>], period: usize, zscore: bool) -> Vec
         if i > 0 && i.is_multiple_of(4096) {
             stats = SlidingPearson::default();
             missing = 0;
-            for prior in i.saturating_sub(period - 1)..i {
-                match input[prior] {
+            for sample in input.iter().take(i).skip(i.saturating_sub(period - 1)) {
+                match *sample {
                     Some(value) => stats.add(value, value),
                     None => missing += 1,
                 }
@@ -1823,10 +1933,16 @@ pub fn rolling_range(input: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
         } else {
             missing += 1;
         }
-        while maxima.front().is_some_and(|(old, _)| old.saturating_add(period) <= index) {
+        while maxima
+            .front()
+            .is_some_and(|(old, _)| old.saturating_add(period) <= index)
+        {
             maxima.pop_front();
         }
-        while minima.front().is_some_and(|(old, _)| old.saturating_add(period) <= index) {
+        while minima
+            .front()
+            .is_some_and(|(old, _)| old.saturating_add(period) <= index)
+        {
             minima.pop_front();
         }
         if index + 1 >= period && missing == 0 {
@@ -1843,7 +1959,10 @@ mod t15_extension_contract {
     use super::*;
     use serde_json::json;
 
-    fn compile(steps: serde_json::Value, result_steps: &[&str]) -> Result<CheckedComposition, String> {
+    fn compile(
+        steps: serde_json::Value,
+        result_steps: &[&str],
+    ) -> Result<CheckedComposition, String> {
         let request = serde_json::from_value(json!({
             "version": COMPOSITION_VERSION,
             "steps": steps,
@@ -1855,28 +1974,41 @@ mod t15_extension_contract {
 
     #[test]
     fn new_pure_operator_has_stable_serde_id_version_descriptor_and_numeric_oracle() {
-        assert_eq!(serde_json::to_value(SeriesOp::RollingRange).unwrap(), "rolling_range");
+        assert_eq!(
+            serde_json::to_value(SeriesOp::RollingRange).unwrap(),
+            "rolling_range"
+        );
         assert_eq!(ROLLING_RANGE_DESCRIPTOR.op, "rolling_range");
         assert_eq!(ROLLING_RANGE_DESCRIPTOR.version, 1);
         assert_eq!(ROLLING_RANGE_DESCRIPTOR.effects, "pure_no_io");
         assert_eq!(ROLLING_RANGE_DESCRIPTOR.output_unit, "same_as_input");
         assert_eq!(ROLLING_RANGE_DESCRIPTOR.period_min, 2);
         assert_eq!(ROLLING_RANGE_DESCRIPTOR.period_max, 1000);
-        assert_eq!(rolling_range(&[Some(10.), Some(14.), Some(13.), Some(18.), Some(18.)], 3),
-            vec![None, None, Some(4.), Some(5.), Some(5.)]);
-        assert_eq!(rolling_range(&[Some(4.); 4], 2),
-            vec![None, Some(0.), Some(0.), Some(0.)]);
-        assert_eq!(rolling_range(&[Some(2.), None, Some(3.), Some(5.), Some(5.)], 2),
-            vec![None, None, None, Some(2.), Some(0.)]);
-        assert_eq!(rolling_range(&[Some(2.), Some(f64::NAN), Some(3.)], 2),
-            vec![None, None, None]);
-        assert_eq!(rolling_range(&[Some(f64::MAX), Some(-f64::MAX)], 2),
-            vec![None, None]);
+        assert_eq!(
+            rolling_range(&[Some(10.), Some(14.), Some(13.), Some(18.), Some(18.)], 3),
+            vec![None, None, Some(4.), Some(5.), Some(5.)]
+        );
+        assert_eq!(
+            rolling_range(&[Some(4.); 4], 2),
+            vec![None, Some(0.), Some(0.), Some(0.)]
+        );
+        assert_eq!(
+            rolling_range(&[Some(2.), None, Some(3.), Some(5.), Some(5.)], 2),
+            vec![None, None, None, Some(2.), Some(0.)]
+        );
+        assert_eq!(
+            rolling_range(&[Some(2.), Some(f64::NAN), Some(3.)], 2),
+            vec![None, None, None]
+        );
+        assert_eq!(
+            rolling_range(&[Some(f64::MAX), Some(-f64::MAX)], 2),
+            vec![None, None]
+        );
 
         // Deliberately independent O(period) reference, with holes and ties,
         // against the production O(bars) two-deque implementation.
         let observations = (0..2037)
-            .map(|i| (i % 31 != 0).then_some(((i * 37 % 101) as i32 - 50) as f64))
+            .map(|i| (i % 31 != 0).then_some((i * 37 % 101 - 50) as f64))
             .collect::<Vec<_>>();
         for period in [2usize, 3, 13, 31, 1000] {
             let actual = rolling_range(&observations, period);
@@ -1885,11 +2017,15 @@ mod t15_extension_contract {
                     None
                 } else {
                     let window = &observations[index + 1 - period..=index];
-                    window.iter().copied().collect::<Option<Vec<_>>>().map(|values| {
-                        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                        let min = values.iter().copied().fold(f64::INFINITY, f64::min);
-                        max - min
-                    })
+                    window
+                        .iter()
+                        .copied()
+                        .collect::<Option<Vec<_>>>()
+                        .map(|values| {
+                            let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                            let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+                            max - min
+                        })
                 };
                 assert_eq!(got, expected, "period={period},bar={index}");
             }
@@ -1906,7 +2042,11 @@ mod t15_extension_contract {
             {"id":"relative","op":"returns_series","input":"close"},
             {"id":"return_span","op":"rolling_range","input":"relative","period":2}
         ]);
-        let compiled = compile(graph.clone(), &["width","wide","first_wide","smooth","return_span"]).unwrap();
+        let compiled = compile(
+            graph.clone(),
+            &["width", "wide", "first_wide", "smooth", "return_span"],
+        )
+        .unwrap();
         let close = [10., 14., 13., 18., 18., 12.];
         let at = compiled.evaluate_at(&close, 3);
         assert_eq!(at["width"], (Some(5.), Unit::Price));
@@ -1922,14 +2062,25 @@ mod t15_extension_contract {
         // binary. No Rust strategy ID, routing entry or finance call is added.
         let mut altered = graph;
         altered[1]["threshold"] = json!(100.0);
-        let different = compile(altered, &["width","wide","first_wide","smooth","return_span"]).unwrap();
+        let different = compile(
+            altered,
+            &["width", "wide", "first_wide", "smooth", "return_span"],
+        )
+        .unwrap();
         assert_eq!(different.evaluate_at(&close, 3)["wide"].0, Some(0.));
         assert_eq!(different.evaluate_at(&close, 3)["first_wide"].0, Some(0.));
         assert_eq!(different.evaluate_at(&close, 3)["width"], at["width"]);
 
         let mut missing = close.to_vec();
         missing[2] = f64::NAN;
-        let (values, causes) = compiled.evaluate_at_sources(&missing, CandlePriceInputs::default(), None, None, 3, true);
+        let (values, causes) = compiled.evaluate_at_sources(
+            &missing,
+            CandlePriceInputs::default(),
+            None,
+            None,
+            3,
+            true,
+        );
         assert_eq!(values["width"].0, None);
         assert_eq!(causes["width"].reason, "SOURCE_OBSERVATION_MISSING");
         assert_eq!(causes["width"].origin_step, "close");
@@ -1939,17 +2090,38 @@ mod t15_extension_contract {
     #[test]
     fn compiler_rejects_malformed_extension_windows_units_and_future_outcomes() {
         for (steps, message) in [
-            (json!([{"id":"range","op":"rolling_range","input":"close"}]), "composition.steps[0].period:INVALID:2..1000"),
-            (json!([{"id":"range","op":"rolling_range","input":"close","period":1}]), "composition.steps[0].period:INVALID:2..1000"),
-            (json!([{"id":"range","op":"rolling_range","input":"close","period":1001}]), "composition.steps[0].period:INVALID:2..1000"),
-            (json!([{"id":"range","op":"rolling_range","input":"close","period":2,"threshold":1}]), "composition.steps[0].threshold:UNEXPECTED"),
-            (json!([{"id":"range","op":"rolling_range","input":"close","period":2,"other":"open"}]), "composition.steps[0].other:UNEXPECTED"),
-            (json!([{"id":"flag","op":"greater_than","input":"close","threshold":1},
-                    {"id":"range","op":"rolling_range","input":"flag","period":2}]), "composition.steps[1].input:UNIT_MISMATCH:expected=numeric_series:actual=boolean"),
-            (json!([{"id":"flag","op":"greater_than","input":"close","threshold":1},
+            (
+                json!([{"id":"range","op":"rolling_range","input":"close"}]),
+                "composition.steps[0].period:INVALID:2..1000",
+            ),
+            (
+                json!([{"id":"range","op":"rolling_range","input":"close","period":1}]),
+                "composition.steps[0].period:INVALID:2..1000",
+            ),
+            (
+                json!([{"id":"range","op":"rolling_range","input":"close","period":1001}]),
+                "composition.steps[0].period:INVALID:2..1000",
+            ),
+            (
+                json!([{"id":"range","op":"rolling_range","input":"close","period":2,"threshold":1}]),
+                "composition.steps[0].threshold:UNEXPECTED",
+            ),
+            (
+                json!([{"id":"range","op":"rolling_range","input":"close","period":2,"other":"open"}]),
+                "composition.steps[0].other:UNEXPECTED",
+            ),
+            (
+                json!([{"id":"flag","op":"greater_than","input":"close","threshold":1},
+                    {"id":"range","op":"rolling_range","input":"flag","period":2}]),
+                "composition.steps[1].input:UNIT_MISMATCH:expected=numeric_series:actual=boolean",
+            ),
+            (
+                json!([{"id":"flag","op":"greater_than","input":"close","threshold":1},
                     {"id":"event","op":"rising_edge","input":"flag"},
                     {"id":"outcome","op":"forward_return_label","input":"close","when":"event","period":2},
-                    {"id":"range","op":"rolling_range","input":"outcome","period":2}]), "composition.steps[3].input:UNIT_MISMATCH:expected=numeric_series:actual=outcome_ratio"),
+                    {"id":"range","op":"rolling_range","input":"outcome","period":2}]),
+                "composition.steps[3].input:UNIT_MISMATCH:expected=numeric_series:actual=outcome_ratio",
+            ),
         ] {
             assert_eq!(compile(steps, &["range"]).unwrap_err(), message);
         }
@@ -2094,19 +2266,21 @@ impl TryFrom<StoredQueryPlan> for QueryPlan {
             composition: snapshot.composition,
         };
         if let Some(graph) = &plan.composition {
-            let cells = plan.range.expected_bars
+            let cells = plan
+                .range
+                .expected_bars
                 .checked_mul(graph.steps().len() as u64)
                 .ok_or("query_plan.composition:CELLS_OVERFLOW")?;
-            if cells != graph.estimated_cells()
-                || plan.timeframe_ms != plan.range.timeframe_ms
-            {
+            if cells != graph.estimated_cells() || plan.timeframe_ms != plan.range.timeframe_ms {
                 return Err("query_plan.composition:RANGE_BINDING_MISMATCH".into());
             }
             let sources = graph.sources();
             if !sources.iter().all(|source| plan.sources.contains(source)) {
                 return Err("query_plan.composition:SOURCE_BINDING_MISMATCH".into());
             }
-            let total_bars = plan.range.expected_bars
+            let total_bars = plan
+                .range
+                .expected_bars
                 .checked_mul(plan.universe.len().max(1) as u64)
                 .ok_or("query_plan.composition:GLOBAL_BARS_OVERFLOW")?;
             graph.validate_global_budget(total_bars)?;
@@ -2334,8 +2508,12 @@ mod tests {
         // A durable QueryPlan with the same checked graph remains readable.
         let range = ClosedRange::strict(0, 420_000, 60_000).unwrap();
         let query = QueryPlan::compile(
-            vec!["BTC-USDT".into()], range, vec![Operator::Returns],
-            BTreeMap::new(), vec![], None,
+            vec!["BTC-USDT".into()],
+            range,
+            vec![Operator::Returns],
+            BTreeMap::new(),
+            vec![],
+            None,
         )
         .unwrap()
         .with_composition(Some(two_step_composition()))
@@ -2347,20 +2525,55 @@ mod tests {
 
     #[test]
     fn t02_t03_checked_graph_restore_rejects_forged_units_edges_depth_and_limits() {
-        let baseline = serde_json::to_value(
-            CheckedComposition::compile(two_step_composition(), 7).unwrap(),
-        )
-        .unwrap();
+        let baseline =
+            serde_json::to_value(CheckedComposition::compile(two_step_composition(), 7).unwrap())
+                .unwrap();
         let mutations: Vec<(&str, serde_json::Value)> = vec![
-            ("unit", { let mut v = baseline.clone(); v["steps"][1]["unit"] = serde_json::json!("price"); v }),
-            ("depth", { let mut v = baseline.clone(); v["steps"][1]["depth"] = serde_json::json!(1); v }),
-            ("output", { let mut v = baseline.clone(); v["result_steps"] = serde_json::json!(["not_a_step"]); v }),
-            ("forward", { let mut v = baseline.clone(); v["steps"][0]["step"]["input"] = serde_json::json!("w1"); v }),
-            ("unit_from_op", { let mut v = baseline.clone(); v["steps"][1]["step"]["op"] = serde_json::json!("returns_series"); v }),
-            ("version", { let mut v = baseline.clone(); v["version"] = serde_json::json!("future-version"); v }),
-            ("non_integral_cells", { let mut v = baseline.clone(); v["estimated_cells"] = serde_json::json!(13); v }),
-            ("over_budget", { let mut v = baseline.clone(); v["estimated_cells"] = serde_json::json!(8_000_002); v }),
-            ("undeclared", { let mut v = baseline.clone(); v["authority"] = serde_json::json!("trade"); v }),
+            ("unit", {
+                let mut v = baseline.clone();
+                v["steps"][1]["unit"] = serde_json::json!("price");
+                v
+            }),
+            ("depth", {
+                let mut v = baseline.clone();
+                v["steps"][1]["depth"] = serde_json::json!(1);
+                v
+            }),
+            ("output", {
+                let mut v = baseline.clone();
+                v["result_steps"] = serde_json::json!(["not_a_step"]);
+                v
+            }),
+            ("forward", {
+                let mut v = baseline.clone();
+                v["steps"][0]["step"]["input"] = serde_json::json!("w1");
+                v
+            }),
+            ("unit_from_op", {
+                let mut v = baseline.clone();
+                v["steps"][1]["step"]["op"] = serde_json::json!("returns_series");
+                v
+            }),
+            ("version", {
+                let mut v = baseline.clone();
+                v["version"] = serde_json::json!("future-version");
+                v
+            }),
+            ("non_integral_cells", {
+                let mut v = baseline.clone();
+                v["estimated_cells"] = serde_json::json!(13);
+                v
+            }),
+            ("over_budget", {
+                let mut v = baseline.clone();
+                v["estimated_cells"] = serde_json::json!(8_000_002);
+                v
+            }),
+            ("undeclared", {
+                let mut v = baseline.clone();
+                v["authority"] = serde_json::json!("trade");
+                v
+            }),
         ];
         for (name, forged) in mutations {
             assert!(
@@ -2371,19 +2584,39 @@ mod tests {
         // This is the same decoding route as a persisted QueryPlan snapshot.
         let range = ClosedRange::strict(0, 420_000, 60_000).unwrap();
         let query = QueryPlan::compile(
-            vec!["BTC-USDT".into()], range, vec![Operator::Returns],
-            BTreeMap::new(), vec![], None,
+            vec!["BTC-USDT".into()],
+            range,
+            vec![Operator::Returns],
+            BTreeMap::new(),
+            vec![],
+            None,
         )
         .unwrap()
         .with_composition(Some(two_step_composition()))
         .unwrap();
         let mut wire = serde_json::to_value(query).unwrap();
         for (name, path, value) in [
-            ("binding", vec!["composition", "steps", "0", "unit"], serde_json::json!("boolean")),
-            ("timeframe", vec!["timeframe_ms"], serde_json::json!(120_000)),
-            ("range_budget", vec!["range", "expected_bars"], serde_json::json!(1)),
+            (
+                "binding",
+                vec!["composition", "steps", "0", "unit"],
+                serde_json::json!("boolean"),
+            ),
+            (
+                "timeframe",
+                vec!["timeframe_ms"],
+                serde_json::json!(120_000),
+            ),
+            (
+                "range_budget",
+                vec!["range", "expected_bars"],
+                serde_json::json!(1),
+            ),
             ("required_source", vec!["sources"], serde_json::json!([])),
-            ("composition_cells", vec!["composition", "estimated_cells"], serde_json::json!(12)),
+            (
+                "composition_cells",
+                vec!["composition", "estimated_cells"],
+                serde_json::json!(12),
+            ),
         ] {
             let mut invalid = wire.clone();
             let mut target = &mut invalid;
@@ -2417,7 +2650,8 @@ mod tests {
                 {"id":"change","op":"returns_series","input":"volume"}
             ],
             "result_steps":["short","lift","entry","change"]
-        })).unwrap();
+        }))
+        .unwrap();
         let checked = CheckedComposition::compile(request, 5).unwrap();
         assert_eq!(input("volume").unwrap().unit, Unit::NativeVolume);
         assert_eq!(checked.steps[0].unit, Unit::NativeVolume);
@@ -2430,10 +2664,13 @@ mod tests {
         assert!(!checked.uses_source("open"));
         let close = [100.0; 5];
         let volume = [10.0, 10.0, 10.0, 10.0, 30.0];
-        let candles = CandlePriceInputs { volume: Some(&volume), ..Default::default() };
-        let (result, causes) = checked.evaluate_with_candle_sources_diagnostics(
-            &close, candles, None, None,
-        ).unwrap();
+        let candles = CandlePriceInputs {
+            volume: Some(&volume),
+            ..Default::default()
+        };
+        let (result, causes) = checked
+            .evaluate_with_candle_sources_diagnostics(&close, candles, None, None)
+            .unwrap();
         assert!(causes.is_empty());
         assert_eq!(result["short"], (Some(20.0), Unit::NativeVolume));
         assert_eq!(result["lift"], (Some(1.0), Unit::Boolean));
@@ -2441,22 +2678,49 @@ mod tests {
         assert_eq!(result["change"], (Some(2.0), Unit::Ratio));
         let mut missing = volume;
         missing[4] = f64::NAN;
-        let (partial, causes) = checked.evaluate_with_candle_sources_diagnostics(
-            &close, CandlePriceInputs { volume: Some(&missing), ..Default::default() }, None, None,
-        ).unwrap();
+        let (partial, causes) = checked
+            .evaluate_with_candle_sources_diagnostics(
+                &close,
+                CandlePriceInputs {
+                    volume: Some(&missing),
+                    ..Default::default()
+                },
+                None,
+                None,
+            )
+            .unwrap();
         assert_eq!(partial["lift"].0, None);
         assert_eq!(causes["lift"].reason, "SOURCE_OBSERVATION_MISSING");
         assert_eq!(causes["lift"].origin_step, "volume");
         let mut negative = volume;
         negative[4] = -1.0;
-        assert_eq!(checked.evaluate_with_candle_sources_diagnostics(
-            &close, CandlePriceInputs { volume: Some(&negative), ..Default::default() }, None, None,
-        ).unwrap_err(), "composition.sources.volume:INVALID_NON_NEGATIVE_VOLUME");
+        assert_eq!(
+            checked
+                .evaluate_with_candle_sources_diagnostics(
+                    &close,
+                    CandlePriceInputs {
+                        volume: Some(&negative),
+                        ..Default::default()
+                    },
+                    None,
+                    None,
+                )
+                .unwrap_err(),
+            "composition.sources.volume:INVALID_NON_NEGATIVE_VOLUME"
+        );
         let mut zero = volume;
         zero[4] = 0.0;
-        let (values, causes) = checked.evaluate_with_candle_sources_diagnostics(
-            &close, CandlePriceInputs { volume: Some(&zero), ..Default::default() }, None, None,
-        ).unwrap();
+        let (values, causes) = checked
+            .evaluate_with_candle_sources_diagnostics(
+                &close,
+                CandlePriceInputs {
+                    volume: Some(&zero),
+                    ..Default::default()
+                },
+                None,
+                None,
+            )
+            .unwrap();
         assert_eq!(values["short"].0, Some(5.0));
         assert_eq!(values["change"].0, None);
         assert_eq!(causes["change"].reason, "NON_POSITIVE_RETURN_INPUT");
@@ -2464,22 +2728,31 @@ mod tests {
 
     #[test]
     fn t02_native_volume_static_mismatch_and_source_shadowing_fail_before_io() {
-        let build = |input: &str, other: &str| serde_json::from_value::<CompositionRequest>(serde_json::json!({
+        let build = |input: &str, other: &str| {
+            serde_json::from_value::<CompositionRequest>(serde_json::json!({
             "version":COMPOSITION_VERSION,
             "steps":[{"id":"comparison","op":"greater_than_series","input":input,"other":other}],
             "result_steps":["comparison"]
-        })).unwrap();
-        assert_eq!(CheckedComposition::compile(build("volume", "close"), 5).unwrap_err(),
-            "composition.steps[0].other:UNIT_MISMATCH:expected=native_volume:actual=price");
-        assert_eq!(CheckedComposition::compile(build("volume", "open_interest"), 5).unwrap_err(),
-            "composition.steps[0].other:UNIT_MISMATCH:expected=native_volume:actual=contracts");
+        })).unwrap()
+        };
+        assert_eq!(
+            CheckedComposition::compile(build("volume", "close"), 5).unwrap_err(),
+            "composition.steps[0].other:UNIT_MISMATCH:expected=native_volume:actual=price"
+        );
+        assert_eq!(
+            CheckedComposition::compile(build("volume", "open_interest"), 5).unwrap_err(),
+            "composition.steps[0].other:UNIT_MISMATCH:expected=native_volume:actual=contracts"
+        );
         let shadow: CompositionRequest = serde_json::from_value(serde_json::json!({
             "version":COMPOSITION_VERSION,
             "steps":[{"id":"volume","op":"rolling_mean","input":"close","period":2}],
             "result_steps":["volume"]
-        })).unwrap();
-        assert_eq!(CheckedComposition::compile(shadow, 5).unwrap_err(),
-            "composition.steps[0].id:DUPLICATE");
+        }))
+        .unwrap();
+        assert_eq!(
+            CheckedComposition::compile(shadow, 5).unwrap_err(),
+            "composition.steps[0].id:DUPLICATE"
+        );
     }
 
     #[test]
@@ -2493,7 +2766,8 @@ mod tests {
                 {"id":"cross","op":"rising_edge","input":"above"}
             ],
             "result_steps":["above","cross"]
-        })).unwrap();
+        }))
+        .unwrap();
         let checked = CheckedComposition::compile(request, 5).unwrap();
         assert_eq!(checked.sources(), BTreeSet::from([Source::Candles]));
         assert_eq!(checked.steps[2].unit, Unit::Boolean);
@@ -2504,7 +2778,10 @@ mod tests {
         assert_eq!(checked.evaluate(&close)["cross"].0, Some(0.0));
         let mut future_changed = close;
         future_changed[4] = 1000.0;
-        assert_eq!(checked.evaluate_at(&future_changed, 3), checked.evaluate_at(&close, 3));
+        assert_eq!(
+            checked.evaluate_at(&future_changed, 3),
+            checked.evaluate_at(&close, 3)
+        );
     }
 
     #[test]
@@ -2517,7 +2794,8 @@ mod tests {
                 {"id":"signal","op":"and","input":"body","other":"spread"}
             ],
             "result_steps":["signal"]
-        })).unwrap();
+        }))
+        .unwrap();
         let checked = CheckedComposition::compile(request.clone(), 3).unwrap();
         assert_eq!(checked.sources(), BTreeSet::from([Source::Candles]));
         assert!(checked.uses_source("open"));
@@ -2533,45 +2811,97 @@ mod tests {
             low: Some(&low),
             volume: None,
         };
-        let (values, causes) = checked.evaluate_with_candle_sources_diagnostics(
-            &close, candles, None, None,
-        ).unwrap();
+        let (values, causes) = checked
+            .evaluate_with_candle_sources_diagnostics(&close, candles, None, None)
+            .unwrap();
         assert_eq!(values["signal"].0, None);
         assert_eq!(causes["signal"].reason, "SOURCE_OBSERVATION_MISSING");
         assert_eq!(causes["signal"].origin_step, "high");
         let mut valid_high = [102.0, 105.0, 111.0];
-        let valid = checked.evaluate_with_candle_sources_diagnostics(
-            &close, CandlePriceInputs { high: Some(&valid_high), ..candles }, None, None,
-        ).unwrap();
+        let valid = checked
+            .evaluate_with_candle_sources_diagnostics(
+                &close,
+                CandlePriceInputs {
+                    high: Some(&valid_high),
+                    ..candles
+                },
+                None,
+                None,
+            )
+            .unwrap();
         assert_eq!(valid.0["signal"], (Some(1.0), Unit::Boolean));
         valid_high[2] = 104.0;
-        let invalid = checked.evaluate_with_candle_sources_diagnostics(
-            &close, CandlePriceInputs { high: Some(&valid_high), ..candles }, None, None,
-        ).unwrap();
+        let invalid = checked
+            .evaluate_with_candle_sources_diagnostics(
+                &close,
+                CandlePriceInputs {
+                    high: Some(&valid_high),
+                    ..candles
+                },
+                None,
+                None,
+            )
+            .unwrap();
         assert_eq!(invalid.0["signal"].0, Some(0.0));
-        assert_eq!(checked.evaluate_with_candle_sources_diagnostics(
-            &close, CandlePriceInputs { high: None, ..candles }, None, None,
-        ).unwrap_err(), "composition.sources.high:REQUIRED");
-        assert_eq!(checked.evaluate_with_candle_sources_diagnostics(
-            &close, CandlePriceInputs { low: Some(&[1.0]), ..candles }, None, None,
-        ).unwrap_err(), "composition.sources.low:ALIGNMENT_LENGTH_MISMATCH");
+        assert_eq!(
+            checked
+                .evaluate_with_candle_sources_diagnostics(
+                    &close,
+                    CandlePriceInputs {
+                        high: None,
+                        ..candles
+                    },
+                    None,
+                    None,
+                )
+                .unwrap_err(),
+            "composition.sources.high:REQUIRED"
+        );
+        assert_eq!(
+            checked
+                .evaluate_with_candle_sources_diagnostics(
+                    &close,
+                    CandlePriceInputs {
+                        low: Some(&[1.0]),
+                        ..candles
+                    },
+                    None,
+                    None,
+                )
+                .unwrap_err(),
+            "composition.sources.low:ALIGNMENT_LENGTH_MISMATCH"
+        );
 
         let mut wrong_units = request.clone();
-        wrong_units.steps.insert(0, SeriesStep {
-            id: "r".into(), op: SeriesOp::ReturnsSeries, input: "close".into(),
-            other: None, period: None, threshold: None, when: None,
-        });
+        wrong_units.steps.insert(
+            0,
+            SeriesStep {
+                id: "r".into(),
+                op: SeriesOp::ReturnsSeries,
+                input: "close".into(),
+                other: None,
+                period: None,
+                threshold: None,
+                when: None,
+            },
+        );
         wrong_units.steps[1].other = Some("r".into());
-        assert_eq!(CheckedComposition::compile(wrong_units, 3).unwrap_err(),
-            "composition.steps[1].other:UNIT_MISMATCH:expected=price:actual=ratio");
+        assert_eq!(
+            CheckedComposition::compile(wrong_units, 3).unwrap_err(),
+            "composition.steps[1].other:UNIT_MISMATCH:expected=price:actual=ratio"
+        );
         let mut no_second = request.clone();
         no_second.steps[0].other = None;
-        assert_eq!(CheckedComposition::compile(no_second, 3).unwrap_err(),
-            "composition.steps[0].other:REQUIRED");
+        assert_eq!(
+            CheckedComposition::compile(no_second, 3).unwrap_err(),
+            "composition.steps[0].other:REQUIRED"
+        );
         let mut bad_threshold = request.clone();
         bad_threshold.steps[0].threshold = Some(0.0);
-        assert_eq!(CheckedComposition::compile(bad_threshold, 3).unwrap_err(),
-            "composition.steps[0].threshold:UNEXPECTED");
+        assert_eq!(
+            CheckedComposition::compile(bad_threshold, 3).unwrap_err(),
+            "composition.steps[0].threshold:UNEXPECTED"
+        );
         let mut unprojected = request;
         unprojected.result_steps = vec!["body".into()];
         let checked = CheckedComposition::compile(unprojected, 3).unwrap();
@@ -3423,27 +3753,52 @@ mod t07_t15_symmetric_causal_signals {
 
     #[test]
     fn population_stddev_matches_independent_oracle_on_full_windows_and_gaps() {
-        let input = [Some(-0.1), Some(0.0), Some(0.1), Some(0.1), None,
-            Some(0.0), Some(0.0), Some(0.0), Some(0.0)];
+        let input = [
+            Some(-0.1),
+            Some(0.0),
+            Some(0.1),
+            Some(0.1),
+            None,
+            Some(0.0),
+            Some(0.0),
+            Some(0.0),
+            Some(0.0),
+        ];
         let observed = rolling_stddev(&input, 3);
         for (i, value) in observed.iter().enumerate() {
             let expected = if i >= 2 {
                 let window = &input[i - 2..=i];
                 if window.iter().all(Option::is_some) {
                     let mean = window.iter().map(|n| n.unwrap()).sum::<f64>() / 3.0;
-                    Some((window.iter().map(|n| (n.unwrap() - mean).powi(2)).sum::<f64>() / 3.0).sqrt())
-                } else { None }
-            } else { None };
+                    Some(
+                        (window
+                            .iter()
+                            .map(|n| (n.unwrap() - mean).powi(2))
+                            .sum::<f64>()
+                            / 3.0)
+                            .sqrt(),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             assert_eq!(value.is_some(), expected.is_some(), "bar={i}");
             if let (Some(value), Some(expected)) = (value, expected) {
-                assert!((value - expected).abs() < 1e-12, "bar={i} actual={value} expected={expected}");
+                assert!(
+                    (value - expected).abs() < 1e-12,
+                    "bar={i} actual={value} expected={expected}"
+                );
             }
         }
         assert_eq!(observed[7], Some(0.0));
         assert_eq!(observed[8], Some(0.0));
         assert_eq!(rolling_zscore(&input, 3)[7], None);
         assert_eq!(rolling_zscore(&input, 3)[8], None);
-        let offset = (0..200).map(|i| Some(1e12 + (i % 5) as f64)).collect::<Vec<_>>();
+        let offset = (0..200)
+            .map(|i| Some(1e12 + (i % 5) as f64))
+            .collect::<Vec<_>>();
         let stable = rolling_stddev(&offset, 5);
         for value in stable.iter().skip(4) {
             assert!((value.unwrap() - 2f64.sqrt()).abs() < 0.02);
@@ -3492,31 +3847,66 @@ mod t07_t15_symmetric_causal_signals {
     #[test]
     fn validation_rejects_untyped_lower_edges_and_future_label_reuse() {
         let reject = |steps, results: &[&str]| compiled(steps, results).unwrap_err();
-        assert_eq!(reject(json!([{"id":"risk","op":"rolling_stddev","input":"close","period":1}]), &["risk"]),
-            "composition.steps[0].period:INVALID:2..1000");
-        assert_eq!(reject(json!([{"id":"risk","op":"rolling_stddev","input":"close","period":2,"threshold":1}]), &["risk"]),
-            "composition.steps[0].threshold:UNEXPECTED");
-        assert_eq!(reject(json!([{"id":"below","op":"less_than","input":"close"}]), &["below"]),
-            "composition.steps[0].threshold:INVALID");
-        assert_eq!(reject(json!([{"id":"edge","op":"falling_edge","input":"close"}]), &["edge"]),
-            "composition.steps[0].input:UNIT_MISMATCH:expected=boolean:actual=price");
-        assert_eq!(reject(json!([
-            {"id":"ret","op":"returns_series","input":"close"},
-            {"id":"below","op":"less_than_series","input":"close","other":"ret"}
-        ]), &["below"]),
-            "composition.steps[1].other:UNIT_MISMATCH:expected=price:actual=ratio");
-        assert_eq!(reject(json!([
-            {"id":"cond","op":"less_than","input":"close","threshold":100},
-            {"id":"event","op":"falling_edge","input":"cond"},
-            {"id":"label","op":"forward_return_label","input":"close","when":"event","period":1},
-            {"id":"leak","op":"rolling_stddev","input":"label","period":2}
-        ]), &["leak"]),
-            "composition.steps[3].input:UNIT_MISMATCH:expected=numeric_series:actual=outcome_ratio");
-        assert_eq!(reject(json!([
-            {"id":"v","op":"rolling_mean","input":"volume","period":2},
-            {"id":"wrong","op":"less_than_series","input":"v","other":"close"}
-        ]), &["wrong"]),
-            "composition.steps[1].other:UNIT_MISMATCH:expected=native_volume:actual=price");
+        assert_eq!(
+            reject(
+                json!([{"id":"risk","op":"rolling_stddev","input":"close","period":1}]),
+                &["risk"]
+            ),
+            "composition.steps[0].period:INVALID:2..1000"
+        );
+        assert_eq!(
+            reject(
+                json!([{"id":"risk","op":"rolling_stddev","input":"close","period":2,"threshold":1}]),
+                &["risk"]
+            ),
+            "composition.steps[0].threshold:UNEXPECTED"
+        );
+        assert_eq!(
+            reject(
+                json!([{"id":"below","op":"less_than","input":"close"}]),
+                &["below"]
+            ),
+            "composition.steps[0].threshold:INVALID"
+        );
+        assert_eq!(
+            reject(
+                json!([{"id":"edge","op":"falling_edge","input":"close"}]),
+                &["edge"]
+            ),
+            "composition.steps[0].input:UNIT_MISMATCH:expected=boolean:actual=price"
+        );
+        assert_eq!(
+            reject(
+                json!([
+                    {"id":"ret","op":"returns_series","input":"close"},
+                    {"id":"below","op":"less_than_series","input":"close","other":"ret"}
+                ]),
+                &["below"]
+            ),
+            "composition.steps[1].other:UNIT_MISMATCH:expected=price:actual=ratio"
+        );
+        assert_eq!(
+            reject(
+                json!([
+                    {"id":"cond","op":"less_than","input":"close","threshold":100},
+                    {"id":"event","op":"falling_edge","input":"cond"},
+                    {"id":"label","op":"forward_return_label","input":"close","when":"event","period":1},
+                    {"id":"leak","op":"rolling_stddev","input":"label","period":2}
+                ]),
+                &["leak"]
+            ),
+            "composition.steps[3].input:UNIT_MISMATCH:expected=numeric_series:actual=outcome_ratio"
+        );
+        assert_eq!(
+            reject(
+                json!([
+                    {"id":"v","op":"rolling_mean","input":"volume","period":2},
+                    {"id":"wrong","op":"less_than_series","input":"v","other":"close"}
+                ]),
+                &["wrong"]
+            ),
+            "composition.steps[1].other:UNIT_MISMATCH:expected=native_volume:actual=price"
+        );
     }
 }
 
@@ -3995,7 +4385,10 @@ mod t02_t06_multisource_regression {
         }))
         .unwrap();
         let plan = CheckedComposition::compile(spec, 3).unwrap();
-        assert_eq!(plan.evaluate_at(&[100., 110., 105.], usize::MAX)["w1"].0, None);
+        assert_eq!(
+            plan.evaluate_at(&[100., 110., 105.], usize::MAX)["w1"].0,
+            None
+        );
         let (_, causes) = plan.evaluate_with_diagnostics(&[]);
         assert_eq!(causes["w1"].reason, "WARMUP");
         assert_eq!(causes["w1"].origin_step, "w1");

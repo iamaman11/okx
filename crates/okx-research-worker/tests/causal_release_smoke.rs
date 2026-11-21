@@ -75,8 +75,14 @@ fn restored_market_graph_is_rechecked_without_gaining_execution_authority() {
     assert_eq!(restored.result_steps(), compiled.result_steps());
     assert_eq!(restored.estimated_cells(), 35);
     let candles = [100.0, 102.0, 98.0, 99.0, 100.0, 101.0, 110.0];
-    assert_eq!(restored.evaluate_at(&candles, 4), compiled.evaluate_at(&candles, 4));
-    assert_eq!(restored.evaluate_at(&candles, 4)["event"], (Some(1.0), Unit::Event));
+    assert_eq!(
+        restored.evaluate_at(&candles, 4),
+        compiled.evaluate_at(&candles, 4)
+    );
+    assert_eq!(
+        restored.evaluate_at(&candles, 4)["event"],
+        (Some(1.0), Unit::Event)
+    );
 
     // Even with an otherwise valid serialized snapshot, forged annotations
     // cannot become an unchecked, authoritative Rust plan through serde.

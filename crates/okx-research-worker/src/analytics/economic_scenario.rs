@@ -99,7 +99,10 @@ fn evaluated_case(case: &EconomicCase) -> Result<(SettlementCashflow, Value), St
         EconomicProduct::Option => return Err("UNSUPPORTED_OPTION_ECONOMICS_MODEL".into()),
     };
     let (gross, net, details) = unit_and_contract;
-    Ok((SettlementCashflow::checked(gross, fees, funding, net)?, details))
+    Ok((
+        SettlementCashflow::checked(gross, fees, funding, net)?,
+        details,
+    ))
 }
 
 pub(super) fn evaluate(
@@ -154,13 +157,18 @@ pub(super) fn evaluate(
     }
     let grouped = group_settlement_cashflows(&flows)?;
     let completed = flows.len();
-    let cashflow_totals = grouped.iter().map(|group| json!({
-        "currency":group.currency,"contributors":group.contributors,
-        "gross_exact":group.gross.normalize().to_string(),
-        "fees_exact":group.fees.normalize().to_string(),
-        "funding_exact":group.funding.normalize().to_string(),
-        "net_exact":group.net.normalize().to_string()
-    })).collect::<Vec<_>>();
+    let cashflow_totals = grouped
+        .iter()
+        .map(|group| {
+            json!({
+                "currency":group.currency,"contributors":group.contributors,
+                "gross_exact":group.gross.normalize().to_string(),
+                "fees_exact":group.fees.normalize().to_string(),
+                "funding_exact":group.funding.normalize().to_string(),
+                "net_exact":group.net.normalize().to_string()
+            })
+        })
+        .collect::<Vec<_>>();
     Ok(
         json!({"schema":"okx.research.economics/v1","kind":"economic_scenario",
         "status":"completed","mode":"counterfactual",
@@ -258,8 +266,10 @@ mod tests {
         );
         assert_eq!(result["summary"]["quality"], "partial");
         assert_eq!(result["summary"]["requested"], 4);
-        assert_eq!(result["summary"]["blocked_reason_counts"],
-            json!({"UNSUPPORTED_OPTION_ECONOMICS_MODEL":1}));
+        assert_eq!(
+            result["summary"]["blocked_reason_counts"],
+            json!({"UNSUPPORTED_OPTION_ECONOMICS_MODEL":1})
+        );
         assert_eq!(
             result["summary"]["totals_by_settlement_currency"][0]["currency"],
             "BTC"
@@ -272,10 +282,13 @@ mod tests {
             result["summary"]["totals_by_settlement_currency"][1]["amount_exact"],
             "22"
         );
-        assert_eq!(result["summary"]["cashflow_by_settlement_currency"][1], json!({
-            "currency":"USDT","contributors":2,
-            "gross_exact":"23","fees_exact":"1","funding_exact":"0","net_exact":"22"
-        }));
+        assert_eq!(
+            result["summary"]["cashflow_by_settlement_currency"][1],
+            json!({
+                "currency":"USDT","contributors":2,
+                "gross_exact":"23","fees_exact":"1","funding_exact":"0","net_exact":"22"
+            })
+        );
         assert!(result["portfolio_equity"].is_null());
         assert_eq!(result["effects"]["public_reads"], 0);
         assert_eq!(result["effects"]["finance_writes"], 0);
@@ -331,12 +344,18 @@ mod tests {
             result["summary"]["totals_by_settlement_currency"],
             json!([])
         );
-        assert_eq!(result["summary"]["cashflow_by_settlement_currency"], json!([]));
-        assert_eq!(result["summary"]["blocked_reason_counts"], json!({
-            "CONTRACT_UNIT_MISMATCH":1,"CURRENCY_MISMATCH_FX_REQUIRED":1,
-            "CONTRACT_MULTIPLIER_MISSING":1,"SPOT_SHORT_REQUIRES_BORROW_MODEL":1,
-            "SPOT_FUNDING_UNSUPPORTED":1
-        }));
+        assert_eq!(
+            result["summary"]["cashflow_by_settlement_currency"],
+            json!([])
+        );
+        assert_eq!(
+            result["summary"]["blocked_reason_counts"],
+            json!({
+                "CONTRACT_UNIT_MISMATCH":1,"CURRENCY_MISMATCH_FX_REQUIRED":1,
+                "CONTRACT_MULTIPLIER_MISSING":1,"SPOT_SHORT_REQUIRES_BORROW_MODEL":1,
+                "SPOT_FUNDING_UNSUPPORTED":1
+            })
+        );
     }
 
     #[test]
@@ -354,8 +373,14 @@ mod tests {
         assert_eq!(result["rows"][0]["gross"]["amount_exact"], "-3");
         assert_eq!(result["rows"][0]["net"]["amount_exact"], "-2.5");
         assert_eq!(result["rows"][0]["funding"]["amount_exact"], "-0.5");
-        assert_eq!(result["summary"]["cashflow_by_settlement_currency"][0]["gross_exact"], "-3");
-        assert_eq!(result["summary"]["cashflow_by_settlement_currency"][0]["funding_exact"], "-0.5");
+        assert_eq!(
+            result["summary"]["cashflow_by_settlement_currency"][0]["gross_exact"],
+            "-3"
+        );
+        assert_eq!(
+            result["summary"]["cashflow_by_settlement_currency"][0]["funding_exact"],
+            "-0.5"
+        );
     }
 
     #[test]
@@ -367,30 +392,42 @@ mod tests {
         let mut inverse = counterfactual_case("inverse_swap");
         inverse["fees"]["amount"] = json!("0.001");
         inverse["funding"]["amount"] = json!("-0.002");
-        let ResearchRequest::Economics { cases, data_mode } =
-            request(vec![spot, linear, inverse, counterfactual_case("option")], "counterfactual")
-        else { panic!() };
+        let ResearchRequest::Economics { cases, data_mode } = request(
+            vec![spot, linear, inverse, counterfactual_case("option")],
+            "counterfactual",
+        ) else {
+            panic!()
+        };
         let result = evaluate(cases, data_mode).unwrap();
         for row in result["rows"].as_array().unwrap().iter().take(3) {
-            let amounts = ["gross", "fees", "funding", "net"]
-                .map(|field| Decimal::from_str(row[field]["amount_exact"].as_str().unwrap()).unwrap());
+            let amounts = ["gross", "fees", "funding", "net"].map(|field| {
+                Decimal::from_str(row[field]["amount_exact"].as_str().unwrap()).unwrap()
+            });
             assert_eq!(amounts[0] - amounts[1] - amounts[2], amounts[3]);
             for field in ["gross", "fees", "funding", "net"] {
                 assert_eq!(row[field]["currency"], row["net"]["currency"]);
             }
-            assert_eq!(row["settlement_identity"], "gross_minus_fees_minus_signed_funding_equals_net");
+            assert_eq!(
+                row["settlement_identity"],
+                "gross_minus_fees_minus_signed_funding_equals_net"
+            );
             assert_eq!(row["historical_rules_verified"], false);
         }
-        let grouped = result["summary"]["cashflow_by_settlement_currency"].as_array().unwrap();
+        let grouped = result["summary"]["cashflow_by_settlement_currency"]
+            .as_array()
+            .unwrap();
         assert_eq!(grouped.len(), 2);
         assert_eq!(grouped[0]["currency"], "BTC");
         assert_eq!(grouped[0]["contributors"], 1);
         assert_eq!(grouped[0]["fees_exact"], "0.001");
         assert_eq!(grouped[0]["funding_exact"], "-0.002");
-        assert_eq!(grouped[1], json!({
-            "currency":"USDT","contributors":2,"gross_exact":"23",
-            "fees_exact":"1.1","funding_exact":"0.2","net_exact":"21.7"
-        }));
+        assert_eq!(
+            grouped[1],
+            json!({
+                "currency":"USDT","contributors":2,"gross_exact":"23",
+                "fees_exact":"1.1","funding_exact":"0.2","net_exact":"21.7"
+            })
+        );
         for total in grouped {
             let values = ["gross_exact", "fees_exact", "funding_exact", "net_exact"]
                 .map(|field| Decimal::from_str(total[field].as_str().unwrap()).unwrap());

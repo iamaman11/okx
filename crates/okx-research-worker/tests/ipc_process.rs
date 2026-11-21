@@ -404,17 +404,17 @@ async fn lost_enqueue_ack_retry_preserves_job_and_rejects_conflict() {
             id: RequestId::new("h1".into()).unwrap(),
             session: next.clone(),
             command: Box::new(ResearchCommand::Research {
-                request: ResearchRequest::Status { job_id: durable_id.clone() },
+                request: ResearchRequest::Status {
+                    job_id: durable_id.clone(),
+                },
             }),
         },
     )
     .await;
-    assert!(
-        matches!(receive(&mut output).await,
+    assert!(matches!(receive(&mut output).await,
             WorkerFrame::Response { result: Ok(WorkerReply::Product(value)), .. }
             if value["id"] == durable_id && value["state"] == "interrupted"
-                && value["error"] == "process restarted before completion")
-    );
+                && value["error"] == "process restarted before completion"));
     send(
         &mut input,
         HostFrame::Request {
@@ -423,7 +423,9 @@ async fn lost_enqueue_ack_retry_preserves_job_and_rejects_conflict() {
             session: next.clone(),
             command: Box::new(ResearchCommand::Research {
                 request: ResearchRequest::Result {
-                    job_id: durable_id.clone(), cursor: None, limit: 1,
+                    job_id: durable_id.clone(),
+                    cursor: None,
+                    limit: 1,
                     view: okx_protocol::analytics::ResearchResultView::Summary,
                 },
             }),
@@ -452,7 +454,7 @@ async fn lost_enqueue_ack_retry_preserves_job_and_rejects_conflict() {
             assert_eq!(value["id"].as_str(), Some(durable_id.as_str()));
             assert_eq!(value["state"], "interrupted");
             assert!(value["artifact"].is_null());
-        },
+        }
         _ => panic!("missing retry response"),
     }
     send(
@@ -630,16 +632,21 @@ async fn t11_t12_real_worker_observation_and_cancel_survive_saturated_work_lane(
         "costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,
             "funding_mode":"zero_assumption"},
         "data_mode":"counterfactual"
-    })).unwrap();
+    }))
+    .unwrap();
     for number in 1..=MAX_IN_FLIGHT + 1 {
-        send(&mut input, HostFrame::Request {
-            invocation: None,
-            id: RequestId::new(format!("h{number}")).unwrap(),
-            session: session.clone(),
-            command: Box::new(ResearchCommand::Research {
-                request: validation.clone(),
-            }),
-        }).await;
+        send(
+            &mut input,
+            HostFrame::Request {
+                invocation: None,
+                id: RequestId::new(format!("h{number}")).unwrap(),
+                session: session.clone(),
+                command: Box::new(ResearchCommand::Research {
+                    request: validation.clone(),
+                }),
+            },
+        )
+        .await;
     }
 
     let mut source_requests = 0usize;
@@ -648,15 +655,24 @@ async fn t11_t12_real_worker_observation_and_cancel_survive_saturated_work_lane(
         loop {
             match receive(&mut output).await {
                 WorkerFrame::SourceRequest { .. } => source_requests += 1,
-                WorkerFrame::Response { id, result: Err(error), .. } if id == overflow => {
+                WorkerFrame::Response {
+                    id,
+                    result: Err(error),
+                    ..
+                } if id == overflow => {
                     assert_eq!(error, "RESEARCH_BUSY", "main lane did not saturate");
                     break;
                 }
                 other => panic!("work completed while synthetic source was held: {other:?}"),
             }
         }
-    }).await.expect("saturated work lane was not observed");
-    assert!(source_requests > 0, "test must actually cross the child source boundary");
+    })
+    .await
+    .expect("saturated work lane was not observed");
+    assert!(
+        source_requests > 0,
+        "test must actually cross the child source boundary"
+    );
     // Public status/cancel validate a full canonical SHA-shaped job ID before
     // querying SQLite. Use a well-formed but absent ID to exercise that path.
     let unknown_job = "f".repeat(64);
@@ -671,20 +687,32 @@ async fn t11_t12_real_worker_observation_and_cancel_survive_saturated_work_lane(
                 job_id: JobId::new(unknown_job.clone()).unwrap(),
             },
             _ => ResearchCommand::Research {
-                request: ResearchRequest::Status { job_id: unknown_job.clone() },
+                request: ResearchRequest::Status {
+                    job_id: unknown_job.clone(),
+                },
             },
         };
         assert_eq!(command.lane(), ResearchLane::Observation);
         let began = Instant::now();
-        send(&mut input, HostFrame::Request {
-            invocation: None, id: id.clone(), session: session.clone(),
-            command: Box::new(command),
-        }).await;
+        send(
+            &mut input,
+            HostFrame::Request {
+                invocation: None,
+                id: id.clone(),
+                session: session.clone(),
+                command: Box::new(command),
+            },
+        )
+        .await;
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match receive(&mut output).await {
                     WorkerFrame::SourceRequest { .. } => source_requests += 1,
-                    WorkerFrame::Response { id: returned, result, .. } if returned == id => {
+                    WorkerFrame::Response {
+                        id: returned,
+                        result,
+                        ..
+                    } if returned == id => {
                         if step % 3 == 2 {
                             assert!(matches!(result, Err(ref e) if e == "JOB_NOT_FOUND"));
                         } else {
@@ -695,30 +723,46 @@ async fn t11_t12_real_worker_observation_and_cancel_survive_saturated_work_lane(
                     other => panic!("unrelated response in saturated IPC test: {other:?}"),
                 }
             }
-        }).await.expect("observation lane blocked by heavy work");
+        })
+        .await
+        .expect("observation lane blocked by heavy work");
         latencies_ms.push(began.elapsed().as_secs_f64() * 1000.0);
     }
 
     // Emergency controls have their own two slots, independent of both the
     // saturated work lane and four read-only observation slots.
     for (number, command) in [
-        ResearchCommand::Research { request: ResearchRequest::Cancel {
-            job_id: unknown_job, idempotency_key: "cancel-under-load".into(),
-        } },
+        ResearchCommand::Research {
+            request: ResearchRequest::Cancel {
+                job_id: unknown_job,
+                idempotency_key: "cancel-under-load".into(),
+            },
+        },
         ResearchCommand::Drain,
-    ].into_iter().enumerate() {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         assert_eq!(command.lane(), ResearchLane::Critical);
         let id = RequestId::new(format!("h{}", MAX_IN_FLIGHT + 102 + number)).unwrap();
         let began = Instant::now();
-        send(&mut input, HostFrame::Request {
-            invocation: None, id: id.clone(), session: session.clone(),
-            command: Box::new(command),
-        }).await;
+        send(
+            &mut input,
+            HostFrame::Request {
+                invocation: None,
+                id: id.clone(),
+                session: session.clone(),
+                command: Box::new(command),
+            },
+        )
+        .await;
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match receive(&mut output).await {
                     WorkerFrame::SourceRequest { .. } => source_requests += 1,
-                    WorkerFrame::Response { id: got, result, .. } if got == id => {
+                    WorkerFrame::Response {
+                        id: got, result, ..
+                    } if got == id => {
                         if number == 0 {
                             assert!(matches!(result, Err(ref error) if error == "JOB_NOT_FOUND"));
                         } else {
@@ -729,33 +773,57 @@ async fn t11_t12_real_worker_observation_and_cancel_survive_saturated_work_lane(
                     other => panic!("unexpected control reply: {other:?}"),
                 }
             }
-        }).await.expect("critical lane blocked");
+        })
+        .await
+        .expect("critical lane blocked");
         latencies_ms.push(began.elapsed().as_secs_f64() * 1000.0);
     }
     let mut sorted = latencies_ms.clone();
     sorted.sort_by(f64::total_cmp);
-    assert!(sorted[96] <= 100.0,
-        "T11/T12 warm IPC read-only/control p95 exceeded 100ms: {}", sorted[96]);
-    println!("T11_T12_IPC_ISOLATION_JSON:{}", serde_json::json!({
-        "schema":"okx.518.t11-t12-ipc-isolation/v1",
-        "work_requests_held":MAX_IN_FLIGHT,
-        "work_lane_overflow":"RESEARCH_BUSY",
-        "observations":100,"critical_commands":2,
-        "warm_p95_ms":sorted[96],"warm_max_ms":sorted[101],
-        "source_rpc_seen":source_requests,
-        "source_policy":"no_reply_no_exchange_http",
-        "engine_or_finance_under_load":"not_evaluated",
-        "venue_posts":0,"finance_writes":0,
-    }));
+    assert!(
+        sorted[96] <= 100.0,
+        "T11/T12 warm IPC read-only/control p95 exceeded 100ms: {}",
+        sorted[96]
+    );
+    println!(
+        "T11_T12_IPC_ISOLATION_JSON:{}",
+        serde_json::json!({
+            "schema":"okx.518.t11-t12-ipc-isolation/v1",
+            "work_requests_held":MAX_IN_FLIGHT,
+            "work_lane_overflow":"RESEARCH_BUSY",
+            "observations":100,"critical_commands":2,
+            "warm_p95_ms":sorted[96],"warm_max_ms":sorted[101],
+            "source_rpc_seen":source_requests,
+            "source_policy":"no_reply_no_exchange_http",
+            "engine_or_finance_under_load":"not_evaluated",
+            "venue_posts":0,"finance_writes":0,
+        })
+    );
 
-    send(&mut input, HostFrame::Request {
-        invocation: None,
-        id: RequestId::new(format!("h{}", MAX_IN_FLIGHT + 104)).unwrap(),
-        session: session.clone(), command: Box::new(ResearchCommand::Shutdown),
-    }).await;
-    assert!(matches!(receive(&mut output).await,
-        WorkerFrame::Response { result: Ok(WorkerReply::Shutdown), .. }));
+    send(
+        &mut input,
+        HostFrame::Request {
+            invocation: None,
+            id: RequestId::new(format!("h{}", MAX_IN_FLIGHT + 104)).unwrap(),
+            session: session.clone(),
+            command: Box::new(ResearchCommand::Shutdown),
+        },
+    )
+    .await;
+    assert!(matches!(
+        receive(&mut output).await,
+        WorkerFrame::Response {
+            result: Ok(WorkerReply::Shutdown),
+            ..
+        }
+    ));
     drop(input);
-    assert!(tokio::time::timeout(Duration::from_secs(10), child.wait()).await.unwrap().unwrap().success());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

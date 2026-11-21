@@ -66,8 +66,19 @@ def check(root):
         if rule is None:
             errors.append('strategies.'+action+' missing')
             continue
-        params=rule['properties'].get('parameters',{}).get('properties',{})
-        if (params.get('fast',{}).get('maximum')!=999 or
+        parameters=rule['properties'].get('parameters',{})
+        if '$ref' in parameters:
+            prefix='#/$defs/'
+            ref=parameters['$ref']
+            parameters=(catalog['strategies']['inputSchema'].get('$defs',{}).get(ref[len(prefix):],{})
+                        if isinstance(ref,str) and ref.startswith(prefix) else {})
+        params=parameters.get('properties',{})
+        if (parameters.get('type')!='object' or
+            parameters.get('additionalProperties') is not False or
+            parameters.get('required')!=['fast','slow'] or
+            params.get('fast',{}).get('minimum')!=1 or
+            params.get('fast',{}).get('maximum')!=999 or
+            params.get('slow',{}).get('minimum')!=2 or
             params.get('slow',{}).get('maximum')!=1000):
             errors.append('strategies.'+action+' does not match Rust StrategyParametersV1 bounds')
         if action=='create' and rule['properties'].get('version',{}).get('maximum')!=1:

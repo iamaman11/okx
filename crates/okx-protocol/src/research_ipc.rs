@@ -99,7 +99,9 @@ pub enum ResearchLane {
 impl ResearchCommand {
     pub fn lane(&self) -> ResearchLane {
         match self {
-            Self::Shutdown | Self::Drain | Self::Research {
+            Self::Shutdown
+            | Self::Drain
+            | Self::Research {
                 request: ResearchRequest::Cancel { .. },
             } => ResearchLane::Critical,
             Self::Explain { .. }
@@ -124,23 +126,51 @@ mod priority_lane_tests {
         let research = |request| ResearchCommand::Research { request };
         assert_eq!(ResearchCommand::Drain.lane(), ResearchLane::Critical);
         assert_eq!(ResearchCommand::Shutdown.lane(), ResearchLane::Critical);
-        assert_eq!(research(ResearchRequest::Cancel {
-            job_id: "job".into(), idempotency_key: "cancel".into(),
-        }).lane(), ResearchLane::Critical);
-        assert_eq!(ResearchCommand::Explain {
-            job_id: JobId::new("job".into()).unwrap(),
-        }.lane(), ResearchLane::Observation);
-        assert_eq!(ResearchCommand::Capabilities.lane(), ResearchLane::Observation);
-        assert_eq!(research(ResearchRequest::Status { job_id: "job".into() }).lane(),
-            ResearchLane::Observation);
-        assert_eq!(research(ResearchRequest::Capabilities {}).lane(),
-            ResearchLane::Observation);
-        assert_eq!(research(ResearchRequest::Economics {
-            cases: vec![], data_mode: crate::analytics::ResearchDataMode::Counterfactual,
-        }).lane(), ResearchLane::Work);
-        assert_eq!(research(ResearchRequest::Benchmark {
-            idempotency_key: "benchmark".into(),
-        }).lane(), ResearchLane::Work);
+        assert_eq!(
+            research(ResearchRequest::Cancel {
+                job_id: "job".into(),
+                idempotency_key: "cancel".into(),
+            })
+            .lane(),
+            ResearchLane::Critical
+        );
+        assert_eq!(
+            ResearchCommand::Explain {
+                job_id: JobId::new("job".into()).unwrap(),
+            }
+            .lane(),
+            ResearchLane::Observation
+        );
+        assert_eq!(
+            ResearchCommand::Capabilities.lane(),
+            ResearchLane::Observation
+        );
+        assert_eq!(
+            research(ResearchRequest::Status {
+                job_id: "job".into()
+            })
+            .lane(),
+            ResearchLane::Observation
+        );
+        assert_eq!(
+            research(ResearchRequest::Capabilities {}).lane(),
+            ResearchLane::Observation
+        );
+        assert_eq!(
+            research(ResearchRequest::Economics {
+                cases: vec![],
+                data_mode: crate::analytics::ResearchDataMode::Counterfactual,
+            })
+            .lane(),
+            ResearchLane::Work
+        );
+        assert_eq!(
+            research(ResearchRequest::Benchmark {
+                idempotency_key: "benchmark".into(),
+            })
+            .lane(),
+            ResearchLane::Work
+        );
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

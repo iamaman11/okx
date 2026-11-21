@@ -59,9 +59,9 @@ pub fn audit_replay(
     }
     let (multiplier, short_allowed) = match &spec.mechanics {
         Mechanics::Spot => (1.0, false),
-        Mechanics::Linear { contract_multiplier }
-            if contract_multiplier.is_finite() && *contract_multiplier > 0.0 =>
-        {
+        Mechanics::Linear {
+            contract_multiplier,
+        } if contract_multiplier.is_finite() && *contract_multiplier > 0.0 => {
             (*contract_multiplier, true)
         }
         _ => return Err("REPLAY_AUDIT_UNSUPPORTED_MECHANICS".into()),
@@ -151,10 +151,22 @@ pub fn audit_replay(
     if net != reported_net.value
         || money.fees != reported_fees.value
         || money.funding != reported_income.value
-        || !approximately(result.summary.pnl, result.equity.last().unwrap().1 - 10_000.0)
-        || !approximately(result.summary.fees, money.fees.to_f64().ok_or("MONEY_PRECISION")?)
-        || !approximately(result.summary.funding, money.funding.to_f64().ok_or("MONEY_PRECISION")?)
-        || !approximately(result.summary.turnover, money.turnover.to_f64().ok_or("MONEY_PRECISION")?)
+        || !approximately(
+            result.summary.pnl,
+            result.equity.last().unwrap().1 - 10_000.0,
+        )
+        || !approximately(
+            result.summary.fees,
+            money.fees.to_f64().ok_or("MONEY_PRECISION")?,
+        )
+        || !approximately(
+            result.summary.funding,
+            money.funding.to_f64().ok_or("MONEY_PRECISION")?,
+        )
+        || !approximately(
+            result.summary.turnover,
+            money.turnover.to_f64().ok_or("MONEY_PRECISION")?,
+        )
     {
         return Err("REPLAY_AUDIT_SUMMARY_MISMATCH".into());
     }
@@ -203,8 +215,13 @@ mod tests {
 
     fn fixture() -> (Vec<Bar>, ReplaySpec, ReplayResult) {
         let bar = |time: u64, close: f64, funding_rate: Option<f64>| Bar {
-            time, open: close, high: close + 1.0, low: close - 1.0,
-            close, volume: 1.0, funding_rate,
+            time,
+            open: close,
+            high: close + 1.0,
+            low: close - 1.0,
+            close,
+            volume: 1.0,
+            funding_rate,
         };
         let bars = vec![
             bar(0, 100.0, None),
@@ -214,10 +231,14 @@ mod tests {
         let spec = ReplaySpec {
             strategy_id: "close_momentum".into(),
             parameters: serde_json::from_value(serde_json::json!({"fast":2,"slow":3})).unwrap(),
-            mechanics: Mechanics::Linear { contract_multiplier: 0.3 },
+            mechanics: Mechanics::Linear {
+                contract_multiplier: 0.3,
+            },
             costs: Costs {
-                maker_fee_bps: 0.0, taker_fee_bps: 0.0,
-                slippage_bps: 0.0, observed_funding: false,
+                maker_fee_bps: 0.0,
+                taker_fee_bps: 0.0,
+                slippage_bps: 0.0,
+                observed_funding: false,
             },
             timeframe_ms: 60_000,
             historical_observed: false,
@@ -232,17 +253,36 @@ mod tests {
             code_version: "test".into(),
             hash: "sha256:replay".into(),
             summary: Summary {
-                pnl: 2.7, pnl_exact: "2.7".into(),
-                fees_exact: "0".into(), funding_exact: "-0.3".into(),
-                max_drawdown: 0.0, sharpe: 0.0,
-                trades: 2, turnover: 63.0, fees: 0.0, funding: -0.3,
-                benchmark: 0.1, assumptions: vec![],
+                pnl: 2.7,
+                pnl_exact: "2.7".into(),
+                fees_exact: "0".into(),
+                funding_exact: "-0.3".into(),
+                max_drawdown: 0.0,
+                sharpe: 0.0,
+                trades: 2,
+                turnover: 63.0,
+                fees: 0.0,
+                funding: -0.3,
+                benchmark: 0.1,
+                assumptions: vec![],
             },
             trades: vec![
-                Trade { time: 60_000, side: 1, price: 100.0,
-                    quantity: 0.3, fee: 0.0, reason: "next_bar_signal".into() },
-                Trade { time: 120_000, side: -1, price: 110.0,
-                    quantity: 0.3, fee: 0.0, reason: "next_bar_signal".into() },
+                Trade {
+                    time: 60_000,
+                    side: 1,
+                    price: 100.0,
+                    quantity: 0.3,
+                    fee: 0.0,
+                    reason: "next_bar_signal".into(),
+                },
+                Trade {
+                    time: 120_000,
+                    side: -1,
+                    price: 110.0,
+                    quantity: 0.3,
+                    fee: 0.0,
+                    reason: "next_bar_signal".into(),
+                },
             ],
             equity: vec![(60_000, 9999.7), (120_000, 10002.7)],
         };

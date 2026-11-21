@@ -249,6 +249,10 @@ pub type AlignedValuePairs = Vec<(f64, f64)>;
 /// A bounded alignment result with its explicit coverage evidence.
 pub type AlignedValueResult = Result<(AlignedValuePairs, AlignmentCounts), &'static str>;
 
+/// Eligibility scan includes the exact samples and coverage counts.
+type AlignmentEligibility<'a> =
+    Result<(Vec<&'a TimedValue>, usize, usize, Option<u64>), &'static str>;
+
 /// Exact inner join of ordered, unique event timestamps, with no as-of
 /// forward-fill or look-ahead. The caller supplies a proven availability time
 /// for each observation; unknown publication times must not be guessed here.
@@ -257,10 +261,7 @@ pub fn align_exact_at(
     right: &[TimedValue],
     decision_ms: u64,
 ) -> AlignedValueResult {
-    fn eligible(
-        samples: &[TimedValue],
-        decision_ms: u64,
-    ) -> Result<(Vec<&TimedValue>, usize, usize, Option<u64>), &'static str> {
+    fn eligible(samples: &[TimedValue], decision_ms: u64) -> AlignmentEligibility<'_> {
         let mut available = Vec::with_capacity(samples.len());
         let (mut unavailable, mut nonfinite) = (0, 0);
         let mut previous = None;
@@ -357,7 +358,9 @@ mod tests {
         assert_eq!(restored, range);
         assert_eq!(restored.expected_bars, 5);
         assert_eq!(
-            restored.coverage([60_000, 120_000, 240_000, 300_000]).first_missing_ms,
+            restored
+                .coverage([60_000, 120_000, 240_000, 300_000])
+                .first_missing_ms,
             Some(180_000)
         );
         for (field, value) in [
@@ -382,13 +385,7 @@ mod tests {
     fn t06_sparse_event_grid_is_exact_and_does_not_invent_publication_time() {
         let range = ClosedRange::strict(60, 360, 60).unwrap();
         let joined = range
-            .align_event_values([
-                (59, 9.0),
-                (60, 0.0),
-                (180, 0.005),
-                (181, 4.0),
-                (360, 7.0),
-            ])
+            .align_event_values([(59, 9.0), (60, 0.0), (180, 0.005), (181, 4.0), (360, 7.0)])
             .unwrap();
         assert_eq!(
             joined.values,
@@ -402,11 +399,15 @@ mod tests {
         // A sparse empty slot must never be substituted with the last rate.
         assert_eq!(joined.values[1], None);
         assert_eq!(
-            range.align_event_values([(60, 1.0), (60, 1.0)]).unwrap_err(),
+            range
+                .align_event_values([(60, 1.0), (60, 1.0)])
+                .unwrap_err(),
             "GRID_DUPLICATE_OR_UNORDERED_EVENT_TIME"
         );
         assert_eq!(
-            range.align_event_values([(180, 1.0), (120, 1.0)]).unwrap_err(),
+            range
+                .align_event_values([(180, 1.0), (120, 1.0)])
+                .unwrap_err(),
             "GRID_DUPLICATE_OR_UNORDERED_EVENT_TIME"
         );
         assert_eq!(
@@ -423,13 +424,7 @@ mod tests {
     fn t06_event_grid_does_not_shift_late_or_misaligned_source_observations() {
         let range = ClosedRange::strict(0, 300, 60).unwrap();
         let left = range
-            .align_event_values([
-                (0, 10.0),
-                (60, 20.0),
-                (120, 30.0),
-                (180, 40.0),
-                (240, 50.0),
-            ])
+            .align_event_values([(0, 10.0), (60, 20.0), (120, 30.0), (180, 40.0), (240, 50.0)])
             .unwrap();
         let right = range
             .align_event_values([(0, 100.0), (61, 200.0), (120, 300.0), (240, 500.0)])
@@ -444,10 +439,7 @@ mod tests {
             .zip(right.values.iter())
             .filter_map(|(left, right)| left.zip(*right))
             .collect::<Vec<_>>();
-        assert_eq!(
-            exact_pairs,
-            [(10.0, 100.0), (30.0, 300.0), (50.0, 500.0)]
-        );
+        assert_eq!(exact_pairs, [(10.0, 100.0), (30.0, 300.0), (50.0, 500.0)]);
         let oversized = ClosedRange::strict(0, 1_000_001, 1).unwrap();
         assert_eq!(
             oversized

@@ -25,7 +25,9 @@ fn independent_replay_currency_totals(rows: &[Value]) -> Result<Value, String> {
             let amount = |field: &str| -> Result<okx_research::economics::QuoteAmount, String> {
                 okx_research::economics::QuoteAmount::parse_exact(
                     currency,
-                    audit[field].as_str().ok_or("REPLAY_ECONOMIC_AUDIT_INCOMPLETE")?,
+                    audit[field]
+                        .as_str()
+                        .ok_or("REPLAY_ECONOMIC_AUDIT_INCOMPLETE")?,
                 )
             };
             if audit["settlement_currency"] != currency || audit["net_exact"] != pnl {
@@ -60,16 +62,20 @@ fn independent_replay_currency_totals(rows: &[Value]) -> Result<Value, String> {
         .collect::<Vec<_>>();
     let complete_audit = cashflows.len() == values.len() && !values.is_empty();
     let flows = if complete_audit {
-        Some(okx_research::economics::group_settlement_cashflows(&cashflows)?
-            .into_iter()
-            .map(|total| json!({
-                "currency":total.currency,"contributors":total.contributors,
-                "gross_exact":total.gross.normalize().to_string(),
-                "fees_exact":total.fees.normalize().to_string(),
-                "funding_cost_exact":total.funding.normalize().to_string(),
-                "net_exact":total.net.normalize().to_string()
-            }))
-            .collect::<Vec<_>>())
+        Some(
+            okx_research::economics::group_settlement_cashflows(&cashflows)?
+                .into_iter()
+                .map(|total| {
+                    json!({
+                        "currency":total.currency,"contributors":total.contributors,
+                        "gross_exact":total.gross.normalize().to_string(),
+                        "fees_exact":total.fees.normalize().to_string(),
+                        "funding_cost_exact":total.funding.normalize().to_string(),
+                        "net_exact":total.net.normalize().to_string()
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
     } else {
         None
     };
@@ -682,7 +688,10 @@ impl AnalyticsService {
                         &bars, &spec, &result, &settlement_currency,
                         score_start, bars.len(), &cancelled,
                     )?;
-                    publish_replay(&store,&result,&dataset,grid,Some(&experiment),Some(json!(audit)),producer.as_ref(),&cancelled)
+                    publish_replay(&store,&result,&dataset,ReplayPublication {
+                        grid, experiment:Some(&experiment), economic_audit:Some(json!(audit)),
+                        producer:producer.as_ref(),
+                    },&cancelled)
                 }).await?;
         Ok::<_, String>(artifact)
     }
@@ -696,11 +705,15 @@ mod t09_currency_batch_tests {
     fn t10_benchmark_memory_evidence_uses_distinct_immutable_job_identity() {
         let benchmark: ResearchRequest = serde_json::from_value(json!({
             "action":"benchmark","idempotency_key":"t10-k9-memory-proof"
-        })).unwrap();
-        assert_eq!(research_job_versions(&benchmark), (
-            "analytics/518.5.resource-lease-rss-v1",
-            "analytics/semantic/518.5.resource-lease-rss-v1",
-        ));
+        }))
+        .unwrap();
+        assert_eq!(
+            research_job_versions(&benchmark),
+            (
+                "analytics/518.5.resource-lease-rss-v1",
+                "analytics/semantic/518.5.resource-lease-rss-v1",
+            )
+        );
         let replay: ResearchRequest = serde_json::from_value(json!({
             "action":"backtest","idempotency_key":"t10-replay-no-rehash",
             "instruments":["BTC-USDT-SWAP"],"timeframe_ms":60000,
@@ -708,9 +721,12 @@ mod t09_currency_batch_tests {
             "parameters":{"fast":2,"slow":4},
             "costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,
                 "funding_mode":"zero_assumption"},"data_mode":"counterfactual"
-        })).unwrap();
-        assert_eq!(research_job_versions(&replay).0,
-            "analytics/518.6.lossless-float-replay-inputs-v1");
+        }))
+        .unwrap();
+        assert_eq!(
+            research_job_versions(&replay).0,
+            "analytics/518.6.lossless-float-replay-inputs-v1"
+        );
     }
 
     #[test]
@@ -784,8 +800,12 @@ mod t09_currency_batch_tests {
 
     #[test]
     fn t09_t13_audited_batch_reconciles_gross_fees_funding_and_currency() {
-        let audited = |currency: &str, gross: &str, fees: &str, funding_cost: &str,
-                       income: &str, net: &str| {
+        let audited = |currency: &str,
+                       gross: &str,
+                       fees: &str,
+                       funding_cost: &str,
+                       income: &str,
+                       net: &str| {
             json!({"state":"completed","quote_currency":currency,
                 "summary":{"pnl_exact":net},
                 "economic_audit":{"settlement_currency":currency,
@@ -802,11 +822,14 @@ mod t09_currency_batch_tests {
         assert_eq!(result["cashflow_quality"], "reconciled_from_replay_ledger");
         assert_eq!(result["by_quote_currency"].as_array().unwrap().len(), 2);
         assert_eq!(result["cross_currency_total"], Value::Null);
-        assert_eq!(result["cashflow_by_settlement_currency"][1], json!({
-            "currency":"USDT","contributors":2,
-            "gross_exact":"2","fees_exact":"0.2",
-            "funding_cost_exact":"0","net_exact":"1.8"
-        }));
+        assert_eq!(
+            result["cashflow_by_settlement_currency"][1],
+            json!({
+                "currency":"USDT","contributors":2,
+                "gross_exact":"2","fees_exact":"0.2",
+                "funding_cost_exact":"0","net_exact":"1.8"
+            })
+        );
         let mut forged = rows;
         forged[0]["economic_audit"]["funding_income_exact"] = json!("0.2");
         assert_eq!(

@@ -25,7 +25,9 @@ fn load_pages<T: DeserializeOwned>(
 ) -> Result<Vec<T>, String> {
     let invalid = || "COMPOSITION_SOURCE_REEXECUTION_MISMATCH".to_owned();
     let manifest_id = capture["evidence_artifact"].as_str().ok_or_else(invalid)?;
-    let manifest: Value = store.read_evidence_json(manifest_id).map_err(|_| invalid())?;
+    let manifest: Value = store
+        .read_evidence_json(manifest_id)
+        .map_err(|_| invalid())?;
     let expected = manifest["observed_points"].as_u64().ok_or_else(invalid)?;
     if expected > MAX_REEXECUTION_OBSERVATIONS {
         return Err(invalid());
@@ -53,7 +55,10 @@ fn semantic_row(mut row: Value) -> Result<Value, String> {
         .as_object_mut()
         .ok_or("COMPOSITION_REEXECUTION_ROW_INVALID")?;
     record.remove("source_integrity");
-    if let Some(captures) = record.get_mut("source_captures").and_then(Value::as_object_mut) {
+    if let Some(captures) = record
+        .get_mut("source_captures")
+        .and_then(Value::as_object_mut)
+    {
         for capture in captures.values_mut() {
             if let Some(source) = capture.as_object_mut() {
                 source.remove("evidence_artifact");
@@ -80,7 +85,11 @@ pub(super) fn verify_persisted_market_metrics(
     if plan.sources.contains(&Source::Ticker) {
         return Ok(not_verified("UNPERSISTED_TICKER_SNAPSHOT"));
     }
-    if request.fields.iter().any(|field| field == "pearson_correlation") {
+    if request
+        .fields
+        .iter()
+        .any(|field| field == "pearson_correlation")
+    {
         return Ok(not_verified("UNPERSISTED_CORRELATION_PEER"));
     }
 
@@ -115,20 +124,28 @@ pub(super) fn verify_persisted_market_metrics(
     }
 
     let bars = if need_candles {
-        Arc::new(load_pages::<Bar>(store, &linked["source_captures"]["candles"], cancel)?)
+        Arc::new(load_pages::<Bar>(
+            store,
+            &linked["source_captures"]["candles"],
+            cancel,
+        )?)
     } else {
         Arc::new(Vec::new())
     };
     let oi = if plan.sources.contains(&Source::OpenInterest) {
         Some(Ok(load_pages::<(u64, f64)>(
-            store, &linked["source_captures"]["open_interest"], cancel,
+            store,
+            &linked["source_captures"]["open_interest"],
+            cancel,
         )?))
     } else {
         None
     };
     let funding = if plan.sources.contains(&Source::Funding) {
         Some(Ok(load_pages::<(u64, f64)>(
-            store, &linked["source_captures"]["funding_rate"], cancel,
+            store,
+            &linked["source_captures"]["funding_rate"],
+            cancel,
         )?))
     } else {
         None
@@ -153,11 +170,9 @@ pub(super) fn verify_persisted_market_metrics(
     if replayed != recorded {
         return Err("COMPOSITION_SOURCE_REEXECUTION_MISMATCH".into());
     }
-    let hash = okx_research::canonical_sha256(&(
-        "okx.market.composition-semantic-row/v1",
-        &replayed,
-    ))
-    .map_err(|error| error.to_string())?;
+    let hash =
+        okx_research::canonical_sha256(&("okx.market.composition-semantic-row/v1", &replayed))
+            .map_err(|error| error.to_string())?;
     Ok(json!({
         "schema":"okx.market.composition-metric-reexecution/v1",
         "quality":"verified_reexecution",

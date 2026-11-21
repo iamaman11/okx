@@ -28,7 +28,9 @@ pub(super) fn observe() -> ProcessMemory {
     ProcessMemory {
         resident_bytes: status.as_deref().and_then(|s| parse_kib_field(s, "VmRSS:")),
         peak_resident_bytes: status.as_deref().and_then(|s| parse_kib_field(s, "VmHWM:")),
-        physical_memory_bytes: meminfo.as_deref().and_then(|s| parse_kib_field(s, "MemTotal:")),
+        physical_memory_bytes: meminfo
+            .as_deref()
+            .and_then(|s| parse_kib_field(s, "MemTotal:")),
         source: "linux_procfs_process_rss_and_hwm",
     }
 }
@@ -62,7 +64,11 @@ pub(super) fn observe() -> ProcessMemory {
     }
     #[link(name = "psapi")]
     unsafe extern "system" {
-        fn GetProcessMemoryInfo(process: *mut core::ffi::c_void, counters: *mut Counters, size: u32) -> i32;
+        fn GetProcessMemoryInfo(
+            process: *mut core::ffi::c_void,
+            counters: *mut Counters,
+            size: u32,
+        ) -> i32;
     }
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -71,17 +77,31 @@ pub(super) fn observe() -> ProcessMemory {
     }
     let mut counters = Counters {
         cb: std::mem::size_of::<Counters>() as u32,
-        faults: 0, peak: 0, working: 0, paged_peak: 0, paged: 0,
-        nonpaged_peak: 0, nonpaged: 0, pagefile: 0, pagefile_peak: 0,
+        faults: 0,
+        peak: 0,
+        working: 0,
+        paged_peak: 0,
+        paged: 0,
+        nonpaged_peak: 0,
+        nonpaged: 0,
+        pagefile: 0,
+        pagefile_peak: 0,
     };
     let mut status = Status {
         length: std::mem::size_of::<Status>() as u32,
-        load: 0, total_phys: 0, avail_phys: 0, total_pagefile: 0,
-        avail_pagefile: 0, total_virtual: 0, avail_virtual: 0, avail_extended: 0,
+        load: 0,
+        total_phys: 0,
+        avail_phys: 0,
+        total_pagefile: 0,
+        avail_pagefile: 0,
+        total_virtual: 0,
+        avail_virtual: 0,
+        avail_extended: 0,
     };
     let measured = unsafe {
         GetProcessMemoryInfo(
-            GetCurrentProcess(), &mut counters,
+            GetCurrentProcess(),
+            &mut counters,
             std::mem::size_of::<Counters>() as u32,
         ) != 0
     };
@@ -104,7 +124,7 @@ pub(super) fn observe() -> ProcessMemory {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
@@ -118,7 +138,10 @@ mod tests {
         assert_eq!(parse_kib_field("VmRSS: 10 MB", "VmRSS:"), None);
         assert_eq!(parse_kib_field("VmRSS: garbage kB", "VmRSS:"), None);
         assert_eq!(parse_kib_field("VmRSS: 10 kB extra", "VmRSS:"), None);
-        assert_eq!(parse_kib_field("VmRSS: 18446744073709551615 kB", "VmRSS:"), None);
+        assert_eq!(
+            parse_kib_field("VmRSS: 18446744073709551615 kB", "VmRSS:"),
+            None
+        );
         assert_eq!(parse_kib_field("NotVmRSS: 10 kB", "VmRSS:"), None);
     }
 
@@ -127,8 +150,12 @@ mod tests {
     fn t10_linux_real_process_rss_is_observed_not_inferred() {
         let memory = observe();
         assert_eq!(memory.source, "linux_procfs_process_rss_and_hwm");
-        let rss = memory.resident_bytes.expect("Linux /proc/self/status VmRSS");
-        let peak = memory.peak_resident_bytes.expect("Linux /proc/self/status VmHWM");
+        let rss = memory
+            .resident_bytes
+            .expect("Linux /proc/self/status VmRSS");
+        let peak = memory
+            .peak_resident_bytes
+            .expect("Linux /proc/self/status VmHWM");
         assert!(rss > 0 && rss <= peak);
         assert!(memory.physical_memory_bytes.unwrap() >= peak);
     }

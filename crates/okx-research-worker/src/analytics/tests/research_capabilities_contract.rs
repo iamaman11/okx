@@ -5,17 +5,29 @@ fn t10_capabilities_separate_memory_permit_from_observed_rss_and_full_slo() {
     let caps = research_capabilities();
     assert_eq!(caps["limits"]["research_memory_total_mib"], 4096);
     assert_eq!(caps["limits"]["max_heavy_concurrent_jobs"], 2);
-    assert_eq!(caps["resource_proof"]["memory_admission"],
-        "shared_estimated_mib_permit_lease_through_terminal_sql_attempt");
-    assert_eq!(caps["resource_proof"]["cancel_while_waiting"],
-        "both_heavy_and_memory_permits_released");
-    assert_eq!(caps["resource_proof"]["memory_measurement_scope"],
-        "whole_process_not_per_job_and_not_hard_enforcement");
-    assert_eq!(caps["resource_proof"]["mcp_and_finance_under_load"], "not_evaluated");
+    assert_eq!(
+        caps["resource_proof"]["memory_admission"],
+        "shared_estimated_mib_permit_lease_through_terminal_sql_attempt"
+    );
+    assert_eq!(
+        caps["resource_proof"]["cancel_while_waiting"],
+        "both_heavy_and_memory_permits_released"
+    );
+    assert_eq!(
+        caps["resource_proof"]["memory_measurement_scope"],
+        "whole_process_not_per_job_and_not_hard_enforcement"
+    );
+    assert_eq!(
+        caps["resource_proof"]["mcp_and_finance_under_load"],
+        "not_evaluated"
+    );
     assert_eq!(caps["ipc_isolation"]["critical_in_flight"], 2);
     assert_eq!(caps["ipc_isolation"]["observation_in_flight"], 4);
     assert_eq!(caps["ipc_isolation"]["work_in_flight"], 32);
-    assert_eq!(caps["ipc_isolation"]["engine_and_finance_slo_under_load"], "not_evaluated");
+    assert_eq!(
+        caps["ipc_isolation"]["engine_and_finance_slo_under_load"],
+        "not_evaluated"
+    );
 }
 #[test]
 fn native_capabilities_do_not_advertise_unavailable_historical_mode() {
@@ -36,10 +48,18 @@ fn native_capabilities_do_not_advertise_unavailable_historical_mode() {
         report["economics"]["replay_products"],
         json!(["spot", "linear_swap"])
     );
-    assert_eq!(report["economics"]["counterfactual_oracle"]["cashflow_attribution"]["identity"],
-        "gross_minus_fees_minus_signed_funding_equals_net");
-    assert_eq!(report["economics"]["counterfactual_oracle"]["cashflow_attribution"]["signed_funding"], true);
-    assert_eq!(report["economics"]["counterfactual_oracle"]["fx_conversion"], false);
+    assert_eq!(
+        report["economics"]["counterfactual_oracle"]["cashflow_attribution"]["identity"],
+        "gross_minus_fees_minus_signed_funding_equals_net"
+    );
+    assert_eq!(
+        report["economics"]["counterfactual_oracle"]["cashflow_attribution"]["signed_funding"],
+        true
+    );
+    assert_eq!(
+        report["economics"]["counterfactual_oracle"]["fx_conversion"],
+        false
+    );
     assert_eq!(
         report["economics"]["observed_funding"]["settlement_join"],
         "funding_event_at_preceding_closed_bar_end_no_forward_fill"
