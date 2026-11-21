@@ -1225,13 +1225,8 @@ impl CheckedComposition {
                 SeriesOp::ReturnsSeries => {
                     let mut result = vec![None; input.len()];
                     for i in 1..input.len() {
-                        result[i] = scalar_value(
-                            checked.step.op,
-                            input[i],
-                            None,
-                            input[i - 1],
-                            None,
-                        );
+                        result[i] =
+                            scalar_value(checked.step.op, input[i], None, input[i - 1], None);
                     }
                     result
                 }
@@ -1275,13 +1270,8 @@ impl CheckedComposition {
                 SeriesOp::RisingEdge | SeriesOp::FallingEdge => {
                     let mut result = vec![None; input.len()];
                     for i in 1..input.len() {
-                        result[i] = scalar_value(
-                            checked.step.op,
-                            input[i],
-                            None,
-                            input[i - 1],
-                            None,
-                        );
+                        result[i] =
+                            scalar_value(checked.step.op, input[i], None, input[i - 1], None);
                     }
                     result
                 }

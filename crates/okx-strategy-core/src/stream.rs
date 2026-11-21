@@ -80,15 +80,15 @@ impl CausalGraphStream {
                 SeriesOp::RollingPearson | SeriesOp::RollingStddev | SeriesOp::RollingZscore => {
                     return Err("composition.stream:OPERATOR_NOT_INCREMENTAL".into());
                 }
-                SeriesOp::RollingMean => {
-                    Memory::Mean(RollingMean::new(step.period.expect("checked period") as usize))
-                }
-                SeriesOp::RollingMax | SeriesOp::RollingMin => Memory::Extremum(
-                    MonotoneWindow::new(
+                SeriesOp::RollingMean => Memory::Mean(RollingMean::new(
+                    step.period.expect("checked period") as usize,
+                )),
+                SeriesOp::RollingMax | SeriesOp::RollingMin => {
+                    Memory::Extremum(MonotoneWindow::new(
                         step.period.expect("checked period") as usize,
                         step.op == SeriesOp::RollingMax,
-                    ),
-                ),
+                    ))
+                }
                 SeriesOp::RollingRange => {
                     let period = step.period.expect("checked period") as usize;
                     Memory::Range(
@@ -114,12 +114,7 @@ impl CausalGraphStream {
         let projection = plan
             .result_steps()
             .iter()
-            .map(|id| {
-                bindings
-                    .get(id.as_str())
-                    .copied()
-                    .expect("checked result")
-            })
+            .map(|id| bindings.get(id.as_str()).copied().expect("checked result"))
             .collect();
         Ok(Self {
             plan: plan.clone(),
@@ -150,7 +145,9 @@ impl CausalGraphStream {
         for (index, node) in self.nodes.iter_mut().enumerate() {
             let step = &self.plan.steps()[index].step;
             let input = node.input.value(close, &columns);
-            let other = node.other.and_then(|binding| binding.value(close, &columns));
+            let other = node
+                .other
+                .and_then(|binding| binding.value(close, &columns));
             columns[index] = match &mut node.memory {
                 Memory::Mean(window) => window.push(input),
                 Memory::Extremum(window) => window.push(input),
@@ -365,9 +362,7 @@ impl MonotoneWindow {
     pub(crate) fn push(&mut self, input: Option<f64>) -> Option<f64> {
         let index = self.next_index;
         self.next_index += 1;
-        if self.gaps.len() == self.period
-            && self.gaps.pop_front().expect("full gap window")
-        {
+        if self.gaps.len() == self.period && self.gaps.pop_front().expect("full gap window") {
             self.missing -= 1;
         }
         let value = input.filter(|value| value.is_finite());
@@ -464,7 +459,11 @@ mod tests {
                 close: Some(price),
             };
             let result = runtime.on_closed_bar(bar).unwrap();
-            assert_eq!(result, plan.evaluate_at(&closes[..=index], index), "bar={index}");
+            assert_eq!(
+                result,
+                plan.evaluate_at(&closes[..=index], index),
+                "bar={index}"
+            );
             historical.push(bar);
         }
         assert_eq!(runtime.processed_bars(), 257);
