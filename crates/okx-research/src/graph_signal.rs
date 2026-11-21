@@ -1,7 +1,8 @@
 //! Research-only, typed bridge from a causal composition to position intent.
 //! A projection is evidence, never financial authority or an exchange order.
 use okx_analysis::query_plan::{
-    CheckedComposition, CompositionRequest, CompositionValues, SeriesOp, Unit,
+    CausalGraphStream, CheckedComposition, ClosedBar, CompositionRequest, CompositionValues,
+    SeriesOp, Unit,
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,11 +30,54 @@ pub enum MissingSignalPolicy {
     Flat,
 }
 
+/// A closed-bar decision is never an order. Hold differs explicitly from an
+/// intentional flattening target; the replay/Engine layer owns risk approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetPosition {
+    Short,
+    Flat,
+    Long,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphIntent {
+    Hold,
+    SetTarget(TargetPosition),
+}
+
+impl TargetPosition {
+    fn from_checked(value: i8) -> Self {
+        match value {
+            -1 => Self::Short,
+            0 => Self::Flat,
+            1 => Self::Long,
+            _ => unreachable!("compiled target range"),
+        }
+    }
+
+    fn as_i8(self) -> i8 {
+        match self {
+            Self::Short => -1,
+            Self::Flat => 0,
+            Self::Long => 1,
+        }
+    }
+}
+
 pub struct CheckedGraphSignal {
     graph: CheckedComposition,
     signal_step: String,
     targets: [i8; 2],
     missing: MissingSignalPolicy,
+}
+
+/// The same compiled, typed policy for replay and a future closed-bar live
+/// adapter. It holds bounded operator state and cannot execute any order.
+pub struct GraphSignalStream<'a> {
+    checked: &'a CheckedGraphSignal,
+    runtime: CausalGraphStream,
 }
 
 impl GraphSignalSpec {
@@ -81,10 +125,26 @@ impl CheckedGraphSignal {
         &self.graph
     }
 
-    /// Pure interpretation of a previously validated closed-bar projection.
-    /// None means hold: callers must not manufacture a trade from missing data.
-    /// The replay executor still owns money, next-open fills, costs and risk.
-    pub fn target(&self, values: &CompositionValues) -> Result<Option<i8>, String> {
+    pub fn stream(&self) -> Result<GraphSignalStream<'_>, String> {
+        Ok(GraphSignalStream {
+            checked: self,
+            runtime: CausalGraphStream::new(&self.graph)?,
+        })
+    }
+
+    /// Recompute mathematical state over a closed prefix exactly once. The
+    /// owner must independently restore its last emitted intent/order cursor.
+    pub fn restore_stream(
+        &self,
+        bars: impl IntoIterator<Item = ClosedBar>,
+    ) -> Result<GraphSignalStream<'_>, String> {
+        Ok(GraphSignalStream {
+            checked: self,
+            runtime: CausalGraphStream::restore_from_history(&self.graph, bars)?,
+        })
+    }
+
+    pub fn intent(&self, values: &CompositionValues) -> Result<GraphIntent, String> {
         let (signal, unit) = values
             .get(&self.signal_step)
             .ok_or("graph_signal:PROJECTION_MISSING")?;
@@ -92,14 +152,42 @@ impl CheckedGraphSignal {
             return Err("graph_signal:PROJECTION_UNIT_MISMATCH".into());
         }
         match signal {
-            Some(0.0) => Ok(Some(self.targets[0])),
-            Some(1.0) => Ok(Some(self.targets[1])),
+            Some(0.0) => Ok(GraphIntent::SetTarget(TargetPosition::from_checked(
+                self.targets[0],
+            ))),
+            Some(1.0) => Ok(GraphIntent::SetTarget(TargetPosition::from_checked(
+                self.targets[1],
+            ))),
             None => Ok(match self.missing {
-                MissingSignalPolicy::Hold => None,
-                MissingSignalPolicy::Flat => Some(0),
+                MissingSignalPolicy::Hold => GraphIntent::Hold,
+                MissingSignalPolicy::Flat => GraphIntent::SetTarget(TargetPosition::Flat),
             }),
             _ => Err("graph_signal:INVALID_BOOLEAN_OBSERVATION".into()),
         }
+    }
+
+    /// Pure interpretation of a previously validated closed-bar projection.
+    /// None means hold: callers must not manufacture a trade from missing data.
+    /// The replay executor still owns money, next-open fills, costs and risk.
+    pub fn target(&self, values: &CompositionValues) -> Result<Option<i8>, String> {
+        Ok(match self.intent(values)? {
+            GraphIntent::Hold => None,
+            GraphIntent::SetTarget(position) => Some(position.as_i8()),
+        })
+    }
+}
+
+impl GraphSignalStream<'_> {
+    pub fn on_closed_bar(&mut self, bar: ClosedBar) -> Result<GraphIntent, String> {
+        self.checked.intent(&self.runtime.on_closed_bar(bar)?)
+    }
+
+    pub fn processed_bars(&self) -> u64 {
+        self.runtime.processed_bars()
+    }
+
+    pub fn operation_count(&self) -> u64 {
+        self.runtime.operation_count()
     }
 }
 
@@ -192,6 +280,63 @@ mod tests {
         assert_eq!(
             hold.target(&wrong).unwrap_err(),
             "graph_signal:INVALID_BOOLEAN_OBSERVATION"
+        );
+    }
+
+    #[test]
+    fn stream_and_historical_replay_emit_the_same_typed_closed_bar_intents() {
+        let checked = spec().compile(200).unwrap();
+        let closes = (0..100)
+            .map(|index| match index % 13 {
+                0 => f64::NAN,
+                1 => 0.0,
+                _ => 100.0 + ((index * 17) % 31) as f64,
+            })
+            .collect::<Vec<_>>();
+        let mut stream = checked.stream().unwrap();
+        let mut bars = Vec::new();
+        for (index, &close) in closes.iter().enumerate() {
+            let bar = ClosedBar {
+                timestamp_ms: index as i64 * 60_000,
+                close: Some(close),
+            };
+            bars.push(bar);
+            let actual = stream.on_closed_bar(bar).unwrap();
+            let expected = checked
+                .intent(&checked.graph().evaluate_at(&closes, index))
+                .unwrap();
+            assert_eq!(actual, expected, "bar={index}");
+        }
+        assert_eq!(stream.processed_bars(), 100);
+        assert_eq!(stream.operation_count(), 200);
+        let mut restored = checked.restore_stream(bars).unwrap();
+        assert_eq!(restored.processed_bars(), 100);
+        let next = ClosedBar {
+            timestamp_ms: 100 * 60_000,
+            close: Some(104.0),
+        };
+        assert_eq!(
+            restored.on_closed_bar(next).unwrap(),
+            stream.on_closed_bar(next).unwrap()
+        );
+    }
+
+    #[test]
+    fn hold_and_explicit_flat_are_distinct_serializable_intents() {
+        let values = spec().compile(2).unwrap().graph().evaluate_at(&[100.0], 0);
+        let held = spec().compile(2).unwrap();
+        assert_eq!(held.intent(&values).unwrap(), GraphIntent::Hold);
+        let mut policy = spec();
+        policy.missing = MissingSignalPolicy::Flat;
+        let flat = policy.compile(2).unwrap();
+        assert_eq!(
+            flat.intent(&values).unwrap(),
+            GraphIntent::SetTarget(TargetPosition::Flat)
+        );
+        assert_eq!(serde_json::to_value(GraphIntent::Hold).unwrap(), "hold");
+        assert_eq!(
+            serde_json::to_value(GraphIntent::SetTarget(TargetPosition::Flat)).unwrap(),
+            serde_json::json!({"set_target":"flat"})
         );
     }
 }

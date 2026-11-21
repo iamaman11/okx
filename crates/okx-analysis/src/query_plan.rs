@@ -1,2 +1,3 @@
-//! Stable public module path. The only compute implementation lives in okx-kernel.
+//! Stable Research-facing path; pure execution lives in okx-strategy-core.
 pub use okx_strategy_core::query_plan::*;
+pub use okx_strategy_core::stream::{CausalGraphStream, ClosedBar};
