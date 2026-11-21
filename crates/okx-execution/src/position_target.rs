@@ -129,14 +129,27 @@ mod tests {
         }
     }
 
-    fn plan(target: TargetPosition, lots: &[StoredLot], pending: bool) -> Result<TargetPlan, TargetPlanError> {
+    fn plan(
+        target: TargetPosition,
+        lots: &[StoredLot],
+        pending: bool,
+    ) -> Result<TargetPlan, TargetPlanError> {
         plan_strategy_target(target, "strategy-a", "BTC-USDT-SWAP", lots, pending)
     }
 
     #[test]
     fn hold_is_not_flat_even_when_position_exists() {
-        let lots = [lot("a", "strategy-a", "BTC-USDT-SWAP", "long", Some("entry-a"))];
-        assert_eq!(plan(TargetPosition::Hold, &lots, false), Ok(TargetPlan::NoChange));
+        let lots = [lot(
+            "a",
+            "strategy-a",
+            "BTC-USDT-SWAP",
+            "long",
+            Some("entry-a"),
+        )];
+        assert_eq!(
+            plan(TargetPosition::Hold, &lots, false),
+            Ok(TargetPlan::NoChange)
+        );
         assert_eq!(
             plan(TargetPosition::Flat, &lots, false),
             Ok(TargetPlan::CloseExisting(vec!["entry-a".into()]))
@@ -145,7 +158,10 @@ mod tests {
 
     #[test]
     fn flat_without_exposure_is_no_change_not_open() {
-        assert_eq!(plan(TargetPosition::Flat, &[], false), Ok(TargetPlan::NoChange));
+        assert_eq!(
+            plan(TargetPosition::Flat, &[], false),
+            Ok(TargetPlan::NoChange)
+        );
     }
 
     #[test]
@@ -162,13 +178,28 @@ mod tests {
 
     #[test]
     fn repeating_long_does_not_add_another_order() {
-        let lots = [lot("a", "strategy-a", "BTC-USDT-SWAP", "long", Some("entry-a"))];
-        assert_eq!(plan(TargetPosition::Long, &lots, false), Ok(TargetPlan::NoChange));
+        let lots = [lot(
+            "a",
+            "strategy-a",
+            "BTC-USDT-SWAP",
+            "long",
+            Some("entry-a"),
+        )];
+        assert_eq!(
+            plan(TargetPosition::Long, &lots, false),
+            Ok(TargetPlan::NoChange)
+        );
     }
 
     #[test]
     fn opposite_side_is_closed_before_a_new_open() {
-        let lots = [lot("a", "strategy-a", "BTC-USDT-SWAP", "short", Some("entry-a"))];
+        let lots = [lot(
+            "a",
+            "strategy-a",
+            "BTC-USDT-SWAP",
+            "short",
+            Some("entry-a"),
+        )];
         assert_eq!(
             plan(TargetPosition::Long, &lots, false),
             Ok(TargetPlan::CloseExisting(vec!["entry-a".into()]))
@@ -192,11 +223,20 @@ mod tests {
         let lots = [
             lot("z", "strategy-a", "BTC-USDT-SWAP", "short", Some("entry-z")),
             lot("a", "strategy-a", "BTC-USDT-SWAP", "long", Some("entry-a")),
-            lot("z2", "strategy-a", "BTC-USDT-SWAP", "short", Some("entry-z")),
+            lot(
+                "z2",
+                "strategy-a",
+                "BTC-USDT-SWAP",
+                "short",
+                Some("entry-z"),
+            ),
         ];
         assert_eq!(
             plan(TargetPosition::Flat, &lots, false),
-            Ok(TargetPlan::CloseExisting(vec!["entry-a".into(), "entry-z".into()]))
+            Ok(TargetPlan::CloseExisting(vec![
+                "entry-a".into(),
+                "entry-z".into()
+            ]))
         );
     }
 
@@ -204,7 +244,13 @@ mod tests {
     fn only_exposure_owned_by_this_strategy_and_instrument_is_considered() {
         let lots = [
             lot("a", "strategy-b", "BTC-USDT-SWAP", "short", Some("foreign")),
-            lot("b", "strategy-a", "ETH-USDT-SWAP", "short", Some("different")),
+            lot(
+                "b",
+                "strategy-a",
+                "ETH-USDT-SWAP",
+                "short",
+                Some("different"),
+            ),
         ];
         assert_eq!(
             plan(TargetPosition::Long, &lots, false),
@@ -222,7 +268,10 @@ mod tests {
             plan(TargetPosition::Flat, &[], true),
             Ok(TargetPlan::AwaitSettlement)
         );
-        assert_eq!(plan(TargetPosition::Hold, &[], true), Ok(TargetPlan::NoChange));
+        assert_eq!(
+            plan(TargetPosition::Hold, &[], true),
+            Ok(TargetPlan::NoChange)
+        );
     }
 
     #[test]
@@ -232,7 +281,13 @@ mod tests {
             plan(TargetPosition::Flat, &missing, false),
             Err(TargetPlanError::MissingCloseReference("a".into()))
         );
-        let bad_side = [lot("b", "strategy-a", "BTC-USDT-SWAP", "unknown", Some("entry-b"))];
+        let bad_side = [lot(
+            "b",
+            "strategy-a",
+            "BTC-USDT-SWAP",
+            "unknown",
+            Some("entry-b"),
+        )];
         assert_eq!(
             plan(TargetPosition::Long, &bad_side, false),
             Err(TargetPlanError::InvalidLot("b".into()))

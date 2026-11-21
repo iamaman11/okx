@@ -2,9 +2,11 @@
 
 The **only normative specification** is [issue #448](https://github.com/iamaman11/okx/issues/448); [issue #449](https://github.com/iamaman11/okx/issues/449) is the sole implementation cursor. Issue #398 and [older architecture](history/ARCHITECTURE_CONTRACT_V1-before-398.md) are historical evidence, not competing product requirements. This page documents current ownership boundaries, not proof of physical acceptance.
 
-**Worker:** OAuth and typed MCP public surface: six non-trade tools plus seven independently annotated `trade.*` operations (13 total), with central persistent governance revisions and one global RiskBook; one native-result projection. Worker neither submits exchange orders nor offers arbitrary RPC/SQL.
+**Cloudflare Worker (MCP gateway, not Research Service):** OAuth and typed MCP public surface: six non-trade tools plus seven independently annotated `trade.*` operations (13 total), with central persistent governance revisions and one global RiskBook; one native-result projection. This gateway neither submits exchange orders nor offers arbitrary RPC/SQL.
 
 **Rust Engine:** independent verified AccountKey (venue/environment/UID) contexts and public/private sources; one TradeService for manual and automatic strategies; protected order execution and reconciliation. An alias, view or changed strategy cannot redirect an intent to another UID. The live product and exact-release acceptance remain tracked in #448/#449; earlier #398 receipts establish only their historical scope.
+
+**Research Service (`okx-research-service.exe`):** an independently deployable computation process. Its internal Rust crate is still named `okx-research-worker`, but it owns no financial state or exchange orders. Engine owns strategy activation and converts verified Research position targets into any needed financial operations; the new graph-publication path is staged, not yet linked to live trading. See [the source boundaries and command flow](research-boundaries.md).
 
 **SQLite:** one WAL AccountStore writer per verified AccountKey; durable plans/intents/orders/fills/bills/finance/policy/source cursors; indexed, bounded addressable queries. Missing or corrupt SQL is an error, never a new installation trigger. Old v14 history, legacy grants and mode-switch migrations are not supported. Research uses immutable artifacts plus bounded CPU/cache; **indexed SQLite WAL research job metadata (F08) is separate from immutable content-addressed research artifacts**. There is no second finance ledger.
 

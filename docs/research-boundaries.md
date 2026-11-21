@@ -14,22 +14,54 @@ are Cargo dependencies, Rust visibility, the IPC enums, and the SQL owners.
 | Financial persistence and RiskBook | Existing `UnifiedFinanceHandle`, one financial SQLite |
 | Live closed candles | `okx-runtime::live_source::LiveCandleSource` |
 | Public market HTTP and shared rate budget | `okx-runtime::market_bootstrap::MarketBootstrapper` |
-| Research child, request correlation, activation | `okx-agent::research_client::ResearchClient` |
+| Research Service child, request correlation, activation | `okx-agent::research_client::ResearchClient`; installed binary `okx-research-service` |
 | Framing and typed public-source requests | `okx-protocol::research_ipc` |
-| Research command handler | `okx-research-worker::analytics::AnalyticsService` |
-| Research jobs, identity, cancellation, root lease | Worker `analytics::jobs::Jobs` |
-| Pure calculations | Existing `okx-analysis` and `okx-research` libraries |
+| Research command handler | Internal crate `okx-research-worker::analytics::AnalyticsService` |
+| Research jobs, identity, cancellation, root lease | Research Service `analytics::jobs::Jobs` |
+| Pure calculations | `okx-strategy-core`, `okx-analysis` and `okx-research` libraries |
 | Verified component staging | Existing CONTROL `artifact::research_component` |
 
-Agent has no production dependency on the research implementation or worker.
-Worker has no production dependency on Agent, execution, API credentials, or
+Agent has no production dependency on the Research Service implementation.
+Research Service has no production dependency on Agent, execution, API credentials, or
 financial storage. Its test-only HTTP fixtures do not authorize those edges.
 `scripts/check_architecture.py` checks both direct and transitive dependencies.
 
 Research requests receive public observations through the existing host source
 owner. They cannot issue arbitrary HTTP, access an account, reserve money, or
-place orders. Live strategies use their own live source and pure signal kernel;
-they do not invoke the research worker.
+place orders. The legacy live `strategy_turn` still synchronously invokes
+`EvaluateSignal` on Research Service per closed-bar decision. The new autonomous
+graph feed exists but has not yet replaced that live trading loop.
+
+## Strategy activation versus position targets
+
+These are distinct commands with distinct owners:
+
+1. A client submits `StrategyRequest::Create` to register an instance, then
+   `StrategyRequest::Start` to enable it (or `Stop` to disable new strategy
+   decisions). Engine persists the strategy's enabled state, version and risk
+   configuration in the original financial owner. `Start` is **not** an order.
+2. Agent sends a read-only `GraphFeed::Start` for a graph session; Research
+   Service obtains closed public candles through Agent's typed source proxy and
+   publishes `GraphSignalPublication` with a typed `GraphSignalIntent`.
+3. The semantic signal is `Hold` (do nothing), `SetTarget(Flat)` (target no
+   strategy exposure), `SetTarget(Long)` or `SetTarget(Short)` (target direction).
+   It is **not** a trade command, order ID, budget grant or exchange POST.
+4. Engine compares the requested target with **its own** strategy/instrument
+   position, pending orders, account policy and risk. The pure
+   `okx-execution::position_target::plan_strategy_target` calculates one
+   reconciliation phase: no change, open, close existing references first, or
+   await settlement. It never sends an order. Only the existing durable Engine
+   decision, risk/admission and venue execution route may act on a plan.
+
+The pure target planner is staged and independently tested, **not wired into
+the live trading loop**. The legacy loop currently treats `SignalPosition::Flat`
+like `Warmup` (no new entry), so it does not flatten existing lots for `Flat`.
+This is a tracked behavior gap, not a claimed live fix. Before connecting graph
+publications to trading, Engine also needs durable per-instance cursor/ACK,
+recovery after restart, stale-generation protection and serialization of
+pending opens/closes; missing Research must not be mistaken for `Flat` or
+`Hold`. Manual `TradeRequest::Execute` remains a separate, explicit one-order
+request through the same financial Engine.
 
 ## Identity and recovery
 
@@ -92,8 +124,8 @@ Admission freshness remains independently enforced and negatively tested.
 ## Direct checks after building
 
 ```powershell
-cargo build --locked -p okx-research-worker --bin okx-research-worker
-$env:OKX_RESEARCH_WORKER_TEST_EXE = (Resolve-Path target/debug/okx-research-worker.exe).Path
+cargo build --locked -p okx-research-worker --bin okx-research-service
+$env:OKX_RESEARCH_WORKER_TEST_EXE = (Resolve-Path target/debug/okx-research-service.exe).Path
 cargo test --locked -p okx-research-worker
 cargo test --locked -p okx-agent --lib research_dispatch_tests::
 cargo test --locked -p okx-agent --lib research_client::
