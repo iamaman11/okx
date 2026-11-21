@@ -1,5 +1,17 @@
 'use strict';
 const path = require('node:path');
+// These are the CI-only changes introduced *after* the last fully tested
+// Windows binary baseline. They cannot affect Rust production crate output.
+// They still trigger full CI if changed in the current PR (file classifier).
+const baselineCiOnly = new Set([
+  '.github/workflows/ci.yml',
+  'scripts/check_ci_native_scope.py',
+  'scripts/prepare-research-release.ps1',
+  'scripts/research-release-scope.cjs',
+  'scripts/test-research-release-scope.cjs',
+]);
+const safe = file => typeof file === 'string' && file.length <= 512 && !file.startsWith('/') && !file.includes('\\') && file.split('/').every(p => /^[A-Za-z0-9_.-]+$/.test(p) && p !== '.' && p !== '..');
+const nonNative = file => file === 'README.md' || (file.startsWith('docs/') && file.endsWith('.md')) || file.startsWith('cloudflare/okx-mcp/') || baselineCiOnly.has(file);
 function check(metadata, changed) {
   if (!metadata.resolve || !Array.isArray(metadata.packages) || !Array.isArray(metadata.resolve.nodes)) throw Error('METADATA_RESOLUTION_REQUIRED');
   const packages = new Map(metadata.packages.map(p => [p.id, p]));
@@ -22,14 +34,21 @@ function check(metadata, changed) {
     if (!relative || relative.startsWith('../') || path.isAbsolute(relative)) throw Error('UNSAFE_WORKSPACE_PACKAGE');
     return relative + '/';
   });
-  if (!Array.isArray(changed) || !changed.some(file => typeof file === 'string' && file !== '.github/research-release-base.json')) throw Error('EMPTY_RESEARCH_DIFF');
+  if (!Array.isArray(changed) || !changed.length || changed.length > 500) throw Error('EMPTY_OR_UNBOUNDED_RESEARCH_DIFF');
+  let touchedResearch = false;
   for (const file of changed) {
-    if (!file || file.startsWith('/') || file.includes('\\') || file.split('/').some(x => x === '..' || x === '.')) throw Error('INVALID_DIFF_PATH');
+    if (!safe(file)) throw Error('INVALID_DIFF_PATH');
     if (file === '.github/research-release-base.json') continue;
     if (file === 'Cargo.lock' || file.endsWith('/Cargo.toml') || file === 'Cargo.toml' || file.startsWith('.cargo/')) throw Error('DEPENDENCY_CONFIGURATION_CHANGED');
     if (protectedDirs.some(dir => file.startsWith(dir))) throw Error('PRODUCTION_DEPENDENCY_CHANGED');
-    if (!file.startsWith('crates/okx-research-worker/') && !file.startsWith('crates/okx-research/')) throw Error('OUTSIDE_RESEARCH_SCOPE');
+    if (file.startsWith('crates/okx-research-worker/') || file.startsWith('crates/okx-research/')) {
+      if (file.endsWith('/build.rs')) throw Error('RESEARCH_BUILD_SCRIPT_CHANGED');
+      touchedResearch = true;
+      continue;
+    }
+    if (!nonNative(file)) throw Error('OUTSIDE_RESEARCH_SCOPE');
   }
+  if (!touchedResearch) throw Error('EMPTY_RESEARCH_DIFF');
   return { production_packages: seen.size, protected_workspace_dirs: protectedDirs.sort(), changed_files: changed.length };
 }
 if (require.main === module) {
