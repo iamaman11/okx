@@ -1,6 +1,7 @@
 """Select and run Draft feedback on the checked-out tree; see docs/testing.md."""
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -129,6 +130,68 @@ def report_t10(value):
            "This does NOT measure Finance/MCP under load or enforce a hard RSS ceiling.")
 
 
+def measured_native_under_research(output):
+    records = re.findall(r"T11_T12_NATIVE_ISOLATION_JSON:(\{[^\n]+\})", output)
+    if len(records) != 1:
+        raise ValueError(f"Native-under-Research requires one proof record; got {len(records)}")
+    value = json.loads(records[0])
+    if (value.get("schema") != "okx.518.t11-t12-native-isolation-campaign/v1"
+            or value.get("native_engine") != "run_engine_until_real_tasks"
+            or value.get("research") != "separate_child_process_two_real_grids"
+            or value.get("mcp_transport") != "not_evaluated_in_native_test"
+            or value.get("exchange_trade_post") is not False):
+        raise ValueError("Native-under-Research proof has unexpected scope or financial side effects")
+    for phase_name, expected in (("under_load", "two_heavy_grids_running"),
+                                 ("without_worker", "worker_disconnected")):
+        phase = value.get(phase_name, {})
+        if (phase.get("schema") != "okx.518.t11-t12-native-concurrent-isolation/v1"
+                or phase.get("phase") != expected
+                or phase.get("native_installation_identity_preserved") is not True
+                or phase.get("financial_owner") != "native_sqlite_original_owner"
+                or phase.get("synthetic_public_source") is not True
+                or phase.get("trading_requests_sent") != 0
+                or phase.get("reserved_entry_usd") != "0"
+                or phase.get("consumed_entry_usd") != "0"):
+            raise ValueError(f"Native-under-Research invalid {phase_name} phase")
+        for lane in ("native_finance_read_only", "research_explain"):
+            proof = phase.get(lane)
+            if phase_name == "without_worker" and lane == "research_explain":
+                if proof is not None:
+                    raise ValueError("Disconnected Worker must not claim an Explain measurement")
+                continue
+            if not isinstance(proof, dict):
+                raise ValueError(f"Missing {phase_name}.{lane} measurement")
+            samples = proof.get("raw_ms", [])
+            if (proof.get("samples") != 100 or len(samples) != 100
+                    or proof.get("slo_p95_ms") != 100.0
+                    or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                               and math.isfinite(v) and v >= 0 for v in samples)):
+                raise ValueError(f"Invalid {phase_name}.{lane} raw timing samples")
+            ordered = sorted(samples)
+            if (proof.get("p50_ms") != ordered[49]
+                    or proof.get("p95_ms") != ordered[94]
+                    or proof.get("max_ms") != ordered[99]
+                    or ordered[94] > 100):
+                raise ValueError(f"Invalid or over-budget {phase_name}.{lane} latency evidence")
+    return value
+
+
+def report_native_under_research(value):
+    for name in ("under_load", "without_worker"):
+        phase = value[name]
+        finance = phase["native_finance_read_only"]
+        report(f"T10/T11/T12 observed Native Finance with {phase['phase']}: 100 read-only "
+               f"SQLite owner samples; p95={finance['p95_ms']:.3f} ms, "
+               f"max={finance['max_ms']:.3f} ms. Native installation identity preserved, "
+               "zero reservations/consumption/trade POSTs.")
+        if name == "under_load":
+            explain = phase["research_explain"]
+            report(f"T10 observed child Research Explain alongside Finance and two running "
+                   f"Grid jobs: 100 IPC samples; p95={explain['p95_ms']:.3f} ms, "
+                   f"max={explain['max_ms']:.3f} ms. "
+                   "MCP transport NOT measured; no full integrated T10 SLO claim.")
+
+
 def execute(scopes):
     if "expanded" in scopes:
         # Check the local platform and changed build inputs. Ready covers Windows and the release.
@@ -163,7 +226,8 @@ def execute(scopes):
         tests("okx-agent", required=("research_dispatch_tests::t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t07_t08_real_worker_intraday_event_and_holdout_stay_separate",), exact=True)
         tests("okx-agent", required=("research_client::transport_tests::t11_t12_cancel_is_dispatchable_while_work_and_observation_lanes_are_full",), exact=True)
-        tests("okx-agent", required=("accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect",), exact=True, show_output=True)
+        native = tests("okx-agent", required=("accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect",), exact=True, show_output=True)
+        report_native_under_research(measured_native_under_research(native))
     if "mcp" in scopes:
         subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=MCP, check=True)
         artifacts = [MCP / "contracts" / name for name in ("tools.schema.json", "action-fixtures.json")]

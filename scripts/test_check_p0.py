@@ -1,6 +1,6 @@
 import unittest
 
-from check_p0 import check_counts, measured_t10, select
+from check_p0 import check_counts, measured_native_under_research, measured_t10, select
 
 
 class FeedbackTests(unittest.TestCase):
@@ -45,6 +45,53 @@ class FeedbackTests(unittest.TestCase):
                 measured_t10("ANALYTICS_PERF_JSON:" + json.dumps(bad))
         with self.assertRaises(ValueError):
             measured_t10("test result: ok. 1 passed")
+
+    def test_native_under_heavy_research_requires_full_finance_and_ipc_samples(self):
+        import json
+
+        def timing():
+            return {"samples": 100, "p50_ms": 1.0, "p95_ms": 1.0,
+                    "max_ms": 1.0, "raw_ms": [1.0] * 100, "slo_p95_ms": 100.0}
+
+        def phase(name, explain):
+            return {"schema": "okx.518.t11-t12-native-concurrent-isolation/v1",
+                    "phase": name, "native_finance_read_only": timing(),
+                    "research_explain": timing() if explain else None,
+                    "native_installation_identity_preserved": True,
+                    "financial_owner": "native_sqlite_original_owner",
+                    "synthetic_public_source": True, "trading_requests_sent": 0,
+                    "reserved_entry_usd": "0", "consumed_entry_usd": "0"}
+
+        value = {"schema": "okx.518.t11-t12-native-isolation-campaign/v1",
+                 "native_engine": "run_engine_until_real_tasks",
+                 "research": "separate_child_process_two_real_grids",
+                 "mcp_transport": "not_evaluated_in_native_test",
+                 "exchange_trade_post": False,
+                 "under_load": phase("two_heavy_grids_running", True),
+                 "without_worker": phase("worker_disconnected", False)}
+
+        def record(data):
+            return "T11_T12_NATIVE_ISOLATION_JSON:" + json.dumps(data)
+
+        self.assertEqual(measured_native_under_research(record(value))["under_load"]["phase"],
+                         "two_heavy_grids_running")
+        for path, changed in (
+            (("under_load", "research_explain", "samples"), 99),
+            (("under_load", "research_explain", "p95_ms"), 101.0),
+            (("under_load", "native_finance_read_only", "raw_ms"), [float("nan")] * 100),
+            (("without_worker", "research_explain"), timing()),
+            (("under_load", "trading_requests_sent"), 1),
+            (("mcp_transport",), "fully_measured"),
+        ):
+            bad = json.loads(json.dumps(value))
+            target = bad
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = changed
+            with self.assertRaises(ValueError):
+                measured_native_under_research(record(bad))
+        with self.assertRaises(ValueError):
+            measured_native_under_research("test result: ok. 1 passed")
 
 
 if __name__ == "__main__":
