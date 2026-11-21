@@ -241,6 +241,7 @@ impl AccountStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::position_target::TargetPosition;
 
     fn database() -> Connection {
         let db = Connection::open_in_memory().unwrap();
