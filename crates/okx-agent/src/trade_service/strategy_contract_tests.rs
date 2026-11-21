@@ -368,7 +368,7 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
         .research
         .graph_signal(GraphSessionRequest::Advance {
             session_id,
-            graph_sha256,
+            graph_sha256: graph_sha256.clone(),
             expected_bars: 4,
             bar: GraphClosedBar {
                 time_ms: 240_000,
