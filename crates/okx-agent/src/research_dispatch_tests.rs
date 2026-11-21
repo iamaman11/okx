@@ -504,9 +504,29 @@ async fn t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated() 
     if result["rows"].is_null() {
         let id = result["id"].as_str().expect("queued market job ID");
         assert_eq!(terminal(&client, id).await["state"], "completed");
-        result = client.market(request, None, None).await.unwrap();
+        result = client.market(request.clone(), None, None).await.unwrap();
     }
-    let rows = result["rows"].as_array().expect("two market rows");
+    // A full provenance row may exceed the response byte budget. Cursor
+    // pagination must replay the immutable artifact, never refetch venues.
+    let source_read_count = (
+        candle_reads.load(Ordering::SeqCst),
+        oi_reads.load(Ordering::SeqCst),
+    );
+    let mut rows = Vec::new();
+    loop {
+        rows.extend(result["rows"].as_array().expect("market result rows").iter().cloned());
+        let Some(cursor) = result["next_cursor"].as_str() else {
+            break;
+        };
+        let mut next = request.clone();
+        next.cursor = Some(cursor.to_owned());
+        result = client.market(next, None, None).await.unwrap();
+    }
+    assert_eq!(
+        (candle_reads.load(Ordering::SeqCst), oi_reads.load(Ordering::SeqCst)),
+        source_read_count,
+        "cursor pages must read immutable evidence without refetching venues"
+    );
     assert_eq!(rows.len(), 2, "{result}");
     let row = |instrument: &str| {
         rows.iter()
