@@ -1,5 +1,6 @@
 use super::*;
 use okx_protocol::trading::{CapitalDirection, StrategyConfigurationV1, StrategyParametersV1};
+use okx_protocol::research_ipc::{ClosedPrice, SignalPosition, SignalRequest};
 #[cfg(test)]
 #[path = "strategy_contract_tests.rs"]
 mod strategy_contract_tests;
@@ -489,6 +490,12 @@ impl TradeService {
         if !config.valid() {
             return Err("STRATEGY_CONFIGURATION_INVALID".into());
         }
+        let research = self
+            .signal_research
+            .read()
+            .await
+            .clone()
+            .ok_or("STRATEGY_RESEARCH_NOT_READY")?;
         let (fast, slow) = (config.parameters.fast, config.parameters.slow);
         let timeframe = config.timeframe_ms;
         for instrument in &config.instruments {
@@ -509,14 +516,19 @@ impl TradeService {
                     last
                 ))?[..40]
             );
-            let mut kernel = okx_analysis::operators::StrategyKernel::from_id(
-                &instance.definition_id,
-                okx_analysis::operators::EmaParameters { fast, slow },
-            )?;
-            let mut signal = None;
-            for (_, close) in &bars {
-                signal = kernel.push_closed(*close)?;
-            }
+            let decision = research
+                .evaluate_signal(SignalRequest {
+                    strategy_id: instance.definition_id.clone(),
+                    parameters: okx_protocol::analytics::EmaParameters { fast, slow },
+                    closes: bars
+                        .iter()
+                        .map(|(time_ms, close)| ClosedPrice {
+                            time_ms: *time_ms,
+                            close: *close,
+                        })
+                        .collect(),
+                })
+                .await?;
             let decision_digest = digest(&(last, &bars))?;
             let (state, control) = self.authority(r, None).await?;
             if !control.access_enabled() {
@@ -544,7 +556,11 @@ impl TradeService {
             let Some(claimed_decision_id) = claimed else {
                 continue;
             };
-            let desired = signal.unwrap_or(0);
+            let desired = match decision.position {
+                SignalPosition::Long => 1,
+                SignalPosition::Short => -1,
+                SignalPosition::Flat | SignalPosition::Warmup => 0,
+            };
             if desired == 0 {
                 let id = instance.instance_id.clone();
                 let key = decision_key.clone();

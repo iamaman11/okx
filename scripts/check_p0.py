@@ -40,7 +40,9 @@ def select(status, path):
         return {"expanded"}
     if path == "README.md" or (path.startswith("docs/") and path.endswith(".md")):
         return set()
-    if path in {"crates/okx-kernel/src/" + f for f in ("operators.rs", "query_plan.rs", "time_series.rs")}:
+    if path.startswith("crates/okx-strategy-core/src/") and path.endswith(".rs"):
+        return {"research", "worker", "analysis"}
+    if path == "crates/okx-kernel/src/time_series.rs":
         return {"kernel"}
     if path.startswith("crates/okx-analysis/src/") and path.endswith(".rs"):
         return {"analysis", "kernel"}
@@ -336,7 +338,9 @@ def execute(scopes):
         subprocess.run([sys.executable, "scripts/check_architecture.py"], cwd=ROOT, check=True)
         scopes = SCOPES
     if "kernel" in scopes:
-        tests("okx-kernel", required=(PLAN_TEST, GAP_TEST))
+        tests("okx-kernel", required=(GAP_TEST,))
+    if "research" in scopes or "analysis" in scopes or "kernel" in scopes:
+        tests("okx-strategy-core", required=(PLAN_TEST,))
     if "analysis" in scopes:
         tests("okx-analysis")
     if "research" in scopes:

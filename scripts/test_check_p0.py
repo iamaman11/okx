@@ -30,7 +30,9 @@ class FeedbackTests(unittest.TestCase):
             "full_scale_execution": "not_attempted", "side_effects": "none"}}
 
     def test_kernel_and_boundaries(self):
-        self.assertEqual(select("M", "crates/okx-kernel/src/operators.rs"), {"kernel"})
+        self.assertEqual(select("M", "crates/okx-kernel/src/time_series.rs"), {"kernel"})
+        self.assertEqual(select("M", "crates/okx-strategy-core/src/operators.rs"), {"research", "worker", "analysis"})
+        self.assertEqual(select("M", "crates/okx-kernel/src/strategy_contract.rs"), {"expanded"})
         self.assertEqual(select("M", "crates/okx-research-worker/src/analytics/jobs.rs"), {"worker"})
         self.assertEqual(select("M", "crates/okx-protocol/src/research_ipc.rs"), {"wire", "worker", "ipc", "mcp"})
         self.assertFalse(select("M", "docs/testing.md"))

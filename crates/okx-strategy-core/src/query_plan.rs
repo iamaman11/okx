@@ -1,24 +1,13 @@
 //! Typed K7 analysis plan, independent of storage, transport and venue.
-use crate::{
-    operators::{Operator, registry},
-    time_series::ClosedRange,
-};
+use crate::operators::{Operator, registry};
+use okx_kernel::time_series::ClosedRange;
+pub use okx_kernel::strategy_contract::{CompositionRequest, SeriesOp, SeriesStep};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const QUERY_PLAN_VERSION: &str = "okx.query-plan/448.1";
 pub const COMPOSITION_VERSION: &str = "okx.market.composition/v1";
 const MAX_COMPOSITION_WORK_UNITS: u64 = 64_000_000;
-
-/// A bounded sequence of typed series operations, evaluated by the existing
-/// market worker. No general-purpose expressions, I/O or financial effects.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompositionRequest {
-    pub version: String,
-    pub steps: Vec<SeriesStep>,
-    pub result_steps: Vec<String>,
-}
 
 #[cfg(test)]
 mod t07_t10_projected_prefix_evaluation {
@@ -293,54 +282,6 @@ mod t07_t10_projected_prefix_evaluation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SeriesStep {
-    pub id: String,
-    pub op: SeriesOp,
-    /// "open", "high", "low", "close" (closed-candle prices), "volume"
-    /// (native venue volume per candle and instrument), "open_interest"
-    /// (contracts), and sparse "funding_rate" (realized event-time ratio) are
-    /// sources; other names must identify previously compiled steps.
-    pub input: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub period: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threshold: Option<f64>,
-    /// Only a prior edge event may condition a future outcome label.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub when: Option<String>,
-    /// Second prior series for dimensionless arithmetic or Boolean logic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub other: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SeriesOp {
-    ReturnsSeries,
-    RollingMean,
-    RollingMax,
-    RollingMin,
-    RollingRange,
-    RollingPearson,
-    RollingZscore,
-    RollingStddev,
-    AddSeries,
-    SubtractSeries,
-    DivideSeries,
-    And,
-    Or,
-    Lag,
-    GreaterThan,
-    GreaterThanSeries,
-    LessThan,
-    LessThanSeries,
-    RisingEdge,
-    FallingEdge,
-    ForwardReturnLabel,
-}
-
 /// One self-contained pure extension contract. The worker serializes this
 /// descriptor directly into market capabilities instead of maintaining a
 /// second, manually copied definition. Availability of the input source is
@@ -377,7 +318,7 @@ pub const ROLLING_RANGE_DESCRIPTOR: RollingRangeDescriptor = RollingRangeDescrip
     causal: true,
     time_basis: "closed_bar",
     effects: "pure_no_io",
-    owner: "okx-kernel::query_plan::rolling_range",
+    owner: "okx-strategy-core::query_plan::rolling_range",
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

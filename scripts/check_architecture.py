@@ -14,7 +14,8 @@ ALLOWED = {
     "okx-observation": {"okx-api", "okx-kernel"},
     "okx-runtime": {"okx-api", "okx-observation", "okx-protocol", "okx-ws"},
     "okx-kernel": set(),
-    "okx-analysis": {"okx-kernel"},
+    "okx-strategy-core": {"okx-kernel"},
+    "okx-analysis": {"okx-kernel", "okx-strategy-core"},
     "okx-research": {"okx-analysis"},
     "okx-execution": {"okx-api", "okx-analysis", "okx-kernel", "okx-observation"},
     "okx-protocol": {"okx-kernel"},
@@ -23,9 +24,8 @@ ALLOWED = {
     "okx-host-launcher": set(),
     "okx-host-control": {"okx-github", "okx-host-launcher", "okx-protocol"},
     "okx-bridge-mcp": {"okx-github", "okx-protocol"},
-    "okx-research-worker": {"okx-analysis", "okx-kernel", "okx-protocol", "okx-research"},
+    "okx-research-worker": {"okx-analysis", "okx-kernel", "okx-protocol", "okx-research", "okx-strategy-core"},
     "okx-agent": {
-        "okx-analysis",
         "okx-api",
         "okx-execution",
         "okx-github",
@@ -115,7 +115,7 @@ def load_graph() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
 
 # K10 pure crates must be free of network/storage/runtime dependencies through
 # the complete resolved production graph, including external package edges.
-K10_TARGET_PURE = ("okx-kernel", "okx-analysis", "okx-research")
+K10_TARGET_PURE = ("okx-kernel", "okx-strategy-core", "okx-analysis", "okx-research")
 K10_ENFORCED_PURE = K10_TARGET_PURE
 K10_FORBIDDEN = {
     "okx-api", "okx-ws", "okx-runtime", "okx-github",
@@ -155,7 +155,7 @@ def pure_dependency_violations(
 
 
 BOUNDARY_FORBIDDEN = {
-    "okx-agent": {"okx-research", "okx-research-worker"},
+    "okx-agent": {"okx-research", "okx-research-worker", "okx-strategy-core", "okx-analysis"},
     "okx-research-worker": {"okx-agent", "okx-execution", "okx-api", "okx-runtime", "okx-host-control", "okx-bridge-mcp"},
 }
 
@@ -211,7 +211,7 @@ def self_test() -> int:
 
     # Removing an old dependency reduces coupling and is always permitted.
     simplified = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
-    simplified["okx-agent"].remove("okx-analysis")
+    simplified["okx-agent"].remove("okx-api")
     if validate(simplified):
         print("self-test failed: a removed dependency was rejected", file=sys.stderr)
         return 1
@@ -239,7 +239,7 @@ def self_test() -> int:
         if not validate(dirty, dev):
             print(f"self-test failed: worker normal edge {dep} accepted", file=sys.stderr)
             return 1
-    for dep in ("okx-research", "okx-research-worker"):
+    for dep in ("okx-research", "okx-research-worker", "okx-strategy-core", "okx-analysis"):
         dirty = {name: set(deps) for name, deps in accepted.items()}
         dirty["okx-agent"].add(dep)
         if not validate(dirty):
@@ -285,7 +285,7 @@ def self_test() -> int:
     if must_find not in violations:
         print("self-test failed: K10 transitive adapter leak passed", file=sys.stderr)
         return 1
-    clean = {"okx-kernel": {"serde"}, "okx-analysis": {"rust_decimal"}, "okx-research": {"okx-analysis"}}
+    clean = {"okx-kernel": {"serde"}, "okx-strategy-core": {"okx-kernel"}, "okx-analysis": {"rust_decimal"}, "okx-research": {"okx-analysis"}}
     if pure_dependency_violations(clean):
         print("self-test failed: clean K10 pure graph rejected", file=sys.stderr)
         return 1

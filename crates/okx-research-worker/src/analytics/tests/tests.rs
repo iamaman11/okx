@@ -1,4 +1,49 @@
 use super::*;
+
+#[tokio::test]
+async fn engine_live_signal_runs_in_research_cpu_lane_with_causal_replay_parity() {
+    let (_root, service) = super::artifact_job_fixtures::service();
+    let closes = [100.0, 102.0, 103.0, 110.0, 105.0, 98.0, 92.0, 90.0];
+    let request = SignalRequest {
+        strategy_id: "ema_cross_v1".into(),
+        parameters: EmaParameters { fast: 2, slow: 4 },
+        closes: closes.iter().enumerate().map(|(i, close)| {
+            okx_protocol::research_ipc::ClosedPrice {
+                time_ms: (i as u64 + 1) * 60_000,
+                close: *close,
+            }
+        }).collect(),
+    };
+    let mut kernel = okx_analysis::operators::StrategyKernel::from_id(
+        &request.strategy_id,
+        request.parameters,
+    ).unwrap();
+    let mut expected = None;
+    for close in closes {
+        expected = kernel.push_closed(close).unwrap();
+    }
+    let result = service.evaluate_signal(request.clone()).await.unwrap();
+    assert!(result.matches_request(&request));
+    assert_eq!(result.position, match expected {
+        Some(1) => SignalPosition::Long,
+        Some(-1) => SignalPosition::Short,
+        Some(0) => SignalPosition::Flat,
+        _ => panic!("unexpected replay signal"),
+    });
+    let mut future_change = request.clone();
+    future_change.closes.push(okx_protocol::research_ipc::ClosedPrice {
+        time_ms: 9 * 60_000,
+        close: 300.0,
+    });
+    assert_eq!(service.evaluate_signal(request.clone()).await.unwrap(), result);
+    assert_eq!(service.evaluate_signal(SignalRequest {
+        strategy_id: "new_uninstalled_operator".into(),
+        ..request.clone()
+    }).await.unwrap_err(), "UNSUPPORTED_STRATEGY");
+    let mut invalid = request;
+    invalid.closes[2].time_ms = invalid.closes[1].time_ms;
+    assert_eq!(service.evaluate_signal(invalid).await.unwrap_err(), "INVALID_SIGNAL_REQUEST");
+}
 #[test]
 fn market_capabilities_discloses_supported_operator_names_and_units() {
     let (root, service) = super::artifact_job_fixtures::service();
@@ -72,7 +117,7 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
         extension,
         &serde_json::to_value(okx_analysis::query_plan::ROLLING_RANGE_DESCRIPTOR).unwrap()
     );
-    assert_eq!(extension["owner"], "okx-kernel::query_plan::rolling_range");
+    assert_eq!(extension["owner"], "okx-strategy-core::query_plan::rolling_range");
     assert_eq!(extension["effects"], "pure_no_io");
     assert_eq!(extension["version"], 1);
     let stddev = operations

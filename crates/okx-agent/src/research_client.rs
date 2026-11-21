@@ -531,6 +531,22 @@ impl ResearchClient {
             .await?
             .product()
     }
+    /// Strictly read-only mathematical result from the independently installed Worker.
+    pub async fn evaluate_signal(
+        &self,
+        request: SignalRequest,
+    ) -> Result<SignalDecision, String> {
+        if !request.valid() {
+            return Err("INVALID_SIGNAL_REQUEST".into());
+        }
+        let decision = self.call(ResearchCommand::EvaluateSignal { request: request.clone() }, true)
+            .await?
+            .signal()?;
+        if !decision.matches_request(&request) {
+            return Err("SIGNAL_RESPONSE_MISMATCH".into());
+        }
+        Ok(decision)
+    }
     pub async fn market(
         &self,
         request: MarketRequest,

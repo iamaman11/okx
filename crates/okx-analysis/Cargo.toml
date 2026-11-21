@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 okx-kernel = { path = "../okx-kernel" }
+okx-strategy-core = { path = "../okx-strategy-core" }
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

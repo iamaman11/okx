@@ -2,7 +2,7 @@
 //! causal-graph wire contract without borrowing financial Engine authority.
 //! The full request is decoded just as the Worker receives it over IPC.
 
-use okx_kernel::query_plan::{CheckedComposition, Unit};
+use okx_strategy_core::query_plan::{CheckedComposition, Unit};
 use okx_protocol::analytics::MarketRequest;
 use serde_json::{Value, json};
 

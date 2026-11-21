@@ -1,6 +1,6 @@
 //! Public compact analytics contract. No transport or financial logic.
-pub use okx_kernel::operators::{BreakoutParameters, EmaParameters, StrategyParameters};
-use okx_kernel::query_plan::CompositionRequest;
+pub use okx_kernel::strategy_contract::{BreakoutParameters, EmaParameters, StrategyParameters};
+use okx_kernel::strategy_contract::CompositionRequest;
 use crate::graph_wire::GraphEnvelope;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -509,7 +509,7 @@ impl ResearchRequest {
                         strategy_id.as_str(),
                         "ema_cross_v1"
                             | "ema_momentum_confirm_v1"
-                            | okx_kernel::operators::BREAKOUT_STRATEGY_ID
+                            | okx_kernel::strategy_contract::BREAKOUT_STRATEGY_ID
                             | "no_trade"
                             | "close_momentum"
                             | "two_bar_momentum"
@@ -545,7 +545,7 @@ impl ResearchRequest {
                         strategy_id.as_str(),
                         "ema_cross_v1"
                             | "ema_momentum_confirm_v1"
-                            | okx_kernel::operators::BREAKOUT_STRATEGY_ID
+                            | okx_kernel::strategy_contract::BREAKOUT_STRATEGY_ID
                             | "no_trade"
                             | "close_momentum"
                             | "two_bar_momentum"
