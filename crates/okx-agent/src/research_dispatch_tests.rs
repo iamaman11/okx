@@ -425,3 +425,125 @@ async fn t06_t09_real_worker_causality_and_economics_are_isolated() {
     client.shutdown().await;
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// T04/T06/T13: the real Agent -> Worker route must keep each instrument's
+/// source grid and provenance separate. An OI point one millisecond off the
+/// candle grid is missing, not a nearest-neighbour historical observation.
+#[tokio::test]
+async fn t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated() {
+    let candle_reads = Arc::new(AtomicUsize::new(0));
+    let oi_reads = Arc::new(AtomicUsize::new(0));
+    let source: SourceHandler = Arc::new({
+        let candle_reads = candle_reads.clone();
+        let oi_reads = oi_reads.clone();
+        move |request| {
+            let candle_reads = candle_reads.clone();
+            let oi_reads = oi_reads.clone();
+            Box::pin(async move {
+                match request {
+                    PublicSourceRequest::Candles { after, .. } => {
+                        candle_reads.fetch_add(1, Ordering::SeqCst);
+                        let cursor = after.as_deref().unwrap_or("0").parse::<u64>().unwrap();
+                        let rows = (0..100u64)
+                            .rev()
+                            .filter(|index| index * 60_000 < cursor)
+                            .map(|index| HistoryCandle {
+                                open_time_ms: (index * 60_000).to_string(),
+                                open: (100 + index).to_string(),
+                                high: (102 + index).to_string(),
+                                low: (99 + index).to_string(),
+                                close: (101 + index).to_string(),
+                                volume: "1".into(),
+                                volume_currency: "1".into(),
+                                volume_quote: None,
+                                confirmed: true,
+                            })
+                            .collect();
+                        Ok(PublicSourceReply::Candles(PublicCandleCapture {
+                            raw_body: b"two-instrument-candles".to_vec(),
+                            rows,
+                            acquired_at_ms: "9000000".into(),
+                        }))
+                    }
+                    PublicSourceRequest::OpenInterest { instrument, .. } => {
+                        oi_reads.fetch_add(1, Ordering::SeqCst);
+                        let shifted = instrument == "ETH-USDT-SWAP";
+                        Ok(PublicSourceReply::OpenInterest(
+                            (0..100u64)
+                                .map(|index| ResearchOpenInterest {
+                                    ts: (index * 60_000
+                                        + u64::from(shifted && index == 42))
+                                    .to_string(),
+                                    oi: (100 + index).to_string(),
+                                    oi_currency: (100 + index).to_string(),
+                                })
+                                .collect(),
+                        ))
+                    }
+                    _ => Err("UNEXPECTED_SOURCE".into()),
+                }
+            })
+        }
+    });
+    let (root, client) = fixture(source);
+    let request: MarketRequest = serde_json::from_value(serde_json::json!({
+        "action":"screen",
+        "instruments":["BTC-USDT-SWAP","ETH-USDT-SWAP"],
+        "fields":["returns"],"timeframe_ms":60000,
+        "start_ms":0,"end_ms":6000000,"limit":2,
+        "composition":{"version":"okx.market.composition/v1","steps":[
+            {"id":"price_return","op":"returns_series","input":"close"},
+            {"id":"price_signal","op":"greater_than","input":"price_return","threshold":0},
+            {"id":"oi_return","op":"returns_series","input":"open_interest"},
+            {"id":"oi_signal","op":"greater_than","input":"oi_return","threshold":0}
+        ],"result_steps":["price_signal","oi_return","oi_signal"]}
+    }))
+    .unwrap();
+    assert!(request.valid());
+    let mut result = client.market(request.clone(), None, None).await.unwrap();
+    if result["rows"].is_null() {
+        let id = result["id"].as_str().expect("queued market job ID");
+        assert_eq!(terminal(&client, id).await["state"], "completed");
+        result = client.market(request, None, None).await.unwrap();
+    }
+    let rows = result["rows"].as_array().expect("two market rows");
+    assert_eq!(rows.len(), 2, "{result}");
+    let row = |instrument: &str| {
+        rows.iter()
+            .find(|row| row["instrument"] == instrument)
+            .expect("instrument must retain its own result")
+    };
+    let aligned = row("BTC-USDT-SWAP");
+    let shifted = row("ETH-USDT-SWAP");
+    for observed in [aligned, shifted] {
+        assert_eq!(observed["metrics"]["price_signal"], true);
+        assert_eq!(observed["composition_quality"]["price_signal"]["status"],
+            "available_at_closed_bar");
+        assert!(observed["metrics"]["oi_signal"].is_null());
+        assert_eq!(observed["source_integrity"]["historical_publication_time_verified"], false);
+        assert_eq!(observed["source_integrity"]["metric_reexecution"]["quality"],
+            "verified_reexecution");
+    }
+    assert!(aligned["metrics"]["oi_return"].is_number());
+    assert_eq!(aligned["source_alignment"]["aligned_observations"], 100);
+    assert_eq!(aligned["source_alignment"]["oi_off_grid_events"], 0);
+    assert_eq!(aligned["composition_quality"]["oi_signal"]["issues"][0]["reason"],
+        "CAUSAL_PUBLICATION_TIME_UNVERIFIED");
+
+    assert!(shifted["metrics"]["oi_return"].is_null());
+    assert_eq!(shifted["source_alignment"]["aligned_observations"], 99);
+    assert_eq!(shifted["source_alignment"]["oi_off_grid_events"], 1);
+    assert_eq!(shifted["source_alignment"]["oi_first_off_grid_ms"], 42 * 60_000 + 1);
+    assert_eq!(shifted["source_alignment"]["first_unaligned_ms"], 42 * 60_000);
+    assert_eq!(shifted["oi_coverage"]["first_missing_ms"], 42 * 60_000);
+    assert_eq!(shifted["composition_quality"]["oi_return"]["issues"][0]["reason"],
+        "OI_RANGE_INCOMPLETE_OR_GAPPED");
+    assert_ne!(aligned["source_captures"]["open_interest"]["capture_hash"],
+        shifted["source_captures"]["open_interest"]["capture_hash"]);
+    assert_eq!(candle_reads.load(Ordering::SeqCst), 2,
+        "each instrument reads its candles once");
+    assert_eq!(oi_reads.load(Ordering::SeqCst), 2,
+        "each instrument reads its OI once");
+    client.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
