@@ -341,7 +341,7 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
     let replayed = restarted
         .graph_signal(GraphSessionRequest::Advance {
             session_id: session_id.clone(),
-            graph_sha256,
+            graph_sha256: graph_sha256.clone(),
             expected_bars: 3,
             bar: GraphClosedBar {
                 time_ms: 180_000,
