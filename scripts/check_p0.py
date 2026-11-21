@@ -124,6 +124,7 @@ def execute(scopes):
         worker = Path(json.loads(metadata)["target_directory"]) / "debug" / ("okx-research-worker" + suffix)
         os.environ["OKX_RESEARCH_WORKER_TEST_EXE"] = str(worker)
         tests("okx-agent", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
+        tests("okx-agent", required=("research_dispatch_tests::t06_t09_real_worker_causality_and_economics_are_isolated",), exact=True)
         tests("okx-agent", required=("research_client::transport_tests::t11_t12_cancel_is_dispatchable_while_work_and_observation_lanes_are_full",), exact=True)
         tests("okx-agent", required=("accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect",), exact=True, show_output=True)
     if "mcp" in scopes:

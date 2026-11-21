@@ -2,7 +2,8 @@ use crate::research_client::{ResearchClient, ResearchClientConfig, SourceHandler
 use okx_protocol::{
     analytics::*,
     research_ipc::{
-        HistoryCandle, PublicCandleCapture, PublicSourceReply, PublicSourceRequest, ResearchScope,
+        FundingHistoryEvent, HistoryCandle, PublicCandleCapture, PublicFundingCapture,
+        PublicSourceReply, PublicSourceRequest, ResearchOpenInterest, ResearchScope,
     },
 };
 use serde_json::Value;
@@ -269,6 +270,158 @@ async fn real_worker_decision_replay_and_scope_are_durable_without_source_reads(
         before,
         "decision metadata cannot fetch source data"
     );
+    client.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// T06/T09/T11: one real Agent -> child Worker IPC campaign. Historical
+/// observation timestamps may explain retrospective metrics, but cannot
+/// certify an OI/funding-derived decision signal. Counterfactual money is
+/// exact and currency-scoped; neither path can reach a financial writer.
+#[tokio::test]
+async fn t06_t09_real_worker_causality_and_economics_are_isolated() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let source: SourceHandler = Arc::new({
+        let reads = reads.clone();
+        move |request| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                match request {
+                    PublicSourceRequest::Candles { after, .. } => {
+                        let cursor = after.as_deref().unwrap_or("0").parse::<u64>().unwrap();
+                        let rows = (0..100u64)
+                            .rev()
+                            .filter(|i| i * 60_000 < cursor)
+                            .map(|i| HistoryCandle {
+                                open_time_ms: (i * 60_000).to_string(),
+                                open: (100 + i).to_string(),
+                                high: (102 + i).to_string(),
+                                low: (99 + i).to_string(),
+                                close: (101 + i).to_string(),
+                                volume: "1".into(),
+                                volume_currency: "1".into(),
+                                volume_quote: None,
+                                confirmed: true,
+                            })
+                            .collect();
+                        Ok(PublicSourceReply::Candles(PublicCandleCapture {
+                            raw_body: b"closed-candles".to_vec(),
+                            rows,
+                            acquired_at_ms: "9000000".into(),
+                        }))
+                    }
+                    PublicSourceRequest::OpenInterest { .. } => {
+                        Ok(PublicSourceReply::OpenInterest(
+                            (0..100u64)
+                                .map(|i| ResearchOpenInterest {
+                                    ts: (i * 60_000).to_string(),
+                                    oi: (100 + i).to_string(),
+                                    oi_currency: (100 + i).to_string(),
+                                })
+                                .collect(),
+                        ))
+                    }
+                    PublicSourceRequest::Funding { after, .. } => {
+                        let cursor = after.as_deref().unwrap_or("0").parse::<u64>().unwrap();
+                        let rows = [60_000u64, 99 * 60_000]
+                            .into_iter()
+                            .filter(|time| *time < cursor)
+                            .map(|time| FundingHistoryEvent {
+                                funding_time_ms: time.to_string(),
+                                funding_rate: "0.002".into(),
+                                realized_rate: Some("0.001".into()),
+                                formula_type: None,
+                                method: None,
+                            })
+                            .collect();
+                        Ok(PublicSourceReply::Funding(PublicFundingCapture {
+                            raw_body: b"realized-funding".to_vec(),
+                            rows,
+                            acquired_at_ms: "9000000".into(),
+                        }))
+                    }
+                    _ => Err("UNEXPECTED_SOURCE".into()),
+                }
+            })
+        }
+    });
+    let (root, client) = fixture(source);
+    let market_request: MarketRequest = serde_json::from_value(serde_json::json!({
+        "action":"screen","instruments":["BTC-USDT-SWAP"],"fields":["returns"],
+        "timeframe_ms":60000,"start_ms":0,"end_ms":6000000,"limit":1,
+        "composition":{"version":"okx.market.composition/v1","steps":[
+            {"id":"price_change","op":"returns_series","input":"close"},
+            {"id":"price_signal","op":"greater_than","input":"price_change","threshold":0},
+            {"id":"oi_change","op":"returns_series","input":"open_interest"},
+            {"id":"oi_signal","op":"greater_than","input":"oi_change","threshold":0},
+            {"id":"funding_observed","op":"rolling_mean","input":"funding_rate","period":1},
+            {"id":"funding_signal","op":"greater_than","input":"funding_rate","threshold":0}
+        ],"result_steps":["price_signal","oi_change","oi_signal","funding_observed","funding_signal"]}
+    })).unwrap();
+    assert!(market_request.valid());
+    let mut market = client.market(market_request.clone(), None, None).await.unwrap();
+    if market["rows"].is_null() {
+        let job_id = market["id"].as_str().expect("queued market job ID");
+        assert_eq!(terminal(&client, job_id).await["state"], "completed");
+        market = client.market(market_request, None, None).await.unwrap();
+    }
+    let row = &market["rows"][0];
+    assert_eq!(row["metrics"]["price_signal"], true);
+    assert_eq!(row["composition_quality"]["price_signal"]["status"], "available_at_closed_bar");
+    assert!(row["metrics"]["oi_change"].is_number());
+    assert_eq!(row["composition_quality"]["oi_change"]["status"], "retrospective_publication_unverified");
+    assert!((row["metrics"]["funding_observed"].as_f64().unwrap() - 0.001).abs() < 1e-12,
+        "funding uses realized_rate, never the conflicting 0.002 forecast");
+    assert_eq!(row["composition_quality"]["funding_observed"]["status"],
+        "retrospective_publication_unverified");
+    for signal in ["oi_signal", "funding_signal"] {
+        assert!(row["metrics"][signal].is_null(), "{signal} cannot be a causal signal");
+        assert_eq!(row["composition_quality"][signal]["issues"][0]["reason"],
+            "CAUSAL_PUBLICATION_TIME_UNVERIFIED");
+    }
+    assert_eq!(row["source_integrity"]["quality"], "verified_normalized_sources");
+    assert_eq!(row["source_integrity"]["historical_publication_time_verified"], false);
+    assert_eq!(row["source_integrity"]["metric_reexecution"]["quality"], "verified_reexecution");
+    let source_reads = reads.load(Ordering::SeqCst);
+    assert!(source_reads >= 3);
+
+    let cases = serde_json::json!([{
+        "instrument":"BTC-USDT-SWAP","product":"linear_swap","side":"long",
+        "quantity":"3","entry_price":"100","exit_price":"110",
+        "contract_type":"linear","contract_value":"0.1",
+        "contract_value_currency":"BTC","settle_currency":"USDT",
+        "fees":{"currency":"USDT","amount":"0"},
+        "funding":{"currency":"USDT","amount":"0"}
+    },{
+        "instrument":"ETH-USD","product":"spot","side":"long",
+        "quantity":"1","entry_price":"20","exit_price":"22",
+        "fees":{"currency":"USD","amount":"0"},
+        "funding":{"currency":"USD","amount":"0"}
+    }]);
+    let counterfactual: ResearchRequest = serde_json::from_value(serde_json::json!({
+        "action":"economics","cases":cases,"data_mode":"counterfactual"
+    })).unwrap();
+    assert!(counterfactual.valid());
+    let economy = client.research(counterfactual).await.unwrap();
+    assert_eq!(economy["rows"][0]["net"]["amount_exact"], "3");
+    assert_eq!(economy["rows"][0]["net"]["currency"], "USDT");
+    assert_eq!(economy["rows"][1]["net"]["amount_exact"], "2");
+    assert_eq!(economy["rows"][1]["net"]["currency"], "USD");
+    assert!(economy["portfolio_equity"].is_null());
+    assert!(economy["joint_portfolio_risk"].is_null());
+    assert_eq!(economy["summary"]["aggregation"], "independent_positions_no_fx_no_joint_risk");
+    assert_eq!(economy["effects"]["venue_posts"], 0);
+    assert_eq!(economy["effects"]["finance_writes"], 0);
+
+    let historical: ResearchRequest = serde_json::from_value(serde_json::json!({
+        "action":"economics","cases":cases,"data_mode":"historical_observed"
+    })).unwrap();
+    let blocked = client.research(historical).await.unwrap();
+    assert_eq!(blocked["status"], "blocked");
+    assert_eq!(blocked["reason_code"], "HISTORICAL_RULES_AND_FEES_UNAVAILABLE");
+    assert_eq!(blocked["effects"]["job_created"], false);
+    assert_eq!(reads.load(Ordering::SeqCst), source_reads,
+        "economic scenario must not read venues or create hidden sources");
     client.shutdown().await;
     std::fs::remove_dir_all(root).unwrap();
 }
