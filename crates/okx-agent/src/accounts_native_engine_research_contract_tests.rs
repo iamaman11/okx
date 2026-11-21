@@ -32,7 +32,8 @@ struct SourceReadWitness {
 
 fn heavy_research(root: std::path::PathBuf, reads: Arc<SourceReadWitness>) -> ResearchClient {
     let executable = std::path::PathBuf::from(
-        std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE").expect("set OKX_RESEARCH_SERVICE_TEST_EXE"),
+        std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
+            .expect("set OKX_RESEARCH_SERVICE_TEST_EXE"),
     );
     assert!(executable.is_file());
     let source: SourceHandler = Arc::new(move |request| {
