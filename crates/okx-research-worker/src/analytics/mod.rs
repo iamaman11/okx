@@ -22,7 +22,8 @@ pub mod sources;
 use futures_util::{StreamExt, stream};
 use okx_protocol::analytics::*;
 use okx_protocol::research_ipc::{
-    GraphPublicationPage, GraphPublicationRequest, GraphSessionReply, GraphSessionRequest,
+    GraphClosedBar, GraphPublicationPage, GraphPublicationRequest, GraphSessionId,
+    GraphSessionReply, GraphSessionRequest,
     SignalDecision, SignalPosition, SignalRequest,
 };
 use okx_research::{
@@ -84,6 +85,56 @@ impl AnalyticsService {
         request: GraphPublicationRequest,
     ) -> Result<GraphPublicationPage, String> {
         self.graph_sessions.replay(&self.cpu, request).await
+    }
+
+    /// A feed is exclusively owned by Research. Agent may configure it once,
+    /// but cannot advance its math with a competing per-bar request.
+    pub(crate) async fn claim_graph_feed(
+        &self,
+        session_id: GraphSessionId,
+        graph_sha256: String,
+        timeframe_ms: u64,
+    ) -> Result<graph_sessions::FeedCursor, String> {
+        self.graph_sessions.claim_feed(&self.cpu, session_id, graph_sha256, timeframe_ms).await
+    }
+
+    pub(crate) async fn graph_feed_cursor(
+        &self,
+        session_id: GraphSessionId,
+        graph_sha256: String,
+    ) -> Result<graph_sessions::FeedCursor, String> {
+        self.graph_sessions.feed_cursor(&self.cpu, session_id, graph_sha256).await
+    }
+
+    pub(crate) async fn release_graph_feed(
+        &self,
+        session_id: GraphSessionId,
+        graph_sha256: String,
+        poison: bool,
+    ) -> Result<(), String> {
+        self.graph_sessions.release_feed(&self.cpu, session_id, graph_sha256, poison).await
+    }
+
+    pub(crate) async fn advance_graph_feed(
+        &self,
+        session_id: GraphSessionId,
+        graph_sha256: String,
+        expected_bars: u64,
+        bar: GraphClosedBar,
+    ) -> Result<(GraphSessionReply, bool), String> {
+        self.graph_sessions.advance_from_feed(&self.cpu, GraphSessionRequest::Advance {
+            session_id, graph_sha256, expected_bars, bar,
+        }).await
+    }
+
+    pub(crate) async fn graph_feed_candles(
+        &self,
+        instrument: &str,
+        timeframe_ms: u64,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> Result<Arc<Vec<okx_research::strategy_registry::Bar>>, String> {
+        self.sources.candles(instrument, timeframe_ms, start_ms, end_ms, false).await
     }
     /// Same causal kernel as replay, isolated behind the Research process and
     /// scheduled on the existing bounded CPU executor (never on Tokio I/O).

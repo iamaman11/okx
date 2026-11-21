@@ -370,6 +370,8 @@ def execute(scopes):
         tests("okx-agent", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::real_worker_live_signal_ipc_is_causal_and_has_no_source_or_finance_access",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_only",), exact=True)
+        tests("okx-agent", required=("research_dispatch_tests::real_research_service_pulls_closed_candles_and_publishes_without_engine_advance",), exact=True)
+        tests("okx-agent", required=("research_dispatch_tests::real_research_feed_rejects_missing_closed_candle_without_synthetic_signal",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t06_t09_real_worker_causality_and_economics_are_isolated",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t07_t08_real_worker_intraday_event_and_holdout_stay_separate",), exact=True)

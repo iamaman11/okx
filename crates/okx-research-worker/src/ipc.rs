@@ -21,6 +21,9 @@ use tokio::{
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::Instrument;
 
+#[path = "ipc/graph_feed.rs"]
+mod graph_feed;
+
 fn codec() -> LengthDelimitedCodec {
     LengthDelimitedCodec::builder()
         .max_frame_length(MAX_FRAME_BYTES)
@@ -160,6 +163,7 @@ where
         &expected_scope,
         producer.clone(),
     )?;
+    let graph_feeds = graph_feed::GraphFeeds::default();
     let hello = WorkerFrame::Hello {
         protocol: PROTOCOL_VERSION,
         storage: STORAGE_VERSION,
@@ -225,7 +229,7 @@ where
                             Ok(permit) => permit,
                             Err(_) => { tx.try_send((WorkerFrame::Response { id, session: session.clone(), result: Err("RESEARCH_BUSY".into()) }, None)).map_err(|_| "WRITER_CLOSED")?; continue; }
                         };
-                        let service = service.clone(); let tx = tx.clone(); let session = session.clone();
+                        let service = service.clone(); let tx = tx.clone(); let session = session.clone(); let feeds = graph_feeds.clone();
                         let span = tracing::info_span!("research_command", owner="research_worker", ipc_request_id=id.as_str(), session=session.as_str(), invocation_id=invocation.as_ref().map(InvocationId::as_str));
                         jobs.spawn(crate::invocation::scope(invocation, async move {
                             let _permit = permit;
@@ -239,6 +243,7 @@ where
                                     WorkerReply::GraphSignal(reply)
                                 }),
                                 ResearchCommand::ReplayGraphPublications { request } => service.replay_graph_publications(request).await.map(WorkerReply::GraphPublications),
+                                ResearchCommand::GraphFeed { request } => feeds.command(service.clone(), tx.clone(), session.clone(), request).await.map(WorkerReply::GraphFeed),
                                 ResearchCommand::Capabilities => Ok(WorkerReply::Product(service.market_capabilities())),
                                 ResearchCommand::Drain => service.begin_drain().await.map(WorkerReply::Draining),
                                 ResearchCommand::Explain { job_id } => Ok(WorkerReply::Product(service.diagnostic_job(job_id.as_str()))),
@@ -268,6 +273,7 @@ where
     }
     jobs.abort_all();
     while jobs.join_next().await.is_some() {}
+    graph_feeds.shutdown().await;
     writers.abort_all();
     while writers.join_next().await.is_some() {}
     Ok(())

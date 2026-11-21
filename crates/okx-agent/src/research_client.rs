@@ -80,6 +80,8 @@ pub struct ResearchClient {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphSignalEvent {
     Published(GraphSignalPublication),
+    /// A per-session public feed stopped; never reinterpret this as Hold.
+    FeedUnavailable(GraphFeedFault),
     ServiceUnavailable,
 }
 type PendingReplies =
@@ -416,6 +418,10 @@ impl ResearchClient {
                                 // slow consumer sees Lagged, never silent skip.
                                 let _ = publications.send(GraphSignalEvent::Published(publication));
                             },
+                            Ok(WorkerFrame::GraphFeedFault { session, fault }) if session == driver.session => {
+                                if !fault.valid() { break; }
+                                let _ = publications.send(GraphSignalEvent::FeedUnavailable(fault));
+                            },
                             _ => break,
                         }, _ => break,
                     },
@@ -622,6 +628,19 @@ impl ResearchClient {
             return Err("GRAPH_PUBLICATION_RESPONSE_MISMATCH".into());
         }
         Ok(page)
+    }
+    /// One-time public feed control: Research polls and publishes thereafter.
+    /// No Engine per-bar request and no financial capability crosses IPC.
+    pub async fn graph_feed(&self, request: GraphFeedRequest) -> Result<GraphFeedReply, String> {
+        if !request.valid() {
+            return Err("GRAPH_FEED_REQUEST_INVALID".into());
+        }
+        let reply = self.call(ResearchCommand::GraphFeed { request: request.clone() }, true)
+            .await?.graph_feed()?;
+        if !reply.matches_request(&request) {
+            return Err("GRAPH_FEED_RESPONSE_MISMATCH".into());
+        }
+        Ok(reply)
     }
     pub async fn market(
         &self,

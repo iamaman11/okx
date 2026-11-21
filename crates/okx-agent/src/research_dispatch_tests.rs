@@ -5,8 +5,9 @@ use okx_protocol::{
     analytics::*,
     research_ipc::{
         ClosedPrice, FundingHistoryEvent, GraphClosedBar, GraphPosition, GraphPublicationCursor,
-        GraphPublicationRequest, GraphSessionId, GraphSessionReply, GraphSessionRequest,
-        GraphSignalDefinition, GraphSignalIntent, HistoryCandle, PublicCandleCapture,
+        GraphFeedFaultReason, GraphFeedReply, GraphFeedRequest, GraphPublicationRequest,
+        GraphSessionId, GraphSessionReply, GraphSessionRequest, GraphSignalDefinition,
+        GraphSignalIntent, HistoryCandle, PublicCandleCapture,
         PublicFundingCapture, PublicSourceReply, PublicSourceRequest, ResearchOpenInterest,
         ResearchScope, SignalPosition, SignalRequest,
     },
@@ -400,6 +401,157 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     restarted.shutdown().await;
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// A real child Research Service pulls confirmed candles itself. Engine makes
+/// exactly one feed Start request, no per-candle Advance or financial call.
+#[tokio::test]
+async fn real_research_service_pulls_closed_candles_and_publishes_without_engine_advance() {
+    const PERIOD: u64 = 14_400_000; // 4H: stable test window across CI seconds.
+    let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+    let open = now / PERIOD * PERIOD;
+    let new_closed = open - PERIOD;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let source: SourceHandler = Arc::new({
+        let reads = reads.clone();
+        move |request| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let PublicSourceRequest::Candles { instrument, bar, queued, after, .. } = request else {
+                    return Err("NOT_PUBLIC_CANDLES".into());
+                };
+                if instrument != "BTC-USDT" || bar != "4H" || queued || after != Some(open.to_string()) {
+                    return Err("INVALID_FEED_SOURCE_REQUEST".into());
+                }
+                let candle = |time: u64, close: f64, confirmed: bool| HistoryCandle {
+                    open_time_ms: time.to_string(), open: close.to_string(),
+                    high: (close+1.0).to_string(), low: (close-1.0).to_string(),
+                    close: close.to_string(), volume: "1".into(), volume_currency: "1".into(),
+                    volume_quote: None, confirmed,
+                };
+                Ok(PublicSourceReply::Candles(PublicCandleCapture {
+                    raw_body: b"public-closed-only".to_vec(),
+                    rows: vec![candle(open, 999.0, false), candle(new_closed, 90.0, true)],
+                    acquired_at_ms: now.to_string(),
+                }))
+            })
+        }
+    });
+    let (root, client) = fixture(source);
+    let session_id = GraphSessionId::new("research:feed:btc".into()).unwrap();
+    let definition: GraphSignalDefinition = serde_json::from_value(serde_json::json!({
+        "version":"okx.graph-signal/v1",
+        "graph":{"version":"okx.graph/v1","steps":[
+            {"id":"return","op":"returns_series","op_version":1,"inputs":{"input":"close"}},
+            {"id":"positive","op":"greater_than","op_version":1,
+             "inputs":{"input":"return"},"parameters":{"threshold":0.0}}
+        ],"result_steps":["positive"]},
+        "signal_step":"positive","target_if_true":1,"target_if_false":0,"missing":"hold"
+    })).unwrap();
+    let history = vec![
+        GraphClosedBar { time_ms: open-3*PERIOD, close: Some(100.0) },
+        GraphClosedBar { time_ms: open-2*PERIOD, close: Some(110.0) },
+    ];
+    let restored = client.graph_signal(GraphSessionRequest::Restore {
+        session_id: session_id.clone(), definition: Box::new(definition), capacity: 64, history,
+    }).await.unwrap();
+    let GraphSessionReply::Evaluated { graph_sha256, .. } = restored else { panic!("restore") };
+    let mut events = client.subscribe_graph_signals();
+    let start = GraphFeedRequest::Start {
+        session_id: session_id.clone(), graph_sha256: graph_sha256.clone(),
+        instrument: "BTC-USDT".into(), timeframe_ms: PERIOD, poll_every_ms: 1_000,
+    };
+    assert!(matches!(client.graph_feed(start.clone()).await.unwrap(), GraphFeedReply::Started { .. }));
+    assert!(matches!(client.graph_feed(start).await.unwrap(), GraphFeedReply::Started { .. }));
+    let GraphSignalEvent::Published(publication) = tokio::time::timeout(Duration::from_secs(8), events.recv())
+        .await.unwrap().unwrap() else { panic!("missing autonomous publication") };
+    assert_eq!(publication.sequence, 3);
+    assert_eq!(publication.closed_ms, new_closed);
+    assert_eq!(publication.intent, GraphSignalIntent::SetTarget(GraphPosition::Flat));
+    assert_eq!(client.replay_graph_publications(GraphPublicationRequest {
+        session_id: session_id.clone(), graph_sha256: graph_sha256.clone(),
+        after_sequence: 2, limit: 8,
+    }).await.unwrap().publications, vec![publication]);
+    assert_eq!(client.graph_signal(GraphSessionRequest::Advance {
+        session_id: session_id.clone(), graph_sha256: graph_sha256.clone(),
+        expected_bars: 4,
+        bar: GraphClosedBar { time_ms: open, close: Some(999.0) },
+    }).await.unwrap_err(), "GRAPH_FEED_OWNS_SESSION");
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    assert_eq!(reads.load(Ordering::SeqCst), 1, "no repeat source read of processed closed bar");
+    assert!(matches!(events.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+    let stop = GraphFeedRequest::Stop { session_id, graph_sha256 };
+    assert!(matches!(client.graph_feed(stop).await.unwrap(), GraphFeedReply::Stopped { .. }));
+    let GraphSignalEvent::FeedUnavailable(fault) = events.recv().await.unwrap() else { panic!("missing stop notice") };
+    assert_eq!(fault.reason, GraphFeedFaultReason::Stopped);
+    client.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn real_research_feed_rejects_missing_closed_candle_without_synthetic_signal() {
+    const PERIOD: u64 = 14_400_000;
+    let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+    let open = now / PERIOD * PERIOD;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let source: SourceHandler = Arc::new({
+        let reads = reads.clone();
+        move |request| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if !matches!(request, PublicSourceRequest::Candles { .. }) {
+                    return Err("NO_FINANCE_SOURCE".into());
+                }
+                // The expected older confirmed candle is absent. Returning a
+                // newer one must FAIL, not heal the gap or skip the timestamp.
+                let close = "90";
+                Ok(PublicSourceReply::Candles(PublicCandleCapture {
+                    raw_body: b"missing-prior-closed-bar".to_vec(),
+                    rows: vec![HistoryCandle {
+                        open_time_ms: (open-PERIOD).to_string(),
+                        open: close.into(), high: "91".into(), low: "89".into(), close: close.into(),
+                        volume: "1".into(), volume_currency: "1".into(), volume_quote: None, confirmed: true,
+                    }],
+                    acquired_at_ms: now.to_string(),
+                }))
+            })
+        }
+    });
+    let (root, client) = fixture(source);
+    let session_id = GraphSessionId::new("research:feed:gap".into()).unwrap();
+    let definition: GraphSignalDefinition = serde_json::from_value(serde_json::json!({
+        "version":"okx.graph-signal/v1",
+        "graph":{"version":"okx.graph/v1","steps":[
+            {"id":"return","op":"returns_series","op_version":1,"inputs":{"input":"close"}},
+            {"id":"positive","op":"greater_than","op_version":1,
+             "inputs":{"input":"return"},"parameters":{"threshold":0.0}}
+        ],"result_steps":["positive"]},
+        "signal_step":"positive","target_if_true":1,"target_if_false":0,"missing":"hold"
+    })).unwrap();
+    let restored = client.graph_signal(GraphSessionRequest::Restore {
+        session_id: session_id.clone(), definition: Box::new(definition), capacity: 64,
+        history: vec![
+            GraphClosedBar { time_ms: open-4*PERIOD, close: Some(100.0) },
+            GraphClosedBar { time_ms: open-3*PERIOD, close: Some(110.0) },
+        ],
+    }).await.unwrap();
+    let GraphSessionReply::Evaluated { graph_sha256, .. } = restored else { panic!("restore") };
+    let mut events = client.subscribe_graph_signals();
+    client.graph_feed(GraphFeedRequest::Start {
+        session_id: session_id.clone(), graph_sha256: graph_sha256.clone(),
+        instrument: "BTC-USDT".into(), timeframe_ms: PERIOD, poll_every_ms: 1_000,
+    }).await.unwrap();
+    let GraphSignalEvent::FeedUnavailable(fault) = tokio::time::timeout(Duration::from_secs(8), events.recv())
+        .await.unwrap().unwrap() else { panic!("gap must fail closed without a publication") };
+    assert_eq!(fault.reason, GraphFeedFaultReason::MissingClosedBar);
+    assert!(reads.load(Ordering::SeqCst) > 0);
+    assert_eq!(client.graph_signal(GraphSessionRequest::Advance {
+        session_id: session_id.clone(), graph_sha256: graph_sha256.clone(),
+        expected_bars: 3, bar: GraphClosedBar { time_ms: open-2*PERIOD, close: Some(95.0) },
+    }).await.unwrap_err(), "GRAPH_SESSION_RESTORE_REQUIRED");
+    client.graph_feed(GraphFeedRequest::Stop { session_id, graph_sha256 }).await.unwrap();
+    client.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
