@@ -102,6 +102,75 @@ fn heavy_grid(key: &str) -> ResearchRequest {
         seed: 7,
     }
 }
+
+fn boundary_grid(key: &str, instruments: usize, bars_per_instrument: u64, variants: usize) -> ResearchRequest {
+    ResearchRequest::Grid {
+        idempotency_key: key.into(),
+        instruments: (0..instruments).map(|i| format!("TEST-{i}")).collect(),
+        timeframe_ms: 60_000,
+        start_ms: 0,
+        end_ms: 60_000 * bars_per_instrument,
+        strategy_id: "ema_cross_v1".into(),
+        variants: (0..variants)
+            .map(|i| EmaParameters { fast: 2, slow: 90 + i }.into())
+            .collect(),
+        costs: ResearchCosts {
+            maker_fee_bps: 1.,
+            taker_fee_bps: 2.,
+            slippage_bps: 1.,
+            funding_mode: FundingMode::ZeroAssumption,
+        },
+        data_mode: ResearchDataMode::Counterfactual,
+        seed: 7,
+    }
+}
+
+/// Pre-source wire rejection on the *same real child process* used for the
+/// concurrent Grid/Finance campaign. Maximal valid plans are admission-only:
+/// executing a million-bar grid here would contaminate the bounded SLO run.
+async fn t10_real_worker_boundary_proof(
+    research: &ResearchClient,
+    reads: &SourceReadWitness,
+) -> serde_json::Value {
+    let before = reads.successful_requests.load(CounterOrdering::SeqCst);
+    let rows_before = reads.returned_rows.load(CounterOrdering::SeqCst);
+    assert_eq!(before, 0, "no source page may precede the boundary check");
+    assert_eq!(rows_before, 0);
+    for (name, request) in [
+        ("one_million_bars_one_instrument_64", boundary_grid("t10-max-bars", 1, 1_000_000, 64)),
+        ("eight_instruments_one_million_bars_64", boundary_grid("t10-max-eight", 8, 125_000, 64)),
+    ] {
+        assert!(request.valid(), "{name}: exact boundary must admit");
+    }
+    let mut rejected = serde_json::Map::new();
+    for (name, request) in [
+        ("one_million_plus_one_bars", boundary_grid("t10-over-bars", 1, 1_000_001, 64)),
+        ("nine_instruments", boundary_grid("t10-over-instruments", 9, 125_000, 64)),
+        ("sixty_five_variants", boundary_grid("t10-over-variants", 8, 125_000, 65)),
+    ] {
+        assert!(!request.valid(), "{name}: exceeding boundary must reject");
+        let error = tokio::time::timeout(Duration::from_secs(5), research.research(request))
+            .await
+            .expect("pre-source real Worker IPC rejection deadline")
+            .expect_err("invalid request must not create a Research job");
+        assert_eq!(error, "INVALID_RESEARCH_REQUEST", "{name}");
+        assert_eq!(reads.successful_requests.load(CounterOrdering::SeqCst), before);
+        assert_eq!(reads.returned_rows.load(CounterOrdering::SeqCst), rows_before);
+        rejected.insert(name.into(), serde_json::Value::String(error));
+    }
+    serde_json::json!({
+        "schema":"okx.518.t10-real-child-pre-source-boundaries/v1",
+        "route":"real_agent_to_separate_research_worker_ipc",
+        "admission_only_not_executed":["one_million_bars_one_instrument_64","eight_instruments_one_million_bars_64"],
+        "rejected_before_source":rejected,
+        "source_requests_before":before,
+        "source_requests_after":reads.successful_requests.load(CounterOrdering::SeqCst),
+        "returned_rows_before":rows_before,
+        "returned_rows_after":reads.returned_rows.load(CounterOrdering::SeqCst),
+        "full_scale_execution":"not_attempted",
+        "side_effects":"none",
+    })
+}
 async fn state(client: &ResearchClient, id: &str) -> serde_json::Value {
     client
         .research(ResearchRequest::Status { job_id: id.into() })
@@ -227,6 +296,7 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
     let bootstrap = MarketBootstrapper::new(api);
     let reads = Arc::new(SourceReadWitness::default());
     let research = heavy_research(fixture.root.join("heavy-research"), reads.clone());
+    let boundaries = t10_real_worker_boundary_proof(&research, &reads).await;
     // Wall clock begins after fixture start, before the first actual source
     // fetch. Cargo build and MCP host startup are outside this interval.
     let phase_started = std::time::Instant::now();
@@ -312,6 +382,7 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
     let authority = fixture.authority.clone();
     let child = research.clone();
     let source_reads = reads.clone();
+    let boundary_evidence = boundaries.clone();
     let (evidence_tx, evidence_rx) = tokio::sync::oneshot::channel();
     let until = async move {
         let mcp_client = reqwest::Client::new();
@@ -452,6 +523,7 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
             "reserved_entry_usd":"0","consumed_entry_usd":"0",
             "financial_owner":"native_sqlite_original_owner",
             "synthetic_public_source":true,
+            "pre_source_boundaries":boundary_evidence,
             "source_reads":{
                 "kind":"actual_research_ipc_public_candles_requests_to_synthetic_handler",
                 "successful_requests":successful_requests,

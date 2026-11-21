@@ -14,6 +14,21 @@ class FeedbackTests(unittest.TestCase):
             "observation_scope": "request_and_rows_counted_in_native_source_handler",
         }, "phase_wall_ms_excluding_build": 1453.0}
 
+    @staticmethod
+    def boundary_witness():
+        return {"pre_source_boundaries": {
+            "schema": "okx.518.t10-real-child-pre-source-boundaries/v1",
+            "route": "real_agent_to_separate_research_worker_ipc",
+            "admission_only_not_executed": ["one_million_bars_one_instrument_64",
+                                            "eight_instruments_one_million_bars_64"],
+            "rejected_before_source": {
+                "one_million_plus_one_bars": "INVALID_RESEARCH_REQUEST",
+                "nine_instruments": "INVALID_RESEARCH_REQUEST",
+                "sixty_five_variants": "INVALID_RESEARCH_REQUEST",
+            }, "source_requests_before": 0, "source_requests_after": 0,
+            "returned_rows_before": 0, "returned_rows_after": 0,
+            "full_scale_execution": "not_attempted", "side_effects": "none"}}
+
     def test_kernel_and_boundaries(self):
         self.assertEqual(select("M", "crates/okx-kernel/src/operators.rs"), {"kernel"})
         self.assertEqual(select("M", "crates/okx-research-worker/src/analytics/jobs.rs"), {"worker"})
@@ -71,6 +86,7 @@ class FeedbackTests(unittest.TestCase):
                     "financial_owner": "native_sqlite_original_owner",
                     "synthetic_public_source": True, "trading_requests_sent": 0,
                     **self.source_witness(),
+                    **self.boundary_witness(),
                     "reserved_entry_usd": "0", "consumed_entry_usd": "0"}
 
         value = {"schema": "okx.518.t11-t12-native-isolation-campaign/v1",
@@ -94,6 +110,7 @@ class FeedbackTests(unittest.TestCase):
             (("under_load", "trading_requests_sent"), 1),
             (("under_load", "source_reads", "successful_requests"), 0),
             (("under_load", "source_reads", "source_storage_page_reads"), 100),
+            (("under_load", "pre_source_boundaries", "returned_rows_after"), 1),
             (("without_worker", "phase_wall_ms_excluding_build"), 0),
             (("mcp_transport",), "fully_measured"),
         ):
@@ -117,12 +134,16 @@ class FeedbackTests(unittest.TestCase):
                  "financial_owner":"native_sqlite_original_owner",
                  "trading_requests_sent":0,"reserved_entry_usd":"0",
                  "consumed_entry_usd":"0","mcp_native_finance_read_only":sample,
-                 **self.source_witness()}
+                 **self.source_witness(), **self.boundary_witness()}
         tree = {"status":"MEASURED_SAMPLED", "scope":"collector_and_current_descendants",
                 "descendants_included":True,"max_active_descendants":3,
                 "samples":30,"peak_sampled_sum_rss_bytes":1234567,
                 "source":"linux_procfs_task_children_and_status",
-                "budget_status":"NOT_PROVEN","rss_hard_limit_enforced":False}
+                "budget_status":"NOT_PROVEN","rss_hard_limit_enforced":False,
+                "observed_process_io":{
+                    "read_char_bytes":10000, "read_syscalls":100,
+                    "storage_read_bytes":4096, "sampled_processes":4,
+                    "source_attribution":"not_attributed"}}
         value = {"schema":"okx.518.t10-mcp-do-wss-native-finance/v1",
                  "mcp_transport":"real_loopback_http_miniflare_sqlite_do_websocket_native",
                  "oauth":"test_scope_only_not_evaluated",
@@ -144,8 +165,10 @@ class FeedbackTests(unittest.TestCase):
             lambda x: x["worker_disconnected"].update(trading_requests_sent=1),
             lambda x: x["under_load"]["source_reads"].update(successful_requests=0),
             lambda x: x["under_load"].update(phase_wall_ms_excluding_build=0),
+            lambda x: x["under_load"]["pre_source_boundaries"]["rejected_before_source"].update(nine_instruments="accepted"),
             lambda x: x["process_tree"].update(budget_status="PASS"),
             lambda x: x["process_tree"].update(max_active_descendants=0),
+            lambda x: x["process_tree"]["observed_process_io"].update(source_attribution="confirmed_venue_reads"),
             lambda x: x.update(production_network="accepted"),
             lambda x: x.update(oauth="production_oauth"),
         ):

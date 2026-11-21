@@ -147,6 +147,24 @@ def check_source_witness(phase):
         raise ValueError("T10 missing actual typed synthetic-source reads or build-excluded phase timing")
 
 
+def check_real_child_boundaries(phase):
+    witness = phase.get("pre_source_boundaries", {})
+    expected = {"one_million_plus_one_bars", "nine_instruments", "sixty_five_variants"}
+    if (witness.get("schema") != "okx.518.t10-real-child-pre-source-boundaries/v1"
+            or witness.get("route") != "real_agent_to_separate_research_worker_ipc"
+            or witness.get("admission_only_not_executed") != [
+                "one_million_bars_one_instrument_64", "eight_instruments_one_million_bars_64"]
+            or witness.get("rejected_before_source") != {name: "INVALID_RESEARCH_REQUEST"
+                                                         for name in expected}
+            or witness.get("source_requests_before") != 0
+            or witness.get("source_requests_after") != 0
+            or witness.get("returned_rows_before") != 0
+            or witness.get("returned_rows_after") != 0
+            or witness.get("full_scale_execution") != "not_attempted"
+            or witness.get("side_effects") != "none"):
+        raise ValueError("T10 real Worker IPC size boundaries did not reject before source I/O")
+
+
 def measured_native_under_research(output):
     records = re.findall(r"T11_T12_NATIVE_ISOLATION_JSON:(\{[^\n]+\})", output)
     if len(records) != 1:
@@ -171,6 +189,7 @@ def measured_native_under_research(output):
                 or phase.get("consumed_entry_usd") != "0"):
             raise ValueError(f"Native-under-Research invalid {phase_name} phase")
         check_source_witness(phase)
+        check_real_child_boundaries(phase)
         for lane in ("native_finance_read_only", "research_explain"):
             proof = phase.get(lane)
             if phase_name == "without_worker" and lane == "research_explain":
@@ -238,6 +257,7 @@ def measured_mcp_native_under_research(output):
                 or phase.get("consumed_entry_usd") != "0"):
             raise ValueError(f"T10 invalid finance identity/side effects in {phase_key}")
         check_source_witness(phase)
+        check_real_child_boundaries(phase)
         sample = phase.get("mcp_native_finance_read_only")
         if not isinstance(sample, dict):
             raise ValueError(f"T10 missing {phase_key} real MCP native latency")
@@ -255,6 +275,7 @@ def measured_mcp_native_under_research(output):
             raise ValueError("T10 MCP p95 exceeded SLO or statistics not from raw data")
     memory = value.get("process_tree", {})
     if sys.platform == "linux":
+        io = memory.get("observed_process_io", {})
         if (memory.get("status") != "MEASURED_SAMPLED"
                 or memory.get("scope") != "collector_and_current_descendants"
                 or memory.get("descendants_included") is not True
@@ -263,8 +284,14 @@ def measured_mcp_native_under_research(output):
                 or memory.get("peak_sampled_sum_rss_bytes", 0) <= 0
                 or memory.get("source") != "linux_procfs_task_children_and_status"
                 or memory.get("budget_status") != "NOT_PROVEN"
-                or memory.get("rss_hard_limit_enforced") is not False):
-            raise ValueError("T10 Linux MCP/Worker/Agent process tree RSS was not sampled")
+                or memory.get("rss_hard_limit_enforced") is not False
+                or not isinstance(io, dict)
+                or type(io.get("read_char_bytes")) is not int or io["read_char_bytes"] <= 0
+                or type(io.get("read_syscalls")) is not int or io["read_syscalls"] <= 0
+                or type(io.get("storage_read_bytes")) is not int or io["storage_read_bytes"] < 0
+                or io.get("sampled_processes", 0) < 3
+                or io.get("source_attribution") != "not_attributed"):
+            raise ValueError("T10 Linux MCP/Worker/Agent process tree RSS and OS I/O not sampled")
     return value
 
 
@@ -282,12 +309,21 @@ def report_mcp_native_under_research(value):
                f"phase wall excluding build={phase['phase_wall_ms_excluding_build']:.1f} ms. "
                "Fixture OAuth replaced with test scope; production network, "
                "physical Windows and overall memory budget NOT evaluated.")
+        report("T10 real Agent->Research Worker IPC admission boundaries: "
+               "1,000,000 bars / 8 instruments / 64 variants protocol-admitted only; "
+               "1,000,001 bars / 9 instruments / 65 variants each rejected before "
+               "source requests or job creation; full-scale execution not attempted.")
     if memory.get("status") == "MEASURED_SAMPLED":
         report(f"T10 observed Linux MCP+Native+Research sampled process tree: "
                f"{memory['samples']} x 20ms /proc observations; max active descendants="
                f"{memory['max_active_descendants']}; max summed current RSS="
                f"{memory['peak_sampled_sum_rss_bytes']} bytes (shared pages double-counted; "
                "between-sample spikes may be missed). No hard RSS budget claim.")
+        io = memory["observed_process_io"]
+        report(f"T10 Linux sampled process-tree I/O (not source-attributed): "
+               f"read syscalls={io['read_syscalls']}, read-character bytes="
+               f"{io['read_char_bytes']}, storage-backed read bytes="
+               f"{io['storage_read_bytes']}; terminated short-lived children may be missed.")
     else:
         report(f"T10 process-tree resource witness: {memory.get('status', 'NOT_PROVEN')}; "
                "not a physical memory acceptance.")
