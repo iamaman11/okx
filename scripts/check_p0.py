@@ -96,6 +96,37 @@ def tests(package, target=("--lib",), required=(), exact=False, show_output=Fals
     count = check_counts("\n".join(output), required)
     report(f"{package} {' '.join(target)}: {count} tests passed in {time.monotonic()-started:.2f}s "
            f"(Cargo + tests). Recompiled workspace targets: {', '.join(sorted(rebuilt)) or 'none'}.")
+    return "\n".join(output)
+
+
+def measured_t10(output):
+    records = re.findall(r"ANALYTICS_PERF_JSON:(\{[^\n]+\})", output)
+    if len(records) != 1:
+        raise ValueError(f"T10 requires exactly one observed performance record; got {len(records)}")
+    value = json.loads(records[0])["two_heavy_stop"]
+    samples = value.get("stop_samples_ms", [])
+    cancellation = value.get("cancel_samples_ms", [])
+    memory = value.get("process_memory", {})
+    if (value.get("measurements") != 30 or len(samples) != 30 or len(cancellation) != 30
+            or value.get("p95_ms", float("inf")) > 100
+            or value.get("cancel_max_ms", float("inf")) > 1000
+            or not isinstance(memory.get("peak_rss_after_bytes"), int)
+            or memory.get("scope") != "whole_process_including_test_harness"
+            or memory.get("reservation_not_rss_limit") is not True):
+        raise ValueError("T10 incomplete samples, budget, or observed process-memory evidence")
+    return value
+
+
+def report_t10(value):
+    memory = value["process_memory"]
+    report(f"T10 observed two-heavy Grid fixture: OS={value['os']}, build={value['build']}, "
+           f"logical CPUs={value['logical_cpus']}; 30 measured after 5 warmups; "
+           f"stop p95={value['p95_ms']:.3f} ms, "
+           f"cancel p95={value['cancel_p95_ms']:.3f} ms, "
+           f"cancel max={value['cancel_max_ms']:.3f} ms; "
+           f"whole-test-process peak RSS={memory['peak_rss_after_bytes']} bytes "
+           f"({memory['measurement_source']}). "
+           "This does NOT measure Finance/MCP under load or enforce a hard RSS ceiling.")
 
 
 def execute(scopes):
@@ -114,6 +145,10 @@ def execute(scopes):
         tests("okx-protocol")
     if "worker" in scopes:
         tests("okx-research-worker", required=WORKER_TESTS)
+        perf = tests("okx-research-worker", required=(
+            "analytics::executor::heavy_fixtures::two_heavy_research_jobs_ingestion_stop_and_cancel_latency",
+        ), exact=True, show_output=True)
+        report_t10(measured_t10(perf))
     elif "kernel" in scopes:
         tests("okx-research-worker", required=WORKER_TESTS, exact=True)
     if "ipc" in scopes:
