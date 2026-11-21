@@ -2,8 +2,9 @@ use crate::research_client::{ResearchClient, ResearchClientConfig, SourceHandler
 use okx_protocol::{
     analytics::*,
     research_ipc::{
-        FundingHistoryEvent, HistoryCandle, PublicCandleCapture, PublicFundingCapture,
+        ClosedPrice, FundingHistoryEvent, HistoryCandle, PublicCandleCapture, PublicFundingCapture,
         PublicSourceReply, PublicSourceRequest, ResearchOpenInterest, ResearchScope,
+        SignalPosition, SignalRequest,
     },
 };
 use serde_json::Value;
@@ -117,6 +118,39 @@ async fn terminal(client: &ResearchClient, id: &str) -> Value {
     })
     .await
     .expect("research job did not finish")
+}
+
+#[tokio::test]
+async fn real_worker_live_signal_ipc_is_causal_and_has_no_source_or_finance_access() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (root, client) = fixture(candle_source(calls.clone()));
+    let request = SignalRequest {
+        strategy_id: "ema_cross_v1".into(),
+        parameters: EmaParameters { fast: 2, slow: 4 },
+        closes: [100.0, 101.0, 105.0, 120.0, 125.0]
+            .into_iter()
+            .enumerate()
+            .map(|(i, close)| ClosedPrice {
+                time_ms: (i as u64 + 1) * 60_000,
+                close,
+            })
+            .collect(),
+    };
+    let result = client.evaluate_signal(request.clone()).await.unwrap();
+    assert_eq!(result.position, SignalPosition::Long);
+    assert!(result.matches_request(&request));
+    assert_eq!(client.evaluate_signal(request.clone()).await.unwrap(), result);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let mut invalid = request.clone();
+    invalid.closes[0].close = f64::NAN;
+    assert_eq!(client.evaluate_signal(invalid).await.unwrap_err(), "INVALID_SIGNAL_REQUEST");
+    assert_eq!(client.evaluate_signal(SignalRequest {
+        strategy_id: "not_installed".into(),
+        ..request
+    }).await.unwrap_err(), "UNSUPPORTED_STRATEGY");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    client.shutdown().await;
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]

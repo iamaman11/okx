@@ -259,6 +259,10 @@ def self_test() -> int:
     if not production_boundary_violations(transitive, transitive_names):
         print("self-test failed: transitive Agent research leak passed", file=sys.stderr)
         return 1
+    transitive_names["api"] = "okx-strategy-core"
+    if not production_boundary_violations(transitive, transitive_names):
+        print("self-test failed: transitive Agent mathematical core leak passed", file=sys.stderr)
+        return 1
 
     pure_source = {"money.rs": "use std::fmt;\nfn one() {}"}
     dirty_source = {"money.rs": "use std::fs;\nfn bad(){std::fs::write(\"x\", b\"x\");}"}

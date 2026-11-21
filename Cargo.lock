@@ -1365,15 +1365,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "okx-strategy-core"
-version = "0.1.0"
-dependencies = [
- "okx-kernel",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "okx-runtime"
 version = "0.1.0"
 dependencies = [
@@ -1387,6 +1378,15 @@ dependencies = [
  "sha2",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "okx-strategy-core"
+version = "0.1.0"
+dependencies = [
+ "okx-kernel",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

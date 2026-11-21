@@ -996,6 +996,8 @@ jobs:
           $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'research-check-target'
           cargo clippy --locked -p okx-research-worker --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p okx-strategy-core --lib
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p okx-research-worker
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

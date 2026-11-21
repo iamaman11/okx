@@ -334,6 +334,7 @@ def report_mcp_native_under_research(value):
 def execute(scopes):
     if "expanded" in scopes:
         # Check the local platform and changed build inputs. Ready covers Windows and the release.
+        subprocess.run(["cargo", "fmt", "--all", "--", "--check"], cwd=ROOT, check=True)
         subprocess.run(["cargo", "check", "--locked", "--workspace", "--all-targets"], cwd=ROOT, check=True)
         subprocess.run([sys.executable, "scripts/check_architecture.py"], cwd=ROOT, check=True)
         scopes = SCOPES
@@ -367,6 +368,7 @@ def execute(scopes):
         worker = Path(json.loads(metadata)["target_directory"]) / "debug" / ("okx-research-worker" + suffix)
         os.environ["OKX_RESEARCH_WORKER_TEST_EXE"] = str(worker)
         tests("okx-agent", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
+        tests("okx-agent", required=("research_dispatch_tests::real_worker_live_signal_ipc_is_causal_and_has_no_source_or_finance_access",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t06_t09_real_worker_causality_and_economics_are_isolated",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t07_t08_real_worker_intraday_event_and_holdout_stay_separate",), exact=True)

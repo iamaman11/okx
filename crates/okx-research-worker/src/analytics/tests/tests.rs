@@ -30,11 +30,6 @@ async fn engine_live_signal_runs_in_research_cpu_lane_with_causal_replay_parity(
         Some(0) => SignalPosition::Flat,
         _ => panic!("unexpected replay signal"),
     });
-    let mut future_change = request.clone();
-    future_change.closes.push(okx_protocol::research_ipc::ClosedPrice {
-        time_ms: 9 * 60_000,
-        close: 300.0,
-    });
     assert_eq!(service.evaluate_signal(request.clone()).await.unwrap(), result);
     assert_eq!(service.evaluate_signal(SignalRequest {
         strategy_id: "new_uninstalled_operator".into(),
