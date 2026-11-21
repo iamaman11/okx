@@ -23,7 +23,7 @@ use std::{
 };
 use tokio::{
     process::Command,
-    sync::{Mutex, Notify, Semaphore, mpsc, oneshot, watch},
+    sync::{Mutex, Notify, Semaphore, broadcast, mpsc, oneshot, watch},
     task::JoinSet,
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -72,6 +72,15 @@ pub struct ResearchClient {
     source: SourceHandler,
     connection: Arc<Mutex<Option<Arc<Connection>>>>,
     deployment: Arc<std::sync::Mutex<ResearchDeploymentStatus>>,
+    publications: broadcast::Sender<GraphSignalEvent>,
+}
+
+/// Subscribers are read-only. On a lagged broadcast or ServiceUnavailable,
+/// consumers must stop using the stream and restore a checked cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphSignalEvent {
+    Published(GraphSignalPublication),
+    ServiceUnavailable,
 }
 type PendingReplies =
     Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Result<WorkerReply, String>>>>>;
@@ -150,12 +159,14 @@ fn next_id(id: &RequestId, prefix: char, previous: &mut u64) -> bool {
 }
 impl ResearchClient {
     pub fn new(config: ResearchClientConfig, source: SourceHandler) -> Self {
+        let (publications, _) = broadcast::channel(64);
         Self {
             config,
             installation_runtime: None,
             source,
             connection: Arc::new(Mutex::new(None)),
             deployment: Arc::new(std::sync::Mutex::new(ResearchDeploymentStatus::default())),
+            publications,
         }
     }
     /// Production factory. Pointer changes are checked on demand; images are hashed before launch.
@@ -165,6 +176,7 @@ impl ResearchClient {
         scope: ResearchScope,
         bootstrap: crate::market_bootstrap::MarketBootstrapper,
     ) -> Self {
+        let (publications, _) = broadcast::channel(64);
         let source: SourceHandler = Arc::new(move |request| {
             let bootstrap = bootstrap.clone();
             Box::pin(async move { bootstrap.research_source(request).await })
@@ -179,7 +191,14 @@ impl ResearchClient {
             source,
             connection: Arc::new(Mutex::new(None)),
             deployment: Arc::new(std::sync::Mutex::new(ResearchDeploymentStatus::default())),
+            publications,
         }
+    }
+
+    /// Direct Research publications; no synchronous strategy calculation or
+    /// financial execution on the subscriber path. `Lagged` means a hard gap.
+    pub fn subscribe_graph_signals(&self) -> broadcast::Receiver<GraphSignalEvent> {
+        self.publications.subscribe()
     }
     async fn connect(&self) -> Result<Arc<Connection>, String> {
         let mut slot = self.connection.lock().await;
@@ -360,6 +379,7 @@ impl ResearchClient {
         let driver = c.clone();
         let source = self.source.clone();
         let deployment = self.deployment.clone();
+        let publications = self.publications.clone();
         tokio::spawn(async move {
             let mut writer_task = tokio::spawn(async move {
                 while let Some(frame) = rx.recv().await {
@@ -390,6 +410,12 @@ impl ResearchClient {
                         Some(Ok(bytes)) => match serde_json::from_slice::<WorkerFrame>(&bytes) {
                             Ok(WorkerFrame::Response { id, session, result }) if session == driver.session => { let reply = driver.pending.lock().ok().and_then(|mut p| p.remove(id.as_str())); if let Some(reply) = reply { let _ = reply.send(result); } else if !issued_host_id(&id, driver.next.load(Ordering::Acquire)) { break; } },
                             Ok(WorkerFrame::SourceRequest { id, session, request }) if session == driver.session => { if !request.valid() || !next_id(&id, 's', &mut last_source) { break; } let permit = match source_permits.clone().try_acquire_owned() { Ok(p) => p, Err(_) => break }; let source = source.clone(); let tx = driver.tx.clone(); sources.spawn(async move { let _permit = permit; let result = source(request).await; let _ = tx.send(HostFrame::SourceReply { id, session, result }).await; }); },
+                            Ok(WorkerFrame::SignalPublished { session, publication }) if session == driver.session => {
+                                if !publication.valid() { break; }
+                                // No subscribers means no trading action; a
+                                // slow consumer sees Lagged, never silent skip.
+                                let _ = publications.send(GraphSignalEvent::Published(publication));
+                            },
                             _ => break,
                         }, _ => break,
                     },
@@ -397,6 +423,7 @@ impl ResearchClient {
                 }
             }
             driver.live.store(false, Ordering::Release);
+            let _ = publications.send(GraphSignalEvent::ServiceUnavailable);
             sources.abort_all();
             while sources.join_next().await.is_some() {}
             if !writer_done {

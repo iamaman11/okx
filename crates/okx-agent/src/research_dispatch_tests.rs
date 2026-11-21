@@ -1,8 +1,8 @@
-use crate::research_client::{ResearchClient, ResearchClientConfig, SourceHandler};
+use crate::research_client::{GraphSignalEvent, ResearchClient, ResearchClientConfig, SourceHandler};
 use okx_protocol::{
     analytics::*,
     research_ipc::{
-        ClosedPrice, FundingHistoryEvent, GraphClosedBar, GraphPosition, GraphSessionId,
+        ClosedPrice, FundingHistoryEvent, GraphClosedBar, GraphPosition, GraphPublicationCursor, GraphSessionId,
         GraphSessionReply, GraphSessionRequest, GraphSignalDefinition, GraphSignalIntent,
         HistoryCandle, PublicCandleCapture, PublicFundingCapture, PublicSourceReply,
         PublicSourceRequest, ResearchOpenInterest, ResearchScope, SignalPosition, SignalRequest,
@@ -170,6 +170,7 @@ async fn real_worker_live_signal_ipc_is_causal_and_has_no_source_or_finance_acce
 async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_only() {
     let calls = Arc::new(AtomicUsize::new(0));
     let (root, client) = fixture(candle_source(calls.clone()));
+    let mut publications = client.subscribe_graph_signals();
     let session_id = GraphSessionId::new("research:graph:btc".into()).unwrap();
     let definition: GraphSignalDefinition = serde_json::from_value(serde_json::json!({
         "version":"okx.graph-signal/v1",
@@ -198,6 +199,8 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
     };
     let first = client.graph_signal(restore.clone()).await.unwrap();
     assert!(first.matches_request(&restore));
+    let mut cursor = GraphPublicationCursor::from_restored(&first).unwrap();
+    assert!(matches!(publications.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
     assert_eq!(first, client.graph_signal(restore).await.unwrap());
     let GraphSessionReply::Evaluated {
         graph_sha256,
@@ -218,7 +221,13 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
         },
     };
     let flat = client.graph_signal(next.clone()).await.unwrap();
+    let GraphSignalEvent::Published(published_flat) = publications.recv().await.unwrap() else {
+        panic!("expected publication")
+    };
+    assert_eq!(published_flat.intent, GraphSignalIntent::SetTarget(GraphPosition::Flat));
+    assert!(cursor.accept(&published_flat).unwrap());
     assert_eq!(flat, client.graph_signal(next).await.unwrap());
+    assert!(matches!(publications.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)), "retry must not re-publish");
     assert!(matches!(
         flat,
         GraphSessionReply::Evaluated {
@@ -244,6 +253,12 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
             ..
         }
     ));
+    let GraphSignalEvent::Published(published_gap) = publications.recv().await.unwrap() else {
+        panic!("expected gap publication")
+    };
+    assert_eq!(published_gap.intent, GraphSignalIntent::Hold);
+    assert!(cursor.accept(&published_gap).unwrap());
+    assert_eq!(cursor.last_sequence(), 4);
     let old = GraphSessionRequest::Advance {
         session_id: session_id.clone(),
         graph_sha256: graph_sha256.clone(),

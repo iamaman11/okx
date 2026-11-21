@@ -61,11 +61,22 @@ fn reply(session_id: GraphSessionId, slot: &GraphSlot) -> GraphSessionReply {
 }
 
 impl GraphSessions {
+    #[cfg(test)]
     pub(super) async fn execute(
         &self,
         cpu: &CpuExecutor,
         request: GraphSessionRequest,
     ) -> Result<GraphSessionReply, String> {
+        self.execute_transition(cpu, request).await.map(|(reply, _)| reply)
+    }
+
+    /// The bool means a new closed-bar transition, never Restore or retry.
+    /// Only new transitions may produce an unsolicited publication.
+    pub(super) async fn execute_transition(
+        &self,
+        cpu: &CpuExecutor,
+        request: GraphSessionRequest,
+    ) -> Result<(GraphSessionReply, bool), String> {
         if !request.valid() {
             return Err("GRAPH_SESSION_REQUEST_INVALID".into());
         }
@@ -117,7 +128,7 @@ impl GraphSessions {
                             && active.last_bar == new.last_bar
                             && active.last_intent == new.last_intent
                         {
-                            return Ok(reply(session_id, &active));
+                            return Ok((reply(session_id, &active), false));
                         }
                         return Err("GRAPH_SESSION_ALREADY_ACTIVE".into());
                     }
@@ -126,7 +137,7 @@ impl GraphSessions {
                     }
                     let result = reply(session_id.clone(), &new);
                     registry.insert(session_id, Arc::new(Mutex::new(new)));
-                    Ok(result)
+                    Ok((result, false))
                 }
                 GraphSessionRequest::Advance {
                     session_id,
@@ -150,7 +161,7 @@ impl GraphSessions {
                     let seen = active.runner.processed_bars();
                     if expected_bars == seen && bar == active.last_bar {
                         // Retried response after timeout: no second state update.
-                        return Ok(reply(session_id, &active));
+                        return Ok((reply(session_id, &active), false));
                     }
                     if expected_bars != seen + 1 {
                         return Err("GRAPH_SESSION_SEQUENCE_MISMATCH".into());
@@ -160,7 +171,7 @@ impl GraphSessions {
                     let outcome = active.runner.on_closed_bar(convert(bar))?;
                     active.last_bar = bar;
                     active.last_intent = intent(outcome);
-                    Ok(reply(session_id, &active))
+                    Ok((reply(session_id, &active), true))
                 }
                 GraphSessionRequest::Release {
                     session_id,
@@ -177,7 +188,7 @@ impl GraphSessions {
                         }
                     }
                     registry.remove(&session_id);
-                    Ok(GraphSessionReply::Released { session_id })
+                    Ok((GraphSessionReply::Released { session_id }, false))
                 }
             }
         })
@@ -246,7 +257,8 @@ mod tests {
             capacity: 100,
             history: vec![bar(10, Some(100.)), bar(20, Some(110.))],
         };
-        let response = registry.execute(&cpu, restore.clone()).await.unwrap();
+        let (response, publish_restore) = registry.execute_transition(&cpu, restore.clone()).await.unwrap();
+        assert!(!publish_restore, "restoring history cannot publish old trades");
         assert!(response.matches_request(&restore));
         assert_eq!(
             response,
@@ -267,9 +279,12 @@ mod tests {
             expected_bars: 3,
             bar: bar(30, Some(90.)),
         };
-        let result = registry.execute(&cpu, next.clone()).await.unwrap();
+        let (result, publish_next) = registry.execute_transition(&cpu, next.clone()).await.unwrap();
+        assert!(publish_next, "only a newly closed bar can publish");
         assert!(result.matches_request(&next));
-        assert_eq!(result, registry.execute(&cpu, next.clone()).await.unwrap());
+        let (retried, publish_retry) = registry.execute_transition(&cpu, next.clone()).await.unwrap();
+        assert!(!publish_retry, "retry must never re-emit an old intent");
+        assert_eq!(result, retried);
         assert!(matches!(
             result,
             GraphSessionReply::Evaluated {

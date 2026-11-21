@@ -225,6 +225,12 @@ pub enum WorkerFrame {
         session: WorkerSession,
         request: PublicSourceRequest,
     },
+    /// Unsolicited read-only Research publication. This is never a trade
+    /// instruction and does not replace the correlated command reply.
+    SignalPublished {
+        session: WorkerSession,
+        publication: GraphSignalPublication,
+    },
 }
 
 /// Control outcomes are typed; product projections stay bounded JSON at the wire boundary.
@@ -453,6 +459,100 @@ impl GraphSessionReply {
     }
 }
 
+/// Immutable closed-bar intent published after a NEW graph advancement.
+/// A replay/restoration never publishes an old decision as a new event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphSignalPublication {
+    pub schema: String,
+    pub session_id: GraphSessionId,
+    pub graph_sha256: String,
+    pub closed_ms: u64,
+    pub sequence: u64,
+    pub intent: GraphSignalIntent,
+}
+
+impl GraphSignalPublication {
+    pub fn from_decision(reply: &GraphSessionReply) -> Option<Self> {
+        let GraphSessionReply::Evaluated {
+            schema, session_id, graph_sha256, last_closed_ms, observed_bars, intent,
+        } = reply else { return None };
+        Some(Self {
+            schema: schema.clone(),
+            session_id: session_id.clone(),
+            graph_sha256: graph_sha256.clone(),
+            closed_ms: *last_closed_ms,
+            sequence: *observed_bars,
+            intent: *intent,
+        })
+    }
+
+    pub fn valid(&self) -> bool {
+        self.schema == GraphSessionReply::SCHEMA
+            && self.graph_sha256.len() == 64
+            && self.graph_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && self.closed_ms > 0 && self.closed_ms <= i64::MAX as u64
+            && (1..=100_000).contains(&self.sequence)
+    }
+}
+
+/// A consumer must start from its explicitly restored cursor; it may not
+/// accept an arbitrary initial signal or skip a closed bar after lag/restart.
+/// A repeated identical publication is harmless, a changed replay is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphPublicationCursor {
+    session_id: GraphSessionId,
+    graph_sha256: String,
+    closed_ms: u64,
+    sequence: u64,
+    intent: GraphSignalIntent,
+}
+
+impl GraphPublicationCursor {
+    pub fn from_restored(reply: &GraphSessionReply) -> Result<Self, &'static str> {
+        let Some(event) = GraphSignalPublication::from_decision(reply) else {
+            return Err("GRAPH_CURSOR_RESTORE_REQUIRED");
+        };
+        if !event.valid() {
+            return Err("GRAPH_CURSOR_RESTORE_INVALID");
+        }
+        Ok(Self {
+            session_id: event.session_id,
+            graph_sha256: event.graph_sha256,
+            closed_ms: event.closed_ms,
+            sequence: event.sequence,
+            intent: event.intent,
+        })
+    }
+
+    /// True only for the next never-before-seen bar. No state mutation on
+    /// missing/reordered/forged events. The actual risk decision is separate.
+    pub fn accept(&mut self, event: &GraphSignalPublication) -> Result<bool, &'static str> {
+        if !event.valid() || event.session_id != self.session_id || event.graph_sha256 != self.graph_sha256 {
+            return Err("GRAPH_PUBLICATION_IDENTITY_MISMATCH");
+        }
+        if event.sequence == self.sequence {
+            return if event.closed_ms == self.closed_ms && event.intent == self.intent {
+                Ok(false)
+            } else {
+                Err("GRAPH_PUBLICATION_CONFLICTING_REPLAY")
+            };
+        }
+        if self.sequence.checked_add(1) != Some(event.sequence) {
+            return Err("GRAPH_PUBLICATION_SEQUENCE_GAP");
+        }
+        if event.closed_ms <= self.closed_ms {
+            return Err("GRAPH_PUBLICATION_NOT_MONOTONIC");
+        }
+        self.sequence = event.sequence;
+        self.closed_ms = event.closed_ms;
+        self.intent = event.intent;
+        Ok(true)
+    }
+
+    pub fn last_sequence(&self) -> u64 { self.sequence }
+}
+
 #[cfg(test)]
 mod graph_signal_contract_tests {
     use super::*;
@@ -548,6 +648,40 @@ mod graph_signal_contract_tests {
             serde_json::to_value(GraphSignalIntent::Hold).unwrap(),
             "hold"
         );
+    }
+
+    #[test]
+    fn publication_requires_restored_cursor_and_rejects_gaps_or_conflicting_replay() {
+        let restore = GraphSessionReply::Evaluated {
+            schema: GraphSessionReply::SCHEMA.into(),
+            session_id: GraphSessionId::new("session:btc".into()).unwrap(),
+            graph_sha256: "a".repeat(64),
+            last_closed_ms: 100,
+            observed_bars: 2,
+            intent: GraphSignalIntent::Hold,
+        };
+        let mut cursor = GraphPublicationCursor::from_restored(&restore).unwrap();
+        let mut publication = GraphSignalPublication::from_decision(&restore).unwrap();
+        assert!(publication.valid());
+        assert!(!cursor.accept(&publication).unwrap());
+        publication.sequence = 4;
+        publication.closed_ms = 200;
+        assert_eq!(cursor.accept(&publication).unwrap_err(), "GRAPH_PUBLICATION_SEQUENCE_GAP");
+        assert_eq!(cursor.last_sequence(), 2);
+        publication.sequence = 3;
+        publication.closed_ms = 100;
+        assert_eq!(cursor.accept(&publication).unwrap_err(), "GRAPH_PUBLICATION_NOT_MONOTONIC");
+        publication.closed_ms = 200;
+        publication.intent = GraphSignalIntent::SetTarget(GraphPosition::Flat);
+        assert!(cursor.accept(&publication).unwrap());
+        assert!(!cursor.accept(&publication).unwrap());
+        publication.intent = GraphSignalIntent::Hold;
+        assert_eq!(cursor.accept(&publication).unwrap_err(), "GRAPH_PUBLICATION_CONFLICTING_REPLAY");
+        publication.sequence = 4;
+        publication.closed_ms = 300;
+        publication.graph_sha256 = "b".repeat(64);
+        assert_eq!(cursor.accept(&publication).unwrap_err(), "GRAPH_PUBLICATION_IDENTITY_MISMATCH");
+        assert_eq!(cursor.last_sequence(), 3);
     }
 }
 

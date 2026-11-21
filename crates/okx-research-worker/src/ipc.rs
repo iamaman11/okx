@@ -229,11 +229,15 @@ where
                         let span = tracing::info_span!("research_command", owner="research_worker", ipc_request_id=id.as_str(), session=session.as_str(), invocation_id=invocation.as_ref().map(InvocationId::as_str));
                         jobs.spawn(crate::invocation::scope(invocation, async move {
                             let _permit = permit;
+                            let mut publication = None;
                             let result = match command {
                                 ResearchCommand::Research { request } => service.research(request).await.map(WorkerReply::Product),
                                 ResearchCommand::Market { request, universe_page, resolved_instruments } => service.market(request, universe_page, resolved_instruments).await.map(WorkerReply::Product),
                                 ResearchCommand::EvaluateSignal { request } => service.evaluate_signal(request).await.map(WorkerReply::Signal),
-                                ResearchCommand::GraphSignal { request } => service.graph_signal(request).await.map(WorkerReply::GraphSignal),
+                                ResearchCommand::GraphSignal { request } => service.graph_signal_transition(request).await.map(|(reply, is_new)| {
+                                    if is_new { publication = GraphSignalPublication::from_decision(&reply); }
+                                    WorkerReply::GraphSignal(reply)
+                                }),
                                 ResearchCommand::Capabilities => Ok(WorkerReply::Product(service.market_capabilities())),
                                 ResearchCommand::Drain => service.begin_drain().await.map(WorkerReply::Draining),
                                 ResearchCommand::Explain { job_id } => Ok(WorkerReply::Product(service.diagnostic_job(job_id.as_str()))),
@@ -243,6 +247,14 @@ where
                                 Ok(WorkerReply::Product(value)) => tracing::info!(stage="reply", job_id=value.get("id").and_then(serde_json::Value::as_str), "research command completed"),
                                 Ok(_) => tracing::info!(stage="control_reply", "research control completed"),
                                 Err(_) => tracing::warn!(stage="reply", reason="RESEARCH_COMMAND_REJECTED", "research command rejected; inspect scoped job diagnostic"),
+                            }
+                            if let Some(publication) = publication {
+                                // An unsolicited, typed event, in the same
+                                // bounded writer as the correlated response.
+                                // Neither the event nor this sender owns a trade.
+                                if tx.send((WorkerFrame::SignalPublished { session: session.clone(), publication }, None)).await.is_err() {
+                                    return;
+                                }
                             }
                             let _ = tx.send((WorkerFrame::Response { id, session, result }, None)).await;
                         }).instrument(span));
