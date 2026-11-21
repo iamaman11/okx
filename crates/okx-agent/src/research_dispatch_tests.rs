@@ -21,8 +21,8 @@ use tokio::sync::Notify;
 
 fn fixture(source: SourceHandler) -> (PathBuf, ResearchClient) {
     let executable = PathBuf::from(
-        std::env::var_os("OKX_RESEARCH_WORKER_TEST_EXE")
-            .expect("set OKX_RESEARCH_WORKER_TEST_EXE to the built research worker"),
+        std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
+            .expect("set OKX_RESEARCH_SERVICE_TEST_EXE to the built research worker"),
     );
     assert!(executable.is_file(), "worker test executable is missing");
     // Wall-clock resolution is not a uniqueness guarantee for parallel tests.
@@ -179,45 +179,93 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
              "inputs":{"input":"return"},"parameters":{"threshold":0.0}}
         ],"result_steps":["positive"]},
         "signal_step":"positive","target_if_true":1,"target_if_false":0,"missing":"hold"
-    })).unwrap();
+    }))
+    .unwrap();
     let restore = GraphSessionRequest::Restore {
         session_id: session_id.clone(),
         definition: Box::new(definition),
         capacity: 64,
         history: vec![
-            GraphClosedBar {time_ms:60_000,close:Some(100.)},
-            GraphClosedBar {time_ms:120_000,close:Some(110.)},
+            GraphClosedBar {
+                time_ms: 60_000,
+                close: Some(100.),
+            },
+            GraphClosedBar {
+                time_ms: 120_000,
+                close: Some(110.),
+            },
         ],
     };
     let first = client.graph_signal(restore.clone()).await.unwrap();
     assert!(first.matches_request(&restore));
     assert_eq!(first, client.graph_signal(restore).await.unwrap());
-    let GraphSessionReply::Evaluated {graph_sha256, intent, ..} = first else {panic!("expected decision")};
+    let GraphSessionReply::Evaluated {
+        graph_sha256,
+        intent,
+        ..
+    } = first
+    else {
+        panic!("expected decision")
+    };
     assert_eq!(intent, GraphSignalIntent::SetTarget(GraphPosition::Long));
     let next = GraphSessionRequest::Advance {
-        session_id: session_id.clone(), graph_sha256: graph_sha256.clone(), expected_bars:3,
-        bar: GraphClosedBar {time_ms:180_000,close:Some(90.)},
+        session_id: session_id.clone(),
+        graph_sha256: graph_sha256.clone(),
+        expected_bars: 3,
+        bar: GraphClosedBar {
+            time_ms: 180_000,
+            close: Some(90.),
+        },
     };
     let flat = client.graph_signal(next.clone()).await.unwrap();
     assert_eq!(flat, client.graph_signal(next).await.unwrap());
-    assert!(matches!(flat, GraphSessionReply::Evaluated {
-        observed_bars:3,intent:GraphSignalIntent::SetTarget(GraphPosition::Flat),..
-    }));
+    assert!(matches!(
+        flat,
+        GraphSessionReply::Evaluated {
+            observed_bars: 3,
+            intent: GraphSignalIntent::SetTarget(GraphPosition::Flat),
+            ..
+        }
+    ));
     let gap = GraphSessionRequest::Advance {
-        session_id: session_id.clone(), graph_sha256: graph_sha256.clone(), expected_bars:4,
-        bar: GraphClosedBar {time_ms:240_000,close:None},
+        session_id: session_id.clone(),
+        graph_sha256: graph_sha256.clone(),
+        expected_bars: 4,
+        bar: GraphClosedBar {
+            time_ms: 240_000,
+            close: None,
+        },
     };
-    assert!(matches!(client.graph_signal(gap).await.unwrap(), GraphSessionReply::Evaluated {
-        observed_bars:4,intent:GraphSignalIntent::Hold,..
-    }));
+    assert!(matches!(
+        client.graph_signal(gap).await.unwrap(),
+        GraphSessionReply::Evaluated {
+            observed_bars: 4,
+            intent: GraphSignalIntent::Hold,
+            ..
+        }
+    ));
     let old = GraphSessionRequest::Advance {
-        session_id: session_id.clone(),graph_sha256:graph_sha256.clone(),expected_bars:5,
-        bar: GraphClosedBar {time_ms:60_000,close:Some(100.)},
+        session_id: session_id.clone(),
+        graph_sha256: graph_sha256.clone(),
+        expected_bars: 5,
+        bar: GraphClosedBar {
+            time_ms: 60_000,
+            close: Some(100.),
+        },
     };
-    assert_eq!(client.graph_signal(old).await.unwrap_err(), "composition.stream:CLOSED_BAR_NOT_MONOTONIC");
+    assert_eq!(
+        client.graph_signal(old).await.unwrap_err(),
+        "composition.stream:CLOSED_BAR_NOT_MONOTONIC"
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    let release = GraphSessionRequest::Release {session_id,graph_sha256};
-    assert!(matches!(client.graph_signal(release).await.unwrap(), GraphSessionReply::Released { .. }));
+    let release = GraphSessionRequest::Release {
+        session_id,
+        graph_sha256,
+    };
+    assert!(matches!(
+        client.graph_signal(release).await.unwrap(),
+        GraphSessionReply::Released { .. }
+    ));
     client.shutdown().await;
     let _ = std::fs::remove_dir_all(root);
 }

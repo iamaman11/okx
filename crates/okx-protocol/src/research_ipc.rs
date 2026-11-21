@@ -272,7 +272,9 @@ impl GraphClosedBar {
     pub fn valid(self) -> bool {
         self.time_ms > 0
             && self.time_ms <= i64::MAX as u64
-            && self.close.is_none_or(|value| value.is_finite() && value > 0.0)
+            && self
+                .close
+                .is_none_or(|value| value.is_finite() && value > 0.0)
     }
 }
 
@@ -322,24 +324,40 @@ pub enum GraphSessionRequest {
 impl GraphSessionRequest {
     pub fn valid(&self) -> bool {
         fn digest_valid(hash: &str) -> bool {
-            hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
         }
         match self {
-            Self::Restore { definition, capacity, history, .. } => {
+            Self::Restore {
+                definition,
+                capacity,
+                history,
+                ..
+            } => {
                 definition.version == "okx.graph-signal/v1"
                     && definition.graph.structurally_valid()
-                    && definition.graph.result_steps.contains(&definition.signal_step)
+                    && definition
+                        .graph
+                        .result_steps
+                        .contains(&definition.signal_step)
                     && (-1..=1).contains(&definition.target_if_true)
                     && (-1..=1).contains(&definition.target_if_false)
                     && (1..=10_000).contains(&history.len())
                     && *capacity >= history.len() as u64
                     && *capacity <= 100_000
                     && history.iter().all(|bar| bar.valid())
-                    && history.windows(2).all(|pair| pair[0].time_ms < pair[1].time_ms)
+                    && history
+                        .windows(2)
+                        .all(|pair| pair[0].time_ms < pair[1].time_ms)
             }
-            Self::Advance { graph_sha256, expected_bars, bar, .. } => {
-                digest_valid(graph_sha256) && *expected_bars > 0 && bar.valid()
-            }
+            Self::Advance {
+                graph_sha256,
+                expected_bars,
+                bar,
+                ..
+            } => digest_valid(graph_sha256) && *expected_bars > 0 && bar.valid(),
             Self::Release { graph_sha256, .. } => digest_valid(graph_sha256),
         }
     }
@@ -382,19 +400,54 @@ impl GraphSessionReply {
     pub fn matches_request(&self, request: &GraphSessionRequest) -> bool {
         match (self, request) {
             (
-                Self::Evaluated { schema, session_id: response_id, graph_sha256, last_closed_ms, observed_bars, .. },
-                GraphSessionRequest::Restore { session_id, history, .. },
-            ) => schema == Self::SCHEMA && response_id == session_id
-                && graph_sha256.len() == 64
-                && *last_closed_ms == history.last().map_or(0, |bar| bar.time_ms)
-                && *observed_bars == history.len() as u64,
+                Self::Evaluated {
+                    schema,
+                    session_id: response_id,
+                    graph_sha256,
+                    last_closed_ms,
+                    observed_bars,
+                    ..
+                },
+                GraphSessionRequest::Restore {
+                    session_id,
+                    history,
+                    ..
+                },
+            ) => {
+                schema == Self::SCHEMA
+                    && response_id == session_id
+                    && graph_sha256.len() == 64
+                    && *last_closed_ms == history.last().map_or(0, |bar| bar.time_ms)
+                    && *observed_bars == history.len() as u64
+            }
             (
-                Self::Evaluated { schema, session_id: response_id, graph_sha256: response_sha, last_closed_ms, observed_bars, .. },
-                GraphSessionRequest::Advance { session_id, graph_sha256, expected_bars, bar },
-            ) => schema == Self::SCHEMA && response_id == session_id
-                && response_sha == graph_sha256 && *last_closed_ms == bar.time_ms
-                && *observed_bars == *expected_bars,
-            (Self::Released { session_id: response_id }, GraphSessionRequest::Release { session_id, .. }) => response_id == session_id,
+                Self::Evaluated {
+                    schema,
+                    session_id: response_id,
+                    graph_sha256: response_sha,
+                    last_closed_ms,
+                    observed_bars,
+                    ..
+                },
+                GraphSessionRequest::Advance {
+                    session_id,
+                    graph_sha256,
+                    expected_bars,
+                    bar,
+                },
+            ) => {
+                schema == Self::SCHEMA
+                    && response_id == session_id
+                    && response_sha == graph_sha256
+                    && *last_closed_ms == bar.time_ms
+                    && *observed_bars == *expected_bars
+            }
+            (
+                Self::Released {
+                    session_id: response_id,
+                },
+                GraphSessionRequest::Release { session_id, .. },
+            ) => response_id == session_id,
             _ => false,
         }
     }
@@ -419,30 +472,36 @@ mod graph_signal_contract_tests {
                 "missing":"hold"
             },
             "history":[{"time_ms":60000,"close":100.0},{"time_ms":120000,"close":110.0}]
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     #[test]
     fn typed_graph_session_admission_limits_history_versions_and_replays() {
         let good = sample();
         assert!(good.valid());
-        let roundtrip: GraphSessionRequest = serde_json::from_value(
-            serde_json::to_value(&good).unwrap()
-        ).unwrap();
+        let roundtrip: GraphSessionRequest =
+            serde_json::from_value(serde_json::to_value(&good).unwrap()).unwrap();
         assert_eq!(good, roundtrip);
 
         let mut out_of_order = good.clone();
-        let GraphSessionRequest::Restore { history, .. } = &mut out_of_order else {unreachable!()};
+        let GraphSessionRequest::Restore { history, .. } = &mut out_of_order else {
+            unreachable!()
+        };
         history[1].time_ms = 60000;
         assert!(!out_of_order.valid());
 
         let mut forged_graph = good.clone();
-        let GraphSessionRequest::Restore { definition, .. } = &mut forged_graph else {unreachable!()};
+        let GraphSessionRequest::Restore { definition, .. } = &mut forged_graph else {
+            unreachable!()
+        };
         definition.graph.version = "future-contract".into();
         assert!(!forged_graph.valid());
 
         let mut too_many = good.clone();
-        let GraphSessionRequest::Restore { capacity, .. } = &mut too_many else {unreachable!()};
+        let GraphSessionRequest::Restore { capacity, .. } = &mut too_many else {
+            unreachable!()
+        };
         *capacity = u64::MAX;
         assert!(!too_many.valid());
 
@@ -454,24 +513,41 @@ mod graph_signal_contract_tests {
     #[test]
     fn flat_is_an_explicit_target_and_reply_must_match_admitted_sequence() {
         let restore = sample();
-        let GraphSessionRequest::Restore { session_id, history, .. } = &restore else {unreachable!()};
+        let GraphSessionRequest::Restore {
+            session_id,
+            history,
+            ..
+        } = &restore
+        else {
+            unreachable!()
+        };
         let response = GraphSessionReply::Evaluated {
             schema: GraphSessionReply::SCHEMA.into(),
-            session_id: session_id.clone(), graph_sha256: "a".repeat(64),
-            last_closed_ms: history[1].time_ms, observed_bars:2,
-            intent:GraphSignalIntent::SetTarget(GraphPosition::Flat),
+            session_id: session_id.clone(),
+            graph_sha256: "a".repeat(64),
+            last_closed_ms: history[1].time_ms,
+            observed_bars: 2,
+            intent: GraphSignalIntent::SetTarget(GraphPosition::Flat),
         };
         assert!(response.matches_request(&restore));
         let advance = GraphSessionRequest::Advance {
-            session_id:session_id.clone(),graph_sha256:"a".repeat(64),expected_bars:3,
-            bar:GraphClosedBar {time_ms:180000,close:None}
+            session_id: session_id.clone(),
+            graph_sha256: "a".repeat(64),
+            expected_bars: 3,
+            bar: GraphClosedBar {
+                time_ms: 180000,
+                close: None,
+            },
         };
         assert!(!response.matches_request(&advance));
         assert_eq!(
             serde_json::to_value(GraphSignalIntent::SetTarget(GraphPosition::Flat)).unwrap(),
             json!({"set_target":"flat"})
         );
-        assert_eq!(serde_json::to_value(GraphSignalIntent::Hold).unwrap(), "hold");
+        assert_eq!(
+            serde_json::to_value(GraphSignalIntent::Hold).unwrap(),
+            "hold"
+        );
     }
 }
 

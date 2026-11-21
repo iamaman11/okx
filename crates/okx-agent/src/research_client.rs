@@ -552,11 +552,20 @@ impl ResearchClient {
     }
     /// Read-only versioned graph transport. The Agent does not resolve
     /// operators, allocate graph state, or transform intent into an order.
-    pub async fn graph_signal(&self, request: GraphSessionRequest) -> Result<GraphSessionReply, String> {
+    pub async fn graph_signal(
+        &self,
+        request: GraphSessionRequest,
+    ) -> Result<GraphSessionReply, String> {
         if !request.valid() {
             return Err("GRAPH_SESSION_REQUEST_INVALID".into());
         }
-        let reply = self.call(ResearchCommand::GraphSignal { request: request.clone() }, true)
+        let reply = self
+            .call(
+                ResearchCommand::GraphSignal {
+                    request: request.clone(),
+                },
+                true,
+            )
             .await?
             .graph_signal()?;
         if !reply.matches_request(&request) {

@@ -68,7 +68,10 @@ pub struct AnalyticsService {
 }
 impl AnalyticsService {
     /// Isolated incremental graph state. No financial actions are available.
-    pub async fn graph_signal(&self, request: GraphSessionRequest) -> Result<GraphSessionReply, String> {
+    pub async fn graph_signal(
+        &self,
+        request: GraphSessionRequest,
+    ) -> Result<GraphSessionReply, String> {
         self.graph_sessions.execute(&self.cpu, request).await
     }
     /// Same causal kernel as replay, isolated behind the Research process and
