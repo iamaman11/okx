@@ -1,10 +1,12 @@
 # #518 — T01–T15 evidence matrix (CODE, not release acceptance)
 
 **Evidence cutoff:** 21 November 2026 (Europe/Minsk). Canonical repository:
-[`iamaman11/okx`](https://github.com/iamaman11/okx). Current protected `main`
+[`iamaman11/okx`](https://github.com/iamaman11/okx). Accepted native release baseline
 [`630b8a4d1b29564c7c7391ed8c81dfd09e8d69f5`](https://github.com/iamaman11/okx/commit/630b8a4d1b29564c7c7391ed8c81dfd09e8d69f5)
 has tree `4f533f877b82a4c254f70963bf6bcdb42b3cd315`, identical to the
-accepted PR #530 test head. [PR #529](https://github.com/iamaman11/okx/pull/529)
+accepted PR #530 test head. Subsequent [MCP fix PR #532](https://github.com/iamaman11/okx/pull/532)
+merged into `main` as [`d5106afc775950718a05d2dce0ce9bc0844dc7a1`](https://github.com/iamaman11/okx/commit/d5106afc775950718a05d2dce0ce9bc0844dc7a1)
+with tree `d954e5e063fa959ea68b68e765a9a9d8195e9a74`, identical to its fully tested head. [PR #529](https://github.com/iamaman11/okx/pull/529)
 and [PR #530](https://github.com/iamaman11/okx/pull/530) are **MERGED**.
 [Full exact-tree CI #4739](https://github.com/iamaman11/okx/actions/runs/44912048553)
 and [post-merge CI #4740](https://github.com/iamaman11/okx/actions/runs/44914879177)
@@ -19,12 +21,16 @@ at PID 9072, actual versioned Research Worker child PID 2008, all four EXE
 SHA256 values matching the verified manifest; release parity `MATCHED`.
 [Full installation evidence](https://github.com/iamaman11/okx/issues/518#issuecomment-7064348654).
 
-**Important public-deployment split:** the Cloudflare MCP Worker still reported
-the **older** `release_source_tree=b1340b40dd40502efe8ce059fc99fd2b77b4c8e2`,
-although MCP transport is connected/fresh and the new native Agent/Research
-installation is reachable. The new Cloudflare tool schema from #529 is **not
-yet verified as deployed**; public end-to-end T01/T03/T15 parity cannot be
-declared PASS until the protected workflow runs on `main` and is checked.
+**Public deployment observed:** Cloudflare `diagnostics.runtime` now reports
+`release_source_tree=d954e5e063fa959ea68b68e765a9a9d8195e9a74`,
+transport PASS/connected/fresh, Agent PID 9072 with the installed SHA256.
+Live read-only `market.capabilities` request
+`req_mcp_b24cada9-4a61-495f-ba1f-6d5ce4384ca3` **completed**, `quality=complete`,
+16 typed operators and 21 composition primitives including the versioned pure
+`rolling_range` descriptor. The previous `RESPONSE_TOO_LARGE` (13,775 vs 12,288
+bytes) is resolved in public MCP through the special 20,480-byte bounded
+read-only catalog; normal results retain the 12,288-byte bound.
+This verifies the public catalog, **not** every live composition/economics test.
 No account is connected; no order was submitted.
 
 ## How to interpret a row
@@ -46,7 +52,7 @@ passed. The table records narrower evidence and remaining release qualification.
 
 | Criterion | CODE | Direct executable witness / public boundary | Remaining qualification |
 |---|---|---|---|
-| **T01 — catalog** | **PASS** | `okx-research-worker::analytics::tests::market_capabilities_discloses_supported_operator_names_and_units`; MCP `execution_tools.test.ts`: 16 distinct IDs, valid/invalid ID, strict 14 accepted and 15/16 rejected, parity with Native descriptors. | The installed Worker is current, but production Cloudflare MCP still has the old source tree. Recheck actual public schema parity after its protected deployment; an on-demand catalog is not historical-source availability. |
+| **T01 — catalog** | **PASS** | `okx-research-worker::analytics::tests::market_capabilities_discloses_supported_operator_names_and_units`; MCP `execution_tools.test.ts`: 16 distinct IDs, valid/invalid ID, strict 14 accepted and 15/16 rejected, parity with Native descriptors. | Production Cloudflare tree `d954e5e` now serves the full public 16+21 descriptor catalog read-only; `rolling_range` typed metadata verified. Public catalog alone is not historical-source availability or complete T01 negative-route acceptance. |
 | **T02 — units and shape** | **PASS** | `okx-kernel::query_plan::t02_scalar_window_and_contract_currency_mix_fail_before_sources`, `t02_t03_t13_serialized_checked_plan_roundtrips_only_after_recompilation`; `okx-research::economics::t02_t09_linear_contract_conversion_is_typed_and_shorts_reverse_gross`; Worker rejects OI/funding composition on spot before reads. | Contract conversion is tied to an explicitly supplied/current instrument specification, not a verified historical spec schedule. |
 | **T03 — step identity** | **PASS** | `okx-kernel::query_plan::t03_checked_composition_allows_branching_and_repeated_ops_but_rejects_bad_refs`; Worker `t02_t03_public_row_uses_checked_operator_and_parameter_binding`; no second graph interpreter or source owner. | A different operator ID/parameter means a different typed plan; no arbitrary unchecked JSON execution. |
 | **T04 — grid and quality** | **PASS** | `okx-kernel::time_series::t04_exact_five_bar_grid_distinguishes_missing_duplicate_and_right_boundary`; Worker strict candle/OI coverage; real Agent→Worker `t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated`: 100/100 versus 99/100 at +1 ms, no nearest/forward fill. | Source-specific actual historical coverage depends on the venue/archive. |
@@ -60,35 +66,29 @@ passed. The table records narrower evidence and remaining release qualification.
 | **T12 — financial invariants** | **PASS** | Fresh [full Windows Native/Finance #4739](https://github.com/iamaman11/okx/actions/runs/44912048553) exact-tree **FULL_PASS 61/61 contracts / 106 witnesses**; Engine under Research load, native p95 0.5457 ms and MCP-to-Native p95 2.3279 ms, 100 samples each. Post-merge #4740 SUCCESS on identical tree; no stale #527 result reused for the changed shared Kernel/Protocol. | This is synthetic/counterfactual acceptance, not a live exchange POST or authorization to trade. Continue to require independent TradeService approvals, idempotency and UNKNOWN acknowledgement controls before any financial operation. |
 | **T13 — repeatability** | **PASS** | Worker `t13_composed_market_route_persists_input_evidence_and_replays_same_job`, `t13_export_rechecks_all_replay_dataset_pages_and_exact_content_hash`, source-page reconstruction and bounded independent reexecution; Agent child immutable cursor paging, changed OOS dataset hash, old typed result reads. | Unverified publication time is never upgraded by a matching hash; large/unsupported replay explicitly says `not_verified`. |
 | **T14 — lifecycle** | **PASS** | Worker `t14_market_retry_and_cursor_never_publish_cancelled_or_interrupted_partial_result`, `t14_partial_artifact_is_never_advertised_as_a_completed_result`; child `ipc_process` lost-ACK/restart/conflicting-key/real-process controls and Agent cancel/reopen tests. | Interrupted work is explicitly terminal/diagnosable, never silently published complete. Installation handoff is a separate release acceptance. |
-| **T15 — extensibility** | **PASS** | [`t15-range-extension.md`](t15-range-extension.md): new pure versioned `rolling_range`, independent oracle, checked plan, Worker descriptor, MCP allowlist and two previously unnamed user graphs through the same `market.screen` route. | Worker/native bits are installed, but new public MCP allowlist still awaits Cloudflare deploy. This proves available-primitive composition, not arbitrary live strategy execution or TradeService dispatch. |
+| **T15 — extensibility** | **PASS** | [`t15-range-extension.md`](t15-range-extension.md): new pure versioned `rolling_range`, independent oracle, checked plan, Worker descriptor, MCP allowlist and two previously unnamed user graphs through the same `market.screen` route. | Public MCP allowlist and typed versioned `rolling_range` descriptor now exposed by the deployed Worker. A fresh live arbitrary-graph `market.screen` job is not covered by this catalog-only check; no arbitrary live strategy execution or TradeService dispatch is implied. |
 
 ## Actual remaining work, in the necessary order
 
-1. **Cloudflare public schema gate.** Dispatch only the protected
-   [Cloudflare MCP Deploy workflow](https://github.com/iamaman11/okx/actions/workflows/cloudflare-mcp-deploy.yml)
-   on `main`, `initialize_clean_v2=false`, leaving one-time initialization
-   inputs empty. Verify the new `release_source_tree`, owner-only inspection,
-   and read-only public catalog/composition, including T01/T03/T15.
-   **Do not reinitialize the Durable Object.**
-2. **T10 real resource and source-I/O proof.** Run a bounded, instrumented
+1. **T10 real resource and source-I/O proof.** Run a bounded, instrumented
    acceptance on fixed identified hardware/OS with exact installed binary
    hashes. Separate compilation, child startup, wall-clock, actual source and
    storage-page reads, whole-process measured peak/limit and cancellation.
    Current synthetic SLO/RSS and code limits are useful but incomplete.
-3. **Final T01–T15 integrated review.** Assemble input/output/reason, effect
+2. **Final T01–T15 integrated review.** Assemble input/output/reason, effect
    counts, source/economic assumptions and test logs on one frozen tree;
    classify each criterion PASS/FAIL/BLOCKED/NOT_RUN at CODE, INSTALLED,
    PHYSICAL and REAL levels separately. Mark genuinely unavailable external
    data as unavailable, not as an invented historical fact.
-4. **Separate product expansion (only if requested).** Market compositions
+3. **Separate product expansion (only if requested).** Market compositions
    and Research strategy grids are each executable now, but an arbitrary
    Market graph is **not automatically** a new live/replay strategy definition.
    That requires an explicit typed adapter/strategy contract and new safety
    criteria; no generic DSL, second finance owner or implicit research→trade
    route is authorized by #518's current tests.
 
-**Actual release claim:** PRs #529/#530 merged and the exact-tree native Windows
-four-component version **is installed/running**. Cloudflare MCP **schema update
-is pending**, final T01–T15 integrated acceptance **not yet certified**, and
-#518 remains OPEN. No account enrollment, RiskBook/TradeService mutation,
+**Actual release claim:** PRs #529/#530/#532 merged; the accepted native Windows
+four-component version **is installed/running** and the latest Cloudflare MCP
+catalog is **deployed and verified read-only**. Final T01–T15 integrated
+acceptance is **not yet certified**, and #518 remains OPEN. No account enrollment, RiskBook/TradeService mutation,
 financial execution or venue order occurred as part of this acceptance.

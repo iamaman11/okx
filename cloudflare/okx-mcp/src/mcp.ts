@@ -1,6 +1,10 @@
 import {PUBLIC_TOOLS,validTool} from './execution_tools.js';
 import {dispatchRuntime,type Env,isObject,type Json,jsonRpc,jsonRpcError,MAX_BODY_BYTES,MCP_PROTOCOL_VERSION,MCP_SERVER_VERSION,TOOL_CONTRACT_VERSION,requestId,runtimeFetch,toolResult as baseToolResult,sha256Hex,transportFailure,workerReleaseSourceTree} from './shared.js';
 const NORMAL_RESULT_BYTES=12_288;
+// An on-demand, read-only operator catalogue includes all versioned type and
+// provenance descriptors. It is not a normal Research decision packet; keep
+// its own finite bound rather than silently dropping required T01/T15 fields.
+const MARKET_CAPABILITIES_RESULT_BYTES=20_480;
 function hasOnlyKeys(v:Record<string,unknown>,keys:string[]){return Object.keys(v).every(k=>keys.includes(k));}
 function canonical(v:unknown):string{if(Array.isArray(v))return '['+v.map(canonical).join(',')+']';if(isObject(v))return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';return JSON.stringify(v);}
 function bytes(value:Json):number{return new TextEncoder().encode(JSON.stringify(value)).byteLength;}
@@ -127,11 +131,11 @@ export function projectNativeResponse(value:Json):Record<string,Json>{
  if(artifact)projected.artifact_id=artifact;
  return projected;
 }
-function toolResult(value:Json):Json{
+function toolResult(value:Json,resultBudgetBytes=NORMAL_RESULT_BYTES):Json{
  const projected=projectNativeResponse(value);
- if(bytes(projected)<=NORMAL_RESULT_BYTES)return baseToolResult(projected);
+ if(bytes(projected)<=resultBudgetBytes)return baseToolResult(projected);
  const status=projected.status==='unknown'?'unknown':'failed';
- return baseToolResult({request_id:projected.request_id,status,as_of_ms:Date.now(),data:{response_bytes:bytes(projected),response_budget_bytes:NORMAL_RESULT_BYTES},quality:{state:'partial'},warnings:['RESPONSE_BUDGET_EXCEEDED'],reason_code:'RESPONSE_TOO_LARGE',scope:'response',retryable:false,next_action:status==='unknown'?'inspect_exact_intent':'inspect_diagnostics'});
+ return baseToolResult({request_id:projected.request_id,status,as_of_ms:Date.now(),data:{response_bytes:bytes(projected),response_budget_bytes:resultBudgetBytes},quality:{state:'partial'},warnings:['RESPONSE_BUDGET_EXCEEDED'],reason_code:'RESPONSE_TOO_LARGE',scope:'response',retryable:false,next_action:status==='unknown'?'inspect_exact_intent':'inspect_diagnostics'});
 }
 export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Response>{
  if(!ctx?.auth?.scope?.includes('mcp:use'))return new Response('insufficient scope',{status:403});
@@ -291,7 +295,7 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
  }
  if(name==='market'&&args.action==='capabilities'){
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
-     operation:{type:'market_capabilities'}})));
+     operation:{type:'market_capabilities'}}),MARKET_CAPABILITIES_RESULT_BYTES));
  }
  if(name==='portfolio'&&args.action==='scenario'){
    const {action:scopedAction,...scenario}=args;

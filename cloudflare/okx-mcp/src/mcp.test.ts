@@ -140,6 +140,30 @@ const budget:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{met
 const budgetResult=budget.result.structuredContent;
 if(budgetResult.status!=='failed'||budgetResult.reason_code!=='RESPONSE_TOO_LARGE'||budgetResult.data.response_budget_bytes!==12_288||budgetResult.data.response_bytes<=12_288)throw Error('oversized native result must terminalize as bounded MCP failure');
 
+// T01/T15: the read-only on-demand typed catalogue is larger than a normal
+// decision packet. Keep every descriptor while retaining a finite bound and
+// preserving the ordinary 12 KiB limit established above.
+const catalogCall=async(padding:number):Promise<any>=>{
+ const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json({
+  schema:'okx.agent.response/v1',request_id:'req_native_catalog',status:'completed',quality:'FRESH',warnings:[],
+  result:{schema:'okx.market.capabilities/v1',operators:[{name:'returns',version:1,unit:'ratio'}],
+   composition:{operations:[{op:'rolling_range',version:1,input_unit:'price'}]},details:'x'.repeat(padding)}
+ })})}};
+ const reply:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
+  jsonrpc:'2.0',id:4,method:'tools/call',params:{name:'market',arguments:{action:'capabilities'}}
+ })}),env,ctx)).json();
+ return reply.result.structuredContent;
+};
+const catalog=await catalogCall(13_000);
+if(catalog.status!=='completed'||catalog.data.schema!=='okx.market.capabilities/v1'||
+ catalog.data.operators[0].unit!=='ratio'||catalog.data.composition.operations[0].op!=='rolling_range'||
+ catalog.data.details.length!==13_000)throw Error('typed market capability descriptor lost at the public 12 KiB boundary');
+const oversizedCatalog=await catalogCall(21_000);
+if(oversizedCatalog.status!=='failed'||oversizedCatalog.reason_code!=='RESPONSE_TOO_LARGE'||
+ oversizedCatalog.data.response_budget_bytes!==20_480||oversizedCatalog.data.response_bytes<=20_480)
+ throw Error('catalogue exception must still terminate above its own finite 20 KiB bound');
+console.log('market_capabilities_20k_only_preserves_descriptors_and_finite_bound PASS');
+
 const nativeResponse=(response:unknown):any=>({RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json(response)})}});
 const mcpResponse=async(tool:string,args:unknown,response:unknown,releaseTree?:string):Promise<any>=>{
  const env={...nativeResponse(response),RELEASE_SOURCE_TREE:releaseTree};
