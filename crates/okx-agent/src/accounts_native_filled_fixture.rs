@@ -6,6 +6,52 @@ pub(crate) const OPEN_ORDER: &str = "native-filled-open-001";
 pub(super) const CLOSE_ORDER: &str = "native-filled-close-001";
 pub(crate) const STOP: &str = "900000002";
 
+/// Exercise the original production campaign-readiness refresh while a
+/// different account is deliberately held at an external HTTP boundary.
+/// `opened_market` stops bootstrap maintenance before installing finite market
+/// transcripts; without this scoped continuation a slow CI executor makes
+/// the real five-second SQL readiness fence expire during the test itself.
+/// This never changes the clock, source generations, balances or safety rules.
+pub(super) fn keep_captured_readiness_current(
+    fixture: &NativeFixture,
+) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+    let service = fixture.trade.clone();
+    let authority = fixture.authority.clone();
+    let (stop, mut stopped) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = stopped.changed() => {
+                    if *stopped.borrow() { break; }
+                }
+                _ = tick.tick() => {
+                    service
+                        .install_captured_empty_campaign_opening(
+                            &authority,
+                            Instant::now() + Duration::from_secs(4),
+                        )
+                        .await
+                        .expect("original captured campaign readiness remains verifiable");
+                }
+            }
+        }
+    });
+    (stop, task)
+}
+
+pub(super) async fn stop_captured_readiness(
+    stop: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+) {
+    stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 pub(crate) async fn opened_market(
     fixture: &mut NativeFixture,
 ) -> (
@@ -30,7 +76,7 @@ pub(super) async fn opened_market_with_public_client(
     let service = fixture.trade.clone();
     let maintenance = tokio::spawn(async move { service.run(stopped).await });
     let mut observations = tokio::time::interval(Duration::from_millis(25));
-    tokio::time::timeout(Duration::from_secs(8), async {
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             observations.tick().await;
             if fixture
