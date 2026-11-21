@@ -11,51 +11,123 @@ use std::{
 };
 
 const LIMIT: usize = 128;
-// Do not even copy raw error payloads/cancellation keys into the projection.
+// Read a bounded prefix of the raw error only inside the SQLite row mapper.
+// Neither the projection nor its JSON representation retains raw payloads.
 const COLUMNS: &str = "substr(id,1,129),state,progress,
     -- An interrupted, failed or cancelled job may retain a partial blob, but
     -- only the completed state can advertise a usable result reference.
     CASE WHEN state='completed' AND length(artifact)=64 THEN artifact ELSE NULL END,
-    CASE WHEN error IS NULL THEN NULL
-      WHEN error IN ('RESULT_EXPIRED_BY_7_DAY_RETENTION','JOB_CANCELLED','CANCELLED',
-        'SOURCE_INVALID','NONFINITE_SOURCE','CANDLE_RANGE_UNAVAILABLE','CANDLE_RANGE_INCOMPLETE',
-        'CANDLE_INTERIOR_GAP','INVALID_FUNDING','FUNDING_RANGE_UNAVAILABLE','FUNDING_RANGE_INCOMPLETE',
-        'GLOBAL_RANK_SOURCE_INCOMPLETE','RESEARCH_MEMORY_LIMIT','CPU_QUEUE_FULL','LIVE_SOURCE_DEADLINE',
-        'UNSUPPORTED_STRATEGY','UNSUPPORTED_INVERSE_CONTRACT','UNSUPPORTED_INSTRUMENT_TYPE',
-        'CONTRACT_MULTIPLIER_MISSING','EMPTY_VARIANTS','RANGE_NOT_CLOSED') THEN error
-      WHEN error='process restarted before completion' THEN 'RESEARCH_INTERRUPTED'
-      WHEN error LIKE 'LIMIT_EXCEEDED:%' THEN 'LIMIT_EXCEEDED'
-      WHEN error LIKE 'LIMIT_TOTAL_BARS:%' THEN 'LIMIT_TOTAL_BARS'
-      WHEN error LIKE 'LIMIT_BARS:%' THEN 'LIMIT_BARS'
-      WHEN error LIKE 'RESOURCE_BUSY:%' THEN 'RESOURCE_BUSY'
-      WHEN error LIKE 'OKX rate/backpressure defer:%'
-        OR error LIKE 'public OKX market API error: OKX rate/backpressure defer:%' THEN 'MARKET_SOURCE_RETRYABLE'
-      ELSE 'UNCLASSIFIED_RESEARCH_ERROR' END,pinned,
+    substr(error,1,256),pinned,
     CASE WHEN length(candidate_progress)<=512 THEN candidate_progress ELSE NULL END,
     CASE WHEN length(origin_invocation)<=256 THEN origin_invocation ELSE NULL END,
     CASE WHEN length(producer)<=512 THEN producer ELSE NULL END";
 
-// Safe bounded event labels only; never emit raw source or request errors.
-pub(in crate::analytics) fn safe_reason(error: &str) -> &'static str {
-    match error {
-        "CANCELLED" | "JOB_CANCELLED" => "CANCELLED",
-        "SOURCE_INVALID" => "SOURCE_INVALID",
-        "CANDLE_RANGE_UNAVAILABLE" => "CANDLE_RANGE_UNAVAILABLE",
-        "CANDLE_RANGE_INCOMPLETE" => "CANDLE_RANGE_INCOMPLETE",
-        "CANDLE_INTERIOR_GAP" => "CANDLE_INTERIOR_GAP",
-        "FUNDING_RANGE_UNAVAILABLE" => "FUNDING_RANGE_UNAVAILABLE",
-        "FUNDING_RANGE_INCOMPLETE" => "FUNDING_RANGE_INCOMPLETE",
-        "RESEARCH_MEMORY_LIMIT" => "RESEARCH_MEMORY_LIMIT",
-        "CPU_QUEUE_FULL" => "CPU_QUEUE_FULL",
-        "LIVE_SOURCE_DEADLINE" => "LIVE_SOURCE_DEADLINE",
-        "UNSUPPORTED_STRATEGY" => "UNSUPPORTED_STRATEGY",
-        _ if okx_protocol::research_ipc::is_retryable_source_defer(error) => {
-            "MARKET_SOURCE_RETRYABLE"
+/// The one closed set of safe diagnostic reasons shared by durable readback
+/// and terminal tracing events. Raw error strings never cross this boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReasonCode {
+    Cancelled,
+    SourceInvalid,
+    NonfiniteSource,
+    CandleRangeUnavailable,
+    CandleRangeIncomplete,
+    CandleInteriorGap,
+    InvalidFunding,
+    FundingRangeUnavailable,
+    FundingRangeIncomplete,
+    GlobalRankSourceIncomplete,
+    ResearchMemoryLimit,
+    CpuQueueFull,
+    LiveSourceDeadline,
+    UnsupportedStrategy,
+    UnsupportedInverseContract,
+    UnsupportedInstrumentType,
+    ContractMultiplierMissing,
+    EmptyVariants,
+    RangeNotClosed,
+    ResultExpired,
+    ResearchInterrupted,
+    LimitExceeded,
+    LimitTotalBars,
+    LimitBars,
+    ResourceBusy,
+    MarketSourceRetryable,
+    Unclassified,
+}
+
+impl ReasonCode {
+    fn classify(error: &str) -> Self {
+        match error {
+            "CANCELLED" | "JOB_CANCELLED" => Self::Cancelled,
+            "SOURCE_INVALID" => Self::SourceInvalid,
+            "NONFINITE_SOURCE" => Self::NonfiniteSource,
+            "CANDLE_RANGE_UNAVAILABLE" => Self::CandleRangeUnavailable,
+            "CANDLE_RANGE_INCOMPLETE" => Self::CandleRangeIncomplete,
+            "CANDLE_INTERIOR_GAP" => Self::CandleInteriorGap,
+            "INVALID_FUNDING" => Self::InvalidFunding,
+            "FUNDING_RANGE_UNAVAILABLE" => Self::FundingRangeUnavailable,
+            "FUNDING_RANGE_INCOMPLETE" => Self::FundingRangeIncomplete,
+            "GLOBAL_RANK_SOURCE_INCOMPLETE" => Self::GlobalRankSourceIncomplete,
+            "RESEARCH_MEMORY_LIMIT" => Self::ResearchMemoryLimit,
+            "CPU_QUEUE_FULL" => Self::CpuQueueFull,
+            "LIVE_SOURCE_DEADLINE" => Self::LiveSourceDeadline,
+            "UNSUPPORTED_STRATEGY" => Self::UnsupportedStrategy,
+            "UNSUPPORTED_INVERSE_CONTRACT" => Self::UnsupportedInverseContract,
+            "UNSUPPORTED_INSTRUMENT_TYPE" => Self::UnsupportedInstrumentType,
+            "CONTRACT_MULTIPLIER_MISSING" => Self::ContractMultiplierMissing,
+            "EMPTY_VARIANTS" => Self::EmptyVariants,
+            "RANGE_NOT_CLOSED" => Self::RangeNotClosed,
+            "RESULT_EXPIRED_BY_7_DAY_RETENTION" => Self::ResultExpired,
+            "process restarted before completion" => Self::ResearchInterrupted,
+            _ if error.starts_with("LIMIT_EXCEEDED:") => Self::LimitExceeded,
+            _ if error.starts_with("LIMIT_TOTAL_BARS:") => Self::LimitTotalBars,
+            _ if error.starts_with("LIMIT_BARS:") => Self::LimitBars,
+            _ if error.starts_with("RESOURCE_BUSY:") => Self::ResourceBusy,
+            _ if error.starts_with("OKX rate/backpressure defer:")
+                || error.starts_with("public OKX market API error: OKX rate/backpressure defer:") =>
+            {
+                Self::MarketSourceRetryable
+            }
+            _ => Self::Unclassified,
         }
-        _ if error.starts_with("RESOURCE_BUSY:") => "RESOURCE_BUSY",
-        _ if error.starts_with("LIMIT_") => "LIMIT_EXCEEDED",
-        _ => "UNCLASSIFIED_RESEARCH_ERROR",
     }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancelled => "CANCELLED",
+            Self::SourceInvalid => "SOURCE_INVALID",
+            Self::NonfiniteSource => "NONFINITE_SOURCE",
+            Self::CandleRangeUnavailable => "CANDLE_RANGE_UNAVAILABLE",
+            Self::CandleRangeIncomplete => "CANDLE_RANGE_INCOMPLETE",
+            Self::CandleInteriorGap => "CANDLE_INTERIOR_GAP",
+            Self::InvalidFunding => "INVALID_FUNDING",
+            Self::FundingRangeUnavailable => "FUNDING_RANGE_UNAVAILABLE",
+            Self::FundingRangeIncomplete => "FUNDING_RANGE_INCOMPLETE",
+            Self::GlobalRankSourceIncomplete => "GLOBAL_RANK_SOURCE_INCOMPLETE",
+            Self::ResearchMemoryLimit => "RESEARCH_MEMORY_LIMIT",
+            Self::CpuQueueFull => "CPU_QUEUE_FULL",
+            Self::LiveSourceDeadline => "LIVE_SOURCE_DEADLINE",
+            Self::UnsupportedStrategy => "UNSUPPORTED_STRATEGY",
+            Self::UnsupportedInverseContract => "UNSUPPORTED_INVERSE_CONTRACT",
+            Self::UnsupportedInstrumentType => "UNSUPPORTED_INSTRUMENT_TYPE",
+            Self::ContractMultiplierMissing => "CONTRACT_MULTIPLIER_MISSING",
+            Self::EmptyVariants => "EMPTY_VARIANTS",
+            Self::RangeNotClosed => "RANGE_NOT_CLOSED",
+            Self::ResultExpired => "RESULT_EXPIRED_BY_7_DAY_RETENTION",
+            Self::ResearchInterrupted => "RESEARCH_INTERRUPTED",
+            Self::LimitExceeded => "LIMIT_EXCEEDED",
+            Self::LimitTotalBars => "LIMIT_TOTAL_BARS",
+            Self::LimitBars => "LIMIT_BARS",
+            Self::ResourceBusy => "RESOURCE_BUSY",
+            Self::MarketSourceRetryable => "MARKET_SOURCE_RETRYABLE",
+            Self::Unclassified => "UNCLASSIFIED_RESEARCH_ERROR",
+        }
+    }
+}
+
+// Event labels and the SQLite projection use the same typed classification.
+pub(in crate::analytics) fn safe_reason(error: &str) -> &'static str {
+    ReasonCode::classify(error).as_str()
 }
 
 #[derive(Clone, Serialize)]
@@ -102,8 +174,8 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
             .get::<_, Option<String>>(8)?
             .and_then(|v| serde_json::from_str(&v).ok()),
         result_ref: artifact.filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())),
-        // SQL emits only the fixed whitelist above, never raw failure payloads.
-        error_code: error,
+        // Classify before publication: raw failures never enter Snapshot.
+        error_code: error.as_deref().map(safe_reason).map(str::to_owned),
         pinned: row.get(5)?,
         observed_at_ms: 0,
         generation: 0,
@@ -387,14 +459,35 @@ mod tests {
     }
     #[test]
     fn job_diagnostic_preserves_known_failure_codes_without_payloads() {
-        let (jobs, _) = jobs("reasons");
+        let (jobs, path) = jobs("reasons");
         for (n, (raw, expected)) in [
+            ("NONFINITE_SOURCE", "NONFINITE_SOURCE"),
+            ("INVALID_FUNDING", "INVALID_FUNDING"),
+            (
+                "GLOBAL_RANK_SOURCE_INCOMPLETE",
+                "GLOBAL_RANK_SOURCE_INCOMPLETE",
+            ),
+            (
+                "UNSUPPORTED_INVERSE_CONTRACT",
+                "UNSUPPORTED_INVERSE_CONTRACT",
+            ),
+            (
+                "RESULT_EXPIRED_BY_7_DAY_RETENTION",
+                "RESULT_EXPIRED_BY_7_DAY_RETENTION",
+            ),
+            ("process restarted before completion", "RESEARCH_INTERRUPTED"),
             ("CANDLE_INTERIOR_GAP", "CANDLE_INTERIOR_GAP"),
             ("LIMIT_EXCEEDED:RESEARCH_MEMORY", "LIMIT_EXCEEDED"),
+            ("LIMIT_TOTAL_BARS:9001", "LIMIT_TOTAL_BARS"),
+            ("LIMIT_BARS:9001", "LIMIT_BARS"),
             ("RESOURCE_BUSY:RESEARCH_QUEUE_FULL", "RESOURCE_BUSY"),
             (
                 "public OKX market API error: OKX rate/backpressure defer: LocalBudget",
                 "MARKET_SOURCE_RETRYABLE",
+            ),
+            (
+                "LIMIT_PRIVATE_TOKEN:DO_NOT_LEAK",
+                "UNCLASSIFIED_RESEARCH_ERROR",
             ),
             ("api_key=DO_NOT_LEAK", "UNCLASSIFIED_RESEARCH_ERROR"),
         ]
@@ -406,9 +499,21 @@ mod tests {
             jobs.update(&id, JobState::Failed, None, Some(raw.into()))
                 .unwrap();
             let observed = jobs.diagnostic_readback(&id);
+            // The same reason is sent to tracing by both terminal paths.
+            assert_eq!(safe_reason(raw), expected, "event reason for {raw}");
             assert_eq!(observed["job"]["error_code"], expected);
             assert!(!observed.to_string().contains("DO_NOT_LEAK"));
         }
+        drop(jobs);
+        let restored = Jobs::open(path).unwrap();
+        assert_eq!(
+            restored.diagnostic_readback(&format!("{:064x}", 0))["job"]["error_code"],
+            "NONFINITE_SOURCE"
+        );
+        assert!(!restored
+            .diagnostic_readback(&format!("{:064x}", 13))
+            .to_string()
+            .contains("DO_NOT_LEAK"));
     }
     #[test]
     fn failed_startup_seed_is_explicit_and_does_not_invent_missing_history() {
