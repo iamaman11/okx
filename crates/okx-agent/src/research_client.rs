@@ -600,6 +600,29 @@ impl ResearchClient {
         }
         Ok(reply)
     }
+    /// Recover missed, already committed Research events. The caller must use
+    /// a durably accepted cursor; receipt alone is never an order command.
+    pub async fn replay_graph_publications(
+        &self,
+        request: GraphPublicationRequest,
+    ) -> Result<GraphPublicationPage, String> {
+        if !request.valid() {
+            return Err("GRAPH_PUBLICATION_REQUEST_INVALID".into());
+        }
+        let page = self
+            .call(
+                ResearchCommand::ReplayGraphPublications {
+                    request: request.clone(),
+                },
+                true,
+            )
+            .await?
+            .graph_publications()?;
+        if !page.matches_request(&request) {
+            return Err("GRAPH_PUBLICATION_RESPONSE_MISMATCH".into());
+        }
+        Ok(page)
+    }
     pub async fn market(
         &self,
         request: MarketRequest,

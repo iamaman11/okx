@@ -90,6 +90,11 @@ pub enum ResearchCommand {
     GraphSignal {
         request: GraphSessionRequest,
     },
+    /// Read the durable Research signal journal after a verified consumer cursor.
+    /// This never advances graph state and cannot publish an order intent.
+    ReplayGraphPublications {
+        request: GraphPublicationRequest,
+    },
     Capabilities,
     Drain,
     Explain {
@@ -245,6 +250,7 @@ pub enum WorkerReply {
     Product(Value),
     Signal(SignalDecision),
     GraphSignal(GraphSessionReply),
+    GraphPublications(GraphPublicationPage),
     Draining(DrainStatus),
     Shutdown,
 }
@@ -508,6 +514,58 @@ impl GraphSignalPublication {
     }
 }
 
+/// The consumer supplies its last *durably accepted* sequence. A replay starts
+/// strictly after it; skipped or conflicting events are hard failures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphPublicationRequest {
+    pub session_id: GraphSessionId,
+    pub graph_sha256: String,
+    pub after_sequence: u64,
+    pub limit: u16,
+}
+
+impl GraphPublicationRequest {
+    pub const MAX_PAGE: u16 = 64;
+
+    pub fn valid(&self) -> bool {
+        (1..=Self::MAX_PAGE).contains(&self.limit)
+            && self.after_sequence <= 100_000
+            && self.graph_sha256.len() == 64
+            && self
+                .graph_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphPublicationPage {
+    pub session_id: GraphSessionId,
+    pub graph_sha256: String,
+    pub after_sequence: u64,
+    pub publications: Vec<GraphSignalPublication>,
+    pub has_more: bool,
+}
+
+impl GraphPublicationPage {
+    pub fn matches_request(&self, request: &GraphPublicationRequest) -> bool {
+        request.valid()
+            && self.session_id == request.session_id
+            && self.graph_sha256 == request.graph_sha256
+            && self.after_sequence == request.after_sequence
+            && self.publications.len() <= request.limit as usize
+            && (!self.has_more || self.publications.len() == request.limit as usize)
+            && self.publications.iter().enumerate().all(|(index, publication)| {
+                publication.valid()
+                    && publication.session_id == request.session_id
+                    && publication.graph_sha256 == request.graph_sha256
+                    && publication.sequence == request.after_sequence + 1 + index as u64
+            })
+    }
+}
+
 /// A consumer must start from its explicitly restored cursor; it may not
 /// accept an arbitrary initial signal or skip a closed bar after lag/restart.
 /// A repeated identical publication is harmless, a changed replay is not.
@@ -712,6 +770,47 @@ mod graph_signal_contract_tests {
         );
         assert_eq!(cursor.last_sequence(), 3);
     }
+
+    #[test]
+    fn replay_page_is_bounded_and_rejects_forged_or_skipped_publications() {
+        let request = GraphPublicationRequest {
+            session_id: GraphSessionId::new("session:btc".into()).unwrap(),
+            graph_sha256: "b".repeat(64),
+            after_sequence: 2,
+            limit: 1,
+        };
+        let publication = GraphSignalPublication {
+            schema: GraphSessionReply::SCHEMA.into(),
+            session_id: request.session_id.clone(),
+            graph_sha256: request.graph_sha256.clone(),
+            closed_ms: 180_000,
+            sequence: 3,
+            intent: GraphSignalIntent::Hold,
+        };
+        let page = GraphPublicationPage {
+            session_id: request.session_id.clone(),
+            graph_sha256: request.graph_sha256.clone(),
+            after_sequence: 2,
+            publications: vec![publication.clone()],
+            has_more: true,
+        };
+        assert!(page.matches_request(&request));
+        let mut forged = page.clone();
+        forged.publications[0].sequence = 4;
+        assert!(!forged.matches_request(&request));
+        forged = page.clone();
+        forged.publications[0].graph_sha256 = "a".repeat(64);
+        assert!(!forged.matches_request(&request));
+        forged = page.clone();
+        forged.publications.push(publication);
+        assert!(!forged.matches_request(&request));
+        let wire = serde_json::to_value(ResearchCommand::ReplayGraphPublications {
+            request: request.clone(),
+        }).unwrap();
+        assert_eq!(wire["type"], "replay_graph_publications");
+        assert!(serde_json::from_value::<ResearchCommand>(wire).is_ok());
+        assert!(!GraphPublicationRequest { limit: 65, ..request }.valid());
+    }
 }
 
 impl SignalRequest {
@@ -783,6 +882,12 @@ impl WorkerReply {
     pub fn graph_signal(self) -> Result<GraphSessionReply, String> {
         match self {
             Self::GraphSignal(reply) => Ok(reply),
+            _ => Err("WORKER_REPLY_KIND_MISMATCH".into()),
+        }
+    }
+    pub fn graph_publications(self) -> Result<GraphPublicationPage, String> {
+        match self {
+            Self::GraphPublications(page) => Ok(page),
             _ => Err("WORKER_REPLY_KIND_MISMATCH".into()),
         }
     }

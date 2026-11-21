@@ -7,6 +7,7 @@ mod decision;
 mod economic_scenario;
 pub mod executor;
 mod graph_resolver;
+mod graph_outbox;
 mod graph_sessions;
 pub mod jobs;
 mod market;
@@ -21,7 +22,8 @@ pub mod sources;
 use futures_util::{StreamExt, stream};
 use okx_protocol::analytics::*;
 use okx_protocol::research_ipc::{
-    GraphSessionReply, GraphSessionRequest, SignalDecision, SignalPosition, SignalRequest,
+    GraphPublicationPage, GraphPublicationRequest, GraphSessionReply, GraphSessionRequest,
+    SignalDecision, SignalPosition, SignalRequest,
 };
 use okx_research::{
     ResearchArtifactStore,
@@ -75,6 +77,13 @@ impl AnalyticsService {
         self.graph_sessions
             .execute_transition(&self.cpu, request)
             .await
+    }
+    /// Durable bounded replay is independent of the lifetime of a graph runner.
+    pub async fn replay_graph_publications(
+        &self,
+        request: GraphPublicationRequest,
+    ) -> Result<GraphPublicationPage, String> {
+        self.graph_sessions.replay(&self.cpu, request).await
     }
     /// Same causal kernel as replay, isolated behind the Research process and
     /// scheduled on the existing bounded CPU executor (never on Tokio I/O).
@@ -156,7 +165,7 @@ impl AnalyticsService {
                 bootstrap: bootstrapper,
             },
             cpu: Default::default(),
-            graph_sessions: Default::default(),
+            graph_sessions: graph_sessions::GraphSessions::open(root.join("research-signals.sqlite"))?,
             jobs,
             producer: None,
             runners: Arc::new(AtomicUsize::new(0)),

@@ -1,10 +1,11 @@
 //! Read-only, restartable graph sessions. The Worker owns ephemeral mathematical
 //! state; the Engine owns the durable decision/order cursor and risk authority.
-use super::{executor::CpuExecutor, graph_resolver};
+use super::{executor::CpuExecutor, graph_outbox::GraphOutbox, graph_resolver};
 use okx_analysis::query_plan::ClosedBar;
 use okx_protocol::research_ipc::{
-    GraphClosedBar, GraphMissingPolicy, GraphPosition, GraphSessionId, GraphSessionReply,
-    GraphSessionRequest, GraphSignalDefinition, GraphSignalIntent,
+    GraphClosedBar, GraphMissingPolicy, GraphPosition, GraphPublicationPage,
+    GraphPublicationRequest, GraphSessionId, GraphSessionReply, GraphSessionRequest,
+    GraphSignalDefinition, GraphSignalIntent, GraphSignalPublication,
 };
 use okx_research::graph_signal::{
     GraphIntent, GraphSignalSpec, GraphSignalStream, MissingSignalPolicy, TargetPosition,
@@ -12,14 +13,16 @@ use okx_research::graph_signal::{
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     sync::{Arc, Mutex, atomic::Ordering},
 };
 
 const MAX_SESSIONS: usize = 32;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(super) struct GraphSessions {
     slots: Arc<Mutex<BTreeMap<GraphSessionId, Arc<Mutex<GraphSlot>>>>>,
+    outbox: GraphOutbox,
 }
 
 struct GraphSlot {
@@ -29,6 +32,17 @@ struct GraphSlot {
     runner: GraphSignalStream,
     last_bar: GraphClosedBar,
     last_intent: GraphSignalIntent,
+    needs_restore: bool,
+}
+
+#[cfg(test)]
+impl Default for GraphSessions {
+    fn default() -> Self {
+        Self {
+            slots: Default::default(),
+            outbox: GraphOutbox::memory(),
+        }
+    }
 }
 
 fn convert(bar: GraphClosedBar) -> ClosedBar {
@@ -61,6 +75,31 @@ fn reply(session_id: GraphSessionId, slot: &GraphSlot) -> GraphSessionReply {
 }
 
 impl GraphSessions {
+    pub(super) fn open(path: PathBuf) -> Result<Self, String> {
+        Ok(Self {
+            slots: Default::default(),
+            outbox: GraphOutbox::open(path)?,
+        })
+    }
+
+    /// Query a committed signal page without activating or restoring a runner.
+    pub(super) async fn replay(
+        &self,
+        cpu: &CpuExecutor,
+        request: GraphPublicationRequest,
+    ) -> Result<GraphPublicationPage, String> {
+        if !request.valid() {
+            return Err("GRAPH_PUBLICATION_REQUEST_INVALID".into());
+        }
+        let outbox = self.outbox.clone();
+        cpu.run(Default::default(), move |cancel| {
+            if cancel.load(Ordering::Acquire) {
+                return Err("CANCELLED".into());
+            }
+            outbox.page(&request)
+        }).await
+    }
+
     #[cfg(test)]
     pub(super) async fn execute(
         &self,
@@ -83,6 +122,7 @@ impl GraphSessions {
             return Err("GRAPH_SESSION_REQUEST_INVALID".into());
         }
         let slots = self.slots.clone();
+        let outbox = self.outbox.clone();
         cpu.run(Default::default(), move |cancel| {
             if cancel.load(Ordering::Acquire) {
                 return Err("CANCELLED".into());
@@ -117,7 +157,12 @@ impl GraphSessions {
                         runner,
                         last_bar: *history.last().expect("validated nonempty"),
                         last_intent: latest,
+                        needs_restore: false,
                     };
+                    outbox.verify_restored(
+                        &GraphSignalPublication::from_decision(&reply(session_id.clone(), &new))
+                            .expect("evaluated graph reply"),
+                    )?;
                     let mut registry = slots
                         .lock()
                         .map_err(|_| "GRAPH_SESSION_REGISTRY_POISONED")?;
@@ -129,6 +174,7 @@ impl GraphSessions {
                             && active.runner.processed_bars() == new.runner.processed_bars()
                             && active.last_bar == new.last_bar
                             && active.last_intent == new.last_intent
+                            && !active.needs_restore
                         {
                             return Ok((reply(session_id, &active), false));
                         }
@@ -160,6 +206,9 @@ impl GraphSessions {
                     if active.digest != graph_sha256 {
                         return Err("GRAPH_SESSION_DEFINITION_MISMATCH".into());
                     }
+                    if active.needs_restore {
+                        return Err("GRAPH_SESSION_RESTORE_REQUIRED".into());
+                    }
                     let seen = active.runner.processed_bars();
                     if expected_bars == seen && bar == active.last_bar {
                         // Retried response after timeout: no second state update.
@@ -173,7 +222,18 @@ impl GraphSessions {
                     let outcome = active.runner.on_closed_bar(convert(bar))?;
                     active.last_bar = bar;
                     active.last_intent = intent(outcome);
-                    Ok((reply(session_id, &active), true))
+                    let decision = reply(session_id, &active);
+                    let publication = GraphSignalPublication::from_decision(&decision)
+                        .expect("evaluated graph reply");
+                    match outbox.record(&publication) {
+                        Ok(newly_committed) => Ok((decision, newly_committed)),
+                        Err(error) => {
+                            // The math runner moved, but no event was accepted.
+                            // Fail closed until Release + Restore or restart.
+                            active.needs_restore = true;
+                            Err(error)
+                        }
+                    }
                 }
                 GraphSessionRequest::Release {
                     session_id,

@@ -5,7 +5,7 @@ use okx_protocol::{
     analytics::*,
     research_ipc::{
         ClosedPrice, FundingHistoryEvent, GraphClosedBar, GraphPosition, GraphPublicationCursor,
-        GraphSessionId, GraphSessionReply, GraphSessionRequest, GraphSignalDefinition,
+        GraphPublicationRequest, GraphSessionId, GraphSessionReply, GraphSessionRequest, GraphSignalDefinition,
         GraphSignalIntent, HistoryCandle, PublicCandleCapture, PublicFundingCapture,
         PublicSourceReply, PublicSourceRequest, ResearchOpenInterest, ResearchScope,
         SignalPosition, SignalRequest,
@@ -207,7 +207,7 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
         publications.try_recv(),
         Err(tokio::sync::broadcast::error::TryRecvError::Empty)
     ));
-    assert_eq!(first, client.graph_signal(restore).await.unwrap());
+    assert_eq!(first, client.graph_signal(restore.clone()).await.unwrap());
     let GraphSessionReply::Evaluated {
         graph_sha256,
         intent,
@@ -274,6 +274,23 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
     assert_eq!(published_gap.intent, GraphSignalIntent::Hold);
     assert!(cursor.accept(&published_gap).unwrap());
     assert_eq!(cursor.last_sequence(), 4);
+    // A persisted page is separate from the ephemeral graph runner and does
+    // not cause an old event to be published as a new closed-bar transition.
+    let missed = GraphPublicationRequest {
+        session_id: session_id.clone(),
+        graph_sha256: graph_sha256.clone(),
+        after_sequence: 2,
+        limit: 1,
+    };
+    let first_page = client.replay_graph_publications(missed.clone()).await.unwrap();
+    assert_eq!(first_page.publications, vec![published_flat.clone()]);
+    assert!(first_page.has_more);
+    let second_page = client.replay_graph_publications(GraphPublicationRequest {
+        after_sequence: 3,
+        ..missed.clone()
+    }).await.unwrap();
+    assert_eq!(second_page.publications, vec![published_gap]);
+    assert!(!second_page.has_more);
     let old = GraphSessionRequest::Advance {
         session_id: session_id.clone(),
         graph_sha256: graph_sha256.clone(),
@@ -289,14 +306,54 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let release = GraphSessionRequest::Release {
-        session_id,
-        graph_sha256,
+        session_id: session_id.clone(),
+        graph_sha256: graph_sha256.clone(),
     };
     assert!(matches!(
         client.graph_signal(release).await.unwrap(),
         GraphSessionReply::Released { .. }
     ));
     client.shutdown().await;
+    // Restart a genuine Research Service process: the graph runner is gone,
+    // yet the journal must be accessible before any Restore command.
+    let restarted = ResearchClient::new(
+        ResearchClientConfig {
+            executable: PathBuf::from(std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE").unwrap()),
+            root: root.clone(),
+            scope: ResearchScope::new("research-test".into()).unwrap(),
+        },
+        candle_source(calls.clone()),
+    );
+    assert_eq!(restarted.replay_graph_publications(missed).await.unwrap(), first_page);
+    let mut after_restart = restarted.subscribe_graph_signals();
+    let restored = restarted.graph_signal(restore.clone()).await.unwrap();
+    assert!(restored.matches_request(&restore));
+    // Replaying a committed bar advances math only, never re-sends the event.
+    let replayed = restarted.graph_signal(GraphSessionRequest::Advance {
+        session_id: session_id.clone(),
+        graph_sha256,
+        expected_bars: 3,
+        bar: GraphClosedBar { time_ms: 180_000, close: Some(90.) },
+    }).await.unwrap();
+    assert!(matches!(replayed, GraphSessionReply::Evaluated { observed_bars: 3, .. }));
+    assert!(matches!(after_restart.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+    // If historical data conflicts with a committed event, invalidate the
+    // runner. A divergent replay can neither overwrite nor broadcast intent.
+    assert_eq!(restarted.graph_signal(GraphSessionRequest::Advance {
+        session_id: session_id.clone(),
+        graph_sha256: graph_sha256.clone(),
+        expected_bars: 4,
+        bar: GraphClosedBar { time_ms: 240_000, close: Some(101.) },
+    }).await.unwrap_err(), "GRAPH_OUTBOX_CONFLICTING_PUBLICATION");
+    assert_eq!(restarted.graph_signal(GraphSessionRequest::Advance {
+        session_id,
+        graph_sha256,
+        expected_bars: 5,
+        bar: GraphClosedBar { time_ms: 300_000, close: Some(102.) },
+    }).await.unwrap_err(), "GRAPH_SESSION_RESTORE_REQUIRED");
+    assert!(matches!(after_restart.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    restarted.shutdown().await;
     let _ = std::fs::remove_dir_all(root);
 }
 

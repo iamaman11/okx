@@ -238,6 +238,7 @@ where
                                     if is_new { publication = GraphSignalPublication::from_decision(&reply); }
                                     WorkerReply::GraphSignal(reply)
                                 }),
+                                ResearchCommand::ReplayGraphPublications { request } => service.replay_graph_publications(request).await.map(WorkerReply::GraphPublications),
                                 ResearchCommand::Capabilities => Ok(WorkerReply::Product(service.market_capabilities())),
                                 ResearchCommand::Drain => service.begin_drain().await.map(WorkerReply::Draining),
                                 ResearchCommand::Explain { job_id } => Ok(WorkerReply::Product(service.diagnostic_job(job_id.as_str()))),
