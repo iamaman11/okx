@@ -173,6 +173,10 @@ impl Jobs {
                     ON research_jobs(created_ms,id) WHERE artifact IS NOT NULL AND pinned=0;
                  CREATE INDEX IF NOT EXISTS idx_research_jobs_active
                     ON research_jobs(state,id);
+                 -- Latest committed jobs must be observable after restart
+                 -- without a full-table scan or ordering by random hash IDs.
+                 CREATE INDEX IF NOT EXISTS idx_research_jobs_diagnostics_recent
+                    ON research_jobs(created_ms DESC,id DESC);
                  CREATE INDEX IF NOT EXISTS idx_research_jobs_artifact
                     ON research_jobs(artifact) WHERE artifact IS NOT NULL;
                  CREATE TABLE IF NOT EXISTS research_cancel_keys(
@@ -547,9 +551,18 @@ impl Jobs {
         state: State,
         artifact: Option<String>,
         error: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
+        // Admission alone creates QUEUED, and startup recovery alone creates
+        // INTERRUPTED. Neither is a permissible executor transition: a late
+        // CPU task may not requeue itself or forge a restart diagnosis.
+        if matches!(state, State::Queued | State::Interrupted) {
+            return Err("RESEARCH_TRANSITION_INVALID".into());
+        }
         if state == State::Completed && artifact.is_none() {
             return Err("RESEARCH_COMPLETED_RESULT_REQUIRED".into());
+        }
+        if state == State::Completed && error.is_some() {
+            return Err("RESEARCH_COMPLETED_ERROR_UNEXPECTED".into());
         }
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let updated = db
@@ -564,7 +577,10 @@ impl Jobs {
         if updated == 0 {
             match Self::read(&db, id)?.ok_or("JOB_NOT_FOUND")?.state {
                 // A cancelled job cannot be resurrected by late compute.
-                State::Cancelled => return Ok(()),
+                // A terminal-cancelled job may not be revived. Returning an
+                // explicit non-commit receipt prevents callers from reporting
+                // success merely because this safe late write was ignored.
+                State::Cancelled => return Ok(false),
                 _ => return Err("RESEARCH_TERMINAL_IMMUTABLE".into()),
             }
         }
@@ -576,7 +592,7 @@ impl Jobs {
                 .remove(id);
         }
         drop(db);
-        Ok(())
+        Ok(true)
     }
     /// Same catalog owner and terminal fence as job transitions. Late CPU
     /// observations may never mutate cancellation or terminal snapshots.
@@ -835,7 +851,7 @@ impl Jobs {
         state: State,
         artifact: Option<String>,
         error: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let owner = self.clone();
         tokio::task::spawn_blocking(move || owner.update(&id, state, artifact, error))
             .await

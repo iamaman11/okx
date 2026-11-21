@@ -683,9 +683,10 @@ jobs:
           retention-days: 14
 
       # Complete coverage is the union of the verified property run and the
-      # remaining regressions, all on this exact checkout. Independent CPU-heavy research fixtures must not age
-      # a separate financial fixture's real-time sources. Concurrency INSIDE
-      # the 100-caller, fairness and two-heavy-job tests is not reduced.
+      # remaining regressions, all on this exact checkout. Independent CPU-heavy
+      # research fixtures must not age a separate financial fixture's real-time
+      # sources. MCP/DO/WSS and protection cleanup have required isolated steps.
+      # Concurrency INSIDE the 100-caller and fairness tests is not reduced.
       - name: Build research worker for process contracts
         shell: pwsh
         run: |
@@ -715,12 +716,24 @@ jobs:
             if ($actual.Count -eq 0 -or $actual.Count -ne $covered.Count -or @(Compare-Object $expected $actual).Count -ne 0) { throw 'FINANCIAL_WITNESS_SET_MISMATCH' }
           }
           foreach ($package in @('okx-agent','okx-host-control','okx-host-launcher','okx-execution')) {
-            $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--test-threads','2')
+            $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--skip','accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research','--skip','trade_service::protection_cleanup::protection_cleanup_direct_tests::','--test-threads','2')
             foreach ($witness in @($covered | Where-Object package -eq $package)) { $testArgs += @('--skip',$witness.test) }
             Write-Host "Remaining regression: $package; exact property witnesses already verified: $(@($covered | Where-Object package -eq $package).Count)"
             cargo test --locked -p $package -- @testArgs
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+
+      # The seven real SQL-owner cleanup transitions have bounded deadlines.
+      # Run them separately so unrelated fixtures cannot age campaign-opening
+      # or worker-termination observations during signed readback checks.
+      - name: Isolated native protection cleanup SQL regressions
+        shell: pwsh
+        run: |
+          $output = & cargo test --locked -p okx-agent --lib trade_service::protection_cleanup::protection_cleanup_direct_tests:: -- --nocapture --test-threads 1 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\. 7 passed; 0 failed;') { throw 'PROTECTION_CLEANUP_EXACT_SEVEN_TESTS_MISSING' }
 
       # Keep the process tree exclusive to this one heavy test so resource
       # observations cannot include unrelated financial regression fixtures.
@@ -749,6 +762,41 @@ jobs:
           path: |
             ${{ runner.temp }}\b-process-tree.log
             ${{ runner.temp }}\b-process-tree.json
+          if-no-files-found: error
+          retention-days: 14
+
+      # CONTROL supplies this incarnation in production. The loopback fixture
+      # needs a synthetic valid value; no production transport or identity is
+      # involved. Run alone so its process-tree and finance p95 are meaningful.
+      - name: MCP DO WSS Native finance under isolated Research load
+        id: mcp-native-load
+        shell: pwsh
+        env:
+          OKX_CONTROL_AGENT_INCAR: ctl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        run: |
+          $env:OKX_RESEARCH_WORKER_TEST_EXE = (Resolve-Path 'target/debug/okx-research-worker.exe').Path
+          $output = & cargo test --locked -p okx-agent --lib accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research -- --exact --nocapture --test-threads 1 2>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object -FilePath "$env:RUNNER_TEMP\mcp-native-load.log" | Out-Host
+          if ($code -ne 0) { exit $code }
+          $log = $output -join "`n"
+          if ($log -notmatch 'test result: ok\. 1 passed;') { throw 'MCP_NATIVE_LOAD_EXACT_TEST_MISSING' }
+          $receipts = [regex]::Matches($log, 'T10_MCP_NATIVE_LOAD_JSON:(\{[^\r\n]+\})')
+          if ($receipts.Count -ne 1) { throw 'MCP_NATIVE_LOAD_RECEIPT_MISSING_OR_DUPLICATED' }
+          $receipt = $receipts[0].Groups[1].Value | ConvertFrom-Json
+          if ($receipt.schema -cne 'okx.518.t10-mcp-do-wss-native-finance/v1' -or
+              $receipt.mcp_transport -cne 'real_loopback_http_miniflare_sqlite_do_websocket_native' -or
+              $receipt.exchange_trade_post -ne $false) { throw 'MCP_NATIVE_LOAD_RECEIPT_INVALID' }
+          $receipts[0].Groups[1].Value | Set-Content -LiteralPath "$env:RUNNER_TEMP\mcp-native-load.json" -Encoding utf8NoBOM
+
+      - name: Upload isolated MCP DO WSS Native load observation
+        if: always() && steps.mcp-native-load.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mcp-native-load-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}\mcp-native-load.log
+            ${{ runner.temp }}\mcp-native-load.json
           if-no-files-found: error
           retention-days: 14
 

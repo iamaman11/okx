@@ -10,6 +10,10 @@ pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 32;
 pub const QUEUE_CAPACITY: usize = 64;
 pub const REQUEST_TIMEOUT_MS: u64 = 10_000;
+/// Independent admission budgets inside the Agent and its child Worker.
+/// A flood of read-only observations cannot consume the emergency STOP/CANCEL lane.
+pub const CRITICAL_IN_FLIGHT: usize = 2;
+pub const OBSERVATION_IN_FLIGHT: usize = 4;
 
 macro_rules! id {
     ($name:ident) => {
@@ -82,6 +86,92 @@ pub enum ResearchCommand {
         job_id: JobId,
     },
     Shutdown,
+}
+
+/// Internal scheduling metadata, not a new IPC wire field or public MCP action.
+/// Both endpoints derive the same lane from the existing typed command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResearchLane {
+    Critical,
+    Observation,
+    Work,
+}
+impl ResearchCommand {
+    pub fn lane(&self) -> ResearchLane {
+        match self {
+            Self::Shutdown
+            | Self::Drain
+            | Self::Research {
+                request: ResearchRequest::Cancel { .. },
+            } => ResearchLane::Critical,
+            Self::Explain { .. }
+            | Self::Capabilities
+            | Self::Research {
+                request: ResearchRequest::Status { .. } | ResearchRequest::Capabilities {},
+            } => ResearchLane::Observation,
+            _ => ResearchLane::Work,
+        }
+    }
+}
+
+#[cfg(test)]
+mod priority_lane_tests {
+    use super::*;
+
+    #[test]
+    fn t11_t12_control_plane_commands_have_typed_independent_budgets() {
+        assert_eq!(CRITICAL_IN_FLIGHT, 2);
+        assert_eq!(OBSERVATION_IN_FLIGHT, 4);
+        assert_eq!(MAX_IN_FLIGHT, 32);
+        let research = |request| ResearchCommand::Research { request };
+        assert_eq!(ResearchCommand::Drain.lane(), ResearchLane::Critical);
+        assert_eq!(ResearchCommand::Shutdown.lane(), ResearchLane::Critical);
+        assert_eq!(
+            research(ResearchRequest::Cancel {
+                job_id: "job".into(),
+                idempotency_key: "cancel".into(),
+            })
+            .lane(),
+            ResearchLane::Critical
+        );
+        assert_eq!(
+            ResearchCommand::Explain {
+                job_id: JobId::new("job".into()).unwrap(),
+            }
+            .lane(),
+            ResearchLane::Observation
+        );
+        assert_eq!(
+            ResearchCommand::Capabilities.lane(),
+            ResearchLane::Observation
+        );
+        assert_eq!(
+            research(ResearchRequest::Status {
+                job_id: "job".into()
+            })
+            .lane(),
+            ResearchLane::Observation
+        );
+        assert_eq!(
+            research(ResearchRequest::Capabilities {}).lane(),
+            ResearchLane::Observation
+        );
+        assert_eq!(
+            research(ResearchRequest::Economics {
+                cases: vec![],
+                data_mode: crate::analytics::ResearchDataMode::Counterfactual,
+            })
+            .lane(),
+            ResearchLane::Work
+        );
+        assert_eq!(
+            research(ResearchRequest::Benchmark {
+                idempotency_key: "benchmark".into(),
+            })
+            .lane(),
+            ResearchLane::Work
+        );
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -293,6 +383,14 @@ pub struct PublicFundingCapture {
 pub struct PublicReferenceInstrument {
     pub contract_type: Option<String>,
     pub contract_value: Option<String>,
+    /// Unit of ctVal. Without this, ctVal cannot be converted to base assets.
+    /// Optional on the wire so an older native peer can still be decoded;
+    /// consumers must reject its absence before using contract economics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_value_currency: Option<String>,
+    /// Settlement unit of realized PnL and funding. Older IPC peers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_currency: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicReferenceCapture {
@@ -300,6 +398,49 @@ pub struct PublicReferenceCapture {
     pub instrument: PublicReferenceInstrument,
     pub reference_generation: String,
     pub acquired_at_ms: String,
+}
+#[cfg(test)]
+mod reference_unit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn t02_reference_ipc_preserves_contract_unit_and_decodes_older_peer() {
+        let capture = PublicReferenceCapture {
+            raw_body: vec![1, 2, 3],
+            instrument: PublicReferenceInstrument {
+                contract_type: Some("linear".into()),
+                contract_value: Some("0.01".into()),
+                contract_value_currency: Some("BTC".into()),
+                settle_currency: Some("USDT".into()),
+            },
+            reference_generation: "sha256:example".into(),
+            acquired_at_ms: "123456789".into(),
+        };
+        let wire = serde_json::to_value(&capture).unwrap();
+        assert_eq!(wire["instrument"]["contract_value_currency"], "BTC");
+        assert_eq!(wire["instrument"]["settle_currency"], "USDT");
+        let roundtrip: PublicReferenceCapture = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            roundtrip.instrument.contract_value_currency.as_deref(),
+            Some("BTC")
+        );
+        assert_eq!(
+            roundtrip.instrument.settle_currency.as_deref(),
+            Some("USDT")
+        );
+        let mut old_peer = wire;
+        old_peer["instrument"]
+            .as_object_mut()
+            .unwrap()
+            .remove("contract_value_currency");
+        old_peer["instrument"]
+            .as_object_mut()
+            .unwrap()
+            .remove("settle_currency");
+        let legacy: PublicReferenceCapture = serde_json::from_value(old_peer).unwrap();
+        assert_eq!(legacy.instrument.contract_value_currency, None);
+        assert_eq!(legacy.instrument.settle_currency, None);
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResearchTicker {

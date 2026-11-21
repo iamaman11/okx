@@ -162,7 +162,19 @@ impl Sources {
                 oldest = oldest.min(time);
                 if time >= start && time < end {
                     let rate = realized_funding_rate(row.realized_rate.as_deref())?;
-                    out.insert(time, rate);
+                    // API pages may overlap; identical events are harmless,
+                    // conflicting realized rates cannot be silently overwritten.
+                    match out.entry(time) {
+                        std::collections::btree_map::Entry::Vacant(slot) => {
+                            slot.insert(rate);
+                        }
+                        std::collections::btree_map::Entry::Occupied(slot)
+                            if *slot.get() != rate =>
+                        {
+                            return Err("FUNDING_CONFLICTING_EVENT_TIMESTAMP".into());
+                        }
+                        _ => {}
+                    }
                 }
             }
             if oldest <= start || oldest >= cursor.parse().unwrap_or(u64::MAX) {
@@ -267,6 +279,72 @@ mod extension_tests {
                 None => assert_eq!(actual.unwrap_err(), "FUNDING_REALIZED_RATE_UNAVAILABLE"),
             }
             assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+            drop(service);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn t06_duplicate_funding_event_requires_consistent_realized_rate() {
+        struct PagedFunding {
+            calls: AtomicUsize,
+            second_rate: &'static str,
+        }
+        impl HttpTransport for PagedFunding {
+            fn send(&self, request: okx_api::HttpRequest, _: std::time::Instant) -> HttpSend<'_> {
+                let page = self.calls.fetch_add(1, Ordering::Relaxed);
+                assert_eq!(request.method(), reqwest::Method::GET);
+                assert_eq!(request.url().path(), "/api/v5/public/funding-rate-history");
+                let cursor = request
+                    .url()
+                    .query_pairs()
+                    .find(|(name, _)| name == "after")
+                    .expect("funding pagination cursor")
+                    .1
+                    .into_owned();
+                assert_eq!(cursor, if page == 0 { "30000" } else { "25000" });
+                let rate = if page == 0 { "0.02" } else { self.second_rate };
+                let body = serde_json::to_vec(&json!({"code":"0","msg":"","data":[
+                    {"instId":"BTC-USDT-SWAP","fundingTime":"25000",
+                     "fundingRate":"0.09","realizedRate":rate}
+                ]}))
+                .unwrap();
+                Box::pin(async move {
+                    Ok(RawHttpResponse {
+                        status: okx_api::HttpStatusCode::OK,
+                        headers: Default::default(),
+                        body,
+                    })
+                })
+            }
+        }
+        for (other_rate, expected) in [
+            ("0.02", None),
+            ("0.03", Some("FUNDING_CONFLICTING_EVENT_TIMESTAMP")),
+        ] {
+            let transport = Arc::new(PagedFunding {
+                calls: AtomicUsize::new(0),
+                second_rate: other_rate,
+            });
+            let (root, mut service) = super::super::artifact_job_fixtures::service();
+            service.sources.bootstrap = MarketBootstrapper::new(
+                okx_api::OkxPublicClient::with_http_transport(
+                    okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
+                    okx_api::RateBudget::new(),
+                    transport.clone(),
+                )
+                .unwrap(),
+            )
+            .into();
+            let result = service
+                .sources
+                .funding("BTC-USDT-SWAP", 20_000, 30_000)
+                .await;
+            match expected {
+                None => assert_eq!(result.unwrap(), vec![(25_000, 0.02)]),
+                Some(error) => assert_eq!(result.unwrap_err(), error),
+            }
+            assert_eq!(transport.calls.load(Ordering::Relaxed), 2);
             drop(service);
             std::fs::remove_dir_all(root).unwrap();
         }
@@ -577,6 +655,7 @@ mod extension_tests {
                                 period: None,
                                 threshold: None,
                                 when: None,
+                                other: None,
                             },
                             okx_analysis::query_plan::SeriesStep {
                                 id: "w1".into(),
@@ -585,6 +664,7 @@ mod extension_tests {
                                 period: Some(2),
                                 threshold: None,
                                 when: None,
+                                other: None,
                             },
                         ],
                         result_steps: vec!["w1".into()],
@@ -609,6 +689,72 @@ mod extension_tests {
         );
         assert_eq!(market["rows"][0]["candle_coverage"]["missing_bars"], 0);
         assert_eq!(market["rows"][0]["unclosed_candles_excluded"], 1);
+        assert_eq!(
+            market["rows"][0]["source_integrity"]["quality"],
+            "verified_normalized_sources"
+        );
+        assert_eq!(
+            market["rows"][0]["source_integrity"]["verified_sources"][0]["source"],
+            "candles"
+        );
+        assert_eq!(
+            market["rows"][0]["source_integrity"]["replay_metric_reexecution_verified"],
+            true
+        );
+        assert_eq!(
+            market["rows"][0]["source_integrity"]["metric_reexecution"]["quality"],
+            "verified_reexecution"
+        );
+        // T07/T15: a previously undeclared combination executes through the
+        // public source decoder and durable market artifact path with the same
+        // binary. The already captured candles are reused, with no venue POST.
+        let boolean_query: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT"],"fields":["returns"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":1200000,"limit":20,
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"return","op":"returns_series","input":"close"},
+                {"id":"positive","op":"greater_than","input":"return","threshold":0},
+                {"id":"prior","op":"lag","input":"positive","period":1},
+                {"id":"both","op":"and","input":"positive","other":"prior"},
+                {"id":"either","op":"or","input":"positive","other":"prior"},
+                {"id":"event","op":"rising_edge","input":"both"}
+            ],"result_steps":["both","either","event"]}
+        }))
+        .unwrap();
+        let boolean_result = service.market(boolean_query, None, None).await.unwrap();
+        let boolean_row = &boolean_result["rows"][0];
+        assert_eq!(boolean_row["metrics"]["both"], true);
+        assert_eq!(boolean_row["metrics"]["either"], true);
+        assert_eq!(boolean_row["metrics"]["event"], false);
+        assert_eq!(boolean_row["units"]["both"], "boolean");
+        assert_eq!(boolean_row["quality"], "complete");
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
+        // T05/T15: ratio arithmetic is available through the same binary,
+        // venue source decoder and immutable result route without new I/O.
+        let arithmetic_query: MarketRequest = serde_json::from_value(json!({
+            "action":"screen","instruments":["BTC-USDT"],"fields":["returns"],
+            "timeframe_ms":60000,"start_ms":0,"end_ms":1200000,"limit":20,
+            "composition":{"version":"okx.market.composition/v1","steps":[
+                {"id":"gain","op":"returns_series","input":"close"},
+                {"id":"previous","op":"lag","input":"gain","period":1},
+                {"id":"difference","op":"subtract_series","input":"gain","other":"previous"},
+                {"id":"relative","op":"divide_series","input":"gain","other":"previous"}
+            ],"result_steps":["difference","relative"]}
+        }))
+        .unwrap();
+        let arithmetic = service.market(arithmetic_query, None, None).await.unwrap();
+        let arithmetic_row = &arithmetic["rows"][0];
+        assert!(
+            (arithmetic_row["metrics"]["difference"].as_f64().unwrap() + 1. / 342.).abs() < 1e-12
+        );
+        assert!(
+            (arithmetic_row["metrics"]["relative"].as_f64().unwrap() - 18. / 19.).abs() < 1e-12
+        );
+        assert_eq!(arithmetic_row["units"]["difference"], "ratio");
+        assert_eq!(arithmetic_row["quality"], "complete");
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
         // T13: composition must disclose its candle dependency even when
         // the only legacy projection depends solely on request parameters.
         let composition_only_source: MarketRequest = serde_json::from_value(json!({
@@ -639,7 +785,7 @@ mod extension_tests {
             start_ms: 0,
             end_ms: 1200000,
             strategy_id: "ema_momentum_confirm_v1".into(),
-            parameters: EmaParameters { fast: 1, slow: 2 },
+            parameters: EmaParameters { fast: 1, slow: 2 }.into(),
             costs: ResearchCosts {
                 maker_fee_bps: 0.,
                 taker_fee_bps: 0.,

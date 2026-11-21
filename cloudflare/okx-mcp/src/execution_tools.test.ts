@@ -1,10 +1,23 @@
-import {ACTION_SCHEMAS,PUBLIC_TOOLS,MARKET_OPERATORS,validTool,matches} from './execution_tools.js';
+import {ACTION_SCHEMAS,PUBLIC_TOOLS,MARKET_OPERATORS,validTool,matches,isExecutionMutation} from './execution_tools.js';
 const fail=(v:boolean,n:string)=>{if(!v)throw Error(n);};
 fail(validTool('diagnostics',{action:'explain',view:'research',reference:'a'.repeat(64)}),'research diagnostics uses existing strict tool');
 fail(!validTool('diagnostics',{action:'explain',view:'unknown',reference:'a'.repeat(64)}),'unknown diagnostic view is rejected');
-function sample(s:any):any{if('const'in s)return s.const;if(s.enum)return s.enum[0];if(s.oneOf)return sample(s.oneOf[0]);if(s.anyOf)return sample(s.anyOf[0]);if(s.type==='object')return Object.fromEntries(Object.entries(s.properties).filter(([k])=>s.required.includes(k)).map(([k,x])=>[k,sample(x)]));if(s.type==='array')return [sample(s.items)];if(s.type==='string'&&s.pattern==='^sha256:[0-9a-f]{64}$')return 'sha256:'+'a'.repeat(64);if(s.type==='string'&&s.pattern==='^[0-9a-f]{64}$')return 'a'.repeat(64);if(s.type==='string')return (s.pattern && s.maxLength===29 && new RegExp(s.pattern).test('1'))?'1':(s.pattern?.includes('0-9]{1,9}')||s.pattern?.includes('\\d{1,9}'))?'1':s.minLength===8?'command_0001':'fixture';if(s.type==='integer'||s.type==='number')return s.minimum??1;if(s.type==='boolean')return true;return null;}
+function sample(s:any):any{if('const'in s)return s.const;if(s.enum)return s.enum[0];if(s.oneOf)return sample(s.oneOf[0]);if(s.anyOf)return sample(s.anyOf[0]);if(s.type==='object'||(s.properties&&s.required))return Object.fromEntries(Object.entries(s.properties).filter(([k])=>s.required.includes(k)).map(([k,x])=>[k,sample(x)]));if(s.type==='array')return [sample(s.items)];if(s.type==='string'&&s.pattern==='^sha256:[0-9a-f]{64}$')return 'sha256:'+'a'.repeat(64);if(s.type==='string'&&s.pattern==='^[0-9a-f]{64}$')return 'a'.repeat(64);if(s.type==='string')return (s.pattern && s.maxLength===29 && new RegExp(s.pattern).test('1'))?'1':(s.pattern?.includes('0-9]{1,9}')||s.pattern?.includes('\\d{1,9}'))?'1':s.minLength===8?'command_0001':'fixture';if(s.type==='integer'||s.type==='number')return s.minimum??1;if(s.type==='boolean')return true;return null;}
 export const payloadFixtures:{tool:string;action:string;positive:any;negative:any[]}[]=[];
-for(const [tool,schemas]of Object.entries(ACTION_SCHEMAS))for(const schema of schemas){const good=sample(schema);if('start_ms'in good)good.end_ms=good.start_ms+100000;if(tool==='market'&&good.action==='screen'){good.instruments=['BTC-USDT-SWAP'];good.fields=[MARKET_OPERATORS[0]];}if(tool==='research'&&good.action==='backtest')good.parameters={fast:9,slow:21};if(tool==='portfolio'&&good.action==='scenario')good.correlations=[];if(tool==='trade'&&['execute','preview'].includes(good.action))good.protection={stop_distance_bps:50};if(tool==='diagnostics'&&good.action==='explain')good.reference='intent_fixture';if(good.order)good.order.type='fok';fail(validTool(tool,good),`positive ${tool}.${good.action}`);const badExtra={...good,raw_rpc:'forbidden'},badRequired={...good};delete badRequired.action;const badType={...good,action:12};for(const bad of [badExtra,badRequired,badType])fail(!validTool(tool,bad),`negative ${tool}.${good.action}`);payloadFixtures.push({tool,action:good.action,positive:good,negative:[badExtra,badRequired,badType]});}
+for(const [tool,schemas]of Object.entries(ACTION_SCHEMAS))for(const schema of schemas){const good=sample(schema);if('start_ms'in good)good.end_ms=good.start_ms+100000;if(tool==='market'&&good.action==='screen'){good.instruments=['BTC-USDT-SWAP'];good.fields=[MARKET_OPERATORS[0]];}if(tool==='research'&&good.action==='backtest')good.parameters={fast:9,slow:21};if(tool==='research'&&good.action==='economics')good.cases=[{instrument:'BTC-USDT',product:'spot',side:'long',quantity:'2',entry_price:'100',exit_price:'110',fees:{currency:'USDT',amount:'0'},funding:{currency:'USDT',amount:'0'}}];if(tool==='portfolio'&&good.action==='scenario')good.correlations=[];if(tool==='trade'&&['execute','preview'].includes(good.action))good.protection={stop_distance_bps:50};if(tool==='diagnostics'&&good.action==='explain')good.reference='intent_fixture';if(good.order)good.order.type='fok';fail(validTool(tool,good),`positive ${tool}.${good.action}`);const badExtra={...good,raw_rpc:'forbidden'},badRequired={...good};delete badRequired.action;const badType={...good,action:12};for(const bad of [badExtra,badRequired,badType])fail(!validTool(tool,bad),`negative ${tool}.${good.action}`);payloadFixtures.push({tool,action:good.action,positive:good,negative:[badExtra,badRequired,badType]});}
+const economic=payloadFixtures.find(x=>x.tool==='research'&&x.action==='economics')!.positive;
+const baseEconomic=economic.cases[0];
+fail(validTool('research',{...economic,cases:[{...baseEconomic,instrument:'BTC-USDT-SWAP',product:'linear_swap',contract_type:'linear',contract_value:'0.1',contract_value_currency:'BTC',settle_currency:'USDT'}]}),'T02/T09 explicit linear contract unit is accepted');
+for(const invalid of [
+ {...economic,cases:[]},
+ {...economic,cases:Array.from({length:9},()=>({...baseEconomic}))},
+ {...economic,cases:[{...baseEconomic,quantity:'BTC'}]},
+ {...economic,cases:[{...baseEconomic,fees:{...baseEconomic.fees,amount:'NaN'}}]},
+ {...economic,cases:[{...baseEconomic,product:'unknown'}]},
+ {...economic,cases:[{...baseEconomic,side:'both'}]},
+ {...economic,cases:[{...baseEconomic,raw_rpc:'forbidden'}]},
+])fail(!validTool('research',invalid),'T02/T09 rejects malformed economics input at MCP boundary');
+fail(!isExecutionMutation('research','economics'),'pure economics cannot acquire research mutation authority');
 const screen=payloadFixtures.find(x=>x.tool==='market'&&x.action==='screen')!.positive;
 fail(validTool('market',{...screen,action:'compare'}),'shared strict screen/compare schema');
 fail(!validTool('market',{...screen,action:'compare',raw_rpc:'forbidden'}),'compare rejects unknown fields');
@@ -45,6 +58,132 @@ fail(!validTool('market',{...marketScreen,action:'compare',composition:composed}
 fail(!validTool('market',{...marketScreen,composition:{...composed,version:'unknown'}}), 'composition version rejected');
 fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'rolling_mean',input:'close'}]}}), 'window must specify period');
 fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'returns_series',input:'close',period:2}]}}), 'returns does not accept window period');
+const extremaGraph={...composed,steps:[
+ {id:'upper',op:'rolling_max',input:'close',period:20},
+ {id:'lower',op:'rolling_min',input:'close',period:20},
+],result_steps:['upper','lower']};
+fail(validTool('market',{...marketScreen,composition:extremaGraph}),'typed causal extrema share one public request');
+const rangeExtension={...composed,steps:[
+ {id:'width',op:'rolling_range',input:'close',period:3},
+ {id:'wide',op:'greater_than',input:'width',threshold:5},
+ {id:'entry',op:'rising_edge',input:'wide'},
+ {id:'smoothed',op:'rolling_mean',input:'width',period:2},
+],result_steps:['width','entry','smoothed']};
+fail(validTool('market',{...marketScreen,composition:rangeExtension}),
+ 'T15 new pure range operator and user-defined causal branching share existing market screen');
+fail(validTool('market',{...marketScreen,composition:{...rangeExtension,steps:[
+ ...rangeExtension.steps.slice(0,1),{...rangeExtension.steps[1],threshold:20},...rangeExtension.steps.slice(2)
+]}}),'T15 user can change graph parameters without an API route change');
+for(const malformed of [
+ {id:'width',op:'rolling_range',input:'close'},
+ {id:'width',op:'rolling_range',input:'close',period:1},
+ {id:'width',op:'rolling_range',input:'close',period:1001},
+ {id:'width',op:'rolling_range',input:'close',period:3,threshold:0},
+ {id:'width',op:'rolling_range',input:'close',period:3,other:'open'},
+])fail(!validTool('market',{...marketScreen,composition:{...rangeExtension,steps:[malformed],result_steps:['width']}}),
+ 'T15 extension rejects illegal windows and unrelated parameters at MCP');
+const zscoreGraph={...composed,steps:[
+ {id:'standard',op:'rolling_zscore',input:'close',period:20},
+ {id:'high',op:'greater_than',input:'standard',threshold:1.5},
+],result_steps:['standard','high']};
+fail(validTool('market',{...marketScreen,composition:zscoreGraph}),
+ 'T15 typed causal zscore is public without a new route');
+const twoSidedRisk={...composed,steps:[
+ {id:'fast',op:'rolling_mean',input:'close',period:2},
+ {id:'slow',op:'rolling_mean',input:'close',period:3},
+ {id:'below',op:'less_than_series',input:'fast',other:'slow'},
+ {id:'exit',op:'falling_edge',input:'below'},
+ {id:'risk',op:'rolling_stddev',input:'close',period:2},
+ {id:'quiet',op:'less_than',input:'risk',threshold:4},
+],result_steps:['exit','risk','quiet']};
+fail(validTool('market',{...marketScreen,composition:twoSidedRisk}),
+ 'T07/T15 symmetric typed exit and causal population volatility use the existing route');
+for(const bad of [
+ {id:'risk',op:'rolling_stddev',input:'close'},
+ {id:'risk',op:'rolling_stddev',input:'close',period:1},
+ {id:'risk',op:'rolling_stddev',input:'close',period:2,threshold:1},
+ {id:'risk',op:'rolling_stddev',input:'close',period:2,other:'close'},
+])fail(!validTool('market',{...marketScreen,composition:{...twoSidedRisk,steps:[bad],result_steps:['risk']}}),
+ 'T02/T03 stddev rejects invalid period or unrelated parameters');
+for(const bad of [
+ {id:'below',op:'less_than_series',input:'fast'},
+ {id:'below',op:'less_than_series',input:'fast',other:'slow',threshold:0},
+ {id:'below',op:'less_than_series',input:'fast',other:'slow',period:2},
+ {id:'quiet',op:'less_than',input:'close'},
+ {id:'quiet',op:'less_than',input:'close',threshold:0,other:'open'},
+ {id:'exit',op:'falling_edge',input:'below',period:2},
+])fail(!validTool('market',{...marketScreen,composition:{...twoSidedRisk,
+ steps:[...twoSidedRisk.steps.slice(0,2),bad],result_steps:[bad.id]}}),
+ 'T02/T03 symmetric thresholds and edge reject malformed arguments');
+const fundingZscore={...composed,steps:[
+ {id:'standard',op:'rolling_zscore',input:'funding_rate',period:2},
+],result_steps:['standard']};
+fail(validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:fundingZscore}),
+ 'funding normalization available for swap research');
+fail(!validTool('market',{...marketScreen,instruments:['BTC-USDT'],composition:fundingZscore}),
+ 'funding normalization rejects spot before venue reads');
+for(const bad of [
+ {id:'standard',op:'rolling_zscore',input:'close'},
+ {id:'standard',op:'rolling_zscore',input:'close',period:1},
+ {id:'standard',op:'rolling_zscore',input:'close',period:1001},
+ {id:'standard',op:'rolling_zscore',input:'close',period:20,threshold:1},
+ {id:'standard',op:'rolling_zscore',input:'close',period:20,other:'close'},
+]){
+ fail(!validTool('market',{...marketScreen,composition:{...zscoreGraph,steps:[bad],result_steps:['standard']}}),
+  'rolling_zscore rejects malformed period and extraneous arguments');
+}
+const joinedGraph={...composed,steps:[
+ {id:'price_return',op:'returns_series',input:'close'},
+ {id:'oi_return',op:'returns_series',input:'open_interest'},
+ {id:'combined',op:'add_series',input:'price_return',other:'oi_return'},
+],result_steps:['combined']};
+fail(validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:joinedGraph}),
+ 'two dimensionless series combine in one public composition');
+const divergenceGraph={...joinedGraph,steps:[
+ ...joinedGraph.steps.slice(0,2),
+ {id:'difference',op:'subtract_series',input:'price_return',other:'oi_return'},
+ {id:'relative',op:'divide_series',input:'price_return',other:'oi_return'},
+],result_steps:['difference','relative']};
+fail(validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:divergenceGraph}),
+ 'T02/T05/T15 typed difference and division share the registered market route');
+const correlationGraph={...joinedGraph,steps:[
+ ...joinedGraph.steps.slice(0,2),
+ {id:'relationship',op:'rolling_pearson',input:'price_return',other:'oi_return',period:30},
+],result_steps:['relationship']};
+fail(validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:correlationGraph}),
+ 'T06 exact cross-source 30-pair Pearson uses the existing market screen route');
+for(const bad of [
+ {id:'relationship',op:'rolling_pearson',input:'price_return',period:30},
+ {id:'relationship',op:'rolling_pearson',input:'price_return',other:'oi_return',period:29},
+ {id:'relationship',op:'rolling_pearson',input:'price_return',other:'oi_return',period:1001},
+ {id:'relationship',op:'rolling_pearson',input:'price_return',other:'oi_return',period:30,threshold:0.9},
+]){
+ fail(!validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:{...correlationGraph,steps:[...correlationGraph.steps.slice(0,2),bad]}}),
+  'rolling_pearson rejects missing source, undersized window and unrelated parameters');
+}
+for(const op of ['subtract_series','divide_series']){
+ for(const bad of [
+  {id:'difference',op,input:'price_return'},
+  {id:'difference',op,input:'price_return',other:'oi_return',period:2},
+  {id:'difference',op,input:'price_return',other:'oi_return',threshold:0},
+ ]){
+  fail(!validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:{...divergenceGraph,steps:[...divergenceGraph.steps.slice(0,2),bad]}}),
+   `${op} rejects missing other and unrelated parameters`);
+ }
+}
+for(const bad of [
+ {id:'combined',op:'add_series',input:'price_return'},
+ {id:'combined',op:'add_series',input:'price_return',other:'oi_return',period:2},
+ {id:'combined',op:'returns_series',input:'price_return',other:'oi_return'},
+]){
+ fail(!validTool('market',{...marketScreen,instruments:['BTC-USDT-SWAP'],composition:{...joinedGraph,steps:[...joinedGraph.steps.slice(0,2),bad]}}),
+  'add_series rejects malformed parameters');
+}
+for(const op of ['rolling_max','rolling_min']){
+ for(const bad of [{id:'upper',op,input:'close'},{id:'upper',op,input:'close',period:1001},{id:'upper',op,input:'close',period:2,threshold:3}]){
+  fail(!validTool('market',{...marketScreen,composition:{...extremaGraph,steps:[bad]}}),`${op} rejects absent, excessive and unrelated parameters`);
+ }
+}
 const causalSteps=[
  {id:'returns',op:'returns_series',input:'close'},
  {id:'positive',op:'greater_than',input:'returns',threshold:0},
@@ -54,6 +193,57 @@ const causalSteps=[
 ];
 const causalGraph={...composed,steps:causalSteps,result_steps:['positive','event','prior','outcome']};
 fail(validTool('market',{...marketScreen,composition:causalGraph}), 'bounded event and future label graph passes strict public schema');
+const priceCrossGraph={...composed,steps:[
+ {id:'fast',op:'rolling_mean',input:'close',period:5},
+ {id:'slow',op:'rolling_mean',input:'close',period:20},
+ {id:'above',op:'greater_than_series',input:'fast',other:'slow'},
+ {id:'cross',op:'rising_edge',input:'above'},
+],result_steps:['above','cross']};
+fail(validTool('market',{...marketScreen,composition:priceCrossGraph}),
+ 'T03/T15 independently parametrized price windows compose into a crossing event');
+const ohlcGraph={...composed,steps:[
+ {id:'body',op:'greater_than_series',input:'close',other:'open'},
+ {id:'range',op:'greater_than_series',input:'high',other:'low'},
+ {id:'confirmed',op:'and',input:'body',other:'range'},
+],result_steps:['confirmed']};
+fail(validTool('market',{...marketScreen,composition:ohlcGraph}),
+ 'T02/T04 four closed-candle inputs can compose into a typed signal');
+const volumeGraph={...composed,steps:[
+ {id:'fast_volume',op:'rolling_mean',input:'volume',period:2},
+ {id:'slow_volume',op:'rolling_mean',input:'volume',period:3},
+ {id:'lift',op:'greater_than_series',input:'fast_volume',other:'slow_volume'},
+ {id:'entry',op:'rising_edge',input:'lift'},
+ {id:'volume_change',op:'returns_series',input:'volume'},
+],result_steps:['fast_volume','lift','entry','volume_change']};
+fail(validTool('market',{...marketScreen,composition:volumeGraph}),
+ 'T02/T07 venue-native volume can feed causal typed series composition');
+for(const bad of [
+ {id:'above',op:'greater_than_series',input:'fast'},
+ {id:'above',op:'greater_than_series',input:'fast',other:'slow',period:2},
+ {id:'above',op:'greater_than_series',input:'fast',other:'slow',threshold:0},
+])fail(!validTool('market',{...marketScreen,composition:{...priceCrossGraph,
+ steps:[...priceCrossGraph.steps.slice(0,2),bad],result_steps:['above']}}),
+ 'T02/T03 invalid binary price comparison rejected by public schema');
+const booleanGraph={...composed,steps:[
+ {id:'returns',op:'returns_series',input:'close'},
+ {id:'positive',op:'greater_than',input:'returns',threshold:0},
+ {id:'prior',op:'lag',input:'positive',period:1},
+ {id:'both',op:'and',input:'positive',other:'prior'},
+ {id:'either',op:'or',input:'positive',other:'prior'},
+ {id:'event',op:'rising_edge',input:'both'},
+],result_steps:['both','either','event']};
+fail(validTool('market',{...marketScreen,composition:booleanGraph}),
+ 'T07/T15 boolean conjunction and disjunction accepted through public market schema');
+for(const op of ['and','or']){
+ for(const bad of [
+  {id:'both',op,input:'positive'},
+  {id:'both',op,input:'positive',other:'prior',period:2},
+  {id:'both',op,input:'positive',other:'prior',threshold:1},
+ ]){
+  fail(!validTool('market',{...marketScreen,composition:{...booleanGraph,steps:[...booleanGraph.steps.slice(0,3),bad]}}),
+   `${op} rejects missing other or unrelated parameter`);
+ }
+}
 for(const invalid of [
  {...causalSteps[1],threshold:undefined},
  {...causalSteps[1],threshold:Infinity},
@@ -193,6 +383,20 @@ for(const action of ['backtest','grid','validate']){
  fail(validTool('research',positive),`registered research composition ${action}`);
  fail(!validTool('research',negative),'unregistered strategy cannot cross research boundary');
  payloadFixtures.push({tool:'research',action:action+'_composition',positive,negative:[negative]});
+}
+
+for(const action of ['backtest','grid','validate']){
+ const base=payloadFixtures.find(x=>x.tool==='research'&&x.action===action)!.positive;
+ const withLookback=(lookback:number)=>action==='grid'
+   ?{...base,strategy_id:'close_breakout_v1',variants:[{lookback}]}
+   :{...base,strategy_id:'close_breakout_v1',parameters:{lookback}};
+ const positive=withLookback(20);
+ const wrongType=action==='grid'?{...positive,variants:[{fast:9,slow:21}]}:{...positive,parameters:{fast:9,slow:21}};
+ const mismatch=action==='grid'?{...base,variants:[{lookback:20}]}:{...base,parameters:{lookback:20}};
+ const invalid=[withLookback(1),withLookback(1001),wrongType,mismatch];
+ fail(validTool('research',positive),`research ${action} accepts own breakout parameters`);
+ for(const bad of invalid)fail(!validTool('research',bad),`research ${action} rejects malformed or mismatched breakout`);
+ payloadFixtures.push({tool:'research',action:action+'_breakout',positive,negative:invalid});
 }
 
 for(const action of ['backtest','grid','validate']){

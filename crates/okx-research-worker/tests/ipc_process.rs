@@ -395,11 +395,50 @@ async fn lost_enqueue_ack_retry_preserves_job_and_rejects_conflict() {
     drop(db);
     let next = WorkerSession::new("session-2".into()).unwrap();
     let (mut child, mut input, mut output) = start(&root, &next, &scope).await;
+    // The old request's response was lost, but its durable state is not a
+    // completed result. Observe the actual restarted child before retrying.
     send(
         &mut input,
         HostFrame::Request {
             invocation: None,
             id: RequestId::new("h1".into()).unwrap(),
+            session: next.clone(),
+            command: Box::new(ResearchCommand::Research {
+                request: ResearchRequest::Status {
+                    job_id: durable_id.clone(),
+                },
+            }),
+        },
+    )
+    .await;
+    assert!(matches!(receive(&mut output).await,
+            WorkerFrame::Response { result: Ok(WorkerReply::Product(value)), .. }
+            if value["id"] == durable_id && value["state"] == "interrupted"
+                && value["error"] == "process restarted before completion"));
+    send(
+        &mut input,
+        HostFrame::Request {
+            invocation: None,
+            id: RequestId::new("h2".into()).unwrap(),
+            session: next.clone(),
+            command: Box::new(ResearchCommand::Research {
+                request: ResearchRequest::Result {
+                    job_id: durable_id.clone(),
+                    cursor: None,
+                    limit: 1,
+                    view: okx_protocol::analytics::ResearchResultView::Summary,
+                },
+            }),
+        },
+    )
+    .await;
+    assert!(matches!(receive(&mut output).await,
+        WorkerFrame::Response { result: Err(error), .. } if error == "RESULT_NOT_READY"));
+    send(
+        &mut input,
+        HostFrame::Request {
+            invocation: None,
+            id: RequestId::new("h3".into()).unwrap(),
             session: next.clone(),
             command: Box::new(ResearchCommand::Research {
                 request: backtest(1),
@@ -411,14 +450,18 @@ async fn lost_enqueue_ack_retry_preserves_job_and_rejects_conflict() {
         WorkerFrame::Response {
             result: Ok(WorkerReply::Product(value)),
             ..
-        } => assert_eq!(value["id"].as_str(), Some(durable_id.as_str())),
+        } => {
+            assert_eq!(value["id"].as_str(), Some(durable_id.as_str()));
+            assert_eq!(value["state"], "interrupted");
+            assert!(value["artifact"].is_null());
+        }
         _ => panic!("missing retry response"),
     }
     send(
         &mut input,
         HostFrame::Request {
             invocation: None,
-            id: RequestId::new("h2".into()).unwrap(),
+            id: RequestId::new("h4".into()).unwrap(),
             session: next,
             command: Box::new(ResearchCommand::Research {
                 request: backtest(2),
@@ -559,6 +602,221 @@ async fn draining_preserves_active_job_and_rejects_new_admission() {
     })
     .await;
     wait.unwrap();
+    drop(input);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// T11/T12: actual child process and actual framed IPC. Thirty-two public
+/// validation requests wait on deliberately unanswered source RPCs. The host
+/// still must be able to obtain status/capabilities/explain and cancel/drain.
+/// No Agent engine, exchange HTTP, finance owner, or order is created here.
+#[tokio::test]
+async fn t11_t12_real_worker_observation_and_cancel_survive_saturated_work_lane() {
+    use std::time::Instant;
+
+    let root = test_root("t11-t12-lane-saturation");
+    let scope = ResearchScope::new("isolation".into()).unwrap();
+    let session = WorkerSession::new("isolation-session".into()).unwrap();
+    let (mut child, mut input, mut output) = start(&root, &session, &scope).await;
+    let validation: ResearchRequest = serde_json::from_value(serde_json::json!({
+        "action":"validate","instruments":["BTC-USDT"],
+        "timeframe_ms":60000,"start_ms":0,"end_ms":12000000,
+        "strategy_id":"ema_cross_v1","parameters":{"fast":2,"slow":5},
+        "costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,
+            "funding_mode":"zero_assumption"},
+        "data_mode":"counterfactual"
+    }))
+    .unwrap();
+    for number in 1..=MAX_IN_FLIGHT + 1 {
+        send(
+            &mut input,
+            HostFrame::Request {
+                invocation: None,
+                id: RequestId::new(format!("h{number}")).unwrap(),
+                session: session.clone(),
+                command: Box::new(ResearchCommand::Research {
+                    request: validation.clone(),
+                }),
+            },
+        )
+        .await;
+    }
+
+    let mut source_requests = 0usize;
+    let overflow = RequestId::new(format!("h{}", MAX_IN_FLIGHT + 1)).unwrap();
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            match receive(&mut output).await {
+                WorkerFrame::SourceRequest { .. } => source_requests += 1,
+                WorkerFrame::Response {
+                    id,
+                    result: Err(error),
+                    ..
+                } if id == overflow => {
+                    assert_eq!(error, "RESEARCH_BUSY", "main lane did not saturate");
+                    break;
+                }
+                other => panic!("work completed while synthetic source was held: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("saturated work lane was not observed");
+    assert!(
+        source_requests > 0,
+        "test must actually cross the child source boundary"
+    );
+    // Public status/cancel validate a full canonical SHA-shaped job ID before
+    // querying SQLite. Use a well-formed but absent ID to exercise that path.
+    let unknown_job = "f".repeat(64);
+
+    let mut latencies_ms = Vec::new();
+    for step in 0..100usize {
+        let number = MAX_IN_FLIGHT + 2 + step;
+        let id = RequestId::new(format!("h{number}")).unwrap();
+        let command = match step % 3 {
+            0 => ResearchCommand::Capabilities,
+            1 => ResearchCommand::Explain {
+                job_id: JobId::new(unknown_job.clone()).unwrap(),
+            },
+            _ => ResearchCommand::Research {
+                request: ResearchRequest::Status {
+                    job_id: unknown_job.clone(),
+                },
+            },
+        };
+        assert_eq!(command.lane(), ResearchLane::Observation);
+        let began = Instant::now();
+        send(
+            &mut input,
+            HostFrame::Request {
+                invocation: None,
+                id: id.clone(),
+                session: session.clone(),
+                command: Box::new(command),
+            },
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match receive(&mut output).await {
+                    WorkerFrame::SourceRequest { .. } => source_requests += 1,
+                    WorkerFrame::Response {
+                        id: returned,
+                        result,
+                        ..
+                    } if returned == id => {
+                        if step % 3 == 2 {
+                            assert!(matches!(result, Err(ref e) if e == "JOB_NOT_FOUND"));
+                        } else {
+                            assert!(matches!(result, Ok(WorkerReply::Product(_))));
+                        }
+                        break;
+                    }
+                    other => panic!("unrelated response in saturated IPC test: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("observation lane blocked by heavy work");
+        latencies_ms.push(began.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    // Emergency controls have their own two slots, independent of both the
+    // saturated work lane and four read-only observation slots.
+    for (number, command) in [
+        ResearchCommand::Research {
+            request: ResearchRequest::Cancel {
+                job_id: unknown_job,
+                idempotency_key: "cancel-under-load".into(),
+            },
+        },
+        ResearchCommand::Drain,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(command.lane(), ResearchLane::Critical);
+        let id = RequestId::new(format!("h{}", MAX_IN_FLIGHT + 102 + number)).unwrap();
+        let began = Instant::now();
+        send(
+            &mut input,
+            HostFrame::Request {
+                invocation: None,
+                id: id.clone(),
+                session: session.clone(),
+                command: Box::new(command),
+            },
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match receive(&mut output).await {
+                    WorkerFrame::SourceRequest { .. } => source_requests += 1,
+                    WorkerFrame::Response {
+                        id: got, result, ..
+                    } if got == id => {
+                        if number == 0 {
+                            assert!(matches!(result, Err(ref error) if error == "JOB_NOT_FOUND"));
+                        } else {
+                            assert!(matches!(result, Ok(WorkerReply::Draining(_))));
+                        }
+                        break;
+                    }
+                    other => panic!("unexpected control reply: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("critical lane blocked");
+        latencies_ms.push(began.elapsed().as_secs_f64() * 1000.0);
+    }
+    let mut sorted = latencies_ms.clone();
+    sorted.sort_by(f64::total_cmp);
+    assert!(
+        sorted[96] <= 100.0,
+        "T11/T12 warm IPC read-only/control p95 exceeded 100ms: {}",
+        sorted[96]
+    );
+    println!(
+        "T11_T12_IPC_ISOLATION_JSON:{}",
+        serde_json::json!({
+            "schema":"okx.518.t11-t12-ipc-isolation/v1",
+            "work_requests_held":MAX_IN_FLIGHT,
+            "work_lane_overflow":"RESEARCH_BUSY",
+            "observations":100,"critical_commands":2,
+            "warm_p95_ms":sorted[96],"warm_max_ms":sorted[101],
+            "source_rpc_seen":source_requests,
+            "source_policy":"no_reply_no_exchange_http",
+            "engine_or_finance_under_load":"not_evaluated",
+            "venue_posts":0,"finance_writes":0,
+        })
+    );
+
+    send(
+        &mut input,
+        HostFrame::Request {
+            invocation: None,
+            id: RequestId::new(format!("h{}", MAX_IN_FLIGHT + 104)).unwrap(),
+            session: session.clone(),
+            command: Box::new(ResearchCommand::Shutdown),
+        },
+    )
+    .await;
+    assert!(matches!(
+        receive(&mut output).await,
+        WorkerFrame::Response {
+            result: Ok(WorkerReply::Shutdown),
+            ..
+        }
+    ));
     drop(input);
     assert!(
         tokio::time::timeout(Duration::from_secs(10), child.wait())

@@ -1,4 +1,5 @@
 //! Public compact analytics contract. No transport or financial logic.
+pub use okx_kernel::operators::{BreakoutParameters, EmaParameters, StrategyParameters};
 use okx_kernel::query_plan::CompositionRequest;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -101,12 +102,6 @@ pub enum MarketAction {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EmaParameters {
-    pub fast: usize,
-    pub slow: usize,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ResearchCosts {
     pub maker_fee_bps: f64,
     pub taker_fee_bps: f64,
@@ -143,6 +138,118 @@ pub enum ResearchDecisionStatus {
     Rejected,
     Deferred,
 }
+
+/// Explicit counterfactual position units. This request never conveys trading
+/// authority or claims historical venue contract rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EconomicProduct {
+    Spot,
+    LinearSwap,
+    InverseSwap,
+    Option,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EconomicSide {
+    Long,
+    Short,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EconomicAmount {
+    pub currency: String,
+    pub amount: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EconomicCase {
+    pub instrument: String,
+    pub product: EconomicProduct,
+    pub side: EconomicSide,
+    /// Spot: base asset; swaps: number of contracts. Exact decimal string.
+    pub quantity: String,
+    /// Price in explicit quote currency per base asset.
+    pub entry_price: String,
+    pub exit_price: String,
+    /// A caller-supplied *assumption*, never a verified historical reference.
+    #[serde(default)]
+    pub contract_type: Option<String>,
+    #[serde(default)]
+    pub contract_value: Option<String>,
+    #[serde(default)]
+    pub contract_value_currency: Option<String>,
+    #[serde(default)]
+    pub settle_currency: Option<String>,
+    pub fees: EconomicAmount,
+    pub funding: EconomicAmount,
+}
+
+#[cfg(test)]
+mod economic_case_contract_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn request() -> Value {
+        json!({"action":"economics","data_mode":"counterfactual","cases":[{
+            "instrument":"BTC-USDT-SWAP","product":"linear_swap","side":"long",
+            "quantity":"3","entry_price":"100","exit_price":"110",
+            "contract_type":"linear","contract_value":"0.1",
+            "contract_value_currency":"BTC","settle_currency":"USDT",
+            "fees":{"currency":"USDT","amount":"0"},
+            "funding":{"currency":"USDT","amount":"0"}
+        }]})
+    }
+
+    #[test]
+    fn t02_t09_economics_is_strictly_typed_bounded_and_backwards_compatible() {
+        let value = request();
+        let typed: ResearchRequest = serde_json::from_value(value.clone()).unwrap();
+        assert!(typed.valid());
+        assert_eq!(serde_json::to_value(typed).unwrap(), value);
+        for (pointer, bad) in [
+            ("/cases/0/product", json!("token")),
+            ("/cases/0/side", json!("buy")),
+            ("/cases/0/quantity", json!(3)),
+            ("/cases/0/fees/currency", json!(42)),
+            ("/data_mode", json!("historical_data_maybe")),
+        ] {
+            let mut invalid = value.clone();
+            *invalid.pointer_mut(pointer).unwrap() = bad;
+            assert!(
+                serde_json::from_value::<ResearchRequest>(invalid).is_err(),
+                "{pointer}"
+            );
+        }
+        let mut invalid = value.clone();
+        invalid["cases"][0]["raw_rpc"] = json!("forbidden");
+        assert!(serde_json::from_value::<ResearchRequest>(invalid).is_err());
+        let mut too_many = value.clone();
+        too_many["cases"] = json!(vec![value["cases"][0].clone(); 9]);
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(too_many)
+                .unwrap()
+                .valid()
+        );
+        let mut empty = value.clone();
+        empty["cases"] = json!([]);
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(empty)
+                .unwrap()
+                .valid()
+        );
+        let mut long = value;
+        long["cases"][0]["entry_price"] = json!("1".repeat(37));
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(long)
+                .unwrap()
+                .valid()
+        );
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResearchRequest {
@@ -162,6 +269,11 @@ pub enum ResearchRequest {
         decision_id: Option<String>,
     },
     Capabilities {},
+    /// Pure, bounded economic oracle. No market read, job, account or order.
+    Economics {
+        cases: Vec<EconomicCase>,
+        data_mode: ResearchDataMode,
+    },
     /// Read-only, opt-in K9 acceptance performed by this same running Agent.
     Benchmark {
         idempotency_key: String,
@@ -174,7 +286,7 @@ pub enum ResearchRequest {
         #[serde(default)]
         range_mode: RangeMode,
         strategy_id: String,
-        parameters: EmaParameters,
+        parameters: StrategyParameters,
         costs: ResearchCosts,
         data_mode: ResearchDataMode,
     },
@@ -185,7 +297,7 @@ pub enum ResearchRequest {
         start_ms: u64,
         end_ms: u64,
         strategy_id: String,
-        parameters: EmaParameters,
+        parameters: StrategyParameters,
         costs: ResearchCosts,
         data_mode: ResearchDataMode,
         #[serde(default)]
@@ -198,7 +310,7 @@ pub enum ResearchRequest {
         start_ms: u64,
         end_ms: u64,
         strategy_id: String,
-        variants: Vec<EmaParameters>,
+        variants: Vec<StrategyParameters>,
         costs: ResearchCosts,
         data_mode: ResearchDataMode,
         #[serde(default)]
@@ -290,11 +402,6 @@ fn valid_range(ms: u64, start: u64, end: u64) -> bool {
     ) && end > start
         && (end - start) / ms <= 1_000_000
 }
-impl EmaParameters {
-    fn valid(&self) -> bool {
-        self.fast >= 1 && self.fast < self.slow && self.slow <= 1000
-    }
-}
 impl ResearchCosts {
     fn valid(&self) -> bool {
         [self.maker_fee_bps, self.taker_fee_bps, self.slippage_bps]
@@ -306,6 +413,34 @@ impl ResearchRequest {
     pub fn valid(&self) -> bool {
         match self {
             Self::Capabilities {} => true,
+            Self::Economics { cases, .. } => {
+                !cases.is_empty()
+                    && cases.len() <= 8
+                    && cases.iter().all(|case| {
+                        !case.instrument.is_empty()
+                            && case.instrument.len() <= 64
+                            && [
+                                case.quantity.as_str(),
+                                case.entry_price.as_str(),
+                                case.exit_price.as_str(),
+                                case.fees.amount.as_str(),
+                                case.funding.amount.as_str(),
+                            ]
+                            .iter()
+                            .all(|s| !s.is_empty() && s.len() <= 36)
+                            && [case.fees.currency.as_str(), case.funding.currency.as_str()]
+                                .iter()
+                                .all(|s| !s.is_empty() && s.len() <= 16)
+                            && [
+                                case.contract_type.as_deref(),
+                                case.contract_value.as_deref(),
+                                case.contract_value_currency.as_deref(),
+                                case.settle_currency.as_deref(),
+                            ]
+                            .iter()
+                            .all(|v| v.is_none_or(|s| !s.is_empty() && s.len() <= 36))
+                    })
+            }
             Self::Benchmark { idempotency_key } => {
                 (8..=128).contains(&idempotency_key.len())
                     && idempotency_key
@@ -329,7 +464,7 @@ impl ResearchRequest {
                 start_ms: *start_ms,
                 end_ms: *end_ms,
                 strategy_id: strategy_id.clone(),
-                parameters: parameters.clone(),
+                parameters: *parameters,
                 costs: costs.clone(),
                 data_mode: *data_mode,
                 seed: 0,
@@ -363,11 +498,12 @@ impl ResearchRequest {
                         strategy_id.as_str(),
                         "ema_cross_v1"
                             | "ema_momentum_confirm_v1"
+                            | okx_kernel::operators::BREAKOUT_STRATEGY_ID
                             | "no_trade"
                             | "close_momentum"
                             | "two_bar_momentum"
                     )
-                    && parameters.valid()
+                    && parameters.warmup_for(strategy_id).is_ok()
                     && costs.valid()
             }
             Self::Grid {
@@ -398,13 +534,14 @@ impl ResearchRequest {
                         strategy_id.as_str(),
                         "ema_cross_v1"
                             | "ema_momentum_confirm_v1"
+                            | okx_kernel::operators::BREAKOUT_STRATEGY_ID
                             | "no_trade"
                             | "close_momentum"
                             | "two_bar_momentum"
                     )
                     && !variants.is_empty()
                     && variants.len() <= 64
-                    && variants.iter().all(EmaParameters::valid)
+                    && variants.iter().all(|p| p.warmup_for(strategy_id).is_ok())
                     && costs.valid()
             }
             Self::RecordDecision {
@@ -588,7 +725,7 @@ mod batch_tests {
     #[test]
     fn k9_grid_variants_match_canonical_sixty_four_limit() {
         let parameters = EmaParameters { fast: 2, slow: 4 };
-        let variants = (0..64).map(|_| parameters.clone()).collect();
+        let variants = (0..64).map(|_| parameters.into()).collect();
         let mut request = ResearchRequest::Grid {
             idempotency_key: "k9-grid".into(),
             instruments: vec!["BTC-USDT".into()],
@@ -608,7 +745,7 @@ mod batch_tests {
         };
         assert!(request.valid());
         if let ResearchRequest::Grid { variants, .. } = &mut request {
-            variants.push(parameters);
+            variants.push(parameters.into());
         }
         assert!(!request.valid());
     }
@@ -622,7 +759,7 @@ mod batch_tests {
             start_ms: 0,
             end_ms: 30000000000,
             strategy_id: "ema_cross_v1".into(),
-            parameters: EmaParameters { fast: 20, slow: 50 },
+            parameters: EmaParameters { fast: 20, slow: 50 }.into(),
             costs: ResearchCosts {
                 maker_fee_bps: 0.0,
                 taker_fee_bps: 0.0,
@@ -758,5 +895,91 @@ mod composition_contract_tests {
                 .unwrap()
                 .valid()
         );
+    }
+}
+
+#[cfg(test)]
+mod t08_breakout_public_wire_tests {
+    use super::*;
+
+    fn request(action: &str) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "action":action,"instruments":["BTC-USDT"],"timeframe_ms":60000,
+            "start_ms":0,"end_ms":12000000,"strategy_id":"close_breakout_v1",
+            "costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,"funding_mode":"zero_assumption"},
+            "data_mode":"counterfactual"
+        });
+        if action != "validate" {
+            value["idempotency_key"] = serde_json::json!("t08-breakout-wire");
+        }
+        if action == "grid" {
+            value["variants"] = serde_json::json!(
+                (2..66)
+                    .map(|lookback| serde_json::json!({"lookback":lookback}))
+                    .collect::<Vec<_>>()
+            );
+        } else {
+            value["parameters"] = serde_json::json!({"lookback":20});
+        }
+        value
+    }
+
+    #[test]
+    fn validate_backtest_grid_accept_breakout_and_reject_mismatched_parameters() {
+        for action in ["validate", "backtest", "grid"] {
+            let wire = request(action);
+            let typed = serde_json::from_value::<ResearchRequest>(wire.clone()).unwrap();
+            assert!(typed.valid(), "{action}");
+            let roundtrip =
+                serde_json::from_value::<ResearchRequest>(serde_json::to_value(&typed).unwrap())
+                    .unwrap();
+            assert_eq!(typed, roundtrip);
+            let mut invalid = wire.clone();
+            invalid["strategy_id"] = serde_json::json!("ema_cross_v1");
+            assert!(
+                !serde_json::from_value::<ResearchRequest>(invalid)
+                    .unwrap()
+                    .valid()
+            );
+            let mut invalid = wire;
+            if action == "grid" {
+                invalid["variants"][0] = serde_json::json!({"fast":2,"slow":4});
+            } else {
+                invalid["parameters"] = serde_json::json!({"fast":2,"slow":4});
+            }
+            assert!(
+                !serde_json::from_value::<ResearchRequest>(invalid)
+                    .unwrap()
+                    .valid()
+            );
+        }
+    }
+
+    #[test]
+    fn breakout_public_grid_allows_64_rejects_65_before_sources() {
+        let mut wire = request("grid");
+        assert!(
+            serde_json::from_value::<ResearchRequest>(wire.clone())
+                .unwrap()
+                .valid()
+        );
+        wire["variants"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"lookback":66}));
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(wire)
+                .unwrap()
+                .valid()
+        );
+        for lookback in [1, 1001] {
+            let mut invalid = request("validate");
+            invalid["parameters"] = serde_json::json!({"lookback":lookback});
+            assert!(
+                !serde_json::from_value::<ResearchRequest>(invalid)
+                    .unwrap()
+                    .valid()
+            );
+        }
     }
 }

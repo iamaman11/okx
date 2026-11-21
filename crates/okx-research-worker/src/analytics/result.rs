@@ -1,8 +1,11 @@
 //! Native Research result presentation: artifact integrity, export verification,
 //! bounded paging, and signed cursors. No SQL mutation or research execution.
-use super::{AnalyticsService, cursor, jobs};
+use super::{AnalyticsService, cursor, jobs, result_reexecution};
 use okx_protocol::analytics::ResearchResultView;
-use okx_research::ResearchArtifactStore;
+use okx_research::{
+    ResearchArtifactStore,
+    strategy_registry::{Bar, ChunkedDataHash},
+};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -90,7 +93,45 @@ pub(super) fn verify_export_manifest(
             {
                 return Err("EXPERIMENT_PROVENANCE_MISMATCH".into());
             }
-            Some(json!({"artifact":id,"checksum_verified":true,"references_match":true}))
+            let basis = &inputs["economic_basis"];
+            let reference_id = basis["reference_capture_artifact"].as_str();
+            if basis["product"] == "linear_swap" && reference_id.is_none() {
+                return Err("EXPERIMENT_PROVENANCE_MISMATCH".into());
+            }
+            if let Some(reference_id) = reference_id {
+                let captured: Value = read_verified_result(store, reference_id)?;
+                if captured["schema"] != "okx.research.reference-capture/v1"
+                    || captured["instrument"] != inputs["instrument"]
+                    || captured["reference_generation"] != basis["reference_generation"]
+                    || captured["acquired_at_ms"] != basis["reference_acquired_at_ms"]
+                    || captured["contract_value_currency"] != basis["source_ct_val_ccy"]
+                    || captured["contract_type"] != basis["source_ct_type"]
+                    || captured["settle_currency"] != basis["source_settle_currency"]
+                    || captured["contract_value"] != basis["source_ct_val"]
+                {
+                    return Err("EXPERIMENT_PROVENANCE_MISMATCH".into());
+                }
+                let raw: Vec<u8> = serde_json::from_value(captured["raw_body"].clone())
+                    .map_err(|_| "EXPERIMENT_PROVENANCE_MISMATCH")?;
+                let recomputed =
+                    okx_research::canonical_sha256(&("okx.public.reference.raw/v1", &raw))
+                        .map_err(|error| error.to_string())?;
+                if basis["reference_capture_hash"] != recomputed {
+                    return Err("EXPERIMENT_PROVENANCE_MISMATCH".into());
+                }
+            }
+            // Rebuild the event-to-bar projection from the captured source,
+            // then compare it to every replay input bar as it is streamed and
+            // hash-verified. A valid capture alone is not proof of attribution.
+            let (funding_capture, expected_funding) = verify_experiment_funding(store, &inputs)?;
+            let dataset =
+                verify_experiment_dataset(store, &inputs, manifest, expected_funding.as_deref())?;
+            Some(
+                json!({"artifact":id,"checksum_verified":true,"references_match":true,
+                "reference_capture_verified":reference_id.is_some(),
+                "funding_replay_attribution_verified":expected_funding.is_some(),
+                "dataset":dataset,"funding_capture":funding_capture}),
+            )
         }
         None => None,
     };
@@ -106,12 +147,269 @@ pub(super) fn verify_export_manifest(
     if trades.is_none() && rows.is_none() {
         return Err("EXPORT_MANIFEST_INVALID".into());
     }
+    let dataset_verified = experiment
+        .as_ref()
+        .is_some_and(|e| e["dataset"]["quality"] == "verified");
+    let funding_verified = experiment.as_ref().is_some_and(|e| {
+        matches!(
+            e["funding_capture"]["quality"].as_str(),
+            Some("verified" | "not_applicable")
+        )
+    });
+    let reexecution = if let Some(id) = manifest["experiment_artifact"].as_str() {
+        let inputs: Value = read_verified_result(store, id)?;
+        result_reexecution::verify(store, &inputs, manifest)?
+    } else {
+        json!({"schema":"okx.research.immutable-reexecution/v1", "quality":"not_verified",
+            "reason_code":"LEGACY_EXPERIMENT_INPUTS_NOT_RETAINED"})
+    };
     Ok(json!({
-        "quality":"complete",
+        "quality":if dataset_verified && funding_verified {"complete"} else {"partial"},
+        "evidence_scope":if dataset_verified && funding_verified {"result_pages_and_replay_sources"} else {"result_pages_or_partial_sources"},
         "counts_verified":true,
-        "checksums_verified":true,
-        "trades":trades,"rows":rows,"equity":equity,"experiment":experiment
+        "checksums_verified":true,"dataset_verified":dataset_verified,
+        "funding_capture_verified":funding_verified,
+        "trades":trades,"rows":rows,"equity":equity,"experiment":experiment,
+        "reexecution":reexecution
     }))
+}
+
+/// A replay's historical funding is a retrospective settlement input, not a
+/// publication-time-certified signal. Verify its normalized capture against
+/// the experiment while keeping availability and mark-price caveats explicit.
+type FundingVerification = Result<(Value, Option<Vec<Option<f64>>>), String>;
+
+fn verify_experiment_funding(store: &ResearchArtifactStore, inputs: &Value) -> FundingVerification {
+    let basis = &inputs["economic_basis"];
+    if !basis["funding_event_alignment"].is_object() {
+        return Ok((json!({"quality":"not_applicable"}), None));
+    }
+    let alignment = &basis["funding_event_alignment"];
+    let attribution_v1 =
+        alignment["allocation_schema"] == "okx.research.funding-bar-observation/v1";
+    if !alignment["allocation_schema"].is_null() && !attribution_v1 {
+        return Err("EXPERIMENT_FUNDING_MISMATCH".into());
+    }
+    let Some(id) = basis["funding_capture_artifact"].as_str() else {
+        if attribution_v1 {
+            return Err("EXPERIMENT_FUNDING_MISMATCH".into());
+        }
+        return Ok((
+            json!({"quality":"unverified_legacy",
+            "reason_code":"FUNDING_CAPTURE_NOT_RETAINED"}),
+            None,
+        ));
+    };
+    let captured: Value = read_verified_result(store, id)?;
+    let reason = "EXPERIMENT_FUNDING_MISMATCH";
+    let end = inputs["effective_range"]["end_ms"]
+        .as_u64()
+        .and_then(|value| value.checked_add(1))
+        .ok_or(reason)?;
+    let start = inputs["requested_range"]["start_ms"]
+        .as_u64()
+        .ok_or(reason)?;
+    if captured["schema"] != "okx.research.funding-event-capture/v1"
+        || captured["instrument"] != inputs["instrument"]
+        || captured["source"] != "okx/funding-rate-history"
+        || captured["rate_basis"] != "realized_settlement_rate"
+        || captured["start_ms"] != start
+        || captured["end_exclusive_ms"] != end
+    {
+        return Err(reason.into());
+    }
+    let events: Vec<(u64, f64)> =
+        serde_json::from_value(captured["events"].clone()).map_err(|_| reason)?;
+    let mut previous = None;
+    for &(time, rate) in &events {
+        if time < start
+            || time >= end
+            || !rate.is_finite()
+            || previous.is_some_and(|prior| prior >= time)
+        {
+            return Err(reason.into());
+        }
+        previous = Some(time);
+    }
+    let hash = okx_research::canonical_sha256(&(
+        "okx.research.realized-funding-events/v1",
+        inputs["instrument"].as_str().ok_or(reason)?,
+        start,
+        end,
+        &events,
+    ))
+    .map_err(|error| error.to_string())?;
+    if captured["normalized_capture_hash"] != hash
+        || alignment["normalized_source_capture_hash"] != hash
+        || alignment["observed_events"] != events.len()
+    {
+        return Err(reason.into());
+    }
+    if !attribution_v1 {
+        // Older immutable experiments can prove event capture only, never
+        // claim to have passed the newer bar-by-bar attribution check.
+        return Ok((
+            json!({"artifact":id,"quality":"verified",
+            "observed_events":events.len(),"normalized_capture_hash":hash,
+            "replay_attribution_verified":false,
+            "publication_time_verified":false,"mark_price_verified":false}),
+            None,
+        ));
+    }
+    let bar_count = inputs["bar_count"].as_u64().ok_or(reason)?;
+    let bar_count = usize::try_from(bar_count).map_err(|_| reason)?;
+    let timeframe = inputs["timeframe_ms"].as_u64().ok_or(reason)?;
+    let first_bar = inputs["effective_range"]["start_ms"]
+        .as_u64()
+        .ok_or(reason)?;
+    let last_close = inputs["effective_range"]["end_ms"].as_u64().ok_or(reason)?;
+    if bar_count == 0
+        || bar_count > okx_research::economics::MAX_FUNDING_ALLOCATION_BARS
+        || timeframe == 0
+        || first_bar.checked_add((bar_count as u64).checked_mul(timeframe).ok_or(reason)?)
+            != Some(last_close)
+        || alignment["join_semantics"]
+            != "funding_event_at_preceding_closed_bar_end_no_forward_fill"
+        || alignment["source"] != "okx/funding-rate-history"
+        || alignment["rate_basis"] != "realized_settlement_rate"
+        || alignment["valuation_price"] != "candle_close_proxy_not_venue_mark_price"
+        || alignment["absence_semantics"] != "no_observed_settlement_event_not_observed_zero_rate"
+        || alignment["arithmetic_projection"]
+            != "unobserved_settlement_contributes_zero_cashflow_not_zero_rate_evidence"
+        || !alignment["expected_events"].is_null()
+        || alignment["publication_time_verified"] != false
+        || alignment["mark_price_verified"] != false
+        || alignment["historical_cadence_verified"] != false
+    {
+        return Err(reason.into());
+    }
+    let bar_opens = (0..bar_count)
+        .map(|index| first_bar + index as u64 * timeframe)
+        .collect::<Vec<_>>();
+    let allocation =
+        okx_research::economics::allocate_funding_at_bar_close(&bar_opens, timeframe, &events)
+            .map_err(|_| reason)?;
+    if alignment["attributed_events"] != allocation.attributed_events
+        || alignment["pre_window_events_ignored"] != allocation.pre_window_events
+        || alignment["observed_zero_rate_events"] != allocation.observed_zero_rate_events
+        || alignment["bars_without_settlement"] != allocation.bars_without_settlement
+        || alignment["first_event_ms"] != json!(allocation.first_event_ms)
+        || alignment["last_event_ms"] != json!(allocation.last_event_ms)
+        || alignment["max_observed_event_gap_ms"] != json!(allocation.max_observed_gap_ms)
+        || alignment["max_allowed_gap_ms"] != okx_research::economics::MAX_FUNDING_EVENT_GAP_MS
+    {
+        return Err(reason.into());
+    }
+    Ok((
+        json!({"artifact":id,"quality":"verified",
+        "observed_events":events.len(),"normalized_capture_hash":hash,
+        "replay_attribution_verified":true,
+        "attributed_events":allocation.attributed_events,
+        "observed_zero_rate_events":allocation.observed_zero_rate_events,
+        "bars_without_settlement":allocation.bars_without_settlement,
+        "publication_time_verified":false,"mark_price_verified":false}),
+        Some(allocation.observed_bar_rates),
+    ))
+}
+
+/// Verify the exact input bars used by replay from the original immutable
+/// pages. Never materialize the entire dataset; the same 4096-row hashing
+/// implementation that computed ReplayResult.dataset_hash is used here.
+/// Older experiment formats stay readable but never claim verified inputs.
+fn verify_experiment_dataset(
+    store: &ResearchArtifactStore,
+    inputs: &Value,
+    result: &Value,
+    expected_funding: Option<&[Option<f64>]>,
+) -> Result<Value, String> {
+    let id = inputs["dataset_artifact"]
+        .as_str()
+        .ok_or("EXPERIMENT_PROVENANCE_MISMATCH")?;
+    let dataset: Value = read_verified_result(store, id)?;
+    if dataset["schema"] != "okx.research.dataset/398.1" {
+        if expected_funding.is_some() {
+            return Err("EXPERIMENT_FUNDING_BAR_MISMATCH".into());
+        }
+        return Ok(json!({"artifact":id,"quality":"unverified_legacy",
+            "reason_code":"DATASET_SCHEMA_NOT_VERIFIABLE"}));
+    }
+    let invalid = || "EXPERIMENT_DATASET_MISMATCH".to_owned();
+    let timeframe = dataset["timeframe_ms"].as_u64().ok_or_else(invalid)?;
+    let start = dataset["start_ms"].as_u64().ok_or_else(invalid)?;
+    let end = dataset["end_ms"].as_u64().ok_or_else(invalid)?;
+    let expected = inputs["bar_count"].as_u64().ok_or_else(invalid)?;
+    if timeframe == 0
+        || end <= start
+        || expected == 0
+        || expected > 1_000_000
+        || dataset["instrument"] != inputs["instrument"]
+        || dataset["timeframe_ms"] != inputs["timeframe_ms"]
+        || dataset["start_ms"] != inputs["requested_range"]["start_ms"]
+        || dataset["end_ms"] != inputs["requested_range"]["end_ms"]
+    {
+        return Err(invalid());
+    }
+    let expected = usize::try_from(expected).map_err(|_| invalid())?;
+    if expected_funding.is_some_and(|rates| rates.len() != expected) {
+        return Err("EXPERIMENT_FUNDING_BAR_MISMATCH".into());
+    }
+    let pages = dataset["chunks"].as_array().ok_or_else(invalid)?;
+    if pages.len() != expected.div_ceil(4096) {
+        return Err("DATASET_PAGE_COUNT_MISMATCH".into());
+    }
+    let mut digest = ChunkedDataHash::new(expected);
+    let mut previous = None;
+    let mut first = None;
+    let mut observed_bars = 0usize;
+    for (index, reference) in pages.iter().enumerate() {
+        let reference = reference.as_str().ok_or_else(invalid)?;
+        let bars: Vec<Bar> = read_verified_result(store, reference)?;
+        if bars.is_empty() || bars.len() > 4096 || (index + 1 < pages.len() && bars.len() != 4096) {
+            return Err("DATASET_PAGE_SIZE_INVALID".into());
+        }
+        for bar in &bars {
+            if bar.time < start
+                || bar.time >= end
+                || !bar.time.is_multiple_of(timeframe)
+                || previous.is_some_and(|time: u64| time.checked_add(timeframe) != Some(bar.time))
+            {
+                return Err("DATASET_TIME_GRID_MISMATCH".into());
+            }
+            if let Some(projection) = expected_funding {
+                // A missing event is an arithmetic zero, but the event's
+                // presence is retained in `projection` for evidence.
+                if bar.funding_rate
+                    != projection
+                        .get(observed_bars)
+                        .map(|rate| Some(rate.unwrap_or(0.0)))
+                        .unwrap_or(None)
+                {
+                    return Err("EXPERIMENT_FUNDING_BAR_MISMATCH".into());
+                }
+            }
+            observed_bars += 1;
+            first.get_or_insert(bar.time);
+            previous = Some(bar.time);
+        }
+        digest.update(&bars)?;
+    }
+    let computed = digest.finish()?;
+    if observed_bars != expected {
+        return Err("DATASET_PAGE_SIZE_INVALID".into());
+    }
+    let last_closed = previous.and_then(|time| time.checked_add(timeframe));
+    if inputs["effective_range"]["start_ms"].as_u64() != first
+        || inputs["effective_range"]["end_ms"].as_u64() != last_closed
+        || result["dataset_hash"].as_str() != Some(computed.as_str())
+    {
+        return Err("EXPERIMENT_DATASET_MISMATCH".into());
+    }
+    Ok(
+        json!({"artifact":id,"quality":"verified","bar_count":expected,
+        "pages":pages.len(),"first_bar_ms":first,"last_closed_ms":last_closed,
+        "dataset_hash":computed,"hash_algorithm":"okx.typed.chunks/4096/v1",
+        "funding_bar_projection_verified":expected_funding.is_some()}),
+    )
 }
 
 impl AnalyticsService {
@@ -184,6 +482,7 @@ impl AnalyticsService {
                 "integrity":verify_export_manifest(&self.artifacts, &value)?,
                 "dataset_hash":value.get("dataset_hash"),
                 "result_hash":value.get("hash"),
+                "economic_audit":value.get("economic_audit"),
                 "code_version":value.get("code_version"),
                 "producer":value.get("producer"),
                 "experiment_artifact":value.get("experiment_artifact"),
@@ -194,6 +493,7 @@ impl AnalyticsService {
             "job_id":job_id,"artifact":artifact,
             "expires_at_ms":j.expires_at_ms,
             "summary":value.get("summary").or_else(||value.pointer("/test/summary")),
+            "economic_audit":value.get("economic_audit"),
             "grid":value.get("grid").map(|g| json!({
                 "selected":g.get("selected"),"train":g.get("train"),
                 "test":value.get("summary"),"split_index":g.get("split_index"),
@@ -223,6 +523,10 @@ impl AnalyticsService {
                     json!({
                         "index": row.get("index"),
                         "instrument": row.get("instrument"),
+                        "product": row.get("product"),
+                        "quote_currency": row.get("quote_currency"),
+                        "net_pnl_exact": row.pointer("/summary/pnl_exact"),
+                        "economic_audit": row.get("economic_audit"),
                         "state": row.get("state"),
                         "reason_code": row.get("reason_code"),
                         "artifact": row.get("artifact"),

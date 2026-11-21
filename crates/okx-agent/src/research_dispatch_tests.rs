@@ -2,7 +2,8 @@ use crate::research_client::{ResearchClient, ResearchClientConfig, SourceHandler
 use okx_protocol::{
     analytics::*,
     research_ipc::{
-        HistoryCandle, PublicCandleCapture, PublicSourceReply, PublicSourceRequest, ResearchScope,
+        FundingHistoryEvent, HistoryCandle, PublicCandleCapture, PublicFundingCapture,
+        PublicSourceReply, PublicSourceRequest, ResearchOpenInterest, ResearchScope,
     },
 };
 use serde_json::Value;
@@ -91,7 +92,7 @@ pub(super) fn grid(key: &str) -> ResearchRequest {
         end_ms: 12_000_000,
         strategy_id: "ema_cross_v1".into(),
         variants: (3..67)
-            .map(|slow| EmaParameters { fast: 2, slow })
+            .map(|slow| EmaParameters { fast: 2, slow }.into())
             .collect(),
         costs: costs(),
         data_mode: ResearchDataMode::Counterfactual,
@@ -207,7 +208,7 @@ async fn real_worker_decision_replay_and_scope_are_durable_without_source_reads(
         start_ms: 0,
         end_ms: 12_000_000,
         strategy_id: "ema_cross_v1".into(),
-        parameters: EmaParameters { fast: 2, slow: 3 },
+        parameters: EmaParameters { fast: 2, slow: 3 }.into(),
         costs: costs(),
         data_mode: ResearchDataMode::Counterfactual,
         seed: 7,
@@ -268,6 +269,555 @@ async fn real_worker_decision_replay_and_scope_are_durable_without_source_reads(
         calls.load(Ordering::SeqCst),
         before,
         "decision metadata cannot fetch source data"
+    );
+    client.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// T06/T09/T11: one real Agent -> child Worker IPC campaign. Historical
+/// observation timestamps may explain retrospective metrics, but cannot
+/// certify an OI/funding-derived decision signal. Counterfactual money is
+/// exact and currency-scoped; neither path can reach a financial writer.
+#[tokio::test]
+async fn t06_t09_real_worker_causality_and_economics_are_isolated() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let source: SourceHandler = Arc::new({
+        let reads = reads.clone();
+        move |request| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                match request {
+                    PublicSourceRequest::Candles { after, .. } => {
+                        let cursor = after.as_deref().unwrap_or("0").parse::<u64>().unwrap();
+                        let rows = (0..100u64)
+                            .rev()
+                            .filter(|i| i * 60_000 < cursor)
+                            .map(|i| HistoryCandle {
+                                open_time_ms: (i * 60_000).to_string(),
+                                open: (100 + i).to_string(),
+                                high: (102 + i).to_string(),
+                                low: (99 + i).to_string(),
+                                close: (101 + i).to_string(),
+                                volume: "1".into(),
+                                volume_currency: "1".into(),
+                                volume_quote: None,
+                                confirmed: true,
+                            })
+                            .collect();
+                        Ok(PublicSourceReply::Candles(PublicCandleCapture {
+                            raw_body: b"closed-candles".to_vec(),
+                            rows,
+                            acquired_at_ms: "9000000".into(),
+                        }))
+                    }
+                    PublicSourceRequest::OpenInterest { .. } => {
+                        Ok(PublicSourceReply::OpenInterest(
+                            (0..100u64)
+                                .map(|i| ResearchOpenInterest {
+                                    ts: (i * 60_000).to_string(),
+                                    oi: (100 + i).to_string(),
+                                    oi_currency: (100 + i).to_string(),
+                                })
+                                .collect(),
+                        ))
+                    }
+                    PublicSourceRequest::Funding { after, .. } => {
+                        let cursor = after.as_deref().unwrap_or("0").parse::<u64>().unwrap();
+                        let rows = [60_000u64, 99 * 60_000]
+                            .into_iter()
+                            .filter(|time| *time < cursor)
+                            .map(|time| FundingHistoryEvent {
+                                funding_time_ms: time.to_string(),
+                                funding_rate: "0.002".into(),
+                                realized_rate: Some("0.001".into()),
+                                formula_type: None,
+                                method: None,
+                            })
+                            .collect();
+                        Ok(PublicSourceReply::Funding(PublicFundingCapture {
+                            raw_body: b"realized-funding".to_vec(),
+                            rows,
+                            acquired_at_ms: "9000000".into(),
+                        }))
+                    }
+                    _ => Err("UNEXPECTED_SOURCE".into()),
+                }
+            })
+        }
+    });
+    let (root, client) = fixture(source);
+    let market_request: MarketRequest = serde_json::from_value(serde_json::json!({
+        "action":"screen","instruments":["BTC-USDT-SWAP"],"fields":["returns"],
+        "timeframe_ms":60000,"start_ms":0,"end_ms":6000000,"limit":1,
+        "composition":{"version":"okx.market.composition/v1","steps":[
+            {"id":"price_change","op":"returns_series","input":"close"},
+            {"id":"price_signal","op":"greater_than","input":"price_change","threshold":0},
+            {"id":"oi_change","op":"returns_series","input":"open_interest"},
+            {"id":"oi_signal","op":"greater_than","input":"oi_change","threshold":0},
+            {"id":"funding_observed","op":"rolling_mean","input":"funding_rate","period":1},
+            {"id":"funding_signal","op":"greater_than","input":"funding_rate","threshold":0}
+        ],"result_steps":["price_signal","oi_change","oi_signal","funding_observed","funding_signal"]}
+    })).unwrap();
+    assert!(market_request.valid());
+    let mut market = client
+        .market(market_request.clone(), None, None)
+        .await
+        .unwrap();
+    if market["rows"].is_null() {
+        let job_id = market["id"].as_str().expect("queued market job ID");
+        assert_eq!(terminal(&client, job_id).await["state"], "completed");
+        market = client.market(market_request, None, None).await.unwrap();
+    }
+    let row = &market["rows"][0];
+    assert_eq!(row["metrics"]["price_signal"], true);
+    assert_eq!(
+        row["composition_quality"]["price_signal"]["status"],
+        "available_at_closed_bar"
+    );
+    assert!(row["metrics"]["oi_change"].is_number());
+    assert_eq!(
+        row["composition_quality"]["oi_change"]["status"],
+        "retrospective_publication_unverified"
+    );
+    assert!(
+        (row["metrics"]["funding_observed"].as_f64().unwrap() - 0.001).abs() < 1e-12,
+        "funding uses realized_rate, never the conflicting 0.002 forecast"
+    );
+    assert_eq!(
+        row["composition_quality"]["funding_observed"]["status"],
+        "retrospective_publication_unverified"
+    );
+    for signal in ["oi_signal", "funding_signal"] {
+        assert!(
+            row["metrics"][signal].is_null(),
+            "{signal} cannot be a causal signal"
+        );
+        assert_eq!(
+            row["composition_quality"][signal]["issues"][0]["reason"],
+            "CAUSAL_PUBLICATION_TIME_UNVERIFIED"
+        );
+    }
+    assert_eq!(
+        row["source_integrity"]["quality"],
+        "verified_normalized_sources"
+    );
+    assert_eq!(
+        row["source_integrity"]["historical_publication_time_verified"],
+        false
+    );
+    assert_eq!(
+        row["source_integrity"]["metric_reexecution"]["quality"],
+        "verified_reexecution"
+    );
+    let source_reads = reads.load(Ordering::SeqCst);
+    assert!(source_reads >= 3);
+
+    let cases = serde_json::json!([{
+        "instrument":"BTC-USDT-SWAP","product":"linear_swap","side":"long",
+        "quantity":"3","entry_price":"100","exit_price":"110",
+        "contract_type":"linear","contract_value":"0.1",
+        "contract_value_currency":"BTC","settle_currency":"USDT",
+        "fees":{"currency":"USDT","amount":"0"},
+        "funding":{"currency":"USDT","amount":"0"}
+    },{
+        "instrument":"ETH-USD","product":"spot","side":"long",
+        "quantity":"1","entry_price":"20","exit_price":"22",
+        "fees":{"currency":"USD","amount":"0"},
+        "funding":{"currency":"USD","amount":"0"}
+    }]);
+    let counterfactual: ResearchRequest = serde_json::from_value(serde_json::json!({
+        "action":"economics","cases":cases,"data_mode":"counterfactual"
+    }))
+    .unwrap();
+    assert!(counterfactual.valid());
+    let economy = client.research(counterfactual).await.unwrap();
+    assert_eq!(economy["rows"][0]["net"]["amount_exact"], "3");
+    assert_eq!(economy["rows"][0]["net"]["currency"], "USDT");
+    assert_eq!(economy["rows"][1]["net"]["amount_exact"], "2");
+    assert_eq!(economy["rows"][1]["net"]["currency"], "USD");
+    assert!(economy["portfolio_equity"].is_null());
+    assert!(economy["joint_portfolio_risk"].is_null());
+    assert_eq!(
+        economy["summary"]["aggregation"],
+        "independent_positions_no_fx_no_joint_risk"
+    );
+    assert_eq!(economy["effects"]["venue_posts"], 0);
+    assert_eq!(economy["effects"]["finance_writes"], 0);
+
+    let historical: ResearchRequest = serde_json::from_value(serde_json::json!({
+        "action":"economics","cases":cases,"data_mode":"historical_observed"
+    }))
+    .unwrap();
+    let blocked = client.research(historical).await.unwrap();
+    assert_eq!(blocked["status"], "blocked");
+    assert_eq!(
+        blocked["reason_code"],
+        "HISTORICAL_RULES_AND_FEES_UNAVAILABLE"
+    );
+    assert_eq!(blocked["effects"]["job_created"], false);
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        source_reads,
+        "economic scenario must not read venues or create hidden sources"
+    );
+    client.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// T04/T06/T13: the real Agent -> Worker route must keep each instrument's
+/// source grid and provenance separate. An OI point one millisecond off the
+/// candle grid is missing, not a nearest-neighbour historical observation.
+#[tokio::test]
+async fn t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated() {
+    let candle_reads = Arc::new(AtomicUsize::new(0));
+    let oi_reads = Arc::new(AtomicUsize::new(0));
+    let source: SourceHandler = Arc::new({
+        let candle_reads = candle_reads.clone();
+        let oi_reads = oi_reads.clone();
+        move |request| {
+            let candle_reads = candle_reads.clone();
+            let oi_reads = oi_reads.clone();
+            Box::pin(async move {
+                match request {
+                    PublicSourceRequest::Candles { after, .. } => {
+                        candle_reads.fetch_add(1, Ordering::SeqCst);
+                        let cursor = after.as_deref().unwrap_or("0").parse::<u64>().unwrap();
+                        let rows = (0..100u64)
+                            .rev()
+                            .filter(|index| index * 60_000 < cursor)
+                            .map(|index| HistoryCandle {
+                                open_time_ms: (index * 60_000).to_string(),
+                                open: (100 + index).to_string(),
+                                high: (102 + index).to_string(),
+                                low: (99 + index).to_string(),
+                                close: (101 + index).to_string(),
+                                volume: "1".into(),
+                                volume_currency: "1".into(),
+                                volume_quote: None,
+                                confirmed: true,
+                            })
+                            .collect();
+                        Ok(PublicSourceReply::Candles(PublicCandleCapture {
+                            raw_body: b"two-instrument-candles".to_vec(),
+                            rows,
+                            acquired_at_ms: "9000000".into(),
+                        }))
+                    }
+                    PublicSourceRequest::OpenInterest { instrument, .. } => {
+                        oi_reads.fetch_add(1, Ordering::SeqCst);
+                        let shifted = instrument == "ETH-USDT-SWAP";
+                        Ok(PublicSourceReply::OpenInterest(
+                            (0..100u64)
+                                .map(|index| ResearchOpenInterest {
+                                    ts: (index * 60_000 + u64::from(shifted && index == 42))
+                                        .to_string(),
+                                    oi: (100 + index).to_string(),
+                                    oi_currency: (100 + index).to_string(),
+                                })
+                                .collect(),
+                        ))
+                    }
+                    _ => Err("UNEXPECTED_SOURCE".into()),
+                }
+            })
+        }
+    });
+    let (root, client) = fixture(source);
+    let request: MarketRequest = serde_json::from_value(serde_json::json!({
+        "action":"screen",
+        "instruments":["BTC-USDT-SWAP","ETH-USDT-SWAP"],
+        "fields":["returns"],"timeframe_ms":60000,
+        "start_ms":0,"end_ms":6000000,"limit":2,
+        "composition":{"version":"okx.market.composition/v1","steps":[
+            {"id":"price_return","op":"returns_series","input":"close"},
+            {"id":"price_signal","op":"greater_than","input":"price_return","threshold":0},
+            {"id":"oi_return","op":"returns_series","input":"open_interest"},
+            {"id":"oi_signal","op":"greater_than","input":"oi_return","threshold":0}
+        ],"result_steps":["price_signal","oi_return","oi_signal"]}
+    }))
+    .unwrap();
+    assert!(request.valid());
+    let mut result = client.market(request.clone(), None, None).await.unwrap();
+    if result["rows"].is_null() {
+        let id = result["id"].as_str().expect("queued market job ID");
+        assert_eq!(terminal(&client, id).await["state"], "completed");
+        result = client.market(request.clone(), None, None).await.unwrap();
+    }
+    // A full provenance row may exceed the response byte budget. Cursor
+    // pagination must replay the immutable artifact, never refetch venues.
+    let source_read_count = (
+        candle_reads.load(Ordering::SeqCst),
+        oi_reads.load(Ordering::SeqCst),
+    );
+    let mut rows = Vec::new();
+    loop {
+        rows.extend(
+            result["rows"]
+                .as_array()
+                .expect("market result rows")
+                .iter()
+                .cloned(),
+        );
+        let Some(cursor) = result["next_cursor"].as_str() else {
+            break;
+        };
+        let mut next = request.clone();
+        next.cursor = Some(cursor.to_owned());
+        result = client.market(next, None, None).await.unwrap();
+    }
+    assert_eq!(
+        (
+            candle_reads.load(Ordering::SeqCst),
+            oi_reads.load(Ordering::SeqCst)
+        ),
+        source_read_count,
+        "cursor pages must read immutable evidence without refetching venues"
+    );
+    assert_eq!(rows.len(), 2, "{result}");
+    let row = |instrument: &str| {
+        rows.iter()
+            .find(|row| row["instrument"] == instrument)
+            .expect("instrument must retain its own result")
+    };
+    let aligned = row("BTC-USDT-SWAP");
+    let shifted = row("ETH-USDT-SWAP");
+    for observed in [aligned, shifted] {
+        assert_eq!(observed["metrics"]["price_signal"], true);
+        assert_eq!(
+            observed["composition_quality"]["price_signal"]["status"],
+            "available_at_closed_bar"
+        );
+        assert!(observed["metrics"]["oi_signal"].is_null());
+        assert_eq!(
+            observed["source_integrity"]["historical_publication_time_verified"],
+            false
+        );
+        assert_eq!(
+            observed["source_integrity"]["metric_reexecution"]["quality"],
+            "verified_reexecution"
+        );
+    }
+    assert!(aligned["metrics"]["oi_return"].is_number());
+    assert_eq!(aligned["source_alignment"]["aligned_observations"], 100);
+    assert_eq!(aligned["source_alignment"]["oi_off_grid_events"], 0);
+    assert_eq!(
+        aligned["composition_quality"]["oi_signal"]["issues"][0]["reason"],
+        "CAUSAL_PUBLICATION_TIME_UNVERIFIED"
+    );
+
+    assert!(shifted["metrics"]["oi_return"].is_null());
+    assert_eq!(shifted["source_alignment"]["aligned_observations"], 99);
+    assert_eq!(shifted["source_alignment"]["oi_off_grid_events"], 1);
+    assert_eq!(
+        shifted["source_alignment"]["oi_first_off_grid_ms"],
+        42 * 60_000 + 1
+    );
+    assert_eq!(
+        shifted["source_alignment"]["first_unaligned_ms"],
+        42 * 60_000
+    );
+    assert_eq!(shifted["oi_coverage"]["first_missing_ms"], 42 * 60_000);
+    assert_eq!(
+        shifted["composition_quality"]["oi_return"]["issues"][0]["reason"],
+        "OI_RANGE_INCOMPLETE_OR_GAPPED"
+    );
+    assert_ne!(
+        aligned["source_captures"]["open_interest"]["capture_hash"],
+        shifted["source_captures"]["open_interest"]["capture_hash"]
+    );
+    assert_eq!(
+        candle_reads.load(Ordering::SeqCst),
+        2,
+        "each instrument reads its candles once"
+    );
+    assert_eq!(
+        oi_reads.load(Ordering::SeqCst),
+        2,
+        "each instrument reads its OI once"
+    );
+    client.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// T07/T08/T10/T13: one captured 1,440-bar market is used by the real child
+/// Worker for both a causal event/unknown outcome and a train-only Grid. The
+/// second instrument has the identical train prefix but a different holdout.
+/// Neither an outcome label nor the changed holdout can choose a strategy.
+#[tokio::test]
+async fn t07_t08_real_worker_intraday_event_and_holdout_stay_separate() {
+    const BARS: u64 = 1_440;
+    const SPLIT: u64 = BARS * 7 / 10;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let source: SourceHandler = Arc::new({
+        let reads = reads.clone();
+        move |request| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let PublicSourceRequest::Candles {
+                    instrument, after, ..
+                } = request
+                else {
+                    return Err("UNEXPECTED_SOURCE".into());
+                };
+                let altered_holdout = instrument == "ETH-USDT";
+                let cursor = after.as_deref().unwrap_or("0").parse::<u64>().unwrap();
+                let rows = (0..BARS)
+                    .rev()
+                    .filter(|index| index * 60_000 < cursor)
+                    .take(100)
+                    .map(|index| {
+                        let mut close =
+                            100.0 + index as f64 * 0.03 + ((index % 13) as f64 - 6.0) * 0.8;
+                        if altered_holdout && index >= SPLIT {
+                            close += 30.0 + (index % 17) as f64 * 0.2;
+                        }
+                        // The final closed candle is a new, known event. Its
+                        // two-bar future label is *not* known or available.
+                        if index == BARS - 1 {
+                            close = 500.0;
+                        }
+                        HistoryCandle {
+                            open_time_ms: (index * 60_000).to_string(),
+                            open: close.to_string(),
+                            high: (close + 1.0).to_string(),
+                            low: (close - 1.0).to_string(),
+                            close: close.to_string(),
+                            volume: "1".into(),
+                            volume_currency: "1".into(),
+                            volume_quote: None,
+                            confirmed: true,
+                        }
+                    })
+                    .collect();
+                Ok(PublicSourceReply::Candles(PublicCandleCapture {
+                    raw_body: b"intraday-train-holdout".to_vec(),
+                    rows,
+                    acquired_at_ms: "90000000".into(),
+                }))
+            })
+        }
+    });
+    let (root, client) = fixture(source);
+    let market_request: MarketRequest = serde_json::from_value(serde_json::json!({
+        "action":"screen","instruments":["BTC-USDT"],"fields":["returns"],
+        "timeframe_ms":60000,"start_ms":0,"end_ms":BARS * 60_000,
+        "composition":{"version":"okx.market.composition/v1","steps":[
+            {"id":"change","op":"returns_series","input":"close"},
+            {"id":"jump","op":"greater_than","input":"change","threshold":0.4},
+            {"id":"event","op":"rising_edge","input":"jump"},
+            {"id":"label","op":"forward_return_label","input":"close","when":"event","period":2}
+        ],"result_steps":["jump","event","label"]}
+    }))
+    .unwrap();
+    assert!(market_request.valid());
+    let mut market = client
+        .market(market_request.clone(), None, None)
+        .await
+        .unwrap();
+    if market["rows"].is_null() {
+        let job_id = market["id"].as_str().expect("queued market job ID");
+        assert_eq!(terminal(&client, job_id).await["state"], "completed");
+        market = client.market(market_request, None, None).await.unwrap();
+    }
+    let event = &market["rows"][0];
+    assert_eq!(event["candle_coverage"]["expected_bars"], BARS);
+    assert_eq!(event["candle_coverage"]["observed_unique_bars"], BARS);
+    assert_eq!(event["metrics"]["jump"], true);
+    assert_eq!(event["metrics"]["event"], true);
+    assert_eq!(
+        event["composition_quality"]["event"]["status"],
+        "available_at_closed_bar"
+    );
+    assert!(event["metrics"]["label"].is_null());
+    assert_eq!(event["units"]["label"], "outcome_ratio");
+    assert!(
+        event["gaps"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("OUTCOME_UNCONFIRMED:label"))
+    );
+    assert_eq!(
+        event["source_integrity"]["metric_reexecution"]["quality"],
+        "verified_reexecution"
+    );
+
+    let submit = |instrument: &str, key: &str| -> ResearchRequest {
+        serde_json::from_value(serde_json::json!({
+            "action":"grid","idempotency_key":key,
+            "instruments":[instrument],"timeframe_ms":60000,
+            "start_ms":0,"end_ms":BARS * 60_000,
+            "strategy_id":"close_breakout_v1",
+            "variants":[{"lookback":2},{"lookback":3},{"lookback":5}],
+            "costs":{"maker_fee_bps":0,"taker_fee_bps":0,
+                "slippage_bps":0,"funding_mode":"zero_assumption"},
+            "data_mode":"counterfactual","seed":17
+        }))
+        .unwrap()
+    };
+    let baseline_request = submit("BTC-USDT", "ipc-intraday-oos-baseline");
+    let altered_request = submit("ETH-USDT", "ipc-intraday-oos-altered");
+    assert!(baseline_request.valid() && altered_request.valid());
+    let baseline = client.research(baseline_request).await.unwrap();
+    let altered = client.research(altered_request).await.unwrap();
+    let baseline_id = baseline["id"].as_str().expect("baseline job ID");
+    let altered_id = altered["id"].as_str().expect("holdout job ID");
+    assert_eq!(terminal(&client, baseline_id).await["state"], "completed");
+    assert_eq!(terminal(&client, altered_id).await["state"], "completed");
+    let view = |job_id: &str, kind: ResearchResultView| ResearchRequest::Result {
+        job_id: job_id.into(),
+        cursor: None,
+        limit: 50,
+        view: kind,
+    };
+    let baseline_summary = client
+        .research(view(baseline_id, ResearchResultView::Summary))
+        .await
+        .unwrap();
+    let altered_summary = client
+        .research(view(altered_id, ResearchResultView::Summary))
+        .await
+        .unwrap();
+    let before = &baseline_summary["metadata"];
+    let after = &altered_summary["metadata"];
+    assert_eq!(before["grid"]["split_index"], SPLIT);
+    assert_eq!(after["grid"]["split_index"], SPLIT);
+    assert_eq!(before["grid"]["selected"], after["grid"]["selected"]);
+    assert_eq!(
+        before["grid"]["train_dataset_hash"],
+        after["grid"]["train_dataset_hash"]
+    );
+    assert_eq!(before["grid"]["train"], after["grid"]["train"]);
+    assert_ne!(
+        before["dataset_hash"], after["dataset_hash"],
+        "only holdout observations changed"
+    );
+    let baseline_variants = client
+        .research(view(baseline_id, ResearchResultView::Variants))
+        .await
+        .unwrap();
+    let altered_variants = client
+        .research(view(altered_id, ResearchResultView::Variants))
+        .await
+        .unwrap();
+    assert_eq!(baseline_variants["total_rows"], 3);
+    assert_eq!(altered_variants["total_rows"], 3);
+    for index in 0..3 {
+        let first = &baseline_variants["rows"][index];
+        let second = &altered_variants["rows"][index];
+        assert_eq!(first["parameters"], second["parameters"]);
+        assert_eq!(first["train_result_hash"], second["train_result_hash"]);
+        assert_eq!(first["train"], second["train"]);
+    }
+    let exported = client
+        .research(view(baseline_id, ResearchResultView::Export))
+        .await
+        .unwrap();
+    assert_eq!(exported["side_effects"], "none");
+    assert!(exported["experiment_artifact"].is_string());
+    assert!(exported["economic_audit"].is_object());
+    assert!(
+        reads.load(Ordering::SeqCst) >= 30,
+        "both 1,440-bar datasets must be acquired through real paged IPC"
     );
     client.shutdown().await;
     std::fs::remove_dir_all(root).unwrap();

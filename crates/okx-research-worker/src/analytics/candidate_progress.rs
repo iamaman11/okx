@@ -119,7 +119,7 @@ mod tests {
     fn fixture() -> (
         Vec<replay::Bar>,
         replay::ReplaySpec,
-        Vec<okx_analysis::operators::EmaParameters>,
+        Vec<okx_protocol::analytics::StrategyParameters>,
     ) {
         let bars = (0..200)
             .map(|i| replay::Bar {
@@ -133,11 +133,11 @@ mod tests {
             })
             .collect();
         let variants = (3..67)
-            .map(|slow| okx_analysis::operators::EmaParameters { fast: 2, slow })
+            .map(|slow| okx_analysis::operators::EmaParameters { fast: 2, slow }.into())
             .collect();
         let spec = replay::ReplaySpec {
             strategy_id: "ema_cross_v1".into(),
-            parameters: okx_analysis::operators::EmaParameters { fast: 2, slow: 3 },
+            parameters: okx_analysis::operators::EmaParameters { fast: 2, slow: 3 }.into(),
             mechanics: replay::Mechanics::Linear {
                 contract_multiplier: 1.0,
             },
@@ -316,7 +316,7 @@ mod tests {
             end_ms: 12_000_000,
             strategy_id: "ema_cross_v1".into(),
             variants: (3..67)
-                .map(|slow| EmaParameters { fast: 2, slow })
+                .map(|slow| EmaParameters { fast: 2, slow }.into())
                 .collect(),
             costs: ResearchCosts {
                 maker_fee_bps: 1.0,

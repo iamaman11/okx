@@ -149,7 +149,7 @@ mod heavy_fixtures {
         );
         let spec = ReplaySpec {
             strategy_id: "ema_cross_v1".into(),
-            parameters: EmaParameters { fast: 10, slow: 30 },
+            parameters: EmaParameters { fast: 10, slow: 30 }.into(),
             mechanics: Mechanics::Spot,
             costs: Costs {
                 maker_fee_bps: 0.0,
@@ -166,13 +166,17 @@ mod heavy_fixtures {
             take_profit_fraction: None,
         };
         let variants = (0..64)
-            .map(|i| EmaParameters {
-                fast: i + 1,
-                slow: i + 101,
+            .map(|i| {
+                EmaParameters {
+                    fast: i + 1,
+                    slow: i + 101,
+                }
+                .into()
             })
             .collect::<Vec<_>>();
         let mut stop_times = Vec::new();
         let mut cancel_times = Vec::new();
+        let memory_before = super::super::resource_observation::observe();
         for iteration in 0..35 {
             let cpu = CpuExecutor {
                 cpu: Arc::new(Semaphore::new(2)),
@@ -237,11 +241,17 @@ mod heavy_fixtures {
         let cancel_samples_ms = cancel_times.clone();
         stop_times.sort_by(f64::total_cmp);
         cancel_times.sort_by(f64::total_cmp);
+        let memory_after = super::super::resource_observation::observe();
+        #[cfg(target_os = "linux")]
+        assert!(
+            memory_after.resident_bytes.is_some() && memory_after.peak_resident_bytes.is_some(),
+            "T10 Linux stress evidence requires an actual kernel RSS observation"
+        );
         assert!(stop_times[28] <= 100.0);
         assert!(cancel_times[29] <= 1000.0);
         println!(
             "ANALYTICS_PERF_JSON:{}",
-            serde_json::json!({"two_heavy_stop":{"build":if cfg!(debug_assertions){"debug"}else{"release"},"os":std::env::consts::OS,"logical_cpus":std::thread::available_parallelism().map_or(1,|x|x.get()),"warmups":5,"measurements":30,"p50_ms":stop_times[14],"p95_ms":stop_times[28],"max_ms":stop_times[29],"cancel_p95_ms":cancel_times[28],"cancel_max_ms":cancel_times[29],"stop_samples_ms":stop_samples_ms,"cancel_samples_ms":cancel_samples_ms,"stage":"two actual causal grid jobs on blocking workers plus simulated typed ingestion; no exchange HTTP"}})
+            serde_json::json!({"two_heavy_stop":{"build":if cfg!(debug_assertions){"debug"}else{"release"},"os":std::env::consts::OS,"logical_cpus":std::thread::available_parallelism().map_or(1,|x|x.get()),"warmups":5,"measurements":30,"p50_ms":stop_times[14],"p95_ms":stop_times[28],"max_ms":stop_times[29],"cancel_p95_ms":cancel_times[28],"cancel_max_ms":cancel_times[29],"stop_samples_ms":stop_samples_ms,"cancel_samples_ms":cancel_samples_ms,"process_memory":{"measurement_source":memory_after.source,"scope":"whole_process_including_test_harness","rss_before_bytes":memory_before.resident_bytes,"rss_after_bytes":memory_after.resident_bytes,"peak_rss_before_bytes":memory_before.peak_resident_bytes,"peak_rss_after_bytes":memory_after.peak_resident_bytes,"reservation_not_rss_limit":true},"stage":"two actual causal grid jobs on blocking workers plus simulated typed ingestion; no exchange HTTP"}})
         );
     }
 }

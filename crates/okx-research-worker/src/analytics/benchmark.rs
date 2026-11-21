@@ -6,7 +6,7 @@ use std::{
 };
 
 use futures_util::{StreamExt, stream};
-use okx_analysis::operators::EmaParameters;
+use okx_analysis::operators::{EmaParameters, StrategyParameters};
 use okx_research::{
     ResearchArtifactStore,
     strategy_registry::{self as replay, Bar, Costs, Mechanics, ReplaySpec},
@@ -29,6 +29,9 @@ pub(super) async fn run(
     cancel: Arc<super::executor::Cancel>,
     producer: Option<crate::producer::Producer>,
 ) -> Result<String, String> {
+    // Baseline precedes the eight-instrument source allocation. High-water
+    // changes during fixture construction must be visible in the report.
+    let before = super::resource_observation::observe();
     // Run source construction on the existing bounded CPU executor, not on
     // the WSS/SQL/REST async control thread. Fixture never contacts an exchange.
     let source = cpu
@@ -69,15 +72,18 @@ pub(super) async fn run(
     let sources = Arc::new(sources);
     let variants = Arc::new(
         (0..VARIANTS)
-            .map(|i| EmaParameters {
-                fast: 2 + i % 16,
-                slow: 40 + i,
+            .map(|i| {
+                EmaParameters {
+                    fast: 2 + i % 16,
+                    slow: 40 + i,
+                }
+                .into()
             })
             .collect::<Vec<_>>(),
     );
     let spec = Arc::new(ReplaySpec {
         strategy_id: "ema_cross_v1".into(),
-        parameters: EmaParameters { fast: 20, slow: 50 },
+        parameters: EmaParameters { fast: 20, slow: 50 }.into(),
         mechanics: Mechanics::Linear {
             contract_multiplier: 0.01,
         },
@@ -99,7 +105,8 @@ pub(super) async fn run(
     let cpu_workers = cpu_worker_budget(logical_cpus);
     let mut profile_rows = Vec::new();
     let mut expected_hashes: Option<Vec<String>> = None;
-    let mut peak_working_set_bytes = process_peak_working_set_bytes();
+    let mut measured = before;
+    let mut peak_working_set_bytes = before.peak_resident_bytes;
     for requested_workers in [1usize, 4, 8]
         .into_iter()
         .filter(|count| *count <= cpu_workers)
@@ -129,9 +136,11 @@ pub(super) async fn run(
             if iteration >= WARMUPS {
                 raw_ms.push(began.elapsed().as_secs_f64() * 1000.0);
             }
-            peak_working_set_bytes = process_peak_working_set_bytes()
-                .or(peak_working_set_bytes)
-                .map(|rss| rss.max(peak_working_set_bytes.unwrap_or_default()));
+            measured = super::resource_observation::observe();
+            peak_working_set_bytes = match (peak_working_set_bytes, measured.peak_resident_bytes) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                (left, right) => left.or(right),
+            };
         }
         let mut sorted = raw_ms.clone();
         sorted.sort_by(f64::total_cmp);
@@ -167,8 +176,23 @@ pub(super) async fn run(
         "operating_system": std::env::consts::OS,
         "logical_cpus": logical_cpus,
         "cpu_workers": cpu_workers,
-        "physical_memory_bytes": physical_memory_bytes(),
+        "physical_memory_bytes": measured.physical_memory_bytes,
         "peak_process_working_set_bytes": peak_working_set_bytes,
+        "process_memory_observation": {
+            "scope":"whole_process_not_attributed_to_this_job",
+            "source":measured.source,
+            "before_peak_bytes":before.peak_resident_bytes,
+            "before_resident_bytes":before.resident_bytes,
+            "after_resident_bytes":measured.resident_bytes,
+            "after_peak_bytes":measured.peak_resident_bytes,
+            "observed_peak_increase_bytes":match (before.peak_resident_bytes,peak_working_set_bytes) {
+                (Some(a),Some(b)) => Some(b.saturating_sub(a)),
+                _ => None
+            },
+            "research_estimate_is_not_observed_rss":true,
+            "measurement_quality":if peak_working_set_bytes.is_some() {"process_observed"} else {"not_evaluated"},
+            "hard_process_rss_limit_enforced":false
+        },
         "research_memory_reserved_mib": 3072,
         "research_memory_limit_mib": super::budget::MEMORY_TOTAL_MIB,
         "data_source": "deterministic_local_fixture_no_http",
@@ -193,7 +217,7 @@ pub(super) async fn run(
             "producer": producer,
             "summary": summary,
             "hash": result_hash,
-            "code_version": "448-k9-native/v1"
+            "code_version": "518.5-k9-native-process-memory/v1"
         }))
         .map(|(id, _)| id)
         .map_err(|e| e.to_string())
@@ -204,7 +228,7 @@ pub(super) async fn run(
 async fn run_grid(
     cpu: &CpuExecutor,
     sources: &Arc<Vec<Arc<Vec<Bar>>>>,
-    variants: &Arc<Vec<EmaParameters>>,
+    variants: &Arc<Vec<StrategyParameters>>,
     spec: &Arc<ReplaySpec>,
     cancel: Arc<super::executor::Cancel>,
     workers: usize,
@@ -232,94 +256,4 @@ async fn run_grid(
         hashes[index] = hash;
     }
     Ok(hashes)
-}
-
-#[cfg(windows)]
-fn process_peak_working_set_bytes() -> Option<usize> {
-    #[repr(C)]
-    struct Counters {
-        cb: u32,
-        faults: u32,
-        peak: usize,
-        working: usize,
-        paged_peak: usize,
-        paged: usize,
-        nonpaged_peak: usize,
-        nonpaged: usize,
-        pagefile: usize,
-        pagefile_peak: usize,
-    }
-    #[link(name = "psapi")]
-    unsafe extern "system" {
-        fn GetProcessMemoryInfo(
-            process: *mut core::ffi::c_void,
-            counters: *mut Counters,
-            size: u32,
-        ) -> i32;
-    }
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetCurrentProcess() -> *mut core::ffi::c_void;
-    }
-    let mut counters = Counters {
-        cb: std::mem::size_of::<Counters>() as u32,
-        faults: 0,
-        peak: 0,
-        working: 0,
-        paged_peak: 0,
-        paged: 0,
-        nonpaged_peak: 0,
-        nonpaged: 0,
-        pagefile: 0,
-        pagefile_peak: 0,
-    };
-    let ok = unsafe {
-        GetProcessMemoryInfo(
-            GetCurrentProcess(),
-            &mut counters,
-            std::mem::size_of::<Counters>() as u32,
-        )
-    };
-    (ok != 0).then_some(counters.peak)
-}
-#[cfg(not(windows))]
-fn process_peak_working_set_bytes() -> Option<usize> {
-    None
-}
-
-#[cfg(windows)]
-fn physical_memory_bytes() -> Option<u64> {
-    #[repr(C)]
-    struct Status {
-        length: u32,
-        load: u32,
-        total_phys: u64,
-        avail_phys: u64,
-        total_pagefile: u64,
-        avail_pagefile: u64,
-        total_virtual: u64,
-        avail_virtual: u64,
-        avail_extended: u64,
-    }
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GlobalMemoryStatusEx(status: *mut Status) -> i32;
-    }
-    let mut status = Status {
-        length: std::mem::size_of::<Status>() as u32,
-        load: 0,
-        total_phys: 0,
-        avail_phys: 0,
-        total_pagefile: 0,
-        avail_pagefile: 0,
-        total_virtual: 0,
-        avail_virtual: 0,
-        avail_extended: 0,
-    };
-    let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
-    (ok != 0).then_some(status.total_phys)
-}
-#[cfg(not(windows))]
-fn physical_memory_bytes() -> Option<u64> {
-    None
 }

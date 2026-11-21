@@ -100,9 +100,18 @@ def checked_schema_negative(route,arguments,response,proof,executed_tests,tool_c
         root=next((tool["inputSchema"] for tool in tool_contract["tools"]
                    if tool.get("name")=="accounts"),{})
         selector={"type":"string","pattern":"^link_[a-f0-9]{32}$"}
+        def exact_link_selector(value):
+            if value==selector:
+                return True
+            if not isinstance(value,dict) or set(value)!={"$ref"}:
+                return False
+            ref=value["$ref"]
+            prefix="#/$defs/"
+            return (isinstance(ref,str) and ref.startswith(prefix)
+                    and root.get("$defs",{}).get(ref[len(prefix):])==selector)
         if (root.get("type")!="object" or root.get("additionalProperties") is not False
-            or root.get("properties",{}).get("link_id")!=selector
-            or selected[0]["properties"].get("link_id")!=selector):
+            or not exact_link_selector(root.get("properties",{}).get("link_id"))
+            or not exact_link_selector(selected[0]["properties"].get("link_id"))):
             return False
     error=response["tool_error"]
     return (isinstance(error,str)
@@ -652,6 +661,18 @@ def self_test():
                 "accounts.status",{"action":"status","raw_rpc":"forbidden"},
                 {"tool_error":"not valid under any of the given schemas"},
                 proof,{"strict_action_fixtures"},contract))
+            # Referenced host selectors must resolve to the exact link ID
+            # pattern. A relaxed $defs entry cannot certify a schema refusal.
+            altered=json.loads(json.dumps(contract))
+            account=next(t for t in altered["tools"] if t["name"]=="accounts")
+            self.assertIn("l",account["inputSchema"].get("$defs",{}))
+            account["inputSchema"]["$defs"]["l"]["pattern"]=".*"
+            args={"action":"list","raw_rpc":"forbidden"}
+            response={"tool_error":repr(args)+" is not valid under any of the given schemas\n"
+                      "Failed validating 'oneOf' in schema:\n"
+                      " {'additionalProperties': False}\nOn instance:\n"+repr(args)}
+            self.assertFalse(checked_schema_negative(
+                "accounts.list",args,response,proof,{"strict_action_fixtures"},altered))
         def test_schema_negative_rejects_relaxed_contract_and_spoofed_result(self):
             contract=json.loads((ROOT/"cloudflare/okx-mcp/contracts/tools.schema.json").read_text(encoding="utf-8-sig"))
             contract=json.loads(json.dumps(contract))

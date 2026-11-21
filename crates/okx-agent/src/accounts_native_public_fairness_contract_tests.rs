@@ -1,7 +1,9 @@
 //! Positive public B execution while one A post-HELD tariff GET is blocked.
 //! A's inventory remains available to the original whole-cohort census; this
 //! witnesses that single HTTP boundary, not an unavailable account or venue.
-use super::filled_fixture::{INSTRUMENT, opened_market};
+use super::filled_fixture::{
+    INSTRUMENT, keep_captured_readiness_current, opened_market, stop_captured_readiness,
+};
 use super::*;
 use okx_execution::{CentralReceiptView, IntentState, TradeIntentLookup};
 use rust_decimal::Decimal;
@@ -46,6 +48,7 @@ fn leverage(feed: &RecordedAccountHttp, actor: &str) {
 async fn risk_book_contract_native_public_b_status_and_cancel_leave_blocked_a_held() {
     let mut fixture = fixture_for_accounts(&["a", "b"]).await;
     let (stop, market, _socket, _public) = opened_market(&mut fixture).await;
+    let (readiness_stop, readiness_task) = keep_captured_readiness_current(&fixture);
     fixture
         .market_boundary
         .market_updates_expected
@@ -146,6 +149,7 @@ async fn risk_book_contract_native_public_b_status_and_cancel_leave_blocked_a_he
     .await
     .expect("B Cancel must not await A's external source")
     .unwrap();
+    stop_captured_readiness(readiness_stop, readiness_task).await;
     assert_eq!(
         cancelled["data"]["central_release"]["state"], "verified",
         "{cancelled}"
@@ -230,6 +234,7 @@ async fn risk_book_contract_native_public_b_status_and_cancel_leave_blocked_a_he
 async fn risk_book_contract_native_public_b_executes_and_keeps_reserve_while_a_source_blocked() {
     let mut fixture = fixture_for_accounts(&["a", "b"]).await;
     let (stop, market, _socket, _public) = opened_market(&mut fixture).await;
+    let (readiness_stop, readiness_task) = keep_captured_readiness_current(&fixture);
     // A pre-reserve plus B pre-reserve and post-HELD each read both accounts.
     fixture
         .market_boundary
@@ -340,6 +345,7 @@ async fn risk_book_contract_native_public_b_executes_and_keeps_reserve_while_a_s
     .expect("B must finish inside its production Execute lifetime while A remains held")
     .expect("B public Execute must reach its own venue send");
     assert!(started.elapsed() < Duration::from_secs(10));
+    stop_captured_readiness(readiness_stop, readiness_task).await;
     assert_eq!(result_b["status"], "unknown", "{result_b}");
     assert_eq!(
         result_b["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",

@@ -6,12 +6,16 @@ use serde_json::{Value, json};
 pub struct ResearchProcessTree {
     #[cfg(windows)]
     job: Result<windows_job::Measurement, &'static str>,
+    #[cfg(target_os = "linux")]
+    procfs: linux_proc::Measurement,
 }
 impl ResearchProcessTree {
     pub fn begin() -> Self {
         Self {
             #[cfg(windows)]
             job: windows_job::Measurement::begin(),
+            #[cfg(target_os = "linux")]
+            procfs: linux_proc::Measurement::begin(),
         }
     }
 
@@ -23,15 +27,250 @@ impl ResearchProcessTree {
                 Err(reason) => research_not_proven(reason),
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         {
-            research_not_proven("WINDOWS_JOB_UNSUPPORTED")
+            self.procfs.finish()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            research_not_proven("PROCESS_TREE_OBSERVATION_UNSUPPORTED")
         }
     }
 }
 fn research_not_proven(reason: &'static str) -> Value {
     json!({"schema":"okx.research-process-tree-resources/v1", "status":"NOT_PROVEN", "reason":reason,
         "budget_status":"NOT_PROVEN", "descendants_included":false})
+}
+
+#[cfg(target_os = "linux")]
+mod linux_proc {
+    use super::*;
+    use std::{
+        collections::{HashMap, HashSet},
+        fs,
+        sync::mpsc::{self, Sender},
+        thread::{self, JoinHandle},
+        time::Duration,
+    };
+
+    // Snapshot the collector and all current descendants by walking the Linux
+    // kernel's per-thread `children` lists. Child processes spawned by a Tokio
+    // thread do not necessarily appear in /proc/<tgid>/task/<tgid>/children.
+    // This is a sampled, summed RSS witness: shared pages can be counted more
+    // than once, and spikes between samples can be missed. No hard limit here.
+    fn descendants(root: u32) -> HashSet<u32> {
+        let mut seen = HashSet::from([root]);
+        let mut pending = vec![root];
+        while let Some(pid) = pending.pop() {
+            let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) else {
+                continue;
+            };
+            for task in tasks.flatten() {
+                let children = task.path().join("children");
+                let Ok(contents) = fs::read_to_string(children) else {
+                    continue;
+                };
+                for child in contents
+                    .split_whitespace()
+                    .filter_map(|s| s.parse::<u32>().ok())
+                {
+                    if seen.insert(child) {
+                        pending.push(child);
+                    }
+                }
+            }
+        }
+        seen
+    }
+
+    fn rss_bytes(pid: u32) -> Option<u64> {
+        let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+        let mut fields = line["VmRSS:".len()..].split_whitespace();
+        let kib: u64 = fields.next()?.parse().ok()?;
+        (fields.next() == Some("kB") && fields.next().is_none())
+            .then(|| kib.checked_mul(1024))
+            .flatten()
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct IoCounters {
+        read_char_bytes: u64,
+        read_syscalls: u64,
+        storage_read_bytes: u64,
+    }
+    impl IoCounters {
+        fn read(pid: u32) -> Option<Self> {
+            let io = fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
+            let field = |key: &str| -> Option<u64> {
+                io.lines()
+                    .find_map(|line| line.strip_prefix(key))?
+                    .trim()
+                    .parse()
+                    .ok()
+            };
+            Some(Self {
+                read_char_bytes: field("rchar:")?,
+                read_syscalls: field("syscr:")?,
+                storage_read_bytes: field("read_bytes:")?,
+            })
+        }
+        fn max_with(&mut self, other: Self) {
+            self.read_char_bytes = self.read_char_bytes.max(other.read_char_bytes);
+            self.read_syscalls = self.read_syscalls.max(other.read_syscalls);
+            self.storage_read_bytes = self.storage_read_bytes.max(other.storage_read_bytes);
+        }
+        fn add_since(&mut self, observed: Self, baseline: Self) {
+            self.read_char_bytes = self.read_char_bytes.saturating_add(
+                observed
+                    .read_char_bytes
+                    .saturating_sub(baseline.read_char_bytes),
+            );
+            self.read_syscalls = self.read_syscalls.saturating_add(
+                observed
+                    .read_syscalls
+                    .saturating_sub(baseline.read_syscalls),
+            );
+            self.storage_read_bytes = self.storage_read_bytes.saturating_add(
+                observed
+                    .storage_read_bytes
+                    .saturating_sub(baseline.storage_read_bytes),
+            );
+        }
+    }
+
+    #[derive(Default)]
+    struct Samples {
+        count: u64,
+        max_active_processes: usize,
+        max_active_descendants: usize,
+        peak_sampled_sum_rss_bytes: u64,
+        peak_sampled_descendant_rss_bytes: u64,
+        peak_sampled_collector_rss_bytes: u64,
+        descendant_pids_seen: HashSet<u32>,
+        missing_rss_observations: u64,
+        collector_rss_observed: bool,
+        io_by_pid: HashMap<u32, IoCounters>,
+        missing_io_observations: u64,
+    }
+    impl Samples {
+        fn observe(&mut self, root: u32) {
+            let processes = descendants(root);
+            self.count += 1;
+            self.max_active_processes = self.max_active_processes.max(processes.len());
+            self.max_active_descendants = self.max_active_descendants.max(processes.len() - 1);
+            let mut descendant_rss = 0u64;
+            let mut collector_rss = 0u64;
+            for pid in processes {
+                if pid != root {
+                    self.descendant_pids_seen.insert(pid);
+                }
+                match rss_bytes(pid) {
+                    Some(bytes) if pid == root => {
+                        self.collector_rss_observed = true;
+                        collector_rss = bytes;
+                    }
+                    Some(bytes) => descendant_rss = descendant_rss.saturating_add(bytes),
+                    None => self.missing_rss_observations += 1,
+                }
+                if let Some(io) = IoCounters::read(pid) {
+                    self.io_by_pid
+                        .entry(pid)
+                        .and_modify(|old| old.max_with(io))
+                        .or_insert(io);
+                } else {
+                    self.missing_io_observations += 1;
+                }
+            }
+            self.peak_sampled_collector_rss_bytes =
+                self.peak_sampled_collector_rss_bytes.max(collector_rss);
+            self.peak_sampled_descendant_rss_bytes =
+                self.peak_sampled_descendant_rss_bytes.max(descendant_rss);
+            self.peak_sampled_sum_rss_bytes = self
+                .peak_sampled_sum_rss_bytes
+                .max(collector_rss.saturating_add(descendant_rss));
+        }
+    }
+
+    pub(super) struct Measurement {
+        pid: u32,
+        initial_io: Option<IoCounters>,
+        stop: Sender<()>,
+        sampler: JoinHandle<Samples>,
+    }
+    impl Measurement {
+        pub(super) fn begin() -> Self {
+            let pid = std::process::id();
+            let initial_io = IoCounters::read(pid);
+            let (stop, receiver) = mpsc::channel();
+            let sampler = thread::spawn(move || {
+                let mut samples = Samples::default();
+                loop {
+                    samples.observe(pid);
+                    if receiver.recv_timeout(Duration::from_millis(20)).is_ok() {
+                        break;
+                    }
+                }
+                samples
+            });
+            Self {
+                pid,
+                initial_io,
+                stop,
+                sampler,
+            }
+        }
+        pub(super) fn finish(self) -> Value {
+            let _ = self.stop.send(());
+            let Ok(samples) = self.sampler.join() else {
+                return research_not_proven("PROCFS_SAMPLER_PANICKED");
+            };
+            if !samples.collector_rss_observed || samples.count == 0 {
+                return research_not_proven("PROCFS_RSS_NOT_OBSERVED");
+            }
+            let mut io_total = IoCounters::default();
+            for (pid, observed) in &samples.io_by_pid {
+                let baseline = if *pid == self.pid {
+                    self.initial_io.unwrap_or_default()
+                } else {
+                    IoCounters::default()
+                };
+                io_total.add_since(*observed, baseline);
+            }
+            let io_measured =
+                self.initial_io.is_some() && samples.io_by_pid.contains_key(&self.pid);
+            json!({
+                "schema":"okx.research-process-tree-resources/v1",
+                "status":"MEASURED_SAMPLED",
+                "budget_status":"NOT_PROVEN",
+                "scope":"collector_and_current_descendants",
+                "descendants_included":true,
+                "collector_pid":self.pid,
+                "sample_interval_ms":20,
+                "samples":samples.count,
+                "max_active_processes":samples.max_active_processes,
+                "max_active_descendants":samples.max_active_descendants,
+                "distinct_descendant_pids_seen":samples.descendant_pids_seen.len(),
+                "peak_sampled_sum_rss_bytes":samples.peak_sampled_sum_rss_bytes,
+                "peak_sampled_collector_rss_bytes":samples.peak_sampled_collector_rss_bytes,
+                "peak_sampled_descendant_rss_bytes":samples.peak_sampled_descendant_rss_bytes,
+                "missing_rss_observations":samples.missing_rss_observations,
+                "observed_process_io": if io_measured { Some(json!({
+                    "read_char_bytes":io_total.read_char_bytes,
+                    "read_syscalls":io_total.read_syscalls,
+                    "storage_read_bytes":io_total.storage_read_bytes,
+                    "sampled_processes":samples.io_by_pid.len(),
+                    "missing_io_observations":samples.missing_io_observations,
+                    "source_attribution":"not_attributed",
+                    "measurement_semantics":"per-seen-PID maximum Linux procfs cumulative I/O counters; collector baseline subtracted, short-lived children and between-sample I/O can be missed; rchar includes pipes and cached reads, read_bytes is storage-backed"
+                })) } else { None },
+                "memory_semantics":"20ms-sampled sum of current per-process VmRSS (shared pages may double-count; between-sample peaks may be missed)",
+                "process_count_semantics":"active descendants sampled via every task/children file; distinct PIDs not durable process-creation accounting",
+                "rss_hard_limit_enforced":false,
+                "source":"linux_procfs_task_children_and_status",
+            })
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -225,11 +464,28 @@ mod windows_job {
 mod research_tree_tests {
     use super::*;
     #[test]
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     fn unsupported_platform_never_claims_tree_measurement() {
         let value = ResearchProcessTree::begin().finish();
         assert_eq!(value["status"], "NOT_PROVEN");
         assert_eq!(value["descendants_included"], false);
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn sampler_counts_live_descendants_and_never_claims_a_hard_rss_limit() {
+        let observation = ResearchProcessTree::begin();
+        let mut child = std::process::Command::new("sleep")
+            .arg("0.2")
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        child.wait().unwrap();
+        let value = observation.finish();
+        assert_eq!(value["status"], "MEASURED_SAMPLED");
+        assert!(value["max_active_descendants"].as_u64().unwrap() >= 1);
+        assert!(value["peak_sampled_sum_rss_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(value["budget_status"], "NOT_PROVEN");
+        assert_eq!(value["rss_hard_limit_enforced"], false);
     }
     #[test]
     #[cfg(windows)]

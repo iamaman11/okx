@@ -1,5 +1,7 @@
 //! Causal EMA replay. Signals at close t execute at open t+1.
-use okx_analysis::operators::{EmaParameters, StrategyKernel};
+#[cfg(test)]
+use okx_analysis::operators::EmaParameters;
+use okx_analysis::operators::{StrategyKernel, StrategyParameters};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,7 +32,7 @@ pub struct Costs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplaySpec {
     pub strategy_id: String,
-    pub parameters: EmaParameters,
+    pub parameters: StrategyParameters,
     pub mechanics: Mechanics,
     pub costs: Costs,
     pub timeframe_ms: u64,
@@ -91,18 +93,11 @@ fn replay_with_hash(
     cancel: &impl Fn() -> bool,
     known_dataset_hash: Option<&str>,
 ) -> Result<ReplayResult, String> {
-    spec.parameters.validate()?;
+    let required_warmup = spec.parameters.warmup_for(&spec.strategy_id)?;
     if bars.len() > 1_000_000 {
         return Err("LIMIT_BARS:1000000".into());
     }
-    // Warm-up belongs to the strategy kernel, not to unrelated EMA
-    // parameters that are also carried by a generic replay specification.
-    let required_warmup = match spec.strategy_id.as_str() {
-        "close_momentum" => 1,
-        "two_bar_momentum" => 2,
-        "no_trade" => 0,
-        _ => spec.parameters.slow,
-    };
+    // Warm-up is a property of the selected, strictly typed definition.
     if spec.timeframe_ms == 0
         || score_end > bars.len()
         || score_start >= score_end
@@ -130,7 +125,7 @@ fn replay_with_hash(
         }
     }
     let (mut kernel, mut desired, mut position, mut cash, mut entry) = (
-        StrategyKernel::from_id(&spec.strategy_id, spec.parameters)?,
+        StrategyKernel::from_definition(&spec.strategy_id, spec.parameters)?,
         0i8,
         0i8,
         10000.0,
@@ -141,7 +136,7 @@ fn replay_with_hash(
     let (mut peak, mut maxdd) = (10000.0f64, 0.0f64);
     let mut previous = None;
     for (i, b) in bars.iter().take(score_end).enumerate() {
-        if i % 4096 == 0 && cancel() {
+        if i.is_multiple_of(4096) && cancel() {
             return Err("CANCELLED".into());
         }
         if [b.open, b.high, b.low, b.close]
@@ -320,7 +315,7 @@ fn replay_with_hash(
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridCandidate {
-    pub parameters: EmaParameters,
+    pub parameters: StrategyParameters,
     pub train: Summary,
     /// Stable train-only replay evidence; changes to the holdout cannot
     /// modify this hash or the candidate's selection score.
@@ -369,18 +364,34 @@ pub struct GridPolicy {
     pub sensitivity: String,
 }
 /// Shared preparation contract, persisted by the adapter before computation.
-pub fn grid_policy(bar_count: usize, variants: &[EmaParameters]) -> Result<GridPolicy, String> {
+pub fn grid_policy(
+    bar_count: usize,
+    strategy_id: &str,
+    variants: &[StrategyParameters],
+) -> Result<GridPolicy, String> {
+    // Internal stress/benchmark callers retain the accepted 100-candidate
+    // performance fixture; the public ResearchRequest admission caps at 64.
     if variants.is_empty() || variants.len() > 100 {
         return Err("LIMIT_VARIANTS:1..100".into());
     }
     if bar_count > 1_000_000 {
         return Err("LIMIT_BARS:1000000".into());
     }
-    for p in variants {
-        p.validate()?;
-    }
+    let warmups = variants
+        .iter()
+        .map(|p| {
+            p.warmup_for(strategy_id)?;
+            // Legacy EMA-shaped grids score from the largest `slow` even when
+            // the selected internal kernel needs less warmup (e.g. no_trade).
+            // Preserve that accepted train/OOS boundary and all old hashes.
+            Ok::<usize, String>(match p {
+                StrategyParameters::Ema(ema) => ema.slow,
+                StrategyParameters::Breakout(breakout) => breakout.lookback,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let split_index = bar_count * 7 / 10;
-    let train_score_start_index = variants.iter().map(|p| p.slow).max().ok_or("EMPTY_GRID")?;
+    let train_score_start_index = warmups.into_iter().max().ok_or("EMPTY_GRID")?;
     if train_score_start_index >= split_index {
         return Err("INSUFFICIENT_TRAIN_BARS".into());
     }
@@ -388,11 +399,18 @@ pub fn grid_policy(bar_count: usize, variants: &[EmaParameters]) -> Result<GridP
         split_index,
         train_score_start_index,
         selection_metric: "train_sharpe_descending".into(),
-        tie_break: vec![
-            "train_turnover_ascending".into(),
-            "fast_ascending".into(),
-            "slow_ascending".into(),
-        ],
+        tie_break: if strategy_id == okx_analysis::operators::BREAKOUT_STRATEGY_ID {
+            vec![
+                "train_turnover_ascending".into(),
+                "lookback_ascending".into(),
+            ]
+        } else {
+            vec![
+                "train_turnover_ascending".into(),
+                "fast_ascending".into(),
+                "slow_ascending".into(),
+            ]
+        },
         baseline: "buy_and_hold_return:summary.benchmark;initial_capital=10000".into(),
         sensitivity: "maker_and_taker_fees_x2;slippage_and_funding_unchanged;report_only".into(),
     })
@@ -400,7 +418,7 @@ pub fn grid_policy(bar_count: usize, variants: &[EmaParameters]) -> Result<GridP
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridResult {
     pub variants: Vec<GridCandidate>,
-    pub selected: EmaParameters,
+    pub selected: StrategyParameters,
     pub split_index: usize,
     pub train_score_start_index: usize,
     pub train_dataset_hash: String,
@@ -411,7 +429,7 @@ pub struct GridResult {
 pub fn grid(
     bars: &[Bar],
     spec: &ReplaySpec,
-    variants: &[EmaParameters],
+    variants: &[StrategyParameters],
     cancel: &impl Fn() -> bool,
 ) -> Result<GridResult, String> {
     grid_with_observer(bars, spec, variants, cancel, &|_| {})
@@ -429,7 +447,7 @@ pub struct GridProgress {
 pub fn grid_with_observer(
     bars: &[Bar],
     spec: &ReplaySpec,
-    variants: &[EmaParameters],
+    variants: &[StrategyParameters],
     cancel: &impl Fn() -> bool,
     observe: &impl Fn(GridProgress),
 ) -> Result<GridResult, String> {
@@ -437,7 +455,7 @@ pub fn grid_with_observer(
         completed_work_units: 0,
         completed_candidates: 0,
     };
-    let policy = grid_policy(bars.len(), variants)?;
+    let policy = grid_policy(bars.len(), &spec.strategy_id, variants)?;
     let split = policy.split_index;
     // All candidate scores use the same reporting window. Different EMA
     // warmups are loaded before it, never counted as reporting returns.
@@ -445,7 +463,7 @@ pub fn grid_with_observer(
     // Never feed holdout observations into training identities or scores.
     let train_dataset_hash = hash_chunks(&bars[..split], cancel)?;
     let dataset_hash = hash_chunks(bars, cancel)?;
-    let mut best: Option<(EmaParameters, Summary)> = None;
+    let mut best: Option<(StrategyParameters, Summary)> = None;
     let mut candidates = Vec::with_capacity(variants.len());
     for p in variants {
         if cancel() {
@@ -475,8 +493,7 @@ pub fn grid_with_observer(
             r.summary.sharpe > b.sharpe
                 || (r.summary.sharpe == b.sharpe
                     && (r.summary.turnover < b.turnover
-                        || (r.summary.turnover == b.turnover
-                            && (p.fast, p.slow) < (prior.fast, prior.slow))))
+                        || (r.summary.turnover == b.turnover && p < prior)))
         }) {
             best = Some((*p, r.summary));
         }
@@ -541,23 +558,23 @@ pub fn grid_with_observer(
     })
 }
 
-fn dec(v: f64) -> Result<Decimal, String> {
+pub(crate) fn dec(v: f64) -> Result<Decimal, String> {
     if !v.is_finite() {
         return Err("MONEY_NONFINITE".into());
     }
     Decimal::from_str(&v.to_string()).map_err(|_| "MONEY_PRECISION".into())
 }
-fn mul(a: Decimal, b: Decimal) -> Result<Decimal, String> {
+pub(crate) fn mul(a: Decimal, b: Decimal) -> Result<Decimal, String> {
     a.checked_mul(b).ok_or("MONEY_OVERFLOW".into())
 }
-struct Money {
-    cash: Decimal,
-    fees: Decimal,
-    funding: Decimal,
-    turnover: Decimal,
+pub(crate) struct Money {
+    pub(crate) cash: Decimal,
+    pub(crate) fees: Decimal,
+    pub(crate) funding: Decimal,
+    pub(crate) turnover: Decimal,
 }
 impl Money {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             cash: Decimal::from(10000),
             fees: Decimal::ZERO,
@@ -565,7 +582,7 @@ impl Money {
             turnover: Decimal::ZERO,
         }
     }
-    fn trade(&mut self, quantity: f64, price: f64, bps: f64) -> Result<(), String> {
+    pub(crate) fn trade(&mut self, quantity: f64, price: f64, bps: f64) -> Result<(), String> {
         let notional = mul(dec(quantity)?, dec(price)?)?;
         let fee = mul(notional.abs(), dec(bps)?)?
             .checked_div(Decimal::from(10000))
@@ -582,7 +599,7 @@ impl Money {
             .ok_or("MONEY_OVERFLOW")?;
         Ok(())
     }
-    fn fund(&mut self, quantity: f64, price: f64, rate: f64) -> Result<(), String> {
+    pub(crate) fn fund(&mut self, quantity: f64, price: f64, rate: f64) -> Result<(), String> {
         let funding = mul(mul(dec(quantity)?, dec(price)?)?, dec(rate)?)?;
         self.cash = self.cash.checked_sub(funding).ok_or("MONEY_OVERFLOW")?;
         self.funding = self.funding.checked_sub(funding).ok_or("MONEY_OVERFLOW")?;
@@ -590,23 +607,92 @@ impl Money {
     }
 }
 
+/// The original replay dataset digest, incrementally verifiable from immutable
+/// 4096-row pages. The writer and export verifier share exactly one hashing
+/// contract; verification never has to allocate the complete million-bar set.
+pub struct ChunkedDataHash {
+    hash: Sha256,
+    expected: usize,
+    observed: usize,
+}
+
+impl ChunkedDataHash {
+    pub fn new(expected: usize) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(b"okx.typed.chunks/4096/v1");
+        hash.update((expected as u64).to_le_bytes());
+        Self {
+            hash,
+            expected,
+            observed: 0,
+        }
+    }
+
+    pub fn update<T: Serialize>(&mut self, values: &[T]) -> Result<(), String> {
+        if values.is_empty()
+            || values.len() > 4096
+            || (self.observed > 0 && !self.observed.is_multiple_of(4096))
+            || self
+                .observed
+                .checked_add(values.len())
+                .is_none_or(|n| n > self.expected)
+        {
+            return Err("DATASET_CHUNK_SHAPE_INVALID".into());
+        }
+        let bytes = serde_json::to_vec(values).map_err(|e| e.to_string())?;
+        self.hash.update((bytes.len() as u64).to_le_bytes());
+        self.hash.update(&bytes);
+        self.observed += values.len();
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<String, String> {
+        if self.observed != self.expected {
+            return Err("DATASET_ROW_COUNT_MISMATCH".into());
+        }
+        Ok(format!("sha256:{:x}", self.hash.finalize()))
+    }
+}
+
 fn hash_chunks<T: Serialize>(values: &[T], cancel: &impl Fn() -> bool) -> Result<String, String> {
-    let mut hash = Sha256::new();
-    hash.update(b"okx.typed.chunks/4096/v1");
-    hash.update((values.len() as u64).to_le_bytes());
+    let mut digest = ChunkedDataHash::new(values.len());
     for chunk in values.chunks(4096) {
         if cancel() {
             return Err("CANCELLED".into());
         }
-        let bytes = serde_json::to_vec(chunk).map_err(|e| e.to_string())?;
-        hash.update((bytes.len() as u64).to_le_bytes());
-        hash.update(&bytes);
+        digest.update(chunk)?;
     }
-    Ok(format!("sha256:{:x}", hash.finalize()))
+    digest.finish()
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn t13_streaming_dataset_hash_matches_original_replay_digest_at_page_boundaries() {
+        for n in [0, 1, 4095, 4096, 4097, 8192] {
+            let values = (0..n).map(|i| i as f64 / 10.0).collect::<Vec<_>>();
+            let original = hash_chunks(&values, &|| false).unwrap();
+            let mut streaming = ChunkedDataHash::new(n);
+            for page in values.chunks(4096) {
+                streaming.update(page).unwrap();
+            }
+            assert_eq!(streaming.finish().unwrap(), original);
+        }
+        let mut missing = ChunkedDataHash::new(2);
+        missing.update(&[1u64]).unwrap();
+        assert_eq!(missing.finish().unwrap_err(), "DATASET_ROW_COUNT_MISMATCH");
+        let mut oversized = ChunkedDataHash::new(4097);
+        assert_eq!(
+            oversized.update(&vec![0u64; 4097]).unwrap_err(),
+            "DATASET_CHUNK_SHAPE_INVALID"
+        );
+        let mut early_partial = ChunkedDataHash::new(3);
+        early_partial.update(&[1u64]).unwrap();
+        assert_eq!(
+            early_partial.update(&[2u64, 3]).unwrap_err(),
+            "DATASET_CHUNK_SHAPE_INVALID"
+        );
+    }
     fn bars() -> Vec<Bar> {
         (0..100)
             .map(|i| Bar {
@@ -620,10 +706,10 @@ mod tests {
             })
             .collect()
     }
-    fn spec() -> ReplaySpec {
+    pub(super) fn spec() -> ReplaySpec {
         ReplaySpec {
             strategy_id: "ema_cross_v1".into(),
-            parameters: EmaParameters { fast: 2, slow: 3 },
+            parameters: EmaParameters { fast: 2, slow: 3 }.into(),
             mechanics: Mechanics::Linear {
                 contract_multiplier: 1.0,
             },
@@ -762,7 +848,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut parameters = spec();
         parameters.strategy_id = "ema_momentum_confirm_v1".into();
-        parameters.parameters = EmaParameters { fast: 1, slow: 2 };
+        parameters.parameters = EmaParameters { fast: 1, slow: 2 }.into();
         parameters.timeframe_ms = 60000;
         parameters.mechanics = Mechanics::Linear {
             contract_multiplier: 1.,
@@ -848,8 +934,8 @@ mod tests {
         let mut s = spec();
         s.strategy_id = "no_trade".into();
         let variants = [
-            EmaParameters { fast: 3, slow: 8 },
-            EmaParameters { fast: 2, slow: 3 },
+            EmaParameters { fast: 3, slow: 8 }.into(),
+            EmaParameters { fast: 2, slow: 3 }.into(),
         ];
         let input = bars();
         let first = grid(&input, &s, &variants, &|| false).unwrap();
@@ -880,7 +966,7 @@ mod tests {
             );
         }
         assert_ne!(first.test.dataset_hash, changed_result.test.dataset_hash);
-        assert_eq!(first.selected, EmaParameters { fast: 2, slow: 3 });
+        assert_eq!(first.selected, EmaParameters { fast: 2, slow: 3 }.into());
         let reversed = [variants[1], variants[0]];
         let inverted = grid(&changed, &s, &reversed, &|| false).unwrap();
         assert_eq!(first.selected, inverted.selected);
@@ -911,8 +997,8 @@ mod tests {
             observed_funding: false,
         };
         let variants = [
-            EmaParameters { fast: 1, slow: 2 },
-            EmaParameters { fast: 2, slow: 3 },
+            EmaParameters { fast: 1, slow: 2 }.into(),
+            EmaParameters { fast: 2, slow: 3 }.into(),
         ];
         let result = grid(&input, &s, &variants, &|| false).unwrap();
         for candidate in result.variants {
@@ -939,8 +1025,8 @@ mod tests {
     fn test_partition_not_used_for_selection() {
         let b = bars();
         let v = [
-            EmaParameters { fast: 2, slow: 3 },
-            EmaParameters { fast: 3, slow: 8 },
+            EmaParameters { fast: 2, slow: 3 }.into(),
+            EmaParameters { fast: 3, slow: 8 }.into(),
         ];
         let a = grid(&b, &spec(), &v, &|| false).unwrap();
         let mut b = b;
@@ -978,7 +1064,7 @@ mod mechanics_fixtures {
             .collect();
         let spec = ReplaySpec {
             strategy_id: "ema_cross_v1".into(),
-            parameters: EmaParameters { fast: 1, slow: 2 },
+            parameters: EmaParameters { fast: 1, slow: 2 }.into(),
             mechanics: Mechanics::Linear {
                 contract_multiplier: multiplier,
             },
@@ -1014,6 +1100,25 @@ mod mechanics_fixtures {
         assert!(a.summary.fees_exact.parse::<Decimal>().unwrap() > Decimal::ZERO);
     }
     #[test]
+    fn t09_three_linear_contracts_exact_quantity_and_usd_pnl() {
+        // Independent decimal oracle: three linear contracts, each worth
+        // 0.1 BTC, give a 0.3 BTC position. USD account and USD/BTC prices
+        // are explicit assumptions; no inverse pricing or FX is implied.
+        let contracts = Decimal::from(3);
+        let btc_per_contract = Decimal::new(1, 1);
+        let quantity_btc = contracts * btc_per_contract;
+        assert_eq!(quantity_btc, Decimal::new(3, 1));
+        let expected_gross_usd = quantity_btc * (Decimal::from(110) - Decimal::from(100));
+        assert_eq!(expected_gross_usd, Decimal::from(3));
+
+        let mut ledger = Money::new();
+        ledger.trade(0.3, 100.0, 0.0).unwrap();
+        ledger.trade(-0.3, 110.0, 0.0).unwrap();
+        assert_eq!(ledger.cash - Decimal::from(10000), expected_gross_usd);
+        assert_eq!(ledger.fees, Decimal::ZERO);
+        assert_eq!(ledger.funding, Decimal::ZERO);
+    }
+    #[test]
     fn gap_through_stop_and_stop_before_take_profit() {
         let (mut b, mut s) = fixture(1.0);
         s.stop_fraction = Some(0.01);
@@ -1037,7 +1142,7 @@ mod mechanics_fixtures {
         let (b, s) = fixture(1.0);
         let a = replay(&b, &s, 2, b.len(), &|| false).unwrap();
         let mut other = s.clone();
-        other.parameters = EmaParameters { fast: 3, slow: 5 };
+        other.parameters = EmaParameters { fast: 3, slow: 5 }.into();
         let _ = replay(&b, &other, 5, b.len(), &|| false).unwrap();
         let c = replay(&b, &s, 2, b.len(), &|| false).unwrap();
         assert_eq!(a.hash, c.hash);
@@ -1049,5 +1154,97 @@ mod mechanics_fixtures {
             replay(&b, &s, 2, b.len(), &|| true).unwrap_err(),
             "CANCELLED"
         );
+    }
+}
+
+#[cfg(test)]
+mod t08_breakout_oos_tests {
+    use super::*;
+    use okx_analysis::operators::{BREAKOUT_STRATEGY_ID, BreakoutParameters};
+
+    #[test]
+    fn breakout_replay_executes_after_signal_and_keeps_future_out_of_decision() {
+        let input = (0..30)
+            .map(|i| Bar {
+                time: i * 60_000,
+                open: 100.0 + i as f64,
+                high: 102.0 + i as f64,
+                low: 99.0 + i as f64,
+                close: 101.0 + i as f64,
+                volume: 1.0,
+                funding_rate: None,
+            })
+            .collect::<Vec<_>>();
+        let mut spec = super::tests::spec();
+        spec.strategy_id = BREAKOUT_STRATEGY_ID.into();
+        spec.parameters = BreakoutParameters { lookback: 2 }.into();
+        spec.mechanics = Mechanics::Spot;
+        spec.timeframe_ms = 60_000;
+        spec.costs.observed_funding = false;
+        let result = replay(&input, &spec, 2, input.len(), &|| false).unwrap();
+        assert_eq!(result.trades[0].time, input[3].time);
+        assert_eq!(result.trades[0].price, input[3].open);
+
+        // The same shared Rust kernel used by the live decision path produces
+        // the signal that replay executes on the NEXT bar, not this close.
+        let mut live =
+            StrategyKernel::from_definition(BREAKOUT_STRATEGY_ID, spec.parameters).unwrap();
+        let decisions = input
+            .iter()
+            .map(|bar| live.push_closed(bar.close).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(decisions[..3], [None, None, Some(1)]);
+    }
+
+    #[test]
+    fn breakout_grid_sixty_four_train_only_candidates_and_oos_isolation() {
+        let input = (0..200)
+            .map(|i| Bar {
+                time: i * 60_000,
+                open: 100.0 + i as f64 * 0.2,
+                high: 101.0 + i as f64 * 0.2,
+                low: 99.0 + i as f64 * 0.2,
+                close: 100.5 + i as f64 * 0.2,
+                volume: 1.0,
+                funding_rate: None,
+            })
+            .collect::<Vec<_>>();
+        let mut spec = super::tests::spec();
+        spec.strategy_id = BREAKOUT_STRATEGY_ID.into();
+        spec.parameters = BreakoutParameters { lookback: 2 }.into();
+        spec.mechanics = Mechanics::Spot;
+        spec.timeframe_ms = 60_000;
+        spec.costs.observed_funding = false;
+        let variants = (2..66)
+            .map(|lookback| BreakoutParameters { lookback }.into())
+            .collect::<Vec<_>>();
+        let before = grid(&input, &spec, &variants, &|| false).unwrap();
+        assert_eq!(before.variants.len(), 64);
+        assert_eq!(before.split_index, 140);
+        assert_eq!(before.train_score_start_index, 65);
+        assert_eq!(
+            grid_policy(input.len(), BREAKOUT_STRATEGY_ID, &variants)
+                .unwrap()
+                .tie_break
+                .last()
+                .unwrap(),
+            "lookback_ascending"
+        );
+
+        let mut changed = input;
+        for bar in &mut changed[140..] {
+            bar.open += 30.0;
+            bar.high += 30.0;
+            bar.low += 30.0;
+            bar.close += 30.0;
+        }
+        let after = grid(&changed, &spec, &variants, &|| false).unwrap();
+        assert_eq!(before.selected, after.selected);
+        assert_eq!(before.train_dataset_hash, after.train_dataset_hash);
+        assert_eq!(before.train.pnl_exact, after.train.pnl_exact);
+        for (left, right) in before.variants.iter().zip(after.variants.iter()) {
+            assert_eq!(left.train_result_hash, right.train_result_hash);
+        }
+        assert_ne!(before.test.dataset_hash, after.test.dataset_hash);
     }
 }

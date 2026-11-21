@@ -38,9 +38,9 @@ fn compile_worker_wire(wire: Value) -> Result<CheckedComposition, String> {
 #[test]
 fn public_market_wire_keeps_causal_prefix_and_separates_future_outcome() {
     let checked = compile_worker_wire(causal_market_wire()).expect("checked graph");
-    assert_eq!(checked.estimated_cells, 35);
+    assert_eq!(checked.estimated_cells(), 35);
     assert_eq!(
-        checked.steps.last().expect("label step").unit,
+        checked.steps().last().expect("label step").unit,
         Unit::OutcomeRatio
     );
 
@@ -64,6 +64,31 @@ fn public_market_wire_keeps_causal_prefix_and_separates_future_outcome() {
     let (confirmed, unit) = after["label"];
     assert_eq!(unit, Unit::OutcomeRatio);
     assert!((confirmed.expect("two future bars") - (110.0 / 100.0 - 1.0)).abs() < 1e-12);
+}
+
+#[test]
+fn restored_market_graph_is_rechecked_without_gaining_execution_authority() {
+    let compiled = compile_worker_wire(causal_market_wire()).unwrap();
+    let snapshot = serde_json::to_value(&compiled).unwrap();
+    let restored: CheckedComposition = serde_json::from_value(snapshot.clone()).unwrap();
+    assert_eq!(restored.version(), "okx.market.composition/v1");
+    assert_eq!(restored.result_steps(), compiled.result_steps());
+    assert_eq!(restored.estimated_cells(), 35);
+    let candles = [100.0, 102.0, 98.0, 99.0, 100.0, 101.0, 110.0];
+    assert_eq!(
+        restored.evaluate_at(&candles, 4),
+        compiled.evaluate_at(&candles, 4)
+    );
+    assert_eq!(
+        restored.evaluate_at(&candles, 4)["event"],
+        (Some(1.0), Unit::Event)
+    );
+
+    // Even with an otherwise valid serialized snapshot, forged annotations
+    // cannot become an unchecked, authoritative Rust plan through serde.
+    let mut forged = snapshot;
+    forged["steps"][4]["unit"] = json!("price");
+    assert!(serde_json::from_value::<CheckedComposition>(forged).is_err());
 }
 
 #[test]

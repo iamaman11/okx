@@ -13,7 +13,9 @@ use std::{
 const LIMIT: usize = 128;
 // Do not even copy raw error payloads/cancellation keys into the projection.
 const COLUMNS: &str = "substr(id,1,129),state,progress,
-    CASE WHEN length(artifact)=64 THEN artifact ELSE NULL END,
+    -- An interrupted, failed or cancelled job may retain a partial blob, but
+    -- only the completed state can advertise a usable result reference.
+    CASE WHEN state='completed' AND length(artifact)=64 THEN artifact ELSE NULL END,
     CASE WHEN error IS NULL THEN NULL
       WHEN error IN ('RESULT_EXPIRED_BY_7_DAY_RETENTION','JOB_CANCELLED','CANCELLED',
         'SOURCE_INVALID','NONFINITE_SOURCE','CANDLE_RANGE_UNAVAILABLE','CANDLE_RANGE_INCOMPLETE',
@@ -157,10 +159,13 @@ impl Projection {
         }
     }
     pub(super) fn restore(&self, db: &Connection) {
-        // PK-order subset, not a claim of most-recent jobs or complete history.
+        // Most recent committed rows, bounded by the research-owned SQLite
+        // index. A lexical hash-ID prefix is not a useful recovery window:
+        // after restart it can hide every job submitted most recently.
+        // LIMIT 129 exposes truncation without scanning the remaining catalog.
         let restored = (|| -> rusqlite::Result<Vec<Snapshot>> {
             let mut statement = db.prepare(&format!(
-                "SELECT {COLUMNS} FROM research_jobs ORDER BY id LIMIT 129"
+                "SELECT {COLUMNS} FROM research_jobs ORDER BY created_ms DESC,id DESC LIMIT 129"
             ))?;
             statement.query_map([], row)?.collect()
         })();
@@ -168,7 +173,9 @@ impl Projection {
             Ok(rows) => {
                 self.restore_partial
                     .store(rows.len() > LIMIT, Ordering::Relaxed);
-                for mut snapshot in rows.into_iter().take(LIMIT) {
+                // The projection's deque is oldest-to-newest. Reverse the
+                // selected bounded window so the newest readback remains last.
+                for mut snapshot in rows.into_iter().take(LIMIT).rev() {
                     snapshot.origin = "durable_startup_subset";
                     self.publish(snapshot);
                 }
@@ -202,6 +209,7 @@ impl Projection {
             "age_ms":snapshot.map(|s|jiff::Timestamp::now().as_millisecond().saturating_sub(s.observed_at_ms).max(0)),
             "retained":state.entries.len(),"retention_limit":LIMIT,"evicted":state.evicted,
             "dropped_events":dropped,"startup_subset_truncated":partial,
+            "startup_subset_selection":"latest_created_ms_then_id",
             "startup_restore_failed":self.restore_failed.load(Ordering::Relaxed),"read_only":true,
             "next_action":if snapshot.is_some(){"inspect_job_snapshot"}else{"retry_read_only_diagnostic"}})
     }
@@ -324,6 +332,60 @@ mod tests {
         );
     }
     #[test]
+    fn t14_partial_artifact_is_never_advertised_as_a_completed_result() {
+        let (jobs, file) = jobs("partial-result");
+        let pending_id = "a".repeat(64);
+        let partial_artifact = "b".repeat(64);
+        jobs.enqueue("pending-job".into(), pending_id.clone())
+            .unwrap();
+        jobs.update(
+            &pending_id,
+            JobState::Running,
+            Some(partial_artifact.clone()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            jobs.diagnostic_readback(&pending_id)["job"]["state"],
+            "running"
+        );
+        assert!(jobs.diagnostic_readback(&pending_id)["job"]["result_ref"].is_null());
+        drop(jobs);
+        let restarted = Jobs::open(file).unwrap();
+        let durable = restarted.get(&pending_id).unwrap();
+        assert_eq!(durable.state, JobState::Interrupted);
+        assert_eq!(durable.artifact, Some(partial_artifact));
+        let observed = restarted.diagnostic_readback(&pending_id);
+        assert_eq!(observed["job"]["state"], "interrupted");
+        assert_eq!(observed["job"]["error_code"], "RESEARCH_INTERRUPTED");
+        assert!(observed["job"]["result_ref"].is_null());
+        assert_eq!(observed["history"], "UNKNOWN");
+        assert_eq!(
+            restarted
+                .update(&pending_id, JobState::Completed, Some("c".repeat(64)), None)
+                .unwrap_err(),
+            "RESEARCH_TERMINAL_IMMUTABLE"
+        );
+
+        let completed_id = "d".repeat(64);
+        let complete_artifact = "e".repeat(64);
+        restarted
+            .enqueue("complete-job".into(), completed_id.clone())
+            .unwrap();
+        restarted
+            .update(
+                &completed_id,
+                JobState::Completed,
+                Some(complete_artifact.clone()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            restarted.diagnostic_readback(&completed_id)["job"]["result_ref"],
+            complete_artifact
+        );
+    }
+    #[test]
     fn job_diagnostic_preserves_known_failure_codes_without_payloads() {
         let (jobs, _) = jobs("reasons");
         for (n, (raw, expected)) in [
@@ -391,7 +453,9 @@ mod tests {
         );
         {
             let db = jobs.db.lock().unwrap();
-            let sql = format!("SELECT {COLUMNS} FROM research_jobs ORDER BY id LIMIT 129");
+            let sql = format!(
+                "SELECT {COLUMNS} FROM research_jobs ORDER BY created_ms DESC,id DESC LIMIT 129"
+            );
             let plan = db
                 .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
                 .unwrap()
@@ -400,7 +464,10 @@ mod tests {
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap()
                 .join(" ");
-            assert!(plan.contains("sqlite_autoindex_research_jobs_1"), "{plan}");
+            assert!(
+                plan.contains("idx_research_jobs_diagnostics_recent"),
+                "{plan}"
+            );
             assert!(!plan.contains("TEMP B-TREE"), "{plan}");
             assert_eq!(
                 db.prepare(&sql)
@@ -422,8 +489,34 @@ mod tests {
             true
         );
         assert_eq!(
-            reopened.diagnostic_readback(&format!("{:064x}", 129))["state"],
+            reopened.diagnostic_readback(&format!("{:064x}", 129))["job"]["origin"],
+            "durable_startup_subset"
+        );
+        assert_eq!(
+            reopened.diagnostic_readback(&format!("{:064x}", 129))["job"]["state"],
+            "failed"
+        );
+        assert_eq!(
+            reopened.diagnostic_readback(&format!("{:064x}", 0))["state"],
             "NOT_OBSERVED"
+        );
+        assert_eq!(
+            reopened.diagnostic_readback(&format!("{:064x}", 1))["state"],
+            "NOT_OBSERVED"
+        );
+        assert_eq!(
+            reopened.diagnostic_readback(&format!("{:064x}", 2))["job"]["state"],
+            "failed"
+        );
+        assert_eq!(
+            reopened.diagnostic_readback(&format!("{:064x}", 0))["startup_subset_selection"],
+            "latest_created_ms_then_id"
+        );
+        // The bounded diagnostic is not the authority. Older jobs remain
+        // available from the original durable catalog when queried by ID.
+        assert_eq!(
+            reopened.get(&format!("{:064x}", 0)).unwrap().state,
+            JobState::Failed
         );
     }
 }

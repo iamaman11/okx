@@ -519,7 +519,7 @@ impl TradeService {
     /// The existing maintenance owner installs one complete cohort opening,
     /// including independently settled historical native entry USD. External
     /// or unsettled history remains pending, never inferred as zero.
-    pub(super) async fn install_captured_empty_campaign_opening(
+    pub(crate) async fn install_captured_empty_campaign_opening(
         &self,
         state: &CentralGovernanceSnapshot,
         until: Instant,

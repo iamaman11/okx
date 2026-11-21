@@ -4,12 +4,16 @@ pub mod cache;
 pub mod candidate_progress;
 mod cursor;
 mod decision;
+mod economic_scenario;
 pub mod executor;
 pub mod jobs;
 mod market;
 pub mod planner;
 mod research;
+mod resource_gate;
+mod resource_observation;
 mod result;
+mod result_reexecution;
 pub mod sources;
 
 use futures_util::{StreamExt, stream};
@@ -137,6 +141,9 @@ impl AnalyticsService {
                     .await
             }
             ResearchRequest::Capabilities {} => Ok(research_capabilities()),
+            ResearchRequest::Economics { cases, data_mode } => {
+                economic_scenario::evaluate(cases, data_mode)
+            }
             ResearchRequest::Validate {
                 data_mode,
                 instruments,
@@ -255,15 +262,26 @@ impl AnalyticsService {
     }
 }
 
+struct ReplayPublication<'a> {
+    grid: Option<Value>,
+    experiment: Option<&'a str>,
+    economic_audit: Option<Value>,
+    producer: Option<&'a crate::producer::Producer>,
+}
+
 fn publish_replay(
     store: &ResearchArtifactStore,
     result: &replay::ReplayResult,
     dataset: &str,
-    grid: Option<Value>,
-    experiment: Option<&str>,
-    producer: Option<&crate::producer::Producer>,
+    publication: ReplayPublication<'_>,
     cancel: &impl Fn() -> bool,
 ) -> Result<String, String> {
+    let ReplayPublication {
+        grid,
+        experiment,
+        economic_audit,
+        producer,
+    } = publication;
     let mut trade_pages = Vec::new();
     let mut curve_pages = Vec::new();
     for chunk in result.trades.chunks(50) {
@@ -278,7 +296,7 @@ fn publish_replay(
         }
         curve_pages.push(store.publish_evidence(&chunk).map_err(|e| e.to_string())?.0);
     }
-    let manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"experiment_artifact":experiment,"producer":producer,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
+    let manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"experiment_artifact":experiment,"economic_audit":economic_audit,"producer":producer,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
     Ok(store
         .publish_evidence(&manifest)
         .map_err(|e| e.to_string())?
@@ -378,6 +396,25 @@ impl AnalyticsService {
                 }
             }
         }
+        // Market row pages are arrays, not object manifests. Their nested
+        // capture references must be traversed or retention can erase source
+        // witnesses of a still-pinned/referenced completed market result.
+        let rows = value
+            .as_array()
+            .or_else(|| value.get("rows").and_then(Value::as_array));
+        if let Some(rows) = rows {
+            for row in rows {
+                if let Some(captures) = row.get("source_captures").and_then(Value::as_object) {
+                    for capture in captures.values() {
+                        if let Some(child) =
+                            capture.get("evidence_artifact").and_then(Value::as_str)
+                        {
+                            self.artifact_graph(child, seen)?;
+                        }
+                    }
+                }
+            }
+        }
         for key in [
             "dataset_artifact",
             "result_artifact",
@@ -385,6 +422,14 @@ impl AnalyticsService {
             "previous_decision_artifact",
         ] {
             if let Some(child) = value.get(key).and_then(Value::as_str) {
+                self.artifact_graph(child, seen)?;
+            }
+        }
+        for key in ["reference_capture_artifact", "funding_capture_artifact"] {
+            if let Some(child) = value
+                .pointer(&format!("/economic_basis/{key}"))
+                .and_then(Value::as_str)
+            {
                 self.artifact_graph(child, seen)?;
             }
         }
@@ -516,18 +561,77 @@ fn research_capabilities() -> Value {
     json!({
         "schema":"okx.research.capabilities/v1",
         "quality":"fresh",
-        "strategy_ids":["ema_cross_v1","ema_momentum_confirm_v1"],
+        "strategy_ids":["ema_cross_v1","ema_momentum_confirm_v1","close_breakout_v1"],
         "strategy_compositions":{"ema_momentum_confirm_v1":{"version":1,"kernels":["ema_cross_v1","close_momentum"],"parameters":"ema_fast_slow","warmup":"slow_closed_bars","disagreement":"flat","execution":"next_open_counterfactual"}},
+        "strategy_definitions":{
+            "ema_cross_v1":{"version":1,"parameters":{"fast":{"min":1,"max":999},"slow":{"min":2,"max":1000}},"constraint":"fast<slow","warmup":"slow_closed_bars"},
+            "ema_momentum_confirm_v1":{"version":1,"parameters":{"fast":{"min":1,"max":999},"slow":{"min":2,"max":1000}},"constraint":"fast<slow","warmup":"slow_closed_bars"},
+            "close_breakout_v1":{"version":1,"parameters":{"lookback":{"min":2,"max":1000}},"signal":"closed_price_vs_prior_lookback_closes","warmup":"lookback_closed_bars","execution":"next_open_counterfactual"}
+        },
         "supported_data_modes":["counterfactual"],
         "unavailable_data_modes":[{"mode":"historical_observed",
             "reason_code":"HISTORICAL_RULES_AND_FEES_UNAVAILABLE"}],
         "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
         "limits":{"max_instruments":8,"max_bars_total":1000000,"max_grid_variants":64,"research_memory_total_mib":budget::MEMORY_TOTAL_MIB,"memory_admission":"conservative_pre_source_shared",
             "max_result_page_rows":50,"max_heavy_concurrent_jobs":2},
+        "resource_proof":{"memory_admission":"shared_estimated_mib_permit_lease_through_terminal_sql_attempt",
+            "cancel_while_waiting":"both_heavy_and_memory_permits_released",
+            "benchmark_process_memory":"windows_psapi_or_linux_procfs_rss_high_watermark",
+            "memory_measurement_scope":"whole_process_not_per_job_and_not_hard_enforcement",
+            "other_platform_measurement":"not_evaluated",
+            "stop_under_load":"two_actual_causal_grids_with_cooperative_cancel",
+            "mcp_and_finance_under_load":"not_evaluated"},
+        "ipc_isolation":{"scheduling":"shared_typed_command_lane_in_protocol_agent_and_worker",
+            "critical_in_flight":okx_protocol::research_ipc::CRITICAL_IN_FLIGHT,
+            "observation_in_flight":okx_protocol::research_ipc::OBSERVATION_IN_FLIGHT,
+            "work_in_flight":okx_protocol::research_ipc::MAX_IN_FLIGHT,
+            "critical_commands":["cancel","drain","shutdown"],
+            "observation_commands":["explain","capabilities","status"],
+            "read_only_observation":"no_venue_trade_or_finance_authority",
+            "worker_ipc_under_saturated_work":"covered_by_real_child_process_test",
+            "engine_and_finance_slo_under_load":"not_evaluated"},
         "result_views":["summary","trades","variants","equity","export"],
         "decisions":{"statuses":["accepted","rejected","deferred"],"single_experiment_only":true,"max_revisions":256,"max_annotation_json_bytes":6144,"trading_authority":false},
         "oos":{"grid_train_test_split":true,"selected_variant_from_train_only":true},
-        "source_evidence":{"closed_candles_only":true,"no_forward_fill":true}
+        "economics":{
+            "replay_products":["spot","linear_swap"],
+            "counterfactual_oracle":{"action":"economics","schema":"okx.research.economics/v1",
+                "products":["spot","linear_swap","inverse_swap"],
+                "option_policy":"blocked_without_explicit_valuation_model",
+                "position_units":{"spot":"base_asset","linear_swap":"contracts",
+                    "inverse_swap":"contracts"},
+                "settlement_units":{"spot":"quote","linear_swap":"quote",
+                    "inverse_swap":"base"},
+                "input_basis":"caller_supplied_unverified_current_and_historical",
+                "money":"exact_decimal_strings","max_cases":8,
+                "independent_currency_totals":true,"fx_conversion":false,
+                "cashflow_attribution":{"per_case":["gross","fees","funding","net"],
+                    "identity":"gross_minus_fees_minus_signed_funding_equals_net",
+                    "grouping":"same_settlement_currency_exact_no_fx",
+                    "blocked_reason_counts":true,"signed_funding":true},
+                "joint_portfolio_risk":false,"market_reads":false,"job_created":false,
+                "trading_authority":false},
+            "unsupported_products":["inverse_swap","option","unverified_contract"],
+            "linear_contract_units":"base_asset_per_contract_with_quote_settlement_verified_from_current_reference",
+            "replay_money_precision":"decimal_ledger_with_f64_price_inputs",
+            "observed_funding":{
+                "products":["linear_swap"],
+                "settlement_join":"funding_event_at_preceding_closed_bar_end_no_forward_fill",
+                "bar_observation_schema":"okx.research.funding-bar-observation/v1",
+                "observation_semantics":"observed_zero_distinct_from_absent_settlement",
+                "replay_arithmetic":"absent_settlement_contributes_zero_cashflow",
+                "export_evidence":"capture_counts_and_every_replay_bar_projection_verified",
+                "valuation_price":"candle_close_proxy_not_venue_mark_price",
+                "historical_cadence_verified":false,
+                "publication_time_verified":false,
+                "expected_events":null,
+                "max_event_gap_guard_ms":okx_research::economics::MAX_FUNDING_EVENT_GAP_MS,
+                "source_capture":"normalized_realized_events_immutable_artifact"
+            },
+            "batch_aggregation":"independent_exact_pnl_totals_grouped_by_quote_currency_no_fx_no_portfolio_risk"
+        },
+        "source_evidence":{"closed_candles_only":true,"no_forward_fill":true,
+            "linear_reference_capture":true,"funding_event_capture_when_requested":true}
     })
 }
 #[cfg(test)]

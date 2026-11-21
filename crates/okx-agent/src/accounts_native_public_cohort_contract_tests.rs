@@ -1,7 +1,9 @@
 //! Two public Execute callers and their original whole-cohort census share
 //! one Native financial owner. The held account's HTTP delivery is the only
 //! scheduling barrier; no fixture constructs a plan, reserve or money fact.
-use super::filled_fixture::opened_market;
+use super::filled_fixture::{
+    keep_captured_readiness_current, opened_market, stop_captured_readiness,
+};
 use super::*;
 use okx_execution::{CentralReceiptView, IntentState, TradeIntentLookup};
 use rust_decimal::Decimal;
@@ -403,6 +405,7 @@ async fn risk_book_contract_native_public_cohort_denied_b_does_not_block_held_a_
         .await
         .unwrap();
     let (stop, market, _socket, _public) = opened_market(&mut fixture).await;
+    let (readiness_stop, readiness_task) = keep_captured_readiness_current(&fixture);
     // A pre-reserve census, B pre-reserve census and A post-HELD census each
     // complete one inventory for each independently verified account: 3 * 2.
     fixture
@@ -554,6 +557,7 @@ async fn risk_book_contract_native_public_cohort_denied_b_does_not_block_held_a_
         .unwrap()
         .unwrap()
         .expect("A public Execute continues from its original HELD receipt");
+    stop_captured_readiness(readiness_stop, readiness_task).await;
 
     // A known local owner denial must be durable and definitive. Otherwise
     // B's unresolved attempt poisons A's next whole-cohort admission fence.
