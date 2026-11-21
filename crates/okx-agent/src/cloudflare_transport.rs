@@ -35,6 +35,24 @@ pub struct CloudflareTransportConfig {
     host_scope: String,
 }
 impl CloudflareTransportConfig {
+    /// Isolated Miniflare fixture only. Production `new` accepts WSS exclusively;
+    /// this constructor does not exist in the released Agent binary.
+    #[cfg(test)]
+    pub(crate) fn isolated_loopback_fixture(ws_url: String) -> Self {
+        ws_url
+            .strip_prefix("ws://127.0.0.1:")
+            .and_then(|s| s.strip_suffix("/runtime"))
+            .and_then(|s| s.parse::<u16>().ok())
+            .filter(|port| *port != 0)
+            .expect("test websocket must bind loopback with an explicit port");
+        Self {
+            ws_url,
+            runtime_id: "windows-primary".into(),
+            bearer_token: Zeroizing::new("integration-only-ephemeral-token".into()),
+            host_scope: "0".repeat(64),
+        }
+    }
+
     pub fn new(
         ws_url: String,
         runtime_id: String,

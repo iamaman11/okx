@@ -72,7 +72,7 @@ def check_counts(output, required):
     return len(passed)
 
 
-def tests(package, target=("--lib",), required=(), exact=False, show_output=False):
+def tests(package, target=("--lib",), required=(), exact=False, show_output=False, extra_env=None):
     cmd = ["cargo", "test", "--locked", "-p", package, *target, "--message-format=json-render-diagnostics"]
     cmd.extend(["--", "--test-threads", "2"])
     if exact:
@@ -81,7 +81,8 @@ def tests(package, target=("--lib",), required=(), exact=False, show_output=Fals
         cmd.append("--show-output")
     print(shlex.join(cmd), flush=True)
     started = time.monotonic()
-    run = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, text=True)
+    run = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, text=True,
+                         env={**os.environ, **extra_env} if extra_env else None)
     rebuilt = set()
     output = []
     for line in run.stdout.splitlines():
@@ -192,6 +193,57 @@ def report_native_under_research(value):
                    "MCP transport NOT measured; no full integrated T10 SLO claim.")
 
 
+def measured_mcp_native_under_research(output):
+    records = re.findall(r"T10_MCP_NATIVE_LOAD_JSON:(\{[^\n]+\})", output)
+    if len(records) != 1:
+        raise ValueError(f"T10 requires one MCP->DO->WSS->Native record; got {len(records)}")
+    value = json.loads(records[0])
+    if (value.get("schema") != "okx.518.t10-mcp-do-wss-native-finance/v1"
+            or value.get("mcp_transport") != "real_loopback_http_miniflare_sqlite_do_websocket_native"
+            or value.get("oauth") != "test_scope_only_not_evaluated"
+            or value.get("production_network") != "not_evaluated"
+            or value.get("research") != "two_cpu_grids_in_separate_native_worker_child"
+            or value.get("financial_owner") != "existing_native_sqlite"
+            or value.get("exchange_trade_post") is not False):
+        raise ValueError("T10 MCP proof scope, financial owner or no-POST flag invalid")
+    for phase_key, expected in (("under_load", "two_heavy_grids_running"),
+                                ("worker_disconnected", "worker_disconnected")):
+        phase = value.get(phase_key, {})
+        if (phase.get("phase") != expected
+                or phase.get("native_installation_identity_preserved") is not True
+                or phase.get("financial_owner") != "native_sqlite_original_owner"
+                or phase.get("trading_requests_sent") != 0
+                or phase.get("reserved_entry_usd") != "0"
+                or phase.get("consumed_entry_usd") != "0"):
+            raise ValueError(f"T10 invalid finance identity/side effects in {phase_key}")
+        sample = phase.get("mcp_native_finance_read_only")
+        if not isinstance(sample, dict):
+            raise ValueError(f"T10 missing {phase_key} real MCP native latency")
+        raw = sample.get("raw_ms", [])
+        if (sample.get("samples") != 100 or len(raw) != 100
+                or sample.get("slo_p95_ms") != 100.0
+                or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                               and math.isfinite(v) and v >= 0 for v in raw)):
+            raise ValueError("T10 MCP raw sample set incomplete or invalid")
+        ordered = sorted(raw)
+        if (sample.get("p50_ms") != ordered[49]
+                or sample.get("p95_ms") != ordered[94]
+                or sample.get("max_ms") != ordered[99]
+                or ordered[94] > 100.0):
+            raise ValueError("T10 MCP p95 exceeded SLO or statistics not from raw data")
+    return value
+
+
+def report_mcp_native_under_research(value):
+    for name in ("under_load", "worker_disconnected"):
+        proof = value[name]["mcp_native_finance_read_only"]
+        report(f"T10 observed {name} genuine loopback MCP HTTP -> Miniflare SQLite DO -> "
+               f"authenticated WSS -> native Finance: 100 calls, p95={proof['p95_ms']:.3f} ms, "
+               f"max={proof['max_ms']:.3f} ms, no trade POST. "
+               "Fixture OAuth replaced with test scope; production network, "
+               "physical Windows and overall memory budget NOT evaluated.")
+
+
 def execute(scopes):
     if "expanded" in scopes:
         # Check the local platform and changed build inputs. Ready covers Windows and the release.
@@ -214,6 +266,10 @@ def execute(scopes):
         report_t10(measured_t10(perf))
     elif "kernel" in scopes:
         tests("okx-research-worker", required=WORKER_TESTS, exact=True)
+    if "mcp" in scopes:
+        # The exact Agent IPC test below spawns a separate, actual Miniflare
+        # process. Install its existing locked dependencies before that test.
+        subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=MCP, check=True)
     if "ipc" in scopes:
         tests("okx-research-worker", ("--test", "ipc_process"))
         metadata = subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
@@ -228,8 +284,13 @@ def execute(scopes):
         tests("okx-agent", required=("research_client::transport_tests::t11_t12_cancel_is_dispatchable_while_work_and_observation_lanes_are_full",), exact=True)
         native = tests("okx-agent", required=("accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect",), exact=True, show_output=True)
         report_native_under_research(measured_native_under_research(native))
+        if "mcp" in scopes:
+            mcp_native = tests("okx-agent", required=(
+                "accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research",
+            ), exact=True, show_output=True,
+                extra_env={"OKX_CONTROL_AGENT_INCAR": "ctl_" + "a" * 32})
+            report_mcp_native_under_research(measured_mcp_native_under_research(mcp_native))
     if "mcp" in scopes:
-        subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=MCP, check=True)
         artifacts = [MCP / "contracts" / name for name in ("tools.schema.json", "action-fixtures.json")]
         before = [path.read_bytes() for path in artifacts]
         subprocess.run(["npm", "run", "check"], cwd=MCP, check=True)

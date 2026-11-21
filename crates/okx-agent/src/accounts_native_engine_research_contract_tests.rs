@@ -4,12 +4,15 @@
 mod process_tree;
 use super::*;
 use crate::{
+    cloudflare_transport::CloudflareTransportConfig,
     finance_dispatch::FinanceDispatch,
     market_bootstrap::MarketBootstrapper,
     query::DispatchContext,
     research_client::{ResearchClient, ResearchClientConfig, SourceHandler},
     runtime::{EngineContext, EngineDrainOutcome, run_engine_until},
 };
+use std::process::Stdio;
+use tokio::{io::{AsyncBufReadExt, BufReader}, process::{Child, Command}};
 use okx_protocol::research_ipc::HistoryCandle;
 use okx_protocol::{
     NATIVE_CHILD_CONTROL_SCHEMA_V1, NativeChildOperation, NativeChildRequest,
@@ -108,7 +111,83 @@ fn latency_proof(mut samples: Vec<f64>, name: &str) -> serde_json::Value {
     })
 }
 
-async fn run_phase(disconnect_before_opening: bool) -> serde_json::Value {
+struct McpLoadHost {
+    child: Child,
+    http_url: String,
+    ws_url: String,
+}
+
+impl McpLoadHost {
+    async fn start(installation_id: &str) -> Self {
+        let mcp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cloudflare/okx-mcp");
+        let mut command = Command::new("node");
+        command
+            .arg("scripts/t10-mcp-load-host.mjs")
+            .arg(installation_id)
+            .current_dir(mcp)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        let mut child = command.spawn().expect("isolated MCP fixture host must start");
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(30), stdout.read_line(&mut line))
+            .await
+            .expect("MCP fixture host ready deadline")
+            .expect("MCP fixture host stdout failed");
+        let json = line
+            .strip_prefix("T10_MCP_LOAD_HOST_READY:")
+            .expect("MCP fixture must produce authenticated typed ready record");
+        let proof: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(proof["schema"], "okx.518.t10-mcp-load-host/v1");
+        assert_eq!(proof["oauth"], "test_scope_only_not_evaluated");
+        assert_eq!(proof["storage"], "ephemeral_sqlite_do");
+        let http_url = proof["http_url"].as_str().unwrap().to_owned();
+        let ws_url = proof["ws_url"].as_str().unwrap().to_owned();
+        assert!(http_url.starts_with("http://127.0.0.1:"));
+        Self { child, http_url, ws_url }
+    }
+
+    async fn close(mut self) {
+        drop(self.child.stdin.take());
+        let status = tokio::time::timeout(Duration::from_secs(10), self.child.wait())
+            .await
+            .expect("MCP fixture host drain deadline")
+            .expect("MCP fixture host wait");
+        assert!(status.success(), "MCP fixture host must close and erase its isolated DO");
+    }
+}
+
+async fn mcp_request(
+    client: &reqwest::Client,
+    url: &str,
+    action: &str,
+    account: Option<&str>,
+) -> serde_json::Value {
+    let arguments = if action == "runtime" {
+        serde_json::json!({"action":"runtime"})
+    } else {
+        serde_json::json!({"action":"explain","view":"finance","account":account,
+            "limit":1})
+    };
+    let request = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"diagnostics","arguments":arguments}});
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.post(url).header("content-type", "application/json")
+            .body(request.to_string()).send(),
+    )
+    .await
+    .expect("MCP HTTP/DO/WSS request timeout")
+    .expect("MCP localhost HTTP request failed");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let json = response.text().await.expect("MCP body read failed");
+    serde_json::from_str(&json).expect("MCP JSON-RPC reply must decode")
+}
+
+async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_json::Value {
     let mut fixture = fixture().await;
     let (market, public, _socket) = raw_market();
     let api = okx_api::OkxPublicClient::with_http_transport(
@@ -174,7 +253,7 @@ async fn run_phase(disconnect_before_opening: bool) -> serde_json::Value {
             bootstrap.clone(),
         ))
         .await;
-    let ctx = EngineContext {
+    let mut ctx = EngineContext {
         dispatch: DispatchContext {
             finance: FinanceDispatch::ready(fixture.registry.clone(), fixture.trade.clone()),
             research: research.clone(),
@@ -192,11 +271,37 @@ async fn run_phase(disconnect_before_opening: bool) -> serde_json::Value {
     let owner = fixture.owner.clone();
     let campaign = fixture.campaign.clone();
     let installation = owner.installation_id().to_owned();
+    let host = if with_mcp {
+        Some(McpLoadHost::start(&installation).await)
+    } else {
+        None
+    };
+    let http_url = host.as_ref().map(|host| host.http_url.clone());
+    ctx.transport = host.as_ref().map(|host| {
+        CloudflareTransportConfig::isolated_loopback_fixture(host.ws_url.clone())
+    });
+    let account = fixture.config.account_key.wire();
     let trade = fixture.trade.clone();
     let authority = fixture.authority.clone();
     let child = research.clone();
     let (evidence_tx, evidence_rx) = tokio::sync::oneshot::channel();
     let until = async move {
+        let mcp_client = reqwest::Client::new();
+        if let Some(url) = &http_url {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    let result = mcp_request(&mcp_client, url, "runtime", None).await;
+                    if result["result"]["structuredContent"]["data"]["transport"]["status"]
+                        == "PASS"
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("genuine loopback HTTP->DO->Agent WSS must become fresh");
+        }
         if disconnect_before_opening {
             child.shutdown().await;
             assert!(
@@ -278,11 +383,35 @@ async fn run_phase(disconnect_before_opening: bool) -> serde_json::Value {
         } else {
             latency_proof(research_explain_ms, "research_child_explain")
         };
+        let mcp_finance = if let Some(url) = &http_url {
+            let mut samples = Vec::with_capacity(100);
+            for _ in 0..100 {
+                let began = std::time::Instant::now();
+                let reply = mcp_request(&mcp_client, url, "finance", Some(&account)).await;
+                samples.push(began.elapsed().as_secs_f64() * 1000.0);
+                assert!(reply.get("error").is_none(), "MCP schema must accept Finance read");
+                let data = &reply["result"]["structuredContent"]["data"];
+                assert_eq!(data["schema"], "okx.finance-diagnostics/v1");
+                assert_eq!(data["account"], account);
+                assert_eq!(data["central_budget"]["state"], "NOT_EVALUATED",
+                    "MCP diagnostics must not fabricate a central financial permit");
+            }
+            latency_proof(samples, "mcp_http_sqlite_do_wss_native_finance")
+        } else {
+            serde_json::Value::Null
+        };
+        if with_mcp && !disconnect_before_opening {
+            let a = state(&child, &first).await;
+            let b = state(&child, &second).await;
+            assert!(a["state"] == "running" || b["state"] == "running",
+                "real Grid must overlap entire MCP Finance measurement: {a} {b}");
+        }
         evidence_tx.send(serde_json::json!({
             "schema":"okx.518.t11-t12-native-concurrent-isolation/v1",
             "phase":if disconnect_before_opening {"worker_disconnected"} else {"two_heavy_grids_running"},
             "native_finance_read_only":finance,
             "research_explain":explain,
+            "mcp_native_finance_read_only":mcp_finance,
             "native_installation_identity_preserved":true,
             "reserved_entry_usd":"0","consumed_entry_usd":"0",
             "financial_owner":"native_sqlite_original_owner",
@@ -304,6 +433,7 @@ async fn run_phase(disconnect_before_opening: bool) -> serde_json::Value {
     assert_eq!(outcome, EngineDrainOutcome::Drained);
     assert!(fixture.feed.outbound_posts.lock().unwrap().is_empty());
     let proof = evidence_rx.await.expect("Native isolation proof not recorded");
+    if let Some(host) = host { host.close().await; }
     research.shutdown().await;
     fixture.finish().await;
     proof
@@ -311,8 +441,8 @@ async fn run_phase(disconnect_before_opening: bool) -> serde_json::Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect() {
     let measurement = process_tree::ResearchProcessTree::begin();
-    let working = run_phase(false).await;
-    let disconnected = run_phase(true).await;
+    let working = run_phase(false, false).await;
+    let disconnected = run_phase(true, false).await;
     let evidence = measurement.finish();
     println!("RESEARCH_PROCESS_TREE={evidence}");
     println!("T11_T12_NATIVE_ISOLATION_JSON:{}", serde_json::json!({
@@ -322,6 +452,22 @@ async fn engine_maintenance_and_stop_remain_independent_of_heavy_research_and_di
         "research":"separate_child_process_two_real_grids",
         "mcp_transport":"not_evaluated_in_native_test",
         "windows_process_tree":evidence,
+        "exchange_trade_post":false,
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research() {
+    let under_load = run_phase(false, true).await;
+    let worker_disconnected = run_phase(true, true).await;
+    println!("T10_MCP_NATIVE_LOAD_JSON:{}", serde_json::json!({
+        "schema":"okx.518.t10-mcp-do-wss-native-finance/v1",
+        "under_load":under_load,"worker_disconnected":worker_disconnected,
+        "mcp_transport":"real_loopback_http_miniflare_sqlite_do_websocket_native",
+        "oauth":"test_scope_only_not_evaluated",
+        "production_network":"not_evaluated",
+        "research":"two_cpu_grids_in_separate_native_worker_child",
+        "financial_owner":"existing_native_sqlite",
         "exchange_trade_post":false,
     }));
 }

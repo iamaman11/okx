@@ -1,6 +1,7 @@
 import unittest
 
-from check_p0 import check_counts, measured_native_under_research, measured_t10, select
+from check_p0 import (check_counts, measured_mcp_native_under_research,
+                      measured_native_under_research, measured_t10, select)
 
 
 class FeedbackTests(unittest.TestCase):
@@ -92,6 +93,44 @@ class FeedbackTests(unittest.TestCase):
                 measured_native_under_research(record(bad))
         with self.assertRaises(ValueError):
             measured_native_under_research("test result: ok. 1 passed")
+
+    def test_t10_mcp_requires_actual_end_to_end_native_finance_samples(self):
+        import json
+
+        sample = {"samples":100,"p50_ms":2.0,"p95_ms":2.0,"max_ms":2.0,
+                  "raw_ms":[2.0]*100,"slo_p95_ms":100.0}
+        phase = {"phase":"two_heavy_grids_running",
+                 "native_installation_identity_preserved":True,
+                 "financial_owner":"native_sqlite_original_owner",
+                 "trading_requests_sent":0,"reserved_entry_usd":"0",
+                 "consumed_entry_usd":"0","mcp_native_finance_read_only":sample}
+        value = {"schema":"okx.518.t10-mcp-do-wss-native-finance/v1",
+                 "mcp_transport":"real_loopback_http_miniflare_sqlite_do_websocket_native",
+                 "oauth":"test_scope_only_not_evaluated",
+                 "production_network":"not_evaluated",
+                 "research":"two_cpu_grids_in_separate_native_worker_child",
+                 "financial_owner":"existing_native_sqlite","exchange_trade_post":False,
+                 "under_load":phase,
+                 "worker_disconnected":{**phase,"phase":"worker_disconnected"}}
+
+        def record(data):
+            return "T10_MCP_NATIVE_LOAD_JSON:"+json.dumps(data)
+
+        self.assertEqual(measured_mcp_native_under_research(record(value))["under_load"]["phase"],
+                         "two_heavy_grids_running")
+        for change in (
+            lambda x: x["under_load"]["mcp_native_finance_read_only"].update(samples=99),
+            lambda x: x["under_load"]["mcp_native_finance_read_only"].update(p95_ms=101.0),
+            lambda x: x["worker_disconnected"].update(trading_requests_sent=1),
+            lambda x: x.update(production_network="accepted"),
+            lambda x: x.update(oauth="production_oauth"),
+        ):
+            bad = json.loads(json.dumps(value))
+            change(bad)
+            with self.assertRaises(ValueError):
+                measured_mcp_native_under_research(record(bad))
+        with self.assertRaises(ValueError):
+            measured_mcp_native_under_research("not a proof")
 
 
 if __name__ == "__main__":
