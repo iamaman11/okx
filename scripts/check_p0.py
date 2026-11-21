@@ -408,6 +408,9 @@ def execute(scopes):
         suffix = ".exe" if os.name == "nt" else ""
         worker = Path(json.loads(metadata)["target_directory"]) / "debug" / ("okx-research-service" + suffix)
         os.environ["OKX_RESEARCH_SERVICE_TEST_EXE"] = str(worker)
+        tests("okx-agent", required=(
+            "trade_service::strategies::strategy_contract_tests::graph_research_journal_consumer_commits_idle_and_blocks_open_without_post",
+        ), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::real_worker_live_signal_ipc_is_causal_and_has_no_source_or_finance_access",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_only",), exact=True)

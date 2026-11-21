@@ -45,7 +45,7 @@ impl GraphTargetBinding {
             .valid()
     }
 
-    fn storage_binding(&self) -> EngineGraphBinding {
+    pub(super) fn storage_binding(&self) -> EngineGraphBinding {
         EngineGraphBinding {
             account_key: self.account_key.clone(),
             instance_id: self.instance_id.clone(),
@@ -58,7 +58,7 @@ impl GraphTargetBinding {
         }
     }
 
-    fn storage_cursor(cursor: &GraphPublicationCursor) -> EngineGraphCursor {
+    pub(super) fn storage_cursor(cursor: &GraphPublicationCursor) -> EngineGraphCursor {
         EngineGraphCursor {
             sequence: cursor.last_sequence(),
             closed_ms: cursor.last_closed_ms(),
