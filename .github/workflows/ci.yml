@@ -1017,7 +1017,9 @@ jobs:
           & node scripts/test-research-release-scope.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & ./scripts/prepare-research-release.ps1 -Dist $dist
-          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'research-only-release-target'
+          # Share host build/proc-macro artifacts with clippy/tests; Cargo
+          # still isolates debug and release profile outputs below this root.
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'research-check-target'
           cargo build --locked --release -p okx-research-worker --bin okx-research-worker 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'research-only-build.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
