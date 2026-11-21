@@ -285,7 +285,8 @@ impl ResearchClient {
             None => self.config.executable.clone(),
         };
         let mut command = Command::new(&executable);
-        command.arg("--root")
+        command
+            .arg("--root")
             .arg(&self.config.root)
             .arg("--scope")
             .arg(self.config.scope.as_str())
