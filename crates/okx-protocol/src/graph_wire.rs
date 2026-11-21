@@ -109,8 +109,7 @@ impl GraphEnvelope {
                             GraphInputRef::Step(reference) => {
                                 // Only already declared steps may be read.
                                 // The current step is not yet inserted.
-                                ids.contains(reference.step.as_str())
-                                    && reference.step != step.id
+                                ids.contains(reference.step.as_str()) && reference.step != step.id
                             }
                         }
                 })

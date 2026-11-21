@@ -12,12 +12,13 @@ pub fn resolve(graph: &GraphEnvelope) -> Result<CompositionRequest, String> {
     let mut steps = Vec::with_capacity(graph.steps.len());
     for step in &graph.steps {
         // This lookup is deliberately NOT performed in the public protocol.
-        let op: SeriesOp = serde_json::from_value(Value::String(step.op.id.clone())).map_err(|_| {
-            format!(
-                "graph.{}:UNKNOWN_OPERATOR:{}@{}",
-                step.id, step.op.id, step.op.version
-            )
-        })?;
+        let op: SeriesOp =
+            serde_json::from_value(Value::String(step.op.id.clone())).map_err(|_| {
+                format!(
+                    "graph.{}:UNKNOWN_OPERATOR:{}@{}",
+                    step.id, step.op.id, step.op.version
+                )
+            })?;
         if step.op.version != 1 {
             return Err(format!(
                 "graph.{}:UNSUPPORTED_OPERATOR_VERSION:{}@{}",
@@ -142,9 +143,7 @@ mod tests {
             "graph.smooth:INVALID_PERIOD_TYPE"
         );
         let mut candidate = graph();
-        candidate.steps[1]
-            .params
-            .insert("period".into(), json!(0));
+        candidate.steps[1].params.insert("period".into(), json!(0));
         assert!(CheckedComposition::compile(resolve(&candidate).unwrap(), 4).is_err());
     }
 
