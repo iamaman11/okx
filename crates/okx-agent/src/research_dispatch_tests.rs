@@ -2,8 +2,8 @@ use crate::research_client::{
     GraphSignalEvent, ResearchClient, ResearchClientConfig, SourceHandler,
 };
 use crate::trade_service::graph_target::GraphTargetBinding;
-use okx_execution::{StoredLot, StrategyInstance, StrategyPositionSnapshot};
 use okx_execution::position_target::{TargetPlan, TargetPosition};
+use okx_execution::{StoredLot, StrategyInstance, StrategyPositionSnapshot};
 use okx_protocol::{
     analytics::*,
     research_ipc::{
@@ -275,8 +275,15 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
         .unwrap()
         .unwrap();
     assert_eq!(candidate.target, TargetPosition::Flat);
-    assert_eq!(candidate.plan, TargetPlan::CloseExisting(vec!["original-entry".into()]));
-    assert_eq!(cursor.last_sequence(), 2, "preview must not commit the cursor");
+    assert_eq!(
+        candidate.plan,
+        TargetPlan::CloseExisting(vec!["original-entry".into()])
+    );
+    assert_eq!(
+        cursor.last_sequence(),
+        2,
+        "preview must not commit the cursor"
+    );
     assert_eq!(candidate.next_cursor.last_sequence(), 3);
     assert_eq!(
         published_flat.intent,

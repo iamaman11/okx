@@ -24,13 +24,17 @@ impl AccountStore {
             values.push(account.to_owned().into());
         }
         let mut query = db.prepare(match scope {
-            None => "SELECT lot_id,intent_id,fill_id,instrument_id,side,remaining_qty,cost,opened_at
+            None => {
+                "SELECT lot_id,intent_id,fill_id,instrument_id,side,remaining_qty,cost,opened_at
                      FROM position_lots WHERE instance_id=?1 AND instrument_id=?2
-                     AND remaining_qty<>'0' ORDER BY side,opened_at,lot_id LIMIT 257",
-            Some(_) => "SELECT lot_id,intent_id,fill_id,instrument_id,side,remaining_qty,cost,opened_at
+                     AND remaining_qty<>'0' ORDER BY side,opened_at,lot_id LIMIT 257"
+            }
+            Some(_) => {
+                "SELECT lot_id,intent_id,fill_id,instrument_id,side,remaining_qty,cost,opened_at
                         FROM position_lots WHERE instance_id=?1 AND instrument_id=?2
                         AND installation_id=?3 AND account_key=?4 AND remaining_qty<>'0'
-                        ORDER BY side,opened_at,lot_id LIMIT 257",
+                        ORDER BY side,opened_at,lot_id LIMIT 257"
+            }
         })?;
         let lots = query
             .query_map(rusqlite::params_from_iter(values), |row| {

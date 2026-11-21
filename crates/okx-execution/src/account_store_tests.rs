@@ -8468,34 +8468,64 @@ fn strategy_status_bounds_owned_positions_and_uses_instance_index() {
 fn graph_target_snapshot_reads_strategy_lots_and_pending_from_one_original_sql_owner() {
     let mut s = store();
     let before = AccountStore::strategy_position_snapshot_sql(
-        &s.connection, None, "manual", "BTC-USDT-SWAP",
-    ).unwrap();
+        &s.connection,
+        None,
+        "manual",
+        "BTC-USDT-SWAP",
+    )
+    .unwrap();
     assert_eq!(before.instance.instance_id, "manual");
     assert!(before.lots.is_empty());
     assert!(!before.in_flight);
     intent(&mut s);
     let during = AccountStore::strategy_position_snapshot_sql(
-        &s.connection, None, "manual", "BTC-USDT-SWAP",
-    ).unwrap();
+        &s.connection,
+        None,
+        "manual",
+        "BTC-USDT-SWAP",
+    )
+    .unwrap();
     assert!(during.in_flight, "PREPARED entry blocks another action");
-    s.connection.execute("UPDATE intents SET state='UNKNOWN' WHERE intent_id='intent'", []).unwrap();
+    s.connection
+        .execute(
+            "UPDATE intents SET state='UNKNOWN' WHERE intent_id='intent'",
+            [],
+        )
+        .unwrap();
     let uncertain = AccountStore::strategy_position_snapshot_sql(
-        &s.connection, None, "manual", "BTC-USDT-SWAP",
-    ).unwrap();
+        &s.connection,
+        None,
+        "manual",
+        "BTC-USDT-SWAP",
+    )
+    .unwrap();
     assert!(uncertain.in_flight, "UNKNOWN is not safe to replay");
-    s.connection.execute("UPDATE intents SET state='FILLED' WHERE intent_id='intent'", []).unwrap();
+    s.connection
+        .execute(
+            "UPDATE intents SET state='FILLED' WHERE intent_id='intent'",
+            [],
+        )
+        .unwrap();
     s.connection.execute(
         "INSERT INTO position_lots VALUES('owned','manual','intent',NULL,'BTC-USDT-SWAP','long','1','100',5)", [],
     ).unwrap();
     let settled = AccountStore::strategy_position_snapshot_sql(
-        &s.connection, None, "manual", "BTC-USDT-SWAP",
-    ).unwrap();
+        &s.connection,
+        None,
+        "manual",
+        "BTC-USDT-SWAP",
+    )
+    .unwrap();
     assert!(!settled.in_flight);
     assert_eq!(settled.lots.len(), 1);
     assert_eq!(settled.lots[0].intent_id.as_deref(), Some("intent"));
     let other_instrument = AccountStore::strategy_position_snapshot_sql(
-        &s.connection, None, "manual", "ETH-USDT-SWAP",
-    ).unwrap();
+        &s.connection,
+        None,
+        "manual",
+        "ETH-USDT-SWAP",
+    )
+    .unwrap();
     assert!(!other_instrument.in_flight);
     assert!(other_instrument.lots.is_empty());
 }

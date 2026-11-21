@@ -87,12 +87,7 @@ impl ExecutionStore {
     ) -> StoreResult<okx_execution::StrategyPositionSnapshot> {
         let Self { owner, account } = self;
         owner
-            .strategy_position_snapshot(
-                deadline,
-                account.wire.clone(),
-                instance_id,
-                instrument_id,
-            )
+            .strategy_position_snapshot(deadline, account.wire.clone(), instance_id, instrument_id)
             .await
     }
 

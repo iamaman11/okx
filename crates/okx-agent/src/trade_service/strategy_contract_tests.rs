@@ -148,13 +148,23 @@ async fn graph_target_preview_reads_the_original_account_owner_without_any_order
     let _capture = fixture.owner.recorded_capture_gate.write().await;
     completed_data(fixture.request(create("graph_preview_create")).await);
     completed_data(
-        fixture.request(StrategyRequest::Start {
-            idempotency_key: "graph_preview_start".into(),
-            instance_id: INSTANCE.into(),
-        }).await,
+        fixture
+            .request(StrategyRequest::Start {
+                idempotency_key: "graph_preview_start".into(),
+                instance_id: INSTANCE.into(),
+            })
+            .await,
     );
-    let instance = fixture.owner.execution.store.strategy_instances(deadline()).await
-        .unwrap().into_iter().find(|v| v.instance_id == INSTANCE).unwrap();
+    let instance = fixture
+        .owner
+        .execution
+        .store
+        .strategy_instances(deadline())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|v| v.instance_id == INSTANCE)
+        .unwrap();
     let session_id = GraphSessionId::new("engine:graph-preview".into()).unwrap();
     let hash = "a".repeat(64);
     let binding = super::graph_target::GraphTargetBinding {
@@ -174,7 +184,8 @@ async fn graph_target_preview_reads_the_original_account_owner_without_any_order
         last_closed_ms: 120_000,
         observed_bars: 2,
         intent: GraphSignalIntent::Hold,
-    }).unwrap();
+    })
+    .unwrap();
     let publication = GraphSignalPublication {
         schema: GraphSessionReply::SCHEMA.into(),
         session_id,
@@ -185,21 +196,47 @@ async fn graph_target_preview_reads_the_original_account_owner_without_any_order
     };
     let before = money(&fixture).await;
     let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
-    let preview = fixture.native.trade.preview_graph_publication(
-        &fixture.owner.configuration.alias, &binding, &confirmed, &publication,
-    ).await.unwrap().unwrap();
-    assert_eq!(preview.target, okx_execution::position_target::TargetPosition::Long);
-    assert_eq!(preview.plan, okx_execution::position_target::TargetPlan::Open(
-        okx_execution::position_target::ExposureSide::Long,
-    ));
+    let preview = fixture
+        .native
+        .trade
+        .preview_graph_publication(
+            &fixture.owner.configuration.alias,
+            &binding,
+            &confirmed,
+            &publication,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        preview.target,
+        okx_execution::position_target::TargetPosition::Long
+    );
+    assert_eq!(
+        preview.plan,
+        okx_execution::position_target::TargetPlan::Open(
+            okx_execution::position_target::ExposureSide::Long,
+        )
+    );
     assert_eq!(confirmed.last_sequence(), 2);
     assert_eq!(money(&fixture).await, before);
     assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
     let mut foreign = binding;
     foreign.account_key.push_str("-foreign");
-    assert_eq!(fixture.native.trade.preview_graph_publication(
-        &fixture.owner.configuration.alias, &foreign, &confirmed, &publication,
-    ).await.unwrap_err(), "GRAPH_TARGET_ACCOUNT_MISMATCH");
+    assert_eq!(
+        fixture
+            .native
+            .trade
+            .preview_graph_publication(
+                &fixture.owner.configuration.alias,
+                &foreign,
+                &confirmed,
+                &publication,
+            )
+            .await
+            .unwrap_err(),
+        "GRAPH_TARGET_ACCOUNT_MISMATCH"
+    );
     drop(_capture);
     fixture.finish().await;
 }

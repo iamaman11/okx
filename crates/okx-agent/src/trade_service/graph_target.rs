@@ -10,8 +10,8 @@ use okx_execution::{
     position_target::{TargetPlan, TargetPlanError, TargetPosition, plan_strategy_target},
 };
 use okx_protocol::research_ipc::{
-    GraphFeedRequest, GraphPosition, GraphPublicationCursor, GraphSessionId,
-    GraphSignalIntent, GraphSignalPublication,
+    GraphFeedRequest, GraphPosition, GraphPublicationCursor, GraphSessionId, GraphSignalIntent,
+    GraphSignalPublication,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,8 +155,8 @@ impl TradeService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_execution::{StoredLot, StrategyInstance};
     use okx_execution::position_target::ExposureSide;
+    use okx_execution::{StoredLot, StrategyInstance};
     use okx_protocol::research_ipc::{GraphSessionReply, GraphSignalPublication};
     use rust_decimal::Decimal;
 
@@ -230,12 +230,23 @@ mod tests {
     fn flat_from_research_previews_close_without_mutating_engine_cursor() {
         let (binding, mut snapshot, cursor, event) = fixture();
         snapshot.lots.push(owned_long());
-        let candidate = binding.preview(&snapshot, &cursor, &event).unwrap().unwrap();
+        let candidate = binding
+            .preview(&snapshot, &cursor, &event)
+            .unwrap()
+            .unwrap();
         assert_eq!(candidate.target, TargetPosition::Flat);
-        assert_eq!(candidate.plan, TargetPlan::CloseExisting(vec!["original-entry".into()]));
+        assert_eq!(
+            candidate.plan,
+            TargetPlan::CloseExisting(vec!["original-entry".into()])
+        );
         assert_eq!(cursor.last_sequence(), 2);
         assert_eq!(candidate.next_cursor.last_sequence(), 3);
-        assert_eq!(binding.preview(&snapshot, &candidate.next_cursor, &event).unwrap(), None);
+        assert_eq!(
+            binding
+                .preview(&snapshot, &candidate.next_cursor, &event)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -243,42 +254,72 @@ mod tests {
         let (binding, mut snapshot, cursor, mut event) = fixture();
         event.intent = GraphSignalIntent::SetTarget(GraphPosition::Long);
         snapshot.lots.push(owned_long());
-        assert_eq!(binding.preview(&snapshot, &cursor, &event).unwrap().unwrap().plan,
-                   TargetPlan::NoChange);
+        assert_eq!(
+            binding
+                .preview(&snapshot, &cursor, &event)
+                .unwrap()
+                .unwrap()
+                .plan,
+            TargetPlan::NoChange
+        );
         snapshot.lots.clear();
-        assert_eq!(binding.preview(&snapshot, &cursor, &event).unwrap().unwrap().plan,
-                   TargetPlan::Open(ExposureSide::Long));
+        assert_eq!(
+            binding
+                .preview(&snapshot, &cursor, &event)
+                .unwrap()
+                .unwrap()
+                .plan,
+            TargetPlan::Open(ExposureSide::Long)
+        );
         snapshot.in_flight = true;
-        assert_eq!(binding.preview(&snapshot, &cursor, &event).unwrap().unwrap().plan,
-                   TargetPlan::AwaitSettlement);
+        assert_eq!(
+            binding
+                .preview(&snapshot, &cursor, &event)
+                .unwrap()
+                .unwrap()
+                .plan,
+            TargetPlan::AwaitSettlement
+        );
     }
 
     #[test]
     fn stale_strategy_revision_and_stopped_strategy_are_rejected() {
         let (binding, mut snapshot, cursor, event) = fixture();
         snapshot.instance.policy_revision += 1;
-        assert_eq!(binding.preview(&snapshot, &cursor, &event),
-                   Err(GraphTargetError::StrategyStoppedOrChanged));
+        assert_eq!(
+            binding.preview(&snapshot, &cursor, &event),
+            Err(GraphTargetError::StrategyStoppedOrChanged)
+        );
         snapshot.instance.policy_revision -= 1;
         snapshot.instance.enabled = false;
-        assert_eq!(binding.preview(&snapshot, &cursor, &event),
-                   Err(GraphTargetError::StrategyStoppedOrChanged));
+        assert_eq!(
+            binding.preview(&snapshot, &cursor, &event),
+            Err(GraphTargetError::StrategyStoppedOrChanged)
+        );
     }
 
     #[test]
     fn graph_session_time_and_sequence_mismatches_fail_closed() {
         let (binding, snapshot, cursor, mut event) = fixture();
         event.graph_sha256 = "b".repeat(64);
-        assert_eq!(binding.preview(&snapshot, &cursor, &event),
-                   Err(GraphTargetError::PublicationMismatch));
+        assert_eq!(
+            binding.preview(&snapshot, &cursor, &event),
+            Err(GraphTargetError::PublicationMismatch)
+        );
         event.graph_sha256 = binding.graph_sha256.clone();
         event.closed_ms += 1;
-        assert_eq!(binding.preview(&snapshot, &cursor, &event),
-                   Err(GraphTargetError::PublicationMismatch));
+        assert_eq!(
+            binding.preview(&snapshot, &cursor, &event),
+            Err(GraphTargetError::PublicationMismatch)
+        );
         event.closed_ms -= 1;
         event.sequence = 4;
-        assert_eq!(binding.preview(&snapshot, &cursor, &event),
-                   Err(GraphTargetError::CursorInvalid("GRAPH_PUBLICATION_SEQUENCE_GAP")));
+        assert_eq!(
+            binding.preview(&snapshot, &cursor, &event),
+            Err(GraphTargetError::CursorInvalid(
+                "GRAPH_PUBLICATION_SEQUENCE_GAP"
+            ))
+        );
     }
 
     #[test]
@@ -286,12 +327,19 @@ mod tests {
         let (binding, mut snapshot, cursor, mut event) = fixture();
         snapshot.lots.push(owned_long());
         event.intent = GraphSignalIntent::Hold;
-        let result = binding.preview(&snapshot, &cursor, &event).unwrap().unwrap();
+        let result = binding
+            .preview(&snapshot, &cursor, &event)
+            .unwrap()
+            .unwrap();
         assert_eq!(result.target, TargetPosition::Hold);
         assert_eq!(result.plan, TargetPlan::NoChange);
         event.intent = GraphSignalIntent::SetTarget(GraphPosition::Flat);
         snapshot.lots[0].intent_id = None;
-        assert_eq!(binding.preview(&snapshot, &cursor, &event),
-                   Err(GraphTargetError::Plan(TargetPlanError::MissingCloseReference("owned-lot".into()))));
+        assert_eq!(
+            binding.preview(&snapshot, &cursor, &event),
+            Err(GraphTargetError::Plan(
+                TargetPlanError::MissingCloseReference("owned-lot".into())
+            ))
+        );
     }
 }
