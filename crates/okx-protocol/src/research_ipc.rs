@@ -475,8 +475,16 @@ pub struct GraphSignalPublication {
 impl GraphSignalPublication {
     pub fn from_decision(reply: &GraphSessionReply) -> Option<Self> {
         let GraphSessionReply::Evaluated {
-            schema, session_id, graph_sha256, last_closed_ms, observed_bars, intent,
-        } = reply else { return None };
+            schema,
+            session_id,
+            graph_sha256,
+            last_closed_ms,
+            observed_bars,
+            intent,
+        } = reply
+        else {
+            return None;
+        };
         Some(Self {
             schema: schema.clone(),
             session_id: session_id.clone(),
@@ -490,8 +498,12 @@ impl GraphSignalPublication {
     pub fn valid(&self) -> bool {
         self.schema == GraphSessionReply::SCHEMA
             && self.graph_sha256.len() == 64
-            && self.graph_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            && self.closed_ms > 0 && self.closed_ms <= i64::MAX as u64
+            && self
+                .graph_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && self.closed_ms > 0
+            && self.closed_ms <= i64::MAX as u64
             && (1..=100_000).contains(&self.sequence)
     }
 }
@@ -528,7 +540,10 @@ impl GraphPublicationCursor {
     /// True only for the next never-before-seen bar. No state mutation on
     /// missing/reordered/forged events. The actual risk decision is separate.
     pub fn accept(&mut self, event: &GraphSignalPublication) -> Result<bool, &'static str> {
-        if !event.valid() || event.session_id != self.session_id || event.graph_sha256 != self.graph_sha256 {
+        if !event.valid()
+            || event.session_id != self.session_id
+            || event.graph_sha256 != self.graph_sha256
+        {
             return Err("GRAPH_PUBLICATION_IDENTITY_MISMATCH");
         }
         if event.sequence == self.sequence {
@@ -550,7 +565,9 @@ impl GraphPublicationCursor {
         Ok(true)
     }
 
-    pub fn last_sequence(&self) -> u64 { self.sequence }
+    pub fn last_sequence(&self) -> u64 {
+        self.sequence
+    }
 }
 
 #[cfg(test)]
@@ -666,21 +683,33 @@ mod graph_signal_contract_tests {
         assert!(!cursor.accept(&publication).unwrap());
         publication.sequence = 4;
         publication.closed_ms = 200;
-        assert_eq!(cursor.accept(&publication).unwrap_err(), "GRAPH_PUBLICATION_SEQUENCE_GAP");
+        assert_eq!(
+            cursor.accept(&publication).unwrap_err(),
+            "GRAPH_PUBLICATION_SEQUENCE_GAP"
+        );
         assert_eq!(cursor.last_sequence(), 2);
         publication.sequence = 3;
         publication.closed_ms = 100;
-        assert_eq!(cursor.accept(&publication).unwrap_err(), "GRAPH_PUBLICATION_NOT_MONOTONIC");
+        assert_eq!(
+            cursor.accept(&publication).unwrap_err(),
+            "GRAPH_PUBLICATION_NOT_MONOTONIC"
+        );
         publication.closed_ms = 200;
         publication.intent = GraphSignalIntent::SetTarget(GraphPosition::Flat);
         assert!(cursor.accept(&publication).unwrap());
         assert!(!cursor.accept(&publication).unwrap());
         publication.intent = GraphSignalIntent::Hold;
-        assert_eq!(cursor.accept(&publication).unwrap_err(), "GRAPH_PUBLICATION_CONFLICTING_REPLAY");
+        assert_eq!(
+            cursor.accept(&publication).unwrap_err(),
+            "GRAPH_PUBLICATION_CONFLICTING_REPLAY"
+        );
         publication.sequence = 4;
         publication.closed_ms = 300;
         publication.graph_sha256 = "b".repeat(64);
-        assert_eq!(cursor.accept(&publication).unwrap_err(), "GRAPH_PUBLICATION_IDENTITY_MISMATCH");
+        assert_eq!(
+            cursor.accept(&publication).unwrap_err(),
+            "GRAPH_PUBLICATION_IDENTITY_MISMATCH"
+        );
         assert_eq!(cursor.last_sequence(), 3);
     }
 }

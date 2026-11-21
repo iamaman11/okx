@@ -72,7 +72,9 @@ impl AnalyticsService {
         &self,
         request: GraphSessionRequest,
     ) -> Result<(GraphSessionReply, bool), String> {
-        self.graph_sessions.execute_transition(&self.cpu, request).await
+        self.graph_sessions
+            .execute_transition(&self.cpu, request)
+            .await
     }
     /// Same causal kernel as replay, isolated behind the Research process and
     /// scheduled on the existing bounded CPU executor (never on Tokio I/O).

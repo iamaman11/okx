@@ -1,11 +1,14 @@
-use crate::research_client::{GraphSignalEvent, ResearchClient, ResearchClientConfig, SourceHandler};
+use crate::research_client::{
+    GraphSignalEvent, ResearchClient, ResearchClientConfig, SourceHandler,
+};
 use okx_protocol::{
     analytics::*,
     research_ipc::{
-        ClosedPrice, FundingHistoryEvent, GraphClosedBar, GraphPosition, GraphPublicationCursor, GraphSessionId,
-        GraphSessionReply, GraphSessionRequest, GraphSignalDefinition, GraphSignalIntent,
-        HistoryCandle, PublicCandleCapture, PublicFundingCapture, PublicSourceReply,
-        PublicSourceRequest, ResearchOpenInterest, ResearchScope, SignalPosition, SignalRequest,
+        ClosedPrice, FundingHistoryEvent, GraphClosedBar, GraphPosition, GraphPublicationCursor,
+        GraphSessionId, GraphSessionReply, GraphSessionRequest, GraphSignalDefinition,
+        GraphSignalIntent, HistoryCandle, PublicCandleCapture, PublicFundingCapture,
+        PublicSourceReply, PublicSourceRequest, ResearchOpenInterest, ResearchScope,
+        SignalPosition, SignalRequest,
     },
 };
 use serde_json::Value;
@@ -200,7 +203,10 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
     let first = client.graph_signal(restore.clone()).await.unwrap();
     assert!(first.matches_request(&restore));
     let mut cursor = GraphPublicationCursor::from_restored(&first).unwrap();
-    assert!(matches!(publications.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+    assert!(matches!(
+        publications.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
     assert_eq!(first, client.graph_signal(restore).await.unwrap());
     let GraphSessionReply::Evaluated {
         graph_sha256,
@@ -224,10 +230,19 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
     let GraphSignalEvent::Published(published_flat) = publications.recv().await.unwrap() else {
         panic!("expected publication")
     };
-    assert_eq!(published_flat.intent, GraphSignalIntent::SetTarget(GraphPosition::Flat));
+    assert_eq!(
+        published_flat.intent,
+        GraphSignalIntent::SetTarget(GraphPosition::Flat)
+    );
     assert!(cursor.accept(&published_flat).unwrap());
     assert_eq!(flat, client.graph_signal(next).await.unwrap());
-    assert!(matches!(publications.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)), "retry must not re-publish");
+    assert!(
+        matches!(
+            publications.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "retry must not re-publish"
+    );
     assert!(matches!(
         flat,
         GraphSessionReply::Evaluated {

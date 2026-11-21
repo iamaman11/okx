@@ -67,7 +67,9 @@ impl GraphSessions {
         cpu: &CpuExecutor,
         request: GraphSessionRequest,
     ) -> Result<GraphSessionReply, String> {
-        self.execute_transition(cpu, request).await.map(|(reply, _)| reply)
+        self.execute_transition(cpu, request)
+            .await
+            .map(|(reply, _)| reply)
     }
 
     /// The bool means a new closed-bar transition, never Restore or retry.
@@ -257,8 +259,14 @@ mod tests {
             capacity: 100,
             history: vec![bar(10, Some(100.)), bar(20, Some(110.))],
         };
-        let (response, publish_restore) = registry.execute_transition(&cpu, restore.clone()).await.unwrap();
-        assert!(!publish_restore, "restoring history cannot publish old trades");
+        let (response, publish_restore) = registry
+            .execute_transition(&cpu, restore.clone())
+            .await
+            .unwrap();
+        assert!(
+            !publish_restore,
+            "restoring history cannot publish old trades"
+        );
         assert!(response.matches_request(&restore));
         assert_eq!(
             response,
@@ -279,10 +287,16 @@ mod tests {
             expected_bars: 3,
             bar: bar(30, Some(90.)),
         };
-        let (result, publish_next) = registry.execute_transition(&cpu, next.clone()).await.unwrap();
+        let (result, publish_next) = registry
+            .execute_transition(&cpu, next.clone())
+            .await
+            .unwrap();
         assert!(publish_next, "only a newly closed bar can publish");
         assert!(result.matches_request(&next));
-        let (retried, publish_retry) = registry.execute_transition(&cpu, next.clone()).await.unwrap();
+        let (retried, publish_retry) = registry
+            .execute_transition(&cpu, next.clone())
+            .await
+            .unwrap();
         assert!(!publish_retry, "retry must never re-emit an old intent");
         assert_eq!(result, retried);
         assert!(matches!(
