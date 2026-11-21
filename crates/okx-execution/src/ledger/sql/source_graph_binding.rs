@@ -267,13 +267,10 @@ mod tests {
     }
 
     fn binding(db: &Connection, account: &str) -> EngineGraphBinding {
-        let instance = AccountStore::instance_sql(
-            db,
-            Some(("installation", account)),
-            "strategy-a",
-        )
-        .unwrap()
-        .unwrap();
+        let instance =
+            AccountStore::instance_sql(db, Some(("installation", account)), "strategy-a")
+                .unwrap()
+                .unwrap();
         EngineGraphBinding {
             account_key: account.into(),
             instance_id: "strategy-a".into(),
