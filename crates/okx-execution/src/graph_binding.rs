@@ -39,6 +39,14 @@ pub enum GraphIdleAck {
     Replayed,
 }
 
+/// The original finance writer has durably linked one graph candle to a
+/// PREPARED opening intent. This is not permission to reserve risk or POST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphOpenClaim {
+    Prepared { intent_id: String },
+    Replayed { intent_id: String },
+}
+
 impl EngineGraphBinding {
     pub fn valid(&self) -> bool {
         !self.account_key.is_empty()

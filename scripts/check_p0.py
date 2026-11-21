@@ -357,6 +357,10 @@ def execute(scopes):
             "account_store::sql::source_graph_binding::tests::never_ack_actionable_gap_conflict_stale_or_foreign_events",
             "account_store::sql::source_graph_binding::tests::stopped_or_revised_strategy_invalidates_binding_without_deleting_money",
             "account_store::sql::source_graph_binding::tests::failed_transaction_never_persists_a_phantom_ack",
+            "account_store::sql::source_graph_binding::tests::graph_open_claim_commits_original_decision_prepared_intent_and_cursor_once",
+            "account_store::sql::source_graph_binding::tests::graph_open_claim_rejects_wrong_side_idle_gap_and_conflicting_replay",
+            "account_store::sql::source_graph_binding::tests::graph_open_claim_crash_before_commit_rolls_back_intent_decision_and_cursor",
+            "account_store::sql::source_graph_binding::tests::graph_open_failed_prepare_undoes_claim_even_when_caller_commits_error",
         })
         subprocess.run(
             ["cargo", "test", "--locked", "-p", "okx-execution", "--lib",

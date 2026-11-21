@@ -79,6 +79,23 @@ pub struct ExecutionStore {
 }
 
 impl ExecutionStore {
+    /// Exact one-finance-transaction graph opening checkpoint and PREPARED intent.
+    #[expect(clippy::too_many_arguments, reason = "Keep the preplanned Engine intent and graph CAS data explicit.")]
+    pub async fn prepare_graph_open(
+        &self,
+        deadline: Instant,
+        binding: okx_execution::graph_binding::EngineGraphBinding,
+        published: okx_execution::graph_binding::EngineGraphCursor,
+        decision: okx_execution::Decision,
+        intent: okx_execution::NewIntent,
+        now: i64,
+    ) -> StoreResult<okx_execution::graph_binding::GraphOpenClaim> {
+        let Self { owner, account } = self;
+        owner
+            .prepare_graph_open(deadline, account.wire.clone(), binding, published, decision, intent, now)
+            .await
+    }
+
     pub async fn graph_progress(
         &self,
         deadline: Instant,
