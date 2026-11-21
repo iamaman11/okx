@@ -6,8 +6,8 @@ mod cursor;
 mod decision;
 mod economic_scenario;
 pub mod executor;
-mod graph_resolver;
 mod graph_outbox;
+mod graph_resolver;
 mod graph_sessions;
 pub mod jobs;
 mod market;
@@ -165,7 +165,9 @@ impl AnalyticsService {
                 bootstrap: bootstrapper,
             },
             cpu: Default::default(),
-            graph_sessions: graph_sessions::GraphSessions::open(root.join("research-signals.sqlite"))?,
+            graph_sessions: graph_sessions::GraphSessions::open(
+                root.join("research-signals.sqlite"),
+            )?,
             jobs,
             producer: None,
             runners: Arc::new(AtomicUsize::new(0)),

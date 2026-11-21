@@ -557,12 +557,16 @@ impl GraphPublicationPage {
             && self.after_sequence == request.after_sequence
             && self.publications.len() <= request.limit as usize
             && (!self.has_more || self.publications.len() == request.limit as usize)
-            && self.publications.iter().enumerate().all(|(index, publication)| {
-                publication.valid()
-                    && publication.session_id == request.session_id
-                    && publication.graph_sha256 == request.graph_sha256
-                    && publication.sequence == request.after_sequence + 1 + index as u64
-            })
+            && self
+                .publications
+                .iter()
+                .enumerate()
+                .all(|(index, publication)| {
+                    publication.valid()
+                        && publication.session_id == request.session_id
+                        && publication.graph_sha256 == request.graph_sha256
+                        && publication.sequence == request.after_sequence + 1 + index as u64
+                })
     }
 }
 
@@ -806,10 +810,17 @@ mod graph_signal_contract_tests {
         assert!(!forged.matches_request(&request));
         let wire = serde_json::to_value(ResearchCommand::ReplayGraphPublications {
             request: request.clone(),
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(wire["type"], "replay_graph_publications");
         assert!(serde_json::from_value::<ResearchCommand>(wire).is_ok());
-        assert!(!GraphPublicationRequest { limit: 65, ..request }.valid());
+        assert!(
+            !GraphPublicationRequest {
+                limit: 65,
+                ..request
+            }
+            .valid()
+        );
     }
 }
 

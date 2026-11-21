@@ -97,7 +97,8 @@ impl GraphSessions {
                 return Err("CANCELLED".into());
             }
             outbox.page(&request)
-        }).await
+        })
+        .await
     }
 
     #[cfg(test)]
