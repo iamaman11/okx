@@ -4,8 +4,8 @@ use okx_api::{
     ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, ApiTriggerPriceType,
     AttachedAlgoOrderRequest, PlaceOrderRequest,
 };
-use std::str::FromStr;
 use okx_execution::graph_binding::{EngineGraphBinding, EngineGraphCursor, GraphOpenClaim};
+use std::str::FromStr;
 
 /// A prevalidated Research publication bound to an Engine-owned strategy.
 /// The original SQL writer rechecks all financial and cursor invariants.
@@ -947,9 +947,11 @@ impl TradeService {
         let client_id = body_hash[..32].to_owned();
         let decision_at = now();
         let decision = Decision {
-            decision_id: graph_identity.as_ref().map(|i| i.decision_id.clone()).or_else(|| {
-                claimed_decision.as_ref().map(|(_, id)| id.clone())
-            }).unwrap_or_else(|| format!("decision_{}", &body_hash[..32])),
+            decision_id: graph_identity
+                .as_ref()
+                .map(|i| i.decision_id.clone())
+                .or_else(|| claimed_decision.as_ref().map(|(_, id)| id.clone()))
+                .unwrap_or_else(|| format!("decision_{}", &body_hash[..32])),
             instance_id: Some(strategy_instance.clone()),
             decision_at,
             input_digest: if let Some(identity) = &graph_identity {

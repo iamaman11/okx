@@ -253,7 +253,8 @@ impl TradeService {
         if resources.configuration.account_key.wire() != binding.account_key {
             return Err("GRAPH_OPEN_ACCOUNT_MISMATCH".into());
         }
-        self.execute_for_graph_open(&resources, request, context).await
+        self.execute_for_graph_open(&resources, request, context)
+            .await
     }
 
     /// Persist one exact Engine activation identity after Research Restore.
@@ -479,7 +480,9 @@ mod tests {
             strategy_instance: binding.instance_id.clone(),
             instrument: binding.instrument_id.clone(),
             side: PositionSide::Long,
-            sizing: Sizing::MaxLossUsd { max_loss_usd: "1".into() },
+            sizing: Sizing::MaxLossUsd {
+                max_loss_usd: "1".into(),
+            },
             order: OrderConstraints {
                 order_type: "fok".into(),
                 limit_price: None,
@@ -494,7 +497,10 @@ mod tests {
         assert_eq!(accepted.binding, storage);
         assert_eq!(accepted.publication, publication);
         let mut wrong_key = request.clone();
-        if let TradeRequest::Execute { idempotency_key, .. } = &mut wrong_key {
+        if let TradeRequest::Execute {
+            idempotency_key, ..
+        } = &mut wrong_key
+        {
             *idempotency_key = "foreign-graph-key".into();
         }
         assert_eq!(
