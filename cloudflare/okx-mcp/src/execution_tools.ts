@@ -113,7 +113,7 @@ const actionAnnotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
 // Factor identical bounded scalar schemas only; internal validation keeps every
 // expanded constraint. Standard JSON Schema references preserve tools/list bounds.
 function publicSchema(schema:Schema):Schema {
-const definitions:Record<string,Schema>={d:money,t:text(),s:text(64),a:artifactId,j:decisionJob,k:token,i:integer(),n:integer(1),p:integer(1,50),r:researchStrategies,q:researchParameters,x:stepId,c:costs,e:economicAmount,h:liveStrategyParams,u:{...array(text(64),8),minItems:1},v:choice('counterfactual','historical_observed'),w:array(account),l:{type:'string',pattern:'^link_[a-f0-9]{32}$'},z:{anyOf:[money,{type:'null'}]}};
+const definitions:Record<string,Schema>={d:money,t:text(),s:text(64),b:text(16),a:artifactId,j:decisionJob,k:token,i:integer(),n:integer(1),p:integer(1,50),y:integer(1,1000),r:researchStrategies,q:researchParameters,x:stepId,c:costs,e:economicAmount,h:liveStrategyParams,u:{...array(text(64),8),minItems:1},v:choice('counterfactual','historical_observed'),w:array(account),l:{type:'string',pattern:'^link_[a-f0-9]{32}$'},z:{anyOf:[money,{type:'null'}]}};
  const counts:Record<string,number>={};
  const key=(node:any):string|undefined=>Object.keys(definitions).find(k=>JSON.stringify(node)===JSON.stringify(definitions[k]));
  const count=(node:any):void=>{

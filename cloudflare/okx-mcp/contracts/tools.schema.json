@@ -535,9 +535,7 @@
                     ]
                   },
                   "settle_currency": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 16
+                    "$ref": "#/$defs/b"
                   },
                   "after_instrument": {
                     "$ref": "#/$defs/s"
@@ -592,6 +590,7 @@
                             "rolling_mean",
                             "rolling_max",
                             "rolling_min",
+                            "rolling_range",
                             "rolling_pearson",
                             "rolling_zscore",
                             "rolling_stddev",
@@ -617,9 +616,7 @@
                           "$ref": "#/$defs/x"
                         },
                         "period": {
-                          "type": "integer",
-                          "minimum": 1,
-                          "maximum": 1000
+                          "$ref": "#/$defs/y"
                         },
                         "threshold": {
                           "type": "number"
@@ -658,19 +655,13 @@
                 "type": "object",
                 "properties": {
                   "ema_period": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000
+                    "$ref": "#/$defs/y"
                   },
                   "atr_period": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000
+                    "$ref": "#/$defs/y"
                   },
                   "rsi_period": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000
+                    "$ref": "#/$defs/y"
                   },
                   "budget": {
                     "type": "number",
@@ -805,14 +796,10 @@
                 "const": "instruments"
               },
               "asset": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 16
+                "$ref": "#/$defs/b"
               },
               "settle_currency": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 16
+                "$ref": "#/$defs/b"
               }
             },
             "required": [
@@ -874,10 +861,20 @@
             "minLength": 1,
             "maxLength": 64
           },
+          "b": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16
+          },
           "n": {
             "type": "integer",
             "minimum": 1,
             "maximum": 9007199254740991
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
           },
           "x": {
             "type": "string",
@@ -1218,14 +1215,10 @@
                       "$ref": "#/$defs/d"
                     },
                     "contract_value_currency": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 16
+                      "$ref": "#/$defs/b"
                     },
                     "settle_currency": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 16
+                      "$ref": "#/$defs/b"
                     },
                     "fees": {
                       "$ref": "#/$defs/e"
@@ -1322,6 +1315,11 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128
+          },
+          "b": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16
           },
           "a": {
             "type": "string",
