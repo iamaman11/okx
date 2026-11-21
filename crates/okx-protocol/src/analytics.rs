@@ -373,7 +373,7 @@ impl MarketRequest {
                 self.composition.is_none()
                     && matches!(self.action, MarketAction::Screen)
                     && graph.structurally_valid()
-                    && self.fields.len().saturating_add(graph.result_steps.len()) <= 14
+                    && self.fields.len().saturating_add(graph.outputs.len()) <= 14
             })
             && self.fields.iter().all(|f| {
                 !f.is_empty()

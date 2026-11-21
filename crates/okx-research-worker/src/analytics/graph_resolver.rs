@@ -12,20 +12,23 @@ pub fn resolve(graph: &GraphEnvelope) -> Result<CompositionRequest, String> {
     let mut steps = Vec::with_capacity(graph.steps.len());
     for step in &graph.steps {
         // This lookup is deliberately NOT performed in the public protocol.
-        let op: SeriesOp = serde_json::from_value(Value::String(step.op.clone()))
-            .map_err(|_| format!("graph.{}:UNKNOWN_OPERATOR", step.id))?;
-        if step.op_version != 1 {
-            return Err(format!("graph.{}:UNSUPPORTED_OPERATOR_VERSION", step.id));
+        let op: SeriesOp = serde_json::from_value(Value::String(step.op.id.clone())).map_err(|_| {
+            format!(
+                "graph.{}:UNKNOWN_OPERATOR:{}@{}",
+                step.id, step.op.id, step.op.version
+            )
+        })?;
+        if step.op.version != 1 {
+            return Err(format!(
+                "graph.{}:UNSUPPORTED_OPERATOR_VERSION:{}@{}",
+                step.id, step.op.id, step.op.version
+            ));
+        }
+        if step.inputs.len() > 2 {
+            return Err(format!("graph.{}:TOO_MANY_INPUTS", step.id));
         }
         if step
-            .inputs
-            .keys()
-            .any(|key| !matches!(key.as_str(), "input" | "other" | "when"))
-        {
-            return Err(format!("graph.{}:UNKNOWN_INPUT_PORT", step.id));
-        }
-        if step
-            .parameters
+            .params
             .keys()
             .any(|key| !matches!(key.as_str(), "period" | "threshold"))
         {
@@ -33,35 +36,46 @@ pub fn resolve(graph: &GraphEnvelope) -> Result<CompositionRequest, String> {
         }
         let input = step
             .inputs
-            .get("input")
+            .first()
             .ok_or_else(|| format!("graph.{}:INPUT_REQUIRED", step.id))?
-            .clone();
+            .name()
+            .to_owned();
         let period = step
-            .parameters
+            .params
             .get("period")
             .map(|v| serde_json::from_value::<u16>(v.clone()))
             .transpose()
             .map_err(|_| format!("graph.{}:INVALID_PERIOD_TYPE", step.id))?;
         let threshold = step
-            .parameters
+            .params
             .get("threshold")
             .map(|v| serde_json::from_value::<f64>(v.clone()))
             .transpose()
             .map_err(|_| format!("graph.{}:INVALID_THRESHOLD_TYPE", step.id))?;
+        // Input order and arity are operator-owned semantics, not wire policy.
+        let second = step
+            .inputs
+            .get(1)
+            .map(|reference| reference.name().to_owned());
+        let (when, other) = if op == SeriesOp::ForwardReturnLabel {
+            (second, None)
+        } else {
+            (None, second)
+        };
         steps.push(SeriesStep {
             id: step.id.clone(),
             op,
             input,
             period,
             threshold,
-            when: step.inputs.get("when").cloned(),
-            other: step.inputs.get("other").cloned(),
+            when,
+            other,
         });
     }
     Ok(CompositionRequest {
         version: COMPOSITION_VERSION.into(),
         steps,
-        result_steps: graph.result_steps.clone(),
+        result_steps: graph.outputs.clone(),
     })
 }
 
@@ -73,14 +87,14 @@ mod tests {
 
     fn graph() -> GraphEnvelope {
         serde_json::from_value(json!({
-            "version":"okx.graph/v1",
+            "schema":"okx.graph/v1",
             "steps":[
-                {"id":"change","op":"returns_series","op_version":1,
-                 "inputs":{"input":"close"}},
-                {"id":"smooth","op":"rolling_mean","op_version":1,
-                 "inputs":{"input":"change"},"parameters":{"period":2}}
+                {"id":"change","op":{"id":"returns_series","version":1},
+                 "inputs":[{"source":"close"}]},
+                {"id":"smooth","op":{"id":"rolling_mean","version":1},
+                 "inputs":[{"step":"change"}],"params":{"period":2}}
             ],
-            "result_steps":["smooth"]
+            "outputs":["smooth"]
         }))
         .unwrap()
     }
@@ -106,22 +120,22 @@ mod tests {
     #[test]
     fn owner_rejects_unsupported_math_and_types_after_transport_validation() {
         let mut candidate = graph();
-        candidate.steps[0].op = "future_primitive".into();
+        candidate.steps[0].op.id = "future_primitive".into();
         assert!(candidate.structurally_valid());
         assert_eq!(
             resolve(&candidate).unwrap_err(),
-            "graph.change:UNKNOWN_OPERATOR"
+            "graph.change:UNKNOWN_OPERATOR:future_primitive@1"
         );
         let mut candidate = graph();
-        candidate.steps[0].op_version = 2;
+        candidate.steps[0].op.version = 2;
         assert!(candidate.structurally_valid());
         assert_eq!(
             resolve(&candidate).unwrap_err(),
-            "graph.change:UNSUPPORTED_OPERATOR_VERSION"
+            "graph.change:UNSUPPORTED_OPERATOR_VERSION:returns_series@2"
         );
         let mut candidate = graph();
         candidate.steps[1]
-            .parameters
+            .params
             .insert("period".into(), json!("two"));
         assert_eq!(
             resolve(&candidate).unwrap_err(),
@@ -129,8 +143,31 @@ mod tests {
         );
         let mut candidate = graph();
         candidate.steps[1]
-            .parameters
+            .params
             .insert("period".into(), json!(0));
         assert!(CheckedComposition::compile(resolve(&candidate).unwrap(), 4).is_err());
+    }
+
+    #[test]
+    fn ordered_references_preserve_binary_and_outcome_operator_ports() {
+        let graph: GraphEnvelope = serde_json::from_value(json!({
+            "schema":"okx.graph/v1",
+            "steps":[
+                {"id":"returns","op":{"id":"returns_series","version":1},"inputs":[{"source":"close"}]},
+                {"id":"mean","op":{"id":"rolling_mean","version":1},"inputs":[{"step":"returns"}],"params":{"period":2}},
+                {"id":"difference","op":{"id":"subtract_series","version":1},"inputs":[{"step":"returns"},{"step":"mean"}]},
+                {"id":"positive","op":{"id":"greater_than","version":1},"inputs":[{"step":"difference"}],"params":{"threshold":0.0}},
+                {"id":"entry","op":{"id":"rising_edge","version":1},"inputs":[{"step":"positive"}]},
+                {"id":"outcome","op":{"id":"forward_return_label","version":1},"inputs":[{"source":"close"},{"step":"entry"}],"params":{"period":2}}
+            ],
+            "outputs":["difference","outcome"]
+        })).unwrap();
+        assert!(graph.structurally_valid());
+        let decoded = resolve(&graph).unwrap();
+        assert_eq!(decoded.steps[2].other.as_deref(), Some("mean"));
+        assert_eq!(decoded.steps[2].when, None);
+        assert_eq!(decoded.steps[5].when.as_deref(), Some("entry"));
+        assert_eq!(decoded.steps[5].other, None);
+        assert!(CheckedComposition::compile(decoded, 16).is_ok());
     }
 }

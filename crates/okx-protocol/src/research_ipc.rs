@@ -362,7 +362,7 @@ impl GraphSessionRequest {
                     && definition.graph.structurally_valid()
                     && definition
                         .graph
-                        .result_steps
+                        .outputs
                         .contains(&definition.signal_step)
                     && (-1..=1).contains(&definition.target_if_true)
                     && (-1..=1).contains(&definition.target_if_false)
@@ -791,11 +791,11 @@ mod graph_signal_contract_tests {
             "type":"restore", "session_id":"instance:btc", "capacity":100,
             "definition":{
                 "version":"okx.graph-signal/v1",
-                "graph":{"version":"okx.graph/v1","steps":[
-                    {"id":"return","op":"returns_series","op_version":1,"inputs":{"input":"close"}},
-                    {"id":"positive","op":"greater_than","op_version":1,
-                     "inputs":{"input":"return"},"parameters":{"threshold":0.0}}
-                ],"result_steps":["positive"]},
+                "graph":{"schema":"okx.graph/v1","steps":[
+                    {"id":"return","op":{"id":"returns_series","version":1},"inputs":[{"source":"close"}]},
+                    {"id":"positive","op":{"id":"greater_than","version":1},
+                     "inputs":[{"step":"return"}],"params":{"threshold":0.0}}
+                ],"outputs":["positive"]},
                 "signal_step":"positive", "target_if_true":1,"target_if_false":0,
                 "missing":"hold"
             },
@@ -823,7 +823,7 @@ mod graph_signal_contract_tests {
         let GraphSessionRequest::Restore { definition, .. } = &mut forged_graph else {
             unreachable!()
         };
-        definition.graph.version = "future-contract".into();
+        definition.graph.schema = "future-contract".into();
         assert!(!forged_graph.valid());
 
         let mut too_many = good.clone();

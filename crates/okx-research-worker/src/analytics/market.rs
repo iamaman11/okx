@@ -511,10 +511,11 @@ impl AnalyticsService {
         capabilities["graph_transport"] = json!({
             "version":okx_protocol::graph_wire::GRAPH_WIRE_VERSION,
             "location":"market.screen.graph",
-            "steps":{"id":"step_id","op":"operator_id","op_version":"positive_u16",
-                     "inputs":{"port":"source_or_prior_step"},
-                     "parameters":{"name":"json_scalar"}},
-            "result_steps":"step_ids",
+            "schema":okx_protocol::graph_wire::GRAPH_WIRE_VERSION,
+            "steps":{"id":"step_id","op":{"id":"operator_id","version":"positive_u32"},
+                     "inputs":[{"source":"source_id"},{"step":"prior_step_id"}],
+                     "params":{"name":"json_scalar"}},
+            "outputs":"step_ids",
             "limits":{"max_steps":32,"max_results":14,"max_inputs_per_step":4,
                       "max_parameters_per_step":8,
                       "max_bytes":okx_protocol::graph_wire::GRAPH_WIRE_MAX_BYTES},
@@ -2724,14 +2725,14 @@ mod tests {
         let mut open = request(vec!["returns"]);
         open.graph = Some(Box::new(
             serde_json::from_value(json!({
-                "version":"okx.graph/v1",
+                "schema":"okx.graph/v1",
                 "steps":[
-                    {"id":"r1","op":"returns_series","op_version":1,
-                     "inputs":{"input":"close"}},
-                    {"id":"mean","op":"rolling_mean","op_version":1,
-                     "inputs":{"input":"r1"},"parameters":{"period":3}}
+                    {"id":"r1","op":{"id":"returns_series","version":1},
+                     "inputs":[{"source":"close"}]},
+                    {"id":"mean","op":{"id":"rolling_mean","version":1},
+                     "inputs":[{"step":"r1"}],"params":{"period":3}}
                 ],
-                "result_steps":["mean"]
+                "outputs":["mean"]
             }))
             .unwrap(),
         ));

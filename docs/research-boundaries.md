@@ -32,6 +32,37 @@ place orders. The legacy live `strategy_turn` still synchronously invokes
 `EvaluateSignal` on Research Service per closed-bar decision. The new autonomous
 graph feed exists but has not yet replaced that live trading loop.
 
+## Graph wire contract (#537)
+
+`okx.graph/v1` uses one shared envelope through MCP, Agent and Research:
+
+```json
+{
+  "schema": "okx.graph/v1",
+  "steps": [{
+    "id": "mean_close",
+    "op": {"id": "rolling_mean", "version": 1},
+    "inputs": [{"source": "close"}],
+    "params": {"period": 20}
+  }],
+  "outputs": ["mean_close"]
+}
+```
+
+An input is exactly one of `{ "source": "close" }` or
+`{ "step": "previous_id" }`; later steps cannot be referenced. Inputs are
+ordered; Research assigns their meaning according to the installed operator.
+The positive operation version is `u32` and is independent of the envelope
+schema version. Public validation checks only this structure and bounds, not
+the list of operations or their parameters. Research resolves operations and
+units, rejects unsupported versions with the step, ID and version, and runs
+the same typed compiler as the legacy composition request. The previous
+`okx.market.composition/v1` request remains a separate compatible route.
+
+The obsolete `version`/`op_version`/`result_steps` graph envelope was an
+unreleased Draft representation; it is not accepted as `okx.graph/v1`.
+The public request ceiling remains 64 KiB and IPC framing remains 4 MiB.
+
 ## Strategy activation versus position targets
 
 These are distinct commands with distinct owners:

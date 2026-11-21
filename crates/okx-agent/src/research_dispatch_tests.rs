@@ -181,11 +181,11 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
     let session_id = GraphSessionId::new("research:graph:btc".into()).unwrap();
     let definition: GraphSignalDefinition = serde_json::from_value(serde_json::json!({
         "version":"okx.graph-signal/v1",
-        "graph":{"version":"okx.graph/v1","steps":[
-            {"id":"return","op":"returns_series","op_version":1,"inputs":{"input":"close"}},
-            {"id":"positive","op":"greater_than","op_version":1,
-             "inputs":{"input":"return"},"parameters":{"threshold":0.0}}
-        ],"result_steps":["positive"]},
+        "graph":{"schema":"okx.graph/v1","steps":[
+            {"id":"return","op":{"id":"returns_series","version":1},"inputs":[{"source":"close"}]},
+            {"id":"positive","op":{"id":"greater_than","version":1},
+             "inputs":[{"step":"return"}],"params":{"threshold":0.0}}
+        ],"outputs":["positive"]},
         "signal_step":"positive","target_if_true":1,"target_if_false":0,"missing":"hold"
     }))
     .unwrap();
@@ -511,11 +511,11 @@ async fn real_research_service_pulls_closed_candles_and_publishes_without_engine
     let session_id = GraphSessionId::new("research:feed:btc".into()).unwrap();
     let definition: GraphSignalDefinition = serde_json::from_value(serde_json::json!({
         "version":"okx.graph-signal/v1",
-        "graph":{"version":"okx.graph/v1","steps":[
-            {"id":"return","op":"returns_series","op_version":1,"inputs":{"input":"close"}},
-            {"id":"positive","op":"greater_than","op_version":1,
-             "inputs":{"input":"return"},"parameters":{"threshold":0.0}}
-        ],"result_steps":["positive"]},
+        "graph":{"schema":"okx.graph/v1","steps":[
+            {"id":"return","op":{"id":"returns_series","version":1},"inputs":[{"source":"close"}]},
+            {"id":"positive","op":{"id":"greater_than","version":1},
+             "inputs":[{"step":"return"}],"params":{"threshold":0.0}}
+        ],"outputs":["positive"]},
         "signal_step":"positive","target_if_true":1,"target_if_false":0,"missing":"hold"
     }))
     .unwrap();
@@ -664,11 +664,11 @@ async fn real_research_feed_rejects_missing_closed_candle_without_synthetic_sign
     let session_id = GraphSessionId::new("research:feed:gap".into()).unwrap();
     let definition: GraphSignalDefinition = serde_json::from_value(serde_json::json!({
         "version":"okx.graph-signal/v1",
-        "graph":{"version":"okx.graph/v1","steps":[
-            {"id":"return","op":"returns_series","op_version":1,"inputs":{"input":"close"}},
-            {"id":"positive","op":"greater_than","op_version":1,
-             "inputs":{"input":"return"},"parameters":{"threshold":0.0}}
-        ],"result_steps":["positive"]},
+        "graph":{"schema":"okx.graph/v1","steps":[
+            {"id":"return","op":{"id":"returns_series","version":1},"inputs":[{"source":"close"}]},
+            {"id":"positive","op":{"id":"greater_than","version":1},
+             "inputs":[{"step":"return"}],"params":{"threshold":0.0}}
+        ],"outputs":["positive"]},
         "signal_step":"positive","target_if_true":1,"target_if_false":0,"missing":"hold"
     }))
     .unwrap();

@@ -54,20 +54,33 @@ const composed={version:'okx.market.composition/v1',steps:[
  {id:'w1',op:'rolling_mean',input:'r1',period:2},
 ],result_steps:['w1']};
 fail(validTool('market',{...marketScreen,composition:composed}), 'versioned market composition accepted');
-const openGraph={version:'okx.graph/v1',steps:[
- {id:'change',op:'returns_series',op_version:1,inputs:{input:'close'}},
- {id:'smooth',op:'future_mathematical_primitive',op_version:2,inputs:{input:'change'},parameters:{period:3}},
-],result_steps:['smooth']};
+const openGraph={schema:'okx.graph/v1',steps:[
+ {id:'change',op:{id:'returns_series',version:1},inputs:[{source:'close'}]},
+ {id:'smooth',op:{id:'future_mathematical_primitive',version:2},inputs:[{step:'change'}],params:{period:3}},
+],outputs:['smooth']};
 fail(validTool('market',{...marketScreen,graph:openGraph}),
  'graph transport accepts unknown mathematical operations for Research to resolve');
 for(const invalid of [
- {...openGraph,version:'okx.graph/v2'},
+ {...openGraph,schema:'okx.graph/v2'},
  {...openGraph,steps:[...openGraph.steps,openGraph.steps[0]]},
- {...openGraph,steps:[{...openGraph.steps[0],parameters:{script:['not_executable']}}]},
- {...openGraph,result_steps:['missing']},
- {...openGraph,steps:[{...openGraph.steps[0],op_version:0}]},
+ {...openGraph,steps:[{...openGraph.steps[0],params:{script:['not_executable']}}]},
+ {...openGraph,outputs:['missing']},
+ {...openGraph,steps:[{...openGraph.steps[0],op:{id:'returns_series',version:0}}]},
+ {...openGraph,steps:[{...openGraph.steps[0],op:{id:'returns_series',version:4294967296}}]},
+ {...openGraph,steps:[{...openGraph.steps[0],inputs:[{step:'smooth'}]},openGraph.steps[1]]},
+ {...openGraph,steps:[{...openGraph.steps[0],inputs:[{source:'close',step:'change'}]},openGraph.steps[1]]},
+ {...openGraph,steps:[{...openGraph.steps[0],inputs:[{source:'close',unexpected:'bad'}]},openGraph.steps[1]]},
+ {...openGraph,steps:[{...openGraph.steps[0],inputs:[{source:'close'},{step:'change'}]},openGraph.steps[1]]},
+ {...openGraph,steps:[openGraph.steps[0],{...openGraph.steps[1],inputs:[{source:'change'}]}]},
+ {...openGraph,steps:[{...openGraph.steps[0],op:'returns_series'},openGraph.steps[1]]},
+ {...openGraph,version:'okx.graph/v1'},
 ])fail(!validTool('market',{...marketScreen,graph:invalid}),
  'untrusted graph must fail structural validation at MCP');
+const issueExample={schema:'okx.graph/v1',steps:[
+ {id:'mean_close',op:{id:'rolling_mean',version:1},inputs:[{source:'close'}],params:{period:20}},
+],outputs:['mean_close']};
+fail(validTool('market',{...marketScreen,graph:issueExample}),
+ 'literal issue #537 graph contract is accepted at MCP');
 fail(!validTool('market',{...marketScreen,action:'compare',graph:openGraph}),
  'graph only available on screen');
 fail(!validTool('market',{...marketScreen,composition:composed,graph:openGraph}),

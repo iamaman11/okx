@@ -435,13 +435,13 @@ mod tests {
         serde_json::from_value(json!({
             "version":"okx.graph-signal/v1",
             "graph": {
-                "version":"okx.graph/v1",
+                "schema":"okx.graph/v1",
                 "steps":[
-                    {"id":"return","op":"returns_series","op_version":1,"inputs":{"input":"close"}},
-                    {"id":"positive","op":"greater_than","op_version":1,
-                     "inputs":{"input":"return"},"parameters":{"threshold":0.0}}
+                    {"id":"return","op":{"id":"returns_series","version":1},"inputs":[{"source":"close"}]},
+                    {"id":"positive","op":{"id":"greater_than","version":1},
+                     "inputs":[{"step":"return"}],"params":{"threshold":0.0}}
                 ],
-                "result_steps":["positive"]
+                "outputs":["positive"]
             },
             "signal_step":"positive",
             "target_if_true":1,

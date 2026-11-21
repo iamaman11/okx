@@ -145,14 +145,14 @@ mod tests {
             "fields":["returns"], "timeframe_ms":60000,
             "start_ms":60000, "end_ms":1200000,
             "graph":{
-                "version":"okx.graph/v1",
+                "schema":"okx.graph/v1",
                 "steps":[
-                    {"id":"r1","op":"returns_series","op_version":1,
-                     "inputs":{"input":"close"}},
-                    {"id":"w1","op":"rolling_mean","op_version":1,
-                     "inputs":{"input":"r1"},"parameters":{"period":2}}
+                    {"id":"r1","op":{"id":"returns_series","version":1},
+                     "inputs":[{"source":"close"}]},
+                    {"id":"w1","op":{"id":"rolling_mean","version":1},
+                     "inputs":[{"step":"r1"}],"params":{"period":2}}
                 ],
-                "result_steps":["w1"]
+                "outputs":["w1"]
             }
         }))
         .unwrap();
@@ -163,14 +163,14 @@ mod tests {
                 .composition
                 .is_some()
         );
-        request.graph.as_mut().unwrap().steps[0].op = "new_primitive".into();
+        request.graph.as_mut().unwrap().steps[0].op.id = "new_primitive".into();
         // Agent can forward the structurally valid graph without knowing op IDs.
         assert!(request.valid());
         assert_eq!(
             AnalysisPlan::compile_market(&request).unwrap_err(),
-            "graph.r1:UNKNOWN_OPERATOR"
+            "graph.r1:UNKNOWN_OPERATOR:new_primitive@1"
         );
-        request.graph.as_mut().unwrap().steps[0].op = "returns_series".into();
+        request.graph.as_mut().unwrap().steps[0].op.id = "returns_series".into();
         request.composition = Some(Box::new(
             serde_json::from_value(serde_json::json!({
                 "version":"okx.market.composition/v1",

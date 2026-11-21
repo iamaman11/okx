@@ -51,10 +51,10 @@ const compositionStep=object({id:stepId,op:choice('returns_series','rolling_mean
 const composition=object({version:choice('okx.market.composition/v1'),steps:{type:'array',items:compositionStep,minItems:1,maxItems:32},result_steps:{type:'array',items:stepId,minItems:1,maxItems:14}});
 // Open mathematical IDs belong to Research. This schema constrains only
 // transport shape and size; it is not a second mathematical operator catalog.
-const graphInputMap={type:'object',propertyNames:stepId,additionalProperties:stepId,minProperties:1,maxProperties:4};
+const graphInput={oneOf:[object({source:stepId}),object({step:stepId})]};
 const graphParameterMap={type:'object',propertyNames:stepId,additionalProperties:{anyOf:[{type:'null'},{type:'boolean'},{type:'number'},text(128)]},maxProperties:8};
-const graphStep=object({id:stepId,op:stepId,op_version:integer(1,65535),inputs:graphInputMap,parameters:graphParameterMap},['id','op','op_version','inputs']);
-const graph=object({version:choice('okx.graph/v1'),steps:{type:'array',items:graphStep,minItems:1,maxItems:32},result_steps:{type:'array',items:stepId,minItems:1,maxItems:14}});
+const graphStep=object({id:stepId,op:object({id:stepId,version:integer(1,4294967295)}),inputs:{type:'array',items:graphInput,minItems:1,maxItems:4},params:graphParameterMap},['id','op','inputs']);
+const graph=object({schema:choice('okx.graph/v1'),steps:{type:'array',items:graphStep,minItems:1,maxItems:32},outputs:{type:'array',items:stepId,minItems:1,maxItems:14}});
 const universe=object({instrument_type:choice('SPOT','SWAP','FUTURES'),settle_currency:text(16),after_instrument:text(64),reference_generation:text(128),limit:integer(1,100),rank_globally:{type:'boolean'}},['instrument_type']);
 // The strict graph structure is validated in validGraphWire on every call.
 // Keep the model-visible tool compact; mathematical descriptors are on-demand.
@@ -230,13 +230,18 @@ function validCompositionStep(s:unknown):boolean {
  return true;
 }
 function validGraphWire(value:unknown):boolean {
- if(!isObject(value)||!matches(graph,value)||new TextEncoder().encode(JSON.stringify(value)).byteLength>16384)return false;
+ if(!isObject(value)||!matches(graph,value)||new TextEncoder().encode(JSON.stringify(value)).byteLength>65536)return false;
+ const declared=new Set((value.steps as Array<{id:string}>).map(step=>step.id));
  const ids=new Set<string>();
- for(const step of value.steps as Record<string,unknown>[]){
+ for(const step of value.steps as Array<{id:string;inputs:Array<{source?:string;step?:string}>}>){
   if(ids.has(String(step.id)))return false;
+  for(const input of step.inputs){
+   if('step'in input&&!ids.has(input.step!))return false;
+   if('source'in input&&declared.has(input.source!))return false;
+  }
   ids.add(String(step.id));
  }
- const results=value.result_steps as string[];
+ const results=value.outputs as string[];
  return new Set(results).size===results.length&&results.every(id=>ids.has(id));
 }
 function validResearchStrategy(args:Record<string,unknown>):boolean {
@@ -256,7 +261,7 @@ export function validTool(name:string,args:unknown):boolean {
  if(name==='market'&&isObject(args)){
   if('graph'in args){
    if(args.action!=='screen'||'composition'in args||!Array.isArray(args.fields)||
-      !validGraphWire(args.graph)||args.fields.length+(args.graph as {result_steps:string[]}).result_steps.length>14)return false;
+      !validGraphWire(args.graph)||args.fields.length+(args.graph as {outputs:string[]}).outputs.length>14)return false;
   }
   if(isObject(args.composition)){
    if(args.action!=='screen'||!Array.isArray(args.fields)||!Array.isArray(args.composition.result_steps)||args.fields.length+args.composition.result_steps.length>14)return false;
