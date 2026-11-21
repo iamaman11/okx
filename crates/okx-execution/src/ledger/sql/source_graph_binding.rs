@@ -266,12 +266,19 @@ mod tests {
         initialized(Connection::open_in_memory().unwrap())
     }
 
-    fn binding(account: &str) -> EngineGraphBinding {
+    fn binding(db: &Connection, account: &str) -> EngineGraphBinding {
+        let instance = AccountStore::instance_sql(
+            db,
+            Some(("installation", account)),
+            "strategy-a",
+        )
+        .unwrap()
+        .unwrap();
         EngineGraphBinding {
             account_key: account.into(),
             instance_id: "strategy-a".into(),
-            definition_version: "1".into(),
-            policy_revision: 1,
+            definition_version: instance.definition_version,
+            policy_revision: instance.policy_revision,
             session_id: "research:strategy-a:btc".into(),
             graph_sha256: "a".repeat(64),
             instrument_id: "BTC-USDT-SWAP".into(),
@@ -322,11 +329,11 @@ mod tests {
                 .as_nanos(),
         ));
         let mut db = initialized(Connection::open(&path).unwrap());
-        let b = binding("account-a");
         let scope = ("installation", "account-a");
-        {
+        let b = {
             let tx = db.transaction().unwrap();
             create(&tx, scope.1);
+            let b = binding(&tx, scope.1);
             let stored = AccountStore::bind_graph_sql(
                 &tx,
                 scope,
@@ -337,7 +344,8 @@ mod tests {
             .unwrap();
             assert_eq!(stored.cursor.sequence, 2);
             tx.commit().unwrap();
-        }
+            b
+        };
         {
             let tx = db.transaction().unwrap();
             assert_eq!(
@@ -398,13 +406,13 @@ mod tests {
     #[test]
     fn never_ack_actionable_gap_conflict_stale_or_foreign_events() {
         let mut db = database();
-        let b = binding("account-a");
-        let foreign = binding("account-b");
         let scope = ("installation", "account-a");
         let other_scope = ("installation", "account-b");
         let tx = db.transaction().unwrap();
         create(&tx, scope.1);
         create(&tx, other_scope.1);
+        let b = binding(&tx, scope.1);
+        let foreign = binding(&tx, other_scope.1);
         AccountStore::bind_graph_sql(&tx, scope, &b, &cursor(2, TargetPosition::Hold), 121_000)
             .unwrap();
         AccountStore::bind_graph_sql(
@@ -483,10 +491,10 @@ mod tests {
     #[test]
     fn stopped_or_revised_strategy_invalidates_binding_without_deleting_money() {
         let mut db = database();
-        let b = binding("account-a");
         let scope = ("installation", "account-a");
         let tx = db.transaction().unwrap();
         create(&tx, scope.1);
+        let b = binding(&tx, scope.1);
         AccountStore::bind_graph_sql(&tx, scope, &b, &cursor(2, TargetPosition::Hold), 121_000)
             .unwrap();
         let mut instance = AccountStore::instance_sql(&tx, Some(scope), &b.instance_id)
@@ -525,10 +533,10 @@ mod tests {
     #[test]
     fn failed_transaction_never_persists_a_phantom_ack() {
         let mut db = database();
-        let b = binding("account-a");
         let scope = ("installation", "account-a");
         let tx = db.transaction().unwrap();
         create(&tx, scope.1);
+        let b = binding(&tx, scope.1);
         AccountStore::bind_graph_sql(&tx, scope, &b, &cursor(2, TargetPosition::Flat), 121_000)
             .unwrap();
         tx.commit().unwrap();
