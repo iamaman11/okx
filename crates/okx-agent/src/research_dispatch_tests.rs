@@ -567,3 +567,149 @@ async fn t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated() 
     client.shutdown().await;
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// T07/T08/T10/T13: one captured 1,440-bar market is used by the real child
+/// Worker for both a causal event/unknown outcome and a train-only Grid. The
+/// second instrument has the identical train prefix but a different holdout.
+/// Neither an outcome label nor the changed holdout can choose a strategy.
+#[tokio::test]
+async fn t07_t08_real_worker_intraday_event_and_holdout_stay_separate() {
+    const BARS: u64 = 1_440;
+    const SPLIT: u64 = BARS * 7 / 10;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let source: SourceHandler = Arc::new({
+        let reads = reads.clone();
+        move |request| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let PublicSourceRequest::Candles {
+                    instrument, after, ..
+                } = request else {
+                    return Err("UNEXPECTED_SOURCE".into());
+                };
+                let altered_holdout = instrument == "ETH-USDT";
+                let cursor = after.as_deref().unwrap_or("0").parse::<u64>().unwrap();
+                let rows = (0..BARS)
+                    .rev()
+                    .filter(|index| index * 60_000 < cursor)
+                    .take(100)
+                    .map(|index| {
+                        let mut close = 100.0
+                            + index as f64 * 0.03
+                            + ((index % 13) as f64 - 6.0) * 0.8;
+                        if altered_holdout && index >= SPLIT {
+                            close += 30.0 + (index % 17) as f64 * 0.2;
+                        }
+                        // The final closed candle is a new, known event. Its
+                        // two-bar future label is *not* known or available.
+                        if index == BARS - 1 {
+                            close = 500.0;
+                        }
+                        HistoryCandle {
+                            open_time_ms: (index * 60_000).to_string(),
+                            open: close.to_string(),
+                            high: (close + 1.0).to_string(),
+                            low: (close - 1.0).to_string(),
+                            close: close.to_string(),
+                            volume: "1".into(),
+                            volume_currency: "1".into(),
+                            volume_quote: None,
+                            confirmed: true,
+                        }
+                    })
+                    .collect();
+                Ok(PublicSourceReply::Candles(PublicCandleCapture {
+                    raw_body: b"intraday-train-holdout".to_vec(),
+                    rows,
+                    acquired_at_ms: "90000000".into(),
+                }))
+            })
+        }
+    });
+    let (root, client) = fixture(source);
+    let market_request: MarketRequest = serde_json::from_value(serde_json::json!({
+        "action":"screen","instruments":["BTC-USDT"],"fields":["returns"],
+        "timeframe_ms":60000,"start_ms":0,"end_ms":BARS * 60_000,
+        "composition":{"version":"okx.market.composition/v1","steps":[
+            {"id":"change","op":"returns_series","input":"close"},
+            {"id":"jump","op":"greater_than","input":"change","threshold":0.4},
+            {"id":"event","op":"rising_edge","input":"jump"},
+            {"id":"label","op":"forward_return_label","input":"close","when":"event","period":2}
+        ],"result_steps":["jump","event","label"]}
+    })).unwrap();
+    assert!(market_request.valid());
+    let mut market = client.market(market_request.clone(), None, None).await.unwrap();
+    if market["rows"].is_null() {
+        let job_id = market["id"].as_str().expect("queued market job ID");
+        assert_eq!(terminal(&client, job_id).await["state"], "completed");
+        market = client.market(market_request, None, None).await.unwrap();
+    }
+    let event = &market["rows"][0];
+    assert_eq!(event["candle_coverage"]["expected_bars"], BARS);
+    assert_eq!(event["candle_coverage"]["observed_unique_bars"], BARS);
+    assert_eq!(event["metrics"]["jump"], true);
+    assert_eq!(event["metrics"]["event"], true);
+    assert_eq!(event["composition_quality"]["event"]["status"],
+        "available_at_closed_bar");
+    assert!(event["metrics"]["label"].is_null());
+    assert_eq!(event["units"]["label"], "outcome_ratio");
+    assert!(event["gaps"].as_array().unwrap().contains(&serde_json::json!(
+        "OUTCOME_UNCONFIRMED:label")));
+    assert_eq!(event["source_integrity"]["metric_reexecution"]["quality"],
+        "verified_reexecution");
+
+    let submit = |instrument: &str, key: &str| -> ResearchRequest {
+        serde_json::from_value(serde_json::json!({
+            "action":"grid","idempotency_key":key,
+            "instruments":[instrument],"timeframe_ms":60000,
+            "start_ms":0,"end_ms":BARS * 60_000,
+            "strategy_id":"close_breakout_v1",
+            "variants":[{"lookback":2},{"lookback":3},{"lookback":5}],
+            "costs":{"maker_fee_bps":0,"taker_fee_bps":0,
+                "slippage_bps":0,"funding_mode":"zero_assumption"},
+            "data_mode":"counterfactual","seed":17
+        })).unwrap()
+    };
+    let baseline_request = submit("BTC-USDT", "ipc-intraday-oos-baseline");
+    let altered_request = submit("ETH-USDT", "ipc-intraday-oos-altered");
+    assert!(baseline_request.valid() && altered_request.valid());
+    let baseline = client.research(baseline_request).await.unwrap();
+    let altered = client.research(altered_request).await.unwrap();
+    let baseline_id = baseline["id"].as_str().expect("baseline job ID");
+    let altered_id = altered["id"].as_str().expect("holdout job ID");
+    assert_eq!(terminal(&client, baseline_id).await["state"], "completed");
+    assert_eq!(terminal(&client, altered_id).await["state"], "completed");
+    let view = |job_id: &str, kind: ResearchResultView| ResearchRequest::Result {
+        job_id: job_id.into(), cursor: None, limit: 50, view: kind,
+    };
+    let baseline_summary = client.research(view(baseline_id, ResearchResultView::Summary)).await.unwrap();
+    let altered_summary = client.research(view(altered_id, ResearchResultView::Summary)).await.unwrap();
+    let before = &baseline_summary["metadata"];
+    let after = &altered_summary["metadata"];
+    assert_eq!(before["grid"]["split_index"], SPLIT);
+    assert_eq!(after["grid"]["split_index"], SPLIT);
+    assert_eq!(before["grid"]["selected"], after["grid"]["selected"]);
+    assert_eq!(before["grid"]["train_dataset_hash"], after["grid"]["train_dataset_hash"]);
+    assert_eq!(before["grid"]["train"], after["grid"]["train"]);
+    assert_ne!(before["dataset_hash"], after["dataset_hash"],
+        "only holdout observations changed");
+    let baseline_variants = client.research(view(baseline_id, ResearchResultView::Variants)).await.unwrap();
+    let altered_variants = client.research(view(altered_id, ResearchResultView::Variants)).await.unwrap();
+    assert_eq!(baseline_variants["total_rows"], 3);
+    assert_eq!(altered_variants["total_rows"], 3);
+    for index in 0..3 {
+        let first = &baseline_variants["rows"][index];
+        let second = &altered_variants["rows"][index];
+        assert_eq!(first["parameters"], second["parameters"]);
+        assert_eq!(first["train_result_hash"], second["train_result_hash"]);
+        assert_eq!(first["train"], second["train"]);
+    }
+    let exported = client.research(view(baseline_id, ResearchResultView::Export)).await.unwrap();
+    assert_eq!(exported["side_effects"], "none");
+    assert!(exported["experiment_artifact"].is_string());
+    assert!(exported["economic_audit"].is_object());
+    assert!(reads.load(Ordering::SeqCst) >= 30,
+        "both 1,440-bar datasets must be acquired through real paged IPC");
+    client.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
