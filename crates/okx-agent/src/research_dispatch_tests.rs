@@ -1,6 +1,9 @@
 use crate::research_client::{
     GraphSignalEvent, ResearchClient, ResearchClientConfig, SourceHandler,
 };
+use crate::trade_service::graph_target::GraphTargetBinding;
+use okx_execution::{StoredLot, StrategyInstance, StrategyPositionSnapshot};
+use okx_execution::position_target::{TargetPlan, TargetPosition};
 use okx_protocol::{
     analytics::*,
     research_ipc::{
@@ -231,6 +234,50 @@ async fn real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_o
     let GraphSignalEvent::Published(published_flat) = publications.recv().await.unwrap() else {
         panic!("expected publication")
     };
+    // Actual Research child IPC -> typed Engine target reconciliation, with
+    // no venue transport or durable cursor ACK on this read-only path.
+    let engine_binding = GraphTargetBinding {
+        account_key: "verified-account".into(),
+        instance_id: "graph-btc".into(),
+        definition_version: "v1".into(),
+        policy_revision: 1,
+        session_id: session_id.clone(),
+        graph_sha256: graph_sha256.clone(),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        timeframe_ms: 60_000,
+    };
+    let engine_snapshot = StrategyPositionSnapshot {
+        instance: StrategyInstance {
+            instance_id: "graph-btc".into(),
+            definition_id: "graph".into(),
+            definition_version: "v1".into(),
+            parameters: "{}".into(),
+            enabled: true,
+            policy_revision: 1,
+            budget: rust_decimal::Decimal::ONE,
+            last_decision_key: None,
+        },
+        lots: vec![StoredLot {
+            lot_id: "existing-long".into(),
+            instance_id: Some("graph-btc".into()),
+            intent_id: Some("original-entry".into()),
+            fill_id: None,
+            instrument_id: "BTC-USDT-SWAP".into(),
+            side: "long".into(),
+            remaining_qty: rust_decimal::Decimal::ONE,
+            cost: rust_decimal::Decimal::ONE,
+            opened_at: 120_000,
+        }],
+        in_flight: false,
+    };
+    let candidate = engine_binding
+        .preview(&engine_snapshot, &cursor, &published_flat)
+        .unwrap()
+        .unwrap();
+    assert_eq!(candidate.target, TargetPosition::Flat);
+    assert_eq!(candidate.plan, TargetPlan::CloseExisting(vec!["original-entry".into()]));
+    assert_eq!(cursor.last_sequence(), 2, "preview must not commit the cursor");
+    assert_eq!(candidate.next_cursor.last_sequence(), 3);
     assert_eq!(
         published_flat.intent,
         GraphSignalIntent::SetTarget(GraphPosition::Flat)

@@ -1,6 +1,9 @@
 //! Typed strategy commands on the existing installation SQL owner.
 use super::UnifiedFinanceHandle;
-use crate::{AccountStore, OperationReceipt, StoreError, StoreResult, StrategyInstance};
+use crate::{
+    AccountStore, OperationReceipt, StoreError, StoreResult, StrategyInstance,
+    StrategyPositionSnapshot,
+};
 use std::time::Instant;
 
 #[derive(Clone)]
@@ -22,6 +25,28 @@ pub struct StrategyDecisionClaimCommand {
     pub time: i64,
 }
 impl UnifiedFinanceHandle {
+    pub async fn strategy_position_snapshot(
+        &self,
+        deadline: Instant,
+        account: String,
+        instance_id: String,
+        instrument_id: String,
+    ) -> StoreResult<StrategyPositionSnapshot> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let snapshot = AccountStore::strategy_position_snapshot_sql(
+                &tx,
+                Some((&installation, &account)),
+                &instance_id,
+                &instrument_id,
+            )?;
+            tx.commit()?;
+            Ok(snapshot)
+        })
+        .await
+    }
+
     pub async fn strategy_status(
         &self,
         deadline: Instant,

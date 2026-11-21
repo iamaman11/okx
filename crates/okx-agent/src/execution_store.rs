@@ -79,6 +79,23 @@ pub struct ExecutionStore {
 }
 
 impl ExecutionStore {
+    pub async fn strategy_position_snapshot(
+        &self,
+        deadline: Instant,
+        instance_id: String,
+        instrument_id: String,
+    ) -> StoreResult<okx_execution::StrategyPositionSnapshot> {
+        let Self { owner, account } = self;
+        owner
+            .strategy_position_snapshot(
+                deadline,
+                account.wire.clone(),
+                instance_id,
+                instrument_id,
+            )
+            .await
+    }
+
     pub async fn strategy_status(
         &self,
         deadline: Instant,

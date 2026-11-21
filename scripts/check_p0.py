@@ -343,6 +343,21 @@ def execute(scopes):
              "position_target::tests::", "--", "--test-threads", "2"],
             cwd=ROOT, check=True,
         )
+        subprocess.run(
+            ["cargo", "test", "--locked", "-p", "okx-execution", "--lib",
+             "graph_target_snapshot_reads_strategy_lots_and_pending", "--", "--test-threads", "2"],
+            cwd=ROOT, check=True,
+        )
+        subprocess.run(
+            ["cargo", "test", "--locked", "-p", "okx-agent", "--lib",
+             "trade_service::graph_target::tests::", "--", "--test-threads", "2"],
+            cwd=ROOT, check=True,
+        )
+        subprocess.run(
+            ["cargo", "test", "--locked", "-p", "okx-agent", "--lib",
+             "graph_target_preview_reads_the_original_account_owner", "--", "--test-threads", "2"],
+            cwd=ROOT, check=True,
+        )
         subprocess.run([sys.executable, "scripts/check_architecture.py"], cwd=ROOT, check=True)
         scopes = SCOPES
     if "kernel" in scopes:

@@ -397,6 +397,14 @@ pub struct StrategyInstance {
     pub budget: Decimal,
     pub last_decision_key: Option<String>,
 }
+/// One read-only snapshot from the financial SQL owner. It cannot grant an
+/// order: a later execution must recheck current state inside its own CAS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyPositionSnapshot {
+    pub instance: StrategyInstance,
+    pub lots: Vec<StoredLot>,
+    pub in_flight: bool,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StrategyDefinitionVersion {
     pub definition_id: String,

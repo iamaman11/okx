@@ -137,6 +137,72 @@ fn completed_data(response: AgentResponse) -> Value {
     assert!(response.failure.is_none());
     response.result.unwrap()["data"].clone()
 }
+
+#[tokio::test]
+async fn graph_target_preview_reads_the_original_account_owner_without_any_order_post() {
+    use okx_protocol::research_ipc::{
+        GraphPosition, GraphPublicationCursor, GraphSessionId, GraphSessionReply,
+        GraphSignalIntent, GraphSignalPublication,
+    };
+    let fixture = Fixture::new().await;
+    let _capture = fixture.owner.recorded_capture_gate.write().await;
+    completed_data(fixture.request(create("graph_preview_create")).await);
+    completed_data(
+        fixture.request(StrategyRequest::Start {
+            idempotency_key: "graph_preview_start".into(),
+            instance_id: INSTANCE.into(),
+        }).await,
+    );
+    let instance = fixture.owner.execution.store.strategy_instances(deadline()).await
+        .unwrap().into_iter().find(|v| v.instance_id == INSTANCE).unwrap();
+    let session_id = GraphSessionId::new("engine:graph-preview".into()).unwrap();
+    let hash = "a".repeat(64);
+    let binding = super::graph_target::GraphTargetBinding {
+        account_key: fixture.owner.configuration.account_key.wire(),
+        instance_id: INSTANCE.into(),
+        definition_version: instance.definition_version.clone(),
+        policy_revision: instance.policy_revision,
+        session_id: session_id.clone(),
+        graph_sha256: hash.clone(),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        timeframe_ms: 60_000,
+    };
+    let confirmed = GraphPublicationCursor::from_restored(&GraphSessionReply::Evaluated {
+        schema: GraphSessionReply::SCHEMA.into(),
+        session_id: session_id.clone(),
+        graph_sha256: hash.clone(),
+        last_closed_ms: 120_000,
+        observed_bars: 2,
+        intent: GraphSignalIntent::Hold,
+    }).unwrap();
+    let publication = GraphSignalPublication {
+        schema: GraphSessionReply::SCHEMA.into(),
+        session_id,
+        graph_sha256: hash,
+        closed_ms: 180_000,
+        sequence: 3,
+        intent: GraphSignalIntent::SetTarget(GraphPosition::Long),
+    };
+    let before = money(&fixture).await;
+    let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
+    let preview = fixture.native.trade.preview_graph_publication(
+        &fixture.owner.configuration.alias, &binding, &confirmed, &publication,
+    ).await.unwrap().unwrap();
+    assert_eq!(preview.target, okx_execution::position_target::TargetPosition::Long);
+    assert_eq!(preview.plan, okx_execution::position_target::TargetPlan::Open(
+        okx_execution::position_target::ExposureSide::Long,
+    ));
+    assert_eq!(confirmed.last_sequence(), 2);
+    assert_eq!(money(&fixture).await, before);
+    assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
+    let mut foreign = binding;
+    foreign.account_key.push_str("-foreign");
+    assert_eq!(fixture.native.trade.preview_graph_publication(
+        &fixture.owner.configuration.alias, &foreign, &confirmed, &publication,
+    ).await.unwrap_err(), "GRAPH_TARGET_ACCOUNT_MISMATCH");
+    drop(_capture);
+    fixture.finish().await;
+}
 fn rejected(response: AgentResponse, code: &str) {
     assert_eq!(response.status, AgentResponseStatus::Rejected);
     assert_eq!(response.quality, DataQuality::NotReady);

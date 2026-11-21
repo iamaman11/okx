@@ -30,6 +30,7 @@ pub(crate) use admission_source::{ProducedPost, ProducedReserve};
 mod entry_settlement;
 mod entry_source_failure;
 mod execute;
+pub mod graph_target;
 mod opening_source;
 pub(crate) use opening_source::ProducedOpening;
 mod plan;

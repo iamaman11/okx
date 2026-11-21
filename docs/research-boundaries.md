@@ -53,8 +53,17 @@ These are distinct commands with distinct owners:
    await settlement. It never sends an order. Only the existing durable Engine
    decision, risk/admission and venue execution route may act on a plan.
 
-The pure target planner is staged and independently tested, **not wired into
-the live trading loop**. The legacy loop currently treats `SignalPosition::Flat`
+The next staged boundary, `TradeService::preview_graph_publication`, now reads
+one scoped strategy/lot/in-flight snapshot from the **original unified finance
+SQL owner** and binds it to an exact Research session, graph hash, strategy
+version and policy revision. The typed publication cursor is checked on a
+clone: **preview never ACKs, stores, or executes** the proposal. Outstanding
+`UNKNOWN` orders block a new opening and existing lots from unrelated
+strategies/accounts do not count. A real Research child IPC publication is
+exercised through this pure preview in tests, without venue POST.
+
+This is a read-only Engine adapter, **not wired into the live trading loop**.
+The legacy loop currently treats `SignalPosition::Flat`
 like `Warmup` (no new entry), so it does not flatten existing lots for `Flat`.
 This is a tracked behavior gap, not a claimed live fix. Before connecting graph
 publications to trading, Engine also needs durable per-instance cursor/ACK,
