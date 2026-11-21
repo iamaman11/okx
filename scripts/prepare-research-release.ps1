@@ -26,8 +26,12 @@ $mergeSha = $merged[0].merge_commit_sha
 $mergeTree = (Api ("/repos/iamaman11/okx/git/commits/" + $mergeSha)).tree.sha
 if ($baseTree -cnotmatch '^[0-9a-f]{40}$' -or $mergeTree -cne $baseTree) { throw 'BASE_MERGED_TREE_MISMATCH' }
 $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
-$baseSha = [string]$event.pull_request.base.sha
-if ($baseSha -cnotmatch '^[0-9a-f]{40}$') { throw 'CURRENT_PR_BASE_MISSING' }
+if ($env:GITHUB_EVENT_NAME -ceq 'pull_request') {
+    $baseSha = [string]$event.pull_request.base.sha
+} elseif ($env:GITHUB_EVENT_NAME -ceq 'push' -and $event.ref -ceq 'refs/heads/main' -and -not $event.forced) {
+    $baseSha = [string]$event.before
+} else { throw 'CURRENT_EVENT_UNSUPPORTED' }
+if ($baseSha -cnotmatch '^[0-9a-f]{40}$' -or $baseSha -ceq '0000000000000000000000000000000000000000') { throw 'CURRENT_BASE_MISSING' }
 $comparison = Api ("/repos/iamaman11/okx/compare/$mergeSha...$baseSha")
 if ($comparison.status -cnotin @('ahead','identical')) { throw 'BASE_NOT_ON_MAIN_HISTORY' }
 & git fetch --no-tags origin $mergeSha
