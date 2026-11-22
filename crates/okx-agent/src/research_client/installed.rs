@@ -233,7 +233,10 @@ mod tests {
         // image if the new file fails content verification.
         let preferred = dir.join("okx-research-service.exe");
         fs::write(&preferred, b"wrong").unwrap();
-        assert_eq!(resolve(&root).unwrap_err(), "RESEARCH_INSTALL_HASH_MISMATCH");
+        assert_eq!(
+            resolve(&root).unwrap_err(),
+            "RESEARCH_INSTALL_HASH_MISMATCH"
+        );
         fs::write(&preferred, b"test worker").unwrap();
         assert_eq!(resolve(&root).unwrap(), preferred);
         fs::remove_dir_all(root).unwrap();
