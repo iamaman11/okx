@@ -21,7 +21,7 @@ pub use account::{
     PositionBuilderSimPosition, PositionBuilderSnapshot, account_uid_fingerprint,
 };
 pub use asset::{AssetApi, FundingBalance};
-pub use client::{CapturedPublicRows, OkxPublicClient, OkxRestClient};
+pub use client::{CapturedHttpDelivery, CapturedPublicRows, OkxPublicClient, OkxRestClient};
 pub use clock::{
     ClockEvidence, ClockEvidenceSnapshot, MAX_CLOCK_ABS_OFFSET_MS, MAX_CLOCK_EVIDENCE_AGE_MS,
     MAX_CLOCK_RTT_MS, MAX_MUTATION_REQUEST_TTL_MS, MUTATION_REQUEST_TTL_MS, MutationTiming,
