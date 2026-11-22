@@ -411,6 +411,9 @@ def execute(scopes):
         subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=MCP, check=True)
     if "ipc" in scopes:
         tests("okx-research-worker", ("--test", "ipc_process"))
+        tests("okx-execution", required=(
+            "graph_binding::tests::close_identity_is_bound_to_original_reference_account_revision_and_bar",
+        ), exact=True)
         metadata = subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
                                            cwd=ROOT, text=True)
         suffix = ".exe" if os.name == "nt" else ""
@@ -430,6 +433,12 @@ def execute(scopes):
         ), exact=True)
         tests("okx-agent", required=(
             "trade_service::strategies::strategy_contract_tests::explicit_graph_open_respects_native_instance_nav_gate_without_order_post",
+        ), exact=True)
+        tests("okx-agent", required=(
+            "trade_service::graph_target::tests::graph_close_candidates_are_explicit_scoped_and_stable_without_dispatch",
+        ), exact=True)
+        tests("okx-agent", required=(
+            "trade_service::graph_target::tests::flip_close_candidates_cannot_open_before_settlement",
         ), exact=True)
         tests("okx-agent", required=(
             "trade_service::graph_activation::tests::identity_is_stable_per_account_revision_and_instrument",

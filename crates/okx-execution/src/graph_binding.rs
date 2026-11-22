@@ -66,6 +66,16 @@ pub struct GraphOpenIdentity {
     pub input_digest: String,
 }
 
+/// Stable reduction identity for one graph publication and ONE original
+/// opening reference. It is only an immutable candidate: a live Close must
+/// still be claimed with the original finance writer in a later stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphCloseIdentity {
+    pub decision_key: String,
+    pub decision_id: String,
+    pub input_digest: String,
+}
+
 /// A real original PREPARED intent fetched in the SAME finance transaction as
 /// the graph cursor. No additional read RPC or RiskBook/POST grant.
 #[derive(Debug, Clone)]
@@ -90,6 +100,44 @@ impl EngineGraphBinding {
             decision_key,
             decision_id,
             input_digest,
+        })
+    }
+
+    pub fn close_identity(
+        &self,
+        publication: &EngineGraphCursor,
+        original_reference: &str,
+    ) -> Option<GraphCloseIdentity> {
+        if !self.valid()
+            || !publication.valid_for(self)
+            || publication.intent == TargetPosition::Hold
+            || !(1..=128).contains(&original_reference.len())
+            || !original_reference
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-:.".contains(&b))
+        {
+            return None;
+        }
+        // Include every original scope dimension and the exact opening
+        // reference. Different positions from one candle MUST NOT share an
+        // idempotency key; retries of the same candidate MUST share it.
+        let body = serde_json::to_vec(&(
+            "okx.graph-close/v1",
+            self,
+            publication,
+            original_reference,
+        ))
+        .ok()?;
+        let digest = format!("{:x}", Sha256::digest(body));
+        let decision_key = format!("graph_close_{}", &digest[..32]);
+        let decision_id = format!(
+            "strategy:{}:{}:{}",
+            self.instance_id, self.definition_version, decision_key
+        );
+        Some(GraphCloseIdentity {
+            decision_key,
+            decision_id,
+            input_digest: digest,
         })
     }
 
@@ -136,5 +184,58 @@ impl EngineGraphCursor {
             && self.closed_ms > 0
             && self.closed_ms <= i64::MAX as u64
             && self.closed_ms % binding.timeframe_ms == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_identity_is_bound_to_original_reference_account_revision_and_bar() {
+        let binding = EngineGraphBinding {
+            account_key: "account-a".into(),
+            instance_id: "strategy-a".into(),
+            definition_version: "version-1".into(),
+            policy_revision: 7,
+            session_id: "engine:strategy-a:btc".into(),
+            graph_sha256: "a".repeat(64),
+            instrument_id: "BTC-USDT-SWAP".into(),
+            timeframe_ms: 60_000,
+        };
+        let candle = EngineGraphCursor {
+            sequence: 3,
+            closed_ms: 180_000,
+            intent: TargetPosition::Flat,
+        };
+        let stable = binding.close_identity(&candle, "entry-a").unwrap();
+        assert_eq!(stable, binding.close_identity(&candle, "entry-a").unwrap());
+        assert_ne!(
+            stable.decision_key,
+            binding.close_identity(&candle, "entry-b").unwrap().decision_key
+        );
+        let mut foreign = binding.clone();
+        foreign.account_key = "account-b".into();
+        assert_ne!(
+            stable.decision_key,
+            foreign.close_identity(&candle, "entry-a").unwrap().decision_key
+        );
+        foreign = binding.clone();
+        foreign.policy_revision += 1;
+        assert_ne!(
+            stable.decision_key,
+            foreign.close_identity(&candle, "entry-a").unwrap().decision_key
+        );
+        let mut next = candle.clone();
+        next.sequence += 1;
+        next.closed_ms += 60_000;
+        assert_ne!(
+            stable.decision_key,
+            binding.close_identity(&next, "entry-a").unwrap().decision_key
+        );
+        next.intent = TargetPosition::Hold;
+        assert!(binding.close_identity(&next, "entry-a").is_none());
+        assert!(binding.close_identity(&candle, "../foreign").is_none());
+        assert!(binding.close_identity(&candle, "").is_none());
     }
 }

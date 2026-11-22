@@ -20,6 +20,7 @@ use okx_protocol::trading::{
     GraphExecutionPolicy, OrderConstraints, PositionSide, Protection, Sizing, TradeOperation,
 };
 use rust_decimal::Decimal;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphTargetBinding {
@@ -103,6 +104,82 @@ impl GraphTargetBinding {
         };
         self.open_context(publication, &request)?;
         Ok(Some(request))
+    }
+
+    /// Construct read-only original TradeService::Close candidates. These
+    /// are NOT dispatchable until the original finance SQL atomically claims
+    /// each reduction alongside the exact publication. In particular this
+    /// method does not acknowledge the cursor or turn Flip into an Open.
+    pub(super) fn close_requests(
+        &self,
+        instance: &StrategyInstance,
+        publication: &GraphSignalPublication,
+        policy: &GraphExecutionPolicy,
+        preview: &GraphTargetPreview,
+    ) -> Result<Option<Vec<TradeRequest>>, String> {
+        if matches!(policy, GraphExecutionPolicy::Observe) {
+            return Ok(None);
+        }
+        if !policy.valid()
+            || !instance.enabled
+            || instance.definition_id != GraphStrategyConfigurationV1::DEFINITION_ID
+            || instance.instance_id != self.instance_id
+            || instance.definition_version != self.definition_version
+            || instance.policy_revision != self.policy_revision
+        {
+            return Err("GRAPH_CLOSE_POLICY_OR_STRATEGY_INVALID".into());
+        }
+        if !self.valid()
+            || !publication.valid()
+            || publication.session_id != self.session_id
+            || publication.graph_sha256 != self.graph_sha256
+            || publication.closed_ms % self.timeframe_ms != 0
+        {
+            return Err("GRAPH_CLOSE_PUBLICATION_MISMATCH".into());
+        }
+        let target = match publication.intent {
+            GraphSignalIntent::SetTarget(GraphPosition::Flat) => TargetPosition::Flat,
+            GraphSignalIntent::SetTarget(GraphPosition::Long) => TargetPosition::Long,
+            GraphSignalIntent::SetTarget(GraphPosition::Short) => TargetPosition::Short,
+            GraphSignalIntent::Hold => return Err("GRAPH_CLOSE_ACTION_REQUIRED".into()),
+        };
+        let published = EngineGraphCursor {
+            sequence: publication.sequence,
+            closed_ms: publication.closed_ms,
+            intent: target,
+        };
+        if preview.target != target
+            || Self::storage_cursor(&preview.next_cursor) != published
+        {
+            return Err("GRAPH_CLOSE_PREVIEW_MISMATCH".into());
+        }
+        let TargetPlan::CloseExisting(references) = &preview.plan else {
+            return Err("GRAPH_CLOSE_EXISTING_EXPOSURE_REQUIRED".into());
+        };
+        if references.is_empty() {
+            return Err("GRAPH_CLOSE_EXISTING_EXPOSURE_REQUIRED".into());
+        }
+        let mut seen = BTreeSet::new();
+        let mut requests = Vec::with_capacity(references.len());
+        for reference in references {
+            if !seen.insert(reference) {
+                return Err("GRAPH_CLOSE_DUPLICATE_REFERENCE".into());
+            }
+            let identity = self
+                .storage_binding()
+                .close_identity(&published, reference)
+                .ok_or("GRAPH_CLOSE_IDENTITY_INVALID")?;
+            let request = TradeRequest::Close {
+                idempotency_key: identity.decision_key,
+                reference: reference.clone(),
+                expires_in_ms: 10_000,
+            };
+            if !request.valid() {
+                return Err("GRAPH_CLOSE_REFERENCE_INVALID".into());
+            }
+            requests.push(request);
+        }
+        Ok(Some(requests))
     }
 
     /// Reconstruct the typed Engine binding from original finance SQL after
@@ -722,6 +799,130 @@ mod tests {
                 .preview(&snapshot, &candidate.next_cursor, &event)
                 .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn graph_close_candidates_are_explicit_scoped_and_stable_without_dispatch() {
+        let (binding, mut snapshot, cursor, event) = fixture();
+        snapshot.instance.definition_id = GraphStrategyConfigurationV1::DEFINITION_ID.into();
+        snapshot.lots.push(owned_long());
+        let preview = binding.preview(&snapshot, &cursor, &event).unwrap().unwrap();
+        assert!(
+            binding
+                .close_requests(
+                    &snapshot.instance,
+                    &event,
+                    &GraphExecutionPolicy::Observe,
+                    &preview,
+                )
+                .unwrap()
+                .is_none()
+        );
+        let policy = GraphExecutionPolicy::Trade {
+            max_slippage_bps: 5,
+            stop_distance_bps: 50,
+        };
+        let requests = binding
+            .close_requests(&snapshot.instance, &event, &policy, &preview)
+            .unwrap()
+            .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].valid());
+        let identity = binding
+            .storage_binding()
+            .close_identity(
+                &GraphTargetBinding::storage_cursor(&preview.next_cursor),
+                "original-entry",
+            )
+            .unwrap();
+        assert_eq!(
+            requests[0],
+            TradeRequest::Close {
+                idempotency_key: identity.decision_key,
+                reference: "original-entry".into(),
+                expires_in_ms: 10_000,
+            }
+        );
+        assert_eq!(
+            binding
+                .close_requests(&snapshot.instance, &event, &policy, &preview)
+                .unwrap(),
+            Some(requests)
+        );
+        assert_eq!(cursor.last_sequence(), 2, "Close candidates cannot ACK a bar");
+        let mut stale = snapshot.instance.clone();
+        stale.policy_revision += 1;
+        assert_eq!(
+            binding
+                .close_requests(&stale, &event, &policy, &preview)
+                .unwrap_err(),
+            "GRAPH_CLOSE_POLICY_OR_STRATEGY_INVALID"
+        );
+        let mut wrong = event.clone();
+        wrong.graph_sha256 = "b".repeat(64);
+        assert_eq!(
+            binding
+                .close_requests(&snapshot.instance, &wrong, &policy, &preview)
+                .unwrap_err(),
+            "GRAPH_CLOSE_PUBLICATION_MISMATCH"
+        );
+        let mut forged = preview.clone();
+        forged.next_cursor = cursor;
+        assert_eq!(
+            binding
+                .close_requests(&snapshot.instance, &event, &policy, &forged)
+                .unwrap_err(),
+            "GRAPH_CLOSE_PREVIEW_MISMATCH"
+        );
+        forged = preview.clone();
+        forged.plan = TargetPlan::CloseExisting(vec!["../foreign".into()]);
+        assert_eq!(
+            binding
+                .close_requests(&snapshot.instance, &event, &policy, &forged)
+                .unwrap_err(),
+            "GRAPH_CLOSE_IDENTITY_INVALID"
+        );
+    }
+
+    #[test]
+    fn flip_close_candidates_cannot_open_before_settlement() {
+        let (binding, mut snapshot, cursor, mut event) = fixture();
+        snapshot.instance.definition_id = GraphStrategyConfigurationV1::DEFINITION_ID.into();
+        snapshot.lots.push(owned_long());
+        event.intent = GraphSignalIntent::SetTarget(GraphPosition::Short);
+        let policy = GraphExecutionPolicy::Trade {
+            max_slippage_bps: 5,
+            stop_distance_bps: 50,
+        };
+        let preview = binding.preview(&snapshot, &cursor, &event).unwrap().unwrap();
+        assert_eq!(
+            preview.plan,
+            TargetPlan::CloseExisting(vec!["original-entry".into()])
+        );
+        let commands = binding
+            .close_requests(&snapshot.instance, &event, &policy, &preview)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(commands.as_slice(), [TradeRequest::Close { .. }]));
+        snapshot.in_flight = true;
+        let waiting = binding.preview(&snapshot, &cursor, &event).unwrap().unwrap();
+        assert_eq!(waiting.plan, TargetPlan::AwaitSettlement);
+        assert_eq!(
+            binding
+                .close_requests(&snapshot.instance, &event, &policy, &waiting)
+                .unwrap_err(),
+            "GRAPH_CLOSE_EXISTING_EXPOSURE_REQUIRED"
+        );
+        snapshot.in_flight = false;
+        snapshot.lots.clear();
+        let after_settlement = binding.preview(&snapshot, &cursor, &event).unwrap().unwrap();
+        assert_eq!(after_settlement.plan, TargetPlan::Open(ExposureSide::Short));
+        assert_eq!(
+            binding
+                .close_requests(&snapshot.instance, &event, &policy, &after_settlement)
+                .unwrap_err(),
+            "GRAPH_CLOSE_EXISTING_EXPOSURE_REQUIRED"
         );
     }
 
