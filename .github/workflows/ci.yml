@@ -809,11 +809,20 @@ jobs:
           }
           foreach ($package in @('okx-agent','okx-host-control','okx-host-launcher','okx-execution')) {
             $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--skip','accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research','--skip','trade_service::protection_cleanup::protection_cleanup_direct_tests::','--test-threads','2')
+            # This OS-kill fixture spawns a second Native process with its own
+            # bounded SQL deadlines. Exercise it alone, not beside other fixtures.
+            if ($package -eq 'okx-agent') { $testArgs += @('--skip','accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once') }
             foreach ($witness in @($covered | Where-Object package -eq $package)) { $testArgs += @('--skip',$witness.test) }
             Write-Host "Remaining regression: $package; exact property witnesses already verified: $(@($covered | Where-Object package -eq $package).Count)"
             cargo test --locked -p $package -- @testArgs
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+
+      - name: Isolated Native pending-fill crash recovery
+        shell: pwsh
+        run: |
+          cargo test --locked -p okx-agent --lib accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once -- --exact --test-threads 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # The seven real SQL-owner cleanup transitions have bounded deadlines.
       # Run them separately so unrelated fixtures cannot age campaign-opening
