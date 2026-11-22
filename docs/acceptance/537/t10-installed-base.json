@@ -1,0 +1,13 @@
+{
+  "schema": "okx.537.installed-native-base/v1",
+  "repository_id": 1388071566,
+  "run_id": 44912048553,
+  "artifact_id": 14710029752,
+  "source_head_sha": "36d79e634f59066943e58b9a8a017a15670caef7",
+  "source_tree": "4f533f877b82a4c254f70963bf6bcdb42b3cd315",
+  "components": {
+    "okx-agent.exe": "3d2672e42e8795295bb5d43a95feb1f40e6d4e654e3c93b7d512f821347540e2",
+    "okx-host-control.exe": "e210ed72a496571a09d0534af57dc3d160466e585877104ad1fbea433c4cc825",
+    "okx-host-launcher.exe": "29434651745d0064e3a0cdf43c32b093a6615f3af841c77359d15b4b6e79707b"
+  }
+}
