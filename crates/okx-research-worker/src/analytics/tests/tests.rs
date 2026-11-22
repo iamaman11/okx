@@ -70,7 +70,7 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
         extension,
         &serde_json::to_value(okx_analysis::query_plan::ROLLING_RANGE_DESCRIPTOR).unwrap()
     );
-    assert_eq!(extension["owner"], "okx-kernel::query_plan::rolling_range");
+    assert_eq!(extension["owner"], "okx-strategy-core::query_plan::rolling_range");
     assert_eq!(extension["effects"], "pure_no_io");
     assert_eq!(extension["version"], 1);
     let stddev = operations
