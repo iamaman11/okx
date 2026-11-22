@@ -164,12 +164,22 @@ mod source_observation_tests {
         let client = PublicSourceClient::new(Arc::new(Captured));
         let meter = Arc::new(crate::source_io::SourceIoMeter::default());
         let capture = crate::source_io::observe(meter.clone(), async {
-            client.research_candles_page("BTC-USDT-SWAP", "1m", None, None, 100).await
-        }).await.unwrap();
+            client
+                .research_candles_page("BTC-USDT-SWAP", "1m", None, None, 100)
+                .await
+        })
+        .await
+        .unwrap();
         assert_eq!(capture.raw_body.len(), 3);
         let observed = meter.snapshot();
-        assert_eq!(observed["source_calls"]["candles"]["proxy_requests_started"], 1);
+        assert_eq!(
+            observed["source_calls"]["candles"]["proxy_requests_started"],
+            1
+        );
         assert_eq!(observed["source_calls"]["candles"]["proxy_replies"], 1);
-        assert_eq!(observed["source_calls"]["candles"]["captured_response_body_bytes"], 3);
+        assert_eq!(
+            observed["source_calls"]["candles"]["captured_response_body_bytes"],
+            3
+        );
     }
 }

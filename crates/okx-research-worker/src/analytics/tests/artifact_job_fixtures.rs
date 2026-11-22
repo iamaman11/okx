@@ -485,7 +485,8 @@ async fn market_artifact_publication_and_cached_result_roundtrip() {
     assert_eq!(result["source_io"]["schema"], "okx.research.source-io/v1");
     assert_eq!(result["source_io"]["candle_cache_hits"], 1);
     assert_eq!(result["source_io"]["source_calls"], json!({}));
-    let manifest: Value = s.artifacts
+    let manifest: Value = s
+        .artifacts
         .read_evidence_json(result["result_artifact"].as_str().unwrap())
         .unwrap();
     assert_eq!(manifest["source_io"], result["source_io"]);

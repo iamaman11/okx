@@ -117,7 +117,8 @@ mod tests {
         let meter = Arc::new(crate::source_io::SourceIoMeter::default());
         let (a, b) = crate::source_io::observe(meter.clone(), async {
             tokio::join!(c.load(key.clone(), f), c.load(key, f))
-        }).await;
+        })
+        .await;
         a.unwrap();
         b.unwrap();
         assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 1);

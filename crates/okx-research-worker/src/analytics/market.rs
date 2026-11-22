@@ -334,7 +334,8 @@ impl AnalyticsService {
         let (rows, correlation_matrix) = crate::source_io::observe(
             meter.clone(),
             self.market_rows(&request, cancel.clone(), global_rank, plan.clone()),
-        ).await?;
+        )
+        .await?;
         let source_io = meter.snapshot();
         let store = self.artifacts.clone();
         let producer = self.producer.clone();
@@ -789,10 +790,11 @@ impl<T: Serialize + DeserializeOwned> Serialize for VerifiedSourcePages<'_, T> {
                 .store
                 .read_evidence(id)
                 .map_err(serde::ser::Error::custom)?;
-            self.successful_file_reads.set(self.successful_file_reads.get() + 1);
-            self.bytes_read.set(self.bytes_read.get() + bytes.len() as u64);
-            let rows: Vec<T> = serde_json::from_slice(&bytes)
-                .map_err(serde::ser::Error::custom)?;
+            self.successful_file_reads
+                .set(self.successful_file_reads.get() + 1);
+            self.bytes_read
+                .set(self.bytes_read.get() + bytes.len() as u64);
+            let rows: Vec<T> = serde_json::from_slice(&bytes).map_err(serde::ser::Error::custom)?;
             if rows.is_empty()
                 || rows.len() > MARKET_SOURCE_EVIDENCE_CHUNK
                 || (index + 1 < self.chunks.len() && rows.len() != MARKET_SOURCE_EVIDENCE_CHUNK)
@@ -2254,10 +2256,7 @@ mod tests {
             market_request_schema(&fields, false, false, false)
         );
         assert_eq!(oi_correlated, oi_composed);
-        assert_eq!(
-            funding_composed,
-            "market/518.11.source-io-composition-v1"
-        );
+        assert_eq!(funding_composed, "market/518.11.source-io-composition-v1");
         assert_eq!(
             funding_composed,
             market_request_schema(&fields, true, true, true)
