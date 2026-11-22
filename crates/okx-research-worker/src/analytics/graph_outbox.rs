@@ -1,7 +1,7 @@
 //! The Research-owned durable signal journal. Commit precedes any IPC delivery.
 //! The Engine alone decides whether an accepted signal changes risk or orders.
 use okx_protocol::research_ipc::{
-    GraphPublicationPage, GraphPublicationRequest, GraphSignalPublication,
+    GraphPublicationPage, GraphPublicationRequest, GraphSessionId, GraphSignalPublication,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{
@@ -51,6 +51,19 @@ impl GraphOutbox {
         Ok(Self {
             db: Arc::new(Mutex::new(connection)),
         })
+    }
+
+    /// A fresh sliding bootstrap prefix cannot safely continue a previously
+    /// published sequence after restart. Recovery must replay the *original*
+    /// prefix, not silently rebase an existing financial identity.
+    pub(super) fn has_session_publications(&self, session_id: &GraphSessionId) -> Result<bool, String> {
+        let db = self.db.lock().map_err(|_| "GRAPH_OUTBOX_POISONED")?;
+        let seen: Option<i64> = db.query_row(
+            "SELECT 1 FROM graph_outbox WHERE session_id=?1 LIMIT 1",
+            params![session_id.as_str()],
+            |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?;
+        Ok(seen.is_some())
     }
 
     /// Returns true only if this event was newly persisted. A crash after
@@ -225,7 +238,10 @@ mod tests {
         let second = event(4, 240_000);
         {
             let outbox = GraphOutbox::open(path.clone()).unwrap();
+            assert!(!outbox.has_session_publications(&first.session_id).unwrap());
             assert!(outbox.record(&first).unwrap());
+            assert!(outbox.has_session_publications(&first.session_id).unwrap());
+            assert!(!outbox.has_session_publications(&GraphSessionId::new("different:session".into()).unwrap()).unwrap());
             assert!(!outbox.record(&first).unwrap());
             assert!(outbox.record(&second).unwrap());
             let mut conflict = first.clone();
@@ -240,6 +256,7 @@ mod tests {
             );
         }
         let outbox = GraphOutbox::open(path).unwrap();
+        assert!(outbox.has_session_publications(&first.session_id).unwrap());
         let mut request = GraphPublicationRequest {
             session_id: first.session_id.clone(),
             graph_sha256: first.graph_sha256.clone(),

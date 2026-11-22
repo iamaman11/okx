@@ -343,6 +343,16 @@ pub enum GraphSessionRequest {
         capacity: u64,
         history: Vec<GraphClosedBar>,
     },
+    /// One-time Research-owned public-candle prefix. It does not start a feed,
+    /// publish a trading intent, or grant financial execution authority.
+    Bootstrap {
+        session_id: GraphSessionId,
+        definition: Box<GraphSignalDefinition>,
+        capacity: u64,
+        instrument: String,
+        timeframe_ms: u64,
+        history_bars: u16,
+    },
     Advance {
         session_id: GraphSessionId,
         graph_sha256: String,
@@ -378,6 +388,21 @@ impl GraphSessionRequest {
                     && history
                         .windows(2)
                         .all(|pair| pair[0].time_ms < pair[1].time_ms)
+            }
+            Self::Bootstrap {
+                definition,
+                capacity,
+                instrument,
+                timeframe_ms,
+                history_bars,
+                ..
+            } => {
+                definition.structurally_valid()
+                    && (2..=256).contains(history_bars)
+                    && *capacity > u64::from(*history_bars)
+                    && *capacity <= 100_000
+                    && graph_feed_instrument_valid(instrument)
+                    && graph_feed_timeframe_valid(*timeframe_ms)
             }
             Self::Advance {
                 graph_sha256,
@@ -446,6 +471,33 @@ impl GraphSessionReply {
                     && graph_sha256.len() == 64
                     && *last_closed_ms == history.last().map_or(0, |bar| bar.time_ms)
                     && *observed_bars == history.len() as u64
+            }
+            (
+                Self::Evaluated {
+                    schema,
+                    session_id: response_id,
+                    graph_sha256,
+                    last_closed_ms,
+                    observed_bars,
+                    ..
+                },
+                GraphSessionRequest::Bootstrap {
+                    session_id,
+                    timeframe_ms,
+                    history_bars,
+                    ..
+                },
+            ) => {
+                request.valid()
+                    && schema == Self::SCHEMA
+                    && response_id == session_id
+                    && graph_sha256.len() == 64
+                    && graph_sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    && *last_closed_ms > 0
+                    && *last_closed_ms % timeframe_ms == 0
+                    && *observed_bars == u64::from(*history_bars)
             }
             (
                 Self::Evaluated {
@@ -604,6 +656,21 @@ pub enum GraphFeedRequest {
     },
 }
 
+fn graph_feed_instrument_valid(instrument: &str) -> bool {
+    (3..=40).contains(&instrument.len())
+        && instrument
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn graph_feed_timeframe_valid(timeframe_ms: u64) -> bool {
+    matches!(
+        timeframe_ms,
+        60_000 | 180_000 | 300_000 | 900_000 | 1_800_000 | 3_600_000 | 14_400_000
+            | 86_400_000
+    )
+}
+
 impl GraphFeedRequest {
     pub fn valid(&self) -> bool {
         let hash = match self {
@@ -623,21 +690,8 @@ impl GraphFeedRequest {
                 poll_every_ms,
                 ..
             } => {
-                (3..=40).contains(&instrument.len())
-                    && instrument
-                        .bytes()
-                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
-                    && matches!(
-                        *timeframe_ms,
-                        60_000
-                            | 180_000
-                            | 300_000
-                            | 900_000
-                            | 1_800_000
-                            | 3_600_000
-                            | 14_400_000
-                            | 86_400_000
-                    )
+                graph_feed_instrument_valid(instrument)
+                    && graph_feed_timeframe_valid(*timeframe_ms)
                     && (1_000..=300_000).contains(poll_every_ms)
             }
             Self::Stop { .. } => true,
@@ -848,6 +902,59 @@ mod graph_signal_contract_tests {
             "history":[{"time_ms":60000,"close":100.0},{"time_ms":120000,"close":110.0}]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn graph_public_bootstrap_has_strict_bounds_and_typed_restore_reply() {
+        let GraphSessionRequest::Restore { session_id, definition, .. } = sample() else {
+            unreachable!()
+        };
+        let good = GraphSessionRequest::Bootstrap {
+            session_id: session_id.clone(),
+            definition,
+            capacity: 10_000,
+            instrument: "BTC-USDT-SWAP".into(),
+            timeframe_ms: 60_000,
+            history_bars: 64,
+        };
+        assert!(good.valid());
+        let wire = serde_json::to_value(&good).unwrap();
+        assert_eq!(wire["type"], "bootstrap");
+        assert_eq!(serde_json::from_value::<GraphSessionRequest>(wire).unwrap(), good);
+        let restored = GraphSessionReply::Evaluated {
+            schema: GraphSessionReply::SCHEMA.into(),
+            session_id,
+            graph_sha256: "a".repeat(64),
+            last_closed_ms: 100 * 60_000,
+            observed_bars: 64,
+            intent: GraphSignalIntent::Hold,
+        };
+        assert!(restored.matches_request(&good));
+        let mut bad = good.clone();
+        if let GraphSessionRequest::Bootstrap { history_bars, .. } = &mut bad {
+            *history_bars = 257;
+        }
+        assert!(!bad.valid());
+        bad = good.clone();
+        if let GraphSessionRequest::Bootstrap { instrument, .. } = &mut bad {
+            *instrument = "private/account".into();
+        }
+        assert!(!bad.valid());
+        bad = good.clone();
+        if let GraphSessionRequest::Bootstrap { capacity, .. } = &mut bad {
+            *capacity = 64;
+        }
+        assert!(!bad.valid());
+        bad = good.clone();
+        if let GraphSessionRequest::Bootstrap { timeframe_ms, .. } = &mut bad {
+            *timeframe_ms = 1_000;
+        }
+        assert!(!bad.valid());
+        let mut forged = restored.clone();
+        if let GraphSessionReply::Evaluated { observed_bars, .. } = &mut forged {
+            *observed_bars -= 1;
+        }
+        assert!(!forged.matches_request(&good));
     }
 
     #[test]

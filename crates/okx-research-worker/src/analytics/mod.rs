@@ -56,6 +56,87 @@ impl Drop for RunnerGuard {
 fn drain_count(durable: u64, runners: &AtomicUsize) -> u64 {
     durable.max(runners.load(Ordering::SeqCst) as u64)
 }
+
+
+fn graph_bootstrap_window(
+    now_ms: u64,
+    timeframe_ms: u64,
+    history_bars: u16,
+) -> Result<(u64, u64), String> {
+    let end = now_ms / timeframe_ms * timeframe_ms;
+    let width = timeframe_ms
+        .checked_mul(u64::from(history_bars))
+        .ok_or("GRAPH_BOOTSTRAP_RANGE_INVALID")?;
+    let start = end
+        .checked_sub(width)
+        .filter(|start| *start > 0)
+        .ok_or("GRAPH_BOOTSTRAP_RANGE_INVALID")?;
+    Ok((start, end))
+}
+
+fn graph_bootstrap_history(
+    candles: &[replay::Bar],
+    start_ms: u64,
+    timeframe_ms: u64,
+    history_bars: u16,
+) -> Result<Vec<GraphClosedBar>, String> {
+    if candles.len() != usize::from(history_bars) {
+        return Err("GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY".into());
+    }
+    candles
+        .iter()
+        .enumerate()
+        .map(|(index, candle)| {
+            let expected = start_ms
+                .checked_add(index as u64 * timeframe_ms)
+                .ok_or("GRAPH_BOOTSTRAP_RANGE_INVALID")?;
+            let bar = GraphClosedBar {
+                time_ms: candle.time,
+                close: Some(candle.close),
+            };
+            if candle.time != expected || !bar.valid() {
+                return Err("GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY".into());
+            }
+            Ok(bar)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod graph_bootstrap_tests {
+    use super::*;
+
+    fn candle(time: u64, close: f64) -> replay::Bar {
+        replay::Bar {
+            time,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1.0,
+            funding_rate: None,
+        }
+    }
+
+    #[test]
+    fn bootstrap_window_excludes_open_candle_and_requires_full_confirmed_prefix() {
+        const M: u64 = 60_000;
+        let (start, end) = graph_bootstrap_window(100 * M + 2_000, M, 3).unwrap();
+        assert_eq!((start, end), (97 * M, 100 * M));
+        let valid = vec![candle(97 * M, 100.0), candle(98 * M, 101.0), candle(99 * M, 102.0)];
+        let prefix = graph_bootstrap_history(&valid, start, M, 3).unwrap();
+        assert_eq!(prefix.iter().map(|b| b.time_ms).collect::<Vec<_>>(), vec![97 * M, 98 * M, 99 * M]);
+        assert_eq!(prefix.last().unwrap().close, Some(102.0));
+        assert_eq!(graph_bootstrap_history(&valid[..2], start, M, 3).unwrap_err(), "GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY");
+        let mut gap = valid.clone();
+        gap[1].time = 99 * M;
+        assert_eq!(graph_bootstrap_history(&gap, start, M, 3).unwrap_err(), "GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY");
+        let mut invalid = valid;
+        invalid[0].close = f64::NAN;
+        assert_eq!(graph_bootstrap_history(&invalid, start, M, 3).unwrap_err(), "GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY");
+        assert_eq!(graph_bootstrap_window(2 * M, M, 3).unwrap_err(), "GRAPH_BOOTSTRAP_RANGE_INVALID");
+    }
+}
 #[derive(Clone)]
 pub struct AnalyticsService {
     sources: sources::Sources,
@@ -74,9 +155,44 @@ impl AnalyticsService {
         &self,
         request: GraphSessionRequest,
     ) -> Result<(GraphSessionReply, bool), String> {
-        self.graph_sessions
-            .execute_transition(&self.cpu, request)
-            .await
+        if !request.valid() {
+            return Err("GRAPH_SESSION_REQUEST_INVALID".into());
+        }
+        match request {
+            GraphSessionRequest::Bootstrap {
+                session_id,
+                definition,
+                capacity,
+                instrument,
+                timeframe_ms,
+                history_bars,
+            } => {
+                self.graph_sessions
+                    .ensure_fresh_bootstrap(&self.cpu, session_id.clone())
+                    .await?;
+                let now_ms = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+                let (start, end) = graph_bootstrap_window(now_ms, timeframe_ms, history_bars)?;
+                // The public-source proxy is scoped to Research. No Engine
+                // account state or private exchange capability is involved.
+                let candles = self
+                    .graph_feed_candles(&instrument, timeframe_ms, start, end)
+                    .await?;
+                let history =
+                    graph_bootstrap_history(&candles, start, timeframe_ms, history_bars)?;
+                self.graph_sessions
+                    .execute_transition(
+                        &self.cpu,
+                        GraphSessionRequest::Restore {
+                            session_id,
+                            definition,
+                            capacity,
+                            history,
+                        },
+                    )
+                    .await
+            }
+            other => self.graph_sessions.execute_transition(&self.cpu, other).await,
+        }
     }
     /// Durable bounded replay is independent of the lifetime of a graph runner.
     pub async fn replay_graph_publications(

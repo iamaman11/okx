@@ -103,6 +103,22 @@ impl GraphSessions {
         })
     }
 
+    /// Reject a new moving-window seed if any signal for this identity has
+    /// reached the durable journal. A restart needs exact-prefix recovery.
+    pub(super) async fn ensure_fresh_bootstrap(
+        &self,
+        cpu: &CpuExecutor,
+        session_id: GraphSessionId,
+    ) -> Result<(), String> {
+        let outbox = self.outbox.clone();
+        cpu.run(Default::default(), move |_| {
+            if outbox.has_session_publications(&session_id)? {
+                return Err("GRAPH_BOOTSTRAP_PUBLISHED_SESSION_REQUIRES_RECOVERY".into());
+            }
+            Ok(())
+        }).await
+    }
+
     /// Query a committed signal page without activating or restoring a runner.
     pub(super) async fn replay(
         &self,
@@ -266,6 +282,9 @@ impl GraphSessions {
                 return Err("CANCELLED".into());
             }
             match request {
+                GraphSessionRequest::Bootstrap { .. } => {
+                    Err("GRAPH_BOOTSTRAP_PUBLIC_SOURCE_REQUIRED".into())
+                }
                 GraphSessionRequest::Restore {
                     session_id,
                     definition,
@@ -484,6 +503,7 @@ mod tests {
         let registry = GraphSessions::default();
         let cpu = CpuExecutor::default();
         let id = GraphSessionId::new("account:instance:BTC".into()).unwrap();
+        registry.ensure_fresh_bootstrap(&cpu, id.clone()).await.unwrap();
         let restore = GraphSessionRequest::Restore {
             session_id: id.clone(),
             definition: Box::new(definition()),
@@ -523,6 +543,10 @@ mod tests {
             .await
             .unwrap();
         assert!(publish_next, "only a newly closed bar can publish");
+        assert_eq!(
+            registry.ensure_fresh_bootstrap(&cpu, id.clone()).await.unwrap_err(),
+            "GRAPH_BOOTSTRAP_PUBLISHED_SESSION_REQUIRES_RECOVERY"
+        );
         assert!(result.matches_request(&next));
         let (retried, publish_retry) = registry
             .execute_transition(&cpu, next.clone())
