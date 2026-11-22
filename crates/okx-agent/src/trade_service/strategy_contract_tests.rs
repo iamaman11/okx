@@ -1267,8 +1267,8 @@ async fn explicit_graph_open_respects_native_instance_nav_gate_without_order_pos
     };
     let binding = super::graph_target::GraphTargetBinding {
         account_key: fixture.owner.configuration.account_key.wire(),
-        instance_id: instance.instance_id,
-        definition_version: instance.definition_version,
+        instance_id: instance.instance_id.clone(),
+        definition_version: instance.definition_version.clone(),
         policy_revision: instance.policy_revision,
         session_id: session.clone(),
         graph_sha256: graph_sha256.clone(),
