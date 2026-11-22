@@ -54,6 +54,8 @@ validator rejects a different installed base, matching bytes with forged
 artifact/source origin, damaged EXE, unknown Research filename, altered source
 tree, incompatible protocol/storage version and mismatched `Cargo.lock`.
 Real downloads add the GitHub/merged-tree readback unavailable to pure fixtures.
+The packager then repeats five negative substitutions against the **actual
+downloaded component bytes** and records each typed refusal in the proof file.
 
 The test uses the **existing** CONTROL source schema and per-component rules,
 but does not call the installed CONTROL operation: a successful actual

@@ -104,6 +104,39 @@ function compose(base, research, baseOrigin, researchOrigin, baseline, candidate
   return candidate;
 }
 
+function verifyRealNegativeControls(candidate, base, research, baseOrigin, researchOrigin, baseline, head, tree) {
+  const copied = () => ({manifest:structuredClone(candidate.manifest),files:{...candidate.files}});
+  const cases = [
+    ['different_installed_base', 'INSTALLED_BASE_ORIGIN_MISMATCH', () => {
+      const wrong = {...baseline,artifact_id:baseline.artifact_id + 1};
+      return [candidate,base,research,baseOrigin,researchOrigin,wrong,head,tree];
+    }],
+    ['foreign_origin_same_bytes', 'COMPONENT_ORIGIN_MISMATCH', () => {
+      const wrong = copied(); wrong.manifest.components[BASE_NAMES[0]].artifact_id += 1;
+      return [wrong,base,research,baseOrigin,researchOrigin,baseline,head,tree];
+    }],
+    ['tampered_worker_bytes', 'COMPONENT_BYTES_MISMATCH', () => {
+      const wrong = copied(); wrong.files[WORKER] = Buffer.from('corrupt');
+      return [wrong,base,research,baseOrigin,researchOrigin,baseline,head,tree];
+    }],
+    ['unsupported_new_research_name', 'COMPOSITION_IDENTITY_MISMATCH', () => {
+      const wrong = copied(); wrong.files['okx-research-service.exe'] = wrong.files[WORKER]; delete wrong.files[WORKER];
+      return [wrong,base,research,baseOrigin,researchOrigin,baseline,head,tree];
+    }],
+    ['different_candidate_tree', 'COMPOSITION_IDENTITY_MISMATCH', () => {
+      const wrong = copied(); wrong.manifest.source_tree = '0'.repeat(40);
+      return [wrong,base,research,baseOrigin,researchOrigin,baseline,head,tree];
+    }],
+  ];
+  return cases.map(([name, code, input]) => {
+    try { validateCandidate(...input()); } catch (e) {
+      if (e.message === code) return {case:name,refusal:code};
+      fail(`NEGATIVE_WRONG_REFUSAL:${name}:${e.message}`);
+    }
+    fail(`NEGATIVE_ACCEPTED:${name}`);
+  });
+}
+
 function readBundle(directory) {
   if (!path.isAbsolute(directory) ||
       JSON.stringify(fs.readdirSync(directory).sort()) !== JSON.stringify([...FILES].sort())) fail('UNSUPPORTED_BUNDLE_ENTRIES');
@@ -125,6 +158,8 @@ function main(argv) {
   const baseline = JSON.parse(fs.readFileSync(input.baseline_file, 'utf8'));
   const candidate = compose(base, research, input.base_origin, input.research_origin,
     baseline, input.candidate_head, input.candidate_tree);
+  const refusals = verifyRealNegativeControls(candidate,base,research,input.base_origin,input.research_origin,
+    baseline,input.candidate_head,input.candidate_tree);
   if (!path.isAbsolute(dist) || !path.isAbsolute(proofPath) ||
       (fs.existsSync(dist) && fs.readdirSync(dist).length)) fail('DESTINATION_NOT_EMPTY');
   fs.mkdirSync(dist, {recursive: true});
@@ -133,6 +168,7 @@ function main(argv) {
     candidate_head: input.candidate_head, candidate_tree: input.candidate_tree,
     base_origin: input.base_origin, research_origin: input.research_origin,
     installed_base_match: true, control_candidate_rules: 'PASS_OFFLINE_NOT_ACTIVATED',
+    real_artifact_negative_controls: refusals,
     files: Object.fromEntries(FILES.map(name => [name, {sha256:sha256(candidate.files[name]),size:candidate.files[name].length}]))};
   fs.writeFileSync(proofPath, JSON.stringify(proof, null, 2) + '\n', {flag:'wx'});
   process.stdout.write(`T10_COMPOSITION_V2_OFFLINE=PASS worker_sha256=${candidate.manifest.components[WORKER].sha256}\n`);
@@ -141,4 +177,4 @@ function main(argv) {
 if (require.main === module) {
   try { main(process.argv.slice(2)); } catch (e) { console.error(e.message); process.exitCode = 1; }
 }
-module.exports = {BASE_NAMES, WORKER, NAMES, FILES, compose, validateCandidate, validateOrigin, validateBaseline, sha256};
+module.exports = {BASE_NAMES, WORKER, NAMES, FILES, compose, validateCandidate, validateOrigin, validateBaseline, verifyRealNegativeControls, sha256};
