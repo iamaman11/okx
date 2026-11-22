@@ -548,6 +548,20 @@ impl ResearchClient {
         .await?
         .product()
     }
+    /// Correlated read-only computation from the separate Research process.
+    pub async fn evaluate_signal(&self, request: SignalRequest) -> Result<SignalDecision, String> {
+        if !request.valid() {
+            return Err("INVALID_SIGNAL_REQUEST".into());
+        }
+        let decision = self
+            .call(ResearchCommand::EvaluateSignal { request: request.clone() }, true)
+            .await?
+            .signal()?;
+        if !decision.matches_request(&request) {
+            return Err("SIGNAL_RESPONSE_MISMATCH".into());
+        }
+        Ok(decision)
+    }
     pub async fn capabilities(&self) -> Result<Value, String> {
         self.call(ResearchCommand::Capabilities, true)
             .await?

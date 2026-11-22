@@ -18,6 +18,7 @@ pub mod sources;
 
 use futures_util::{StreamExt, stream};
 use okx_protocol::analytics::*;
+use okx_protocol::research_ipc::{SignalDecision, SignalPosition, SignalRequest};
 use okx_research::{
     ResearchArtifactStore,
     strategy_registry::{self as replay, Costs, Mechanics, ReplaySpec},
@@ -61,6 +62,42 @@ pub struct AnalyticsService {
     runners: Arc<AtomicUsize>,
 }
 impl AnalyticsService {
+    /// Legacy signal execution on the existing bounded Research CPU executor.
+    /// No account state, risk admission or order sender is available here.
+    pub async fn evaluate_signal(&self, request: SignalRequest) -> Result<SignalDecision, String> {
+        if !request.valid() {
+            return Err("INVALID_SIGNAL_REQUEST".into());
+        }
+        self.cpu
+            .run(Default::default(), move |_| {
+                let mut kernel = okx_analysis::operators::StrategyKernel::from_id(
+                    &request.strategy_id,
+                    request.parameters,
+                )?;
+                let mut signal = None;
+                for bar in &request.closes {
+                    signal = kernel.push_closed(bar.close)?;
+                }
+                let position = match signal {
+                    Some(1) => SignalPosition::Long,
+                    Some(-1) => SignalPosition::Short,
+                    Some(0) => SignalPosition::Flat,
+                    None => SignalPosition::Warmup,
+                    _ => return Err("INVALID_SIGNAL_OUTPUT".into()),
+                };
+                Ok(SignalDecision {
+                    schema: SignalDecision::SCHEMA.into(),
+                    last_closed_ms: request
+                        .closes
+                        .last()
+                        .expect("validated nonempty history")
+                        .time_ms,
+                    observed_bars: request.closes.len(),
+                    position,
+                })
+            })
+            .await
+    }
     /// Local metadata projection only: never enters the catalog SQL owner.
     pub fn diagnostic_job(&self, id: &str) -> Value {
         self.jobs.diagnostic_readback(id)
