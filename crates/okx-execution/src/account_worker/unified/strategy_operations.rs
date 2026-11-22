@@ -1,8 +1,8 @@
 //! Typed strategy commands on the existing installation SQL owner.
 use super::UnifiedFinanceHandle;
 use crate::graph_binding::{
-    EngineGraphBinding, EngineGraphBindingPage, EngineGraphCursor, EngineGraphProgress, GraphIdleAck,
-    GraphOpenAdmission,
+    EngineGraphBinding, EngineGraphBindingPage, EngineGraphCursor, EngineGraphProgress,
+    GraphIdleAck, GraphOpenAdmission,
 };
 use crate::{
     AccountStore, Decision, NewIntent, OperationReceipt, StoreError, StoreResult, StrategyInstance,
@@ -39,12 +39,7 @@ impl UnifiedFinanceHandle {
     ) -> StoreResult<EngineGraphBindingPage> {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
-            AccountStore::graph_bindings_page_sql(
-                db,
-                (&installation, &account),
-                limit,
-                offset,
-            )
+            AccountStore::graph_bindings_page_sql(db, (&installation, &account), limit, offset)
         })
         .await
     }

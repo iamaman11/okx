@@ -3,15 +3,15 @@
 //! Broadcast is a wake-up hint only. Every accepted event comes from the
 //! Research SQLite journal after the last ORIGINAL finance SQL checkpoint.
 //! Never fabricate Hold, accept a missing sequence, or skip an actionable bar.
-use super::{AccountResources, GRAPH_BINDINGS_BATCH, TradeService};
 use super::graph_target::GraphTargetBinding;
+use super::{AccountResources, GRAPH_BINDINGS_BATCH, TradeService};
 use crate::research_client::{GraphSignalEvent, ResearchClient};
 use okx_execution::position_target::TargetPlan;
 use okx_protocol::research_ipc::{
     GraphFeedFaultReason, GraphPublicationRequest, GraphSignalPublication,
 };
-use tokio::sync::broadcast;
 use std::{sync::Arc, time::Duration};
+use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GraphConsumeOutcome {
@@ -217,17 +217,26 @@ impl TradeService {
             .graph_bindings_page(super::deadline(), GRAPH_BINDINGS_BATCH, offset)
             .await
             .map_err(super::err)?;
-        self.recovery_schedule.lock().await.advance_graph_page(&account, offset, page.scanned);
+        self.recovery_schedule
+            .lock()
+            .await
+            .advance_graph_page(&account, offset, page.scanned);
         if page.active.is_empty() {
             return Ok(Vec::new());
         }
-        let research = self.signal_research.read().await.clone()
+        let research = self
+            .signal_research
+            .read()
+            .await
+            .clone()
             .ok_or("GRAPH_RESEARCH_NOT_READY")?;
         let mut outcomes = Vec::with_capacity(page.active.len());
         for stored in page.active {
             let binding = GraphTargetBinding::from_storage(stored)?;
             let consumer = EngineGraphConsumer::new(
-                &research, resources.configuration.alias.clone(), binding.clone()
+                &research,
+                resources.configuration.alias.clone(),
+                binding.clone(),
             )?;
             let outcome = tokio::time::timeout(
                 Duration::from_millis(180),
@@ -235,7 +244,11 @@ impl TradeService {
             )
             .await
             .map_err(|_| "GRAPH_RESEARCH_REPLAY_TIMEOUT")??;
-            if let GraphConsumeOutcome::Blocked { ref publication, ref plan } = outcome {
+            if let GraphConsumeOutcome::Blocked {
+                ref publication,
+                ref plan,
+            } = outcome
+            {
                 let reason = match plan {
                     TargetPlan::Open(_) => "OPEN_AWAITING_EXECUTION",
                     TargetPlan::CloseExisting(_) => "CLOSE_AWAITING_EXECUTION",
@@ -244,7 +257,11 @@ impl TradeService {
                 };
                 eprintln!(
                     "OKX_GRAPH_ENGINE_V1 account={} instance={} instrument={} sequence={} state=BLOCKED reason={}",
-                    account, binding.instance_id, binding.instrument_id, publication.sequence, reason
+                    account,
+                    binding.instance_id,
+                    binding.instrument_id,
+                    publication.sequence,
+                    reason
                 );
             }
             outcomes.push(outcome);

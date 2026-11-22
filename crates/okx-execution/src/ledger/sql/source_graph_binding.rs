@@ -1117,7 +1117,10 @@ mod tests {
         let foreign = ("installation", "account-b");
         assert_eq!(
             AccountStore::graph_bindings_page_sql(&db, account, 1, 0).unwrap(),
-            EngineGraphBindingPage { scanned: 0, active: vec![] }
+            EngineGraphBindingPage {
+                scanned: 0,
+                active: vec![]
+            }
         );
         let bound = {
             let tx = db.transaction().unwrap();
@@ -1126,21 +1129,37 @@ mod tests {
             let bound = binding(&tx, account.1);
             let other = binding(&tx, foreign.1);
             AccountStore::bind_graph_sql(
-                &tx, account, &bound, &cursor(2, TargetPosition::Hold), 121_000
-            ).unwrap();
+                &tx,
+                account,
+                &bound,
+                &cursor(2, TargetPosition::Hold),
+                121_000,
+            )
+            .unwrap();
             AccountStore::bind_graph_sql(
-                &tx, foreign, &other, &cursor(2, TargetPosition::Hold), 121_000
-            ).unwrap();
+                &tx,
+                foreign,
+                &other,
+                &cursor(2, TargetPosition::Hold),
+                121_000,
+            )
+            .unwrap();
             tx.commit().unwrap();
             bound
         };
         assert_eq!(
             AccountStore::graph_bindings_page_sql(&db, account, 1, 0).unwrap(),
-            EngineGraphBindingPage { scanned: 1, active: vec![bound.clone()] }
+            EngineGraphBindingPage {
+                scanned: 1,
+                active: vec![bound.clone()]
+            }
         );
         assert_eq!(
             AccountStore::graph_bindings_page_sql(&db, account, 1, 1).unwrap(),
-            EngineGraphBindingPage { scanned: 0, active: vec![] }
+            EngineGraphBindingPage {
+                scanned: 0,
+                active: vec![]
+            }
         );
         assert!(matches!(
             AccountStore::graph_bindings_page_sql(&db, account, 5, 0),
@@ -1148,17 +1167,28 @@ mod tests {
         ));
         let tx = db.transaction().unwrap();
         let mut stopped = AccountStore::instance_sql(&tx, Some(account), &bound.instance_id)
-            .unwrap().unwrap();
+            .unwrap()
+            .unwrap();
         stopped.enabled = false;
         stopped.policy_revision += 1;
         AccountStore::mutate_instance_sql(
-            &tx, Some(account), "discovery-stop", "discovery-stop-hash", "stop",
-            &stopped, Some(1), 181_000,
-        ).unwrap();
+            &tx,
+            Some(account),
+            "discovery-stop",
+            "discovery-stop-hash",
+            "stop",
+            &stopped,
+            Some(1),
+            181_000,
+        )
+        .unwrap();
         tx.commit().unwrap();
         assert_eq!(
             AccountStore::graph_bindings_page_sql(&db, account, 1, 0).unwrap(),
-            EngineGraphBindingPage { scanned: 1, active: vec![] },
+            EngineGraphBindingPage {
+                scanned: 1,
+                active: vec![]
+            },
             "stale receipts advance the scan but cannot resurrect a stopped graph"
         );
     }

@@ -506,11 +506,22 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
             .last_sequence(),
         3
     );
-    fixture.native.trade.set_signal_research(fixture.ctx.research.clone()).await;
+    fixture
+        .native
+        .trade
+        .set_signal_research(fixture.ctx.research.clone())
+        .await;
     assert_eq!(
-        fixture.native.trade.graph_research_turn(&fixture.owner).await.unwrap(),
+        fixture
+            .native
+            .trade
+            .graph_research_turn(&fixture.owner)
+            .await
+            .unwrap(),
         vec![GraphConsumeOutcome::Idle {
-            accepted: 0, confirmed_sequence: 3, has_more: false
+            accepted: 0,
+            confirmed_sequence: 3,
+            has_more: false
         }],
         "the ordinary Engine maintenance route rediscovers the SQL binding"
     );
@@ -616,7 +627,12 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
         )
     );
     assert_eq!(
-        fixture.native.trade.graph_research_turn(&fixture.owner).await.unwrap(),
+        fixture
+            .native
+            .trade
+            .graph_research_turn(&fixture.owner)
+            .await
+            .unwrap(),
         vec![GraphConsumeOutcome::Blocked {
             publication: publication.clone(),
             plan: plan.clone(),
