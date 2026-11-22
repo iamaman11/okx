@@ -705,18 +705,20 @@ mod tests {
             rust_version: "rustc test".into(),
             files: BTreeMap::new(),
         };
-        let cursor = Cursor::new(Vec::new());
-        let mut zip = zip::ZipWriter::new(cursor);
-        let options = zip::write::SimpleFileOptions::default();
-        zip.start_file("manifest.json", options).unwrap();
-        zip.write_all(&serde_json::to_vec(&manifest).unwrap())
-            .unwrap();
-        zip.start_file("okx-research-service.exe", options).unwrap();
-        zip.write_all(b"worker").unwrap();
-        let bytes = zip.finish().unwrap().into_inner();
-        assert!(matches!(
-            parse_bundle(&bytes),
-            Err(HostControlError::ArtifactVerification(_))
-        ));
+        for name in ["okx-research-service.exe", "okx-research-worker.exe"] {
+            let cursor = Cursor::new(Vec::new());
+            let mut zip = zip::ZipWriter::new(cursor);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("manifest.json", options).unwrap();
+            zip.write_all(&serde_json::to_vec(&manifest).unwrap())
+                .unwrap();
+            zip.start_file(name, options).unwrap();
+            zip.write_all(b"worker").unwrap();
+            let bytes = zip.finish().unwrap().into_inner();
+            assert!(matches!(
+                parse_bundle(&bytes),
+                Err(HostControlError::ArtifactVerification(_))
+            ));
+        }
     }
 }

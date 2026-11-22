@@ -369,6 +369,9 @@ def execute(scopes):
         tests("okx-host-control", required=(
             "artifact::research_component::tests::research_staging_publishes_only_verified_version_and_preserves_agent_state",
         ), exact=True)
+        tests("okx-host-control", required=(
+            "artifact::research_component::tests::legacy_bundle_cannot_carry_research_worker",
+        ), exact=True)
         metadata = subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
                                            cwd=ROOT, text=True)
         suffix = ".exe" if os.name == "nt" else ""

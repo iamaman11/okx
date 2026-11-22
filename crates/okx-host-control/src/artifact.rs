@@ -402,7 +402,11 @@ fn parse_bundle(zip_bytes: &[u8]) -> HostControlResult<VerifiedBundle> {
 
     let manifest_bytes = read_entry(&mut archive, "manifest.json", MAX_MANIFEST_BYTES)?;
     let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)?;
-    if archive.by_name("okx-research-service.exe").is_ok() {
+    // v1 predates Research as a separately verified component. Reject both
+    // names so a legacy image cannot be smuggled through a renamed reader.
+    if archive.by_name("okx-research-service.exe").is_ok()
+        || archive.by_name("okx-research-worker.exe").is_ok()
+    {
         return Err(HostControlError::ArtifactVerification(
             "v1 bundle cannot carry Research worker",
         ));
