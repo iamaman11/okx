@@ -1437,6 +1437,26 @@ mod tests {
     }
 
     #[test]
+    fn controller_release_identity_rejects_foreign_repo_and_missing_artifact() {
+        let valid = version('e');
+        assert!(valid.validate().is_ok());
+
+        let mut foreign = valid.clone();
+        foreign.repository_id += 1;
+        assert!(matches!(
+            foreign.validate(),
+            Err(LauncherError::InvalidState)
+        ));
+
+        let mut missing = valid;
+        missing.artifact_id = 0;
+        assert!(matches!(
+            missing.validate(),
+            Err(LauncherError::InvalidState)
+        ));
+    }
+
+    #[test]
     fn active_rejects_same_previous_and_active() {
         let value = version('c');
         let active = ActiveController::new(value.clone(), Some(value));
