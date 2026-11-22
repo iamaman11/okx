@@ -135,8 +135,12 @@ impl EngineGraphConsumer {
             );
             return Ok(result);
         }
-        for _ in 0..GraphPublicationRequest::MAX_PAGE {
-            match self.notices.recv().await {
+        // Wait for ONE wake-up; drain the remaining already-queued frames
+        // without waiting for another unrelated session to publish. The
+        // per-turn bound must limit *work*, not require 64 notifications.
+        let mut next = self.notices.recv().await;
+        for index in 0..GraphPublicationRequest::MAX_PAGE {
+            match next {
                 Ok(GraphSignalEvent::Published(publication))
                     if publication.session_id == self.binding.session_id
                         && publication.graph_sha256 == self.binding.graph_sha256 =>
@@ -162,6 +166,21 @@ impl EngineGraphConsumer {
                 }
                 Ok(_) => {}
             }
+            if index + 1 == GraphPublicationRequest::MAX_PAGE {
+                break;
+            }
+            next = match self.notices.try_recv() {
+                Ok(notification) => Ok(notification),
+                Err(broadcast::error::TryRecvError::Empty) => {
+                    return Ok(GraphConsumeOutcome::UnrelatedNotifications);
+                }
+                Err(broadcast::error::TryRecvError::Closed) => {
+                    Err(broadcast::error::RecvError::Closed)
+                }
+                Err(broadcast::error::TryRecvError::Lagged(missed)) => {
+                    Err(broadcast::error::RecvError::Lagged(missed))
+                }
+            };
         }
         Ok(GraphConsumeOutcome::UnrelatedNotifications)
     }

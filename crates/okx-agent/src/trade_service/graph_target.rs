@@ -15,6 +15,7 @@ use okx_protocol::research_ipc::{
     GraphFeedRequest, GraphPosition, GraphPublicationCursor, GraphSessionId, GraphSignalIntent,
     GraphSignalPublication,
 };
+use okx_protocol::trading::GraphStrategyConfigurationV1;
 use okx_protocol::trading::{PositionSide, TradeOperation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,6 +274,27 @@ impl TradeService {
         let resources = self.resources(account).await?;
         if resources.configuration.account_key.wire() != binding.account_key {
             return Err("GRAPH_TARGET_ACCOUNT_MISMATCH".into());
+        }
+        let instance = resources
+            .execution
+            .store
+            .strategy_instances(super::deadline())
+            .await
+            .map_err(super::err)?
+            .into_iter()
+            .find(|instance| instance.instance_id == binding.instance_id)
+            .ok_or("GRAPH_TARGET_STRATEGY_MISSING")?;
+        if instance.definition_id != GraphStrategyConfigurationV1::DEFINITION_ID {
+            return Err("GRAPH_TARGET_STRATEGY_MODE_MISMATCH".into());
+        }
+        let configuration: GraphStrategyConfigurationV1 =
+            serde_json::from_str(&instance.parameters)
+                .map_err(|_| "GRAPH_TARGET_CONFIGURATION_CORRUPT")?;
+        if !configuration.valid()
+            || configuration.timeframe_ms != binding.timeframe_ms
+            || !configuration.instruments.contains(&binding.instrument_id)
+        {
+            return Err("GRAPH_TARGET_CONFIGURATION_MISMATCH".into());
         }
         let progress = resources
             .execution

@@ -377,6 +377,12 @@ def execute(scopes):
              "graph_target_preview_reads_the_original_account_owner", "--", "--test-threads", "2"],
             cwd=ROOT, check=True,
         )
+        subprocess.run(
+            ["cargo", "test", "--locked", "-p", "okx-agent", "--lib",
+             "graph_strategy_is_durable_and_does_not_invoke_legacy_ema",
+             "--", "--test-threads", "2"],
+            cwd=ROOT, check=True,
+        )
         subprocess.run([sys.executable, "scripts/check_architecture.py"], cwd=ROOT, check=True)
         scopes = SCOPES
     if "kernel" in scopes:

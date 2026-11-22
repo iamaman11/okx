@@ -1,6 +1,8 @@
 use super::*;
 use okx_protocol::research_ipc::{ClosedPrice, SignalPosition, SignalRequest};
-use okx_protocol::trading::{CapitalDirection, StrategyConfigurationV1, StrategyParametersV1};
+use okx_protocol::trading::{
+    CapitalDirection, GraphStrategyConfigurationV1, StrategyConfigurationV1, StrategyParametersV1,
+};
 #[cfg(test)]
 #[path = "strategy_contract_tests.rs"]
 mod strategy_contract_tests;
@@ -22,11 +24,22 @@ impl TradeService {
             let result = match request {
                 StrategyRequest::Status { instance_id } => {
                     let instance_id = instance_id.clone();
-                    r.execution
+                    let mut status = r.execution
                         .store
                         .strategy_status(deadline(), instance_id, now())
                         .await
-                        .map_err(err)?
+                        .map_err(err)?;
+                    if status["instance"]["definition_id"]
+                        == GraphStrategyConfigurationV1::DEFINITION_ID
+                    {
+                        // Persisting a graph definition and starting the
+                        // instance do NOT grant an execution subscription.
+                        status["graph_execution"] = json!({
+                            "state": "NOT_ACTIVATED",
+                            "reason_code": "GRAPH_EXECUTION_NOT_CONNECTED"
+                        });
+                    }
+                    status
                 }
                 _ => {
                     json!({"instances":r.execution.store.strategy_instances(deadline()).await.map_err(err)?})
@@ -140,27 +153,48 @@ impl TradeService {
                     timeframe_ms,
                     budget_usd,
                 } => {
-                    if !matches!(
-                        definition_id.as_str(),
-                        "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
+                    if !matches!(definition_id.as_str(),
+                        "ema_cross_v1" | "no_trade" | "close_momentum"
+                            | "two_bar_momentum" | GraphStrategyConfigurationV1::DEFINITION_ID
                     ) {
                         return Err(okx_execution::StoreError::Invalid(
                             "STRATEGY_DEFINITION_UNSUPPORTED",
                         ));
                     }
-                    let config = StrategyConfigurationV1 {
-                        parameters: StrategyParametersV1::parse(parameters).ok_or(
-                            okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
-                        )?,
-                        instruments: instruments.clone(),
-                        timeframe_ms: *timeframe_ms,
-                    };
-                    if !config.valid() || *version != 1 {
+                    if *version != 1 {
                         return Err(okx_execution::StoreError::Invalid(
                             "STRATEGY_CONFIGURATION_INVALID",
                         ));
                     }
-                    let parameters = serde_json::to_string(&config).map_err(|_| {
+                    let parameters = if definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
+                        let config = GraphStrategyConfigurationV1 {
+                            signal: GraphStrategyConfigurationV1::parse_signal(parameters).ok_or(
+                                okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
+                            )?,
+                            instruments: instruments.clone(),
+                            timeframe_ms: *timeframe_ms,
+                        };
+                        if !config.valid() {
+                            return Err(okx_execution::StoreError::Invalid(
+                                "STRATEGY_CONFIGURATION_INVALID",
+                            ));
+                        }
+                        serde_json::to_string(&config)
+                    } else {
+                        let config = StrategyConfigurationV1 {
+                            parameters: StrategyParametersV1::parse(parameters).ok_or(
+                                okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
+                            )?,
+                            instruments: instruments.clone(),
+                            timeframe_ms: *timeframe_ms,
+                        };
+                        if !config.valid() {
+                            return Err(okx_execution::StoreError::Invalid(
+                                "STRATEGY_CONFIGURATION_INVALID",
+                            ));
+                        }
+                        serde_json::to_string(&config)
+                    }.map_err(|_| {
                         okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
                     })?;
                     let instance = StrategyInstance {
@@ -190,21 +224,29 @@ impl TradeService {
                         .ok_or(okx_execution::StoreError::Invalid(
                             "STRATEGY_INSTANCE_NOT_FOUND",
                         ))?;
-                    let mut config: StrategyConfigurationV1 = serde_json::from_str(&i.parameters)
-                        .map_err(|_| {
-                        okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT")
-                    })?;
-                    config.parameters = StrategyParametersV1::parse(parameters).ok_or(
-                        okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
-                    )?;
-                    if !config.valid() {
-                        return Err(okx_execution::StoreError::Invalid(
-                            "STRATEGY_CONFIGURATION_INVALID",
-                        ));
+                    if i.definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
+                        let mut config: GraphStrategyConfigurationV1 = serde_json::from_str(&i.parameters)
+                            .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT"))?;
+                        config.signal = GraphStrategyConfigurationV1::parse_signal(parameters).ok_or(
+                            okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
+                        )?;
+                        if !config.valid() {
+                            return Err(okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID"));
+                        }
+                        i.parameters = serde_json::to_string(&config)
+                            .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID"))?;
+                    } else {
+                        let mut config: StrategyConfigurationV1 = serde_json::from_str(&i.parameters)
+                            .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT"))?;
+                        config.parameters = StrategyParametersV1::parse(parameters).ok_or(
+                            okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
+                        )?;
+                        if !config.valid() {
+                            return Err(okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID"));
+                        }
+                        i.parameters = serde_json::to_string(&config)
+                            .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID"))?;
                     }
-                    i.parameters = serde_json::to_string(&config).map_err(|_| {
-                        okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
-                    })?;
                     i.budget = Decimal::from_str(budget_usd)
                         .map_err(|_| okx_execution::StoreError::Invalid("INVALID_BUDGET"))?;
                     let expected = i64::try_from(*expected_revision).map_err(|_| {
@@ -479,6 +521,12 @@ impl TradeService {
         r: &Arc<AccountResources>,
         instance: &StrategyInstance,
     ) -> Result<(), String> {
+        if instance.definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
+            // This is a separate target-driven execution mode. Until a
+            // durable graph activation is wired to Engine, it is not an EMA
+            // job and must never request per-bar EvaluateSignal or POST.
+            return Err("GRAPH_EXECUTION_NOT_CONNECTED".into());
+        }
         let live_source = self
             .live_source
             .read()

@@ -313,6 +313,18 @@ pub struct GraphSignalDefinition {
     pub missing: GraphMissingPolicy,
 }
 
+impl GraphSignalDefinition {
+    /// Wire admission only. Mathematical operator IDs, versions, and units
+    /// remain exclusively owned by the Research compiler.
+    pub fn structurally_valid(&self) -> bool {
+        self.version == "okx.graph-signal/v1"
+            && self.graph.structurally_valid()
+            && self.graph.outputs.contains(&self.signal_step)
+            && (-1..=1).contains(&self.target_if_true)
+            && (-1..=1).contains(&self.target_if_false)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphMissingPolicy {
@@ -358,11 +370,7 @@ impl GraphSessionRequest {
                 history,
                 ..
             } => {
-                definition.version == "okx.graph-signal/v1"
-                    && definition.graph.structurally_valid()
-                    && definition.graph.outputs.contains(&definition.signal_step)
-                    && (-1..=1).contains(&definition.target_if_true)
-                    && (-1..=1).contains(&definition.target_if_false)
+                definition.structurally_valid()
                     && (1..=10_000).contains(&history.len())
                     && *capacity >= history.len() as u64
                     && *capacity <= 100_000

@@ -126,6 +126,86 @@ fn update(key: &str, revision: u64) -> StrategyRequest {
         budget_usd: "3".into(),
     }
 }
+
+fn graph_signal_parameters() -> Value {
+    json!({
+        "version":"okx.graph-signal/v1",
+        "graph":{"schema":"okx.graph/v1","steps":[
+            {"id":"return","op":{"id":"returns_series","version":1},"inputs":[{"source":"close"}]},
+            {"id":"positive","op":{"id":"greater_than","version":1},
+             "inputs":[{"step":"return"}],"params":{"threshold":0.0}}
+        ],"outputs":["positive"]},
+        "signal_step":"positive","target_if_true":1,"target_if_false":0,"missing":"hold"
+    })
+}
+
+#[tokio::test]
+async fn graph_strategy_is_durable_and_does_not_invoke_legacy_ema() {
+    let fixture = Fixture::new().await;
+    let _capture = fixture.owner.recorded_capture_gate.write().await;
+    let before = money(&fixture).await;
+    let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
+    let instance_id = "graph_contract";
+    let graph = graph_signal_parameters();
+    let create = StrategyRequest::Create {
+        idempotency_key: "graph_create".into(),
+        instance_id: instance_id.into(),
+        definition_id: "graph_signal_v1".into(),
+        version: 1,
+        parameters: graph.clone(),
+        instruments: vec!["BTC-USDT-SWAP".into()],
+        timeframe_ms: 60_000,
+        budget_usd: "2".into(),
+    };
+    let created = completed_data(fixture.request(create.clone()).await)["instance"].clone();
+    assert_eq!(created["enabled"], false);
+    assert_eq!(created["definition_id"], "graph_signal_v1");
+    assert_eq!(completed_data(fixture.request(create).await)["instance"], created);
+    let update = StrategyRequest::Update {
+        idempotency_key: "graph_update".into(),
+        instance_id: instance_id.into(),
+        expected_revision: 1,
+        parameters: graph.clone(),
+        budget_usd: "2".into(),
+    };
+    assert_eq!(
+        completed_data(fixture.request(update).await)["instance"]["policy_revision"],
+        2
+    );
+    rejected(
+        fixture.request(StrategyRequest::Update {
+            idempotency_key: "graph_update_ema_wrong_type".into(),
+            instance_id: instance_id.into(),
+            expected_revision: 2,
+            parameters: json!({"fast": 5, "slow": 10}),
+            budget_usd: "2".into(),
+        }).await,
+        "STRATEGY_PARAMETERS_INVALID",
+    );
+    completed_data(fixture.request(StrategyRequest::Start {
+        idempotency_key: "graph_start".into(),
+        instance_id: instance_id.into(),
+    }).await);
+    let status = completed_data(fixture.request(StrategyRequest::Status {
+        instance_id: instance_id.into(),
+    }).await);
+    assert_eq!(status["graph_execution"]["state"], "NOT_ACTIVATED");
+    assert_eq!(status["graph_execution"]["reason_code"], "GRAPH_EXECUTION_NOT_CONNECTED");
+    let persisted = fixture.owner.execution.store.strategy_instances(deadline()).await.unwrap()
+        .into_iter().find(|instance| instance.instance_id == instance_id).unwrap();
+    assert!(persisted.enabled);
+    let typed: okx_protocol::trading::GraphStrategyConfigurationV1 =
+        serde_json::from_str(&persisted.parameters).unwrap();
+    assert_eq!(typed.signal, serde_json::from_value(graph).unwrap());
+    assert_eq!(
+        fixture.native.trade.strategy_turn(&fixture.owner, &persisted).await.unwrap_err(),
+        "GRAPH_EXECUTION_NOT_CONNECTED"
+    );
+    assert_eq!(money(&fixture).await, before);
+    assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
+    drop(_capture);
+    fixture.finish().await;
+}
 fn completed_data(response: AgentResponse) -> Value {
     assert_eq!(response.request_id, "strategy-contract-request");
     assert_eq!(
@@ -186,6 +266,13 @@ async fn graph_target_preview_reads_the_original_account_owner_without_any_order
         intent: GraphSignalIntent::Hold,
     })
     .unwrap();
+    assert_eq!(
+        fixture.native.trade.bind_graph_strategy(
+            &fixture.owner.configuration.alias, &binding, &confirmed
+        ).await.unwrap_err(),
+        "GRAPH_TARGET_STRATEGY_MODE_MISMATCH",
+        "a legacy EMA instance must never acquire a concurrent graph dispatcher"
+    );
     let publication = GraphSignalPublication {
         schema: GraphSessionReply::SCHEMA.into(),
         session_id,
@@ -250,7 +337,16 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
     };
     let fixture = Fixture::new().await;
     let _capture = fixture.owner.recorded_capture_gate.write().await;
-    completed_data(fixture.request(create("graph_consumer_create")).await);
+    completed_data(fixture.request(StrategyRequest::Create {
+        idempotency_key: "graph_consumer_create".into(),
+        instance_id: INSTANCE.into(),
+        definition_id: "graph_signal_v1".into(),
+        version: 1,
+        parameters: graph_signal_parameters(),
+        instruments: vec!["BTC-USDT-SWAP".into()],
+        timeframe_ms: 60_000,
+        budget_usd: "2".into(),
+    }).await);
     completed_data(
         fixture
             .request(StrategyRequest::Start {
@@ -315,13 +411,20 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
     };
     let account = fixture.owner.configuration.alias.clone();
     let original = GraphPublicationCursor::from_restored(&restored).unwrap();
+    let mut wrong_timeframe = binding.clone();
+    wrong_timeframe.timeframe_ms = 300_000;
+    assert_eq!(
+        fixture.native.trade.bind_graph_strategy(&account, &wrong_timeframe, &original)
+            .await.unwrap_err(),
+        "GRAPH_TARGET_CONFIGURATION_MISMATCH"
+    );
     fixture
         .native
         .trade
         .bind_graph_strategy(&account, &binding, &original)
         .await
         .unwrap();
-    let consumer =
+    let mut consumer =
         EngineGraphConsumer::new(&fixture.ctx.research, account.clone(), binding.clone()).unwrap();
     let before = money(&fixture).await;
     let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
@@ -343,7 +446,7 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
         .unwrap();
     assert!(matches!(
         consumer
-            .replay_one_page(&fixture.native.trade, &fixture.ctx.research)
+            .next(&fixture.native.trade, &fixture.ctx.research)
             .await
             .unwrap(),
         GraphConsumeOutcome::Idle {
@@ -363,6 +466,42 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
             .last_sequence(),
         3
     );
+    // A newly attached subscriber recovers from finance SQL without needing
+    // any old broadcast event, then ignores unrelated Research sessions.
+    let mut recovered =
+        EngineGraphConsumer::new(&fixture.ctx.research, account.clone(), binding.clone()).unwrap();
+    assert!(matches!(
+        recovered.next(&fixture.native.trade, &fixture.ctx.research).await.unwrap(),
+        GraphConsumeOutcome::Idle { accepted: 0, confirmed_sequence: 3, has_more: false }
+    ));
+    let other_session = GraphSessionId::new("engine:unrelated-session".into()).unwrap();
+    let other_definition: GraphSignalDefinition =
+        serde_json::from_value(graph_signal_parameters()).unwrap();
+    let other_restored = fixture.ctx.research.graph_signal(GraphSessionRequest::Restore {
+        session_id: other_session.clone(),
+        definition: Box::new(other_definition),
+        capacity: 64,
+        history: vec![
+            GraphClosedBar { time_ms: 60_000, close: Some(100.) },
+            GraphClosedBar { time_ms: 120_000, close: Some(110.) },
+        ],
+    }).await.unwrap();
+    let GraphSessionReply::Evaluated { graph_sha256: other_hash, .. } = other_restored else {
+        panic!("other session must be restored");
+    };
+    fixture.ctx.research.graph_signal(GraphSessionRequest::Advance {
+        session_id: other_session,
+        graph_sha256: other_hash,
+        expected_bars: 3,
+        bar: GraphClosedBar { time_ms: 180_000, close: Some(90.) },
+    }).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            recovered.next(&fixture.native.trade, &fixture.ctx.research)
+        ).await.expect("unrelated event must not block waiting for 64 notifications").unwrap(),
+        GraphConsumeOutcome::UnrelatedNotifications
+    );
     fixture
         .ctx
         .research
@@ -377,8 +516,8 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
         })
         .await
         .unwrap();
-    let outcome = consumer
-        .replay_one_page(&fixture.native.trade, &fixture.ctx.research)
+    let outcome = recovered
+        .next(&fixture.native.trade, &fixture.ctx.research)
         .await
         .unwrap();
     let GraphConsumeOutcome::Blocked { publication, plan } = outcome else {

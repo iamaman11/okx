@@ -96,6 +96,12 @@ impl AccountStore {
         }
         let instance = Self::instance_sql(db, Some(scope), &binding.instance_id)?
             .ok_or(StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"))?;
+        // Graph activation is a separate strategy mode. Never allow the
+        // existing per-bar EMA dispatcher and graph outbox to trade the
+        // same instance under one original finance owner.
+        if instance.definition_id != "graph_signal_v1" {
+            return Err(StoreError::Invalid("GRAPH_FINANCE_STRATEGY_MODE_MISMATCH"));
+        }
         if !instance.enabled
             || instance.policy_revision != binding.policy_revision
             || instance.definition_version != binding.definition_version
@@ -474,7 +480,7 @@ mod tests {
     fn create(tx: &rusqlite::Transaction<'_>, account: &str) {
         let instance = StrategyInstance {
             instance_id: "strategy-a".into(),
-            definition_id: "no_trade".into(),
+            definition_id: "graph_signal_v1".into(),
             definition_version: "1".into(),
             parameters: "{}".into(),
             enabled: true,
