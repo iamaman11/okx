@@ -36,6 +36,10 @@ const PACKAGES: [&str; 5] = [
     "okx-protocol",
     "okx-runtime",
 ];
+// Native finance witnesses use real wall clocks, process children and bounded
+// SQLite owners. Parallel libtest workers can starve one another and turn an
+// independently safe operation into a false clock/queue-deadline failure.
+const FINANCIAL_WITNESS_TEST_THREADS: u64 = 1;
 type Witnesses = BTreeSet<(String, String)>;
 type Result<T> = std::result::Result<T, &'static str>;
 fn timing_distribution(mut times: Vec<u64>) -> Value {
@@ -175,6 +179,7 @@ async fn execute(
                 return Err("GIT_TREE_CHANGED");
             }
             let mut cmd = Command::new(&binaries[package]);
+            let thread_count = FINANCIAL_WITNESS_TEST_THREADS.to_string();
             cmd.current_dir(repo)
                 .args([
                     "--exact",
@@ -183,7 +188,7 @@ async fn execute(
                     "--color",
                     "never",
                     "--test-threads",
-                    "4",
+                    &thread_count,
                 ])
                 .args(&names);
             cmd.env(
@@ -333,7 +338,7 @@ async fn main() {
     let run_id: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
     let mut report = json!({"schema":"okx.native-finance-acceptance/v1", "run_id":run_id,"mode":mode,
         "head":null,"tree":null,"git_clean":false,"build_ms":null,"runtime_setup_to_teardown_ms":null,
-        "observed_witnesses":[],"repository_guards":[],"stages":[],"contracts":[],"overall":"FAIL","timeout_guards_seconds":{"build":1800,"per_package_libtest":180},"test_threads":4});
+        "observed_witnesses":[],"repository_guards":[],"stages":[],"contracts":[],"overall":"FAIL","timeout_guards_seconds":{"build":1800,"per_package_libtest":180},"test_threads":FINANCIAL_WITNESS_TEST_THREADS});
     let result: Result<Witnesses> = async {
         collector_sources_match(repo)?;
         report["collector_source_binding"] = json!("VERIFIED");
@@ -349,7 +354,7 @@ async fn main() {
             "logical_processors":std::thread::available_parallelism().ok().map(|n|n.get()),
             "processor_identifier":std::env::var("PROCESSOR_IDENTIFIER").ok(),
             "toolchain":String::from_utf8_lossy(&compiler.stdout).trim(),
-            "profile":"Cargo test debug","test_threads":4});
+            "profile":"Cargo test debug","test_threads":FINANCIAL_WITNESS_TEST_THREADS});
         let wanted = selected()?;
         if mode == "full" && incomplete() {
             report["overall"] = json!("BLOCKED");
