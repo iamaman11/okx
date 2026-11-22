@@ -1105,6 +1105,306 @@ async fn explicit_graph_open_uses_original_paused_risk_gate_without_order_post()
     drop(_capture);
     fixture.finish().await;
 }
+
+#[tokio::test]
+async fn explicit_graph_open_posts_once_through_native_risk_and_durable_cursor() {
+    use crate::accounts::recorded_support::RecordedPost;
+    use crate::native_finance_risk::NativeFinanceRisk;
+    use crate::risk_bridge::NativeRiskClient;
+    use okx_protocol::research_ipc::{
+        GraphClosedBar, GraphPublicationCursor, GraphSessionId, GraphSessionReply,
+        GraphSessionRequest, GraphSignalDefinition,
+    };
+    use tokio::sync::watch;
+
+    let mut fixture = Fixture::new().await;
+    let parameters = json!({
+        "signal": graph_signal_parameters(),
+        "execution": {"mode":"trade","max_slippage_bps":5,"stop_distance_bps":50}
+    });
+    completed_data(
+        fixture
+            .request(StrategyRequest::Create {
+                idempotency_key: "graph_native_create".into(),
+                instance_id: "graph_native".into(),
+                definition_id: "graph_signal_v1".into(),
+                version: 1,
+                parameters,
+                instruments: vec!["BTC-USDT-SWAP".into()],
+                timeframe_ms: 60_000,
+                budget_usd: "2".into(),
+            })
+            .await,
+    );
+    completed_data(
+        fixture
+            .request(StrategyRequest::Start {
+                idempotency_key: "graph_native_start".into(),
+                instance_id: "graph_native".into(),
+            })
+            .await,
+    );
+    let instance = fixture
+        .owner
+        .execution
+        .store
+        .strategy_instances(deadline())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|instance| instance.instance_id == "graph_native")
+        .unwrap();
+
+    // Only production maintenance may install this campaign opening. A
+    // synthetic opening or a bypassed RiskBook would invalidate the test.
+    let (maintenance_stop, stopped) = watch::channel(false);
+    let service = fixture.native.trade.clone();
+    let maintenance = tokio::spawn(async move { service.run(stopped).await });
+    let mut observations = tokio::time::interval(Duration::from_millis(25));
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            observations.tick().await;
+            if fixture
+                .owner
+                .campaign_summary(fixture.native.campaign.clone())
+                .await
+                .unwrap()
+                .opening
+                .is_some()
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("production maintenance installs the native campaign opening");
+    maintenance_stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), maintenance)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Public reference, executable book and mark are parsed through the
+    // original WS coordinator. No fake market snapshot enters the Engine.
+    let (market, public, socket) = native::raw_market();
+    let mut updates = public.subscribe_market_updates();
+    let (market_stop, stopped) = watch::channel(false);
+    let market_task = tokio::spawn(async move { market.run(stopped) });
+    public.demand_instrument("BTC-USDT-SWAP").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if public
+                .risk_fresh_snapshot(
+                    "BTC-USDT-SWAP",
+                    jiff::Timestamp::now().as_millisecond() as u64,
+                    2_000,
+                    180_000,
+                    jiff::Timestamp::now().to_string(),
+                )
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            updates.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("recorded venue frames must enter the public market parser");
+    fixture
+        .native
+        .attach_recorded_market(socket, public.clone());
+    fixture.native.trade = Arc::new(TradeService::new(
+        fixture.native.registry.clone(),
+        public,
+        NativeRiskClient::local(
+            NativeFinanceRisk::new(
+                fixture.native.owner.clone(),
+                fixture.native.owner.installation_id().into(),
+                fixture.native.campaign.clone(),
+            )
+            .unwrap(),
+        ),
+    ));
+    fixture
+        .native
+        .trade
+        .update_governance(&fixture.native.authority)
+        .await
+        .unwrap();
+    fixture
+        .native
+        .trade
+        .set_signal_research(fixture.ctx.research.clone())
+        .await;
+
+    let _capture = fixture.owner.recorded_capture_gate.write().await;
+    let definition: GraphSignalDefinition =
+        serde_json::from_value(graph_signal_parameters()).unwrap();
+    let session = GraphSessionId::new("engine:positive-native-open".into()).unwrap();
+    let restored = fixture
+        .ctx
+        .research
+        .graph_signal(GraphSessionRequest::Restore {
+            session_id: session.clone(),
+            definition: Box::new(definition),
+            capacity: 64,
+            history: vec![
+                GraphClosedBar {
+                    time_ms: 60_000,
+                    close: Some(100.),
+                },
+                GraphClosedBar {
+                    time_ms: 120_000,
+                    close: Some(90.),
+                },
+            ],
+        })
+        .await
+        .unwrap();
+    let GraphSessionReply::Evaluated { graph_sha256, .. } = &restored else {
+        panic!("Research must evaluate the native graph session");
+    };
+    let binding = super::graph_target::GraphTargetBinding {
+        account_key: fixture.owner.configuration.account_key.wire(),
+        instance_id: instance.instance_id,
+        definition_version: instance.definition_version,
+        policy_revision: instance.policy_revision,
+        session_id: session.clone(),
+        graph_sha256: graph_sha256.clone(),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        timeframe_ms: 60_000,
+    };
+    fixture
+        .native
+        .trade
+        .bind_graph_strategy(
+            &fixture.owner.configuration.alias,
+            &binding,
+            &GraphPublicationCursor::from_restored(&restored).unwrap(),
+        )
+        .await
+        .unwrap();
+    fixture
+        .ctx
+        .research
+        .graph_signal(GraphSessionRequest::Advance {
+            session_id: session,
+            graph_sha256: binding.graph_sha256.clone(),
+            expected_bars: 3,
+            bar: GraphClosedBar {
+                time_ms: 180_000,
+                close: Some(95.),
+            },
+        })
+        .await
+        .unwrap();
+
+    // Strict finite transport transcript: finance must consume exactly the
+    // signed fee/leverage reads, then create one FOK with the bounded stop.
+    let now = jiff::Timestamp::now().as_millisecond().to_string();
+    fixture.native.feed.expect_public_clock(native::envelope(json!([{"ts":now}])));
+    native::record_fee(&fixture.native.feed, &now);
+    native::record_leverage(&fixture.native.feed);
+    native::record_leverage(&fixture.native.feed);
+    native::record_fee(&fixture.native.feed, &now);
+    native::record_fee(&fixture.native.feed, &now);
+    native::record_leverage(&fixture.native.feed);
+    fixture.native.feed.expect_post(RecordedPost {
+        access_key: "fixture-executor-a".into(),
+        path: "/api/v5/trade/order".into(),
+        expected_body: json!({
+            "instId":"BTC-USDT-SWAP","tdMode":"cross",
+            "clOrdId":"__REQUEST_CL_ORD_ID__","side":"buy","posSide":"long",
+            "ordType":"fok","sz":"0.99","px":"1000.5",
+            "attachAlgoOrds":[{
+                "attachAlgoClOrdId":"__REQUEST_ATTACH_ALGO_ID__",
+                "tpTriggerPxType":"mark","slTriggerPx":"995.4",
+                "slTriggerPxType":"mark","slOrdPx":"-1"
+            }]
+        }),
+        raw_response: native::envelope(json!([{
+            "ordId":"native-graph-open-001",
+            "clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"
+        }])),
+    });
+
+    let first = fixture
+        .native
+        .trade
+        .graph_research_turn(&fixture.owner)
+        .await
+        .unwrap();
+    assert_eq!(
+        first,
+        vec![super::graph_consumer::GraphConsumeOutcome::OpenAdmissionScheduled {
+            sequence: 3
+        }]
+    );
+    // Acquiring the same account-local permit proves the spawned Execute has
+    // left its risk/venue path; a queued task alone is not evidence of POST.
+    let permit = tokio::time::timeout(
+        Duration::from_secs(12),
+        fixture.owner.graph_order_dispatch.clone().acquire_owned(),
+    )
+    .await
+    .expect("native graph Open admission must finish")
+    .unwrap();
+    assert_eq!(fixture.native.feed.outbound_posts.lock().unwrap().len(), 1);
+    assert_eq!(fixture.native.feed.unconsumed_reads(), 0);
+    assert_eq!(
+        fixture
+            .native
+            .trade
+            .graph_confirmed_cursor(&fixture.owner.configuration.alias, &binding)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_sequence(),
+        3,
+        "the native SQL prepare must bind the graph cursor to the order"
+    );
+    assert!(
+        fixture
+            .owner
+            .reconcilable_intents_page(
+                fixture.native.config.account_key.wire(),
+                100,
+                0,
+                deadline(),
+            )
+            .await
+            .unwrap()
+            .iter()
+            .any(|intent| intent.plan.strategy_instance == "graph_native"),
+        "the Graph order must survive in the original finance ledger"
+    );
+    let replay = fixture
+        .native
+        .trade
+        .graph_research_turn(&fixture.owner)
+        .await
+        .unwrap();
+    assert!(matches!(
+        replay.as_slice(),
+        [super::graph_consumer::GraphConsumeOutcome::Idle {
+            confirmed_sequence: 3,
+            ..
+        }]
+    ));
+    assert_eq!(fixture.native.feed.outbound_posts.lock().unwrap().len(), 1);
+
+    drop(permit);
+    drop(_capture);
+    market_stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), market_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    fixture.finish().await;
+}
+
 fn rejected(response: AgentResponse, code: &str) {
     assert_eq!(response.status, AgentResponseStatus::Rejected);
     assert_eq!(response.quality, DataQuality::NotReady);
