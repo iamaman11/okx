@@ -226,6 +226,7 @@ impl TradeService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use okx_protocol::trading::GraphExecutionPolicy;
     use rust_decimal::Decimal;
     use serde_json::json;
 
@@ -242,6 +243,7 @@ mod tests {
             })).unwrap(),
             instruments: vec!["BTC-USDT-SWAP".into(), "ETH-USDT-SWAP".into()],
             timeframe_ms: 60_000,
+            execution: GraphExecutionPolicy::Observe,
         }
     }
 

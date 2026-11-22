@@ -112,6 +112,10 @@ pub struct AccountResources {
     /// trade.status, protection check, Close or emergency action never waits
     /// on this permit. Source/SQL/Worker financial owners stay unchanged.
     pub execute_replay_reconciliation: Semaphore,
+    /// At most one graph-derived order admission task per account. This is
+    /// separate from the original financial mutation/risk semaphores, which
+    /// the existing TradeService must still acquire itself.
+    pub(crate) graph_order_dispatch: Arc<Semaphore>,
     source_shutdown: watch::Sender<bool>,
     verified_source_generation: AtomicU64,
     _identity_lease: File,
@@ -554,6 +558,7 @@ impl AccountRuntimeRegistry {
             mutation_capacity: Semaphore::new(128),
             new_risk_admission: Semaphore::new(1),
             execute_replay_reconciliation: Semaphore::new(1),
+            graph_order_dispatch: Arc::new(Semaphore::new(1)),
             source_shutdown: shutdown,
             verified_source_generation: AtomicU64::new(0),
             _identity_lease: identity_lease,

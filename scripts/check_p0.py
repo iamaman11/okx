@@ -426,6 +426,9 @@ def execute(scopes):
             "trade_service::strategies::strategy_contract_tests::research_bootstrap_binds_and_starts_public_feed_without_order_post",
         ), exact=True)
         tests("okx-agent", required=(
+            "trade_service::strategies::strategy_contract_tests::explicit_graph_open_uses_original_paused_risk_gate_without_order_post",
+        ), exact=True)
+        tests("okx-agent", required=(
             "trade_service::graph_activation::tests::identity_is_stable_per_account_revision_and_instrument",
         ), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)

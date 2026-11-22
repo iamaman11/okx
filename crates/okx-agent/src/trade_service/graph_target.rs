@@ -7,7 +7,7 @@
 use super::execute::GraphOpenContext;
 use super::{TradeRequest, TradeService};
 use okx_execution::{
-    StrategyPositionSnapshot,
+    StrategyInstance, StrategyPositionSnapshot,
     graph_binding::{EngineGraphBinding, EngineGraphCursor, GraphIdleAck},
     position_target::{TargetPlan, TargetPlanError, TargetPosition, plan_strategy_target},
 };
@@ -16,7 +16,10 @@ use okx_protocol::research_ipc::{
     GraphSignalPublication,
 };
 use okx_protocol::trading::GraphStrategyConfigurationV1;
-use okx_protocol::trading::{PositionSide, TradeOperation};
+use okx_protocol::trading::{
+    GraphExecutionPolicy, OrderConstraints, PositionSide, Protection, Sizing, TradeOperation,
+};
+use rust_decimal::Decimal;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphTargetBinding {
@@ -31,6 +34,77 @@ pub struct GraphTargetBinding {
 }
 
 impl GraphTargetBinding {
+    /// Construct a candidate for the ORIGINAL TradeService path. This has no
+    /// SQL, risk or venue effects. Observe-only strategy Start cannot create
+    /// an order command, including after an executable upgrade.
+    pub(super) fn open_request(
+        &self,
+        instance: &StrategyInstance,
+        publication: &GraphSignalPublication,
+        policy: &GraphExecutionPolicy,
+    ) -> Result<Option<TradeRequest>, String> {
+        let GraphExecutionPolicy::Trade {
+            max_slippage_bps,
+            stop_distance_bps,
+        } = policy
+        else {
+            return Ok(None);
+        };
+        if !policy.valid()
+            || !instance.enabled
+            || instance.definition_id != GraphStrategyConfigurationV1::DEFINITION_ID
+            || instance.instance_id != self.instance_id
+            || instance.definition_version != self.definition_version
+            || instance.policy_revision != self.policy_revision
+            || instance.budget <= Decimal::ZERO
+        {
+            return Err("GRAPH_OPEN_POLICY_OR_STRATEGY_INVALID".into());
+        }
+        let side = match publication.intent {
+            GraphSignalIntent::SetTarget(GraphPosition::Long) => PositionSide::Long,
+            GraphSignalIntent::SetTarget(GraphPosition::Short) => PositionSide::Short,
+            _ => return Err("GRAPH_OPEN_ACTION_REQUIRED".into()),
+        };
+        let cursor = EngineGraphCursor {
+            sequence: publication.sequence,
+            closed_ms: publication.closed_ms,
+            intent: if side == PositionSide::Long {
+                TargetPosition::Long
+            } else {
+                TargetPosition::Short
+            },
+        };
+        let identity = self
+            .storage_binding()
+            .open_identity(&cursor)
+            .ok_or("GRAPH_OPEN_IDENTITY_INVALID")?;
+        let request = TradeRequest::Execute {
+            idempotency_key: identity.decision_key,
+            operation: TradeOperation::Open,
+            strategy_instance: self.instance_id.clone(),
+            instrument: self.instrument_id.clone(),
+            side,
+            sizing: Sizing::MaxLossUsd {
+                // This is only the instance's already validated risk ceiling;
+                // the current campaign/account ceiling is checked by Engine.
+                max_loss_usd: instance.budget.normalize().to_string(),
+            },
+            order: OrderConstraints {
+                order_type: "fok".into(),
+                limit_price: None,
+                reference: None,
+                max_entry_usd: None,
+                max_slippage_bps: *max_slippage_bps,
+            },
+            protection: Some(Protection::Distance {
+                stop_distance_bps: *stop_distance_bps,
+            }),
+            expires_in_ms: 10_000,
+        };
+        self.open_context(publication, &request)?;
+        Ok(Some(request))
+    }
+
     /// Reconstruct the typed Engine binding from original finance SQL after
     /// a process restart; never trust a broadcast frame as activation state.
     pub(super) fn from_storage(stored: EngineGraphBinding) -> Result<Self, String> {
@@ -563,6 +637,51 @@ mod tests {
         assert_eq!(
             binding.open_context(&event, &request).unwrap_err(),
             "GRAPH_OPEN_ACTION_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn graph_open_request_requires_explicit_trade_policy_and_original_identity() {
+        let (binding, mut snapshot, _, mut event) = fixture();
+        snapshot.instance.definition_id = GraphStrategyConfigurationV1::DEFINITION_ID.into();
+        snapshot.instance.budget = Decimal::new(250, 2);
+        event.intent = GraphSignalIntent::SetTarget(GraphPosition::Short);
+        assert!(binding
+            .open_request(&snapshot.instance, &event, &GraphExecutionPolicy::Observe)
+            .unwrap()
+            .is_none());
+        let policy = GraphExecutionPolicy::Trade {
+            max_slippage_bps: 5,
+            stop_distance_bps: 50,
+        };
+        let request = binding
+            .open_request(&snapshot.instance, &event, &policy)
+            .unwrap()
+            .unwrap();
+        assert!(request.valid());
+        assert_eq!(binding.open_context(&event, &request).unwrap().binding, binding.storage_binding());
+        let TradeRequest::Execute {
+            side,
+            sizing,
+            protection,
+            ..
+        } = request
+        else {
+            panic!("an armed graph must yield an Execute command");
+        };
+        assert_eq!(side, PositionSide::Short);
+        assert_eq!(sizing, Sizing::MaxLossUsd { max_loss_usd: "2.5".into() });
+        assert_eq!(protection, Some(Protection::Distance { stop_distance_bps: 50 }));
+        let mut stale = snapshot.instance.clone();
+        stale.policy_revision += 1;
+        assert_eq!(
+            binding.open_request(&stale, &event, &policy).unwrap_err(),
+            "GRAPH_OPEN_POLICY_OR_STRATEGY_INVALID"
+        );
+        event.graph_sha256 = "b".repeat(64);
+        assert_eq!(
+            binding.open_request(&snapshot.instance, &event, &policy).unwrap_err(),
+            "GRAPH_OPEN_PUBLICATION_MISMATCH"
         );
     }
 

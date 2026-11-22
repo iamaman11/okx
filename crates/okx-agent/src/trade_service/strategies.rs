@@ -1,7 +1,8 @@
 use super::*;
 use okx_protocol::research_ipc::{ClosedPrice, SignalPosition, SignalRequest};
 use okx_protocol::trading::{
-    CapitalDirection, GraphStrategyConfigurationV1, StrategyConfigurationV1, StrategyParametersV1,
+    CapitalDirection, GraphExecutionPolicy, GraphStrategyConfigurationV1, StrategyConfigurationV1,
+    StrategyParametersV1,
 };
 #[cfg(test)]
 #[path = "strategy_contract_tests.rs"]
@@ -40,11 +41,16 @@ impl TradeService {
                                 .map_err(|_| "GRAPH_STATUS_INSTANCE_CORRUPT")?;
                         let mut bound = 0usize;
                         let mut total = 0usize;
+                        let mut trade_armed = false;
                         if instance.enabled {
                             let configuration: GraphStrategyConfigurationV1 =
                                 serde_json::from_str(&instance.parameters)
                                     .map_err(|_| "GRAPH_STATUS_CONFIGURATION_CORRUPT")?;
                             total = configuration.instruments.len();
+                            trade_armed = matches!(
+                                configuration.execution,
+                                GraphExecutionPolicy::Trade { .. }
+                            );
                             for instrument in &configuration.instruments {
                                 let binding = graph_activation::activation_binding(
                                     &r.configuration.account_key.wire(),
@@ -63,7 +69,14 @@ impl TradeService {
                                 }
                             }
                         }
-                        status["graph_execution"] = if bound > 0 {
+                        status["graph_execution"] = if bound > 0 && trade_armed {
+                            json!({
+                                "state": "FINANCE_BOUND_TRADE_ARMED",
+                                "reason_code": "GRAPH_ORDERS_SUBJECT_TO_RISK_ADMISSION",
+                                "bound_instruments": bound,
+                                "configured_instruments": total,
+                            })
+                        } else if bound > 0 {
                             json!({
                                 "state": "FINANCE_BOUND_EXECUTION_DISABLED",
                                 "reason_code": "GRAPH_ORDERS_NOT_CONNECTED",
@@ -225,13 +238,16 @@ impl TradeService {
                     }
                     let parameters =
                         if definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
-                            let config = GraphStrategyConfigurationV1 {
-                                signal: GraphStrategyConfigurationV1::parse_signal(parameters)
+                            let (signal, execution) =
+                                GraphStrategyConfigurationV1::parse_parameters(parameters)
                                     .ok_or(okx_execution::StoreError::Invalid(
                                         "STRATEGY_PARAMETERS_INVALID",
-                                    ))?,
+                                    ))?;
+                            let config = GraphStrategyConfigurationV1 {
+                                signal,
                                 instruments: instruments.clone(),
                                 timeframe_ms: *timeframe_ms,
+                                execution,
                             };
                             if !config.valid() {
                                 return Err(okx_execution::StoreError::Invalid(
@@ -291,10 +307,19 @@ impl TradeService {
                             serde_json::from_str(&i.parameters).map_err(|_| {
                                 okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT")
                             })?;
-                        config.signal = GraphStrategyConfigurationV1::parse_signal(parameters)
-                            .ok_or(okx_execution::StoreError::Invalid(
-                                "STRATEGY_PARAMETERS_INVALID",
-                            ))?;
+                        let (signal, execution) =
+                            GraphStrategyConfigurationV1::parse_parameters(parameters).ok_or(
+                                okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
+                            )?;
+                        // An already running observation must never become a
+                        // live order strategy as a side effect of Update.
+                        if i.enabled && !matches!(execution, GraphExecutionPolicy::Observe) {
+                            return Err(okx_execution::StoreError::Invalid(
+                                "GRAPH_TRADE_REQUIRES_STOP",
+                            ));
+                        }
+                        config.signal = signal;
+                        config.execution = execution;
                         if !config.valid() {
                             return Err(okx_execution::StoreError::Invalid(
                                 "STRATEGY_CONFIGURATION_INVALID",
@@ -418,7 +443,7 @@ impl TradeService {
         }
         Ok(completed(json!({"instance":result})))
     }
-    pub async fn run(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    pub async fn run(self: Arc<Self>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let mut timer = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
@@ -451,7 +476,7 @@ impl TradeService {
             }
         }
     }
-    async fn maintenance_turn(&self) {
+    async fn maintenance_turn(self: &Arc<Self>) {
         // One existing maintenance owner. The recovery scheduler provides
         // bounded retry spacing for the campaign, while independent account
         // capture keeps advancing cursors every two seconds. No archive

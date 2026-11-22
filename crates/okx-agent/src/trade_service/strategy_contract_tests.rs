@@ -230,6 +230,53 @@ async fn graph_strategy_is_durable_and_does_not_invoke_legacy_ema() {
             .unwrap_err(),
         "GRAPH_EXECUTION_NOT_CONNECTED"
     );
+    let trading = json!({
+        "signal": graph_signal_parameters(),
+        "execution": {"mode":"trade","max_slippage_bps":5,"stop_distance_bps":50}
+    });
+    rejected(
+        fixture
+            .request(StrategyRequest::Update {
+                idempotency_key: "graph_live_update_denied".into(),
+                instance_id: instance_id.into(),
+                expected_revision: persisted.policy_revision as u64,
+                parameters: trading.clone(),
+                budget_usd: "2".into(),
+            })
+            .await,
+        "GRAPH_TRADE_REQUIRES_STOP",
+    );
+    let stopped = completed_data(
+        fixture
+            .request(StrategyRequest::Stop {
+                idempotency_key: "graph_explicit_stop".into(),
+                instance_id: instance_id.into(),
+            })
+            .await,
+    );
+    let updated = completed_data(
+        fixture
+            .request(StrategyRequest::Update {
+                idempotency_key: "graph_explicit_trading_policy".into(),
+                instance_id: instance_id.into(),
+                expected_revision: stopped["instance"]["policy_revision"].as_u64().unwrap(),
+                parameters: trading,
+                budget_usd: "2".into(),
+            })
+            .await,
+    );
+    assert!(!updated["instance"]["enabled"].as_bool().unwrap());
+    assert_eq!(
+        serde_json::from_str::<okx_protocol::trading::GraphStrategyConfigurationV1>(
+            updated["instance"]["parameters"].as_str().unwrap()
+        )
+        .unwrap()
+        .execution,
+        okx_protocol::trading::GraphExecutionPolicy::Trade {
+            max_slippage_bps: 5,
+            stop_distance_bps: 50,
+        }
+    );
     assert_eq!(money(&fixture).await, before);
     assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
     drop(_capture);
@@ -905,6 +952,97 @@ async fn research_bootstrap_binds_and_starts_public_feed_without_order_post() {
     assert!(matches!(reply, GraphFeedReply::Started { .. }));
     assert_eq!(money(&fixture).await, before);
     assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
+    drop(_capture);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn explicit_graph_open_uses_original_paused_risk_gate_without_order_post() {
+    use super::graph_consumer::GraphConsumeOutcome;
+    use okx_protocol::research_ipc::{
+        GraphClosedBar, GraphPublicationCursor, GraphSessionId, GraphSessionReply, GraphSessionRequest,
+        GraphSignalDefinition,
+    };
+    let fixture = Fixture::new().await;
+    let _capture = fixture.owner.recorded_capture_gate.write().await;
+    let parameters = json!({
+        "signal": graph_signal_parameters(),
+        "execution": {"mode":"trade","max_slippage_bps":5,"stop_distance_bps":50}
+    });
+    completed_data(fixture.request(StrategyRequest::Create {
+        idempotency_key: "graph_armed_create".into(),
+        instance_id: "graph_armed".into(),
+        definition_id: "graph_signal_v1".into(),
+        version: 1,
+        parameters,
+        instruments: vec!["BTC-USDT-SWAP".into()],
+        timeframe_ms: 60_000,
+        budget_usd: "2".into(),
+    }).await);
+    completed_data(fixture.request(StrategyRequest::Start {
+        idempotency_key: "graph_armed_start".into(),
+        instance_id: "graph_armed".into(),
+    }).await);
+    let instance = fixture.owner.execution.store.strategy_instances(deadline())
+        .await.unwrap().into_iter().find(|v| v.instance_id == "graph_armed").unwrap();
+    let definition: GraphSignalDefinition = serde_json::from_value(graph_signal_parameters()).unwrap();
+    let session = GraphSessionId::new("engine:armed-smoke".into()).unwrap();
+    let restored = fixture.ctx.research.graph_signal(GraphSessionRequest::Restore {
+        session_id: session.clone(),
+        definition: Box::new(definition),
+        capacity: 64,
+        history: vec![
+            GraphClosedBar { time_ms: 60_000, close: Some(100.) },
+            GraphClosedBar { time_ms: 120_000, close: Some(90.) },
+        ],
+    }).await.unwrap();
+    let GraphSessionReply::Evaluated { graph_sha256, .. } = &restored else {
+        panic!("Research must return an evaluated graph session");
+    };
+    let cursor = GraphPublicationCursor::from_restored(&restored).unwrap();
+    let binding = super::graph_target::GraphTargetBinding {
+        account_key: fixture.owner.configuration.account_key.wire(),
+        instance_id: instance.instance_id,
+        definition_version: instance.definition_version,
+        policy_revision: instance.policy_revision,
+        session_id: session.clone(),
+        graph_sha256: graph_sha256.clone(),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        timeframe_ms: 60_000,
+    };
+    fixture.native.trade.bind_graph_strategy(
+        &fixture.owner.configuration.alias, &binding, &cursor,
+    ).await.unwrap();
+    fixture.native.trade.set_signal_research(fixture.ctx.research.clone()).await;
+    // Policy has been paused AFTER creation and durable binding. It is the
+    // original Engine authority, not a fake Research-side risk decision.
+    fixture.authority(true).await;
+    let before = money(&fixture).await;
+    let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
+    fixture.ctx.research.graph_signal(GraphSessionRequest::Advance {
+        session_id: session,
+        graph_sha256: binding.graph_sha256.clone(),
+        expected_bars: 3,
+        bar: GraphClosedBar { time_ms: 180_000, close: Some(95.) },
+    }).await.unwrap();
+    let first = fixture.native.trade.graph_research_turn(&fixture.owner).await.unwrap();
+    assert_eq!(first, vec![GraphConsumeOutcome::OpenAdmissionScheduled { sequence: 3 }]);
+    // Joining the account-local permit also proves this spawned admission
+    // finished; no 10-second blocked research task is treated as success.
+    let _permit = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        fixture.owner.graph_order_dispatch.clone().acquire_owned(),
+    ).await.unwrap().unwrap();
+    assert_eq!(
+        fixture.native.trade.graph_confirmed_cursor(
+            &fixture.owner.configuration.alias, &binding,
+        ).await.unwrap().unwrap().last_sequence(),
+        2,
+        "paused RiskBook must not ACK an actionable graph event",
+    );
+    assert_eq!(money(&fixture).await, before);
+    assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
+    drop(_permit);
     drop(_capture);
     fixture.finish().await;
 }

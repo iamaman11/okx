@@ -84,7 +84,7 @@ These are distinct commands with distinct owners:
    await settlement. It never sends an order. Only the existing durable Engine
    decision, risk/admission and venue execution route may act on a plan.
 
-The next staged boundary, `TradeService::preview_graph_publication`, now reads
+`TradeService::preview_graph_publication` reads
 one scoped strategy/lot/in-flight snapshot from the **original unified finance
 SQL owner** and binds it to an exact Research session, graph hash, strategy
 version and policy revision. The typed publication cursor is checked on a
@@ -93,7 +93,45 @@ clone: **preview never ACKs, stores, or executes** the proposal. Outstanding
 strategies/accounts do not count. A real Research child IPC publication is
 exercised through this pure preview in tests, without venue POST.
 
-This is a read-only Engine adapter, **not wired into the live trading loop**.
+The ordinary Engine maintenance loop now reads the Research outbox and
+acknowledges `NoChange` in original finance SQL. A graph started with the
+legacy signal-only parameters, or an explicit `execution.mode=observe`,
+remains **read-only**. To arm an executable graph the client must submit a
+strictly typed strategy parameter wrapper:
+
+```json
+{
+  "signal": {
+    "version": "okx.graph-signal/v1",
+    "graph": {
+      "schema": "okx.graph/v1",
+      "steps": [
+        {"id":"change","op":{"id":"returns_series","version":1},"inputs":[{"source":"close"}]},
+        {"id":"positive","op":{"id":"greater_than","version":1},"inputs":[{"step":"change"}],"params":{"threshold":0}}
+      ],
+      "outputs": ["positive"]
+    },
+    "signal_step": "positive",
+    "target_if_true": 1,
+    "target_if_false": 0,
+    "missing": "hold"
+  },
+  "execution": {"mode":"trade","max_slippage_bps":5,"stop_distance_bps":50}
+}
+```
+
+The policy must be stored while stopped,
+then `Start` must be requested explicitly. A running observation cannot
+become an executable strategy merely through `Update`. Once armed, an `Open`
+from the committed Research journal schedules one bounded per-account task
+for the **existing** TradeService, with a graph-derived deterministic key,
+strategy loss budget, FOK constraints and mandatory stop protection. The
+original SQL `PREPARED + cursor` claim, RiskBook, governance, idempotency and
+venue recovery are still the only financial authorities. The read-only
+`Hold/NoChange` route never sends an order; `Close/Flip` and outstanding
+settlement remain blocked pending their own atomic Engine paths. This Draft
+code is not released or authorized for real exchange testing.
+
 The legacy loop currently treats `SignalPosition::Flat`
 like `Warmup` (no new entry), so it does not flatten existing lots for `Flat`.
 This is a tracked behavior gap, not a claimed live fix. Before connecting graph

@@ -1,4 +1,4 @@
-//! Engine-side bounded Research outbox consumer (not a live order scheduler).
+//! Engine-side bounded Research outbox consumer and explicit-policy admission.
 //!
 //! Broadcast is a wake-up hint only. Every accepted event comes from the
 //! Research SQLite journal after the last ORIGINAL finance SQL checkpoint.
@@ -10,7 +10,8 @@ use okx_execution::position_target::TargetPlan;
 use okx_protocol::research_ipc::{
     GraphFeedFaultReason, GraphPublicationRequest, GraphSignalPublication,
 };
-use std::{sync::Arc, time::Duration};
+use okx_protocol::trading::{GraphExecutionPolicy, GraphStrategyConfigurationV1, TradeRequest};
+use std::{sync::Arc, time::{Duration, Instant}};
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +27,9 @@ pub(crate) enum GraphConsumeOutcome {
         publication: GraphSignalPublication,
         plan: TargetPlan,
     },
+    /// A bounded task has been given one exact immutable request. This is not
+    /// a venue acknowledgement or evidence that an order was posted.
+    OpenAdmissionScheduled { sequence: u64 },
     FeedUnavailable(GraphFeedFaultReason),
     ResearchUnavailable,
     UnrelatedNotifications,
@@ -201,12 +205,96 @@ impl EngineGraphConsumer {
 }
 
 impl TradeService {
-    /// One bounded journal-only maintenance turn. Bindings are always
+    /// Execute one explicitly armed strategy through the ORIGINAL finance,
+    /// RiskBook and venue owner. Observational Start never reaches this path.
+    /// The account-local permit coalesces repeated maintenance turns while
+    /// SQL identity and the original TradeService protect crash/retry cases.
+    async fn schedule_graph_open(
+        self: &Arc<Self>,
+        resources: &Arc<AccountResources>,
+        binding: &GraphTargetBinding,
+        publication: &GraphSignalPublication,
+    ) -> Result<bool, String> {
+        let instance = resources
+            .execution
+            .store
+            .strategy_instances(super::deadline())
+            .await
+            .map_err(super::err)?
+            .into_iter()
+            .find(|v| v.instance_id == binding.instance_id)
+            .ok_or("GRAPH_OPEN_STRATEGY_MISSING")?;
+        let configuration: GraphStrategyConfigurationV1 =
+            serde_json::from_str(&instance.parameters)
+                .map_err(|_| "GRAPH_OPEN_CONFIGURATION_INVALID")?;
+        if !configuration.valid()
+            || !configuration.instruments.contains(&binding.instrument_id)
+            || configuration.timeframe_ms != binding.timeframe_ms
+        {
+            return Err("GRAPH_OPEN_CONFIGURATION_MISMATCH".into());
+        }
+        if matches!(configuration.execution, GraphExecutionPolicy::Observe) {
+            return Ok(false);
+        }
+        let command = binding
+            .open_request(&instance, publication, &configuration.execution)?
+            .ok_or("GRAPH_OPEN_POLICY_UNARMED")?;
+        let TradeRequest::Execute { idempotency_key, .. } = &command else {
+            return Err("GRAPH_OPEN_EXECUTE_REQUIRED".into());
+        };
+        let permit = match resources.graph_order_dispatch.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => return Ok(false),
+        };
+        let account_key = resources.configuration.account_key.wire();
+        if !self.recovery_schedule.lock().await.due(
+            &account_key,
+            idempotency_key,
+            Instant::now(),
+        ) {
+            return Ok(false);
+        }
+        let trade = Arc::clone(self);
+        let account = resources.configuration.alias.clone();
+        let binding = binding.clone();
+        let publication = publication.clone();
+        let key = idempotency_key.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            match trade
+                .execute_graph_open(&account, &binding, &publication, &command)
+                .await
+            {
+                Ok(_) => {
+                    eprintln!(
+                        "OKX_GRAPH_ENGINE_V1 instance={} instrument={} sequence={} state=ADMISSION_RETURNED decision={}",
+                        binding.instance_id, binding.instrument_id, publication.sequence, key
+                    );
+                }
+                Err(reason) => {
+                    // Original finance SQL and status/recovery remain the
+                    // authority when an error occurs after PREPARED.
+                    let code = if reason.len() <= 96 && reason.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') {
+                        reason.as_str()
+                    } else {
+                        "GRAPH_OPEN_ADMISSION_FAILURE"
+                    };
+                    eprintln!(
+                        "OKX_GRAPH_ENGINE_V1 instance={} instrument={} sequence={} state=ADMISSION_UNAVAILABLE reason={code}",
+                        binding.instance_id, binding.instrument_id, publication.sequence
+                    );
+                }
+            }
+        });
+        Ok(true)
+    }
+
+    /// One bounded journal maintenance turn. Bindings are always
     /// rediscovered from original finance SQL, including after Engine restart.
-    /// It may persist idle ACKs; actionable events are diagnostic blockers,
-    /// never an implicit command to place or close an order.
+    /// It may persist idle ACKs. Only an explicitly armed Open can enqueue an
+    /// original TradeService admission; Close and settlement stay blocked.
     pub(super) async fn graph_research_turn(
-        &self,
+        self: &Arc<Self>,
         resources: &Arc<AccountResources>,
     ) -> Result<Vec<GraphConsumeOutcome>, String> {
         let account = resources.configuration.account_key.wire();
@@ -238,12 +326,40 @@ impl TradeService {
                 resources.configuration.alias.clone(),
                 binding.clone(),
             )?;
-            let outcome = tokio::time::timeout(
+            let mut outcome = tokio::time::timeout(
                 Duration::from_millis(180),
                 consumer.replay_one_page(self, &research),
             )
             .await
             .map_err(|_| "GRAPH_RESEARCH_REPLAY_TIMEOUT")??;
+            let open_candidate = match &outcome {
+                GraphConsumeOutcome::Blocked {
+                    publication,
+                    plan: TargetPlan::Open(_),
+                } => Some(publication.clone()),
+                _ => None,
+            };
+            if let Some(publication) = open_candidate {
+                match self.schedule_graph_open(resources, &binding, &publication).await {
+                    Ok(true) => {
+                        outcome = GraphConsumeOutcome::OpenAdmissionScheduled {
+                            sequence: publication.sequence,
+                        };
+                    }
+                    Ok(false) => {}
+                    Err(reason) => {
+                        let code = if reason.len() <= 96 && reason.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') {
+                            reason.as_str()
+                        } else {
+                            "GRAPH_OPEN_POLICY_FAILURE"
+                        };
+                        eprintln!(
+                            "OKX_GRAPH_ENGINE_V1 account={} instance={} state=OPEN_NOT_SCHEDULED reason={code}",
+                            account, binding.instance_id
+                        );
+                    }
+                }
+            }
             if let GraphConsumeOutcome::Blocked {
                 ref publication,
                 ref plan,
