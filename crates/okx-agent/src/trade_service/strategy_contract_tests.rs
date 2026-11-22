@@ -1303,7 +1303,10 @@ async fn explicit_graph_open_posts_once_through_native_risk_and_durable_cursor()
     // Strict finite transport transcript: finance must consume exactly the
     // signed fee/leverage reads, then create one FOK with the bounded stop.
     let now = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture.native.feed.expect_public_clock(native::envelope(json!([{"ts":now}])));
+    fixture
+        .native
+        .feed
+        .expect_public_clock(native::envelope(json!([{"ts":now}])));
     native::record_fee(&fixture.native.feed, &now);
     native::record_leverage(&fixture.native.feed);
     native::record_leverage(&fixture.native.feed);
@@ -1337,9 +1340,7 @@ async fn explicit_graph_open_posts_once_through_native_risk_and_durable_cursor()
         .unwrap();
     assert_eq!(
         first,
-        vec![super::graph_consumer::GraphConsumeOutcome::OpenAdmissionScheduled {
-            sequence: 3
-        }]
+        vec![super::graph_consumer::GraphConsumeOutcome::OpenAdmissionScheduled { sequence: 3 }]
     );
     // Acquiring the same account-local permit proves the spawned Execute has
     // left its risk/venue path; a queued task alone is not evidence of POST.
