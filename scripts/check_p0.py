@@ -361,6 +361,14 @@ def execute(scopes):
         subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=MCP, check=True)
     if "ipc" in scopes:
         tests("okx-research-worker", ("--test", "ipc_process"))
+        # Binary renaming must preserve content-addressed legacy installations
+        # and stage only the verified new Research Service image.
+        tests("okx-agent", required=(
+            "research_client::installed::tests::existing_verified_worker_image_remains_usable_after_service_rename",
+        ), exact=True)
+        tests("okx-host-control", required=(
+            "artifact::research_component::tests::research_staging_publishes_only_verified_version_and_preserves_agent_state",
+        ), exact=True)
         metadata = subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
                                            cwd=ROOT, text=True)
         suffix = ".exe" if os.name == "nt" else ""
