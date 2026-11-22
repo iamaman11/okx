@@ -341,7 +341,10 @@ mod reply_contract_tests {
             strategy_id: "ema_cross_v1".into(),
             parameters: crate::analytics::EmaParameters { fast: 2, slow: 4 },
             closes: (1..=4)
-                .map(|time_ms| ClosedPrice { time_ms, close: 100.0 })
+                .map(|time_ms| ClosedPrice {
+                    time_ms,
+                    close: 100.0,
+                })
                 .collect(),
         };
         assert!(request.valid());

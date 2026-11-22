@@ -554,7 +554,12 @@ impl ResearchClient {
             return Err("INVALID_SIGNAL_REQUEST".into());
         }
         let decision = self
-            .call(ResearchCommand::EvaluateSignal { request: request.clone() }, true)
+            .call(
+                ResearchCommand::EvaluateSignal {
+                    request: request.clone(),
+                },
+                true,
+            )
             .await?
             .signal()?;
         if !decision.matches_request(&request) {
