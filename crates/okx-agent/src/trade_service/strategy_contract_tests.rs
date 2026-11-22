@@ -1107,13 +1107,12 @@ async fn explicit_graph_open_uses_original_paused_risk_gate_without_order_post()
 }
 
 #[tokio::test]
-async fn explicit_graph_open_posts_once_through_native_risk_and_durable_cursor() {
-    use crate::accounts::recorded_support::RecordedPost;
+async fn explicit_graph_open_respects_native_instance_nav_gate_without_order_post() {
     use crate::native_finance_risk::NativeFinanceRisk;
     use crate::risk_bridge::NativeRiskClient;
     use okx_protocol::research_ipc::{
         GraphClosedBar, GraphPublicationCursor, GraphSessionId, GraphSessionReply,
-        GraphSessionRequest, GraphSignalDefinition,
+        GraphSessionRequest, GraphSignalDefinition, GraphSignalPublication,
     };
     use tokio::sync::watch;
 
@@ -1286,7 +1285,7 @@ async fn explicit_graph_open_posts_once_through_native_risk_and_durable_cursor()
         )
         .await
         .unwrap();
-    fixture
+    let advanced = fixture
         .ctx
         .research
         .graph_signal(GraphSessionRequest::Advance {
@@ -1300,39 +1299,15 @@ async fn explicit_graph_open_posts_once_through_native_risk_and_durable_cursor()
         })
         .await
         .unwrap();
+    let publication = GraphSignalPublication::from_decision(&advanced).unwrap();
+    let configuration: GraphStrategyConfigurationV1 =
+        serde_json::from_str(&instance.parameters).unwrap();
+    let command = binding
+        .open_request(&instance, &publication, &configuration.execution)
+        .unwrap()
+        .unwrap();
 
-    // Strict finite transport transcript: finance must consume exactly the
-    // signed fee/leverage reads, then create one FOK with the bounded stop.
-    let now = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture
-        .native
-        .feed
-        .expect_public_clock(native::envelope(json!([{"ts":now}])));
-    native::record_fee(&fixture.native.feed, &now);
-    native::record_leverage(&fixture.native.feed);
-    native::record_leverage(&fixture.native.feed);
-    native::record_fee(&fixture.native.feed, &now);
-    native::record_fee(&fixture.native.feed, &now);
-    native::record_leverage(&fixture.native.feed);
-    fixture.native.feed.expect_post(RecordedPost {
-        access_key: "fixture-executor-a".into(),
-        path: "/api/v5/trade/order".into(),
-        expected_body: json!({
-            "instId":"BTC-USDT-SWAP","tdMode":"cross",
-            "clOrdId":"__REQUEST_CL_ORD_ID__","side":"buy","posSide":"long",
-            "ordType":"fok","sz":"0.99","px":"1000.5",
-            "attachAlgoOrds":[{
-                "attachAlgoClOrdId":"__REQUEST_ATTACH_ALGO_ID__",
-                "tpTriggerPxType":"mark","slTriggerPx":"995.4",
-                "slTriggerPxType":"mark","slOrdPx":"-1"
-            }]
-        }),
-        raw_response: native::envelope(json!([{
-            "ordId":"native-graph-open-001",
-            "clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"
-        }])),
-    });
-
+    let before = money(&fixture).await;
     let first = fixture
         .native
         .trade
@@ -1343,8 +1318,9 @@ async fn explicit_graph_open_posts_once_through_native_risk_and_durable_cursor()
         first,
         vec![super::graph_consumer::GraphConsumeOutcome::OpenAdmissionScheduled { sequence: 3 }]
     );
-    // Acquiring the same account-local permit proves the spawned Execute has
-    // left its risk/venue path; a queued task alone is not evidence of POST.
+    // A scheduled task is never a financial grant. The original finance
+    // owner refuses unvalued strategy NAV before SQL PREPARE or venue POST,
+    // even with a valid campaign opening and fresh recorded market frames.
     let permit = tokio::time::timeout(
         Duration::from_secs(12),
         fixture.owner.graph_order_dispatch.clone().acquire_owned(),
@@ -1352,8 +1328,22 @@ async fn explicit_graph_open_posts_once_through_native_risk_and_durable_cursor()
     .await
     .expect("native graph Open admission must finish")
     .unwrap();
-    assert_eq!(fixture.native.feed.outbound_posts.lock().unwrap().len(), 1);
-    assert_eq!(fixture.native.feed.unconsumed_reads(), 0);
+    assert_eq!(
+        fixture
+            .native
+            .trade
+            .execute_graph_open(
+                &fixture.owner.configuration.alias,
+                &binding,
+                &publication,
+                &command,
+            )
+            .await
+            .unwrap_err(),
+        "INSTANCE_NAV_INCOMPLETE"
+    );
+    assert!(fixture.native.feed.outbound_posts.lock().unwrap().is_empty());
+    assert_eq!(money(&fixture).await, before);
     assert_eq!(
         fixture
             .native
@@ -1363,24 +1353,8 @@ async fn explicit_graph_open_posts_once_through_native_risk_and_durable_cursor()
             .unwrap()
             .unwrap()
             .last_sequence(),
-        3,
-        "the native SQL prepare must bind the graph cursor to the order"
-    );
-    assert!(
-        fixture
-            .native
-            .owner
-            .reconcilable_intents_page(
-                fixture.native.config.account_key.wire(),
-                100,
-                0,
-                deadline(),
-            )
-            .await
-            .unwrap()
-            .iter()
-            .any(|intent| intent.plan.strategy_instance == "graph_native"),
-        "the Graph order must survive in the original finance ledger"
+        2,
+        "a rejected NAV assessment must leave the graph bar unacknowledged"
     );
     let replay = fixture
         .native
@@ -1390,12 +1364,12 @@ async fn explicit_graph_open_posts_once_through_native_risk_and_durable_cursor()
         .unwrap();
     assert!(matches!(
         replay.as_slice(),
-        [super::graph_consumer::GraphConsumeOutcome::Idle {
-            confirmed_sequence: 3,
-            ..
+        [super::graph_consumer::GraphConsumeOutcome::Blocked {
+            publication: GraphSignalPublication { sequence: 3, .. },
+            plan: okx_execution::position_target::TargetPlan::Open(_),
         }]
     ));
-    assert_eq!(fixture.native.feed.outbound_posts.lock().unwrap().len(), 1);
+    assert!(fixture.native.feed.outbound_posts.lock().unwrap().is_empty());
 
     drop(permit);
     drop(_capture);

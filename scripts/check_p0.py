@@ -429,7 +429,7 @@ def execute(scopes):
             "trade_service::strategies::strategy_contract_tests::explicit_graph_open_uses_original_paused_risk_gate_without_order_post",
         ), exact=True)
         tests("okx-agent", required=(
-            "trade_service::strategies::strategy_contract_tests::explicit_graph_open_posts_once_through_native_risk_and_durable_cursor",
+            "trade_service::strategies::strategy_contract_tests::explicit_graph_open_respects_native_instance_nav_gate_without_order_post",
         ), exact=True)
         tests("okx-agent", required=(
             "trade_service::graph_activation::tests::identity_is_stable_per_account_revision_and_instrument",
