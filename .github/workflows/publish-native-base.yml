@@ -91,14 +91,14 @@ jobs:
           gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/${{ steps.select.outputs.artifact }}/zip" > "$zip"
           digest="$(sha256sum "$zip" | cut -d' ' -f1)"
           test "sha256:$digest" = "${{ steps.select.outputs.digest }}"
-          test "$(unzip -Z1 "$zip" | sort | paste -sd'|' -)" = 'Cargo.lock|manifest.json|okx-agent.exe|okx-host-control.exe|okx-host-launcher.exe|okx-research-worker.exe'
+          test "$(unzip -Z1 "$zip" | sort | paste -sd'|' -)" = 'Cargo.lock|manifest.json|okx-agent.exe|okx-host-control.exe|okx-host-launcher.exe|okx-research-service.exe'
           unzip -q "$zip" -d "$extract"
           jq -e --arg head '${{ steps.select.outputs.head }}' --arg tree '${{ steps.select.outputs.tree }}' '
             .schema == "okx.windows.bundle/v2" and .repository_id == 1388071566 and
             .source_head_sha == $head and .source_tree == $tree and
             (.components | length == 4) and (.rust_version | type == "string" and length > 0)
           ' "$extract/manifest.json" >/dev/null
-          for file in okx-agent.exe okx-host-control.exe okx-host-launcher.exe okx-research-worker.exe; do
+          for file in okx-agent.exe okx-host-control.exe okx-host-launcher.exe okx-research-service.exe; do
             jq -e --arg f "$file" --arg head '${{ steps.select.outputs.head }}' --arg tree '${{ steps.select.outputs.tree }}' '
               .components[$f] | .source_head_sha == $head and .source_tree == $tree and .run_id == 0 and
               .artifact_id == 0 and .protocol_version == 1 and .storage_version == 1
@@ -115,7 +115,7 @@ jobs:
           node scripts/published-release-origin.cjs "$input" "$extract/manifest.json" "$zip" "$RUNNER_TEMP/published-origin.json"
           {
             (cd "$RUNNER_TEMP" && sha256sum okx-windows-base.zip published-origin.json)
-            (cd "$extract" && sha256sum Cargo.lock manifest.json okx-agent.exe okx-host-control.exe okx-host-launcher.exe okx-research-worker.exe)
+            (cd "$extract" && sha256sum Cargo.lock manifest.json okx-agent.exe okx-host-control.exe okx-host-launcher.exe okx-research-service.exe)
           } > "$RUNNER_TEMP/SHA256SUMS.txt"
           echo "zip=$zip" >> "$GITHUB_OUTPUT"
 

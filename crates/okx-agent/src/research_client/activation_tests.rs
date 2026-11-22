@@ -15,7 +15,7 @@ fn stage(runtime: &std::path::Path, executable: &std::path::Path, overlay: bool)
     let hash = format!("{:x}", Sha256::digest(&bytes));
     let dir = runtime.join("research").join("versions").join(&hash);
     fs::create_dir_all(&dir).unwrap();
-    let image = dir.join("okx-research-worker.exe");
+    let image = dir.join("okx-research-service.exe");
     fs::copy(executable, &image).unwrap();
     if overlay {
         fs::OpenOptions::new()
@@ -58,8 +58,8 @@ fn job(key: &str) -> ResearchRequest {
 #[tokio::test]
 async fn installed_worker_drains_and_replays_across_actual_child_handoff() {
     let executable = PathBuf::from(
-        std::env::var_os("OKX_RESEARCH_WORKER_TEST_EXE")
-            .expect("set OKX_RESEARCH_WORKER_TEST_EXE to the built worker"),
+        std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
+            .expect("set OKX_RESEARCH_SERVICE_TEST_EXE to the built worker"),
     );
     assert!(executable.is_file());
     let root = std::env::temp_dir().join(format!("okx-installed-activation-{}", unique()));
@@ -202,7 +202,7 @@ async fn installed_worker_drains_and_replays_across_actual_child_handoff() {
         .join("research")
         .join("versions")
         .join(&v1)
-        .join("okx-research-worker.exe");
+        .join("okx-research-service.exe");
     fs::OpenOptions::new()
         .append(true)
         .open(inactive_image)

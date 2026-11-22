@@ -364,8 +364,8 @@ def execute(scopes):
         metadata = subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
                                            cwd=ROOT, text=True)
         suffix = ".exe" if os.name == "nt" else ""
-        worker = Path(json.loads(metadata)["target_directory"]) / "debug" / ("okx-research-worker" + suffix)
-        os.environ["OKX_RESEARCH_WORKER_TEST_EXE"] = str(worker)
+        worker = Path(json.loads(metadata)["target_directory"]) / "debug" / ("okx-research-service" + suffix)
+        os.environ["OKX_RESEARCH_SERVICE_TEST_EXE"] = str(worker)
         tests("okx-agent", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t06_t09_real_worker_causality_and_economics_are_isolated",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated",), exact=True)

@@ -19,8 +19,8 @@ use tokio::sync::Notify;
 
 fn fixture(source: SourceHandler) -> (PathBuf, ResearchClient) {
     let executable = PathBuf::from(
-        std::env::var_os("OKX_RESEARCH_WORKER_TEST_EXE")
-            .expect("set OKX_RESEARCH_WORKER_TEST_EXE to the built research worker"),
+        std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
+            .expect("set OKX_RESEARCH_SERVICE_TEST_EXE to the built research worker"),
     );
     assert!(executable.is_file(), "worker test executable is missing");
     // Wall-clock resolution is not a uniqueness guarantee for parallel tests.

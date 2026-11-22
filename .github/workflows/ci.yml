@@ -324,8 +324,8 @@ jobs:
         run: cargo test --locked -p okx-execution --lib risk_book_contract_fresh_owner_failed_job_counts_and_preserves_installation -- --nocapture
       - name: Build actual research child for draft session contracts
         run: |
-          cargo build --locked -p okx-research-worker --bin okx-research-worker
-          echo "OKX_RESEARCH_WORKER_TEST_EXE=$GITHUB_WORKSPACE/target/debug/okx-research-worker" >> "$GITHUB_ENV"
+          cargo build --locked -p okx-research-worker --bin okx-research-service
+          echo "OKX_RESEARCH_SERVICE_TEST_EXE=$GITHUB_WORKSPACE/target/debug/okx-research-service" >> "$GITHUB_ENV"
       - name: Production startup, source independence and correlated research failures
         shell: bash
         run: |
@@ -435,8 +435,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked -p okx-research-worker --bin okx-research-worker
-          echo "OKX_RESEARCH_WORKER_TEST_EXE=$PWD/target/debug/okx-research-worker" >> "$GITHUB_ENV"
+          cargo build --locked -p okx-research-worker --bin okx-research-service
+          echo "OKX_RESEARCH_SERVICE_TEST_EXE=$PWD/target/debug/okx-research-service" >> "$GITHUB_ENV"
       - name: Native admission and existing trading boundary regressions
         shell: bash
         run: |
@@ -554,8 +554,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked -p okx-research-worker --bin okx-research-worker
-          export OKX_RESEARCH_WORKER_TEST_EXE="$PWD/target/debug/okx-research-worker"
+          cargo build --locked -p okx-research-worker --bin okx-research-service
+          export OKX_RESEARCH_SERVICE_TEST_EXE="$PWD/target/debug/okx-research-service"
           cargo test --locked -p okx-research-worker --lib -- --test-threads 2 | tee "$RUNNER_TEMP/research-worker-unit.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-worker-unit.log"
           cargo test --locked -p okx-research-worker --test ipc_process -- --nocapture | tee "$RUNNER_TEMP/research-worker-ipc.log"
@@ -734,13 +734,13 @@ jobs:
       - name: Build research worker for process contracts
         shell: pwsh
         run: |
-          cargo build --locked -p okx-research-worker --bin okx-research-worker
+          cargo build --locked -p okx-research-worker --bin okx-research-service
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Native trading, SQL, CONTROL and Launcher regression
         shell: pwsh
         run: |
-          $env:OKX_RESEARCH_WORKER_TEST_EXE = (Resolve-Path 'target/debug/okx-research-worker.exe').Path
+          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
           $covered = @()
           if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
             $proof = Get-Content -Raw "$env:RUNNER_TEMP\native-finance-full.json" | ConvertFrom-Json
@@ -785,7 +785,7 @@ jobs:
         id: engine-autonomy
         shell: pwsh
         run: |
-          $env:OKX_RESEARCH_WORKER_TEST_EXE = (Resolve-Path 'target/debug/okx-research-worker.exe').Path
+          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
           $output = & cargo test --locked -p okx-agent --lib accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect -- --exact --nocapture 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\b-process-tree.log" | Out-Host
@@ -818,7 +818,7 @@ jobs:
         env:
           OKX_CONTROL_AGENT_INCAR: ctl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         run: |
-          $env:OKX_RESEARCH_WORKER_TEST_EXE = (Resolve-Path 'target/debug/okx-research-worker.exe').Path
+          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
           $output = & cargo test --locked -p okx-agent --lib accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research -- --exact --nocapture --test-threads 1 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\mcp-native-load.log" | Out-Host
@@ -862,7 +862,7 @@ jobs:
       - name: Agent dispatch to actual research child
         shell: pwsh
         run: |
-          $env:OKX_RESEARCH_WORKER_TEST_EXE = (Resolve-Path 'target/debug/okx-research-worker.exe').Path
+          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
           $output = & cargo test --locked -p okx-agent --lib research_dispatch_tests:: -- --test-threads 2 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
@@ -903,7 +903,7 @@ jobs:
           $env:OKX_BUILD_SOURCE_HEAD = (git rev-parse HEAD).Trim()
           $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
           New-Item -ItemType Directory -Path $dist -Force | Out-Null
-          $names = @('okx-agent.exe', 'okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-worker.exe')
+          $names = @('okx-agent.exe', 'okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-service.exe')
           $sourceHead = (git rev-parse HEAD).Trim()
           $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
           $components = [ordered]@{}
@@ -945,7 +945,7 @@ jobs:
             }
             # Current v1 readers never install Research; new v1 readers reject
             # unmanifested Research bytes. The next v2 release restores Worker.
-            Remove-Item -LiteralPath (Join-Path $dist 'okx-research-worker.exe') -Force
+            Remove-Item -LiteralPath (Join-Path $dist 'okx-research-service.exe') -Force
             $manifest = [ordered]@{
               schema = 'okx.windows.bundle/v1'
               repository_id = 1388071566
@@ -1008,7 +1008,7 @@ jobs:
           $env:OKX_BUILD_SOURCE_HEAD = (git rev-parse HEAD).Trim()
           $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
           New-Item -ItemType Directory -Path $dist -Force | Out-Null
-          $names = @('okx-agent.exe', 'okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-worker.exe')
+          $names = @('okx-agent.exe', 'okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-service.exe')
           $sourceHead = (git rev-parse HEAD).Trim()
           $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
           $components = [ordered]@{}
@@ -1016,13 +1016,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & ./scripts/prepare-research-release.ps1 -Dist $dist
           $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'research-only-release-target'
-          cargo build --locked --release -p okx-research-worker --bin okx-research-worker 2>&1 |
+          cargo build --locked --release -p okx-research-worker --bin okx-research-service 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'research-only-build.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $proof = Get-Content -Raw -LiteralPath (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') | ConvertFrom-Json
           foreach ($name in $names[0..2]) { $components[$name] = $proof.components.PSObject.Properties[$name].Value }
-          Copy-Item (Join-Path $env:CARGO_TARGET_DIR 'release\okx-research-worker.exe') (Join-Path $dist 'okx-research-worker.exe')
-          $freshNames = @('okx-research-worker.exe')
+          Copy-Item (Join-Path $env:CARGO_TARGET_DIR 'release\okx-research-service.exe') (Join-Path $dist 'okx-research-service.exe')
+          $freshNames = @('okx-research-service.exe')
           foreach ($name in $freshNames) {
             $path = Join-Path $dist $name
             $components[$name] = [ordered]@{

@@ -103,7 +103,7 @@ try {
     Add-Type -AssemblyName System.IO.Compression.ZipFile
     $archive = [IO.Compression.ZipFile]::OpenRead($zip)
     $expectedFiles = @('okx-agent.exe','okx-host-control.exe','okx-host-launcher.exe','Cargo.lock','manifest.json')
-    if (@($archive.Entries | Where-Object { $_.FullName -ceq 'okx-research-worker.exe' }).Count -eq 1) { $expectedFiles += 'okx-research-worker.exe' }
+    if (@($archive.Entries | Where-Object { $_.FullName -ceq 'okx-research-service.exe' }).Count -eq 1) { $expectedFiles += 'okx-research-service.exe' }
     try {
         $actualFiles = @($archive.Entries | ForEach-Object { $_.FullName })
         if ($actualFiles.Count -ne $expectedFiles.Count -or
@@ -130,11 +130,11 @@ try {
     if ($prGit.tree.sha -cne $sourceTree) { throw 'Tested PR and merged main trees differ.' }
     $names = @('okx-agent.exe','okx-host-control.exe','okx-host-launcher.exe')
     if ($manifest.schema -ceq 'okx.windows.bundle/v2') {
-        $names += 'okx-research-worker.exe'
+        $names += 'okx-research-service.exe'
         if (@($manifest.components.PSObject.Properties).Count -ne 4 -or
-            @($expectedFiles | Where-Object { $_ -ceq 'okx-research-worker.exe' }).Count -ne 1 -or
+            @($expectedFiles | Where-Object { $_ -ceq 'okx-research-service.exe' }).Count -ne 1 -or
             [string]::IsNullOrWhiteSpace([string]$manifest.rust_version)) { throw 'Invalid v2 composition.' }
-    } elseif ($expectedFiles -ccontains 'okx-research-worker.exe') { throw 'A v1 bundle cannot contain a Research worker.' }
+    } elseif ($expectedFiles -ccontains 'okx-research-service.exe') { throw 'A v1 bundle cannot contain a Research worker.' }
     foreach ($name in $names) {
         if ($manifest.schema -ceq 'okx.windows.bundle/v2') {
             $component = $manifest.components.PSObject.Properties[$name].Value

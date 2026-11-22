@@ -9,13 +9,13 @@ async fn main() {
         .try_init()
         .is_err()
     {
-        eprintln!("research worker: TRACING_SUBSCRIBER_INIT_FAILED");
+        eprintln!("OKX Research Service: TRACING_SUBSCRIBER_INIT_FAILED");
         std::process::exit(1);
     }
     match run().await {
         Ok(()) => std::process::exit(0),
         Err(error) => {
-            eprintln!("research worker: {error}");
+            eprintln!("OKX Research Service: {error}");
             std::process::exit(1);
         }
     }

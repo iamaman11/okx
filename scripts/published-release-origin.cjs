@@ -9,7 +9,7 @@ function createProvenance(input, manifest, archiveBytes) {
   if (!manifest || manifest.repository_id !== input.repository_id || manifest.source_head_sha !== input.source_head_sha || manifest.source_tree !== input.source_tree) throw Error('MANIFEST_ORIGIN_MISMATCH');
   const components = {};
   const files = ['okx-agent.exe', 'okx-host-control.exe', 'okx-host-launcher.exe'];
-  if (manifest.schema === 'okx.windows.bundle/v2') files.push('okx-research-worker.exe');
+  if (manifest.schema === 'okx.windows.bundle/v2') files.push('okx-research-service.exe');
   else if (manifest.schema !== 'okx.windows.bundle/v1') throw Error('UNSUPPORTED_MANIFEST');
   for (const name of files) {
     const item = manifest.schema.endsWith('/v2') ? manifest.components?.[name] : manifest.files?.[name];
