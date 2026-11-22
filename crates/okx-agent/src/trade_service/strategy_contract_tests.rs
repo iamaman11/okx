@@ -659,9 +659,7 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
 
 #[tokio::test]
 async fn graph_status_reads_finance_binding_without_claiming_live_execution() {
-    use okx_protocol::research_ipc::{
-        GraphClosedBar, GraphPublicationCursor, GraphSessionRequest,
-    };
+    use okx_protocol::research_ipc::{GraphClosedBar, GraphPublicationCursor, GraphSessionRequest};
     let fixture = Fixture::new().await;
     let _capture = fixture.owner.recorded_capture_gate.write().await;
     let account = fixture.owner.configuration.alias.clone();
@@ -669,50 +667,176 @@ async fn graph_status_reads_finance_binding_without_claiming_live_execution() {
     let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
     let instance_id = "graph_status_bound";
     completed_data(
-        fixture.request(StrategyRequest::Create {
-            idempotency_key: "graph_status_create".into(),
-            instance_id: instance_id.into(),
-            definition_id: "graph_signal_v1".into(),
-            version: 1,
-            parameters: graph_signal_parameters(),
-            instruments: vec!["BTC-USDT-SWAP".into()],
-            timeframe_ms: 60_000,
-            budget_usd: "2".into(),
-        }).await,
+        fixture
+            .request(StrategyRequest::Create {
+                idempotency_key: "graph_status_create".into(),
+                instance_id: instance_id.into(),
+                definition_id: "graph_signal_v1".into(),
+                version: 1,
+                parameters: graph_signal_parameters(),
+                instruments: vec!["BTC-USDT-SWAP".into()],
+                timeframe_ms: 60_000,
+                budget_usd: "2".into(),
+            })
+            .await,
     );
     completed_data(
-        fixture.request(StrategyRequest::Start {
-            idempotency_key: "graph_status_start".into(),
-            instance_id: instance_id.into(),
-        }).await,
+        fixture
+            .request(StrategyRequest::Start {
+                idempotency_key: "graph_status_start".into(),
+                instance_id: instance_id.into(),
+            })
+            .await,
     );
-    let instance = fixture.owner.execution.store.strategy_instances(deadline()).await.unwrap()
-        .into_iter().find(|v| v.instance_id == instance_id).unwrap();
-    let configuration: GraphStrategyConfigurationV1 = serde_json::from_str(&instance.parameters).unwrap();
+    let instance = fixture
+        .owner
+        .execution
+        .store
+        .strategy_instances(deadline())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|v| v.instance_id == instance_id)
+        .unwrap();
+    let configuration: GraphStrategyConfigurationV1 =
+        serde_json::from_str(&instance.parameters).unwrap();
     let binding = super::graph_activation::activation_binding(
         &fixture.owner.configuration.account_key.wire(),
         &instance,
         &configuration,
         "BTC-USDT-SWAP",
-    ).unwrap();
-    let restored = fixture.ctx.research.graph_signal(GraphSessionRequest::Restore {
-        session_id: binding.session_id.clone(),
-        definition: Box::new(configuration.signal),
-        capacity: 64,
-        history: vec![
-            GraphClosedBar { time_ms: 60_000, close: Some(100.0) },
-            GraphClosedBar { time_ms: 120_000, close: Some(105.0) },
-        ],
-    }).await.unwrap();
+    )
+    .unwrap();
+    let restored = fixture
+        .ctx
+        .research
+        .graph_signal(GraphSessionRequest::Restore {
+            session_id: binding.session_id.clone(),
+            definition: Box::new(configuration.signal),
+            capacity: 64,
+            history: vec![
+                GraphClosedBar {
+                    time_ms: 60_000,
+                    close: Some(100.0),
+                },
+                GraphClosedBar {
+                    time_ms: 120_000,
+                    close: Some(105.0),
+                },
+            ],
+        })
+        .await
+        .unwrap();
     let original = GraphPublicationCursor::from_restored(&restored).unwrap();
     assert!(original.matches_binding(&binding.session_id, &binding.graph_sha256));
-    fixture.native.trade.bind_graph_strategy(&account, &binding, &original).await.unwrap();
-    let status = completed_data(fixture.request(StrategyRequest::Status {
-        instance_id: instance_id.into(),
-    }).await);
-    assert_eq!(status["graph_execution"]["state"], "FINANCE_BOUND_EXECUTION_DISABLED");
+    fixture
+        .native
+        .trade
+        .bind_graph_strategy(&account, &binding, &original)
+        .await
+        .unwrap();
+    let status = completed_data(
+        fixture
+            .request(StrategyRequest::Status {
+                instance_id: instance_id.into(),
+            })
+            .await,
+    );
+    assert_eq!(
+        status["graph_execution"]["state"],
+        "FINANCE_BOUND_EXECUTION_DISABLED"
+    );
     assert_eq!(status["graph_execution"]["bound_instruments"], 1);
     assert_eq!(status["graph_execution"]["configured_instruments"], 1);
+    assert_eq!(money(&fixture).await, before);
+    assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
+    drop(_capture);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn research_bootstrap_binds_and_starts_public_feed_without_order_post() {
+    use crate::research_client::{ResearchClient, ResearchClientConfig, SourceHandler};
+    use okx_protocol::research_ipc::{
+        GraphFeedReply, GraphFeedRequest, PublicCandleCapture, PublicSourceReply,
+        PublicSourceRequest, ResearchScope,
+    };
+    let fixture = Fixture::new().await;
+    let _capture = fixture.owner.recorded_capture_gate.write().await;
+    let before = money(&fixture).await;
+    let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
+    let instance_id = "graph_bootstrap_contract";
+    completed_data(fixture.request(StrategyRequest::Create {
+        idempotency_key: "graph_bootstrap_create".into(),
+        instance_id: instance_id.into(),
+        definition_id: "graph_signal_v1".into(),
+        version: 1,
+        parameters: graph_signal_parameters(),
+        instruments: vec!["BTC-USDT-SWAP".into()],
+        timeframe_ms: 60_000,
+        budget_usd: "2".into(),
+    }).await);
+    completed_data(fixture.request(StrategyRequest::Start {
+        idempotency_key: "graph_bootstrap_start".into(),
+        instance_id: instance_id.into(),
+    }).await);
+    let source: SourceHandler = Arc::new(|request| Box::pin(async move {
+        let PublicSourceRequest::Candles { instrument, bar, after, limit, queued, .. } = request else {
+            return Err("GRAPH_TEST_PUBLIC_CANDLES_ONLY".into());
+        };
+        if instrument != "BTC-USDT-SWAP" || bar != "1m" || queued || limit != 100 {
+            return Err("GRAPH_TEST_SOURCE_SCOPE_INVALID".into());
+        }
+        let end: u64 = after.ok_or("GRAPH_TEST_CURSOR_MISSING")?.parse()
+            .map_err(|_| "GRAPH_TEST_CURSOR_INVALID")?;
+        let rows = (1..=100u64).map(|i| {
+            let time = end - i * 60_000;
+            okx_protocol::research_ipc::HistoryCandle {
+                open_time_ms: time.to_string(),
+                open: "100".into(), high: "100".into(), low: "100".into(),
+                close: "100".into(), volume: "1".into(), volume_currency: "1".into(),
+                volume_quote: None, confirmed: true,
+            }
+        }).collect();
+        Ok(PublicSourceReply::Candles(PublicCandleCapture {
+            raw_body: vec![], rows,
+            acquired_at_ms: jiff::Timestamp::now().as_millisecond().to_string(),
+        }))
+    }));
+    let executable = std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut executable = std::env::current_exe().unwrap();
+            executable.pop();
+            if executable.ends_with("deps") { executable.pop(); }
+            executable.push(format!("okx-research-service{}", std::env::consts::EXE_SUFFIX));
+            executable
+        });
+    let research = ResearchClient::new(ResearchClientConfig {
+        executable,
+        root: fixture.native.root.join("graph-bootstrap-research"),
+        scope: ResearchScope::new(format!("graph-bootstrap-test-{}", std::process::id())).unwrap(),
+    }, source);
+    fixture.native.trade.set_signal_research(research.clone()).await;
+    let instance = fixture.owner.execution.store.strategy_instances(deadline()).await.unwrap()
+        .into_iter().find(|v| v.instance_id == instance_id).unwrap();
+    fixture.native.trade.graph_activation_turn(&fixture.owner, &[instance.clone()]).await.unwrap();
+    let configuration: GraphStrategyConfigurationV1 = serde_json::from_str(&instance.parameters).unwrap();
+    let binding = super::graph_activation::activation_binding(
+        &fixture.owner.configuration.account_key.wire(), &instance, &configuration, "BTC-USDT-SWAP",
+    ).unwrap();
+    let cursor = fixture.native.trade.graph_confirmed_cursor(
+        &fixture.owner.configuration.alias, &binding,
+    ).await.unwrap().unwrap();
+    assert_eq!(cursor.last_sequence(), 64);
+    let reply = research.graph_feed(GraphFeedRequest::Start {
+        session_id: binding.session_id,
+        graph_sha256: binding.graph_sha256,
+        instrument: "BTC-USDT-SWAP".into(),
+        timeframe_ms: 60_000,
+        poll_every_ms: 5_000,
+    }).await.unwrap();
+    assert!(matches!(reply, GraphFeedReply::Started { .. }));
     assert_eq!(money(&fixture).await, before);
     assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
     drop(_capture);

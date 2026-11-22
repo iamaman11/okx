@@ -80,7 +80,10 @@ const RECOVERY_BATCH: usize = 16;
 const GRAPH_BINDINGS_BATCH: usize = 4;
 impl RecoverySchedule {
     fn next_graph_activation(&mut self, account: &str, count: usize) -> usize {
-        let offset = self.graph_activation_offsets.entry(account.to_owned()).or_default();
+        let offset = self
+            .graph_activation_offsets
+            .entry(account.to_owned())
+            .or_default();
         let selected = *offset % count;
         *offset = (selected + 1) % count;
         selected

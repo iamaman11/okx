@@ -1211,11 +1211,21 @@ mod tests {
                 ..btc.clone()
             };
             AccountStore::bind_graph_sql(
-                &tx, scope, &btc, &cursor(2, TargetPosition::Hold), 121_000,
-            ).unwrap();
+                &tx,
+                scope,
+                &btc,
+                &cursor(2, TargetPosition::Hold),
+                121_000,
+            )
+            .unwrap();
             AccountStore::bind_graph_sql(
-                &tx, scope, &eth, &cursor(2, TargetPosition::Flat), 121_000,
-            ).unwrap();
+                &tx,
+                scope,
+                &eth,
+                &cursor(2, TargetPosition::Flat),
+                121_000,
+            )
+            .unwrap();
             tx.commit().unwrap();
             (btc, eth)
         };
@@ -1228,18 +1238,31 @@ mod tests {
             let tx = db.transaction().unwrap();
             assert_eq!(
                 AccountStore::acknowledge_graph_idle_sql(
-                    &tx, scope, &btc, &cursor(3, TargetPosition::Hold), 181_000,
-                ).unwrap(),
+                    &tx,
+                    scope,
+                    &btc,
+                    &cursor(3, TargetPosition::Hold),
+                    181_000,
+                )
+                .unwrap(),
                 GraphIdleAck::Advanced
             );
             tx.commit().unwrap();
         }
         assert_eq!(
-            AccountStore::graph_progress_sql(&db, scope, &btc).unwrap().unwrap().cursor.sequence,
+            AccountStore::graph_progress_sql(&db, scope, &btc)
+                .unwrap()
+                .unwrap()
+                .cursor
+                .sequence,
             3
         );
         assert_eq!(
-            AccountStore::graph_progress_sql(&db, scope, &eth).unwrap().unwrap().cursor.sequence,
+            AccountStore::graph_progress_sql(&db, scope, &eth)
+                .unwrap()
+                .unwrap()
+                .cursor
+                .sequence,
             2
         );
         let tx = db.transaction().unwrap();
@@ -1249,7 +1272,11 @@ mod tests {
         };
         assert!(matches!(
             AccountStore::bind_graph_sql(
-                &tx, scope, &conflicting, &cursor(2, TargetPosition::Hold), 241_000,
+                &tx,
+                scope,
+                &conflicting,
+                &cursor(2, TargetPosition::Hold),
+                241_000,
             ),
             Err(StoreError::Invalid("GRAPH_FINANCE_BINDING_CONFLICT"))
         ));

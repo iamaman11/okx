@@ -52,9 +52,13 @@ impl TradeService {
                                     &configuration,
                                     instrument,
                                 )?;
-                                if r.execution.store.graph_progress(
-                                    deadline(), binding.storage_binding(),
-                                ).await.map_err(err)?.is_some() {
+                                if r.execution
+                                    .store
+                                    .graph_progress(deadline(), binding.storage_binding())
+                                    .await
+                                    .map_err(err)?
+                                    .is_some()
+                                {
                                     bound += 1;
                                 }
                             }

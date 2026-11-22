@@ -72,9 +72,8 @@ pub(super) async fn retire_graph_instance(
     if !instance.enabled || instance.definition_id != GraphStrategyConfigurationV1::DEFINITION_ID {
         return Ok(());
     }
-    let configuration: GraphStrategyConfigurationV1 =
-        serde_json::from_str(&instance.parameters)
-            .map_err(|_| "GRAPH_RETIRE_CONFIGURATION_CORRUPT")?;
+    let configuration: GraphStrategyConfigurationV1 = serde_json::from_str(&instance.parameters)
+        .map_err(|_| "GRAPH_RETIRE_CONFIGURATION_CORRUPT")?;
     for instrument in &configuration.instruments {
         let binding = activation_binding(account_key, instance, &configuration, instrument)?;
         research
@@ -109,7 +108,11 @@ impl TradeService {
             instrument,
         )?;
         let account = &resources.configuration.alias;
-        if self.graph_confirmed_cursor(account, &binding).await?.is_none() {
+        if self
+            .graph_confirmed_cursor(account, &binding)
+            .await?
+            .is_none()
+        {
             let restored = research
                 .graph_signal(GraphSessionRequest::Bootstrap {
                     session_id: binding.session_id.clone(),
@@ -159,9 +162,10 @@ impl TradeService {
     ) -> Result<(), String> {
         let mut candidates = Vec::new();
         let mut count = 0usize;
-        for instance in instances.iter().filter(|i| {
-            i.enabled && i.definition_id == GraphStrategyConfigurationV1::DEFINITION_ID
-        }) {
+        for instance in instances
+            .iter()
+            .filter(|i| i.enabled && i.definition_id == GraphStrategyConfigurationV1::DEFINITION_ID)
+        {
             let configuration: GraphStrategyConfigurationV1 =
                 serde_json::from_str(&instance.parameters)
                     .map_err(|_| "GRAPH_ACTIVATION_CONFIGURATION_CORRUPT")?;
@@ -202,7 +206,13 @@ impl TradeService {
                 .clone()
                 .ok_or("GRAPH_RESEARCH_NOT_READY")?;
             let result = self
-                .activate_graph_instrument(resources, &research, instance, &configuration, instrument)
+                .activate_graph_instrument(
+                    resources,
+                    &research,
+                    instance,
+                    &configuration,
+                    instrument,
+                )
                 .await?;
             if !matches!(result, GraphFeedReply::Started { .. }) {
                 return Err("GRAPH_ACTIVATION_FEED_NOT_STARTED".into());
@@ -248,16 +258,35 @@ mod tests {
             budget: Decimal::ONE,
             last_decision_key: None,
         };
-        let btc = activation_binding("account-a", &instance, &configuration, "BTC-USDT-SWAP").unwrap();
-        assert_eq!(btc, activation_binding("account-a", &instance, &configuration, "BTC-USDT-SWAP").unwrap());
-        let eth = activation_binding("account-a", &instance, &configuration, "ETH-USDT-SWAP").unwrap();
+        let btc =
+            activation_binding("account-a", &instance, &configuration, "BTC-USDT-SWAP").unwrap();
+        assert_eq!(
+            btc,
+            activation_binding("account-a", &instance, &configuration, "BTC-USDT-SWAP").unwrap()
+        );
+        let eth =
+            activation_binding("account-a", &instance, &configuration, "ETH-USDT-SWAP").unwrap();
         assert_ne!(btc.session_id, eth.session_id);
         assert_eq!(btc.graph_sha256, eth.graph_sha256);
-        assert_ne!(btc.session_id, activation_binding("account-b", &instance, &configuration, "BTC-USDT-SWAP").unwrap().session_id);
+        assert_ne!(
+            btc.session_id,
+            activation_binding("account-b", &instance, &configuration, "BTC-USDT-SWAP")
+                .unwrap()
+                .session_id
+        );
         assert_eq!(btc.graph_sha256, digest(&configuration.signal).unwrap());
         instance.policy_revision += 1;
-        assert_ne!(btc.session_id, activation_binding("account-a", &instance, &configuration, "BTC-USDT-SWAP").unwrap().session_id);
+        assert_ne!(
+            btc.session_id,
+            activation_binding("account-a", &instance, &configuration, "BTC-USDT-SWAP")
+                .unwrap()
+                .session_id
+        );
         instance.enabled = false;
-        assert_eq!(activation_binding("account-a", &instance, &configuration, "BTC-USDT-SWAP").unwrap_err(), "GRAPH_ACTIVATION_STRATEGY_INVALID");
+        assert_eq!(
+            activation_binding("account-a", &instance, &configuration, "BTC-USDT-SWAP")
+                .unwrap_err(),
+            "GRAPH_ACTIVATION_STRATEGY_INVALID"
+        );
     }
 }
