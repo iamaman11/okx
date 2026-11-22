@@ -532,7 +532,10 @@ impl GraphStrategyConfigurationV1 {
     /// requires an explicit, strictly typed `signal` + `execution` wrapper.
     pub fn parse_parameters(
         value: &serde_json::Value,
-    ) -> Option<(crate::research_ipc::GraphSignalDefinition, GraphExecutionPolicy)> {
+    ) -> Option<(
+        crate::research_ipc::GraphSignalDefinition,
+        GraphExecutionPolicy,
+    )> {
         if value.get("signal").is_none() {
             return Some((Self::parse_signal(value)?, GraphExecutionPolicy::Observe));
         }
@@ -573,10 +576,13 @@ mod typed_strategy_parameters_tests {
             "execution":{"mode":"trade","max_slippage_bps":5,"stop_distance_bps":50}
         });
         let (_, mode) = GraphStrategyConfigurationV1::parse_parameters(&request).unwrap();
-        assert_eq!(mode, GraphExecutionPolicy::Trade {
-            max_slippage_bps: 5,
-            stop_distance_bps: 50,
-        });
+        assert_eq!(
+            mode,
+            GraphExecutionPolicy::Trade {
+                max_slippage_bps: 5,
+                stop_distance_bps: 50,
+            }
+        );
         for invalid in [
             serde_json::json!({"mode":"trade","max_slippage_bps":0,"stop_distance_bps":50}),
             serde_json::json!({"mode":"trade","max_slippage_bps":5,"stop_distance_bps":0}),

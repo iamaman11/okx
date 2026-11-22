@@ -646,10 +646,12 @@ mod tests {
         snapshot.instance.definition_id = GraphStrategyConfigurationV1::DEFINITION_ID.into();
         snapshot.instance.budget = Decimal::new(250, 2);
         event.intent = GraphSignalIntent::SetTarget(GraphPosition::Short);
-        assert!(binding
-            .open_request(&snapshot.instance, &event, &GraphExecutionPolicy::Observe)
-            .unwrap()
-            .is_none());
+        assert!(
+            binding
+                .open_request(&snapshot.instance, &event, &GraphExecutionPolicy::Observe)
+                .unwrap()
+                .is_none()
+        );
         let policy = GraphExecutionPolicy::Trade {
             max_slippage_bps: 5,
             stop_distance_bps: 50,
@@ -659,7 +661,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(request.valid());
-        assert_eq!(binding.open_context(&event, &request).unwrap().binding, binding.storage_binding());
+        assert_eq!(
+            binding.open_context(&event, &request).unwrap().binding,
+            binding.storage_binding()
+        );
         let TradeRequest::Execute {
             side,
             sizing,
@@ -670,8 +675,18 @@ mod tests {
             panic!("an armed graph must yield an Execute command");
         };
         assert_eq!(side, PositionSide::Short);
-        assert_eq!(sizing, Sizing::MaxLossUsd { max_loss_usd: "2.5".into() });
-        assert_eq!(protection, Some(Protection::Distance { stop_distance_bps: 50 }));
+        assert_eq!(
+            sizing,
+            Sizing::MaxLossUsd {
+                max_loss_usd: "2.5".into()
+            }
+        );
+        assert_eq!(
+            protection,
+            Some(Protection::Distance {
+                stop_distance_bps: 50
+            })
+        );
         let mut stale = snapshot.instance.clone();
         stale.policy_revision += 1;
         assert_eq!(
@@ -680,7 +695,9 @@ mod tests {
         );
         event.graph_sha256 = "b".repeat(64);
         assert_eq!(
-            binding.open_request(&snapshot.instance, &event, &policy).unwrap_err(),
+            binding
+                .open_request(&snapshot.instance, &event, &policy)
+                .unwrap_err(),
             "GRAPH_OPEN_PUBLICATION_MISMATCH"
         );
     }

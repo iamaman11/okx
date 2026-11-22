@@ -11,7 +11,10 @@ use okx_protocol::research_ipc::{
     GraphFeedFaultReason, GraphPublicationRequest, GraphSignalPublication,
 };
 use okx_protocol::trading::{GraphExecutionPolicy, GraphStrategyConfigurationV1, TradeRequest};
-use std::{sync::Arc, time::{Duration, Instant}};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +32,9 @@ pub(crate) enum GraphConsumeOutcome {
     },
     /// A bounded task has been given one exact immutable request. This is not
     /// a venue acknowledgement or evidence that an order was posted.
-    OpenAdmissionScheduled { sequence: u64 },
+    OpenAdmissionScheduled {
+        sequence: u64,
+    },
     FeedUnavailable(GraphFeedFaultReason),
     ResearchUnavailable,
     UnrelatedNotifications,
@@ -239,7 +244,10 @@ impl TradeService {
         let command = binding
             .open_request(&instance, publication, &configuration.execution)?
             .ok_or("GRAPH_OPEN_POLICY_UNARMED")?;
-        let TradeRequest::Execute { idempotency_key, .. } = &command else {
+        let TradeRequest::Execute {
+            idempotency_key, ..
+        } = &command
+        else {
             return Err("GRAPH_OPEN_EXECUTE_REQUIRED".into());
         };
         let permit = match resources.graph_order_dispatch.clone().try_acquire_owned() {
@@ -247,11 +255,12 @@ impl TradeService {
             Err(_) => return Ok(false),
         };
         let account_key = resources.configuration.account_key.wire();
-        if !self.recovery_schedule.lock().await.due(
-            &account_key,
-            idempotency_key,
-            Instant::now(),
-        ) {
+        if !self
+            .recovery_schedule
+            .lock()
+            .await
+            .due(&account_key, idempotency_key, Instant::now())
+        {
             return Ok(false);
         }
         let trade = Arc::clone(self);
@@ -274,7 +283,11 @@ impl TradeService {
                 Err(reason) => {
                     // Original finance SQL and status/recovery remain the
                     // authority when an error occurs after PREPARED.
-                    let code = if reason.len() <= 96 && reason.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') {
+                    let code = if reason.len() <= 96
+                        && reason
+                            .bytes()
+                            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                    {
                         reason.as_str()
                     } else {
                         "GRAPH_OPEN_ADMISSION_FAILURE"
@@ -340,7 +353,10 @@ impl TradeService {
                 _ => None,
             };
             if let Some(publication) = open_candidate {
-                match self.schedule_graph_open(resources, &binding, &publication).await {
+                match self
+                    .schedule_graph_open(resources, &binding, &publication)
+                    .await
+                {
                     Ok(true) => {
                         outcome = GraphConsumeOutcome::OpenAdmissionScheduled {
                             sequence: publication.sequence,
@@ -348,7 +364,11 @@ impl TradeService {
                     }
                     Ok(false) => {}
                     Err(reason) => {
-                        let code = if reason.len() <= 96 && reason.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') {
+                        let code = if reason.len() <= 96
+                            && reason
+                                .bytes()
+                                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                        {
                             reason.as_str()
                         } else {
                             "GRAPH_OPEN_POLICY_FAILURE"

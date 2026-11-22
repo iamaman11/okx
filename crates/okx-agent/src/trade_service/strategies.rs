@@ -239,10 +239,11 @@ impl TradeService {
                     let parameters =
                         if definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
                             let (signal, execution) =
-                                GraphStrategyConfigurationV1::parse_parameters(parameters)
-                                    .ok_or(okx_execution::StoreError::Invalid(
+                                GraphStrategyConfigurationV1::parse_parameters(parameters).ok_or(
+                                    okx_execution::StoreError::Invalid(
                                         "STRATEGY_PARAMETERS_INVALID",
-                                    ))?;
+                                    ),
+                                )?;
                             let config = GraphStrategyConfigurationV1 {
                                 signal,
                                 instruments: instruments.clone(),
