@@ -148,9 +148,7 @@ impl GraphTargetBinding {
             closed_ms: publication.closed_ms,
             intent: target,
         };
-        if preview.target != target
-            || Self::storage_cursor(&preview.next_cursor) != published
-        {
+        if preview.target != target || Self::storage_cursor(&preview.next_cursor) != published {
             return Err("GRAPH_CLOSE_PREVIEW_MISMATCH".into());
         }
         let TargetPlan::CloseExisting(references) = &preview.plan else {
@@ -807,7 +805,10 @@ mod tests {
         let (binding, mut snapshot, cursor, event) = fixture();
         snapshot.instance.definition_id = GraphStrategyConfigurationV1::DEFINITION_ID.into();
         snapshot.lots.push(owned_long());
-        let preview = binding.preview(&snapshot, &cursor, &event).unwrap().unwrap();
+        let preview = binding
+            .preview(&snapshot, &cursor, &event)
+            .unwrap()
+            .unwrap();
         assert!(
             binding
                 .close_requests(
@@ -850,7 +851,11 @@ mod tests {
                 .unwrap(),
             Some(requests)
         );
-        assert_eq!(cursor.last_sequence(), 2, "Close candidates cannot ACK a bar");
+        assert_eq!(
+            cursor.last_sequence(),
+            2,
+            "Close candidates cannot ACK a bar"
+        );
         let mut stale = snapshot.instance.clone();
         stale.policy_revision += 1;
         assert_eq!(
@@ -895,7 +900,10 @@ mod tests {
             max_slippage_bps: 5,
             stop_distance_bps: 50,
         };
-        let preview = binding.preview(&snapshot, &cursor, &event).unwrap().unwrap();
+        let preview = binding
+            .preview(&snapshot, &cursor, &event)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             preview.plan,
             TargetPlan::CloseExisting(vec!["original-entry".into()])
@@ -906,7 +914,10 @@ mod tests {
             .unwrap();
         assert!(matches!(commands.as_slice(), [TradeRequest::Close { .. }]));
         snapshot.in_flight = true;
-        let waiting = binding.preview(&snapshot, &cursor, &event).unwrap().unwrap();
+        let waiting = binding
+            .preview(&snapshot, &cursor, &event)
+            .unwrap()
+            .unwrap();
         assert_eq!(waiting.plan, TargetPlan::AwaitSettlement);
         assert_eq!(
             binding
@@ -916,7 +927,10 @@ mod tests {
         );
         snapshot.in_flight = false;
         snapshot.lots.clear();
-        let after_settlement = binding.preview(&snapshot, &cursor, &event).unwrap().unwrap();
+        let after_settlement = binding
+            .preview(&snapshot, &cursor, &event)
+            .unwrap()
+            .unwrap();
         assert_eq!(after_settlement.plan, TargetPlan::Open(ExposureSide::Short));
         assert_eq!(
             binding

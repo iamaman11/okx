@@ -121,13 +121,9 @@ impl EngineGraphBinding {
         // Include every original scope dimension and the exact opening
         // reference. Different positions from one candle MUST NOT share an
         // idempotency key; retries of the same candidate MUST share it.
-        let body = serde_json::to_vec(&(
-            "okx.graph-close/v1",
-            self,
-            publication,
-            original_reference,
-        ))
-        .ok()?;
+        let body =
+            serde_json::to_vec(&("okx.graph-close/v1", self, publication, original_reference))
+                .ok()?;
         let digest = format!("{:x}", Sha256::digest(body));
         let decision_key = format!("graph_close_{}", &digest[..32]);
         let decision_id = format!(
@@ -212,26 +208,38 @@ mod tests {
         assert_eq!(stable, binding.close_identity(&candle, "entry-a").unwrap());
         assert_ne!(
             stable.decision_key,
-            binding.close_identity(&candle, "entry-b").unwrap().decision_key
+            binding
+                .close_identity(&candle, "entry-b")
+                .unwrap()
+                .decision_key
         );
         let mut foreign = binding.clone();
         foreign.account_key = "account-b".into();
         assert_ne!(
             stable.decision_key,
-            foreign.close_identity(&candle, "entry-a").unwrap().decision_key
+            foreign
+                .close_identity(&candle, "entry-a")
+                .unwrap()
+                .decision_key
         );
         foreign = binding.clone();
         foreign.policy_revision += 1;
         assert_ne!(
             stable.decision_key,
-            foreign.close_identity(&candle, "entry-a").unwrap().decision_key
+            foreign
+                .close_identity(&candle, "entry-a")
+                .unwrap()
+                .decision_key
         );
         let mut next = candle.clone();
         next.sequence += 1;
         next.closed_ms += 60_000;
         assert_ne!(
             stable.decision_key,
-            binding.close_identity(&next, "entry-a").unwrap().decision_key
+            binding
+                .close_identity(&next, "entry-a")
+                .unwrap()
+                .decision_key
         );
         next.intent = TargetPosition::Hold;
         assert!(binding.close_identity(&next, "entry-a").is_none());
