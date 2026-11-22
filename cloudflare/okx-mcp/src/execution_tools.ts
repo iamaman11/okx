@@ -29,8 +29,8 @@ const sizing={oneOf:[object({contracts:money}),object({max_loss_usd:money}),obje
 const constraints=object({type:choice('limit','market','post_only','ioc','fok'),limit_price:money,reference:text(),max_entry_usd:money,max_slippage_bps:integer(0,10000)},['type','max_slippage_bps']);
 const protection={oneOf:[object({stop_price:money}),object({stop_distance_bps:integer(1,10000)})]};
 const trade={operation:choice('open','add','reduce','close','replace'),strategy_instance:text(64),instrument:text(64),side:choice('long','short'),sizing,order:constraints,protection};
-// The live Engine supports only StrategyParametersV1 and definition version 1.
-// Research shares the same supported EMA period bounds.
+// Legacy strategies retain their EMA bounds. Graph strategies use the same
+// bounded, operator-agnostic transport as Research; math belongs to Research.
 const liveStrategyParams=object({fast:integer(1,999),slow:integer(2,1000)});
 const ema=liveStrategyParams;
 const researchParameters={oneOf:[ema,object({lookback:integer(2,1000)})]};
@@ -55,6 +55,9 @@ const graphInput={oneOf:[object({source:stepId}),object({step:stepId})]};
 const graphParameterMap={type:'object',propertyNames:stepId,additionalProperties:{anyOf:[{type:'null'},{type:'boolean'},{type:'number'},text(128)]},maxProperties:8};
 const graphStep=object({id:stepId,op:object({id:stepId,version:integer(1,4294967295)}),inputs:{type:'array',items:graphInput,minItems:1,maxItems:4},params:graphParameterMap},['id','op','inputs']);
 const graph=object({schema:choice('okx.graph/v1'),steps:{type:'array',items:graphStep,minItems:1,maxItems:32},outputs:{type:'array',items:stepId,minItems:1,maxItems:14}});
+const graphSignal=object({version:choice('okx.graph-signal/v1'),graph,signal_step:stepId,target_if_true:integer(-1,1),target_if_false:integer(-1,1),missing:choice('hold','flat')});
+const graphExecution={oneOf:[object({mode:choice('observe')}),object({mode:choice('trade'),max_slippage_bps:integer(1,100),stop_distance_bps:integer(1,5000)})]};
+const strategyParams={oneOf:[liveStrategyParams,graphSignal,object({signal:graphSignal,execution:graphExecution})]};
 const universe=object({instrument_type:choice('SPOT','SWAP','FUTURES'),settle_currency:text(16),after_instrument:text(64),reference_generation:text(128),limit:integer(1,100),rank_globally:{type:'boolean'}},['instrument_type']);
 // The strict graph structure is validated in validGraphWire on every call.
 // Keep the model-visible tool compact; mathematical descriptors are on-demand.
@@ -81,7 +84,7 @@ const economicCase=object({instrument:text(64),product:choice('spot','linear_swa
  ['instrument','product','side','quantity','entry_price','exit_price','fees','funding']);
 export const ACTION_SCHEMAS:Record<string,Schema[]>={
  accounts:[action('list'),action('status',{account}),action('connect',{...mutation,credential_ref:text(),alias:text(64),label:text(128),limits,enabled:{type:'boolean'}},['idempotency_key','credential_ref','alias','limits','enabled']),pauseResume,action('set_limits',{account,...mutation,expected_revision:integer(),limits:limitsWithEntry})],
- strategies:[action('list',{account}),action('status',{account,...instance}),action('create',{account,...mutation,...instance,definition_id:text(64),version:integer(1,1),parameters:liveStrategyParams,instruments:array(text(64)),timeframe_ms:integer(1000),budget_usd:money}),action('update',{account,...mutation,...instance,expected_revision:integer(),parameters:liveStrategyParams,budget_usd:money}),startStop,action('capital_assign',{account,...mutation,...instance,direction:choice('assign','release'),amount_usd:money,expected_authority_revision:integer(1)},['account','idempotency_key','instance_id','direction','amount_usd','expected_authority_revision'])],
+ strategies:[action('list',{account}),action('status',{account,...instance}),action('create',{account,...mutation,...instance,definition_id:text(64),version:integer(1,1),parameters:strategyParams,instruments:array(text(64)),timeframe_ms:integer(1000),budget_usd:money}),action('update',{account,...mutation,...instance,expected_revision:integer(),parameters:strategyParams,budget_usd:money}),startStop,action('capital_assign',{account,...mutation,...instance,direction:choice('assign','release'),amount_usd:money,expected_authority_revision:integer(1)},['account','idempotency_key','instance_id','direction','amount_usd','expected_authority_revision'])],
  market:[screenCompare,action('instruments',{asset:text(16),settle_currency:text(16)},['asset']),action('snapshot',{instrument:text(64)}),action('microstructure',{instrument:text(64),size_contracts:money},['instrument']),action('capabilities')],
  research:[action('record_decision',{job_id:decisionJob,result_id:artifactId,expected_decision_id:artifactId,name:annotationText(128),hypothesis:annotationText(4096),status:choice('accepted','rejected','deferred'),reason:annotationText(2048)},['job_id','result_id','name','hypothesis','status','reason']),action('decision',{job_id:decisionJob,decision_id:artifactId},['job_id']),researchRun,action('benchmark',{idempotency_key:token}),action('status',{job_id:text()}),action('cancel',{job_id:text(),...mutation}),action('result',{job_id:text(),cursor:text(512),limit:integer(1,50),view:choice('summary','trades','equity','variants','export')},['job_id','limit']),action('capabilities'),action('economics',{cases:{type:'array',items:economicCase,minItems:1,maxItems:8},data_mode:choice('counterfactual','historical_observed')}),action('validate',{...range,range_mode:choice('strict','normalize'),instruments:{...array(text(64),8),minItems:1},strategy_id:researchStrategies,parameters:researchParameters,costs,data_mode:choice('counterfactual','historical_observed')},['instruments','timeframe_ms','start_ms','end_ms','strategy_id','parameters','costs','data_mode'])],
  trade:[action('preview',{account,...trade},['account','operation','strategy_instance','instrument','side','sizing','order']),action('execute',{account,...mutation,...trade,expires_in_ms:integer(1,30000)},['account','idempotency_key','operation','strategy_instance','instrument','side','sizing','order','expires_in_ms']),action('status',{account,reference:text()}),action('cancel',{account,...mutation,reference:text()}),action('close',{account,...mutation,reference:text(),expires_in_ms:integer(1,30000)}),action('capabilities',{account}),action('preflight',{account})],
@@ -167,7 +170,12 @@ function publicAccountsSchema():Schema {
 export const PUBLIC_TOOLS:Json[]=[
  ...Object.entries(ACTION_SCHEMAS).filter(([name])=>name!=='trade')
    .map(([name,schemas])=>({name,description:TOOL_NOTES[name].description,
-     inputSchema:name==='accounts'?publicAccountsSchema():publicSchema({oneOf:schemas}),
+     // Graph descriptors are discoverable via market.capabilities. Keep the
+     // MCP catalog below 24 KiB; validTool still applies the full typed schema.
+     inputSchema:name==='accounts'?publicAccountsSchema():publicSchema({oneOf:name==='strategies'?schemas.map(s=>
+       ['create','update'].includes(String(s.properties.action.const))?{
+         ...s,properties:{...s.properties,parameters:{type:'object'}}
+       }:s):schemas}),
      annotations:annotation(TOOL_NOTES[name])})),
  ...ACTION_SCHEMAS.trade.map(schema=>{
    const scopedAction=String(schema.properties.action.const);
@@ -233,8 +241,10 @@ function validGraphWire(value:unknown):boolean {
  if(!isObject(value)||!matches(graph,value)||new TextEncoder().encode(JSON.stringify(value)).byteLength>65536)return false;
  const declared=new Set((value.steps as Array<{id:string}>).map(step=>step.id));
  const ids=new Set<string>();
- for(const step of value.steps as Array<{id:string;inputs:Array<{source?:string;step?:string}>}>){
+ for(const step of value.steps as Array<{id:string;inputs:Array<{source?:string;step?:string}>;params?:Record<string,unknown>}>){
   if(ids.has(String(step.id)))return false;
+  if(step.params&&Object.values(step.params).some(param=>
+    typeof param==='string'&&new TextEncoder().encode(param).byteLength>128))return false;
   for(const input of step.inputs){
    if('step'in input&&!ids.has(input.step!))return false;
    if('source'in input&&declared.has(input.source!))return false;
@@ -267,6 +277,16 @@ export function validTool(name:string,args:unknown):boolean {
    if(args.action!=='screen'||!Array.isArray(args.fields)||!Array.isArray(args.composition.result_steps)||args.fields.length+args.composition.result_steps.length>14)return false;
    if(Array.isArray(args.composition.steps)&&!args.composition.steps.every(validCompositionStep))return false;
   }
+ }
+ if(name==='strategies'&&isObject(args)&&['create','update'].includes(String(args.action))){
+  const params=args.parameters;
+  const signal=isObject(params)&&'signal'in params?params.signal:params;
+  if(matches(graphSignal,signal)){
+   if(!isObject(signal)||!validGraphWire(signal.graph)||
+     !(signal.graph as {outputs:string[]}).outputs.includes(String(signal.signal_step))||
+     new TextEncoder().encode(JSON.stringify(params)).byteLength>60*1024)return false;
+   if(args.action==='create'&&args.definition_id!=='graph_signal_v1')return false;
+  }else if(args.action==='create'&&args.definition_id==='graph_signal_v1')return false;
  }
  if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;
  return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);

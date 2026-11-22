@@ -132,12 +132,22 @@ venue recovery are still the only financial authorities. The read-only
 settlement remain blocked pending their own atomic Engine paths. This Draft
 code is not released or authorized for real exchange testing.
 
-The legacy loop currently treats `SignalPosition::Flat`
-like `Warmup` (no new entry), so it does not flatten existing lots for `Flat`.
-This is a tracked behavior gap, not a claimed live fix. Before connecting graph
-publications to trading, Engine also needs durable per-instance cursor/ACK,
-recovery after restart, stale-generation protection and serialization of
-pending opens/closes; missing Research must not be mistaken for `Flat` or
+The public MCP `strategies.create` and `strategies.update` actions now carry
+the same typed `parameters` wire: a plain graph signal is observation-only,
+while the `signal` + `execution` wrapper above is an explicit trading request.
+MCP validates the graph structure, causal references, output ID and bounds,
+the UTF-8 size limits and the exact execution policy before dispatching to
+Native; unrecognized operator IDs are still resolved only by Research. The
+model-visible MCP catalog keeps `parameters` as a compact object because the
+full graph schema would exceed the 24 KiB `tools/list` limit. The server
+does **not** accept arbitrary objects merely because that descriptor is short.
+
+The legacy loop currently treats `SignalPosition::Flat` like `Warmup` (no
+new entry), so it does not flatten existing lots for `Flat`. This is a tracked
+behavior gap, not a claimed live fix. The graph path now has the original
+finance SQL cursor/ACK, restart discovery and bounded Open admission. Close,
+Flip, independently managed protective exits and Research-failure recovery
+still need acceptance; missing Research must not be mistaken for `Flat` or
 `Hold`. Manual `TradeRequest::Execute` remains a separate, explicit one-order
 request through the same financial Engine.
 
