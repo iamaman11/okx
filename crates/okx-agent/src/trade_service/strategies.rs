@@ -33,12 +33,47 @@ impl TradeService {
                     if status["instance"]["definition_id"]
                         == GraphStrategyConfigurationV1::DEFINITION_ID
                     {
-                        // Persisting a graph definition and starting the
-                        // instance do NOT grant an execution subscription.
-                        status["graph_execution"] = json!({
-                            "state": "NOT_ACTIVATED",
-                            "reason_code": "GRAPH_EXECUTION_NOT_CONNECTED"
-                        });
+                        // A finance binding is durable but never proves that
+                        // Research is online or that trading is enabled.
+                        let instance: StrategyInstance =
+                            serde_json::from_value(status["instance"].clone())
+                                .map_err(|_| "GRAPH_STATUS_INSTANCE_CORRUPT")?;
+                        let mut bound = 0usize;
+                        let mut total = 0usize;
+                        if instance.enabled {
+                            let configuration: GraphStrategyConfigurationV1 =
+                                serde_json::from_str(&instance.parameters)
+                                    .map_err(|_| "GRAPH_STATUS_CONFIGURATION_CORRUPT")?;
+                            total = configuration.instruments.len();
+                            for instrument in &configuration.instruments {
+                                let binding = graph_activation::activation_binding(
+                                    &r.configuration.account_key.wire(),
+                                    &instance,
+                                    &configuration,
+                                    instrument,
+                                )?;
+                                if r.execution.store.graph_progress(
+                                    deadline(), binding.storage_binding(),
+                                ).await.map_err(err)?.is_some() {
+                                    bound += 1;
+                                }
+                            }
+                        }
+                        status["graph_execution"] = if bound > 0 {
+                            json!({
+                                "state": "FINANCE_BOUND_EXECUTION_DISABLED",
+                                "reason_code": "GRAPH_ORDERS_NOT_CONNECTED",
+                                "bound_instruments": bound,
+                                "configured_instruments": total,
+                            })
+                        } else {
+                            json!({
+                                "state": "NOT_ACTIVATED",
+                                "reason_code": "GRAPH_EXECUTION_NOT_CONNECTED",
+                                "bound_instruments": 0,
+                                "configured_instruments": total,
+                            })
+                        };
                     }
                     status
                 }
@@ -107,6 +142,7 @@ impl TradeService {
             return Ok(completed(serde_json::to_value(result).map_err(err)?));
         }
         let body = request.clone();
+        let mut retiring_graph = None;
         let result: okx_execution::StoreResult<StrategyInstance> = async {
             let operation = match &body {
                 StrategyRequest::Create {
@@ -143,6 +179,18 @@ impl TradeService {
                     .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"));
             }
             let instances = r.execution.store.strategy_instances(deadline()).await?;
+            if let StrategyRequest::Stop { instance_id, .. }
+            | StrategyRequest::Update { instance_id, .. } = &body
+            {
+                retiring_graph = instances
+                    .iter()
+                    .find(|instance| &instance.instance_id == instance_id)
+                    .filter(|instance| {
+                        instance.enabled
+                            && instance.definition_id == GraphStrategyConfigurationV1::DEFINITION_ID
+                    })
+                    .cloned();
+            }
             let (operation, action, instance, expected) = match &body {
                 StrategyRequest::Create {
                     idempotency_key,
@@ -348,6 +396,22 @@ impl TradeService {
         }
         .await;
         let result = result.map_err(err)?;
+        if let Some(prior) = retiring_graph
+            && let Some(research) = self.signal_research.read().await.clone()
+        {
+            let account_key = r.configuration.account_key.wire();
+            tokio::spawn(async move {
+                if graph_activation::retire_graph_instance(&research, &account_key, &prior)
+                    .await
+                    .is_err()
+                {
+                    eprintln!(
+                        "OKX_GRAPH_ENGINE_V1 account={} state=RETIRE_INCOMPLETE reason=RESEARCH_SESSION_STOP_FAILED",
+                        account_key
+                    );
+                }
+            });
+        }
         Ok(completed(json!({"instance":result})))
     }
     pub async fn run(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
@@ -528,7 +592,7 @@ impl TradeService {
                         r.execution.store.strategy_instances(deadline()).await
                     {
                         let mut has_graph_strategy = false;
-                        for instance in instances.into_iter().filter(|i| i.enabled) {
+                        for instance in instances.iter().filter(|i| i.enabled) {
                             if instance.definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
                                 has_graph_strategy = true;
                                 continue;
@@ -546,6 +610,25 @@ impl TradeService {
                                     "OKX_GRAPH_ENGINE_V1 account={} state=REPLAY_UNAVAILABLE reason=FINANCE_OR_RESEARCH_READ_FAILED",
                                     r.configuration.account_key.wire()
                                 );
+                            }
+                            // One rotating read-only public subscription at
+                            // most per account. Longer startup never blocks
+                            // the separate risk/intent reconciliation lane.
+                            let activation = tokio::time::timeout(
+                                Duration::from_secs(12),
+                                self.graph_activation_turn(&r, &instances),
+                            ).await;
+                            match activation {
+                                Ok(Ok(())) => {}
+                                Ok(Err(reason)) => {
+                                    let code = if reason.len() <= 96 && reason.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') {
+                                        reason.as_str()
+                                    } else {
+                                        "GRAPH_ACTIVATION_INTERNAL_FAILURE"
+                                    };
+                                    eprintln!("OKX_GRAPH_ENGINE_V1 account={} state=OBSERVATION_UNAVAILABLE reason={code}", r.configuration.account_key.wire());
+                                }
+                                Err(_) => eprintln!("OKX_GRAPH_ENGINE_V1 account={} state=OBSERVATION_UNAVAILABLE reason=GRAPH_ACTIVATION_TIMEOUT", r.configuration.account_key.wire()),
                             }
                         }
                     }

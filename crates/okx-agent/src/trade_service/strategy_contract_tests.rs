@@ -656,6 +656,68 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
     drop(_capture);
     fixture.finish().await;
 }
+
+#[tokio::test]
+async fn graph_status_reads_finance_binding_without_claiming_live_execution() {
+    use okx_protocol::research_ipc::{
+        GraphClosedBar, GraphPublicationCursor, GraphSessionRequest,
+    };
+    let fixture = Fixture::new().await;
+    let _capture = fixture.owner.recorded_capture_gate.write().await;
+    let account = fixture.owner.configuration.alias.clone();
+    let before = money(&fixture).await;
+    let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
+    let instance_id = "graph_status_bound";
+    completed_data(
+        fixture.request(StrategyRequest::Create {
+            idempotency_key: "graph_status_create".into(),
+            instance_id: instance_id.into(),
+            definition_id: "graph_signal_v1".into(),
+            version: 1,
+            parameters: graph_signal_parameters(),
+            instruments: vec!["BTC-USDT-SWAP".into()],
+            timeframe_ms: 60_000,
+            budget_usd: "2".into(),
+        }).await,
+    );
+    completed_data(
+        fixture.request(StrategyRequest::Start {
+            idempotency_key: "graph_status_start".into(),
+            instance_id: instance_id.into(),
+        }).await,
+    );
+    let instance = fixture.owner.execution.store.strategy_instances(deadline()).await.unwrap()
+        .into_iter().find(|v| v.instance_id == instance_id).unwrap();
+    let configuration: GraphStrategyConfigurationV1 = serde_json::from_str(&instance.parameters).unwrap();
+    let binding = super::graph_activation::activation_binding(
+        &fixture.owner.configuration.account_key.wire(),
+        &instance,
+        &configuration,
+        "BTC-USDT-SWAP",
+    ).unwrap();
+    let restored = fixture.ctx.research.graph_signal(GraphSessionRequest::Restore {
+        session_id: binding.session_id.clone(),
+        definition: Box::new(configuration.signal),
+        capacity: 64,
+        history: vec![
+            GraphClosedBar { time_ms: 60_000, close: Some(100.0) },
+            GraphClosedBar { time_ms: 120_000, close: Some(105.0) },
+        ],
+    }).await.unwrap();
+    let original = GraphPublicationCursor::from_restored(&restored).unwrap();
+    assert!(original.matches_binding(&binding.session_id, &binding.graph_sha256));
+    fixture.native.trade.bind_graph_strategy(&account, &binding, &original).await.unwrap();
+    let status = completed_data(fixture.request(StrategyRequest::Status {
+        instance_id: instance_id.into(),
+    }).await);
+    assert_eq!(status["graph_execution"]["state"], "FINANCE_BOUND_EXECUTION_DISABLED");
+    assert_eq!(status["graph_execution"]["bound_instruments"], 1);
+    assert_eq!(status["graph_execution"]["configured_instruments"], 1);
+    assert_eq!(money(&fixture).await, before);
+    assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
+    drop(_capture);
+    fixture.finish().await;
+}
 fn rejected(response: AgentResponse, code: &str) {
     assert_eq!(response.status, AgentResponseStatus::Rejected);
     assert_eq!(response.quality, DataQuality::NotReady);

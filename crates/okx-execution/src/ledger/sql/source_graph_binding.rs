@@ -23,17 +23,19 @@ struct PreparedGraphOpen {
 
 fn binding_key(binding: &EngineGraphBinding) -> String {
     format!(
-        "graph-binding:{:x}:{}",
+        "graph-binding:{:x}:{}:{:x}",
         Sha256::digest(binding.instance_id.as_bytes()),
-        binding.policy_revision
+        binding.policy_revision,
+        Sha256::digest(binding.instrument_id.as_bytes())
     )
 }
 
 fn cursor_prefix(binding: &EngineGraphBinding) -> String {
     format!(
-        "graph-cursor:{:x}:{}:",
+        "graph-cursor:{:x}:{}:{:x}:",
         Sha256::digest(binding.instance_id.as_bytes()),
-        binding.policy_revision
+        binding.policy_revision,
+        Sha256::digest(binding.instrument_id.as_bytes())
     )
 }
 
@@ -43,9 +45,10 @@ fn cursor_key(binding: &EngineGraphBinding, sequence: u64) -> String {
 
 fn open_key(binding: &EngineGraphBinding, sequence: u64) -> String {
     format!(
-        "graph-open:{:x}:{}:{sequence:020}",
+        "graph-open:{:x}:{}:{:x}:{sequence:020}",
         Sha256::digest(binding.instance_id.as_bytes()),
-        binding.policy_revision
+        binding.policy_revision,
+        Sha256::digest(binding.instrument_id.as_bytes())
     )
 }
 
@@ -206,7 +209,7 @@ impl AccountStore {
         Ok(cursor)
     }
 
-    /// Read the only installed graph binding for the **current** strategy
+    /// Read the binding for exactly one instrument of the current strategy
     /// revision. Stopped or reconfigured strategies cannot revive an old one.
     pub(crate) fn graph_progress_sql(
         db: &Connection,
@@ -230,7 +233,7 @@ impl AccountStore {
 
     /// Register an existing, explicitly activated strategy and its verified
     /// Research restore cursor. Replays return the current durable progress;
-    /// they never rewind it. One graph per strategy policy revision.
+    /// they never rewind it. One graph per instrument and policy revision.
     pub(crate) fn bind_graph_sql(
         tx: &rusqlite::Transaction<'_>,
         scope: (&str, &str),
@@ -1191,6 +1194,65 @@ mod tests {
             },
             "stale receipts advance the scan but cannot resurrect a stopped graph"
         );
+    }
+
+    #[test]
+    fn one_revision_can_bind_two_instruments_with_independent_cursors() {
+        let mut db = database();
+        let scope = ("installation", "account-a");
+        let (btc, eth) = {
+            let tx = db.transaction().unwrap();
+            create(&tx, scope.1);
+            let btc = binding(&tx, scope.1);
+            let eth = EngineGraphBinding {
+                session_id: "research:strategy-a:eth".into(),
+                graph_sha256: "b".repeat(64),
+                instrument_id: "ETH-USDT-SWAP".into(),
+                ..btc.clone()
+            };
+            AccountStore::bind_graph_sql(
+                &tx, scope, &btc, &cursor(2, TargetPosition::Hold), 121_000,
+            ).unwrap();
+            AccountStore::bind_graph_sql(
+                &tx, scope, &eth, &cursor(2, TargetPosition::Flat), 121_000,
+            ).unwrap();
+            tx.commit().unwrap();
+            (btc, eth)
+        };
+        let page = AccountStore::graph_bindings_page_sql(&db, scope, 4, 0).unwrap();
+        assert_eq!(page.scanned, 2);
+        assert_eq!(page.active.len(), 2);
+        assert!(page.active.contains(&btc));
+        assert!(page.active.contains(&eth));
+        {
+            let tx = db.transaction().unwrap();
+            assert_eq!(
+                AccountStore::acknowledge_graph_idle_sql(
+                    &tx, scope, &btc, &cursor(3, TargetPosition::Hold), 181_000,
+                ).unwrap(),
+                GraphIdleAck::Advanced
+            );
+            tx.commit().unwrap();
+        }
+        assert_eq!(
+            AccountStore::graph_progress_sql(&db, scope, &btc).unwrap().unwrap().cursor.sequence,
+            3
+        );
+        assert_eq!(
+            AccountStore::graph_progress_sql(&db, scope, &eth).unwrap().unwrap().cursor.sequence,
+            2
+        );
+        let tx = db.transaction().unwrap();
+        let conflicting = EngineGraphBinding {
+            session_id: "research:forged".into(),
+            ..eth
+        };
+        assert!(matches!(
+            AccountStore::bind_graph_sql(
+                &tx, scope, &conflicting, &cursor(2, TargetPosition::Hold), 241_000,
+            ),
+            Err(StoreError::Invalid("GRAPH_FINANCE_BINDING_CONFLICT"))
+        ));
     }
 
     #[test]
