@@ -545,7 +545,9 @@ async fn t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated() 
     if result["rows"].is_null() {
         let id = result["id"].as_str().expect("queued market job ID");
         assert_eq!(terminal(&client, id).await["state"], "completed");
-        result = client.market(request.clone(), None, None).await.unwrap();
+        let mut first_page = request.clone();
+        first_page.cursor = Some(format!("{id}:0"));
+        result = client.market(first_page, None, None).await.unwrap();
     }
     // A full provenance row may exceed the response byte budget. Cursor
     // pagination must replay the immutable artifact, never refetch venues.
