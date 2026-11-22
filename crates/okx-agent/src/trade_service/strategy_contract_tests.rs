@@ -1165,6 +1165,7 @@ async fn explicit_graph_open_posts_once_through_native_risk_and_durable_cursor()
         loop {
             observations.tick().await;
             if fixture
+                .native
                 .owner
                 .campaign_summary(fixture.native.campaign.clone())
                 .await
@@ -1189,7 +1190,7 @@ async fn explicit_graph_open_posts_once_through_native_risk_and_durable_cursor()
     let (market, public, socket) = native::raw_market();
     let mut updates = public.subscribe_market_updates();
     let (market_stop, stopped) = watch::channel(false);
-    let market_task = tokio::spawn(async move { market.run(stopped) });
+    let market_task = tokio::spawn(market.run(stopped));
     public.demand_instrument("BTC-USDT-SWAP").await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -1367,6 +1368,7 @@ async fn explicit_graph_open_posts_once_through_native_risk_and_durable_cursor()
     );
     assert!(
         fixture
+            .native
             .owner
             .reconcilable_intents_page(
                 fixture.native.config.account_key.wire(),
