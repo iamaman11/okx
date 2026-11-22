@@ -34,6 +34,11 @@ hashes are retained as **non-deployable** evidence. It never publishes a new
 Native base; `.github/workflows/publish-native-base.yml` continues to require
 fresh `windows-native-full` plus B1 and a complete four-EXE artifact.
 
+Draft PRs with only host Rust sources run direct Launcher and CONTROL Cargo
+tests of library and binary targets via `scripts/check_p0.py`, reusing the
+same host path classifier. Manifest, shared-code and CI changes retain the
+expanded Draft checks; no host exception covers them.
+
 Acceptance controls:
 
 1. A CONTROL-only or Launcher-only Rust diff selects its own Windows job;

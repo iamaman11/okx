@@ -35,6 +35,25 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(select("M", "crates/okx-protocol/src/research_ipc.rs"), {"wire", "worker", "ipc", "mcp"})
         self.assertFalse(select("M", "docs/testing.md"))
 
+    def test_host_source_uses_owner_and_consumer_not_expanded(self):
+        for path in (
+            "crates/okx-host-control/src/main.rs",
+            "crates/okx-host-control/src/lifecycle/activation.rs",
+            "crates/okx-host-launcher/src/main.rs",
+            "crates/okx-host-launcher/src/stdio_capture.rs",
+        ):
+            self.assertEqual(select("M", path), {"host"})
+            self.assertEqual(select("A", path), {"host"})
+            self.assertEqual(select("D", path), {"expanded"})
+        for path in (
+            "crates/okx-host-control/Cargo.toml",
+            "crates/okx-host-launcher/build.rs",
+            "crates/okx-host-launcher/assets/manifest.json",
+            "crates/okx-agent/src/trade_service/mod.rs",
+            "crates/okx-protocol/src/lib.rs",
+        ):
+            self.assertNotEqual(select("M", path), {"host"})
+
     def test_expand_uncertain_impact(self):
         for path in ("Cargo.lock", "crates/okx-kernel/Cargo.toml", "rust-toolchain.toml",
                      "crates/okx-research-worker/build.rs", ".github/workflows/ci.yml", "unknown"):
