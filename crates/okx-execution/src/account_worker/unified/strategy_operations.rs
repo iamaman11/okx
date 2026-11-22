@@ -2,7 +2,7 @@
 use super::UnifiedFinanceHandle;
 use crate::graph_binding::{
     EngineGraphBinding, EngineGraphBindingPage, EngineGraphCursor, EngineGraphProgress,
-    GraphCloseAdmission, GraphCloseClaim, GraphIdleAck, GraphOpenAdmission,
+    GraphCloseAdmission, GraphCloseClaim, GraphCloseRecovery, GraphIdleAck, GraphOpenAdmission,
 };
 use crate::{
     AccountStore, Decision, NewIntent, OperationReceipt, StoreError, StoreResult, StrategyInstance,
@@ -29,6 +29,25 @@ pub struct StrategyDecisionClaimCommand {
     pub time: i64,
 }
 impl UnifiedFinanceHandle {
+    /// Bounded read-only reconstruction from original finance SQL, including
+    /// source-backed Close settlement, after Engine restart.
+    pub async fn graph_close_recoveries(
+        &self,
+        deadline: Instant,
+        account: String,
+        binding: EngineGraphBinding,
+        published: EngineGraphCursor,
+    ) -> StoreResult<Vec<GraphCloseRecovery>> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let result = AccountStore::graph_close_recoveries_sql(
+                &tx, (&installation, &account), &binding, &published,
+            )?;
+            tx.commit()?;
+            Ok(result)
+        }).await
+    }
     /// Read only: bounded discovery through the same installed finance owner.
     pub async fn graph_bindings_page(
         &self,

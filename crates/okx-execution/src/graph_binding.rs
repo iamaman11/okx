@@ -65,6 +65,25 @@ pub enum GraphCloseClaim {
     Replayed { intent_id: String },
 }
 
+/// Finance-owned restart state for one original opening reference. A venue
+/// terminal label alone is NOT proof that exchange fills, separate bills and
+/// local risk release have been reconciled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphCloseRecoveryStage {
+    AwaitingOrderOutcome,
+    TerminalResidualExposure,
+    AwaitingSourceSettlement,
+    Settled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphCloseRecovery {
+    pub original_reference: String,
+    pub intent_id: String,
+    pub intent_state: crate::IntentState,
+    pub stage: GraphCloseRecoveryStage,
+}
+
 /// Shared exact graph-derived identity for TradeService and its finance SQL
 /// owner. Neither layer independently invents a second idempotency rule.
 #[derive(Debug, Clone, PartialEq, Eq)]

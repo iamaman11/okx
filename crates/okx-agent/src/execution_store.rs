@@ -79,6 +79,16 @@ pub struct ExecutionStore {
 }
 
 impl ExecutionStore {
+    /// Original finance SQL is the only source of restart/settlement status.
+    pub async fn graph_close_recoveries(
+        &self,
+        deadline: Instant,
+        binding: okx_execution::graph_binding::EngineGraphBinding,
+        published: okx_execution::graph_binding::EngineGraphCursor,
+    ) -> StoreResult<Vec<okx_execution::graph_binding::GraphCloseRecovery>> {
+        let Self { owner, account } = self;
+        owner.graph_close_recoveries(deadline, account.wire.clone(), binding, published).await
+    }
     pub async fn graph_bindings_page(
         &self,
         deadline: Instant,
