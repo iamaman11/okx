@@ -1342,7 +1342,15 @@ async fn explicit_graph_open_respects_native_instance_nav_gate_without_order_pos
             .unwrap_err(),
         "INSTANCE_NAV_INCOMPLETE"
     );
-    assert!(fixture.native.feed.outbound_posts.lock().unwrap().is_empty());
+    assert!(
+        fixture
+            .native
+            .feed
+            .outbound_posts
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(money(&fixture).await, before);
     assert_eq!(
         fixture
@@ -1369,7 +1377,15 @@ async fn explicit_graph_open_respects_native_instance_nav_gate_without_order_pos
             plan: okx_execution::position_target::TargetPlan::Open(_),
         }]
     ));
-    assert!(fixture.native.feed.outbound_posts.lock().unwrap().is_empty());
+    assert!(
+        fixture
+            .native
+            .feed
+            .outbound_posts
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
 
     drop(permit);
     drop(_capture);
