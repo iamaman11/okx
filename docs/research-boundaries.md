@@ -92,8 +92,8 @@ Admission freshness remains independently enforced and negatively tested.
 ## Direct checks after building
 
 ```powershell
-cargo build --locked -p okx-research-worker --bin okx-research-worker
-$env:OKX_RESEARCH_WORKER_TEST_EXE = (Resolve-Path target/debug/okx-research-worker.exe).Path
+cargo build --locked -p okx-research-worker --bin okx-research-service
+$env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path target/debug/okx-research-service.exe).Path
 cargo test --locked -p okx-research-worker
 cargo test --locked -p okx-agent --lib research_dispatch_tests::
 cargo test --locked -p okx-agent --lib research_client::
