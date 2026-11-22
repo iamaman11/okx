@@ -201,7 +201,12 @@ impl GraphTargetBinding {
             GraphSignalIntent::SetTarget(GraphPosition::Long) => TargetPosition::Long,
             GraphSignalIntent::SetTarget(GraphPosition::Short) => TargetPosition::Short,
         };
-        let TradeRequest::Close { idempotency_key, reference, .. } = request else {
+        let TradeRequest::Close {
+            idempotency_key,
+            reference,
+            ..
+        } = request
+        else {
             return Err("GRAPH_CLOSE_REQUEST_REQUIRED".into());
         };
         let published = EngineGraphCursor {
@@ -209,7 +214,9 @@ impl GraphTargetBinding {
             closed_ms: publication.closed_ms,
             intent: target,
         };
-        let identity = self.storage_binding().close_identity(&published, reference)
+        let identity = self
+            .storage_binding()
+            .close_identity(&published, reference)
             .ok_or("GRAPH_CLOSE_IDENTITY_INVALID")?;
         if *idempotency_key != identity.decision_key {
             return Err("GRAPH_CLOSE_IDEMPOTENCY_MISMATCH".into());
@@ -485,25 +492,35 @@ impl TradeService {
         if !binding.valid() || resources.configuration.account_key.wire() != binding.account_key {
             return Err("GRAPH_CLOSE_ACCOUNT_MISMATCH".into());
         }
-        let instance = resources.execution.store.strategy_instances(super::deadline())
-            .await.map_err(super::err)?.into_iter()
+        let instance = resources
+            .execution
+            .store
+            .strategy_instances(super::deadline())
+            .await
+            .map_err(super::err)?
+            .into_iter()
             .find(|v| v.instance_id == binding.instance_id)
             .ok_or("GRAPH_CLOSE_STRATEGY_MISSING")?;
-        let configuration: GraphStrategyConfigurationV1 = serde_json::from_str(&instance.parameters)
-            .map_err(|_| "GRAPH_CLOSE_CONFIGURATION_INVALID")?;
+        let configuration: GraphStrategyConfigurationV1 =
+            serde_json::from_str(&instance.parameters)
+                .map_err(|_| "GRAPH_CLOSE_CONFIGURATION_INVALID")?;
         if !configuration.valid()
             || !configuration.instruments.contains(&binding.instrument_id)
             || configuration.timeframe_ms != binding.timeframe_ms
         {
             return Err("GRAPH_CLOSE_CONFIGURATION_MISMATCH".into());
         }
-        let confirmed = self.graph_confirmed_cursor(account, binding)
-            .await?.ok_or("GRAPH_FINANCE_BINDING_MISSING")?;
-        let preview = self.preview_graph_publication(account, binding, &confirmed, publication)
-            .await?.ok_or("GRAPH_CLOSE_ALREADY_CONFIRMED")?;
-        let candidates = binding.close_requests(
-            &instance, publication, &configuration.execution, &preview,
-        )?.ok_or("GRAPH_CLOSE_POLICY_UNARMED")?;
+        let confirmed = self
+            .graph_confirmed_cursor(account, binding)
+            .await?
+            .ok_or("GRAPH_FINANCE_BINDING_MISSING")?;
+        let preview = self
+            .preview_graph_publication(account, binding, &confirmed, publication)
+            .await?
+            .ok_or("GRAPH_CLOSE_ALREADY_CONFIRMED")?;
+        let candidates = binding
+            .close_requests(&instance, publication, &configuration.execution, &preview)?
+            .ok_or("GRAPH_CLOSE_POLICY_UNARMED")?;
         if !candidates.iter().any(|candidate| candidate == request) {
             return Err("GRAPH_CLOSE_REQUEST_NOT_TARGETED".into());
         }
@@ -931,7 +948,10 @@ mod tests {
         assert_eq!(context.original_reference, "original-entry");
         assert_eq!(context.publication.sequence, 3);
         let mut wrong_key = requests[0].clone();
-        if let TradeRequest::Close { idempotency_key, .. } = &mut wrong_key {
+        if let TradeRequest::Close {
+            idempotency_key, ..
+        } = &mut wrong_key
+        {
             *idempotency_key = "forged-key".into();
         }
         assert_eq!(

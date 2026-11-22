@@ -1,6 +1,6 @@
 //! Close only the verified remaining lots belonging to the original intent.
-use super::*;
 use super::super::execute::GraphCloseContext;
+use super::*;
 
 impl TradeService {
     pub(in crate::trade_service) async fn close(
@@ -120,7 +120,10 @@ impl TradeService {
                 self.execute_for_graph_close(r, &command, bound_hash, context)
                     .await
             }
-            None => self.execute_bound(r, &command, governance, Some(bound_hash)).await,
+            None => {
+                self.execute_bound(r, &command, governance, Some(bound_hash))
+                    .await
+            }
         }
     }
 }

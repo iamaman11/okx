@@ -754,9 +754,15 @@ impl TradeService {
     ) -> Result<Value, String> {
         let version = context.binding.definition_version.clone();
         self.execute_inner(
-            r, request, None, None, Some(version), None,
+            r,
+            request,
+            None,
+            None,
+            Some(version),
+            None,
             Some(GraphExecutionContext::Open(context)),
-        ).await
+        )
+        .await
     }
 
     /// Reuse the ORIGINAL reduction planner, account mutation fence, native
@@ -772,9 +778,15 @@ impl TradeService {
     ) -> Result<Value, String> {
         let version = context.binding.definition_version.clone();
         self.execute_inner(
-            r, request, None, Some(bound_hash), Some(version), None,
+            r,
+            request,
+            None,
+            Some(bound_hash),
+            Some(version),
+            None,
             Some(GraphExecutionContext::Close(context)),
-        ).await
+        )
+        .await
     }
     async fn execute_inner(
         &self,
@@ -808,7 +820,9 @@ impl TradeService {
                 {
                     return Err("GRAPH_OPEN_REQUEST_SCOPE_MISMATCH".into());
                 }
-                let identity = context.binding.open_identity(&context.publication)
+                let identity = context
+                    .binding
+                    .open_identity(&context.publication)
                     .ok_or("GRAPH_OPEN_IDENTITY_INVALID")?;
                 if *idempotency_key != identity.decision_key {
                     return Err("GRAPH_OPEN_IDEMPOTENCY_MISMATCH".into());
@@ -822,7 +836,9 @@ impl TradeService {
                 {
                     return Err("GRAPH_CLOSE_REQUEST_SCOPE_MISMATCH".into());
                 }
-                let identity = context.binding.close_identity(&context.publication, &context.original_reference)
+                let identity = context
+                    .binding
+                    .close_identity(&context.publication, &context.original_reference)
                     .ok_or("GRAPH_CLOSE_IDENTITY_INVALID")?;
                 if *idempotency_key != identity.decision_key {
                     return Err("GRAPH_CLOSE_IDEMPOTENCY_MISMATCH".into());
@@ -1033,19 +1049,39 @@ impl TradeService {
 
         let prepared = match graph {
             Some(GraphExecutionContext::Open(graph)) => {
-                let admitted = r.execution.store.prepare_graph_open(
-                    until, graph.binding, graph.publication, decision, intent, decision_at,
-                ).await.map_err(err)?;
+                let admitted = r
+                    .execution
+                    .store
+                    .prepare_graph_open(
+                        until,
+                        graph.binding,
+                        graph.publication,
+                        decision,
+                        intent,
+                        decision_at,
+                    )
+                    .await
+                    .map_err(err)?;
                 if !matches!(admitted.claim, GraphOpenClaim::Prepared { .. }) {
                     return Err("GRAPH_OPEN_REPLAY_STATUS_REQUIRED".into());
                 }
                 admitted.intent
             }
             Some(GraphExecutionContext::Close(graph)) => {
-                let admitted = r.execution.store.prepare_graph_close(
-                    until, graph.binding, graph.publication,
-                    graph.original_reference, decision, intent, decision_at,
-                ).await.map_err(err)?;
+                let admitted = r
+                    .execution
+                    .store
+                    .prepare_graph_close(
+                        until,
+                        graph.binding,
+                        graph.publication,
+                        graph.original_reference,
+                        decision,
+                        intent,
+                        decision_at,
+                    )
+                    .await
+                    .map_err(err)?;
                 if !matches!(admitted.claim, GraphCloseClaim::Prepared { .. }) {
                     return Err("GRAPH_CLOSE_REPLAY_STATUS_REQUIRED".into());
                 }
@@ -1053,8 +1089,10 @@ impl TradeService {
             }
             None => {
                 let (owner, account) = r.execution.store.scope();
-                owner.prepare_admission(until, account.to_owned(), decision, intent)
-                    .await.map_err(err)?
+                owner
+                    .prepare_admission(until, account.to_owned(), decision, intent)
+                    .await
+                    .map_err(err)?
             }
         };
         tracing::Span::current().record("intent_id", prepared.intent_id.as_str());

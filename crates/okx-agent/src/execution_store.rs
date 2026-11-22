@@ -120,7 +120,10 @@ impl ExecutionStore {
     }
 
     /// Original finance owner stages one exact reduction without cursor ACK.
-    #[expect(clippy::too_many_arguments, reason = "Keep the original lot reference and graph evidence explicit.")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the original lot reference and graph evidence explicit."
+    )]
     pub async fn prepare_graph_close(
         &self,
         deadline: Instant,
@@ -132,10 +135,18 @@ impl ExecutionStore {
         now: i64,
     ) -> StoreResult<okx_execution::graph_binding::GraphCloseAdmission> {
         let Self { owner, account } = self;
-        owner.prepare_graph_close(
-            deadline, account.wire.clone(), binding, published,
-            original_reference, decision, intent, now,
-        ).await
+        owner
+            .prepare_graph_close(
+                deadline,
+                account.wire.clone(),
+                binding,
+                published,
+                original_reference,
+                decision,
+                intent,
+                now,
+            )
+            .await
     }
 
     pub async fn graph_progress(
