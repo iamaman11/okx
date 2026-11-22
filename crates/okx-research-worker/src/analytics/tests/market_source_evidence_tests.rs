@@ -74,6 +74,23 @@ fn t06_t13_all_three_sources_are_immutable_chunked_and_reconstructable() {
         assert_eq!(source["quality"], "verified_normalized_capture");
         assert!(source["capture_hash"].is_string());
         assert_eq!(source["publication_time_verified"], false);
+        assert_eq!(
+            source["verified_storage_io"]["scope"],
+            "source_hash_reconstruction_only"
+        );
+        assert_eq!(
+            source["verified_storage_io"]["successful_artifact_file_reads"]
+                .as_u64()
+                .unwrap(),
+            1 + source["pages"].as_u64().unwrap()
+        );
+        assert!(
+            source["verified_storage_io"]["artifact_bytes_read"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(source["verified_storage_io"]["os_physical_disk_reads"].is_null());
     }
     linked["source_integrity"] = integrity;
     let proof = replay_proof::verify_persisted_market_metrics(
