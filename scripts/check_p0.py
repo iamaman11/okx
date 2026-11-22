@@ -443,6 +443,9 @@ def execute(scopes):
             "trade_service::graph_target::tests::flip_close_candidates_cannot_open_before_settlement",
         ), exact=True)
         tests("okx-agent", required=(
+            "trade_service::strategies::strategy_contract_tests::graph_close_internal_route_denies_unowned_exposure_before_any_order_post",
+        ), exact=True)
+        tests("okx-agent", required=(
             "trade_service::graph_activation::tests::identity_is_stable_per_account_revision_and_instrument",
         ), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)

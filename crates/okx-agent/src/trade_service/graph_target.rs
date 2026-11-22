@@ -4,7 +4,7 @@
 //! publication cursor and atomic decision claim are prerequisites to routing
 //! any candidate to `TradeService::execute_for_definition` or `close`.
 
-use super::execute::GraphOpenContext;
+use super::execute::{GraphCloseContext, GraphOpenContext};
 use super::{TradeRequest, TradeService};
 use okx_execution::{
     StrategyInstance, StrategyPositionSnapshot,
@@ -178,6 +178,47 @@ impl GraphTargetBinding {
             requests.push(request);
         }
         Ok(Some(requests))
+    }
+
+    /// Bind a candidate to its exact original lot reference. Caller must
+    /// separately verify current policy and the finance-owned target preview.
+    fn close_context(
+        &self,
+        publication: &GraphSignalPublication,
+        request: &TradeRequest,
+    ) -> Result<GraphCloseContext, String> {
+        if !self.valid()
+            || !publication.valid()
+            || publication.session_id != self.session_id
+            || publication.graph_sha256 != self.graph_sha256
+            || publication.closed_ms % self.timeframe_ms != 0
+        {
+            return Err("GRAPH_CLOSE_PUBLICATION_MISMATCH".into());
+        }
+        let target = match publication.intent {
+            GraphSignalIntent::Hold => return Err("GRAPH_CLOSE_ACTION_REQUIRED".into()),
+            GraphSignalIntent::SetTarget(GraphPosition::Flat) => TargetPosition::Flat,
+            GraphSignalIntent::SetTarget(GraphPosition::Long) => TargetPosition::Long,
+            GraphSignalIntent::SetTarget(GraphPosition::Short) => TargetPosition::Short,
+        };
+        let TradeRequest::Close { idempotency_key, reference, .. } = request else {
+            return Err("GRAPH_CLOSE_REQUEST_REQUIRED".into());
+        };
+        let published = EngineGraphCursor {
+            sequence: publication.sequence,
+            closed_ms: publication.closed_ms,
+            intent: target,
+        };
+        let identity = self.storage_binding().close_identity(&published, reference)
+            .ok_or("GRAPH_CLOSE_IDENTITY_INVALID")?;
+        if *idempotency_key != identity.decision_key {
+            return Err("GRAPH_CLOSE_IDEMPOTENCY_MISMATCH".into());
+        }
+        Ok(GraphCloseContext {
+            binding: self.storage_binding(),
+            publication: published,
+            original_reference: reference.clone(),
+        })
     }
 
     /// Reconstruct the typed Engine binding from original finance SQL after
@@ -427,6 +468,47 @@ impl TradeService {
         }
         self.execute_for_graph_open(&resources, request, context)
             .await
+    }
+
+    /// The internal reduction route reuses ORIGINAL TradeService::Close and
+    /// its existing financial admission/venue owner. It validates explicit
+    /// Trade policy and current original finance target before touching any
+    /// command path. Autonomous dispatch remains separately disabled.
+    pub(crate) async fn execute_graph_close(
+        &self,
+        account: &str,
+        binding: &GraphTargetBinding,
+        publication: &GraphSignalPublication,
+        request: &TradeRequest,
+    ) -> Result<serde_json::Value, String> {
+        let resources = self.resources(account).await?;
+        if !binding.valid() || resources.configuration.account_key.wire() != binding.account_key {
+            return Err("GRAPH_CLOSE_ACCOUNT_MISMATCH".into());
+        }
+        let instance = resources.execution.store.strategy_instances(super::deadline())
+            .await.map_err(super::err)?.into_iter()
+            .find(|v| v.instance_id == binding.instance_id)
+            .ok_or("GRAPH_CLOSE_STRATEGY_MISSING")?;
+        let configuration: GraphStrategyConfigurationV1 = serde_json::from_str(&instance.parameters)
+            .map_err(|_| "GRAPH_CLOSE_CONFIGURATION_INVALID")?;
+        if !configuration.valid()
+            || !configuration.instruments.contains(&binding.instrument_id)
+            || configuration.timeframe_ms != binding.timeframe_ms
+        {
+            return Err("GRAPH_CLOSE_CONFIGURATION_MISMATCH".into());
+        }
+        let confirmed = self.graph_confirmed_cursor(account, binding)
+            .await?.ok_or("GRAPH_FINANCE_BINDING_MISSING")?;
+        let preview = self.preview_graph_publication(account, binding, &confirmed, publication)
+            .await?.ok_or("GRAPH_CLOSE_ALREADY_CONFIRMED")?;
+        let candidates = binding.close_requests(
+            &instance, publication, &configuration.execution, &preview,
+        )?.ok_or("GRAPH_CLOSE_POLICY_UNARMED")?;
+        if !candidates.iter().any(|candidate| candidate == request) {
+            return Err("GRAPH_CLOSE_REQUEST_NOT_TARGETED".into());
+        }
+        let context = binding.close_context(publication, request)?;
+        self.close_for_graph(&resources, request, context).await
     }
 
     /// Persist one exact Engine activation identity after Research Restore.
@@ -844,6 +926,17 @@ mod tests {
                 reference: "original-entry".into(),
                 expires_in_ms: 10_000,
             }
+        );
+        let context = binding.close_context(&event, &requests[0]).unwrap();
+        assert_eq!(context.original_reference, "original-entry");
+        assert_eq!(context.publication.sequence, 3);
+        let mut wrong_key = requests[0].clone();
+        if let TradeRequest::Close { idempotency_key, .. } = &mut wrong_key {
+            *idempotency_key = "forged-key".into();
+        }
+        assert_eq!(
+            binding.close_context(&event, &wrong_key).unwrap_err(),
+            "GRAPH_CLOSE_IDEMPOTENCY_MISMATCH"
         );
         assert_eq!(
             binding

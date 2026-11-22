@@ -408,6 +408,91 @@ async fn graph_target_preview_reads_the_original_account_owner_without_any_order
 }
 
 #[tokio::test]
+async fn graph_close_internal_route_denies_unowned_exposure_before_any_order_post() {
+    use okx_execution::position_target::TargetPosition;
+    use okx_protocol::research_ipc::{
+        GraphPosition, GraphPublicationCursor, GraphSessionId, GraphSessionReply,
+        GraphSignalIntent, GraphSignalPublication,
+    };
+    let fixture = Fixture::new().await;
+    let _capture = fixture.owner.recorded_capture_gate.write().await;
+    completed_data(fixture.request(StrategyRequest::Create {
+        idempotency_key: "graph_close_route_create".into(),
+        instance_id: "graph_close_route".into(),
+        definition_id: "graph_signal_v1".into(),
+        version: 1,
+        parameters: json!({
+            "signal": graph_signal_parameters(),
+            "execution": {"mode":"trade","max_slippage_bps":5,"stop_distance_bps":50}
+        }),
+        instruments: vec!["BTC-USDT-SWAP".into()],
+        timeframe_ms: 60_000,
+        budget_usd: "2".into(),
+    }).await);
+    completed_data(fixture.request(StrategyRequest::Start {
+        idempotency_key: "graph_close_route_start".into(),
+        instance_id: "graph_close_route".into(),
+    }).await);
+    let instance = fixture.owner.execution.store.strategy_instances(deadline()).await.unwrap()
+        .into_iter().find(|v| v.instance_id == "graph_close_route").unwrap();
+    let session = GraphSessionId::new("engine:close-boundary".into()).unwrap();
+    let graph_hash = "a".repeat(64);
+    let binding = super::graph_target::GraphTargetBinding {
+        account_key: fixture.owner.configuration.account_key.wire(),
+        instance_id: instance.instance_id,
+        definition_version: instance.definition_version,
+        policy_revision: instance.policy_revision,
+        session_id: session.clone(),
+        graph_sha256: graph_hash.clone(),
+        instrument_id: "BTC-USDT-SWAP".into(),
+        timeframe_ms: 60_000,
+    };
+    let restored = GraphPublicationCursor::from_restored(&GraphSessionReply::Evaluated {
+        schema: GraphSessionReply::SCHEMA.into(),
+        session_id: session.clone(),
+        graph_sha256: graph_hash.clone(),
+        last_closed_ms: 120_000,
+        observed_bars: 2,
+        intent: GraphSignalIntent::Hold,
+    }).unwrap();
+    let account = fixture.owner.configuration.alias.clone();
+    fixture.native.trade.bind_graph_strategy(&account, &binding, &restored)
+        .await.unwrap();
+    let publication = GraphSignalPublication {
+        schema: GraphSessionReply::SCHEMA.into(),
+        session_id: session,
+        graph_sha256: graph_hash,
+        closed_ms: 180_000,
+        sequence: 3,
+        intent: GraphSignalIntent::SetTarget(GraphPosition::Flat),
+    };
+    let identity = binding.storage_binding().close_identity(
+        &okx_execution::graph_binding::EngineGraphCursor {
+            sequence: 3, closed_ms: 180_000, intent: TargetPosition::Flat,
+        }, "foreign-opening",
+    ).unwrap();
+    let request = TradeRequest::Close {
+        idempotency_key: identity.decision_key,
+        reference: "foreign-opening".into(),
+        expires_in_ms: 10_000,
+    };
+    let before = money(&fixture).await;
+    let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
+    assert_eq!(
+        fixture.native.trade.execute_graph_close(
+            &account, &binding, &publication, &request,
+        ).await.unwrap_err(),
+        "GRAPH_CLOSE_EXISTING_EXPOSURE_REQUIRED"
+    );
+    assert_eq!(fixture.native.trade.graph_confirmed_cursor(&account, &binding)
+        .await.unwrap().unwrap().last_sequence(), 2);
+    assert_eq!(money(&fixture).await, before);
+    assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
+    drop(_capture);
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_post() {
     use super::graph_consumer::{EngineGraphConsumer, GraphConsumeOutcome};
     use okx_protocol::research_ipc::{

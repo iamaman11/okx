@@ -4,7 +4,9 @@ use okx_api::{
     ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, ApiTriggerPriceType,
     AttachedAlgoOrderRequest, PlaceOrderRequest,
 };
-use okx_execution::graph_binding::{EngineGraphBinding, EngineGraphCursor, GraphOpenClaim};
+use okx_execution::graph_binding::{
+    EngineGraphBinding, EngineGraphCursor, GraphCloseClaim, GraphOpenClaim,
+};
 use std::str::FromStr;
 
 /// A prevalidated Research publication bound to an Engine-owned strategy.
@@ -13,6 +15,19 @@ use std::str::FromStr;
 pub(super) struct GraphOpenContext {
     pub binding: EngineGraphBinding,
     pub publication: EngineGraphCursor,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct GraphCloseContext {
+    pub binding: EngineGraphBinding,
+    pub publication: EngineGraphCursor,
+    pub original_reference: String,
+}
+
+#[derive(Debug, Clone)]
+enum GraphExecutionContext {
+    Open(GraphOpenContext),
+    Close(GraphCloseContext),
 }
 /// Immutable provenance for checking the fresh post-HELD FX rate against the
 /// exact native account that owns the central reservation.
@@ -738,8 +753,28 @@ impl TradeService {
         context: GraphOpenContext,
     ) -> Result<Value, String> {
         let version = context.binding.definition_version.clone();
-        self.execute_inner(r, request, None, None, Some(version), None, Some(context))
-            .await
+        self.execute_inner(
+            r, request, None, None, Some(version), None,
+            Some(GraphExecutionContext::Open(context)),
+        ).await
+    }
+
+    /// Reuse the ORIGINAL reduction planner, account mutation fence, native
+    /// risk evidence and venue path; ONLY the first PREPARE is graph-scoped.
+    /// Not invoked by the autonomous Graph consumer until settlement/retry
+    /// acceptance is proven separately.
+    pub(super) async fn execute_for_graph_close(
+        &self,
+        r: &Arc<AccountResources>,
+        request: &TradeRequest,
+        bound_hash: String,
+        context: GraphCloseContext,
+    ) -> Result<Value, String> {
+        let version = context.binding.definition_version.clone();
+        self.execute_inner(
+            r, request, None, Some(bound_hash), Some(version), None,
+            Some(GraphExecutionContext::Close(context)),
+        ).await
     }
     async fn execute_inner(
         &self,
@@ -749,7 +784,7 @@ impl TradeService {
         bound_hash: Option<String>,
         expected_definition: Option<String>,
         claimed_decision: Option<(String, String)>,
-        graph_open: Option<GraphOpenContext>,
+        graph: Option<GraphExecutionContext>,
     ) -> Result<Value, String> {
         let TradeRequest::Execute {
             idempotency_key,
@@ -765,23 +800,36 @@ impl TradeService {
         else {
             return Err("EXECUTE_REQUIRED".into());
         };
-        let graph_identity = if let Some(graph) = &graph_open {
-            if *operation != TradeOperation::Open
-                || graph.binding.instance_id != *strategy_instance
-                || graph.binding.instrument_id != *instrument
-            {
-                return Err("GRAPH_OPEN_REQUEST_SCOPE_MISMATCH".into());
+        let graph_identity = match &graph {
+            Some(GraphExecutionContext::Open(context)) => {
+                if *operation != TradeOperation::Open
+                    || context.binding.instance_id != *strategy_instance
+                    || context.binding.instrument_id != *instrument
+                {
+                    return Err("GRAPH_OPEN_REQUEST_SCOPE_MISMATCH".into());
+                }
+                let identity = context.binding.open_identity(&context.publication)
+                    .ok_or("GRAPH_OPEN_IDENTITY_INVALID")?;
+                if *idempotency_key != identity.decision_key {
+                    return Err("GRAPH_OPEN_IDEMPOTENCY_MISMATCH".into());
+                }
+                Some((identity.decision_id, identity.input_digest))
             }
-            let identity = graph
-                .binding
-                .open_identity(&graph.publication)
-                .ok_or("GRAPH_OPEN_IDENTITY_INVALID")?;
-            if *idempotency_key != identity.decision_key {
-                return Err("GRAPH_OPEN_IDEMPOTENCY_MISMATCH".into());
+            Some(GraphExecutionContext::Close(context)) => {
+                if *operation != TradeOperation::Close
+                    || context.binding.instance_id != *strategy_instance
+                    || context.binding.instrument_id != *instrument
+                {
+                    return Err("GRAPH_CLOSE_REQUEST_SCOPE_MISMATCH".into());
+                }
+                let identity = context.binding.close_identity(&context.publication, &context.original_reference)
+                    .ok_or("GRAPH_CLOSE_IDENTITY_INVALID")?;
+                if *idempotency_key != identity.decision_key {
+                    return Err("GRAPH_CLOSE_IDEMPOTENCY_MISMATCH".into());
+                }
+                Some((identity.decision_id, identity.input_digest))
             }
-            Some(identity)
-        } else {
-            None
+            None => None,
         };
         let started = Instant::now();
         self.verify_runtime_finance_route(r)?;
@@ -949,13 +997,13 @@ impl TradeService {
         let decision = Decision {
             decision_id: graph_identity
                 .as_ref()
-                .map(|i| i.decision_id.clone())
+                .map(|i| i.0.clone())
                 .or_else(|| claimed_decision.as_ref().map(|(_, id)| id.clone()))
                 .unwrap_or_else(|| format!("decision_{}", &body_hash[..32])),
             instance_id: Some(strategy_instance.clone()),
             decision_at,
             input_digest: if let Some(identity) = &graph_identity {
-                identity.input_digest.clone()
+                identity.1.clone()
             } else if let Some((digest, _)) = &claimed_decision {
                 digest.clone()
             } else {
@@ -983,30 +1031,31 @@ impl TradeService {
             return Err("STRATEGY_VERSION_CHANGED".into());
         }
 
-        let prepared = if let Some(graph) = graph_open {
-            let admitted = r
-                .execution
-                .store
-                .prepare_graph_open(
-                    until,
-                    graph.binding,
-                    graph.publication,
-                    decision,
-                    intent,
-                    decision_at,
-                )
-                .await
-                .map_err(err)?;
-            if !matches!(admitted.claim, GraphOpenClaim::Prepared { .. }) {
-                return Err("GRAPH_OPEN_REPLAY_STATUS_REQUIRED".into());
+        let prepared = match graph {
+            Some(GraphExecutionContext::Open(graph)) => {
+                let admitted = r.execution.store.prepare_graph_open(
+                    until, graph.binding, graph.publication, decision, intent, decision_at,
+                ).await.map_err(err)?;
+                if !matches!(admitted.claim, GraphOpenClaim::Prepared { .. }) {
+                    return Err("GRAPH_OPEN_REPLAY_STATUS_REQUIRED".into());
+                }
+                admitted.intent
             }
-            admitted.intent
-        } else {
-            let (owner, account) = r.execution.store.scope();
-            owner
-                .prepare_admission(until, account.to_owned(), decision, intent)
-                .await
-                .map_err(err)?
+            Some(GraphExecutionContext::Close(graph)) => {
+                let admitted = r.execution.store.prepare_graph_close(
+                    until, graph.binding, graph.publication,
+                    graph.original_reference, decision, intent, decision_at,
+                ).await.map_err(err)?;
+                if !matches!(admitted.claim, GraphCloseClaim::Prepared { .. }) {
+                    return Err("GRAPH_CLOSE_REPLAY_STATUS_REQUIRED".into());
+                }
+                admitted.intent
+            }
+            None => {
+                let (owner, account) = r.execution.store.scope();
+                owner.prepare_admission(until, account.to_owned(), decision, intent)
+                    .await.map_err(err)?
+            }
         };
         tracing::Span::current().record("intent_id", prepared.intent_id.as_str());
         if Instant::now() >= until {

@@ -1,5 +1,6 @@
 //! Close only the verified remaining lots belonging to the original intent.
 use super::*;
+use super::super::execute::GraphCloseContext;
 
 impl TradeService {
     pub(in crate::trade_service) async fn close(
@@ -9,6 +10,50 @@ impl TradeService {
         reference: &str,
         expires: u64,
         governance: Option<&CentralGovernanceSnapshot>,
+    ) -> Result<Value, String> {
+        self.close_inner(r, key, reference, expires, governance, None)
+            .await
+    }
+
+    /// Same original Close command builder, but with one immutable graph
+    /// identity checked again at original finance PREPARE. This is internal
+    /// only; background Graph consumer is not authorized to call it yet.
+    pub(in crate::trade_service) async fn close_for_graph(
+        &self,
+        r: &Arc<AccountResources>,
+        request: &TradeRequest,
+        context: GraphCloseContext,
+    ) -> Result<Value, String> {
+        let TradeRequest::Close {
+            idempotency_key,
+            reference,
+            expires_in_ms,
+        } = request
+        else {
+            return Err("GRAPH_CLOSE_REQUEST_REQUIRED".into());
+        };
+        if context.original_reference != *reference {
+            return Err("GRAPH_CLOSE_REFERENCE_MISMATCH".into());
+        }
+        self.close_inner(
+            r,
+            idempotency_key,
+            reference,
+            *expires_in_ms,
+            None,
+            Some(context),
+        )
+        .await
+    }
+
+    async fn close_inner(
+        &self,
+        r: &Arc<AccountResources>,
+        key: &str,
+        reference: &str,
+        expires: u64,
+        governance: Option<&CentralGovernanceSnapshot>,
+        graph: Option<GraphCloseContext>,
     ) -> Result<Value, String> {
         let public = TradeRequest::Close {
             idempotency_key: key.into(),
@@ -70,7 +115,12 @@ impl TradeService {
             protection: None,
             expires_in_ms: expires,
         };
-        self.execute_bound(r, &command, governance, Some(bound_hash))
-            .await
+        match graph {
+            Some(context) => {
+                self.execute_for_graph_close(r, &command, bound_hash, context)
+                    .await
+            }
+            None => self.execute_bound(r, &command, governance, Some(bound_hash)).await,
+        }
     }
 }
