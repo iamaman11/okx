@@ -132,8 +132,12 @@ impl AccountStore {
         binding: &EngineGraphBinding,
         published: &EngineGraphCursor,
     ) -> StoreResult<Vec<GraphCloseRecovery>> {
-        if !published.valid_for(binding) || published.intent == crate::position_target::TargetPosition::Hold {
-            return Err(StoreError::Invalid("GRAPH_CLOSE_RECOVERY_PUBLICATION_INVALID"));
+        if !published.valid_for(binding)
+            || published.intent == crate::position_target::TargetPosition::Hold
+        {
+            return Err(StoreError::Invalid(
+                "GRAPH_CLOSE_RECOVERY_PUBLICATION_INVALID",
+            ));
         }
         Self::graph_progress_sql(db, scope, binding)?
             .ok_or(StoreError::Invalid("GRAPH_FINANCE_BINDING_MISSING"))?;
@@ -145,34 +149,45 @@ impl AccountStore {
                AND operation_id>=?3 AND operation_id<?4
              ORDER BY operation_id LIMIT 257",
         )?;
-        let receipts = statement.query_map(
-            params![scope.0, scope.1, prefix, format!("{prefix}~")],
-            |row| Ok(OperationReceipt {
-                operation_id: row.get(0)?,
-                kind: row.get(1)?,
-                request_hash: row.get(2)?,
-                result_ref: row.get(3)?,
-                committed_at: row.get(4)?,
-            }),
-        )?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let receipts = statement
+            .query_map(
+                params![scope.0, scope.1, prefix, format!("{prefix}~")],
+                |row| {
+                    Ok(OperationReceipt {
+                        operation_id: row.get(0)?,
+                        kind: row.get(1)?,
+                        request_hash: row.get(2)?,
+                        result_ref: row.get(3)?,
+                        committed_at: row.get(4)?,
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         if receipts.len() > 256 {
             return Err(StoreError::Invalid("GRAPH_CLOSE_RECOVERY_LIMIT"));
         }
         let snapshot = Self::strategy_position_snapshot_sql(
-            db, Some(scope), &binding.instance_id, &binding.instrument_id,
+            db,
+            Some(scope),
+            &binding.instance_id,
+            &binding.instrument_id,
         )?;
         let mut outcomes = Vec::with_capacity(receipts.len());
         for receipt in receipts {
             let recorded: PreparedGraphClose = decode(&receipt, CLOSE_KIND)?;
             if receipt.operation_id != close_key(binding, published, &recorded.original_reference)?
                 || recorded.input_fingerprint.len() != 64
-                || !recorded.input_fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
+                || !recorded
+                    .input_fingerprint
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit())
             {
                 return Err(StoreError::Invalid("GRAPH_CLOSE_RECOVERY_RECEIPT_INVALID"));
             }
             let intent = Self::find_intent_sql(db, Some(scope), "intent_id", &recorded.intent_id)?
                 .ok_or(StoreError::Invalid("GRAPH_CLOSE_RECOVERY_INTENT_MISSING"))?;
-            let expected_key = binding.close_identity(published, &recorded.original_reference)
+            let expected_key = binding
+                .close_identity(published, &recorded.original_reference)
                 .ok_or(StoreError::Invalid("GRAPH_CLOSE_RECOVERY_IDENTITY_INVALID"))?;
             if intent.idempotency_key != expected_key.decision_key
                 || intent.plan.operation != "close"
@@ -182,29 +197,39 @@ impl AccountStore {
             {
                 return Err(StoreError::Invalid("GRAPH_CLOSE_RECOVERY_INTENT_MISMATCH"));
             }
-            let residual = snapshot.lots.iter().any(|lot| {
-                lot.intent_id.as_deref() == Some(recorded.original_reference.as_str())
-            });
+            let residual = snapshot
+                .lots
+                .iter()
+                .any(|lot| lot.intent_id.as_deref() == Some(recorded.original_reference.as_str()));
             let stage = if !intent.state.terminal() {
                 GraphCloseRecoveryStage::AwaitingOrderOutcome
             } else if residual {
                 GraphCloseRecoveryStage::TerminalResidualExposure
             } else {
                 let local = Self::operation_sql(
-                    db, Some(scope), &format!("local-terminal-release:{}", intent.intent_id),
+                    db,
+                    Some(scope),
+                    &format!("local-terminal-release:{}", intent.intent_id),
                 )?;
                 match local {
-                    Some(proof) if proof.kind == "LOCAL_TERMINAL_RELEASE"
-                        && proof.request_hash == intent.request_hash
-                        && proof.result_ref.len() == 64
-                        && proof.result_ref.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                    Some(proof)
+                        if proof.kind == "LOCAL_TERMINAL_RELEASE"
+                            && proof.request_hash == intent.request_hash
+                            && proof.result_ref.len() == 64
+                            && proof.result_ref.bytes().all(|b| b.is_ascii_hexdigit()) =>
+                    {
                         let released: bool = db.query_row(
                             "SELECT EXISTS(SELECT 1 FROM risk_receipts
                              WHERE installation_id=?1 AND account_key=?2
                                AND intent_id=?3 AND reservation_key=?4
                                AND plan_hash=?5 AND state='RELEASED')",
-                            params![scope.0, scope.1, intent.intent_id,
-                                format!("local:{}", intent.intent_id), intent.plan_hash],
+                            params![
+                                scope.0,
+                                scope.1,
+                                intent.intent_id,
+                                format!("local:{}", intent.intent_id),
+                                intent.plan_hash
+                            ],
                             |row| row.get(0),
                         )?;
                         if released {
@@ -214,7 +239,9 @@ impl AccountStore {
                         }
                     }
                     None => GraphCloseRecoveryStage::AwaitingSourceSettlement,
-                    Some(_) => return Err(StoreError::Invalid("GRAPH_CLOSE_RECOVERY_PROOF_CORRUPT")),
+                    Some(_) => {
+                        return Err(StoreError::Invalid("GRAPH_CLOSE_RECOVERY_PROOF_CORRUPT"));
+                    }
                 }
             };
             outcomes.push(GraphCloseRecovery {
@@ -445,12 +472,16 @@ impl AccountStore {
         if plan != TargetPlan::NoChange {
             return Err(StoreError::Invalid("GRAPH_FINANCE_ATOMIC_INTENT_REQUIRED"));
         }
-        if !matches!(published.intent, crate::position_target::TargetPosition::Hold)
-            && Self::graph_close_recoveries_sql(tx, scope, binding, published)?
-                .iter()
-                .any(|progress| progress.stage != GraphCloseRecoveryStage::Settled)
+        if !matches!(
+            published.intent,
+            crate::position_target::TargetPosition::Hold
+        ) && Self::graph_close_recoveries_sql(tx, scope, binding, published)?
+            .iter()
+            .any(|progress| progress.stage != GraphCloseRecoveryStage::Settled)
         {
-            return Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_SETTLEMENT_PENDING"));
+            return Err(StoreError::Invalid(
+                "GRAPH_FINANCE_CLOSE_SETTLEMENT_PENDING",
+            ));
         }
         insert_receipt(
             tx,
@@ -1259,8 +1290,14 @@ mod tests {
             let tx = db.transaction().unwrap();
             assert!(matches!(
                 AccountStore::prepare_graph_close_sql(
-                    &tx, scope, &binding, &publication, "graph-test-intent",
-                    &decision, &intent, 241_000,
+                    &tx,
+                    scope,
+                    &binding,
+                    &publication,
+                    "graph-test-intent",
+                    &decision,
+                    &intent,
+                    241_000,
                 ),
                 Ok(GraphCloseClaim::Prepared { .. })
             ));
@@ -1272,12 +1309,15 @@ mod tests {
         let inspect = |db: &Connection| {
             AccountStore::graph_close_recoveries_sql(db, scope, &binding, &publication).unwrap()
         };
-        assert_eq!(inspect(&reopened), vec![GraphCloseRecovery {
-            original_reference: "graph-test-intent".into(),
-            intent_id: intent.intent_id.clone(),
-            intent_state: IntentState::Prepared,
-            stage: GraphCloseRecoveryStage::AwaitingOrderOutcome,
-        }]);
+        assert_eq!(
+            inspect(&reopened),
+            vec![GraphCloseRecovery {
+                original_reference: "graph-test-intent".into(),
+                intent_id: intent.intent_id.clone(),
+                intent_state: IntentState::Prepared,
+                stage: GraphCloseRecoveryStage::AwaitingOrderOutcome,
+            }]
+        );
         // A terminal venue order and zero remaining lots are NOT a final
         // finance proof. Independent fills/bills and local risk release follow.
         reopened.execute(
@@ -1288,44 +1328,90 @@ mod tests {
             "UPDATE position_lots SET remaining_qty='0' WHERE installation_id=?1 AND account_key=?2 AND lot_id='graph-original-lot'",
             params![scope.0, scope.1],
         ).unwrap();
-        assert_eq!(inspect(&reopened)[0].stage, GraphCloseRecoveryStage::AwaitingSourceSettlement);
+        assert_eq!(
+            inspect(&reopened)[0].stage,
+            GraphCloseRecoveryStage::AwaitingSourceSettlement
+        );
         {
             let tx = reopened.transaction().unwrap();
             assert!(matches!(
-                AccountStore::acknowledge_graph_idle_sql(&tx, scope, &binding, &publication, 242_000),
-                Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_SETTLEMENT_PENDING"))
+                AccountStore::acknowledge_graph_idle_sql(
+                    &tx,
+                    scope,
+                    &binding,
+                    &publication,
+                    242_000
+                ),
+                Err(StoreError::Invalid(
+                    "GRAPH_FINANCE_CLOSE_SETTLEMENT_PENDING"
+                ))
             ));
         }
         // Mimic only the immutable receipt emitted by ORIGINAL
         // acknowledge_local_terminal_close_sql. That routine's actual
         // authenticated fill+bill proof is covered by its own tests.
-        reopened.execute(
-            "INSERT INTO operation_receipts
+        reopened
+            .execute(
+                "INSERT INTO operation_receipts
              (installation_id,account_key,operation_id,kind,request_hash,result_ref,committed_at)
              VALUES (?1,?2,?3,'LOCAL_TERMINAL_RELEASE',?4,?5,243000)",
-            params![scope.0, scope.1, format!("local-terminal-release:{}", intent.intent_id),
-                intent.request_hash, "f".repeat(64)],
-        ).unwrap();
-        assert_eq!(inspect(&reopened)[0].stage, GraphCloseRecoveryStage::AwaitingSourceSettlement);
-        reopened.execute(
-            "INSERT INTO risk_receipts
+                params![
+                    scope.0,
+                    scope.1,
+                    format!("local-terminal-release:{}", intent.intent_id),
+                    intent.request_hash,
+                    "f".repeat(64)
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            inspect(&reopened)[0].stage,
+            GraphCloseRecoveryStage::AwaitingSourceSettlement
+        );
+        reopened
+            .execute(
+                "INSERT INTO risk_receipts
              (reservation_key,intent_id,account_key,installation_id,instance_id,
               plan_hash,policy_revision,receipt_hash,requested_loss_usd,conversion_digest,state)
              VALUES (?1,?2,?3,?4,'strategy-a',?5,1,?6,'0',?7,'RELEASED')",
-            params![format!("local:{}", intent.intent_id), intent.intent_id,
-                scope.1, scope.0, intent.plan_hash, "b".repeat(64), "c".repeat(64)],
-        ).unwrap();
-        assert_eq!(inspect(&reopened)[0].stage, GraphCloseRecoveryStage::Settled);
+                params![
+                    format!("local:{}", intent.intent_id),
+                    intent.intent_id,
+                    scope.1,
+                    scope.0,
+                    intent.plan_hash,
+                    "b".repeat(64),
+                    "c".repeat(64)
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            inspect(&reopened)[0].stage,
+            GraphCloseRecoveryStage::Settled
+        );
         {
             let tx = reopened.transaction().unwrap();
             assert_eq!(
-                AccountStore::acknowledge_graph_idle_sql(&tx, scope, &binding, &publication, 244_000).unwrap(),
+                AccountStore::acknowledge_graph_idle_sql(
+                    &tx,
+                    scope,
+                    &binding,
+                    &publication,
+                    244_000
+                )
+                .unwrap(),
                 GraphIdleAck::Advanced
             );
             tx.commit().unwrap();
         }
-        assert_eq!(AccountStore::graph_progress_sql(&reopened, scope, &binding)
-            .unwrap().unwrap().cursor.sequence, 4);
+        assert_eq!(
+            AccountStore::graph_progress_sql(&reopened, scope, &binding)
+                .unwrap()
+                .unwrap()
+                .cursor
+                .sequence,
+            4
+        );
         drop(reopened);
         std::fs::remove_file(&path).unwrap();
     }
@@ -1337,10 +1423,19 @@ mod tests {
         let (binding, publication, decision, intent) = close_fixture(&mut db);
         {
             let tx = db.transaction().unwrap();
-            assert!(matches!(AccountStore::prepare_graph_close_sql(
-                &tx, scope, &binding, &publication, "graph-test-intent",
-                &decision, &intent, 241_000,
-            ), Ok(GraphCloseClaim::Prepared { .. })));
+            assert!(matches!(
+                AccountStore::prepare_graph_close_sql(
+                    &tx,
+                    scope,
+                    &binding,
+                    &publication,
+                    "graph-test-intent",
+                    &decision,
+                    &intent,
+                    241_000,
+                ),
+                Ok(GraphCloseClaim::Prepared { .. })
+            ));
             tx.commit().unwrap();
         }
         // A terminal cancellation can still leave the original position.
@@ -1358,10 +1453,22 @@ mod tests {
             }]
         );
         let tx = db.transaction().unwrap();
-        assert_eq!(AccountStore::prepare_graph_close_sql(
-            &tx, scope, &binding, &publication, "graph-test-intent",
-            &decision, &intent, 242_000,
-        ).unwrap(), GraphCloseClaim::Replayed { intent_id: intent.intent_id.clone() });
+        assert_eq!(
+            AccountStore::prepare_graph_close_sql(
+                &tx,
+                scope,
+                &binding,
+                &publication,
+                "graph-test-intent",
+                &decision,
+                &intent,
+                242_000,
+            )
+            .unwrap(),
+            GraphCloseClaim::Replayed {
+                intent_id: intent.intent_id.clone()
+            }
+        );
         assert!(matches!(
             AccountStore::acknowledge_graph_idle_sql(&tx, scope, &binding, &publication, 242_000),
             Err(StoreError::Invalid("GRAPH_FINANCE_ATOMIC_INTENT_REQUIRED"))
@@ -1370,7 +1477,10 @@ mod tests {
             "SELECT COUNT(*) FROM intents WHERE installation_id=?1 AND account_key=?2 AND idempotency_key=?3",
             params![scope.0, scope.1, intent.idempotency_key], |r| r.get(0)
         ).unwrap();
-        assert_eq!(count, 1, "a terminal partial/zero-fill may not invent a new POST");
+        assert_eq!(
+            count, 1,
+            "a terminal partial/zero-fill may not invent a new POST"
+        );
     }
 
     #[test]

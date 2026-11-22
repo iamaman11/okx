@@ -42,11 +42,15 @@ impl UnifiedFinanceHandle {
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
             let result = AccountStore::graph_close_recoveries_sql(
-                &tx, (&installation, &account), &binding, &published,
+                &tx,
+                (&installation, &account),
+                &binding,
+                &published,
             )?;
             tx.commit()?;
             Ok(result)
-        }).await
+        })
+        .await
     }
     /// Read only: bounded discovery through the same installed finance owner.
     pub async fn graph_bindings_page(

@@ -87,7 +87,9 @@ impl ExecutionStore {
         published: okx_execution::graph_binding::EngineGraphCursor,
     ) -> StoreResult<Vec<okx_execution::graph_binding::GraphCloseRecovery>> {
         let Self { owner, account } = self;
-        owner.graph_close_recoveries(deadline, account.wire.clone(), binding, published).await
+        owner
+            .graph_close_recoveries(deadline, account.wire.clone(), binding, published)
+            .await
     }
     pub async fn graph_bindings_page(
         &self,
