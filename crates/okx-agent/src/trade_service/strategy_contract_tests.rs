@@ -766,76 +766,142 @@ async fn research_bootstrap_binds_and_starts_public_feed_without_order_post() {
     let before = money(&fixture).await;
     let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
     let instance_id = "graph_bootstrap_contract";
-    completed_data(fixture.request(StrategyRequest::Create {
-        idempotency_key: "graph_bootstrap_create".into(),
-        instance_id: instance_id.into(),
-        definition_id: "graph_signal_v1".into(),
-        version: 1,
-        parameters: graph_signal_parameters(),
-        instruments: vec!["BTC-USDT-SWAP".into()],
-        timeframe_ms: 60_000,
-        budget_usd: "2".into(),
-    }).await);
-    completed_data(fixture.request(StrategyRequest::Start {
-        idempotency_key: "graph_bootstrap_start".into(),
-        instance_id: instance_id.into(),
-    }).await);
-    let source: SourceHandler = Arc::new(|request| Box::pin(async move {
-        let PublicSourceRequest::Candles { instrument, bar, after, limit, queued, .. } = request else {
-            return Err("GRAPH_TEST_PUBLIC_CANDLES_ONLY".into());
-        };
-        if instrument != "BTC-USDT-SWAP" || bar != "1m" || queued || limit != 100 {
-            return Err("GRAPH_TEST_SOURCE_SCOPE_INVALID".into());
-        }
-        let end: u64 = after.ok_or("GRAPH_TEST_CURSOR_MISSING")?.parse()
-            .map_err(|_| "GRAPH_TEST_CURSOR_INVALID")?;
-        let rows = (1..=100u64).map(|i| {
-            let time = end - i * 60_000;
-            okx_protocol::research_ipc::HistoryCandle {
-                open_time_ms: time.to_string(),
-                open: "100".into(), high: "100".into(), low: "100".into(),
-                close: "100".into(), volume: "1".into(), volume_currency: "1".into(),
-                volume_quote: None, confirmed: true,
+    completed_data(
+        fixture
+            .request(StrategyRequest::Create {
+                idempotency_key: "graph_bootstrap_create".into(),
+                instance_id: instance_id.into(),
+                definition_id: "graph_signal_v1".into(),
+                version: 1,
+                parameters: graph_signal_parameters(),
+                instruments: vec!["BTC-USDT-SWAP".into()],
+                timeframe_ms: 60_000,
+                budget_usd: "2".into(),
+            })
+            .await,
+    );
+    completed_data(
+        fixture
+            .request(StrategyRequest::Start {
+                idempotency_key: "graph_bootstrap_start".into(),
+                instance_id: instance_id.into(),
+            })
+            .await,
+    );
+    let source: SourceHandler = Arc::new(|request| {
+        Box::pin(async move {
+            let PublicSourceRequest::Candles {
+                instrument,
+                bar,
+                after,
+                limit,
+                queued,
+                ..
+            } = request
+            else {
+                return Err("GRAPH_TEST_PUBLIC_CANDLES_ONLY".into());
+            };
+            if instrument != "BTC-USDT-SWAP" || bar != "1m" || queued || limit != 100 {
+                return Err("GRAPH_TEST_SOURCE_SCOPE_INVALID".into());
             }
-        }).collect();
-        Ok(PublicSourceReply::Candles(PublicCandleCapture {
-            raw_body: vec![], rows,
-            acquired_at_ms: jiff::Timestamp::now().as_millisecond().to_string(),
-        }))
-    }));
+            let end: u64 = after
+                .ok_or("GRAPH_TEST_CURSOR_MISSING")?
+                .parse()
+                .map_err(|_| "GRAPH_TEST_CURSOR_INVALID")?;
+            let rows = (1..=100u64)
+                .map(|i| {
+                    let time = end - i * 60_000;
+                    okx_protocol::research_ipc::HistoryCandle {
+                        open_time_ms: time.to_string(),
+                        open: "100".into(),
+                        high: "100".into(),
+                        low: "100".into(),
+                        close: "100".into(),
+                        volume: "1".into(),
+                        volume_currency: "1".into(),
+                        volume_quote: None,
+                        confirmed: true,
+                    }
+                })
+                .collect();
+            Ok(PublicSourceReply::Candles(PublicCandleCapture {
+                raw_body: vec![],
+                rows,
+                acquired_at_ms: jiff::Timestamp::now().as_millisecond().to_string(),
+            }))
+        })
+    });
     let executable = std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             let mut executable = std::env::current_exe().unwrap();
             executable.pop();
-            if executable.ends_with("deps") { executable.pop(); }
-            executable.push(format!("okx-research-service{}", std::env::consts::EXE_SUFFIX));
+            if executable.ends_with("deps") {
+                executable.pop();
+            }
+            executable.push(format!(
+                "okx-research-service{}",
+                std::env::consts::EXE_SUFFIX
+            ));
             executable
         });
-    let research = ResearchClient::new(ResearchClientConfig {
-        executable,
-        root: fixture.native.root.join("graph-bootstrap-research"),
-        scope: ResearchScope::new(format!("graph-bootstrap-test-{}", std::process::id())).unwrap(),
-    }, source);
-    fixture.native.trade.set_signal_research(research.clone()).await;
-    let instance = fixture.owner.execution.store.strategy_instances(deadline()).await.unwrap()
-        .into_iter().find(|v| v.instance_id == instance_id).unwrap();
-    fixture.native.trade.graph_activation_turn(&fixture.owner, &[instance.clone()]).await.unwrap();
-    let configuration: GraphStrategyConfigurationV1 = serde_json::from_str(&instance.parameters).unwrap();
+    let research = ResearchClient::new(
+        ResearchClientConfig {
+            executable,
+            root: fixture.native.root.join("graph-bootstrap-research"),
+            scope: ResearchScope::new(format!("graph-bootstrap-test-{}", std::process::id()))
+                .unwrap(),
+        },
+        source,
+    );
+    fixture
+        .native
+        .trade
+        .set_signal_research(research.clone())
+        .await;
+    let instance = fixture
+        .owner
+        .execution
+        .store
+        .strategy_instances(deadline())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|v| v.instance_id == instance_id)
+        .unwrap();
+    fixture
+        .native
+        .trade
+        .graph_activation_turn(&fixture.owner, &[instance.clone()])
+        .await
+        .unwrap();
+    let configuration: GraphStrategyConfigurationV1 =
+        serde_json::from_str(&instance.parameters).unwrap();
     let binding = super::graph_activation::activation_binding(
-        &fixture.owner.configuration.account_key.wire(), &instance, &configuration, "BTC-USDT-SWAP",
-    ).unwrap();
-    let cursor = fixture.native.trade.graph_confirmed_cursor(
-        &fixture.owner.configuration.alias, &binding,
-    ).await.unwrap().unwrap();
+        &fixture.owner.configuration.account_key.wire(),
+        &instance,
+        &configuration,
+        "BTC-USDT-SWAP",
+    )
+    .unwrap();
+    let cursor = fixture
+        .native
+        .trade
+        .graph_confirmed_cursor(&fixture.owner.configuration.alias, &binding)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(cursor.last_sequence(), 64);
-    let reply = research.graph_feed(GraphFeedRequest::Start {
-        session_id: binding.session_id,
-        graph_sha256: binding.graph_sha256,
-        instrument: "BTC-USDT-SWAP".into(),
-        timeframe_ms: 60_000,
-        poll_every_ms: 5_000,
-    }).await.unwrap();
+    let reply = research
+        .graph_feed(GraphFeedRequest::Start {
+            session_id: binding.session_id,
+            graph_sha256: binding.graph_sha256,
+            instrument: "BTC-USDT-SWAP".into(),
+            timeframe_ms: 60_000,
+            poll_every_ms: 5_000,
+        })
+        .await
+        .unwrap();
     assert!(matches!(reply, GraphFeedReply::Started { .. }));
     assert_eq!(money(&fixture).await, before);
     assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts);
