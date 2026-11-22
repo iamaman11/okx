@@ -111,7 +111,7 @@ pub(super) fn candidate(runtime: &Path) -> Result<PathBuf, String> {
         .join("versions")
         .join(&record.worker_sha256);
     directory_chain(&version)?;
-    let binary = version.join("okx-research-worker.exe");
+    let binary = version.join("okx-research-service.exe");
     let meta = plain(&binary, false)?;
     if meta.len() == 0 || meta.len() > MAX_BINARY_BYTES {
         return Err("RESEARCH_INSTALL_INVALID_BINARY".into());
@@ -193,7 +193,7 @@ mod tests {
         assert!(resolve(&root).is_err());
         let dir = root.join("research/versions").join(&hash);
         fs::create_dir_all(&dir).unwrap();
-        let binary = dir.join("okx-research-worker.exe");
+        let binary = dir.join("okx-research-service.exe");
         fs::write(&binary, b"wrong").unwrap();
         assert_eq!(candidate(&root).unwrap(), binary);
         assert_eq!(

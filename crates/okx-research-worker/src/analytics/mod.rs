@@ -6,6 +6,9 @@ mod cursor;
 mod decision;
 mod economic_scenario;
 pub mod executor;
+mod graph_outbox;
+mod graph_resolver;
+mod graph_sessions;
 pub mod jobs;
 mod market;
 pub mod planner;
@@ -18,6 +21,10 @@ pub mod sources;
 
 use futures_util::{StreamExt, stream};
 use okx_protocol::analytics::*;
+use okx_protocol::research_ipc::{
+    GraphClosedBar, GraphPublicationPage, GraphPublicationRequest, GraphSessionId,
+    GraphSessionReply, GraphSessionRequest, SignalDecision, SignalPosition, SignalRequest,
+};
 use okx_research::{
     ResearchArtifactStore,
     strategy_registry::{self as replay, Costs, Mechanics, ReplaySpec},
@@ -49,10 +56,110 @@ impl Drop for RunnerGuard {
 fn drain_count(durable: u64, runners: &AtomicUsize) -> u64 {
     durable.max(runners.load(Ordering::SeqCst) as u64)
 }
+
+fn graph_bootstrap_window(
+    now_ms: u64,
+    timeframe_ms: u64,
+    history_bars: u16,
+) -> Result<(u64, u64), String> {
+    let end = now_ms / timeframe_ms * timeframe_ms;
+    let width = timeframe_ms
+        .checked_mul(u64::from(history_bars))
+        .ok_or("GRAPH_BOOTSTRAP_RANGE_INVALID")?;
+    let start = end
+        .checked_sub(width)
+        .filter(|start| *start > 0)
+        .ok_or("GRAPH_BOOTSTRAP_RANGE_INVALID")?;
+    Ok((start, end))
+}
+
+fn graph_bootstrap_history(
+    candles: &[replay::Bar],
+    start_ms: u64,
+    timeframe_ms: u64,
+    history_bars: u16,
+) -> Result<Vec<GraphClosedBar>, String> {
+    if candles.len() != usize::from(history_bars) {
+        return Err("GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY".into());
+    }
+    candles
+        .iter()
+        .enumerate()
+        .map(|(index, candle)| {
+            let expected = start_ms
+                .checked_add(index as u64 * timeframe_ms)
+                .ok_or("GRAPH_BOOTSTRAP_RANGE_INVALID")?;
+            let bar = GraphClosedBar {
+                time_ms: candle.time,
+                close: Some(candle.close),
+            };
+            if candle.time != expected || !bar.valid() {
+                return Err("GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY".into());
+            }
+            Ok(bar)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod graph_bootstrap_tests {
+    use super::*;
+
+    fn candle(time: u64, close: f64) -> replay::Bar {
+        replay::Bar {
+            time,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1.0,
+            funding_rate: None,
+        }
+    }
+
+    #[test]
+    fn bootstrap_window_excludes_open_candle_and_requires_full_confirmed_prefix() {
+        const M: u64 = 60_000;
+        let (start, end) = graph_bootstrap_window(100 * M + 2_000, M, 3).unwrap();
+        assert_eq!((start, end), (97 * M, 100 * M));
+        let valid = vec![
+            candle(97 * M, 100.0),
+            candle(98 * M, 101.0),
+            candle(99 * M, 102.0),
+        ];
+        let prefix = graph_bootstrap_history(&valid, start, M, 3).unwrap();
+        assert_eq!(
+            prefix.iter().map(|b| b.time_ms).collect::<Vec<_>>(),
+            vec![97 * M, 98 * M, 99 * M]
+        );
+        assert_eq!(prefix.last().unwrap().close, Some(102.0));
+        assert_eq!(
+            graph_bootstrap_history(&valid[..2], start, M, 3).unwrap_err(),
+            "GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY"
+        );
+        let mut gap = valid.clone();
+        gap[1].time = 99 * M;
+        assert_eq!(
+            graph_bootstrap_history(&gap, start, M, 3).unwrap_err(),
+            "GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY"
+        );
+        let mut invalid = valid;
+        invalid[0].close = f64::NAN;
+        assert_eq!(
+            graph_bootstrap_history(&invalid, start, M, 3).unwrap_err(),
+            "GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY"
+        );
+        assert_eq!(
+            graph_bootstrap_window(2 * M, M, 3).unwrap_err(),
+            "GRAPH_BOOTSTRAP_RANGE_INVALID"
+        );
+    }
+}
 #[derive(Clone)]
 pub struct AnalyticsService {
     sources: sources::Sources,
     cpu: executor::CpuExecutor,
+    graph_sessions: graph_sessions::GraphSessions,
     jobs: jobs::Jobs,
     producer: Option<crate::producer::Producer>,
     artifacts: ResearchArtifactStore,
@@ -61,6 +168,162 @@ pub struct AnalyticsService {
     runners: Arc<AtomicUsize>,
 }
 impl AnalyticsService {
+    /// Isolated incremental graph state. No financial actions are available.
+    pub async fn graph_signal_transition(
+        &self,
+        request: GraphSessionRequest,
+    ) -> Result<(GraphSessionReply, bool), String> {
+        if !request.valid() {
+            return Err("GRAPH_SESSION_REQUEST_INVALID".into());
+        }
+        match request {
+            GraphSessionRequest::Bootstrap {
+                session_id,
+                definition,
+                capacity,
+                instrument,
+                timeframe_ms,
+                history_bars,
+            } => {
+                self.graph_sessions
+                    .ensure_fresh_bootstrap(&self.cpu, session_id.clone())
+                    .await?;
+                let now_ms = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+                let (start, end) = graph_bootstrap_window(now_ms, timeframe_ms, history_bars)?;
+                // The public-source proxy is scoped to Research. No Engine
+                // account state or private exchange capability is involved.
+                let candles = self
+                    .graph_feed_candles(&instrument, timeframe_ms, start, end)
+                    .await?;
+                let history = graph_bootstrap_history(&candles, start, timeframe_ms, history_bars)?;
+                self.graph_sessions
+                    .execute_transition(
+                        &self.cpu,
+                        GraphSessionRequest::Restore {
+                            session_id,
+                            definition,
+                            capacity,
+                            history,
+                        },
+                    )
+                    .await
+            }
+            other => {
+                self.graph_sessions
+                    .execute_transition(&self.cpu, other)
+                    .await
+            }
+        }
+    }
+    /// Durable bounded replay is independent of the lifetime of a graph runner.
+    pub async fn replay_graph_publications(
+        &self,
+        request: GraphPublicationRequest,
+    ) -> Result<GraphPublicationPage, String> {
+        self.graph_sessions.replay(&self.cpu, request).await
+    }
+
+    /// A feed is exclusively owned by Research. Agent may configure it once,
+    /// but cannot advance its math with a competing per-bar request.
+    pub(crate) async fn claim_graph_feed(
+        &self,
+        session_id: GraphSessionId,
+        graph_sha256: String,
+        timeframe_ms: u64,
+    ) -> Result<graph_sessions::FeedCursor, String> {
+        self.graph_sessions
+            .claim_feed(&self.cpu, session_id, graph_sha256, timeframe_ms)
+            .await
+    }
+
+    pub(crate) async fn graph_feed_cursor(
+        &self,
+        session_id: GraphSessionId,
+        graph_sha256: String,
+    ) -> Result<graph_sessions::FeedCursor, String> {
+        self.graph_sessions
+            .feed_cursor(&self.cpu, session_id, graph_sha256)
+            .await
+    }
+
+    pub(crate) async fn release_graph_feed(
+        &self,
+        session_id: GraphSessionId,
+        graph_sha256: String,
+        poison: bool,
+    ) -> Result<(), String> {
+        self.graph_sessions
+            .release_feed(&self.cpu, session_id, graph_sha256, poison)
+            .await
+    }
+
+    pub(crate) async fn advance_graph_feed(
+        &self,
+        session_id: GraphSessionId,
+        graph_sha256: String,
+        expected_bars: u64,
+        bar: GraphClosedBar,
+    ) -> Result<(GraphSessionReply, bool), String> {
+        self.graph_sessions
+            .advance_from_feed(
+                &self.cpu,
+                GraphSessionRequest::Advance {
+                    session_id,
+                    graph_sha256,
+                    expected_bars,
+                    bar,
+                },
+            )
+            .await
+    }
+
+    pub(crate) async fn graph_feed_candles(
+        &self,
+        instrument: &str,
+        timeframe_ms: u64,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> Result<Arc<Vec<okx_research::strategy_registry::Bar>>, String> {
+        self.sources
+            .candles(instrument, timeframe_ms, start_ms, end_ms, false)
+            .await
+    }
+    /// Same causal kernel as replay, isolated behind the Research process and
+    /// scheduled on the existing bounded CPU executor (never on Tokio I/O).
+    pub async fn evaluate_signal(&self, request: SignalRequest) -> Result<SignalDecision, String> {
+        if !request.valid() {
+            return Err("INVALID_SIGNAL_REQUEST".into());
+        }
+        self.cpu
+            .run(Default::default(), move |_| {
+                let mut kernel = okx_analysis::operators::StrategyKernel::from_id(
+                    &request.strategy_id,
+                    request.parameters,
+                )?;
+                let mut signal = None;
+                for bar in &request.closes {
+                    signal = kernel.push_closed(bar.close)?;
+                }
+                let position = match signal {
+                    Some(1) => SignalPosition::Long,
+                    Some(-1) => SignalPosition::Short,
+                    Some(0) => SignalPosition::Flat,
+                    None => SignalPosition::Warmup,
+                    _ => return Err("INVALID_SIGNAL_OUTPUT".into()),
+                };
+                Ok(SignalDecision {
+                    schema: SignalDecision::SCHEMA.into(),
+                    last_closed_ms: request
+                        .closes
+                        .last()
+                        .expect("validated nonempty history")
+                        .time_ms,
+                    observed_bars: request.closes.len(),
+                    position,
+                })
+            })
+            .await
+    }
     /// Local metadata projection only: never enters the catalog SQL owner.
     pub fn diagnostic_job(&self, id: &str) -> Value {
         self.jobs.diagnostic_readback(id)
@@ -105,6 +368,9 @@ impl AnalyticsService {
                 bootstrap: bootstrapper,
             },
             cpu: Default::default(),
+            graph_sessions: graph_sessions::GraphSessions::open(
+                root.join("research-signals.sqlite"),
+            )?,
             jobs,
             producer: None,
             runners: Arc::new(AtomicUsize::new(0)),

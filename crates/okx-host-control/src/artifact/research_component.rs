@@ -44,7 +44,7 @@ const COMPONENT_NAMES: [&str; 4] = [
     "okx-agent.exe",
     "okx-host-control.exe",
     "okx-host-launcher.exe",
-    "okx-research-worker.exe",
+    "okx-research-service.exe",
 ];
 const MAX_COMPONENT_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -115,7 +115,7 @@ async fn verify_component_origin(
     let manifest_bytes = read_entry(&mut archive, "manifest.json", MAX_MANIFEST_BYTES)?;
     let value: Value = serde_json::from_slice(&manifest_bytes)?;
     match value.get("schema").and_then(Value::as_str) {
-        Some("okx.windows.bundle/v1") if name != "okx-research-worker.exe" => {
+        Some("okx.windows.bundle/v1") if name != "okx-research-service.exe" => {
             let m: BundleManifest = serde_json::from_value(value)?;
             if m.repository_id != REPOSITORY_ID
                 || m.source_head_sha != head
@@ -211,7 +211,7 @@ pub async fn deploy_research(
         } else {
             verify_component_origin(github, name, c).await?;
         }
-        if name == "okx-research-worker.exe" {
+        if name == "okx-research-service.exe" {
             worker = Some((resolved, component_bytes));
         }
     }
@@ -359,7 +359,7 @@ fn stage_research(root: &Path, record: &InstalledResearch, bytes: &[u8]) -> Host
     plain_directory(&versions)?;
     let version = versions.join(&record.worker_sha256);
     plain_directory(&version)?;
-    let binary = version.join("okx-research-worker.exe");
+    let binary = version.join("okx-research-service.exe");
     match fs::symlink_metadata(&binary) {
         Ok(m) if m.is_file() && !is_reparse(&m) => {
             if sha256_hex(&fs::read(&binary)?) != record.worker_sha256 {
@@ -598,7 +598,7 @@ mod tests {
             fs::read(
                 root.join("research/versions")
                     .join(&record.worker_sha256)
-                    .join("okx-research-worker.exe")
+                    .join("okx-research-service.exe")
             )
             .unwrap(),
             bytes
@@ -677,7 +677,7 @@ mod tests {
             zip.write_all(b"lock").unwrap();
             for name in COMPONENT_NAMES {
                 zip.start_file(name, options).unwrap();
-                zip.write_all(if corrupt && name == "okx-research-worker.exe" {
+                zip.write_all(if corrupt && name == "okx-research-service.exe" {
                     b"bad"
                 } else {
                     name.as_bytes()
@@ -711,7 +711,7 @@ mod tests {
         zip.start_file("manifest.json", options).unwrap();
         zip.write_all(&serde_json::to_vec(&manifest).unwrap())
             .unwrap();
-        zip.start_file("okx-research-worker.exe", options).unwrap();
+        zip.start_file("okx-research-service.exe", options).unwrap();
         zip.write_all(b"worker").unwrap();
         let bytes = zip.finish().unwrap().into_inner();
         assert!(matches!(

@@ -464,6 +464,86 @@ pub struct StrategyConfigurationV1 {
     pub instruments: Vec<String>,
     pub timeframe_ms: u64,
 }
+
+/// Version-pinned graph strategy configuration. The graph is pure data;
+/// Research alone resolves operator semantics. No implicit trade activation.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GraphExecutionPolicy {
+    /// Existing graph strategy Start means read-only observation by default.
+    #[default]
+    Observe,
+    /// Explicitly supplied order risk parameters. This is still subject to
+    /// Engine account authority, the strategy budget, RiskBook and venue gates.
+    Trade {
+        max_slippage_bps: u32,
+        stop_distance_bps: u32,
+    },
+}
+
+impl GraphExecutionPolicy {
+    pub fn valid(&self) -> bool {
+        match self {
+            Self::Observe => true,
+            Self::Trade {
+                max_slippage_bps,
+                stop_distance_bps,
+            } => (1..=100).contains(max_slippage_bps) && (1..=5_000).contains(stop_distance_bps),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphStrategyParametersInput {
+    signal: crate::research_ipc::GraphSignalDefinition,
+    execution: GraphExecutionPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphStrategyConfigurationV1 {
+    pub signal: crate::research_ipc::GraphSignalDefinition,
+    pub instruments: Vec<String>,
+    pub timeframe_ms: u64,
+    #[serde(default)]
+    pub execution: GraphExecutionPolicy,
+}
+impl GraphStrategyConfigurationV1 {
+    pub const DEFINITION_ID: &'static str = "graph_signal_v1";
+
+    pub fn valid(&self) -> bool {
+        self.signal.structurally_valid()
+            && self.execution.valid()
+            && !self.instruments.is_empty()
+            && self.instruments.len() <= 32
+            && self.instruments.iter().all(|v| name(v))
+            && self.timeframe_ms >= 1000
+    }
+    pub fn parse_signal(
+        value: &serde_json::Value,
+    ) -> Option<crate::research_ipc::GraphSignalDefinition> {
+        let parsed: crate::research_ipc::GraphSignalDefinition =
+            serde_json::from_value(value.clone()).ok()?;
+        parsed.structurally_valid().then_some(parsed)
+    }
+
+    /// Legacy graph parameters remain observation-only. An executable graph
+    /// requires an explicit, strictly typed `signal` + `execution` wrapper.
+    pub fn parse_parameters(
+        value: &serde_json::Value,
+    ) -> Option<(
+        crate::research_ipc::GraphSignalDefinition,
+        GraphExecutionPolicy,
+    )> {
+        if value.get("signal").is_none() {
+            return Some((Self::parse_signal(value)?, GraphExecutionPolicy::Observe));
+        }
+        let input: GraphStrategyParametersInput = serde_json::from_value(value.clone()).ok()?;
+        (input.signal.structurally_valid() && input.execution.valid())
+            .then_some((input.signal, input.execution))
+    }
+}
 impl StrategyConfigurationV1 {
     pub fn valid(&self) -> bool {
         self.parameters.valid()
@@ -476,6 +556,44 @@ impl StrategyConfigurationV1 {
 #[cfg(test)]
 mod typed_strategy_parameters_tests {
     use super::*;
+    #[test]
+    fn graph_execution_requires_explicit_typed_trade_policy() {
+        let signal = serde_json::json!({
+            "version":"okx.graph-signal/v1",
+            "graph":{"schema":"okx.graph/v1","steps":[
+                {"id":"r","op":{"id":"returns_series","version":1},
+                 "inputs":[{"source":"close"}]},
+                {"id":"p","op":{"id":"greater_than","version":1},
+                 "inputs":[{"step":"r"}],"params":{"threshold":0.0}}
+            ],"outputs":["p"]},
+            "signal_step":"p","target_if_true":1,"target_if_false":0,"missing":"hold"
+        });
+        let (legacy, mode) = GraphStrategyConfigurationV1::parse_parameters(&signal).unwrap();
+        assert_eq!(mode, GraphExecutionPolicy::Observe);
+        assert!(legacy.structurally_valid());
+        let request = serde_json::json!({
+            "signal":signal,
+            "execution":{"mode":"trade","max_slippage_bps":5,"stop_distance_bps":50}
+        });
+        let (_, mode) = GraphStrategyConfigurationV1::parse_parameters(&request).unwrap();
+        assert_eq!(
+            mode,
+            GraphExecutionPolicy::Trade {
+                max_slippage_bps: 5,
+                stop_distance_bps: 50,
+            }
+        );
+        for invalid in [
+            serde_json::json!({"mode":"trade","max_slippage_bps":0,"stop_distance_bps":50}),
+            serde_json::json!({"mode":"trade","max_slippage_bps":5,"stop_distance_bps":0}),
+            serde_json::json!({"mode":"trade","max_slippage_bps":5,"stop_distance_bps":50,"extra":true}),
+        ] {
+            let mut invalid_request = request.clone();
+            invalid_request["execution"] = invalid;
+            assert!(GraphStrategyConfigurationV1::parse_parameters(&invalid_request).is_none());
+        }
+    }
+
     #[test]
     fn s2_06_same_golden_preimage_and_sha256_for_reordered_semantics() {
         use sha2::{Digest, Sha256};
@@ -583,8 +701,13 @@ impl StrategyRequest {
                     && name(instance_id)
                     && name(definition_id)
                     && *version == 1
-                    && StrategyParametersV1::parse(parameters).is_some()
-                    && parameters.to_string().len() <= 4096
+                    && (if definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
+                        GraphStrategyConfigurationV1::parse_parameters(parameters).is_some()
+                            && parameters.to_string().len() <= 60 * 1024
+                    } else {
+                        StrategyParametersV1::parse(parameters).is_some()
+                            && parameters.to_string().len() <= 4096
+                    })
                     && !instruments.is_empty()
                     && instruments.len() <= 32
                     && instruments.iter().all(|v| name(v))
@@ -600,8 +723,10 @@ impl StrategyRequest {
             } => {
                 id(idempotency_key)
                     && name(instance_id)
-                    && StrategyParametersV1::parse(parameters).is_some()
-                    && parameters.to_string().len() <= 4096
+                    && ((GraphStrategyConfigurationV1::parse_parameters(parameters).is_some()
+                        && parameters.to_string().len() <= 60 * 1024)
+                        || (StrategyParametersV1::parse(parameters).is_some()
+                            && parameters.to_string().len() <= 4096))
                     && decimal(budget_usd)
             }
         }
@@ -634,6 +759,64 @@ impl DiagnosticsRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn graph_strategy_accepts_typed_composition_and_rejects_legacy_ema_parameters() {
+        let graph = serde_json::json!({
+            "version":"okx.graph-signal/v1",
+            "graph":{"schema":"okx.graph/v1","steps":[
+                {"id":"positive","op":{"id":"greater_than","version":1},
+                 "inputs":[{"source":"close"}],"params":{"threshold":100}}
+            ],"outputs":["positive"]},
+            "signal_step":"positive","target_if_true":1,"target_if_false":0,"missing":"hold"
+        });
+        let create = StrategyRequest::Create {
+            idempotency_key: "graph_contract_create".into(),
+            instance_id: "graph-btc".into(),
+            definition_id: GraphStrategyConfigurationV1::DEFINITION_ID.into(),
+            version: 1,
+            parameters: graph.clone(),
+            instruments: vec!["BTC-USDT-SWAP".into()],
+            timeframe_ms: 60_000,
+            budget_usd: "2".into(),
+        };
+        assert!(create.valid());
+        let mut legacy_payload = create.clone();
+        if let StrategyRequest::Create { parameters, .. } = &mut legacy_payload {
+            *parameters = serde_json::json!({"fast": 5, "slow": 10});
+        }
+        assert!(!legacy_payload.valid());
+        let mut invalid_step = create;
+        if let StrategyRequest::Create { parameters, .. } = &mut invalid_step {
+            parameters["graph"]["steps"][0]["op"]["version"] = serde_json::json!(0);
+        }
+        assert!(!invalid_step.valid());
+        let update = StrategyRequest::Update {
+            idempotency_key: "graph_contract_update".into(),
+            instance_id: "graph-btc".into(),
+            expected_revision: 1,
+            parameters: graph.clone(),
+            budget_usd: "2".into(),
+        };
+        assert!(update.valid());
+        let trading = serde_json::json!({
+            "signal": graph,
+            "execution": {"mode":"trade","max_slippage_bps":5,"stop_distance_bps":50}
+        });
+        let mut wrapped_create = legacy_payload;
+        if let StrategyRequest::Create { parameters, .. } = &mut wrapped_create {
+            *parameters = trading.clone();
+        }
+        assert!(wrapped_create.valid());
+        let mut wrapped_update = update;
+        if let StrategyRequest::Update { parameters, .. } = &mut wrapped_update {
+            *parameters = trading;
+        }
+        assert!(wrapped_update.valid());
+        if let StrategyRequest::Update { parameters, .. } = &mut wrapped_update {
+            parameters["execution"]["max_slippage_bps"] = serde_json::json!(0);
+        }
+        assert!(!wrapped_update.valid());
+    }
     #[test]
     fn trade_positive_negative_wire_fixtures() {
         let good = r#"{"action":"execute","operation":"open","strategy_instance":"manual","idempotency_key":"command_001","instrument":"BTC-USDT-SWAP","side":"long","sizing":{"max_loss_usd":"5.00"},"order":{"type":"fok","max_slippage_bps":5},"protection":{"stop_distance_bps":50},"expires_in_ms":10000}"#;

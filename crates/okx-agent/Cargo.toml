@@ -17,7 +17,6 @@ getrandom = "0.4"
 futures-util = "0.3"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
-okx-analysis = { path = "../okx-analysis" }
 okx-api = { path = "../okx-api" }
 okx-github = { path = "../okx-github" }
 okx-execution = { path = "../okx-execution" }

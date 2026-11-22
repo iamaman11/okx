@@ -14,22 +14,142 @@ are Cargo dependencies, Rust visibility, the IPC enums, and the SQL owners.
 | Financial persistence and RiskBook | Existing `UnifiedFinanceHandle`, one financial SQLite |
 | Live closed candles | `okx-runtime::live_source::LiveCandleSource` |
 | Public market HTTP and shared rate budget | `okx-runtime::market_bootstrap::MarketBootstrapper` |
-| Research child, request correlation, activation | `okx-agent::research_client::ResearchClient` |
+| Research Service child, request correlation, activation | `okx-agent::research_client::ResearchClient`; installed binary `okx-research-service` |
 | Framing and typed public-source requests | `okx-protocol::research_ipc` |
-| Research command handler | `okx-research-worker::analytics::AnalyticsService` |
-| Research jobs, identity, cancellation, root lease | Worker `analytics::jobs::Jobs` |
-| Pure calculations | Existing `okx-analysis` and `okx-research` libraries |
+| Research command handler | Internal crate `okx-research-worker::analytics::AnalyticsService` |
+| Research jobs, identity, cancellation, root lease | Research Service `analytics::jobs::Jobs` |
+| Pure calculations | `okx-strategy-core`, `okx-analysis` and `okx-research` libraries |
 | Verified component staging | Existing CONTROL `artifact::research_component` |
 
-Agent has no production dependency on the research implementation or worker.
-Worker has no production dependency on Agent, execution, API credentials, or
+Agent has no production dependency on the Research Service implementation.
+Research Service has no production dependency on Agent, execution, API credentials, or
 financial storage. Its test-only HTTP fixtures do not authorize those edges.
 `scripts/check_architecture.py` checks both direct and transitive dependencies.
 
 Research requests receive public observations through the existing host source
 owner. They cannot issue arbitrary HTTP, access an account, reserve money, or
-place orders. Live strategies use their own live source and pure signal kernel;
-they do not invoke the research worker.
+place orders. The legacy live `strategy_turn` still synchronously invokes
+`EvaluateSignal` on Research Service per closed-bar decision. The new autonomous
+graph feed exists but has not yet replaced that live trading loop.
+
+## Graph wire contract (#537)
+
+`okx.graph/v1` uses one shared envelope through MCP, Agent and Research:
+
+```json
+{
+  "schema": "okx.graph/v1",
+  "steps": [{
+    "id": "mean_close",
+    "op": {"id": "rolling_mean", "version": 1},
+    "inputs": [{"source": "close"}],
+    "params": {"period": 20}
+  }],
+  "outputs": ["mean_close"]
+}
+```
+
+An input is exactly one of `{ "source": "close" }` or
+`{ "step": "previous_id" }`; later steps cannot be referenced. Inputs are
+ordered; Research assigns their meaning according to the installed operator.
+The positive operation version is `u32` and is independent of the envelope
+schema version. Public validation checks only this structure and bounds, not
+the list of operations or their parameters. Research resolves operations and
+units, rejects unsupported versions with the step, ID and version, and runs
+the same typed compiler as the legacy composition request. The previous
+`okx.market.composition/v1` request remains a separate compatible route.
+
+The obsolete `version`/`op_version`/`result_steps` graph envelope was an
+unreleased Draft representation; it is not accepted as `okx.graph/v1`.
+The public request ceiling remains 64 KiB and IPC framing remains 4 MiB.
+
+## Strategy activation versus position targets
+
+These are distinct commands with distinct owners:
+
+1. A client submits `StrategyRequest::Create` to register an instance, then
+   `StrategyRequest::Start` to enable it (or `Stop` to disable new strategy
+   decisions). Engine persists the strategy's enabled state, version and risk
+   configuration in the original financial owner. `Start` is **not** an order.
+2. Agent sends a read-only `GraphFeed::Start` for a graph session; Research
+   Service obtains closed public candles through Agent's typed source proxy and
+   publishes `GraphSignalPublication` with a typed `GraphSignalIntent`.
+3. The semantic signal is `Hold` (do nothing), `SetTarget(Flat)` (target no
+   strategy exposure), `SetTarget(Long)` or `SetTarget(Short)` (target direction).
+   It is **not** a trade command, order ID, budget grant or exchange POST.
+4. Engine compares the requested target with **its own** strategy/instrument
+   position, pending orders, account policy and risk. The pure
+   `okx-execution::position_target::plan_strategy_target` calculates one
+   reconciliation phase: no change, open, close existing references first, or
+   await settlement. It never sends an order. Only the existing durable Engine
+   decision, risk/admission and venue execution route may act on a plan.
+
+`TradeService::preview_graph_publication` reads
+one scoped strategy/lot/in-flight snapshot from the **original unified finance
+SQL owner** and binds it to an exact Research session, graph hash, strategy
+version and policy revision. The typed publication cursor is checked on a
+clone: **preview never ACKs, stores, or executes** the proposal. Outstanding
+`UNKNOWN` orders block a new opening and existing lots from unrelated
+strategies/accounts do not count. A real Research child IPC publication is
+exercised through this pure preview in tests, without venue POST.
+
+The ordinary Engine maintenance loop now reads the Research outbox and
+acknowledges `NoChange` in original finance SQL. A graph started with the
+legacy signal-only parameters, or an explicit `execution.mode=observe`,
+remains **read-only**. To arm an executable graph the client must submit a
+strictly typed strategy parameter wrapper:
+
+```json
+{
+  "signal": {
+    "version": "okx.graph-signal/v1",
+    "graph": {
+      "schema": "okx.graph/v1",
+      "steps": [
+        {"id":"change","op":{"id":"returns_series","version":1},"inputs":[{"source":"close"}]},
+        {"id":"positive","op":{"id":"greater_than","version":1},"inputs":[{"step":"change"}],"params":{"threshold":0}}
+      ],
+      "outputs": ["positive"]
+    },
+    "signal_step": "positive",
+    "target_if_true": 1,
+    "target_if_false": 0,
+    "missing": "hold"
+  },
+  "execution": {"mode":"trade","max_slippage_bps":5,"stop_distance_bps":50}
+}
+```
+
+The policy must be stored while stopped,
+then `Start` must be requested explicitly. A running observation cannot
+become an executable strategy merely through `Update`. Once armed, an `Open`
+from the committed Research journal schedules one bounded per-account task
+for the **existing** TradeService, with a graph-derived deterministic key,
+strategy loss budget, FOK constraints and mandatory stop protection. The
+original SQL `PREPARED + cursor` claim, RiskBook, governance, idempotency and
+venue recovery are still the only financial authorities. The read-only
+`Hold/NoChange` route never sends an order; `Close/Flip` and outstanding
+settlement remain blocked pending their own atomic Engine paths. This Draft
+code is not released or authorized for real exchange testing.
+
+The public MCP `strategies.create` and `strategies.update` actions now carry
+the same typed `parameters` wire: a plain graph signal is observation-only,
+while the `signal` + `execution` wrapper above is an explicit trading request.
+MCP validates the graph structure, causal references, output ID and bounds,
+the UTF-8 size limits and the exact execution policy before dispatching to
+Native; unrecognized operator IDs are still resolved only by Research. The
+model-visible MCP catalog keeps `parameters` as a compact object because the
+full graph schema would exceed the 24 KiB `tools/list` limit. The server
+does **not** accept arbitrary objects merely because that descriptor is short.
+
+The legacy loop currently treats `SignalPosition::Flat` like `Warmup` (no
+new entry), so it does not flatten existing lots for `Flat`. This is a tracked
+behavior gap, not a claimed live fix. The graph path now has the original
+finance SQL cursor/ACK, restart discovery and bounded Open admission. Close,
+Flip, independently managed protective exits and Research-failure recovery
+still need acceptance; missing Research must not be mistaken for `Flat` or
+`Hold`. Manual `TradeRequest::Execute` remains a separate, explicit one-order
+request through the same financial Engine.
 
 ## Identity and recovery
 
@@ -92,8 +212,8 @@ Admission freshness remains independently enforced and negatively tested.
 ## Direct checks after building
 
 ```powershell
-cargo build --locked -p okx-research-worker --bin okx-research-worker
-$env:OKX_RESEARCH_WORKER_TEST_EXE = (Resolve-Path target/debug/okx-research-worker.exe).Path
+cargo build --locked -p okx-research-worker --bin okx-research-service
+$env:OKX_RESEARCH_WORKER_TEST_EXE = (Resolve-Path target/debug/okx-research-service.exe).Path
 cargo test --locked -p okx-research-worker
 cargo test --locked -p okx-agent --lib research_dispatch_tests::
 cargo test --locked -p okx-agent --lib research_client::

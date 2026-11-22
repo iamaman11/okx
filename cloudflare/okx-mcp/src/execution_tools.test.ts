@@ -54,6 +54,37 @@ const composed={version:'okx.market.composition/v1',steps:[
  {id:'w1',op:'rolling_mean',input:'r1',period:2},
 ],result_steps:['w1']};
 fail(validTool('market',{...marketScreen,composition:composed}), 'versioned market composition accepted');
+const openGraph={schema:'okx.graph/v1',steps:[
+ {id:'change',op:{id:'returns_series',version:1},inputs:[{source:'close'}]},
+ {id:'smooth',op:{id:'future_mathematical_primitive',version:2},inputs:[{step:'change'}],params:{period:3}},
+],outputs:['smooth']};
+fail(validTool('market',{...marketScreen,graph:openGraph}),
+ 'graph transport accepts unknown mathematical operations for Research to resolve');
+for(const invalid of [
+ {...openGraph,schema:'okx.graph/v2'},
+ {...openGraph,steps:[...openGraph.steps,openGraph.steps[0]]},
+ {...openGraph,steps:[{...openGraph.steps[0],params:{script:['not_executable']}}]},
+ {...openGraph,outputs:['missing']},
+ {...openGraph,steps:[{...openGraph.steps[0],op:{id:'returns_series',version:0}}]},
+ {...openGraph,steps:[{...openGraph.steps[0],op:{id:'returns_series',version:4294967296}}]},
+ {...openGraph,steps:[{...openGraph.steps[0],inputs:[{step:'smooth'}]},openGraph.steps[1]]},
+ {...openGraph,steps:[{...openGraph.steps[0],inputs:[{source:'close',step:'change'}]},openGraph.steps[1]]},
+ {...openGraph,steps:[{...openGraph.steps[0],inputs:[{source:'close',unexpected:'bad'}]},openGraph.steps[1]]},
+ {...openGraph,steps:[{...openGraph.steps[0],inputs:[{source:'close'},{step:'change'}]},openGraph.steps[1]]},
+ {...openGraph,steps:[openGraph.steps[0],{...openGraph.steps[1],inputs:[{source:'change'}]}]},
+ {...openGraph,steps:[{...openGraph.steps[0],op:'returns_series'},openGraph.steps[1]]},
+ {...openGraph,version:'okx.graph/v1'},
+])fail(!validTool('market',{...marketScreen,graph:invalid}),
+ 'untrusted graph must fail structural validation at MCP');
+const issueExample={schema:'okx.graph/v1',steps:[
+ {id:'mean_close',op:{id:'rolling_mean',version:1},inputs:[{source:'close'}],params:{period:20}},
+],outputs:['mean_close']};
+fail(validTool('market',{...marketScreen,graph:issueExample}),
+ 'literal issue #537 graph contract is accepted at MCP');
+fail(!validTool('market',{...marketScreen,action:'compare',graph:openGraph}),
+ 'graph only available on screen');
+fail(!validTool('market',{...marketScreen,composition:composed,graph:openGraph}),
+ 'legacy and graph formats are mutually exclusive');
 fail(!validTool('market',{...marketScreen,action:'compare',composition:composed}), 'composition limited to screen');
 fail(!validTool('market',{...marketScreen,composition:{...composed,version:'unknown'}}), 'composition version rejected');
 fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'rolling_mean',input:'close'}]}}), 'window must specify period');
@@ -284,6 +315,40 @@ for(const [action,valid]of [['create',liveCreate],['update',liveUpdate]] as cons
  fail(!validTool('strategies',{...valid,parameters:{fast:1000,slow:1000}}),`strategy ${action} fast upper bound`);
 }
 fail(!validTool('strategies',{...liveCreate,version:2}),'only live strategy definition v1 supported');
+const graphSignal={
+ version:'okx.graph-signal/v1',
+ graph:{schema:'okx.graph/v1',steps:[
+  {id:'return',op:{id:'returns_series',version:1},inputs:[{source:'close'}]},
+  {id:'positive',op:{id:'greater_than',version:1},inputs:[{step:'return'}],params:{threshold:0}}
+ ],outputs:['positive']},
+ signal_step:'positive',target_if_true:1,target_if_false:0,missing:'hold'
+};
+const graphCreate={...liveCreate,definition_id:'graph_signal_v1',parameters:graphSignal};
+const graphTrade={signal:graphSignal,execution:{mode:'trade',max_slippage_bps:5,stop_distance_bps:50}};
+fail(validTool('strategies',graphCreate),'legacy graph signal admits observation only');
+fail(validTool('strategies',{...graphCreate,parameters:graphTrade}),'explicit typed graph trading admitted');
+fail(validTool('strategies',{...liveUpdate,parameters:graphTrade}),'graph trading policy update admitted');
+fail(validTool('strategies',{...graphCreate,parameters:{signal:graphSignal,execution:{mode:'observe'}}}),'explicit observation admitted');
+for(const invalid of [
+ {...graphSignal,signal_step:'unknown'},
+ {...graphSignal,target_if_true:2},
+ {...graphSignal,graph:{...graphSignal.graph,steps:[...graphSignal.graph.steps,
+   {id:'invalid',op:{id:'lag',version:1},inputs:[{step:'future'}]}]}},
+ {...graphSignal,extra:true}
+])fail(!validTool('strategies',{...graphCreate,parameters:invalid}),'invalid graph signal rejected at MCP');
+for(const invalid of [
+ {mode:'trade',max_slippage_bps:0,stop_distance_bps:50},
+ {mode:'trade',max_slippage_bps:5,stop_distance_bps:5001},
+ {mode:'trade',max_slippage_bps:5,stop_distance_bps:50,extra:true},
+ {mode:'observe',max_slippage_bps:5},
+ {mode:'trade',max_slippage_bps:5}
+])fail(!validTool('strategies',{...graphCreate,parameters:{signal:graphSignal,execution:invalid}}),'invalid graph execution policy rejected at MCP');
+fail(!validTool('strategies',{...liveCreate,parameters:graphSignal}),'graph requires graph definition ID');
+fail(!validTool('strategies',{...graphCreate,parameters:liveCreate.parameters}),'graph cannot silently use EMA parameters');
+fail(!validTool('strategies',{...graphCreate,parameters:{...graphSignal,graph:{...graphSignal.graph,
+ steps:[...graphSignal.graph.steps,{id:'unicode',op:{id:'lag',version:1},inputs:[{step:'positive'}],params:{str:'я'.repeat(100)}}]}}}),
+ 'graph rejects params exceeding Rust UTF-8 byte bound');
+console.log('graph_strategy_observation_and_explicit_trade_policy PASS');
 const researchResult=payloadFixtures.find(x=>x.tool==='research'&&x.action==='result')!.positive;
 for(const view of ['summary','trades','equity','variants'])
  fail(validTool('research',{...researchResult,view}),`research result view ${view} accepted`);
@@ -368,11 +433,17 @@ for(const tool of PUBLIC_TOOLS as any[]){
   fail(!validTool('accounts',{action:'list',link_id:'link_fixture'}),
     'native protocol never accepts host-only link selector');
  }else{
-  fail(JSON.stringify(expanded)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),
+  // The public strategy descriptor shares market.graph's compact object
+  // transport; validTool enforces the full typed graph and execution union.
+  const expected=tool.name==='strategies'?{oneOf:ACTION_SCHEMAS.strategies.map((branch:any)=>
+   ['create','update'].includes(String(branch.properties.action.const))?{
+    ...branch,properties:{...branch.properties,parameters:{type:'object'}}
+   }:branch)}:{oneOf:ACTION_SCHEMAS[tool.name]};
+  fail(JSON.stringify(expanded)===JSON.stringify(expected),
     `exact public schema factoring ${tool.name}`);
   for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))
    for(const input of [fixture.positive,...fixture.negative])
-    fail(matches(expanded,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),
+    fail(matches(expanded,input)===matches(expected,input),
       `factored positive/negative semantics ${tool.name}.${fixture.action}`);
  }
 }

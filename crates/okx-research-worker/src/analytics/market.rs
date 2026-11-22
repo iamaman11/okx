@@ -162,7 +162,7 @@ impl AnalyticsService {
         let hash = okx_research::canonical_sha256(&(
             market_request_schema(
                 &hash_request.fields,
-                hash_request.composition.is_some(),
+                hash_request.composition.is_some() || hash_request.graph.is_some(),
                 oi_composition,
                 funding_composition,
             ),
@@ -506,6 +506,22 @@ impl AnalyticsService {
                 "max_instruments_per_page":100},
             "quality":"complete"});
         capabilities["correlation_matrix"] = correlation_matrix;
+        // Full transport shape is discoverable on demand rather than copied
+        // into the size-constrained public MCP tools/list schema.
+        capabilities["graph_transport"] = json!({
+            "version":okx_protocol::graph_wire::GRAPH_WIRE_VERSION,
+            "location":"market.screen.graph",
+            "schema":okx_protocol::graph_wire::GRAPH_WIRE_VERSION,
+            "steps":{"id":"step_id","op":{"id":"operator_id","version":"positive_u32"},
+                     "inputs":[{"source":"source_id"},{"step":"prior_step_id"}],
+                     "params":{"name":"json_scalar"}},
+            "outputs":"step_ids",
+            "limits":{"max_steps":32,"max_results":14,"max_inputs_per_step":4,
+                      "max_parameters_per_step":8,
+                      "max_bytes":okx_protocol::graph_wire::GRAPH_WIRE_MAX_BYTES},
+            "math_semantics":"resolved_only_by_installed_research_operations",
+            "legacy_field":"composition"
+        });
         capabilities
     }
     pub(super) async fn market_rows(
@@ -2702,6 +2718,49 @@ mod tests {
         assert_eq!(
             compute_row_planned(row(), &mismatched, None, &checked, true).unwrap_err(),
             "COMPILED_PLAN_PROJECTION_MISMATCH"
+        );
+    }
+    #[test]
+    fn graph_v1_public_market_row_matches_legacy_numerical_evidence() {
+        let mut open = request(vec!["returns"]);
+        open.graph = Some(Box::new(
+            serde_json::from_value(json!({
+                "schema":"okx.graph/v1",
+                "steps":[
+                    {"id":"r1","op":{"id":"returns_series","version":1},
+                     "inputs":[{"source":"close"}]},
+                    {"id":"mean","op":{"id":"rolling_mean","version":1},
+                     "inputs":[{"step":"r1"}],"params":{"period":3}}
+                ],
+                "outputs":["mean"]
+            }))
+            .unwrap(),
+        ));
+        let mut legacy = open.clone();
+        legacy.graph = None;
+        legacy.composition = Some(Box::new(
+            serde_json::from_value(json!({
+                "version":okx_analysis::query_plan::COMPOSITION_VERSION,
+                "steps":[
+                    {"id":"r1","op":"returns_series","input":"close"},
+                    {"id":"mean","op":"rolling_mean","input":"r1","period":3}
+                ],
+                "result_steps":["mean"]
+            }))
+            .unwrap(),
+        ));
+        let open_plan = planner::AnalysisPlan::compile_market(&open).unwrap();
+        let legacy_plan = planner::AnalysisPlan::compile_market(&legacy).unwrap();
+        let open_result = compute_row_planned(row(), &open, None, &open_plan, true).unwrap();
+        let legacy_result = compute_row_planned(row(), &legacy, None, &legacy_plan, true).unwrap();
+        assert_eq!(
+            open_result["metrics"]["mean"],
+            legacy_result["metrics"]["mean"]
+        );
+        assert_eq!(open_result["units"]["mean"], legacy_result["units"]["mean"]);
+        assert_eq!(
+            open_result["composition_quality"]["mean"],
+            legacy_result["composition_quality"]["mean"]
         );
     }
     #[test]

@@ -1,6 +1,13 @@
 //! Typed strategy commands on the existing installation SQL owner.
 use super::UnifiedFinanceHandle;
-use crate::{AccountStore, OperationReceipt, StoreError, StoreResult, StrategyInstance};
+use crate::graph_binding::{
+    EngineGraphBinding, EngineGraphBindingPage, EngineGraphCursor, EngineGraphProgress,
+    GraphCloseAdmission, GraphCloseClaim, GraphCloseRecovery, GraphIdleAck, GraphOpenAdmission,
+};
+use crate::{
+    AccountStore, Decision, NewIntent, OperationReceipt, StoreError, StoreResult, StrategyInstance,
+    StrategyPositionSnapshot,
+};
 use std::time::Instant;
 
 #[derive(Clone)]
@@ -22,6 +29,241 @@ pub struct StrategyDecisionClaimCommand {
     pub time: i64,
 }
 impl UnifiedFinanceHandle {
+    /// Bounded read-only reconstruction from original finance SQL, including
+    /// source-backed Close settlement, after Engine restart.
+    pub async fn graph_close_recoveries(
+        &self,
+        deadline: Instant,
+        account: String,
+        binding: EngineGraphBinding,
+        published: EngineGraphCursor,
+    ) -> StoreResult<Vec<GraphCloseRecovery>> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let result = AccountStore::graph_close_recoveries_sql(
+                &tx,
+                (&installation, &account),
+                &binding,
+                &published,
+            )?;
+            tx.commit()?;
+            Ok(result)
+        })
+        .await
+    }
+    /// Read only: bounded discovery through the same installed finance owner.
+    pub async fn graph_bindings_page(
+        &self,
+        deadline: Instant,
+        account: String,
+        limit: usize,
+        offset: usize,
+    ) -> StoreResult<EngineGraphBindingPage> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            AccountStore::graph_bindings_page_sql(db, (&installation, &account), limit, offset)
+        })
+        .await
+    }
+
+    /// Original finance FIFO: graph checkpoint, strategy decision and one
+    /// PREPARED opening order are inseparable. Risk admission/POST are later.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Original finance owner requires all atomic evidence explicitly."
+    )]
+    pub async fn prepare_graph_open(
+        &self,
+        deadline: Instant,
+        account: String,
+        binding: EngineGraphBinding,
+        published: EngineGraphCursor,
+        decision: Decision,
+        intent: NewIntent,
+        now: i64,
+    ) -> StoreResult<GraphOpenAdmission> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            super::finance_authority::require_preparation_authority(&tx, &installation)?;
+            let claim = AccountStore::prepare_graph_open_sql(
+                &tx,
+                (&installation, &account),
+                &binding,
+                &published,
+                &decision,
+                &intent,
+                now,
+            )?;
+            let intent_id = match &claim {
+                crate::graph_binding::GraphOpenClaim::Prepared { intent_id }
+                | crate::graph_binding::GraphOpenClaim::Replayed { intent_id } => intent_id,
+            };
+            let prepared = AccountStore::find_intent_sql(
+                &tx,
+                Some((&installation, &account)),
+                "intent_id",
+                intent_id,
+            )?
+            .ok_or(StoreError::Invalid("GRAPH_FINANCE_PREPARED_INTENT_MISSING"))?;
+            tx.commit().map_err(|_| {
+                StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
+            })?;
+            Ok(GraphOpenAdmission {
+                claim,
+                intent: prepared,
+            })
+        })
+        .await
+    }
+
+    /// Stage a graph reduction through the SAME original finance writer and
+    /// PREPARE rules. Never acknowledge the publication cursor here: all
+    /// remaining references/partial fills require independent settlement.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The original owner needs exact reference and immutable claim evidence."
+    )]
+    pub async fn prepare_graph_close(
+        &self,
+        deadline: Instant,
+        account: String,
+        binding: EngineGraphBinding,
+        published: EngineGraphCursor,
+        original_reference: String,
+        decision: Decision,
+        intent: NewIntent,
+        now: i64,
+    ) -> StoreResult<GraphCloseAdmission> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            super::finance_authority::require_preparation_authority(&tx, &installation)?;
+            let claim = AccountStore::prepare_graph_close_sql(
+                &tx,
+                (&installation, &account),
+                &binding,
+                &published,
+                &original_reference,
+                &decision,
+                &intent,
+                now,
+            )?;
+            let intent_id = match &claim {
+                GraphCloseClaim::Prepared { intent_id }
+                | GraphCloseClaim::Replayed { intent_id } => intent_id,
+            };
+            let prepared = AccountStore::find_intent_sql(
+                &tx,
+                Some((&installation, &account)),
+                "intent_id",
+                intent_id,
+            )?
+            .ok_or(StoreError::Invalid("GRAPH_FINANCE_PREPARED_INTENT_MISSING"))?;
+            tx.commit().map_err(|_| {
+                StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
+            })?;
+            Ok(GraphCloseAdmission {
+                claim,
+                intent: prepared,
+            })
+        })
+        .await
+    }
+
+    pub async fn graph_progress(
+        &self,
+        deadline: Instant,
+        account: String,
+        binding: EngineGraphBinding,
+    ) -> StoreResult<Option<EngineGraphProgress>> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let result =
+                AccountStore::graph_progress_sql(&tx, (&installation, &account), &binding)?;
+            tx.commit()?;
+            Ok(result)
+        })
+        .await
+    }
+
+    pub async fn bind_graph(
+        &self,
+        deadline: Instant,
+        account: String,
+        binding: EngineGraphBinding,
+        restored: EngineGraphCursor,
+        now: i64,
+    ) -> StoreResult<EngineGraphProgress> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            super::finance_authority::require_preparation_authority(&tx, &installation)?;
+            let progress = AccountStore::bind_graph_sql(
+                &tx,
+                (&installation, &account),
+                &binding,
+                &restored,
+                now,
+            )?;
+            tx.commit().map_err(|_| {
+                StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
+            })?;
+            Ok(progress)
+        })
+        .await
+    }
+
+    pub async fn acknowledge_graph_idle(
+        &self,
+        deadline: Instant,
+        account: String,
+        binding: EngineGraphBinding,
+        published: EngineGraphCursor,
+        now: i64,
+    ) -> StoreResult<GraphIdleAck> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let ack = AccountStore::acknowledge_graph_idle_sql(
+                &tx,
+                (&installation, &account),
+                &binding,
+                &published,
+                now,
+            )?;
+            tx.commit().map_err(|_| {
+                StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
+            })?;
+            Ok(ack)
+        })
+        .await
+    }
+
+    pub async fn strategy_position_snapshot(
+        &self,
+        deadline: Instant,
+        account: String,
+        instance_id: String,
+        instrument_id: String,
+    ) -> StoreResult<StrategyPositionSnapshot> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let snapshot = AccountStore::strategy_position_snapshot_sql(
+                &tx,
+                Some((&installation, &account)),
+                &instance_id,
+                &instrument_id,
+            )?;
+            tx.commit()?;
+            Ok(snapshot)
+        })
+        .await
+    }
+
     pub async fn strategy_status(
         &self,
         deadline: Instant,

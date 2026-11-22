@@ -669,6 +669,7 @@ mod extension_tests {
                         ],
                         result_steps: vec!["w1".into()],
                     })),
+                    graph: None,
                     limit: 20,
                     cursor: None,
                 },

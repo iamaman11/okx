@@ -224,7 +224,7 @@ pub(crate) fn record_leverage(feed: &RecordedAccountHttp) {
 }
 
 /// Finite original venue bytes. Only production WS parsing publishes prices.
-pub(super) fn raw_market() -> (
+pub(crate) fn raw_market() -> (
     okx_runtime::PublicWsCoordinator,
     okx_runtime::PublicWsHandle,
     Arc<RecordedWsConnector>,
@@ -634,6 +634,16 @@ pub(crate) fn execute() -> TradeRequest {
 }
 
 impl NativeFixture {
+    /// Attach only recorded public venue frames to the original native
+    /// execution boundary. The account and finance owners are unchanged.
+    pub(crate) fn attach_recorded_market(
+        &self,
+        socket: Arc<RecordedWsConnector>,
+        public: okx_runtime::PublicWsHandle,
+    ) {
+        *self.market_boundary.market.lock().unwrap() = Some((socket, public));
+    }
+
     pub(crate) async fn expect_trade_reason(&self, response: &Value, expected: &str) {
         if response["reason_code"] != expected {
             let facts = self

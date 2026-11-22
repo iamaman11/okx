@@ -1,7 +1,9 @@
 import unittest
+from unittest.mock import patch
 
+from check_ci_native_scope import classify as ready_classify
 from check_p0 import (check_counts, measured_mcp_native_under_research,
-                      measured_native_under_research, measured_t10, select)
+                      measured_native_under_research, measured_t10, execute, select)
 
 
 class FeedbackTests(unittest.TestCase):
@@ -30,7 +32,9 @@ class FeedbackTests(unittest.TestCase):
             "full_scale_execution": "not_attempted", "side_effects": "none"}}
 
     def test_kernel_and_boundaries(self):
-        self.assertEqual(select("M", "crates/okx-kernel/src/operators.rs"), {"kernel"})
+        self.assertEqual(select("M", "crates/okx-kernel/src/time_series.rs"), {"kernel"})
+        self.assertEqual(select("M", "crates/okx-strategy-core/src/operators.rs"), {"research", "worker", "analysis"})
+        self.assertEqual(select("M", "crates/okx-kernel/src/strategy_contract.rs"), {"expanded"})
         self.assertEqual(select("M", "crates/okx-research-worker/src/analytics/jobs.rs"), {"worker"})
         self.assertEqual(select("M", "crates/okx-protocol/src/research_ipc.rs"), {"wire", "worker", "ipc", "mcp"})
         self.assertFalse(select("M", "docs/testing.md"))
@@ -40,6 +44,34 @@ class FeedbackTests(unittest.TestCase):
                      "crates/okx-research-worker/build.rs", ".github/workflows/ci.yml", "unknown"):
             self.assertEqual(select("M", path), {"expanded"})
         self.assertEqual(select("D", "crates/okx-kernel/src/query_plan.rs"), {"expanded"})
+
+    def test_one_strategy_primitive_selects_owner_and_ready_research(self):
+        def ready_scope(path):
+            return ready_classify([[{"filename": path, "status": "modified"}]])
+
+        for primitive in ("operators.rs", "query_plan.rs", "stream.rs"):
+            path = f"crates/okx-strategy-core/src/{primitive}"
+            self.assertEqual(ready_scope(path), "research")
+            draft_scope = select("M", path)
+            self.assertEqual(draft_scope, {"analysis", "research", "worker"})
+            with (patch("check_p0.tests", return_value="") as run_tests,
+                  patch("check_p0.measured_t10", return_value={}),
+                  patch("check_p0.report_t10")):
+                execute(draft_scope)
+            packages = [call.args[0] for call in run_tests.call_args_list]
+            self.assertIn("okx-strategy-core", packages)
+            self.assertIn("okx-analysis", packages)
+            self.assertIn("okx-research", packages)
+            self.assertIn("okx-research-worker", packages)
+            self.assertNotIn("okx-agent", packages)
+            self.assertNotIn("okx-execution", packages)
+
+    def test_finance_and_dependency_changes_keep_full_native(self):
+        for path in ("crates/okx-agent/src/trade_service/execute.rs",
+                     "crates/okx-execution/src/lib.rs",
+                     "crates/okx-strategy-core/Cargo.toml", "Cargo.lock"):
+            self.assertEqual(ready_classify([[{"filename": path, "status": "modified"}]]), "full")
+            self.assertEqual(select("M", path), {"expanded"})
 
     def test_missing_or_filtered_out_test_is_a_failure(self):
         self.assertEqual(check_counts("test one ... ok\ntest two ... ignored", ["one"]), 1)

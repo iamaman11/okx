@@ -31,7 +31,7 @@ async fn start(
     FramedWrite<ChildStdin, LengthDelimitedCodec>,
     FramedRead<ChildStdout, LengthDelimitedCodec>,
 ) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_okx-research-worker"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_okx-research-service"))
         .arg("--root")
         .arg(root)
         .arg("--scope")
@@ -198,7 +198,7 @@ fn raw_start(
     FramedWrite<ChildStdin, LengthDelimitedCodec>,
     FramedRead<ChildStdout, LengthDelimitedCodec>,
 ) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_okx-research-worker"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_okx-research-service"))
         .arg("--root")
         .arg(root)
         .arg("--scope")

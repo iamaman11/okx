@@ -1,5 +1,9 @@
 use super::*;
-use okx_protocol::trading::{CapitalDirection, StrategyConfigurationV1, StrategyParametersV1};
+use okx_protocol::research_ipc::{ClosedPrice, SignalPosition, SignalRequest};
+use okx_protocol::trading::{
+    CapitalDirection, GraphExecutionPolicy, GraphStrategyConfigurationV1, StrategyConfigurationV1,
+    StrategyParametersV1,
+};
 #[cfg(test)]
 #[path = "strategy_contract_tests.rs"]
 mod strategy_contract_tests;
@@ -21,11 +25,74 @@ impl TradeService {
             let result = match request {
                 StrategyRequest::Status { instance_id } => {
                     let instance_id = instance_id.clone();
-                    r.execution
+                    let mut status = r
+                        .execution
                         .store
                         .strategy_status(deadline(), instance_id, now())
                         .await
-                        .map_err(err)?
+                        .map_err(err)?;
+                    if status["instance"]["definition_id"]
+                        == GraphStrategyConfigurationV1::DEFINITION_ID
+                    {
+                        // A finance binding is durable but never proves that
+                        // Research is online or that trading is enabled.
+                        let instance: StrategyInstance =
+                            serde_json::from_value(status["instance"].clone())
+                                .map_err(|_| "GRAPH_STATUS_INSTANCE_CORRUPT")?;
+                        let mut bound = 0usize;
+                        let mut total = 0usize;
+                        let mut trade_armed = false;
+                        if instance.enabled {
+                            let configuration: GraphStrategyConfigurationV1 =
+                                serde_json::from_str(&instance.parameters)
+                                    .map_err(|_| "GRAPH_STATUS_CONFIGURATION_CORRUPT")?;
+                            total = configuration.instruments.len();
+                            trade_armed = matches!(
+                                configuration.execution,
+                                GraphExecutionPolicy::Trade { .. }
+                            );
+                            for instrument in &configuration.instruments {
+                                let binding = graph_activation::activation_binding(
+                                    &r.configuration.account_key.wire(),
+                                    &instance,
+                                    &configuration,
+                                    instrument,
+                                )?;
+                                if r.execution
+                                    .store
+                                    .graph_progress(deadline(), binding.storage_binding())
+                                    .await
+                                    .map_err(err)?
+                                    .is_some()
+                                {
+                                    bound += 1;
+                                }
+                            }
+                        }
+                        status["graph_execution"] = if bound > 0 && trade_armed {
+                            json!({
+                                "state": "FINANCE_BOUND_TRADE_ARMED",
+                                "reason_code": "GRAPH_ORDERS_SUBJECT_TO_RISK_ADMISSION",
+                                "bound_instruments": bound,
+                                "configured_instruments": total,
+                            })
+                        } else if bound > 0 {
+                            json!({
+                                "state": "FINANCE_BOUND_EXECUTION_DISABLED",
+                                "reason_code": "GRAPH_ORDERS_NOT_CONNECTED",
+                                "bound_instruments": bound,
+                                "configured_instruments": total,
+                            })
+                        } else {
+                            json!({
+                                "state": "NOT_ACTIVATED",
+                                "reason_code": "GRAPH_EXECUTION_NOT_CONNECTED",
+                                "bound_instruments": 0,
+                                "configured_instruments": total,
+                            })
+                        };
+                    }
+                    status
                 }
                 _ => {
                     json!({"instances":r.execution.store.strategy_instances(deadline()).await.map_err(err)?})
@@ -92,6 +159,7 @@ impl TradeService {
             return Ok(completed(serde_json::to_value(result).map_err(err)?));
         }
         let body = request.clone();
+        let mut retiring_graph = None;
         let result: okx_execution::StoreResult<StrategyInstance> = async {
             let operation = match &body {
                 StrategyRequest::Create {
@@ -128,6 +196,18 @@ impl TradeService {
                     .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"));
             }
             let instances = r.execution.store.strategy_instances(deadline()).await?;
+            if let StrategyRequest::Stop { instance_id, .. }
+            | StrategyRequest::Update { instance_id, .. } = &body
+            {
+                retiring_graph = instances
+                    .iter()
+                    .find(|instance| &instance.instance_id == instance_id)
+                    .filter(|instance| {
+                        instance.enabled
+                            && instance.definition_id == GraphStrategyConfigurationV1::DEFINITION_ID
+                    })
+                    .cloned();
+            }
             let (operation, action, instance, expected) = match &body {
                 StrategyRequest::Create {
                     idempotency_key,
@@ -141,27 +221,61 @@ impl TradeService {
                 } => {
                     if !matches!(
                         definition_id.as_str(),
-                        "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
+                        "ema_cross_v1"
+                            | "no_trade"
+                            | "close_momentum"
+                            | "two_bar_momentum"
+                            | GraphStrategyConfigurationV1::DEFINITION_ID
                     ) {
                         return Err(okx_execution::StoreError::Invalid(
                             "STRATEGY_DEFINITION_UNSUPPORTED",
                         ));
                     }
-                    let config = StrategyConfigurationV1 {
-                        parameters: StrategyParametersV1::parse(parameters).ok_or(
-                            okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
-                        )?,
-                        instruments: instruments.clone(),
-                        timeframe_ms: *timeframe_ms,
-                    };
-                    if !config.valid() || *version != 1 {
+                    if *version != 1 {
                         return Err(okx_execution::StoreError::Invalid(
                             "STRATEGY_CONFIGURATION_INVALID",
                         ));
                     }
-                    let parameters = serde_json::to_string(&config).map_err(|_| {
-                        okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
-                    })?;
+                    let parameters =
+                        if definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
+                            let (signal, execution) =
+                                GraphStrategyConfigurationV1::parse_parameters(parameters).ok_or(
+                                    okx_execution::StoreError::Invalid(
+                                        "STRATEGY_PARAMETERS_INVALID",
+                                    ),
+                                )?;
+                            let config = GraphStrategyConfigurationV1 {
+                                signal,
+                                instruments: instruments.clone(),
+                                timeframe_ms: *timeframe_ms,
+                                execution,
+                            };
+                            if !config.valid() {
+                                return Err(okx_execution::StoreError::Invalid(
+                                    "STRATEGY_CONFIGURATION_INVALID",
+                                ));
+                            }
+                            serde_json::to_string(&config)
+                        } else {
+                            let config = StrategyConfigurationV1 {
+                                parameters: StrategyParametersV1::parse(parameters).ok_or(
+                                    okx_execution::StoreError::Invalid(
+                                        "STRATEGY_PARAMETERS_INVALID",
+                                    ),
+                                )?,
+                                instruments: instruments.clone(),
+                                timeframe_ms: *timeframe_ms,
+                            };
+                            if !config.valid() {
+                                return Err(okx_execution::StoreError::Invalid(
+                                    "STRATEGY_CONFIGURATION_INVALID",
+                                ));
+                            }
+                            serde_json::to_string(&config)
+                        }
+                        .map_err(|_| {
+                            okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
+                        })?;
                     let instance = StrategyInstance {
                         instance_id: instance_id.clone(),
                         definition_id: definition_id.clone(),
@@ -189,21 +303,49 @@ impl TradeService {
                         .ok_or(okx_execution::StoreError::Invalid(
                             "STRATEGY_INSTANCE_NOT_FOUND",
                         ))?;
-                    let mut config: StrategyConfigurationV1 = serde_json::from_str(&i.parameters)
-                        .map_err(|_| {
-                        okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT")
-                    })?;
-                    config.parameters = StrategyParametersV1::parse(parameters).ok_or(
-                        okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
-                    )?;
-                    if !config.valid() {
-                        return Err(okx_execution::StoreError::Invalid(
-                            "STRATEGY_CONFIGURATION_INVALID",
-                        ));
+                    if i.definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
+                        let mut config: GraphStrategyConfigurationV1 =
+                            serde_json::from_str(&i.parameters).map_err(|_| {
+                                okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT")
+                            })?;
+                        let (signal, execution) =
+                            GraphStrategyConfigurationV1::parse_parameters(parameters).ok_or(
+                                okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
+                            )?;
+                        // An already running observation must never become a
+                        // live order strategy as a side effect of Update.
+                        if i.enabled && !matches!(execution, GraphExecutionPolicy::Observe) {
+                            return Err(okx_execution::StoreError::Invalid(
+                                "GRAPH_TRADE_REQUIRES_STOP",
+                            ));
+                        }
+                        config.signal = signal;
+                        config.execution = execution;
+                        if !config.valid() {
+                            return Err(okx_execution::StoreError::Invalid(
+                                "STRATEGY_CONFIGURATION_INVALID",
+                            ));
+                        }
+                        i.parameters = serde_json::to_string(&config).map_err(|_| {
+                            okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
+                        })?;
+                    } else {
+                        let mut config: StrategyConfigurationV1 =
+                            serde_json::from_str(&i.parameters).map_err(|_| {
+                                okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT")
+                            })?;
+                        config.parameters = StrategyParametersV1::parse(parameters).ok_or(
+                            okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
+                        )?;
+                        if !config.valid() {
+                            return Err(okx_execution::StoreError::Invalid(
+                                "STRATEGY_CONFIGURATION_INVALID",
+                            ));
+                        }
+                        i.parameters = serde_json::to_string(&config).map_err(|_| {
+                            okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
+                        })?;
                     }
-                    i.parameters = serde_json::to_string(&config).map_err(|_| {
-                        okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
-                    })?;
                     i.budget = Decimal::from_str(budget_usd)
                         .map_err(|_| okx_execution::StoreError::Invalid("INVALID_BUDGET"))?;
                     let expected = i64::try_from(*expected_revision).map_err(|_| {
@@ -284,9 +426,25 @@ impl TradeService {
         }
         .await;
         let result = result.map_err(err)?;
+        if let Some(prior) = retiring_graph
+            && let Some(research) = self.signal_research.read().await.clone()
+        {
+            let account_key = r.configuration.account_key.wire();
+            tokio::spawn(async move {
+                if graph_activation::retire_graph_instance(&research, &account_key, &prior)
+                    .await
+                    .is_err()
+                {
+                    eprintln!(
+                        "OKX_GRAPH_ENGINE_V1 account={} state=RETIRE_INCOMPLETE reason=RESEARCH_SESSION_STOP_FAILED",
+                        account_key
+                    );
+                }
+            });
+        }
         Ok(completed(json!({"instance":result})))
     }
-    pub async fn run(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    pub async fn run(self: Arc<Self>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let mut timer = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
@@ -319,7 +477,7 @@ impl TradeService {
             }
         }
     }
-    async fn maintenance_turn(&self) {
+    async fn maintenance_turn(self: &Arc<Self>) {
         // One existing maintenance owner. The recovery scheduler provides
         // bounded retry spacing for the campaign, while independent account
         // capture keeps advancing cursors every two seconds. No archive
@@ -463,8 +621,45 @@ impl TradeService {
                     if let Ok(instances) =
                         r.execution.store.strategy_instances(deadline()).await
                     {
-                        for instance in instances.into_iter().filter(|i| i.enabled) {
+                        let mut has_graph_strategy = false;
+                        for instance in instances.iter().filter(|i| i.enabled) {
+                            if instance.definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
+                                has_graph_strategy = true;
+                                continue;
+                            }
                             let _ = self.strategy_turn(&r, &instance).await;
+                        }
+                        if has_graph_strategy {
+                            // Shares the existing maintenance owner, not a
+                            // second background trader. Only idle ACKs here.
+                            let turn = tokio::time::timeout(
+                                Duration::from_millis(900), self.graph_research_turn(&r)
+                            ).await;
+                            if !matches!(turn, Ok(Ok(_))) {
+                                eprintln!(
+                                    "OKX_GRAPH_ENGINE_V1 account={} state=REPLAY_UNAVAILABLE reason=FINANCE_OR_RESEARCH_READ_FAILED",
+                                    r.configuration.account_key.wire()
+                                );
+                            }
+                            // One rotating read-only public subscription at
+                            // most per account. Longer startup never blocks
+                            // the separate risk/intent reconciliation lane.
+                            let activation = tokio::time::timeout(
+                                Duration::from_secs(12),
+                                self.graph_activation_turn(&r, &instances),
+                            ).await;
+                            match activation {
+                                Ok(Ok(())) => {}
+                                Ok(Err(reason)) => {
+                                    let code = if reason.len() <= 96 && reason.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') {
+                                        reason.as_str()
+                                    } else {
+                                        "GRAPH_ACTIVATION_INTERNAL_FAILURE"
+                                    };
+                                    eprintln!("OKX_GRAPH_ENGINE_V1 account={} state=OBSERVATION_UNAVAILABLE reason={code}", r.configuration.account_key.wire());
+                                }
+                                Err(_) => eprintln!("OKX_GRAPH_ENGINE_V1 account={} state=OBSERVATION_UNAVAILABLE reason=GRAPH_ACTIVATION_TIMEOUT", r.configuration.account_key.wire()),
+                            }
                         }
                     }
                 };
@@ -478,6 +673,12 @@ impl TradeService {
         r: &Arc<AccountResources>,
         instance: &StrategyInstance,
     ) -> Result<(), String> {
+        if instance.definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
+            // This is a separate target-driven execution mode. Until a
+            // durable graph activation is wired to Engine, it is not an EMA
+            // job and must never request per-bar EvaluateSignal or POST.
+            return Err("GRAPH_EXECUTION_NOT_CONNECTED".into());
+        }
         let live_source = self
             .live_source
             .read()
@@ -489,6 +690,12 @@ impl TradeService {
         if !config.valid() {
             return Err("STRATEGY_CONFIGURATION_INVALID".into());
         }
+        let research = self
+            .signal_research
+            .read()
+            .await
+            .clone()
+            .ok_or("STRATEGY_RESEARCH_NOT_READY")?;
         let (fast, slow) = (config.parameters.fast, config.parameters.slow);
         let timeframe = config.timeframe_ms;
         for instrument in &config.instruments {
@@ -509,14 +716,19 @@ impl TradeService {
                     last
                 ))?[..40]
             );
-            let mut kernel = okx_analysis::operators::StrategyKernel::from_id(
-                &instance.definition_id,
-                okx_analysis::operators::EmaParameters { fast, slow },
-            )?;
-            let mut signal = None;
-            for (_, close) in &bars {
-                signal = kernel.push_closed(*close)?;
-            }
+            let decision = research
+                .evaluate_signal(SignalRequest {
+                    strategy_id: instance.definition_id.clone(),
+                    parameters: okx_protocol::analytics::EmaParameters { fast, slow },
+                    closes: bars
+                        .iter()
+                        .map(|(time_ms, close)| ClosedPrice {
+                            time_ms: *time_ms,
+                            close: *close,
+                        })
+                        .collect(),
+                })
+                .await?;
             let decision_digest = digest(&(last, &bars))?;
             let (state, control) = self.authority(r, None).await?;
             if !control.access_enabled() {
@@ -544,7 +756,11 @@ impl TradeService {
             let Some(claimed_decision_id) = claimed else {
                 continue;
             };
-            let desired = signal.unwrap_or(0);
+            let desired = match decision.position {
+                SignalPosition::Long => 1,
+                SignalPosition::Short => -1,
+                SignalPosition::Flat | SignalPosition::Warmup => 0,
+            };
             if desired == 0 {
                 let id = instance.instance_id.clone();
                 let key = decision_key.clone();

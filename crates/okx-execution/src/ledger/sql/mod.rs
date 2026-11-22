@@ -26,6 +26,7 @@ mod source_financial_risk;
 mod source_flows;
 mod source_funding;
 mod source_funding_projection;
+mod source_graph_binding;
 mod source_identity;
 mod source_instance_mutation;
 mod source_local_close;

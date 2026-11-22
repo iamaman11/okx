@@ -3,6 +3,7 @@ pub mod account_governance;
 pub mod accounts;
 pub mod analytics;
 pub mod crypto;
+pub mod graph_wire;
 pub mod host_state_proto;
 pub mod numeric;
 pub mod research_ipc;

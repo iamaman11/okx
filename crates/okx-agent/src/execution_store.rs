@@ -79,6 +79,137 @@ pub struct ExecutionStore {
 }
 
 impl ExecutionStore {
+    /// Original finance SQL is the only source of restart/settlement status.
+    pub async fn graph_close_recoveries(
+        &self,
+        deadline: Instant,
+        binding: okx_execution::graph_binding::EngineGraphBinding,
+        published: okx_execution::graph_binding::EngineGraphCursor,
+    ) -> StoreResult<Vec<okx_execution::graph_binding::GraphCloseRecovery>> {
+        let Self { owner, account } = self;
+        owner
+            .graph_close_recoveries(deadline, account.wire.clone(), binding, published)
+            .await
+    }
+    pub async fn graph_bindings_page(
+        &self,
+        deadline: Instant,
+        limit: usize,
+        offset: usize,
+    ) -> StoreResult<okx_execution::graph_binding::EngineGraphBindingPage> {
+        let Self { owner, account } = self;
+        owner
+            .graph_bindings_page(deadline, account.wire.clone(), limit, offset)
+            .await
+    }
+
+    /// Exact one-finance-transaction graph opening checkpoint and PREPARED intent.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the preplanned Engine intent and graph CAS data explicit."
+    )]
+    pub async fn prepare_graph_open(
+        &self,
+        deadline: Instant,
+        binding: okx_execution::graph_binding::EngineGraphBinding,
+        published: okx_execution::graph_binding::EngineGraphCursor,
+        decision: okx_execution::Decision,
+        intent: okx_execution::NewIntent,
+        now: i64,
+    ) -> StoreResult<okx_execution::graph_binding::GraphOpenAdmission> {
+        let Self { owner, account } = self;
+        owner
+            .prepare_graph_open(
+                deadline,
+                account.wire.clone(),
+                binding,
+                published,
+                decision,
+                intent,
+                now,
+            )
+            .await
+    }
+
+    /// Original finance owner stages one exact reduction without cursor ACK.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the original lot reference and graph evidence explicit."
+    )]
+    pub async fn prepare_graph_close(
+        &self,
+        deadline: Instant,
+        binding: okx_execution::graph_binding::EngineGraphBinding,
+        published: okx_execution::graph_binding::EngineGraphCursor,
+        original_reference: String,
+        decision: okx_execution::Decision,
+        intent: okx_execution::NewIntent,
+        now: i64,
+    ) -> StoreResult<okx_execution::graph_binding::GraphCloseAdmission> {
+        let Self { owner, account } = self;
+        owner
+            .prepare_graph_close(
+                deadline,
+                account.wire.clone(),
+                binding,
+                published,
+                original_reference,
+                decision,
+                intent,
+                now,
+            )
+            .await
+    }
+
+    pub async fn graph_progress(
+        &self,
+        deadline: Instant,
+        binding: okx_execution::graph_binding::EngineGraphBinding,
+    ) -> StoreResult<Option<okx_execution::graph_binding::EngineGraphProgress>> {
+        let Self { owner, account } = self;
+        owner
+            .graph_progress(deadline, account.wire.clone(), binding)
+            .await
+    }
+
+    pub async fn bind_graph(
+        &self,
+        deadline: Instant,
+        binding: okx_execution::graph_binding::EngineGraphBinding,
+        restored: okx_execution::graph_binding::EngineGraphCursor,
+        now: i64,
+    ) -> StoreResult<okx_execution::graph_binding::EngineGraphProgress> {
+        let Self { owner, account } = self;
+        owner
+            .bind_graph(deadline, account.wire.clone(), binding, restored, now)
+            .await
+    }
+
+    pub async fn acknowledge_graph_idle(
+        &self,
+        deadline: Instant,
+        binding: okx_execution::graph_binding::EngineGraphBinding,
+        published: okx_execution::graph_binding::EngineGraphCursor,
+        now: i64,
+    ) -> StoreResult<okx_execution::graph_binding::GraphIdleAck> {
+        let Self { owner, account } = self;
+        owner
+            .acknowledge_graph_idle(deadline, account.wire.clone(), binding, published, now)
+            .await
+    }
+
+    pub async fn strategy_position_snapshot(
+        &self,
+        deadline: Instant,
+        instance_id: String,
+        instrument_id: String,
+    ) -> StoreResult<okx_execution::StrategyPositionSnapshot> {
+        let Self { owner, account } = self;
+        owner
+            .strategy_position_snapshot(deadline, account.wire.clone(), instance_id, instrument_id)
+            .await
+    }
+
     pub async fn strategy_status(
         &self,
         deadline: Instant,

@@ -7,8 +7,8 @@ use std::sync::atomic::AtomicUsize;
 async fn research_warm_cancelled_explain_measurement() {
     let total = std::time::Instant::now();
     let executable = PathBuf::from(
-        std::env::var_os("OKX_RESEARCH_WORKER_TEST_EXE")
-            .expect("set OKX_RESEARCH_WORKER_TEST_EXE to the built Worker"),
+        std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
+            .expect("set OKX_RESEARCH_SERVICE_TEST_EXE to the built Worker"),
     );
     let hash = format!("{:x}", Sha256::digest(std::fs::read(&executable).unwrap()));
     let root = std::env::temp_dir().join(format!("okx-research-measure-{}", unique()));

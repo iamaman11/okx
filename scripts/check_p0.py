@@ -40,7 +40,9 @@ def select(status, path):
         return {"expanded"}
     if path == "README.md" or (path.startswith("docs/") and path.endswith(".md")):
         return set()
-    if path in {"crates/okx-kernel/src/" + f for f in ("operators.rs", "query_plan.rs", "time_series.rs")}:
+    if path.startswith("crates/okx-strategy-core/src/") and path.endswith(".rs"):
+        return {"research", "worker", "analysis"}
+    if path == "crates/okx-kernel/src/time_series.rs":
         return {"kernel"}
     if path.startswith("crates/okx-analysis/src/") and path.endswith(".rs"):
         return {"analysis", "kernel"}
@@ -332,11 +334,67 @@ def report_mcp_native_under_research(value):
 def execute(scopes):
     if "expanded" in scopes:
         # Check the local platform and changed build inputs. Ready covers Windows and the release.
+        subprocess.run(["cargo", "fmt", "--all", "--", "--check"], cwd=ROOT, check=True)
         subprocess.run(["cargo", "check", "--locked", "--workspace", "--all-targets"], cwd=ROOT, check=True)
+        # A target signal is never an order. Exercise the pure Engine decision
+        # boundary, including Hold/Flat, flips and in-flight idempotence.
+        subprocess.run(
+            ["cargo", "test", "--locked", "-p", "okx-execution", "--lib",
+             "position_target::tests::", "--", "--test-threads", "2"],
+            cwd=ROOT, check=True,
+        )
+        # `cargo check --all-targets` compiles test sources but does not run
+        # the graph journal's actual SQLite crash/replay assertions.
+        graph_sql = subprocess.run(
+            ["cargo", "test", "--locked", "-p", "okx-execution", "--lib",
+             "source_graph_binding::tests::", "--", "--test-threads", "2"],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        print(graph_sql.stdout, flush=True)
+        graph_sql.check_returncode()
+        check_counts(graph_sql.stdout, {
+            "account_store::sql::source_graph_binding::tests::owner_replay_and_sql_reopen_preserve_exact_cursor_without_rewind",
+            "account_store::sql::source_graph_binding::tests::never_ack_actionable_gap_conflict_stale_or_foreign_events",
+            "account_store::sql::source_graph_binding::tests::stopped_or_revised_strategy_invalidates_binding_without_deleting_money",
+            "account_store::sql::source_graph_binding::tests::failed_transaction_never_persists_a_phantom_ack",
+            "account_store::sql::source_graph_binding::tests::graph_open_claim_commits_original_decision_prepared_intent_and_cursor_once",
+            "account_store::sql::source_graph_binding::tests::graph_open_claim_rejects_wrong_side_idle_gap_and_conflicting_replay",
+            "account_store::sql::source_graph_binding::tests::graph_open_claim_crash_before_commit_rolls_back_intent_decision_and_cursor",
+            "account_store::sql::source_graph_binding::tests::graph_open_failed_prepare_undoes_claim_even_when_caller_commits_error",
+            "account_store::sql::source_graph_binding::tests::graph_close_claim_stages_original_reduction_without_ack_and_replays",
+            "account_store::sql::source_graph_binding::tests::graph_close_claim_rejects_quantity_foreign_reference_conflicts_and_rolls_back",
+            "account_store::sql::source_graph_binding::tests::graph_close_restart_requires_original_finance_release_before_cursor_ack",
+            "account_store::sql::source_graph_binding::tests::graph_close_terminal_residual_fails_closed_without_new_intent",
+            "account_store::sql::source_graph_binding::tests::graph_binding_discovery_pages_from_original_finance_and_skips_stopped",
+            "account_store::sql::source_graph_binding::tests::one_revision_can_bind_two_instruments_with_independent_cursors",
+        })
+        subprocess.run(
+            ["cargo", "test", "--locked", "-p", "okx-execution", "--lib",
+             "graph_target_snapshot_reads_strategy_lots_and_pending", "--", "--test-threads", "2"],
+            cwd=ROOT, check=True,
+        )
+        subprocess.run(
+            ["cargo", "test", "--locked", "-p", "okx-agent", "--lib",
+             "trade_service::graph_target::tests::", "--", "--test-threads", "2"],
+            cwd=ROOT, check=True,
+        )
+        subprocess.run(
+            ["cargo", "test", "--locked", "-p", "okx-agent", "--lib",
+             "graph_target_preview_reads_the_original_account_owner", "--", "--test-threads", "2"],
+            cwd=ROOT, check=True,
+        )
+        subprocess.run(
+            ["cargo", "test", "--locked", "-p", "okx-agent", "--lib",
+             "graph_strategy_is_durable_and_does_not_invoke_legacy_ema",
+             "--", "--test-threads", "2"],
+            cwd=ROOT, check=True,
+        )
         subprocess.run([sys.executable, "scripts/check_architecture.py"], cwd=ROOT, check=True)
         scopes = SCOPES
     if "kernel" in scopes:
-        tests("okx-kernel", required=(PLAN_TEST, GAP_TEST))
+        tests("okx-kernel", required=(GAP_TEST,))
+    if "research" in scopes or "analysis" in scopes or "kernel" in scopes:
+        tests("okx-strategy-core", required=(PLAN_TEST,))
     if "analysis" in scopes:
         tests("okx-analysis")
     if "research" in scopes:
@@ -357,12 +415,46 @@ def execute(scopes):
         subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=MCP, check=True)
     if "ipc" in scopes:
         tests("okx-research-worker", ("--test", "ipc_process"))
+        tests("okx-execution", required=(
+            "graph_binding::tests::close_identity_is_bound_to_original_reference_account_revision_and_bar",
+        ), exact=True)
         metadata = subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
                                            cwd=ROOT, text=True)
         suffix = ".exe" if os.name == "nt" else ""
-        worker = Path(json.loads(metadata)["target_directory"]) / "debug" / ("okx-research-worker" + suffix)
-        os.environ["OKX_RESEARCH_WORKER_TEST_EXE"] = str(worker)
+        worker = Path(json.loads(metadata)["target_directory"]) / "debug" / ("okx-research-service" + suffix)
+        os.environ["OKX_RESEARCH_SERVICE_TEST_EXE"] = str(worker)
+        tests("okx-agent", required=(
+            "trade_service::strategies::strategy_contract_tests::graph_research_journal_consumer_commits_idle_and_blocks_open_without_post",
+        ), exact=True)
+        tests("okx-agent", required=(
+            "trade_service::strategies::strategy_contract_tests::graph_status_reads_finance_binding_without_claiming_live_execution",
+        ), exact=True)
+        tests("okx-agent", required=(
+            "trade_service::strategies::strategy_contract_tests::research_bootstrap_binds_and_starts_public_feed_without_order_post",
+        ), exact=True)
+        tests("okx-agent", required=(
+            "trade_service::strategies::strategy_contract_tests::explicit_graph_open_uses_original_paused_risk_gate_without_order_post",
+        ), exact=True)
+        tests("okx-agent", required=(
+            "trade_service::strategies::strategy_contract_tests::explicit_graph_open_respects_native_instance_nav_gate_without_order_post",
+        ), exact=True)
+        tests("okx-agent", required=(
+            "trade_service::graph_target::tests::graph_close_candidates_are_explicit_scoped_and_stable_without_dispatch",
+        ), exact=True)
+        tests("okx-agent", required=(
+            "trade_service::graph_target::tests::flip_close_candidates_cannot_open_before_settlement",
+        ), exact=True)
+        tests("okx-agent", required=(
+            "trade_service::strategies::strategy_contract_tests::graph_close_internal_route_denies_unowned_exposure_before_any_order_post",
+        ), exact=True)
+        tests("okx-agent", required=(
+            "trade_service::graph_activation::tests::identity_is_stable_per_account_revision_and_instrument",
+        ), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
+        tests("okx-agent", required=("research_dispatch_tests::real_worker_live_signal_ipc_is_causal_and_has_no_source_or_finance_access",), exact=True)
+        tests("okx-agent", required=("research_dispatch_tests::real_agent_worker_ipc_graph_stream_is_incremental_idempotent_and_read_only",), exact=True)
+        tests("okx-agent", required=("research_dispatch_tests::real_research_service_pulls_closed_candles_and_publishes_without_engine_advance",), exact=True)
+        tests("okx-agent", required=("research_dispatch_tests::real_research_feed_rejects_missing_closed_candle_without_synthetic_signal",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t06_t09_real_worker_causality_and_economics_are_isolated",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t07_t08_real_worker_intraday_event_and_holdout_stay_separate",), exact=True)

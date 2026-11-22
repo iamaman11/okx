@@ -1,6 +1,100 @@
 //! Original strategy projections and decision journal on one account-scoped snapshot.
 use super::super::*;
 impl AccountStore {
+    pub(crate) fn strategy_position_snapshot_sql(
+        db: &Connection,
+        scope: Option<(&str, &str)>,
+        instance_id: &str,
+        instrument_id: &str,
+    ) -> StoreResult<StrategyPositionSnapshot> {
+        if instance_id.is_empty() || instrument_id.is_empty() {
+            return Err(StoreError::Invalid("STRATEGY_TARGET_SCOPE_REQUIRED"));
+        }
+        let instance = Self::instance_sql(db, scope, instance_id)?
+            .ok_or(StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"))?;
+        if let Some((installation, account)) = scope {
+            Self::verify_source_account_sql(db, installation, account)?;
+        }
+        let mut values = vec![
+            rusqlite::types::Value::from(instance_id.to_owned()),
+            instrument_id.to_owned().into(),
+        ];
+        if let Some((installation, account)) = scope {
+            values.push(installation.to_owned().into());
+            values.push(account.to_owned().into());
+        }
+        let mut query = db.prepare(match scope {
+            None => {
+                "SELECT lot_id,intent_id,fill_id,instrument_id,side,remaining_qty,cost,opened_at
+                     FROM position_lots WHERE instance_id=?1 AND instrument_id=?2
+                     AND remaining_qty<>'0' ORDER BY side,opened_at,lot_id LIMIT 257"
+            }
+            Some(_) => {
+                "SELECT lot_id,intent_id,fill_id,instrument_id,side,remaining_qty,cost,opened_at
+                        FROM position_lots WHERE instance_id=?1 AND instrument_id=?2
+                        AND installation_id=?3 AND account_key=?4 AND remaining_qty<>'0'
+                        ORDER BY side,opened_at,lot_id LIMIT 257"
+            }
+        })?;
+        let lots = query
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                Ok((
+                    StoredLot {
+                        lot_id: row.get(0)?,
+                        instance_id: Some(instance_id.to_owned()),
+                        intent_id: row.get(1)?,
+                        fill_id: row.get(2)?,
+                        instrument_id: row.get(3)?,
+                        side: row.get(4)?,
+                        remaining_qty: Decimal::ZERO,
+                        cost: Decimal::ZERO,
+                        opened_at: row.get(7)?,
+                    },
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })?
+            .map(|result| {
+                let (mut lot, quantity, cost) = result?;
+                lot.remaining_qty = decimal(quantity)?;
+                lot.cost = decimal(cost)?;
+                Ok(lot)
+            })
+            .collect::<StoreResult<Vec<_>>>()?;
+        if lots.len() > 256 {
+            return Err(StoreError::Invalid("STRATEGY_TARGET_LOTS_LIMIT"));
+        }
+        // Includes every unresolved entry/exit, including UNKNOWN. The query
+        // uses the original scoped intent + plan, never a Research-side cache.
+        let pending: i64 = match scope {
+            Some((installation, account)) => db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM intents i
+                   JOIN intent_plans p ON p.installation_id=i.installation_id
+                     AND p.account_key=i.account_key AND p.intent_id=i.intent_id
+                 WHERE i.installation_id=?1 AND i.account_key=?2
+                   AND p.strategy_instance=?3 AND i.instrument_id=?4
+                   AND i.state IN ('PREPARED','RESERVED','POSTING',
+                                   'UNKNOWN','ACKNOWLEDGED','PARTIALLY_FILLED'))",
+                params![installation, account, instance_id, instrument_id],
+                |row| row.get(0),
+            )?,
+            None => db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM intents i
+                   JOIN intent_plans p ON p.intent_id=i.intent_id
+                 WHERE p.strategy_instance=?1 AND i.instrument_id=?2
+                   AND i.state IN ('PREPARED','RESERVED','POSTING',
+                                   'UNKNOWN','ACKNOWLEDGED','PARTIALLY_FILLED'))",
+                params![instance_id, instrument_id],
+                |row| row.get(0),
+            )?,
+        };
+        Ok(StrategyPositionSnapshot {
+            instance,
+            lots,
+            in_flight: pending != 0,
+        })
+    }
+
     pub(crate) fn strategy_status_sql(
         db: &Connection,
         scope: Option<(&str, &str)>,
