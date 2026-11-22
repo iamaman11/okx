@@ -362,6 +362,7 @@ def execute(scopes):
             "account_store::sql::source_graph_binding::tests::graph_open_claim_crash_before_commit_rolls_back_intent_decision_and_cursor",
             "account_store::sql::source_graph_binding::tests::graph_open_failed_prepare_undoes_claim_even_when_caller_commits_error",
             "account_store::sql::source_graph_binding::tests::graph_binding_discovery_pages_from_original_finance_and_skips_stopped",
+            "account_store::sql::source_graph_binding::tests::one_revision_can_bind_two_instruments_with_independent_cursors",
         })
         subprocess.run(
             ["cargo", "test", "--locked", "-p", "okx-execution", "--lib",
@@ -417,6 +418,15 @@ def execute(scopes):
         os.environ["OKX_RESEARCH_SERVICE_TEST_EXE"] = str(worker)
         tests("okx-agent", required=(
             "trade_service::strategies::strategy_contract_tests::graph_research_journal_consumer_commits_idle_and_blocks_open_without_post",
+        ), exact=True)
+        tests("okx-agent", required=(
+            "trade_service::strategies::strategy_contract_tests::graph_status_reads_finance_binding_without_claiming_live_execution",
+        ), exact=True)
+        tests("okx-agent", required=(
+            "trade_service::strategies::strategy_contract_tests::research_bootstrap_binds_and_starts_public_feed_without_order_post",
+        ), exact=True)
+        tests("okx-agent", required=(
+            "trade_service::graph_activation::tests::identity_is_stable_per_account_revision_and_instrument",
         ), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::real_worker_live_signal_ipc_is_causal_and_has_no_source_or_finance_access",), exact=True)
