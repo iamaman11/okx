@@ -14,7 +14,9 @@ import sys
 
 
 _PART = re.compile(r"^[A-Za-z0-9_.-]+$")
-_RESEARCH_DIRS = ("crates/okx-research/", "crates/okx-research-worker/")
+# The core is linked only by Research/Analysis; the architecture DAG gate
+# rejects any transitive Native Agent dependency before this fast path is used.
+_RESEARCH_DIRS = ("crates/okx-research/", "crates/okx-research-worker/", "crates/okx-strategy-core/")
 _CLOUDFLARE_DIR = "cloudflare/okx-mcp/"
 
 
@@ -79,7 +81,7 @@ def _self_test() -> None:
     cases = {
         "docs": [files("docs/acceptance/518/t01-t15-evidence-matrix.md"), files("README.md", "docs/arch.md")],
         "cloudflare": [files("cloudflare/okx-mcp/src/runtime_session.ts"), files("cloudflare/okx-mcp/src/mcp.test.ts", "docs/okx.md")],
-        "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-research-worker/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md")],
+        "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-research-worker/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md"), files("crates/okx-strategy-core/src/operators.rs"), files("crates/okx-strategy-core/src/query_plan.rs", "docs/a.md")],
     }
     for wanted, selections in cases.items():
         assert all(classify(pages) == wanted for pages in selections)
@@ -91,6 +93,7 @@ def _self_test() -> None:
         files("crates/okx-execution/src/lib.rs"),
         files("Cargo.toml"), files("Cargo.lock"),
         files("crates/okx-research-worker/Cargo.toml"),
+        files("crates/okx-strategy-core/Cargo.toml"),
         files("crates/okx-research-worker/build.rs"),
         files(".github/workflows/ci.yml"),
         files("scripts/prepare-research-release.ps1"),

@@ -1,24 +1,14 @@
 //! Typed K7 analysis plan, independent of storage, transport and venue.
-use crate::{
-    operators::{Operator, registry},
-    time_series::ClosedRange,
-};
+use crate::operators::{Operator, registry};
+use crate::stream::{MonotoneWindow, RollingMean, scalar_value};
+pub use okx_kernel::strategy_contract::{CompositionRequest, SeriesOp, SeriesStep};
+use okx_kernel::time_series::ClosedRange;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const QUERY_PLAN_VERSION: &str = "okx.query-plan/448.1";
 pub const COMPOSITION_VERSION: &str = "okx.market.composition/v1";
 const MAX_COMPOSITION_WORK_UNITS: u64 = 64_000_000;
-
-/// A bounded sequence of typed series operations, evaluated by the existing
-/// market worker. No general-purpose expressions, I/O or financial effects.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompositionRequest {
-    pub version: String,
-    pub steps: Vec<SeriesStep>,
-    pub result_steps: Vec<String>,
-}
 
 #[cfg(test)]
 mod t07_t10_projected_prefix_evaluation {
@@ -293,54 +283,6 @@ mod t07_t10_projected_prefix_evaluation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SeriesStep {
-    pub id: String,
-    pub op: SeriesOp,
-    /// "open", "high", "low", "close" (closed-candle prices), "volume"
-    /// (native venue volume per candle and instrument), "open_interest"
-    /// (contracts), and sparse "funding_rate" (realized event-time ratio) are
-    /// sources; other names must identify previously compiled steps.
-    pub input: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub period: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threshold: Option<f64>,
-    /// Only a prior edge event may condition a future outcome label.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub when: Option<String>,
-    /// Second prior series for dimensionless arithmetic or Boolean logic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub other: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SeriesOp {
-    ReturnsSeries,
-    RollingMean,
-    RollingMax,
-    RollingMin,
-    RollingRange,
-    RollingPearson,
-    RollingZscore,
-    RollingStddev,
-    AddSeries,
-    SubtractSeries,
-    DivideSeries,
-    And,
-    Or,
-    Lag,
-    GreaterThan,
-    GreaterThanSeries,
-    LessThan,
-    LessThanSeries,
-    RisingEdge,
-    FallingEdge,
-    ForwardReturnLabel,
-}
-
 /// One self-contained pure extension contract. The worker serializes this
 /// descriptor directly into market capabilities instead of maintaining a
 /// second, manually copied definition. Availability of the input source is
@@ -377,7 +319,7 @@ pub const ROLLING_RANGE_DESCRIPTOR: RollingRangeDescriptor = RollingRangeDescrip
     causal: true,
     time_basis: "closed_bar",
     effects: "pure_no_io",
-    owner: "okx-kernel::query_plan::rolling_range",
+    owner: "okx-strategy-core::query_plan::rolling_range",
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1261,18 +1203,8 @@ impl CheckedComposition {
                     input
                         .iter()
                         .zip(other)
-                        .map(|(left, right)| match (left, right) {
-                            (Some(a), Some(b)) => {
-                                let value = match checked.step.op {
-                                    SeriesOp::AddSeries => *a + *b,
-                                    SeriesOp::SubtractSeries => *a - *b,
-                                    SeriesOp::DivideSeries if *b != 0.0 => *a / *b,
-                                    SeriesOp::DivideSeries => return None,
-                                    _ => unreachable!("checked binary arithmetic"),
-                                };
-                                value.is_finite().then_some(value)
-                            }
-                            _ => None,
+                        .map(|(&left, &right)| {
+                            scalar_value(checked.step.op, left, right, None, None)
                         })
                         .collect()
                 }
@@ -1285,63 +1217,23 @@ impl CheckedComposition {
                     input
                         .iter()
                         .zip(other)
-                        .map(|(left, right)| match (left, right) {
-                            (Some(a), Some(b)) => Some(if checked.step.op == SeriesOp::And {
-                                f64::from(*a == 1.0 && *b == 1.0)
-                            } else {
-                                f64::from(*a == 1.0 || *b == 1.0)
-                            }),
-                            // A missing observation is unknown, never false.
-                            _ => None,
+                        .map(|(&left, &right)| {
+                            scalar_value(checked.step.op, left, right, None, None)
                         })
                         .collect()
                 }
                 SeriesOp::ReturnsSeries => {
                     let mut result = vec![None; input.len()];
                     for i in 1..input.len() {
-                        if let (Some(a), Some(b)) = (input[i - 1], input[i])
-                            && a > 0.0
-                            && b > 0.0
-                        {
-                            let value = b / a - 1.0;
-                            result[i] = value.is_finite().then_some(value);
-                        }
+                        result[i] =
+                            scalar_value(checked.step.op, input[i], None, input[i - 1], None);
                     }
                     result
                 }
                 SeriesOp::RollingMean => {
                     let period = checked.step.period.unwrap_or(1) as usize;
-                    let mut result = vec![None; input.len()];
-                    // Accumulate normalized contributions to avoid overflow
-                    // when finite prices sum beyond f64::MAX although their
-                    // *mean* is representable.
-                    let mut mean_sum = 0.0f64;
-                    let mut correction = 0.0f64;
-                    let divisor = period as f64;
-                    let mut missing = 0usize;
-                    for (i, current) in input.iter().copied().enumerate() {
-                        if i >= period {
-                            match input[i - period] {
-                                Some(removed) => compensated_add(
-                                    &mut mean_sum,
-                                    &mut correction,
-                                    -removed / divisor,
-                                ),
-                                None => missing -= 1,
-                            }
-                        }
-                        match current {
-                            Some(value) => {
-                                compensated_add(&mut mean_sum, &mut correction, value / divisor)
-                            }
-                            None => missing += 1,
-                        }
-                        if i + 1 >= period && missing == 0 {
-                            let mean = mean_sum + correction;
-                            result[i] = mean.is_finite().then_some(mean);
-                        }
-                    }
-                    result
+                    let mut window = RollingMean::new(period);
+                    input.iter().copied().map(|v| window.push(v)).collect()
                 }
                 SeriesOp::RollingMax | SeriesOp::RollingMin => rolling_extremum(
                     input,
@@ -1360,15 +1252,7 @@ impl CheckedComposition {
                     let threshold = checked.step.threshold.expect("validated threshold");
                     input
                         .iter()
-                        .map(|value| {
-                            value.map(|v| {
-                                f64::from(if checked.step.op == SeriesOp::GreaterThan {
-                                    v > threshold
-                                } else {
-                                    v < threshold
-                                })
-                            })
-                        })
+                        .map(|&v| scalar_value(checked.step.op, v, None, None, Some(threshold)))
                         .collect()
                 }
                 SeriesOp::GreaterThanSeries | SeriesOp::LessThanSeries => {
@@ -1380,29 +1264,14 @@ impl CheckedComposition {
                     input
                         .iter()
                         .zip(other)
-                        .map(|(a, b)| match (a, b) {
-                            (Some(a), Some(b)) => Some(f64::from(
-                                if checked.step.op == SeriesOp::GreaterThanSeries {
-                                    a > b
-                                } else {
-                                    a < b
-                                },
-                            )),
-                            _ => None,
-                        })
+                        .map(|(&a, &b)| scalar_value(checked.step.op, a, b, None, None))
                         .collect()
                 }
                 SeriesOp::RisingEdge | SeriesOp::FallingEdge => {
                     let mut result = vec![None; input.len()];
                     for i in 1..input.len() {
-                        if let (Some(previous), Some(current)) = (input[i - 1], input[i]) {
-                            result[i] =
-                                Some(f64::from(if checked.step.op == SeriesOp::RisingEdge {
-                                    previous == 0.0 && current == 1.0
-                                } else {
-                                    previous == 1.0 && current == 0.0
-                                }));
-                        }
+                        result[i] =
+                            scalar_value(checked.step.op, input[i], None, input[i - 1], None);
                     }
                     result
                 }
@@ -1855,7 +1724,7 @@ fn rolling_stddev(input: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
 
 /// Compensated add/subtract for a sliding window, preserving small terms
 /// when a large observation exits. Each update is constant time.
-fn compensated_add(sum: &mut f64, correction: &mut f64, term: f64) {
+pub(crate) fn compensated_add(sum: &mut f64, correction: &mut f64, term: f64) {
     let next = *sum + term;
     if sum.abs() >= term.abs() {
         *correction += (*sum - next) + term;
@@ -1868,39 +1737,8 @@ fn compensated_add(sum: &mut f64, correction: &mut f64, term: f64) {
 /// Causal, closed-bar window extrema in O(bars) time and O(period) memory.
 /// Every incomplete window, including one with an interior gap, stays None.
 fn rolling_extremum(input: &[Option<f64>], period: usize, maximum: bool) -> Vec<Option<f64>> {
-    let mut result = vec![None; input.len()];
-    let mut deque = VecDeque::<(usize, f64)>::with_capacity(period);
-    let mut missing = 0usize;
-    for (index, value) in input.iter().copied().enumerate() {
-        if index >= period && input[index - period].is_none() {
-            missing -= 1;
-        }
-        match value {
-            Some(value) => {
-                while deque.back().is_some_and(|(_, prior)| {
-                    if maximum {
-                        *prior <= value
-                    } else {
-                        *prior >= value
-                    }
-                }) {
-                    deque.pop_back();
-                }
-                deque.push_back((index, value));
-            }
-            None => missing += 1,
-        }
-        while deque
-            .front()
-            .is_some_and(|(prior, _)| prior.saturating_add(period) <= index)
-        {
-            deque.pop_front();
-        }
-        if index + 1 >= period && missing == 0 {
-            result[index] = deque.front().map(|(_, value)| *value);
-        }
-    }
-    result
+    let mut window = MonotoneWindow::new(period, maximum);
+    input.iter().copied().map(|v| window.push(v)).collect()
 }
 
 /// Inclusive closed-bar high-minus-low of an already typed numeric series.
@@ -1908,50 +1746,22 @@ fn rolling_extremum(input: &[Option<f64>], period: usize, maximum: bool) -> Vec<
 /// nonfinite observations invalidate exactly the windows containing them;
 /// constant *complete* windows produce the observed numeric zero.
 pub fn rolling_range(input: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
-    let mut result = vec![None; input.len()];
     if !(2..=1000).contains(&period) {
-        return result;
+        return vec![None; input.len()];
     }
-    let (mut maxima, mut minima) = (
-        VecDeque::<(usize, f64)>::with_capacity(period),
-        VecDeque::<(usize, f64)>::with_capacity(period),
-    );
-    let mut missing = 0usize;
-    for (index, observed) in input.iter().copied().enumerate() {
-        if index >= period && !input[index - period].is_some_and(f64::is_finite) {
-            missing -= 1;
-        }
-        if let Some(value) = observed.filter(|value| value.is_finite()) {
-            while maxima.back().is_some_and(|(_, prior)| *prior <= value) {
-                maxima.pop_back();
+    let mut maxima = MonotoneWindow::new(period, true);
+    let mut minima = MonotoneWindow::new(period, false);
+    input
+        .iter()
+        .copied()
+        .map(|value| match (maxima.push(value), minima.push(value)) {
+            (Some(max), Some(min)) => {
+                let width = max - min;
+                width.is_finite().then_some(width)
             }
-            while minima.back().is_some_and(|(_, prior)| *prior >= value) {
-                minima.pop_back();
-            }
-            maxima.push_back((index, value));
-            minima.push_back((index, value));
-        } else {
-            missing += 1;
-        }
-        while maxima
-            .front()
-            .is_some_and(|(old, _)| old.saturating_add(period) <= index)
-        {
-            maxima.pop_front();
-        }
-        while minima
-            .front()
-            .is_some_and(|(old, _)| old.saturating_add(period) <= index)
-        {
-            minima.pop_front();
-        }
-        if index + 1 >= period && missing == 0 {
-            let width = maxima.front().expect("complete maximum").1
-                - minima.front().expect("complete minimum").1;
-            result[index] = width.is_finite().then_some(width);
-        }
-    }
-    result
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
