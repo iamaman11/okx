@@ -130,7 +130,7 @@ function verifyRealNegativeControls(candidate, base, research, baseOrigin, resea
   ];
   return cases.map(([name, code, input]) => {
     try { validateCandidate(...input()); } catch (e) {
-      if (e.message === code) return {case:name,refusal:code};
+      if (e.message === code || e.message.startsWith(`${code}:`)) return {case:name,refusal:e.message};
       fail(`NEGATIVE_WRONG_REFUSAL:${name}:${e.message}`);
     }
     fail(`NEGATIVE_ACCEPTED:${name}`);

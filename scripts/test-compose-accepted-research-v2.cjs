@@ -1,6 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
-const {BASE_NAMES, WORKER, NAMES, FILES, compose, validateCandidate, sha256} =
+const {BASE_NAMES, WORKER, NAMES, FILES, compose, validateCandidate, verifyRealNegativeControls, sha256} =
   require('./compose-accepted-research-v2.cjs');
 
 const head = letter => letter.repeat(40);
@@ -30,6 +30,8 @@ const verify = (c=candidate, b=base, r=research, bo=baseOrigin, ro=researchOrigi
   validateCandidate(c,b,r,bo,ro,installed,ch,ct);
 const copied = () => ({manifest:structuredClone(candidate.manifest),files:{...candidate.files}});
 assert.equal(verify(),true);
+assert.equal(verifyRealNegativeControls(candidate,base,research,baseOrigin,researchOrigin,
+  baseline,candidateHead,candidateTree).length,5);
 assert.equal(candidate.manifest.components[WORKER].sha256,research.manifest.components[WORKER].sha256);
 assert.equal(candidate.manifest.components[BASE_NAMES[0]].sha256,base.manifest.components[BASE_NAMES[0]].sha256);
 assert.deepEqual(Object.keys(candidate.files).sort(),[...FILES].sort());
