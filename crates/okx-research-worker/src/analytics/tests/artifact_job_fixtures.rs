@@ -482,6 +482,13 @@ async fn market_artifact_publication_and_cached_result_roundtrip() {
     drop(workers);
     let result = completed_market(&s, request.clone(), pending).await;
     assert_eq!(result["returned_rows"], 1);
+    assert_eq!(result["source_io"]["schema"], "okx.research.source-io/v1");
+    assert_eq!(result["source_io"]["candle_cache_hits"], 1);
+    assert_eq!(result["source_io"]["source_calls"], json!({}));
+    let manifest: Value = s.artifacts
+        .read_evidence_json(result["result_artifact"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(manifest["source_io"], result["source_io"]);
     assert_eq!(s.market(request, None, None).await.unwrap(), result);
     let page = s
         .research(ResearchRequest::Result {

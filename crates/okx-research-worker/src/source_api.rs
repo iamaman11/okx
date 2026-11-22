@@ -12,6 +12,12 @@ impl PublicSourceClient {
     pub fn new(provider: Arc<dyn PublicSourceProvider>) -> Self {
         Self(provider)
     }
+    async fn request(&self, request: PublicSourceRequest) -> Result<PublicSourceReply, String> {
+        crate::source_io::request_started(&request);
+        let result = self.0.request(request.clone()).await;
+        crate::source_io::request_finished(&request, &result);
+        result
+    }
     pub async fn research_candles_page(
         &self,
         instrument: &str,
@@ -44,7 +50,6 @@ impl PublicSourceClient {
         queued: bool,
     ) -> Result<PublicCandleCapture, String> {
         match self
-            .0
             .request(PublicSourceRequest::Candles {
                 instrument: instrument.into(),
                 bar: bar.into(),
@@ -67,7 +72,6 @@ impl PublicSourceClient {
         limit: u16,
     ) -> Result<PublicFundingCapture, String> {
         match self
-            .0
             .request(PublicSourceRequest::Funding {
                 instrument: instrument.into(),
                 after: after.map(str::to_owned),
@@ -85,7 +89,6 @@ impl PublicSourceClient {
         instrument: &str,
     ) -> Result<PublicReferenceCapture, String> {
         match self
-            .0
             .request(PublicSourceRequest::Reference {
                 instrument: instrument.into(),
             })
@@ -97,7 +100,6 @@ impl PublicSourceClient {
     }
     pub async fn analytics_ticker(&self, instrument: &str) -> Result<ResearchTicker, String> {
         match self
-            .0
             .request(PublicSourceRequest::Ticker {
                 instrument: instrument.into(),
             })
@@ -113,7 +115,6 @@ impl PublicSourceClient {
         period: &str,
     ) -> Result<Vec<ResearchOpenInterest>, String> {
         match self
-            .0
             .request(PublicSourceRequest::OpenInterest {
                 instrument: instrument.into(),
                 period: period.into(),
@@ -138,5 +139,37 @@ impl From<okx_runtime::market_bootstrap::MarketBootstrapper> for PublicSourceCli
             }
         }
         Self::new(Arc::new(Source(value)))
+    }
+}
+
+#[cfg(test)]
+mod source_observation_tests {
+    use super::*;
+
+    struct Captured;
+    impl PublicSourceProvider for Captured {
+        fn request(&self, _: PublicSourceRequest) -> SourceFuture<'_> {
+            Box::pin(async {
+                Ok(PublicSourceReply::Candles(PublicCandleCapture {
+                    raw_body: vec![0, 1, 2],
+                    rows: Vec::new(),
+                    acquired_at_ms: "1".into(),
+                }))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_observation_includes_real_adapter_call() {
+        let client = PublicSourceClient::new(Arc::new(Captured));
+        let meter = Arc::new(crate::source_io::SourceIoMeter::default());
+        let capture = crate::source_io::observe(meter.clone(), async {
+            client.research_candles_page("BTC-USDT-SWAP", "1m", None, None, 100).await
+        }).await.unwrap();
+        assert_eq!(capture.raw_body.len(), 3);
+        let observed = meter.snapshot();
+        assert_eq!(observed["source_calls"]["candles"]["proxy_requests_started"], 1);
+        assert_eq!(observed["source_calls"]["candles"]["proxy_replies"], 1);
+        assert_eq!(observed["source_calls"]["candles"]["captured_response_body_bytes"], 3);
     }
 }

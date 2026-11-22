@@ -56,6 +56,7 @@ impl SourceCache {
         };
         let _guard = lock.lock().await;
         if let Some(e) = self.entries.lock().unwrap().get(&key) {
+            crate::source_io::candle_cache_hit();
             return Ok(e.value.clone());
         }
         let _permit = self.global.acquire().await.map_err(|e| e.to_string())?;
@@ -113,10 +114,14 @@ mod tests {
                 Ok(Vec::new())
             }
         };
-        let (a, b) = tokio::join!(c.load(key.clone(), f), c.load(key, f));
+        let meter = Arc::new(crate::source_io::SourceIoMeter::default());
+        let (a, b) = crate::source_io::observe(meter.clone(), async {
+            tokio::join!(c.load(key.clone(), f), c.load(key, f))
+        }).await;
         a.unwrap();
         b.unwrap();
         assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(meter.snapshot()["candle_cache_hits"], 1);
     }
     #[test]
     fn cache_key_includes_range_and_version() {
