@@ -79,6 +79,18 @@ pub struct ExecutionStore {
 }
 
 impl ExecutionStore {
+    pub async fn graph_bindings_page(
+        &self,
+        deadline: Instant,
+        limit: usize,
+        offset: usize,
+    ) -> StoreResult<okx_execution::graph_binding::EngineGraphBindingPage> {
+        let Self { owner, account } = self;
+        owner
+            .graph_bindings_page(deadline, account.wire.clone(), limit, offset)
+            .await
+    }
+
     /// Exact one-finance-transaction graph opening checkpoint and PREPARED intent.
     #[expect(
         clippy::too_many_arguments,

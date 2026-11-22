@@ -31,6 +31,28 @@ pub struct GraphTargetBinding {
 }
 
 impl GraphTargetBinding {
+    /// Reconstruct the typed Engine binding from original finance SQL after
+    /// a process restart; never trust a broadcast frame as activation state.
+    pub(super) fn from_storage(stored: EngineGraphBinding) -> Result<Self, String> {
+        if !stored.valid() {
+            return Err("GRAPH_TARGET_STORED_BINDING_INVALID".into());
+        }
+        let binding = Self {
+            account_key: stored.account_key,
+            instance_id: stored.instance_id,
+            definition_version: stored.definition_version,
+            policy_revision: stored.policy_revision,
+            session_id: GraphSessionId::new(stored.session_id).map_err(str::to_owned)?,
+            graph_sha256: stored.graph_sha256,
+            instrument_id: stored.instrument_id,
+            timeframe_ms: stored.timeframe_ms,
+        };
+        if !binding.valid() {
+            return Err("GRAPH_TARGET_STORED_BINDING_INVALID".into());
+        }
+        Ok(binding)
+    }
+
     pub fn valid(&self) -> bool {
         !self.account_key.is_empty()
             && !self.instance_id.is_empty()

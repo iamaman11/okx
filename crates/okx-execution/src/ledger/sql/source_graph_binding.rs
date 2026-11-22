@@ -4,7 +4,8 @@
 //! no side database, schema drift, or unsupervised background writer.
 use super::super::*;
 use crate::graph_binding::{
-    EngineGraphBinding, EngineGraphCursor, EngineGraphProgress, GraphIdleAck, GraphOpenClaim,
+    EngineGraphBinding, EngineGraphBindingPage, EngineGraphCursor, EngineGraphProgress,
+    GraphIdleAck, GraphOpenClaim,
 };
 use crate::position_target::{ExposureSide, TargetPlan, plan_strategy_target};
 use sha2::{Digest, Sha256};
@@ -86,6 +87,63 @@ fn insert_receipt(
 }
 
 impl AccountStore {
+    /// Find active graph bindings from original immutable receipts. Page
+    /// by commit time and stored key using the existing receipt index, then
+    /// filter stopped/revised strategies. A
+    /// process restart needs no volatile subscription registry or side DB.
+    pub(crate) fn graph_bindings_page_sql(
+        db: &Connection,
+        scope: (&str, &str),
+        limit: usize,
+        offset: usize,
+    ) -> StoreResult<EngineGraphBindingPage> {
+        if !(1..=4).contains(&limit) || offset > 100_000 {
+            return Err(StoreError::Invalid("GRAPH_FINANCE_PAGE_INVALID"));
+        }
+        let mut query = db.prepare(
+            "SELECT operation_id,kind,request_hash,result_ref,committed_at
+             FROM operation_receipts
+             WHERE installation_id=?1 AND account_key=?2 AND kind=?3
+             ORDER BY committed_at,operation_id LIMIT ?4 OFFSET ?5",
+        )?;
+        let receipts = query
+            .query_map(
+                params![scope.0, scope.1, BINDING_KIND, limit as i64, offset as i64],
+                |row| {
+                    Ok(OperationReceipt {
+                        operation_id: row.get(0)?,
+                        kind: row.get(1)?,
+                        request_hash: row.get(2)?,
+                        result_ref: row.get(3)?,
+                        committed_at: row.get(4)?,
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let scanned = receipts.len();
+        let mut active = Vec::new();
+        for receipt in receipts {
+            let binding: EngineGraphBinding = decode(&receipt, BINDING_KIND)?;
+            if !binding.valid()
+                || binding.account_key != scope.1
+                || receipt.operation_id != binding_key(&binding)
+            {
+                return Err(StoreError::Invalid("GRAPH_FINANCE_BINDING_RECEIPT_INVALID"));
+            }
+            let Some(instance) = Self::instance_sql(db, Some(scope), &binding.instance_id)? else {
+                continue;
+            };
+            if instance.enabled
+                && instance.definition_id == "graph_signal_v1"
+                && instance.policy_revision == binding.policy_revision
+                && instance.definition_version == binding.definition_version
+            {
+                active.push(binding);
+            }
+        }
+        Ok(EngineGraphBindingPage { scanned, active })
+    }
+
     fn graph_binding_current_sql(
         db: &Connection,
         scope: (&str, &str),
@@ -1050,6 +1108,59 @@ mod tests {
             Err(StoreError::Invalid("GRAPH_FINANCE_STRATEGY_CHANGED"))
         ));
         tx.commit().unwrap();
+    }
+
+    #[test]
+    fn graph_binding_discovery_pages_from_original_finance_and_skips_stopped() {
+        let mut db = database();
+        let account = ("installation", "account-a");
+        let foreign = ("installation", "account-b");
+        assert_eq!(
+            AccountStore::graph_bindings_page_sql(&db, account, 1, 0).unwrap(),
+            EngineGraphBindingPage { scanned: 0, active: vec![] }
+        );
+        let bound = {
+            let tx = db.transaction().unwrap();
+            create(&tx, account.1);
+            create(&tx, foreign.1);
+            let bound = binding(&tx, account.1);
+            let other = binding(&tx, foreign.1);
+            AccountStore::bind_graph_sql(
+                &tx, account, &bound, &cursor(2, TargetPosition::Hold), 121_000
+            ).unwrap();
+            AccountStore::bind_graph_sql(
+                &tx, foreign, &other, &cursor(2, TargetPosition::Hold), 121_000
+            ).unwrap();
+            tx.commit().unwrap();
+            bound
+        };
+        assert_eq!(
+            AccountStore::graph_bindings_page_sql(&db, account, 1, 0).unwrap(),
+            EngineGraphBindingPage { scanned: 1, active: vec![bound.clone()] }
+        );
+        assert_eq!(
+            AccountStore::graph_bindings_page_sql(&db, account, 1, 1).unwrap(),
+            EngineGraphBindingPage { scanned: 0, active: vec![] }
+        );
+        assert!(matches!(
+            AccountStore::graph_bindings_page_sql(&db, account, 5, 0),
+            Err(StoreError::Invalid("GRAPH_FINANCE_PAGE_INVALID"))
+        ));
+        let tx = db.transaction().unwrap();
+        let mut stopped = AccountStore::instance_sql(&tx, Some(account), &bound.instance_id)
+            .unwrap().unwrap();
+        stopped.enabled = false;
+        stopped.policy_revision += 1;
+        AccountStore::mutate_instance_sql(
+            &tx, Some(account), "discovery-stop", "discovery-stop-hash", "stop",
+            &stopped, Some(1), 181_000,
+        ).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            AccountStore::graph_bindings_page_sql(&db, account, 1, 0).unwrap(),
+            EngineGraphBindingPage { scanned: 1, active: vec![] },
+            "stale receipts advance the scan but cannot resurrect a stopped graph"
+        );
     }
 
     #[test]

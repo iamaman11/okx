@@ -62,6 +62,7 @@ pub struct TradeService {
 #[derive(Default)]
 struct RecoverySchedule {
     pages: HashMap<String, usize>,
+    graph_pages: HashMap<String, usize>,
     attempts: HashMap<(String, String), RecoveryAttempt>,
 }
 struct RecoveryAttempt {
@@ -73,7 +74,24 @@ const RECOVERY_DELAYS_SECONDS: [u64; 6] = [1, 2, 4, 8, 16, 30];
 // One maintenance turn reads at most 16 native intents per account.
 // The SQL API itself supports bounded pages up to 100, without full scans.
 const RECOVERY_BATCH: usize = 16;
+// At most four graph subscriptions are visited per account maintenance turn.
+const GRAPH_BINDINGS_BATCH: usize = 4;
 impl RecoverySchedule {
+    fn graph_page(&self, account: &str) -> usize {
+        *self.graph_pages.get(account).unwrap_or(&0)
+    }
+
+    fn advance_graph_page(&mut self, account: &str, offset: usize, scanned: usize) {
+        self.graph_pages.insert(
+            account.to_owned(),
+            if scanned == GRAPH_BINDINGS_BATCH && offset < 100_000 - GRAPH_BINDINGS_BATCH {
+                offset + GRAPH_BINDINGS_BATCH
+            } else {
+                0
+            },
+        );
+    }
+
     fn page(&self, account: &str) -> usize {
         *self.pages.get(account).unwrap_or(&0)
     }

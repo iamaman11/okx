@@ -506,6 +506,14 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
             .last_sequence(),
         3
     );
+    fixture.native.trade.set_signal_research(fixture.ctx.research.clone()).await;
+    assert_eq!(
+        fixture.native.trade.graph_research_turn(&fixture.owner).await.unwrap(),
+        vec![GraphConsumeOutcome::Idle {
+            accepted: 0, confirmed_sequence: 3, has_more: false
+        }],
+        "the ordinary Engine maintenance route rediscovers the SQL binding"
+    );
     // A newly attached subscriber recovers from finance SQL without needing
     // any old broadcast event, then ignores unrelated Research sessions.
     let mut recovered =
@@ -606,6 +614,14 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
         okx_execution::position_target::TargetPlan::Open(
             okx_execution::position_target::ExposureSide::Long
         )
+    );
+    assert_eq!(
+        fixture.native.trade.graph_research_turn(&fixture.owner).await.unwrap(),
+        vec![GraphConsumeOutcome::Blocked {
+            publication: publication.clone(),
+            plan: plan.clone(),
+        }],
+        "the maintenance route must neither ACK nor execute an actionable Open"
     );
     assert_eq!(
         fixture

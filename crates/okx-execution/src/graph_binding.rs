@@ -34,6 +34,15 @@ pub struct EngineGraphProgress {
     pub cursor: EngineGraphCursor,
 }
 
+/// Bounded discovery from original finance SQL. `scanned` includes stale
+/// historical revisions so the caller advances its page even when no active
+/// graph happens to be present in the current slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineGraphBindingPage {
+    pub scanned: usize,
+    pub active: Vec<EngineGraphBinding>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphIdleAck {
     Advanced,

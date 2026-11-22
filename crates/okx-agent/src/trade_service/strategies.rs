@@ -527,8 +527,26 @@ impl TradeService {
                     if let Ok(instances) =
                         r.execution.store.strategy_instances(deadline()).await
                     {
+                        let mut has_graph_strategy = false;
                         for instance in instances.into_iter().filter(|i| i.enabled) {
+                            if instance.definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
+                                has_graph_strategy = true;
+                                continue;
+                            }
                             let _ = self.strategy_turn(&r, &instance).await;
+                        }
+                        if has_graph_strategy {
+                            // Shares the existing maintenance owner, not a
+                            // second background trader. Only idle ACKs here.
+                            let turn = tokio::time::timeout(
+                                Duration::from_millis(900), self.graph_research_turn(&r)
+                            ).await;
+                            if !matches!(turn, Ok(Ok(_))) {
+                                eprintln!(
+                                    "OKX_GRAPH_ENGINE_V1 account={} state=REPLAY_UNAVAILABLE reason=FINANCE_OR_RESEARCH_READ_FAILED",
+                                    r.configuration.account_key.wire()
+                                );
+                            }
                         }
                     }
                 };

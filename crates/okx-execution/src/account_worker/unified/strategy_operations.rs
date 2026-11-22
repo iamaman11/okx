@@ -1,7 +1,8 @@
 //! Typed strategy commands on the existing installation SQL owner.
 use super::UnifiedFinanceHandle;
 use crate::graph_binding::{
-    EngineGraphBinding, EngineGraphCursor, EngineGraphProgress, GraphIdleAck, GraphOpenAdmission,
+    EngineGraphBinding, EngineGraphBindingPage, EngineGraphCursor, EngineGraphProgress, GraphIdleAck,
+    GraphOpenAdmission,
 };
 use crate::{
     AccountStore, Decision, NewIntent, OperationReceipt, StoreError, StoreResult, StrategyInstance,
@@ -28,6 +29,26 @@ pub struct StrategyDecisionClaimCommand {
     pub time: i64,
 }
 impl UnifiedFinanceHandle {
+    /// Read only: bounded discovery through the same installed finance owner.
+    pub async fn graph_bindings_page(
+        &self,
+        deadline: Instant,
+        account: String,
+        limit: usize,
+        offset: usize,
+    ) -> StoreResult<EngineGraphBindingPage> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            AccountStore::graph_bindings_page_sql(
+                db,
+                (&installation, &account),
+                limit,
+                offset,
+            )
+        })
+        .await
+    }
+
     /// Original finance FIFO: graph checkpoint, strategy decision and one
     /// PREPARED opening order are inseparable. Risk admission/POST are later.
     #[expect(
