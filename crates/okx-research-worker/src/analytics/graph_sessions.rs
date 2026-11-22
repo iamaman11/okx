@@ -116,7 +116,8 @@ impl GraphSessions {
                 return Err("GRAPH_BOOTSTRAP_PUBLISHED_SESSION_REQUIRES_RECOVERY".into());
             }
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Query a committed signal page without activating or restoring a runner.
@@ -503,7 +504,10 @@ mod tests {
         let registry = GraphSessions::default();
         let cpu = CpuExecutor::default();
         let id = GraphSessionId::new("account:instance:BTC".into()).unwrap();
-        registry.ensure_fresh_bootstrap(&cpu, id.clone()).await.unwrap();
+        registry
+            .ensure_fresh_bootstrap(&cpu, id.clone())
+            .await
+            .unwrap();
         let restore = GraphSessionRequest::Restore {
             session_id: id.clone(),
             definition: Box::new(definition()),
@@ -544,7 +548,10 @@ mod tests {
             .unwrap();
         assert!(publish_next, "only a newly closed bar can publish");
         assert_eq!(
-            registry.ensure_fresh_bootstrap(&cpu, id.clone()).await.unwrap_err(),
+            registry
+                .ensure_fresh_bootstrap(&cpu, id.clone())
+                .await
+                .unwrap_err(),
             "GRAPH_BOOTSTRAP_PUBLISHED_SESSION_REQUIRES_RECOVERY"
         );
         assert!(result.matches_request(&next));

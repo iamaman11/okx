@@ -57,7 +57,6 @@ fn drain_count(durable: u64, runners: &AtomicUsize) -> u64 {
     durable.max(runners.load(Ordering::SeqCst) as u64)
 }
 
-
 fn graph_bootstrap_window(
     now_ms: u64,
     timeframe_ms: u64,
@@ -123,18 +122,37 @@ mod graph_bootstrap_tests {
         const M: u64 = 60_000;
         let (start, end) = graph_bootstrap_window(100 * M + 2_000, M, 3).unwrap();
         assert_eq!((start, end), (97 * M, 100 * M));
-        let valid = vec![candle(97 * M, 100.0), candle(98 * M, 101.0), candle(99 * M, 102.0)];
+        let valid = vec![
+            candle(97 * M, 100.0),
+            candle(98 * M, 101.0),
+            candle(99 * M, 102.0),
+        ];
         let prefix = graph_bootstrap_history(&valid, start, M, 3).unwrap();
-        assert_eq!(prefix.iter().map(|b| b.time_ms).collect::<Vec<_>>(), vec![97 * M, 98 * M, 99 * M]);
+        assert_eq!(
+            prefix.iter().map(|b| b.time_ms).collect::<Vec<_>>(),
+            vec![97 * M, 98 * M, 99 * M]
+        );
         assert_eq!(prefix.last().unwrap().close, Some(102.0));
-        assert_eq!(graph_bootstrap_history(&valid[..2], start, M, 3).unwrap_err(), "GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY");
+        assert_eq!(
+            graph_bootstrap_history(&valid[..2], start, M, 3).unwrap_err(),
+            "GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY"
+        );
         let mut gap = valid.clone();
         gap[1].time = 99 * M;
-        assert_eq!(graph_bootstrap_history(&gap, start, M, 3).unwrap_err(), "GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY");
+        assert_eq!(
+            graph_bootstrap_history(&gap, start, M, 3).unwrap_err(),
+            "GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY"
+        );
         let mut invalid = valid;
         invalid[0].close = f64::NAN;
-        assert_eq!(graph_bootstrap_history(&invalid, start, M, 3).unwrap_err(), "GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY");
-        assert_eq!(graph_bootstrap_window(2 * M, M, 3).unwrap_err(), "GRAPH_BOOTSTRAP_RANGE_INVALID");
+        assert_eq!(
+            graph_bootstrap_history(&invalid, start, M, 3).unwrap_err(),
+            "GRAPH_BOOTSTRAP_INCOMPLETE_HISTORY"
+        );
+        assert_eq!(
+            graph_bootstrap_window(2 * M, M, 3).unwrap_err(),
+            "GRAPH_BOOTSTRAP_RANGE_INVALID"
+        );
     }
 }
 #[derive(Clone)]
@@ -177,8 +195,7 @@ impl AnalyticsService {
                 let candles = self
                     .graph_feed_candles(&instrument, timeframe_ms, start, end)
                     .await?;
-                let history =
-                    graph_bootstrap_history(&candles, start, timeframe_ms, history_bars)?;
+                let history = graph_bootstrap_history(&candles, start, timeframe_ms, history_bars)?;
                 self.graph_sessions
                     .execute_transition(
                         &self.cpu,
@@ -191,7 +208,11 @@ impl AnalyticsService {
                     )
                     .await
             }
-            other => self.graph_sessions.execute_transition(&self.cpu, other).await,
+            other => {
+                self.graph_sessions
+                    .execute_transition(&self.cpu, other)
+                    .await
+            }
         }
     }
     /// Durable bounded replay is independent of the lifetime of a graph runner.

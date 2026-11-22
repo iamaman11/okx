@@ -56,13 +56,19 @@ impl GraphOutbox {
     /// A fresh sliding bootstrap prefix cannot safely continue a previously
     /// published sequence after restart. Recovery must replay the *original*
     /// prefix, not silently rebase an existing financial identity.
-    pub(super) fn has_session_publications(&self, session_id: &GraphSessionId) -> Result<bool, String> {
+    pub(super) fn has_session_publications(
+        &self,
+        session_id: &GraphSessionId,
+    ) -> Result<bool, String> {
         let db = self.db.lock().map_err(|_| "GRAPH_OUTBOX_POISONED")?;
-        let seen: Option<i64> = db.query_row(
-            "SELECT 1 FROM graph_outbox WHERE session_id=?1 LIMIT 1",
-            params![session_id.as_str()],
-            |row| row.get(0),
-        ).optional().map_err(|e| e.to_string())?;
+        let seen: Option<i64> = db
+            .query_row(
+                "SELECT 1 FROM graph_outbox WHERE session_id=?1 LIMIT 1",
+                params![session_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
         Ok(seen.is_some())
     }
 
@@ -241,7 +247,13 @@ mod tests {
             assert!(!outbox.has_session_publications(&first.session_id).unwrap());
             assert!(outbox.record(&first).unwrap());
             assert!(outbox.has_session_publications(&first.session_id).unwrap());
-            assert!(!outbox.has_session_publications(&GraphSessionId::new("different:session".into()).unwrap()).unwrap());
+            assert!(
+                !outbox
+                    .has_session_publications(
+                        &GraphSessionId::new("different:session".into()).unwrap()
+                    )
+                    .unwrap()
+            );
             assert!(!outbox.record(&first).unwrap());
             assert!(outbox.record(&second).unwrap());
             let mut conflict = first.clone();

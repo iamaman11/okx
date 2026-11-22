@@ -666,8 +666,7 @@ fn graph_feed_instrument_valid(instrument: &str) -> bool {
 fn graph_feed_timeframe_valid(timeframe_ms: u64) -> bool {
     matches!(
         timeframe_ms,
-        60_000 | 180_000 | 300_000 | 900_000 | 1_800_000 | 3_600_000 | 14_400_000
-            | 86_400_000
+        60_000 | 180_000 | 300_000 | 900_000 | 1_800_000 | 3_600_000 | 14_400_000 | 86_400_000
     )
 }
 
@@ -906,7 +905,12 @@ mod graph_signal_contract_tests {
 
     #[test]
     fn graph_public_bootstrap_has_strict_bounds_and_typed_restore_reply() {
-        let GraphSessionRequest::Restore { session_id, definition, .. } = sample() else {
+        let GraphSessionRequest::Restore {
+            session_id,
+            definition,
+            ..
+        } = sample()
+        else {
             unreachable!()
         };
         let good = GraphSessionRequest::Bootstrap {
@@ -920,7 +924,10 @@ mod graph_signal_contract_tests {
         assert!(good.valid());
         let wire = serde_json::to_value(&good).unwrap();
         assert_eq!(wire["type"], "bootstrap");
-        assert_eq!(serde_json::from_value::<GraphSessionRequest>(wire).unwrap(), good);
+        assert_eq!(
+            serde_json::from_value::<GraphSessionRequest>(wire).unwrap(),
+            good
+        );
         let restored = GraphSessionReply::Evaluated {
             schema: GraphSessionReply::SCHEMA.into(),
             session_id,
