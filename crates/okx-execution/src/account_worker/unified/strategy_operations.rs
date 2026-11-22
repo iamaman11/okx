@@ -2,7 +2,7 @@
 use super::UnifiedFinanceHandle;
 use crate::graph_binding::{
     EngineGraphBinding, EngineGraphBindingPage, EngineGraphCursor, EngineGraphProgress,
-    GraphIdleAck, GraphOpenAdmission,
+    GraphCloseAdmission, GraphCloseClaim, GraphIdleAck, GraphOpenAdmission,
 };
 use crate::{
     AccountStore, Decision, NewIntent, OperationReceipt, StoreError, StoreResult, StrategyInstance,
@@ -91,6 +91,49 @@ impl UnifiedFinanceHandle {
                 claim,
                 intent: prepared,
             })
+        })
+        .await
+    }
+
+    /// Stage a graph reduction through the SAME original finance writer and
+    /// PREPARE rules. Never acknowledge the publication cursor here: all
+    /// remaining references/partial fills require independent settlement.
+    #[expect(clippy::too_many_arguments, reason = "The original owner needs exact reference and immutable claim evidence.")]
+    pub async fn prepare_graph_close(
+        &self,
+        deadline: Instant,
+        account: String,
+        binding: EngineGraphBinding,
+        published: EngineGraphCursor,
+        original_reference: String,
+        decision: Decision,
+        intent: NewIntent,
+        now: i64,
+    ) -> StoreResult<GraphCloseAdmission> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            super::finance_authority::require_preparation_authority(&tx, &installation)?;
+            let claim = AccountStore::prepare_graph_close_sql(
+                &tx,
+                (&installation, &account),
+                &binding,
+                &published,
+                &original_reference,
+                &decision,
+                &intent,
+                now,
+            )?;
+            let intent_id = match &claim {
+                GraphCloseClaim::Prepared { intent_id } | GraphCloseClaim::Replayed { intent_id } => intent_id,
+            };
+            let prepared = AccountStore::find_intent_sql(
+                &tx, Some((&installation, &account)), "intent_id", intent_id,
+            )?.ok_or(StoreError::Invalid("GRAPH_FINANCE_PREPARED_INTENT_MISSING"))?;
+            tx.commit().map_err(|_| {
+                StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
+            })?;
+            Ok(GraphCloseAdmission { claim, intent: prepared })
         })
         .await
     }

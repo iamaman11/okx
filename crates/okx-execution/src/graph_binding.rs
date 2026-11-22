@@ -57,6 +57,14 @@ pub enum GraphOpenClaim {
     Replayed { intent_id: String },
 }
 
+/// One original-finance PREPARED reduction, without acknowledging the graph
+/// candle. Settlement, partial fills and other lot references remain pending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphCloseClaim {
+    Prepared { intent_id: String },
+    Replayed { intent_id: String },
+}
+
 /// Shared exact graph-derived identity for TradeService and its finance SQL
 /// owner. Neither layer independently invents a second idempotency rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +89,13 @@ pub struct GraphCloseIdentity {
 #[derive(Debug, Clone)]
 pub struct GraphOpenAdmission {
     pub claim: GraphOpenClaim,
+    pub intent: crate::StoredIntent,
+}
+
+/// Original finance SQL evidence only; no risk, venue send or cursor ACK.
+#[derive(Debug, Clone)]
+pub struct GraphCloseAdmission {
+    pub claim: GraphCloseClaim,
     pub intent: crate::StoredIntent,
 }
 

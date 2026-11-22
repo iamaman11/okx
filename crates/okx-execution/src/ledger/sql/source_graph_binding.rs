@@ -5,7 +5,7 @@
 use super::super::*;
 use crate::graph_binding::{
     EngineGraphBinding, EngineGraphBindingPage, EngineGraphCursor, EngineGraphProgress,
-    GraphIdleAck, GraphOpenClaim,
+    GraphCloseClaim, GraphIdleAck, GraphOpenClaim,
 };
 use crate::position_target::{ExposureSide, TargetPlan, plan_strategy_target};
 use sha2::{Digest, Sha256};
@@ -13,11 +13,20 @@ use sha2::{Digest, Sha256};
 const BINDING_KIND: &str = "graph_strategy_binding_v1";
 const CURSOR_KIND: &str = "graph_strategy_idle_cursor_v1";
 const OPEN_KIND: &str = "graph_strategy_prepared_open_v1";
+const CLOSE_KIND: &str = "graph_strategy_prepared_close_v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreparedGraphOpen {
     input_fingerprint: String,
+    intent_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedGraphClose {
+    input_fingerprint: String,
+    original_reference: String,
     intent_id: String,
 }
 
@@ -50,6 +59,16 @@ fn open_key(binding: &EngineGraphBinding, sequence: u64) -> String {
         binding.policy_revision,
         Sha256::digest(binding.instrument_id.as_bytes())
     )
+}
+
+fn close_key(binding: &EngineGraphBinding, published: &EngineGraphCursor, reference: &str) -> StoreResult<String> {
+    Ok(format!(
+        "graph-close:{}",
+        binding
+            .close_identity(published, reference)
+            .ok_or(StoreError::Invalid("GRAPH_FINANCE_CLOSE_IDENTITY_INVALID"))?
+            .decision_key
+    ))
 }
 
 fn encode<T: serde::Serialize>(value: &T) -> StoreResult<(String, String)> {
@@ -491,6 +510,155 @@ impl AccountStore {
             intent_id: intent.intent_id.clone(),
         })
     }
+
+    /// Stage exactly ONE lot-reference reduction in the ORIGINAL finance
+    /// transaction: immutable decision, PREPARED intent and claim receipt.
+    /// Crucially there is NO graph cursor ACK. An in-flight/partial close
+    /// blocks the same candle until authoritative settlement is re-read.
+    #[expect(clippy::too_many_arguments, reason = "One scoped original SQL claim with explicit evidence.")]
+    pub(crate) fn prepare_graph_close_sql(
+        tx: &rusqlite::Transaction<'_>,
+        scope: (&str, &str),
+        binding: &EngineGraphBinding,
+        published: &EngineGraphCursor,
+        original_reference: &str,
+        decision: &Decision,
+        intent: &NewIntent,
+        now: i64,
+    ) -> StoreResult<GraphCloseClaim> {
+        tx.execute_batch("SAVEPOINT okx_graph_close_command")?;
+        match Self::prepare_graph_close_inner_sql(
+            tx, scope, binding, published, original_reference, decision, intent, now,
+        ) {
+            Ok(claim) => {
+                tx.execute_batch("RELEASE SAVEPOINT okx_graph_close_command")?;
+                Ok(claim)
+            }
+            Err(error) => {
+                tx.execute_batch(
+                    "ROLLBACK TO SAVEPOINT okx_graph_close_command;
+                     RELEASE SAVEPOINT okx_graph_close_command",
+                )?;
+                Err(error)
+            }
+        }
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "Keep original reference and financial plan in one claim.")]
+    fn prepare_graph_close_inner_sql(
+        tx: &rusqlite::Transaction<'_>,
+        scope: (&str, &str),
+        binding: &EngineGraphBinding,
+        published: &EngineGraphCursor,
+        original_reference: &str,
+        decision: &Decision,
+        intent: &NewIntent,
+        now: i64,
+    ) -> StoreResult<GraphCloseClaim> {
+        if now <= 0 || !published.valid_for(binding) || published.closed_ms > now as u64 {
+            return Err(StoreError::Invalid("GRAPH_FINANCE_PUBLICATION_INVALID"));
+        }
+        let state = Self::graph_progress_sql(tx, scope, binding)?
+            .ok_or(StoreError::Invalid("GRAPH_FINANCE_BINDING_MISSING"))?;
+        let identity = binding.close_identity(published, original_reference)
+            .ok_or(StoreError::Invalid("GRAPH_FINANCE_CLOSE_IDENTITY_INVALID"))?;
+        let (_, fingerprint) = encode(&(binding, published, original_reference, decision, intent))?;
+        if intent.idempotency_key != identity.decision_key
+            || intent.plan.strategy_instance != binding.instance_id
+            || intent.instrument_id != binding.instrument_id
+            || intent.plan.operation != "close"
+            || intent.risk_increase
+            || decision.instance_id.as_deref() != Some(binding.instance_id.as_str())
+            || decision.decision_id != identity.decision_id
+            || decision.input_digest != identity.input_digest
+            || decision.policy_revision < 1
+            || decision.policy_revision != intent.policy_revision
+        {
+            return Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_IDENTITY_INVALID"));
+        }
+        if state.cursor.sequence.checked_add(1) != Some(published.sequence)
+            || published.closed_ms <= state.cursor.closed_ms
+        {
+            return Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_CURSOR_NOT_NEXT"));
+        }
+        let receipt_id = close_key(binding, published, original_reference)?;
+        if let Some(receipt) = Self::operation_sql(tx, Some(scope), &receipt_id)? {
+            let recorded: PreparedGraphClose = decode(&receipt, CLOSE_KIND)?;
+            if recorded.input_fingerprint != fingerprint
+                || recorded.original_reference != original_reference
+                || recorded.intent_id != intent.intent_id
+            {
+                return Err(StoreError::Invalid("GRAPH_FINANCE_CONFLICTING_REPLAY"));
+            }
+            let existing = Self::find_intent_sql(tx, Some(scope), "intent_id", &intent.intent_id)?
+                .ok_or(StoreError::Invalid("GRAPH_FINANCE_PREPARED_INTENT_MISSING"))?;
+            if existing.idempotency_key != identity.decision_key
+                || existing.request_hash != intent.request_hash
+            {
+                return Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_RECEIPT_CORRUPT"));
+            }
+            return Ok(GraphCloseClaim::Replayed { intent_id: intent.intent_id.clone() });
+        }
+        if decision.decision_at != now {
+            return Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_DECISION_TIME_INVALID"));
+        }
+        let original = Self::find_intent_sql(tx, Some(scope), "intent_id", original_reference)?
+            .ok_or(StoreError::Invalid("GRAPH_FINANCE_CLOSE_ORIGINAL_MISSING"))?;
+        if original.intent_id != original_reference
+            || original.plan.operation != "open"
+            || original.plan.strategy_instance != binding.instance_id
+            || original.instrument_id != binding.instrument_id
+            || original.plan.position_side != intent.plan.position_side
+        {
+            return Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_ORIGINAL_MISMATCH"));
+        }
+        let snapshot = Self::strategy_position_snapshot_sql(
+            tx, Some(scope), &binding.instance_id, &binding.instrument_id,
+        )?;
+        let plan = plan_strategy_target(
+            published.intent, &binding.instance_id, &binding.instrument_id,
+            &snapshot.lots, snapshot.in_flight,
+        ).map_err(|_| StoreError::Invalid("GRAPH_FINANCE_POSITION_INVALID"))?;
+        let TargetPlan::CloseExisting(references) = plan else {
+            return Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_EXPOSURE_REQUIRED"));
+        };
+        if !references.iter().any(|reference| reference == original_reference) {
+            return Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_REFERENCE_NOT_TARGETED"));
+        }
+        let mut quantity = Decimal::ZERO;
+        for lot in snapshot.lots.iter().filter(|lot| lot.intent_id.as_deref() == Some(original_reference)) {
+            if lot.side != original.plan.position_side || lot.remaining_qty <= Decimal::ZERO {
+                return Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_LOT_INVALID"));
+            }
+            quantity = quantity.checked_add(lot.remaining_qty)
+                .ok_or(StoreError::Invalid("GRAPH_FINANCE_CLOSE_QUANTITY_OVERFLOW"))?;
+        }
+        let side = match original.plan.position_side.as_str() {
+            "long" => "sell",
+            "short" => "buy",
+            _ => return Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_ORIGINAL_SIDE_INVALID")),
+        };
+        if quantity <= Decimal::ZERO || intent.plan.quantity != quantity || intent.plan.side != side {
+            return Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_EXACT_QUANTITY_REQUIRED"));
+        }
+        let claimed = Self::claim_strategy_decision_sql(
+            tx, Some(scope), &binding.instance_id, &identity.decision_key,
+            &identity.input_digest, decision.policy_revision,
+            Some(&binding.definition_version), now,
+        )?;
+        if claimed.as_deref() != Some(decision.decision_id.as_str()) {
+            return Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_CLAIM_CONFLICT"));
+        }
+        if !Self::prepare_sql_transaction(tx, Some(scope), decision, intent)? {
+            return Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_ALREADY_PREPARED"));
+        }
+        insert_receipt(tx, scope, &receipt_id, CLOSE_KIND, &PreparedGraphClose {
+            input_fingerprint: fingerprint,
+            original_reference: original_reference.to_owned(),
+            intent_id: intent.intent_id.clone(),
+        }, now)?;
+        Ok(GraphCloseClaim::Prepared { intent_id: intent.intent_id.clone() })
+    }
 }
 
 #[cfg(test)]
@@ -623,6 +791,144 @@ mod tests {
                 instrument_id: binding.instrument_id.clone(),
             },
         )
+    }
+
+    fn close_fixture(db: &mut Connection) -> (EngineGraphBinding, EngineGraphCursor, Decision, NewIntent) {
+        let scope = ("installation", "account-a");
+        let tx = db.transaction().unwrap();
+        create(&tx, scope.1);
+        let binding = binding(&tx, scope.1);
+        AccountStore::bind_graph_sql(&tx, scope, &binding, &cursor(2, TargetPosition::Flat), 121_000).unwrap();
+        let publication = cursor(3, TargetPosition::Long);
+        let (opening_decision, opening_intent) = opening(&tx, scope, &binding, &publication);
+        assert!(matches!(
+            AccountStore::prepare_graph_open_sql(&tx, scope, &binding, &publication, &opening_decision, &opening_intent, 181_000),
+            Ok(GraphOpenClaim::Prepared { .. })
+        ));
+        tx.execute(
+            "UPDATE intents SET state='FILLED' WHERE installation_id=?1 AND account_key=?2 AND intent_id=?3",
+            params![scope.0, scope.1, opening_intent.intent_id],
+        ).unwrap();
+        tx.execute(
+            "INSERT INTO position_lots (installation_id,account_key,lot_id,instance_id,intent_id,fill_id,instrument_id,side,remaining_qty,cost,opened_at)
+             VALUES (?1,?2,'graph-original-lot',?3,?4,NULL,?5,'long','1','100',182000)",
+            params![scope.0, scope.1, binding.instance_id, opening_intent.intent_id, binding.instrument_id],
+        ).unwrap();
+        tx.commit().unwrap();
+
+        let closing = cursor(4, TargetPosition::Flat);
+        let identity = binding.close_identity(&closing, &opening_intent.intent_id).unwrap();
+        let mut plan = opening_intent.plan;
+        plan.operation = "close".into();
+        plan.side = "sell".into();
+        plan.stop_price = None;
+        (
+            binding,
+            closing,
+            Decision {
+                decision_id: identity.decision_id,
+                instance_id: Some("strategy-a".into()),
+                decision_at: 241_000,
+                input_digest: identity.input_digest,
+                policy_revision: 1,
+                code_version: "graph-close/v1".into(),
+            },
+            NewIntent {
+                plan,
+                intent_id: "graph-test-close-intent".into(),
+                idempotency_key: identity.decision_key,
+                request_hash: "graph-test-close-request-hash".into(),
+                client_order_id: "graph-test-close-client".into(),
+                deadline: 300_000,
+                plan_hash: "graph-test-close-plan-hash".into(),
+                policy_revision: 1,
+                risk_increase: false,
+                instrument_id: "BTC-USDT-SWAP".into(),
+            }
+        )
+    }
+
+    #[test]
+    fn graph_close_claim_stages_original_reduction_without_ack_and_replays() {
+        let mut db = database();
+        let scope = ("installation", "account-a");
+        let (binding, closing, decision, intent) = close_fixture(&mut db);
+        {
+            let tx = db.transaction().unwrap();
+            assert_eq!(
+                AccountStore::prepare_graph_close_sql(
+                    &tx, scope, &binding, &closing, "graph-test-intent", &decision, &intent, 241_000,
+                ).unwrap(),
+                GraphCloseClaim::Prepared { intent_id: intent.intent_id.clone() }
+            );
+            tx.commit().unwrap();
+        }
+        assert_eq!(AccountStore::graph_progress_sql(&db, scope, &binding).unwrap().unwrap().cursor.sequence, 3);
+        let saved = AccountStore::find_intent_sql(&db, Some(scope), "intent_id", &intent.intent_id).unwrap().unwrap();
+        assert_eq!(saved.state, IntentState::Prepared);
+        assert_eq!(saved.plan.operation, "close");
+        assert_eq!(saved.plan.quantity, Decimal::ONE);
+        let tx = db.transaction().unwrap();
+        assert_eq!(
+            AccountStore::prepare_graph_close_sql(
+                &tx, scope, &binding, &closing, "graph-test-intent", &decision, &intent, 242_000,
+            ).unwrap(),
+            GraphCloseClaim::Replayed { intent_id: intent.intent_id.clone() }
+        );
+        assert!(matches!(
+            AccountStore::acknowledge_graph_idle_sql(&tx, scope, &binding, &closing, 242_000),
+            Err(StoreError::Invalid("GRAPH_FINANCE_ATOMIC_INTENT_REQUIRED"))
+        ));
+        assert!(AccountStore::strategy_position_snapshot_sql(&tx, Some(scope), &binding.instance_id, &binding.instrument_id).unwrap().in_flight);
+    }
+
+    #[test]
+    fn graph_close_claim_rejects_quantity_foreign_reference_conflicts_and_rolls_back() {
+        let mut db = database();
+        let scope = ("installation", "account-a");
+        let (binding, closing, decision, intent) = close_fixture(&mut db);
+        {
+            let tx = db.transaction().unwrap();
+            let mut wrong = intent.clone();
+            wrong.plan.quantity = Decimal::from(2);
+            assert!(matches!(
+                AccountStore::prepare_graph_close_sql(&tx, scope, &binding, &closing, "graph-test-intent", &decision, &wrong, 241_000),
+                Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_EXACT_QUANTITY_REQUIRED"))
+            ));
+            assert!(matches!(
+                AccountStore::prepare_graph_close_sql(&tx, scope, &binding, &closing, "foreign-entry", &decision, &intent, 241_000),
+                Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_IDENTITY_INVALID"))
+            ));
+            // Caller committing a failed command must not leak the decision.
+            tx.commit().unwrap();
+        }
+        assert!(AccountStore::find_intent_sql(&db, Some(scope), "intent_id", &intent.intent_id).unwrap().is_none());
+        {
+            let tx = db.transaction().unwrap();
+            assert!(matches!(
+                AccountStore::prepare_graph_close_sql(&tx, scope, &binding, &closing, "graph-test-intent", &decision, &intent, 241_000),
+                Ok(GraphCloseClaim::Prepared { .. })
+            ));
+            // Simulate a crash before commit.
+        }
+        assert!(AccountStore::find_intent_sql(&db, Some(scope), "intent_id", &intent.intent_id).unwrap().is_none());
+        assert_eq!(AccountStore::graph_progress_sql(&db, scope, &binding).unwrap().unwrap().cursor.sequence, 3);
+        let tx = db.transaction().unwrap();
+        assert!(matches!(
+            AccountStore::prepare_graph_close_sql(&tx, scope, &binding, &cursor(5, TargetPosition::Flat), "graph-test-intent", &decision, &intent, 301_000),
+            Err(StoreError::Invalid("GRAPH_FINANCE_CLOSE_IDENTITY_INVALID"))
+        ));
+        assert_eq!(
+            AccountStore::prepare_graph_close_sql(&tx, scope, &binding, &closing, "graph-test-intent", &decision, &intent, 241_000).unwrap(),
+            GraphCloseClaim::Prepared { intent_id: intent.intent_id.clone() }
+        );
+        let mut conflicting = intent.clone();
+        conflicting.request_hash = "other-close-request".into();
+        assert!(matches!(
+            AccountStore::prepare_graph_close_sql(&tx, scope, &binding, &closing, "graph-test-intent", &decision, &conflicting, 241_000),
+            Err(StoreError::Invalid("GRAPH_FINANCE_CONFLICTING_REPLAY"))
+        ));
+        tx.commit().unwrap();
     }
 
     #[test]

@@ -361,6 +361,8 @@ def execute(scopes):
             "account_store::sql::source_graph_binding::tests::graph_open_claim_rejects_wrong_side_idle_gap_and_conflicting_replay",
             "account_store::sql::source_graph_binding::tests::graph_open_claim_crash_before_commit_rolls_back_intent_decision_and_cursor",
             "account_store::sql::source_graph_binding::tests::graph_open_failed_prepare_undoes_claim_even_when_caller_commits_error",
+            "account_store::sql::source_graph_binding::tests::graph_close_claim_stages_original_reduction_without_ack_and_replays",
+            "account_store::sql::source_graph_binding::tests::graph_close_claim_rejects_quantity_foreign_reference_conflicts_and_rolls_back",
             "account_store::sql::source_graph_binding::tests::graph_binding_discovery_pages_from_original_finance_and_skips_stopped",
             "account_store::sql::source_graph_binding::tests::one_revision_can_bind_two_instruments_with_independent_cursors",
         })
