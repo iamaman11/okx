@@ -24,7 +24,8 @@ impl TradeService {
             let result = match request {
                 StrategyRequest::Status { instance_id } => {
                     let instance_id = instance_id.clone();
-                    let mut status = r.execution
+                    let mut status = r
+                        .execution
                         .store
                         .strategy_status(deadline(), instance_id, now())
                         .await
@@ -153,9 +154,13 @@ impl TradeService {
                     timeframe_ms,
                     budget_usd,
                 } => {
-                    if !matches!(definition_id.as_str(),
-                        "ema_cross_v1" | "no_trade" | "close_momentum"
-                            | "two_bar_momentum" | GraphStrategyConfigurationV1::DEFINITION_ID
+                    if !matches!(
+                        definition_id.as_str(),
+                        "ema_cross_v1"
+                            | "no_trade"
+                            | "close_momentum"
+                            | "two_bar_momentum"
+                            | GraphStrategyConfigurationV1::DEFINITION_ID
                     ) {
                         return Err(okx_execution::StoreError::Invalid(
                             "STRATEGY_DEFINITION_UNSUPPORTED",
@@ -166,37 +171,42 @@ impl TradeService {
                             "STRATEGY_CONFIGURATION_INVALID",
                         ));
                     }
-                    let parameters = if definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
-                        let config = GraphStrategyConfigurationV1 {
-                            signal: GraphStrategyConfigurationV1::parse_signal(parameters).ok_or(
-                                okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
-                            )?,
-                            instruments: instruments.clone(),
-                            timeframe_ms: *timeframe_ms,
-                        };
-                        if !config.valid() {
-                            return Err(okx_execution::StoreError::Invalid(
-                                "STRATEGY_CONFIGURATION_INVALID",
-                            ));
+                    let parameters =
+                        if definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
+                            let config = GraphStrategyConfigurationV1 {
+                                signal: GraphStrategyConfigurationV1::parse_signal(parameters)
+                                    .ok_or(okx_execution::StoreError::Invalid(
+                                        "STRATEGY_PARAMETERS_INVALID",
+                                    ))?,
+                                instruments: instruments.clone(),
+                                timeframe_ms: *timeframe_ms,
+                            };
+                            if !config.valid() {
+                                return Err(okx_execution::StoreError::Invalid(
+                                    "STRATEGY_CONFIGURATION_INVALID",
+                                ));
+                            }
+                            serde_json::to_string(&config)
+                        } else {
+                            let config = StrategyConfigurationV1 {
+                                parameters: StrategyParametersV1::parse(parameters).ok_or(
+                                    okx_execution::StoreError::Invalid(
+                                        "STRATEGY_PARAMETERS_INVALID",
+                                    ),
+                                )?,
+                                instruments: instruments.clone(),
+                                timeframe_ms: *timeframe_ms,
+                            };
+                            if !config.valid() {
+                                return Err(okx_execution::StoreError::Invalid(
+                                    "STRATEGY_CONFIGURATION_INVALID",
+                                ));
+                            }
+                            serde_json::to_string(&config)
                         }
-                        serde_json::to_string(&config)
-                    } else {
-                        let config = StrategyConfigurationV1 {
-                            parameters: StrategyParametersV1::parse(parameters).ok_or(
-                                okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
-                            )?,
-                            instruments: instruments.clone(),
-                            timeframe_ms: *timeframe_ms,
-                        };
-                        if !config.valid() {
-                            return Err(okx_execution::StoreError::Invalid(
-                                "STRATEGY_CONFIGURATION_INVALID",
-                            ));
-                        }
-                        serde_json::to_string(&config)
-                    }.map_err(|_| {
-                        okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
-                    })?;
+                        .map_err(|_| {
+                            okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
+                        })?;
                     let instance = StrategyInstance {
                         instance_id: instance_id.clone(),
                         definition_id: definition_id.clone(),
@@ -225,27 +235,38 @@ impl TradeService {
                             "STRATEGY_INSTANCE_NOT_FOUND",
                         ))?;
                     if i.definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
-                        let mut config: GraphStrategyConfigurationV1 = serde_json::from_str(&i.parameters)
-                            .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT"))?;
-                        config.signal = GraphStrategyConfigurationV1::parse_signal(parameters).ok_or(
-                            okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
-                        )?;
+                        let mut config: GraphStrategyConfigurationV1 =
+                            serde_json::from_str(&i.parameters).map_err(|_| {
+                                okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT")
+                            })?;
+                        config.signal = GraphStrategyConfigurationV1::parse_signal(parameters)
+                            .ok_or(okx_execution::StoreError::Invalid(
+                                "STRATEGY_PARAMETERS_INVALID",
+                            ))?;
                         if !config.valid() {
-                            return Err(okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID"));
+                            return Err(okx_execution::StoreError::Invalid(
+                                "STRATEGY_CONFIGURATION_INVALID",
+                            ));
                         }
-                        i.parameters = serde_json::to_string(&config)
-                            .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID"))?;
+                        i.parameters = serde_json::to_string(&config).map_err(|_| {
+                            okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
+                        })?;
                     } else {
-                        let mut config: StrategyConfigurationV1 = serde_json::from_str(&i.parameters)
-                            .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT"))?;
+                        let mut config: StrategyConfigurationV1 =
+                            serde_json::from_str(&i.parameters).map_err(|_| {
+                                okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT")
+                            })?;
                         config.parameters = StrategyParametersV1::parse(parameters).ok_or(
                             okx_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
                         )?;
                         if !config.valid() {
-                            return Err(okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID"));
+                            return Err(okx_execution::StoreError::Invalid(
+                                "STRATEGY_CONFIGURATION_INVALID",
+                            ));
                         }
-                        i.parameters = serde_json::to_string(&config)
-                            .map_err(|_| okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID"))?;
+                        i.parameters = serde_json::to_string(&config).map_err(|_| {
+                            okx_execution::StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID")
+                        })?;
                     }
                     i.budget = Decimal::from_str(budget_usd)
                         .map_err(|_| okx_execution::StoreError::Invalid("INVALID_BUDGET"))?;

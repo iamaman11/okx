@@ -160,7 +160,10 @@ async fn graph_strategy_is_durable_and_does_not_invoke_legacy_ema() {
     let created = completed_data(fixture.request(create.clone()).await)["instance"].clone();
     assert_eq!(created["enabled"], false);
     assert_eq!(created["definition_id"], "graph_signal_v1");
-    assert_eq!(completed_data(fixture.request(create).await)["instance"], created);
+    assert_eq!(
+        completed_data(fixture.request(create).await)["instance"],
+        created
+    );
     let update = StrategyRequest::Update {
         idempotency_key: "graph_update".into(),
         instance_id: instance_id.into(),
@@ -173,32 +176,58 @@ async fn graph_strategy_is_durable_and_does_not_invoke_legacy_ema() {
         2
     );
     rejected(
-        fixture.request(StrategyRequest::Update {
-            idempotency_key: "graph_update_ema_wrong_type".into(),
-            instance_id: instance_id.into(),
-            expected_revision: 2,
-            parameters: json!({"fast": 5, "slow": 10}),
-            budget_usd: "2".into(),
-        }).await,
+        fixture
+            .request(StrategyRequest::Update {
+                idempotency_key: "graph_update_ema_wrong_type".into(),
+                instance_id: instance_id.into(),
+                expected_revision: 2,
+                parameters: json!({"fast": 5, "slow": 10}),
+                budget_usd: "2".into(),
+            })
+            .await,
         "STRATEGY_PARAMETERS_INVALID",
     );
-    completed_data(fixture.request(StrategyRequest::Start {
-        idempotency_key: "graph_start".into(),
-        instance_id: instance_id.into(),
-    }).await);
-    let status = completed_data(fixture.request(StrategyRequest::Status {
-        instance_id: instance_id.into(),
-    }).await);
+    completed_data(
+        fixture
+            .request(StrategyRequest::Start {
+                idempotency_key: "graph_start".into(),
+                instance_id: instance_id.into(),
+            })
+            .await,
+    );
+    let status = completed_data(
+        fixture
+            .request(StrategyRequest::Status {
+                instance_id: instance_id.into(),
+            })
+            .await,
+    );
     assert_eq!(status["graph_execution"]["state"], "NOT_ACTIVATED");
-    assert_eq!(status["graph_execution"]["reason_code"], "GRAPH_EXECUTION_NOT_CONNECTED");
-    let persisted = fixture.owner.execution.store.strategy_instances(deadline()).await.unwrap()
-        .into_iter().find(|instance| instance.instance_id == instance_id).unwrap();
+    assert_eq!(
+        status["graph_execution"]["reason_code"],
+        "GRAPH_EXECUTION_NOT_CONNECTED"
+    );
+    let persisted = fixture
+        .owner
+        .execution
+        .store
+        .strategy_instances(deadline())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|instance| instance.instance_id == instance_id)
+        .unwrap();
     assert!(persisted.enabled);
     let typed: okx_protocol::trading::GraphStrategyConfigurationV1 =
         serde_json::from_str(&persisted.parameters).unwrap();
     assert_eq!(typed.signal, serde_json::from_value(graph).unwrap());
     assert_eq!(
-        fixture.native.trade.strategy_turn(&fixture.owner, &persisted).await.unwrap_err(),
+        fixture
+            .native
+            .trade
+            .strategy_turn(&fixture.owner, &persisted)
+            .await
+            .unwrap_err(),
         "GRAPH_EXECUTION_NOT_CONNECTED"
     );
     assert_eq!(money(&fixture).await, before);
@@ -267,9 +296,12 @@ async fn graph_target_preview_reads_the_original_account_owner_without_any_order
     })
     .unwrap();
     assert_eq!(
-        fixture.native.trade.bind_graph_strategy(
-            &fixture.owner.configuration.alias, &binding, &confirmed
-        ).await.unwrap_err(),
+        fixture
+            .native
+            .trade
+            .bind_graph_strategy(&fixture.owner.configuration.alias, &binding, &confirmed)
+            .await
+            .unwrap_err(),
         "GRAPH_TARGET_STRATEGY_MODE_MISMATCH",
         "a legacy EMA instance must never acquire a concurrent graph dispatcher"
     );
@@ -337,16 +369,20 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
     };
     let fixture = Fixture::new().await;
     let _capture = fixture.owner.recorded_capture_gate.write().await;
-    completed_data(fixture.request(StrategyRequest::Create {
-        idempotency_key: "graph_consumer_create".into(),
-        instance_id: INSTANCE.into(),
-        definition_id: "graph_signal_v1".into(),
-        version: 1,
-        parameters: graph_signal_parameters(),
-        instruments: vec!["BTC-USDT-SWAP".into()],
-        timeframe_ms: 60_000,
-        budget_usd: "2".into(),
-    }).await);
+    completed_data(
+        fixture
+            .request(StrategyRequest::Create {
+                idempotency_key: "graph_consumer_create".into(),
+                instance_id: INSTANCE.into(),
+                definition_id: "graph_signal_v1".into(),
+                version: 1,
+                parameters: graph_signal_parameters(),
+                instruments: vec!["BTC-USDT-SWAP".into()],
+                timeframe_ms: 60_000,
+                budget_usd: "2".into(),
+            })
+            .await,
+    );
     completed_data(
         fixture
             .request(StrategyRequest::Start {
@@ -414,8 +450,12 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
     let mut wrong_timeframe = binding.clone();
     wrong_timeframe.timeframe_ms = 300_000;
     assert_eq!(
-        fixture.native.trade.bind_graph_strategy(&account, &wrong_timeframe, &original)
-            .await.unwrap_err(),
+        fixture
+            .native
+            .trade
+            .bind_graph_strategy(&account, &wrong_timeframe, &original)
+            .await
+            .unwrap_err(),
         "GRAPH_TARGET_CONFIGURATION_MISMATCH"
     );
     fixture
@@ -471,35 +511,68 @@ async fn graph_research_journal_consumer_commits_idle_and_blocks_open_without_po
     let mut recovered =
         EngineGraphConsumer::new(&fixture.ctx.research, account.clone(), binding.clone()).unwrap();
     assert!(matches!(
-        recovered.next(&fixture.native.trade, &fixture.ctx.research).await.unwrap(),
-        GraphConsumeOutcome::Idle { accepted: 0, confirmed_sequence: 3, has_more: false }
+        recovered
+            .next(&fixture.native.trade, &fixture.ctx.research)
+            .await
+            .unwrap(),
+        GraphConsumeOutcome::Idle {
+            accepted: 0,
+            confirmed_sequence: 3,
+            has_more: false
+        }
     ));
     let other_session = GraphSessionId::new("engine:unrelated-session".into()).unwrap();
     let other_definition: GraphSignalDefinition =
         serde_json::from_value(graph_signal_parameters()).unwrap();
-    let other_restored = fixture.ctx.research.graph_signal(GraphSessionRequest::Restore {
-        session_id: other_session.clone(),
-        definition: Box::new(other_definition),
-        capacity: 64,
-        history: vec![
-            GraphClosedBar { time_ms: 60_000, close: Some(100.) },
-            GraphClosedBar { time_ms: 120_000, close: Some(110.) },
-        ],
-    }).await.unwrap();
-    let GraphSessionReply::Evaluated { graph_sha256: other_hash, .. } = other_restored else {
+    let other_restored = fixture
+        .ctx
+        .research
+        .graph_signal(GraphSessionRequest::Restore {
+            session_id: other_session.clone(),
+            definition: Box::new(other_definition),
+            capacity: 64,
+            history: vec![
+                GraphClosedBar {
+                    time_ms: 60_000,
+                    close: Some(100.),
+                },
+                GraphClosedBar {
+                    time_ms: 120_000,
+                    close: Some(110.),
+                },
+            ],
+        })
+        .await
+        .unwrap();
+    let GraphSessionReply::Evaluated {
+        graph_sha256: other_hash,
+        ..
+    } = other_restored
+    else {
         panic!("other session must be restored");
     };
-    fixture.ctx.research.graph_signal(GraphSessionRequest::Advance {
-        session_id: other_session,
-        graph_sha256: other_hash,
-        expected_bars: 3,
-        bar: GraphClosedBar { time_ms: 180_000, close: Some(90.) },
-    }).await.unwrap();
+    fixture
+        .ctx
+        .research
+        .graph_signal(GraphSessionRequest::Advance {
+            session_id: other_session,
+            graph_sha256: other_hash,
+            expected_bars: 3,
+            bar: GraphClosedBar {
+                time_ms: 180_000,
+                close: Some(90.),
+            },
+        })
+        .await
+        .unwrap();
     assert_eq!(
         tokio::time::timeout(
             std::time::Duration::from_millis(500),
             recovered.next(&fixture.native.trade, &fixture.ctx.research)
-        ).await.expect("unrelated event must not block waiting for 64 notifications").unwrap(),
+        )
+        .await
+        .expect("unrelated event must not block waiting for 64 notifications")
+        .unwrap(),
         GraphConsumeOutcome::UnrelatedNotifications
     );
     fixture

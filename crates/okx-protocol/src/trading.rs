@@ -484,8 +484,11 @@ impl GraphStrategyConfigurationV1 {
             && self.instruments.iter().all(|v| name(v))
             && self.timeframe_ms >= 1000
     }
-    pub fn parse_signal(value: &serde_json::Value) -> Option<crate::research_ipc::GraphSignalDefinition> {
-        let parsed: crate::research_ipc::GraphSignalDefinition = serde_json::from_value(value.clone()).ok()?;
+    pub fn parse_signal(
+        value: &serde_json::Value,
+    ) -> Option<crate::research_ipc::GraphSignalDefinition> {
+        let parsed: crate::research_ipc::GraphSignalDefinition =
+            serde_json::from_value(value.clone()).ok()?;
         parsed.structurally_valid().then_some(parsed)
     }
 }
