@@ -702,7 +702,7 @@ impl StrategyRequest {
                     && name(definition_id)
                     && *version == 1
                     && (if definition_id == GraphStrategyConfigurationV1::DEFINITION_ID {
-                        GraphStrategyConfigurationV1::parse_signal(parameters).is_some()
+                        GraphStrategyConfigurationV1::parse_parameters(parameters).is_some()
                             && parameters.to_string().len() <= 60 * 1024
                     } else {
                         StrategyParametersV1::parse(parameters).is_some()
@@ -723,7 +723,7 @@ impl StrategyRequest {
             } => {
                 id(idempotency_key)
                     && name(instance_id)
-                    && ((GraphStrategyConfigurationV1::parse_signal(parameters).is_some()
+                    && ((GraphStrategyConfigurationV1::parse_parameters(parameters).is_some()
                         && parameters.to_string().len() <= 60 * 1024)
                         || (StrategyParametersV1::parse(parameters).is_some()
                             && parameters.to_string().len() <= 4096))
@@ -794,10 +794,28 @@ mod tests {
             idempotency_key: "graph_contract_update".into(),
             instance_id: "graph-btc".into(),
             expected_revision: 1,
-            parameters: graph,
+            parameters: graph.clone(),
             budget_usd: "2".into(),
         };
         assert!(update.valid());
+        let trading = serde_json::json!({
+            "signal": graph,
+            "execution": {"mode":"trade","max_slippage_bps":5,"stop_distance_bps":50}
+        });
+        let mut wrapped_create = legacy_payload;
+        if let StrategyRequest::Create { parameters, .. } = &mut wrapped_create {
+            *parameters = trading.clone();
+        }
+        assert!(wrapped_create.valid());
+        let mut wrapped_update = update;
+        if let StrategyRequest::Update { parameters, .. } = &mut wrapped_update {
+            *parameters = trading;
+        }
+        assert!(wrapped_update.valid());
+        if let StrategyRequest::Update { parameters, .. } = &mut wrapped_update {
+            parameters["execution"]["max_slippage_bps"] = serde_json::json!(0);
+        }
+        assert!(!wrapped_update.valid());
     }
     #[test]
     fn trade_positive_negative_wire_fixtures() {
