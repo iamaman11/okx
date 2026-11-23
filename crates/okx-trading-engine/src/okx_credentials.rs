@@ -68,7 +68,10 @@ pub fn store_native_account_credentials(reference: &str, payload: &[u8]) -> Agen
     let _validated = decode_named_credentials(payload)?;
     #[cfg(windows)]
     {
-        let service = format!("iamaman11.okx-trading-engine.account.{reference}");
+        let service = format!(
+            "{}{reference}",
+            crate::windows_credentials::ACCOUNT_SERVICE_PREFIX
+        );
         let entry = crate::windows_credentials::entry(&service, "credentials")
             .map_err(secret_store_error)?;
         entry.set_secret(payload).map_err(secret_store_error)?;
@@ -86,7 +89,10 @@ pub fn load_native_account_credentials(reference: &str) -> AgentResult<NamedAcco
     }
     #[cfg(windows)]
     {
-        let service = format!("iamaman11.okx-trading-engine.account.{reference}");
+        let service = format!(
+            "{}{reference}",
+            crate::windows_credentials::ACCOUNT_SERVICE_PREFIX
+        );
         let entry = crate::windows_credentials::entry(&service, "credentials")
             .map_err(secret_store_error)?;
         let encoded = Zeroizing::new(match entry.get_secret() {

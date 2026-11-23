@@ -150,7 +150,7 @@ jobs:
               scope="$(python3 -B scripts/check_ci_native_scope.py < "$RUNNER_TEMP/ci-files.json")"
             fi
           fi
-          case "$scope" in docs|cloudflare|research|host-control|host-launcher|full) ;; *) exit 1;; esac
+          case "$scope" in docs|cloudflare|research|host-controller|host-launcher|full) ;; *) exit 1;; esac
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
           echo "COMPONENT_SCOPE=$scope"
       - name: Verify Research-only scope and immutable accepted base
@@ -323,6 +323,7 @@ jobs:
       - name: Select checks from the complete PR diff
         id: scope
         run: |
+          python3 -B scripts/check_ci_native_scope.py --self-test
           python3 -B scripts/test_check_p0.py
           python3 scripts/check_p0.py --base "$BASE_SHA" --plan
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
@@ -1252,7 +1253,7 @@ jobs:
     # on a real Windows gate or on the narrowly proven identical native tree;
     # it never reports a newly executed 26/26 on the reuse path.
     name: windows-native
-    needs: [component_impact, trading_windows_full, host_lifecycle_windows, cloudflare_mcp_contracts, research_service_windows]
+    needs: [component_impact, trading_windows_full, trading_safety_windows, host_lifecycle_windows, cloudflare_mcp_contracts, research_service_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -1262,15 +1263,18 @@ jobs:
           set -euo pipefail
           test "${{ needs.component_impact.result }}" = "success"
           if [[ "${{ needs.component_impact.outputs.build_required }}" == "false" ]]; then
+            test "${{ needs.trading_safety_windows.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.reason }}" = "merged tree exactly matches successful PR head tree"
             echo "WINDOWS_NATIVE_PROOF=EXACT_SUCCESSFUL_MERGED_TREE"
           elif [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
+            test "${{ needs.trading_safety_windows.result }}" = "skipped"
             test "${{ needs.trading_windows_full.result }}" = "skipped"
             test "${{ needs.research_service_windows.result }}" = "success"
             test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_BASE_${{ needs.component_impact.outputs.research_base_head }}"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
+            test "${{ needs.trading_safety_windows.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
             test "${{ needs.trading_windows_full.result }}" = "skipped"
             test "${{ needs.host_lifecycle_windows.result }}" = "success"
@@ -1279,6 +1283,7 @@ jobs:
             echo "WINDOWS_NATIVE_PROOF=HOST_COMPONENTS_TESTED_NO_ENGINE_REBUILD"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.component_impact.outputs.native_required }}" == "false" ]]; then
+            test "${{ needs.trading_safety_windows.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
             scope="${{ needs.component_impact.outputs.component_scope }}"
             [[ "$scope" == "docs" || "$scope" == "cloudflare" ]]
@@ -1292,6 +1297,7 @@ jobs:
             echo "WINDOWS_NATIVE_PROOF=COMPONENT_${scope}_NO_NATIVE_SOURCE_CHANGED"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           else
+            test "${{ needs.trading_safety_windows.result }}" = "success"
             test "${{ needs.trading_windows_full.result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=FULL_WINDOWS_NATIVE_SUCCESS"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
@@ -1304,7 +1310,7 @@ jobs:
     # replaced by the actual current Native public contracts, not an exemption.
     name: trading-safety-windows-prerequisite
     needs: component_impact
-    if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
+    if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     runs-on: windows-latest
     timeout-minutes: 18
     steps:
@@ -1330,7 +1336,10 @@ jobs:
             'accounts::native_trade_contracts::native_strategies::risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner'
           )
           $packages = @('-p','okx-trading-engine','-p','okx-trade-execution','-p','okx-domain-core','-p','okx-ipc-contracts','-p','okx-market-runtime')
-          $output = & cargo test --locked @packages --lib -- --exact --test-threads 4 --nocapture @names 2>&1
+          # The five recorded-source fixtures have time-bounded readiness
+          # maintenance. Isolate the fixtures; the 100-caller CAS test still
+          # exercises its real internal concurrency.
+          $output = & cargo test --locked @packages --lib -- --exact --test-threads 1 --nocapture @names 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\native-b1-current.log" | Out-Host
           if ($code -ne 0) { exit $code }

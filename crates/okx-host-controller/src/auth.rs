@@ -3,7 +3,8 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{HostControlError, HostControlResult};
 
 #[cfg(windows)]
-const WINDOWS_CREDENTIAL_SERVICE: &str = "iamaman11.okx-host-controller.github";
+// Keep the already installed Credential Manager target across Cargo renames.
+const WINDOWS_CREDENTIAL_SERVICE: &str = "iamaman11.okx-host-control.github";
 #[cfg(windows)]
 const WINDOWS_CREDENTIAL_ACCOUNT: &str = "control-token";
 
@@ -107,9 +108,7 @@ mod tests {
             WINDOWS_CREDENTIAL_ACCOUNT,
         )
         .unwrap();
-        assert!(
-            format!("{built:?}").contains("control-token.iamaman11.okx-host-controller.github")
-        );
+        assert!(format!("{built:?}").contains("control-token.iamaman11.okx-host-control.github"));
         let mock = keyring::mock::Store::new().unwrap();
         let entry = entry_from_store(
             mock.as_ref(),

@@ -8,9 +8,6 @@ use crate::{
     config::{AGENT_IDENTITY_SCHEMA_V1, DEFAULT_AGENT_KEY_ID},
 };
 
-#[cfg(windows)]
-const WINDOWS_CREDENTIAL_SERVICE: &str = "iamaman11.okx-trading-engine";
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AgentIdentity {
     pub schema: &'static str,
@@ -36,8 +33,9 @@ pub fn initialize_native_identity(key_id: &str) -> AgentResult<AgentIdentity> {
 
     #[cfg(windows)]
     {
-        let entry = crate::windows_credentials::entry(WINDOWS_CREDENTIAL_SERVICE, key_id)
-            .map_err(secret_store_error)?;
+        let entry =
+            crate::windows_credentials::entry(crate::windows_credentials::IDENTITY_SERVICE, key_id)
+                .map_err(secret_store_error)?;
 
         match entry.get_secret() {
             Ok(mut existing) => {
@@ -69,8 +67,9 @@ pub fn load_native_private_key(key_id: &str) -> AgentResult<[u8; 32]> {
 
     #[cfg(windows)]
     {
-        let entry = crate::windows_credentials::entry(WINDOWS_CREDENTIAL_SERVICE, key_id)
-            .map_err(secret_store_error)?;
+        let entry =
+            crate::windows_credentials::entry(crate::windows_credentials::IDENTITY_SERVICE, key_id)
+                .map_err(secret_store_error)?;
         let mut secret = match entry.get_secret() {
             Ok(secret) => secret,
             Err(keyring::Error::NoEntry) => {

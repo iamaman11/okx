@@ -95,8 +95,27 @@ def classify(pages):
 def _self_test() -> None:
     # Post-merge reuse must skip Research compilation, not just full Native.
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
+    # The Actions shell guard must accept exactly the names produced by this
+    # classifier. A stale host-control spelling once rejected host-controller
+    # source changes before their dedicated short Windows job could start.
+    expected_scopes = {"docs", "cloudflare", "research", "host-controller", "host-launcher", "full"}
+    scope_guards = re.findall(r'case "\$scope" in ([a-z|-]+)\)', workflow)
+    assert len(scope_guards) == 1, "CI_SCOPE_GUARD_MISSING_OR_AMBIGUOUS"
+    guard_scopes = scope_guards[0].split("|")
+    assert len(guard_scopes) == len(set(guard_scopes))
+    assert set(guard_scopes) == expected_scopes, "CI_SCOPE_GUARD_DRIFT"
+    windows = workflow.split("\n  required_windows:\n", 1)[1].split("\n  trading_safety_windows:\n", 1)[0]
+    assert "needs: [component_impact, trading_windows_full, trading_safety_windows," in windows
+    assert 'test "${{ needs.trading_safety_windows.result }}" = "success"' in windows
+    assert windows.count('test "${{ needs.trading_safety_windows.result }}" = "skipped"') == 4
+    host = workflow.split("\n  host_lifecycle_windows:\n", 1)[1].split("\n  trading_windows_full:\n", 1)[0]
+    assert "needs.component_impact.outputs.component_scope == 'host-controller'" in host
+    assert "needs.component_impact.outputs.component_scope == 'host-launcher'" in host
+    assert "cargo build --locked --release -p okx-host-launcher -p okx-host-controller" in host
+    assert "cargo build --locked --release -p okx-trading-engine" not in host
     research = workflow.split("\n  research_service_windows:\n", 1)[1].split("\n  required_windows:\n", 1)[0]
     assert "if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'" in research
+    assert "cargo build --locked --release -p okx-research-service --bin okx-research-service" in research
     # Reuse the same established Cargo cache action and one target directory.
     assert "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6" in research
     assert research.count("Join-Path $env:GITHUB_WORKSPACE 'target'") == 2

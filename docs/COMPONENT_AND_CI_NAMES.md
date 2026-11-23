@@ -37,6 +37,25 @@ migration, the v2 manifest and installed installation keep these names:
 | Host Controller (`okx-host-controller`) | `okx-host-control.exe`; `iamaman11-okx-host-control` task/mutex |
 | Host Launcher | `okx-host-launcher.exe` |
 
+The existing non-Windows default data directory remains `.okx-agent`, and
+the Windows scheduled-task XML remains
+`C:\okx\control\okx-host-control-task.xml`.
+
+Windows Credential Manager targets are also persistent installation identities,
+**not** Cargo package names. An installed token or signing key must remain
+readable after a source-only rename:
+
+| Owner | Stable Credential Manager service |
+| --- | --- |
+| Trading Engine identity/signing key | `iamaman11.okx-agent` |
+| Trading Engine GitHub mailbox token | `iamaman11.okx-agent.github` |
+| Trading Engine Cloudflare runtime token | `iamaman11.okx-agent.cloudflare` |
+| Trading Engine account credentials | `iamaman11.okx-agent.account.<reference>` |
+| Host Controller GitHub token | `iamaman11.okx-host-control.github` |
+
+Any future credential target migration requires explicit, separately accepted
+secret-preserving migration and rollback; never silently write a renamed target.
+
 Historic release manifests, stored source SHA256, previously installed roots
 (`C:\okx-runtime`) and other provenance records are facts, not identifiers to
 rewrite. Do not silently rename them or fake a new accepted binary. There is
