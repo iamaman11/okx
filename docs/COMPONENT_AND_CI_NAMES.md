@@ -71,7 +71,9 @@ means proven reusable binary bytes, not a runtime library. Existing
 | --- | --- |
 | `classify` | Protected fail-closed changed-file/Cargo boundary classifier |
 | `draft-component-tests` | Scoped feedback for Draft pull requests |
-| `trading-engine-acceptance-windows` | Trading Engine/financial SQLite and complete Windows release acceptance |
+| `trading-engine-acceptance-windows` | Mandatory Trading Engine, financial SQLite, regression and resource-budget acceptance |
+| `trading-engine-build-windows` | Parallel fresh four-component Windows release build and artifact on full Ready PRs; manual accepted-`main` release cache seed |
+| `trusted-main-windows-test-cache-prime` | Optional manual compile-only test/collector cache seed from accepted `main`; no financial acceptance or deployment |
 | `trading-safety-acceptance-windows` | Independent mandatory B1 financial safety checks |
 | `research-service-tests-windows` | Research Service tests and build against the accepted unchanged Trading Engine |
 | `host-controller-launcher-checks` | Host Controller and Host Launcher tests/build without the Trading Engine |
@@ -86,8 +88,9 @@ The required check **display names** `classify`, `windows-native` and `linux-cor
 are retained for branch protection and accepted-CI reuse. `classify` is the
 actual `component_impact` job, without a redundant alias; the platform
 aggregators keep implementation IDs `required_windows` and `required_linux`.
-They verify executed evidence or an explicitly proved safe reuse, never claim
-that skipped financial tests ran. The old branch-only Draft jobs for closed
+They require both the finance acceptance and independent release build on the
+full Native route; on reuse they verify the accepted exact tree instead. They
+never claim that skipped financial tests ran. The old branch-only Draft jobs for closed
 issues #510 and #512 have been removed; normal Draft owner tests remain.
 
 ## Release acceptance for a future executable rename

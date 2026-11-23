@@ -6,6 +6,13 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      prime_windows_cargo_cache:
+        description: 'One-time trusted main Windows Cargo test/release cache seed (no acceptance or publish)'
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
   # The release step is part of this main CI run. A later main commit must not
@@ -639,6 +646,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          shared-key: trading-engine-tests-windows
 
       - name: Windows installation root migration contracts
         shell: pwsh
@@ -879,90 +887,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Build deployable Windows binaries
-        if: github.event_name == 'pull_request'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $env:OKX_BUILD_SOURCE_TREE = (git rev-parse "HEAD^{tree}").Trim()
-          $env:OKX_BUILD_SOURCE_HEAD = (git rev-parse HEAD).Trim()
-          $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
-          New-Item -ItemType Directory -Path $dist -Force | Out-Null
-          $names = @('okx-agent.exe', 'okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-service.exe')
-          $sourceHead = (git rev-parse HEAD).Trim()
-          $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
-          $components = [ordered]@{}
-          & node scripts/test-research-release-scope.cjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # The full native gate ALWAYS produces fresh binaries, even when a
-          # pinned Research reuse base exists. Reuse is isolated to its job.
-          cargo build --locked --release -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-research-service
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($name in $names) { Copy-Item (Join-Path 'target\release' $name) (Join-Path $dist $name) }
-          $freshNames = $names
-          foreach ($name in $freshNames) {
-            $path = Join-Path $dist $name
-            $components[$name] = [ordered]@{
-              sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
-              size = (Get-Item -LiteralPath $path).Length
-              source_head_sha = $sourceHead
-              source_tree = $sourceTree
-              run_id = 0
-              artifact_id = 0
-              protocol_version = 1
-              storage_version = 1
-            }
-          }
-          Copy-Item 'Cargo.lock' (Join-Path $dist 'Cargo.lock')
-          # Temporary one-release bridge for an already installed v1 CONTROL.
-          # That executable rejects the v2 "components" field before it can
-          # stage its successor. Keep the marker pinned in the tested source
-          # tree and remove it in a follow-up full v2 release.
-          if (Test-Path -LiteralPath '.github/windows-legacy-control-bridge.txt') {
-            if (Test-Path -LiteralPath '.github/research-release-base.json') {
-              throw 'LEGACY_BRIDGE_CANNOT_COMPOSE_RESEARCH_ORIGINS'
-            }
-            $files = [ordered]@{}
-            foreach ($name in $names[0..2]) {
-              $files[$name] = [ordered]@{
-                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dist $name)).Hash.ToLowerInvariant()
-              }
-            }
-            # Current v1 readers never install Research; new v1 readers reject
-            # unmanifested Research bytes. The next v2 release restores Worker.
-            Remove-Item -LiteralPath (Join-Path $dist 'okx-research-service.exe') -Force
-            $manifest = [ordered]@{
-              schema = 'okx.windows.bundle/v1'
-              repository_id = 1388071566
-              source_head_sha = $sourceHead
-              source_tree = $sourceTree
-              rust_version = (rustc --version).Trim()
-              files = $files
-            }
-          } else {
-            $manifest = [ordered]@{
-              schema = 'okx.windows.bundle/v2'
-              repository_id = 1388071566
-              source_head_sha = $sourceHead
-              source_tree = $sourceTree
-              rust_version = (rustc --version).Trim()
-              components = $components
-            }
-          }
-          $manifest | ConvertTo-Json -Depth 8 |
-            Set-Content -LiteralPath (Join-Path $dist 'manifest.json') -Encoding utf8NoBOM
-
-      - name: Upload deployable Windows bundle
-        if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}\okx-windows-bundle
-          if-no-files-found: error
-          compression-level: 9
-          retention-days: 14
-
   research_service_tests_windows:
     name: research-service-tests-windows
     needs: component_impact
@@ -1081,7 +1005,7 @@ jobs:
     # on a real Windows gate or on the narrowly proven identical native tree;
     # it never reports a newly executed 26/26 on the reuse path.
     name: windows-native
-    needs: [component_impact, trading_engine_acceptance_windows, trading_safety_acceptance_windows, host_controller_launcher_checks, cloudflare_mcp_contracts, research_service_tests_windows]
+    needs: [component_impact, trading_engine_acceptance_windows, trading_engine_build_windows, trading_safety_acceptance_windows, host_controller_launcher_checks, cloudflare_mcp_contracts, research_service_tests_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -1127,6 +1051,7 @@ jobs:
           else
             test "${{ needs.trading_safety_acceptance_windows.result }}" = "success"
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "success"
+            test "${{ needs.trading_engine_build_windows.result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=FULL_WINDOWS_NATIVE_SUCCESS"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
           fi
@@ -1197,6 +1122,204 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # #560: build the full Windows release in parallel with financial tests.
+  # A manual accepted-main run can warm its release cache for future PRs.
+  # Neither cache priming path runs acceptance, publishes or deploys.
+  trading_engine_build_windows:
+    name: trading-engine-build-windows
+    needs: component_impact
+    if: >-
+      ${{
+        (needs.component_impact.outputs.build_required == 'true' &&
+         needs.component_impact.outputs.native_required != 'false' &&
+         needs.component_impact.outputs.research_only != 'true') ||
+        (github.event_name == 'workflow_dispatch' &&
+         inputs.prime_windows_cargo_cache == true &&
+         github.ref == 'refs/heads/main' &&
+         needs.component_impact.outputs.build_required == 'false' &&
+         needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree')
+      }}
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Require exact trusted main checkout
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          if ('${{ github.ref }}' -cne 'refs/heads/main' -or
+              (git rev-parse HEAD).Trim() -cne '${{ github.sha }}' -or
+              @(git status --porcelain).Count -ne 0) { throw 'UNTRUSTED_CACHE_SEED_CHECKOUT' }
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.95.0
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        id: release-cache
+        with:
+          shared-key: trading-engine-release-windows
+          cache-on-failure: false
+      - name: Seed only missing Windows release outputs from trusted main
+        if: github.event_name == 'workflow_dispatch' && steps.release-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-research-service
+          if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_RELEASE_BUILD_FAILED' }
+      - name: Build deployable Windows binaries
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $env:OKX_BUILD_SOURCE_TREE = (git rev-parse "HEAD^{tree}").Trim()
+          $env:OKX_BUILD_SOURCE_HEAD = (git rev-parse HEAD).Trim()
+          $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+          $names = @('okx-agent.exe', 'okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-service.exe')
+          $sourceHead = (git rev-parse HEAD).Trim()
+          $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
+          $components = [ordered]@{}
+          & node scripts/test-research-release-scope.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The full native gate ALWAYS produces fresh binaries, even when a
+          # pinned Research reuse base exists. Reuse is isolated to its job.
+          cargo build --locked --release -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-research-service
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($name in $names) { Copy-Item (Join-Path 'target\release' $name) (Join-Path $dist $name) }
+          $freshNames = $names
+          foreach ($name in $freshNames) {
+            $path = Join-Path $dist $name
+            $components[$name] = [ordered]@{
+              sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+              size = (Get-Item -LiteralPath $path).Length
+              source_head_sha = $sourceHead
+              source_tree = $sourceTree
+              run_id = 0
+              artifact_id = 0
+              protocol_version = 1
+              storage_version = 1
+            }
+          }
+          Copy-Item 'Cargo.lock' (Join-Path $dist 'Cargo.lock')
+          # Temporary one-release bridge for an already installed v1 CONTROL.
+          # That executable rejects the v2 "components" field before it can
+          # stage its successor. Keep the marker pinned in the tested source
+          # tree and remove it in a follow-up full v2 release.
+          if (Test-Path -LiteralPath '.github/windows-legacy-control-bridge.txt') {
+            if (Test-Path -LiteralPath '.github/research-release-base.json') {
+              throw 'LEGACY_BRIDGE_CANNOT_COMPOSE_RESEARCH_ORIGINS'
+            }
+            $files = [ordered]@{}
+            foreach ($name in $names[0..2]) {
+              $files[$name] = [ordered]@{
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dist $name)).Hash.ToLowerInvariant()
+              }
+            }
+            # Current v1 readers never install Research; new v1 readers reject
+            # unmanifested Research bytes. The next v2 release restores Worker.
+            Remove-Item -LiteralPath (Join-Path $dist 'okx-research-service.exe') -Force
+            $manifest = [ordered]@{
+              schema = 'okx.windows.bundle/v1'
+              repository_id = 1388071566
+              source_head_sha = $sourceHead
+              source_tree = $sourceTree
+              rust_version = (rustc --version).Trim()
+              files = $files
+            }
+          } else {
+            $manifest = [ordered]@{
+              schema = 'okx.windows.bundle/v2'
+              repository_id = 1388071566
+              source_head_sha = $sourceHead
+              source_tree = $sourceTree
+              rust_version = (rustc --version).Trim()
+              components = $components
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath (Join-Path $dist 'manifest.json') -Encoding utf8NoBOM
+
+      - name: Upload deployable Windows bundle
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}\okx-windows-bundle
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 14
+
+      - name: Record non-acceptance cache-seed evidence
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          "CACHE_SEED=TRUSTED_MAIN_COMPILATION_ONLY" >> $env:GITHUB_STEP_SUMMARY
+          "MAIN_SHA=${{ github.sha }}" >> $env:GITHUB_STEP_SUMMARY
+          "RELEASE_CACHE_HIT=${{ steps.release-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+          "FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED" >> $env:GITHUB_STEP_SUMMARY
+
+  # Keep the test cache isolated from the release cache. Each rust-cache action
+  # owns one target directory on its own runner; post-job cleanup cannot cause
+  # the other cache to silently capture an incomplete Cargo profile.
+  trusted_main_test_cache_prime:
+    name: trusted-main-windows-test-cache-prime
+    needs: component_impact
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        inputs.prime_windows_cargo_cache == true &&
+        github.ref == 'refs/heads/main' &&
+        needs.component_impact.outputs.build_required == 'false' &&
+        needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree'
+      }}
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require exact trusted main checkout
+        shell: pwsh
+        run: |
+          if ('${{ github.ref }}' -cne 'refs/heads/main' -or
+              (git rev-parse HEAD).Trim() -cne '${{ github.sha }}' -or
+              @(git status --porcelain).Count -ne 0) { throw 'UNTRUSTED_CACHE_SEED_CHECKOUT' }
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.95.0
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        id: test-cache
+        with:
+          shared-key: trading-engine-tests-windows
+          cache-on-failure: false
+      - name: Seed only missing Windows debug/test outputs from trusted main
+        if: steps.test-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo clippy --locked -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-trade-execution --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_CLIPPY_BUILD_FAILED' }
+          cargo test --locked --no-run --all-targets -p okx-trading-engine -p okx-trade-execution -p okx-host-controller -p okx-host-launcher -p okx-strategy-core -p okx-research -p okx-research-service
+          if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_TEST_BUILD_FAILED' }
+          cargo build --locked -p okx-trading-engine --example native_finance_acceptance
+          if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_COLLECTOR_BUILD_FAILED' }
+      - name: Record non-acceptance test-cache evidence
+        shell: pwsh
+        run: |
+          "CACHE_SEED=TRUSTED_MAIN_TEST_COMPILATION_ONLY" >> $env:GITHUB_STEP_SUMMARY
+          "MAIN_SHA=${{ github.sha }}" >> $env:GITHUB_STEP_SUMMARY
+          "TEST_CACHE_HIT=${{ steps.test-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+          "FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED" >> $env:GITHUB_STEP_SUMMARY
+
   # Successful protected main checks publish the verified PR artifact here.
   publish_accepted_windows_release:
     name: publish-accepted-windows-release
@@ -1261,7 +1384,7 @@ jobs:
             jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/jobs?per_page=100")"
             # Require the *fresh* 4-EXE financial gate, never an aggregate
             # that reused older proof or the isolated Research-only worker.
-            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-acceptance-windows","trading-safety-acceptance-windows","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
+            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-acceptance-windows","trading-engine-build-windows","trading-safety-acceptance-windows","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
               continue
             fi
             artifacts="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts?per_page=100")"
