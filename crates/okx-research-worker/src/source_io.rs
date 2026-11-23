@@ -61,6 +61,7 @@ pub(crate) async fn observe<T>(meter: Arc<SourceIoMeter>, future: impl Future<Ou
 
 fn kind(request: &PublicSourceRequest) -> &'static str {
     match request {
+        PublicSourceRequest::CatalogPage { .. } => "catalog_page",
         PublicSourceRequest::Candles { .. } => "candles",
         PublicSourceRequest::Funding { .. } => "funding",
         PublicSourceRequest::Reference { .. } => "reference",
@@ -98,6 +99,10 @@ pub(crate) fn request_finished(
             Ok(reply) => {
                 counts.proxy_replies += 1;
                 match reply {
+                    PublicSourceReply::CatalogPage(value) => {
+                        counts.captured_response_body_bytes += value.raw_body.len() as u64;
+                        account_delivery(counts, Some(&value.http_delivery), value.raw_body.len());
+                    }
                     PublicSourceReply::Candles(value) => {
                         counts.captured_response_body_bytes += value.raw_body.len() as u64;
                         account_delivery(

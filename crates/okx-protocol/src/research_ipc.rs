@@ -410,6 +410,15 @@ mod reply_contract_tests {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PublicSourceRequest {
+    /// Stable catalog of bounded public market GETs. Research owns parsing;
+    /// Agent still owns HTTP admission, venue and the shared rate budget.
+    CatalogPage {
+        route: String,
+        instrument: String,
+        after: Option<String>,
+        before: Option<String>,
+        limit: u16,
+    },
     Candles {
         instrument: String,
         bar: String,
@@ -448,6 +457,25 @@ impl PublicSourceRequest {
                 .is_none_or(|s| s.len() <= 32 && s.bytes().all(|b| b.is_ascii_digit()))
         };
         match self {
+            Self::CatalogPage {
+                route,
+                instrument,
+                after,
+                before,
+                limit,
+            } => {
+                symbol(instrument)
+                    && (1..=100).contains(limit)
+                    && cursor(after)
+                    && cursor(before)
+                    && after.as_ref().is_none_or(|value| !value.is_empty())
+                    && before.as_ref().is_none_or(|value| !value.is_empty())
+                    && match route.as_str() {
+                        "history_trades" => true,
+                        "recent_trades" => after.is_none() && before.is_none(),
+                        _ => false,
+                    }
+            }
             Self::Candles {
                 instrument,
                 bar,
@@ -487,6 +515,16 @@ pub struct PublicSourceHttpDelivery {
     pub response_status: u16,
     /// Body bytes returned by the host transport, not total network traffic.
     pub response_body_bytes: u64,
+}
+/// Raw, provenance-bearing public rows for Research-owned source adapters.
+/// The Agent never accepts arbitrary URL, method, host or query parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicCatalogCapture {
+    pub route: String,
+    pub raw_body: Vec<u8>,
+    pub rows: Vec<Value>,
+    pub acquired_at_ms: String,
+    pub http_delivery: PublicSourceHttpDelivery,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicCandleCapture {
@@ -628,11 +666,54 @@ pub struct ResearchOpenInterest {
     deny_unknown_fields
 )]
 pub enum PublicSourceReply {
+    CatalogPage(PublicCatalogCapture),
     Candles(PublicCandleCapture),
     Funding(PublicFundingCapture),
     Reference(PublicReferenceCapture),
     Ticker(ResearchTicker),
     OpenInterest(Vec<ResearchOpenInterest>),
+}
+#[cfg(test)]
+mod research_catalog_boundary_tests {
+    use super::*;
+
+    fn request(route: &str) -> PublicSourceRequest {
+        PublicSourceRequest::CatalogPage {
+            route: route.into(),
+            instrument: "BTC-USDT-SWAP".into(),
+            after: None,
+            before: None,
+            limit: 100,
+        }
+    }
+
+    #[test]
+    fn finite_public_catalog_accepts_only_registered_gets_and_bounded_fields() {
+        assert!(request("recent_trades").valid());
+        assert!(request("history_trades").valid());
+        for forbidden in [
+            "",
+            "private_account",
+            "/api/v5/trade/order",
+            "https://example.com",
+        ] {
+            assert!(!request(forbidden).valid());
+        }
+        let mut recent = request("recent_trades");
+        if let PublicSourceRequest::CatalogPage { after, .. } = &mut recent {
+            *after = Some("123".into());
+        }
+        assert!(!recent.valid());
+        let mut history = request("history_trades");
+        if let PublicSourceRequest::CatalogPage { after, .. } = &mut history {
+            *after = Some("1&instId=EVIL".into());
+        }
+        assert!(!history.valid());
+        if let PublicSourceRequest::CatalogPage { limit, .. } = &mut history {
+            *limit = 101;
+        }
+        assert!(!history.valid());
+    }
 }
 /// Preserve the existing public source backpressure classification across IPC.
 pub fn is_retryable_source_defer(error: &str) -> bool {
