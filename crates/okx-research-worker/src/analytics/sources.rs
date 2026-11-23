@@ -1,5 +1,5 @@
 use super::cache::{SourceCache, SourceKey};
-use crate::source_api::PublicSourceClient;
+use crate::source_api::{PublicSourceClient, ResearchTradePage};
 use okx_research::strategy_registry::Bar;
 #[cfg(test)]
 use okx_runtime::market_bootstrap::MarketBootstrapper;
@@ -41,6 +41,28 @@ fn realized_funding_rate(value: Option<&str>) -> Result<f64, String> {
 }
 
 impl Sources {
+    /// Typed public trade source with Research-owned normalization and evidence.
+    /// The only network capability is the host's pre-registered public GET route.
+    pub async fn recent_trades(
+        &self,
+        symbol: &str,
+        limit: u16,
+    ) -> Result<ResearchTradePage, String> {
+        self.bootstrap.recent_trades(symbol, limit).await
+    }
+
+    pub async fn history_trades(
+        &self,
+        symbol: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: u16,
+    ) -> Result<ResearchTradePage, String> {
+        self.bootstrap
+            .history_trades(symbol, after, before, limit)
+            .await
+    }
+
     pub async fn candles(
         &self,
         symbol: &str,
