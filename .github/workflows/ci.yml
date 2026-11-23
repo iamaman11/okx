@@ -1119,7 +1119,8 @@ jobs:
   research-only-windows:
     name: research-only-windows
     needs: classify
-    if: needs.classify.outputs.research_only == 'true'
+    # A successful, identical PR tree is already accepted; main must reuse it.
+    if: needs.classify.outputs.build_required == 'true' && needs.classify.outputs.research_only == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -1129,10 +1130,17 @@ jobs:
         with:
           toolchain: 1.95.0
           components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        id: research-cache
+        with:
+          shared-key: research-only-windows
+          cache-workspace-crates: true
       - name: Fresh Strategy Core, Research and Worker owner checks
         shell: pwsh
         run: |
-          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'research-check-target'
+          # One Cargo target root for tests and release, and the action cache.
+          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
+          "Research Cargo cache exact hit: ${{ steps.research-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
           # This is the REQUIRED Ready gate for all three Research owners.
           # A failing primitive unit test must fail this job before packaging.
           cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-worker --all-targets -- -D warnings
@@ -1156,7 +1164,7 @@ jobs:
           & node scripts/test-research-release-scope.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & ./scripts/prepare-research-release.ps1 -Dist $dist
-          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'research-only-release-target'
+          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
           cargo build --locked --release -p okx-research-worker --bin okx-research-service 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'research-only-build.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
