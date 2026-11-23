@@ -558,6 +558,55 @@ impl GitHubClient {
         validated_commit_tree(&sha, commit)
     }
 
+    /// A full, self-origin Native PR artifact remains admissible after main
+    /// advances *only* through files outside the installed Native closure.
+    /// Compare immutable Git commits; never trust the current branch name in
+    /// a compare response or accept GitHub's truncated file listing.
+    pub async fn native_base_on_research_only_main(
+        &self,
+        accepted_head: &str,
+        accepted_tree: &str,
+    ) -> Result<bool, GitHubError> {
+        if !is_commit_sha(accepted_head) || !is_commit_sha(accepted_tree) {
+            return Err(GitHubError::UntrustedWorkflowRun);
+        }
+        if self.repository_commit_tree(accepted_head).await? != accepted_tree {
+            return Ok(false);
+        }
+        let url = format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/git/ref/heads/main");
+        let response = self
+            .send_checked(
+                self.http
+                    .get(url)
+                    .bearer_auth(self.token.as_str())
+                    .header("Accept", "application/vnd.github+json"),
+            )
+            .await?;
+        let main: RepositoryReference =
+            decode_workflow_json(response, "native_base_main_ref").await?;
+        if main.object.kind != "commit" || !is_commit_sha(&main.object.sha) {
+            return Err(GitHubError::UntrustedWorkflowRun);
+        }
+        let main_sha = main.object.sha;
+        if self.repository_commit_tree(&main_sha).await? == accepted_tree {
+            return Ok(true);
+        }
+
+        let url =
+            format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/compare/{accepted_head}...{main_sha}");
+        let response = self
+            .send_checked(
+                self.http
+                    .get(url)
+                    .bearer_auth(self.token.as_str())
+                    .header("Accept", "application/vnd.github+json"),
+            )
+            .await?;
+        let comparison: RepositoryComparison =
+            decode_workflow_json(response, "native_base_main_comparison").await?;
+        Ok(research_only_descendant(accepted_head, &comparison))
+    }
+
     pub async fn issue_comments(
         &self,
         issue_number: u64,
@@ -1236,6 +1285,89 @@ struct RepositoryCommitTree {
     sha: String,
 }
 
+#[derive(Deserialize)]
+struct RepositoryComparison {
+    status: String,
+    ahead_by: u64,
+    behind_by: u64,
+    total_commits: u64,
+    base_commit: RepositoryCommitRef,
+    merge_base_commit: RepositoryCommitRef,
+    commits: Vec<RepositoryCommitRef>,
+    files: Vec<RepositoryChangedFile>,
+}
+
+#[derive(Deserialize)]
+struct RepositoryCommitRef {
+    sha: String,
+}
+
+#[derive(Deserialize)]
+struct RepositoryChangedFile {
+    filename: String,
+    status: String,
+    #[serde(default)]
+    previous_filename: Option<String>,
+}
+
+/// Narrower than the CI Research classifier: changes to Worker IPC, entry
+/// point, dependency manifests or shared Native contracts require a new full
+/// Native base, even if their PR selected a Research-only workflow.
+fn safe_research_delta(path: &str) -> bool {
+    if path.len() > 512
+        || path.contains('\\')
+        || path.split('/').any(|part| {
+            part.is_empty()
+                || matches!(part, "." | "..")
+                || !part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        })
+    {
+        return false;
+    }
+    if path == "README.md" || (path.starts_with("docs/") && path.ends_with(".md")) {
+        return true;
+    }
+    if !path.ends_with(".rs") {
+        return false;
+    }
+    if path.starts_with("crates/okx-research/src/")
+        || path.starts_with("crates/okx-strategy-core/src/")
+    {
+        return true;
+    }
+    path.starts_with("crates/okx-research-worker/src/")
+        && path != "crates/okx-research-worker/src/main.rs"
+        && path != "crates/okx-research-worker/src/ipc.rs"
+        && !path.starts_with("crates/okx-research-worker/src/ipc/")
+}
+
+fn research_only_descendant(head: &str, c: &RepositoryComparison) -> bool {
+    if !is_commit_sha(head)
+        || c.status != "ahead"
+        || c.base_commit.sha != head
+        || c.merge_base_commit.sha != head
+        || c.behind_by != 0
+        || !(1..=250).contains(&c.ahead_by)
+        || c.total_commits != c.ahead_by
+        || c.commits.len() != c.total_commits as usize
+        || c.files.is_empty()
+        // GitHub compare caps the *entire* changed-file list at 300 entries.
+        || c.files.len() >= 300
+        || c.commits.iter().any(|commit| !is_commit_sha(&commit.sha))
+    {
+        return false;
+    }
+    let mut paths = BTreeSet::new();
+    c.files.iter().all(|file| {
+        matches!(file.status.as_str(), "added" | "modified" | "removed")
+            && file.previous_filename.is_none()
+            && safe_research_delta(&file.filename)
+            && paths.insert(&file.filename)
+    })
+}
+
 fn is_commit_sha(value: &str) -> bool {
     value.len() == 40
         && value
@@ -1334,6 +1466,117 @@ mod tests {
         assert!(validated_commit_tree(&head, parse(&tree, &tree)).is_err());
         assert!(validated_commit_tree(&head, parse(&head, "invalid")).is_err());
         assert!(!is_commit_sha("main/../../other-repository"));
+    }
+
+    #[test]
+    fn research_only_native_base_descendant_accepts_exact_bounded_changes() {
+        let head = "a".repeat(40);
+        let next = "b".repeat(40);
+        let parse = |files: serde_json::Value| -> RepositoryComparison {
+            serde_json::from_value(serde_json::json!({
+                "status": "ahead", "ahead_by": 2, "behind_by": 0,
+                "total_commits": 2,
+                "base_commit": {"sha": head},
+                "merge_base_commit": {"sha": head},
+                "commits": [{"sha": next}, {"sha": "c".repeat(40)}],
+                "files": files
+            }))
+            .unwrap()
+        };
+        let accepted = parse(serde_json::json!([
+            {"filename": "crates/okx-research-worker/src/analytics/source_io.rs", "status": "modified"},
+            {"filename": "crates/okx-strategy-core/src/operators.rs", "status": "added"},
+            {"filename": "docs/acceptance/537/proof.md", "status": "modified"}
+        ]));
+        assert!(research_only_descendant(&head, &accepted));
+        assert!(safe_research_delta("crates/okx-research/src/query_plan.rs"));
+        assert!(safe_research_delta(
+            "crates/okx-research-worker/src/source_api.rs"
+        ));
+        assert!(safe_research_delta("README.md"));
+
+        for path in [
+            "crates/okx-agent/src/main.rs",
+            "crates/okx-github/src/lib.rs",
+            "crates/okx-host-control/src/artifact.rs",
+            "crates/okx-protocol/src/lib.rs",
+            "crates/okx-research-worker/Cargo.toml",
+            "crates/okx-research-worker/src/main.rs",
+            "crates/okx-research-worker/src/ipc.rs",
+            "crates/okx-research-worker/src/ipc/message.rs",
+            ".github/workflows/ci.yml",
+            "scripts/check_ci_native_scope.py",
+            "cloudflare/okx-mcp/src/mcp.ts",
+            "crates/okx-research-worker/src/../ipc.rs",
+            "crates//okx-research-worker/src/source_api.rs",
+            "crates\\okx-research-worker\\src\\source_api.rs",
+        ] {
+            assert!(!safe_research_delta(path), "unsafe path accepted: {path}");
+            let candidate = parse(serde_json::json!([{"filename": path, "status": "modified"}]));
+            assert!(!research_only_descendant(&head, &candidate));
+        }
+    }
+
+    #[test]
+    fn research_only_native_base_descendant_rejects_incomplete_compare() {
+        let head = "a".repeat(40);
+        let valid = serde_json::json!({
+            "status": "ahead", "ahead_by": 1, "behind_by": 0,
+            "total_commits": 1,
+            "base_commit": {"sha": head},
+            "merge_base_commit": {"sha": head},
+            "commits": [{"sha": "b".repeat(40)}],
+            "files": [{"filename": "crates/okx-research-worker/src/source_api.rs", "status": "modified"}]
+        });
+        let accepts = |value| {
+            research_only_descendant(
+                &head,
+                &serde_json::from_value::<RepositoryComparison>(value).unwrap(),
+            )
+        };
+        assert!(accepts(valid.clone()));
+        let cases = [
+            ("status", serde_json::json!("diverged")),
+            ("status", serde_json::json!("identical")),
+            ("ahead_by", serde_json::json!(251)),
+            ("behind_by", serde_json::json!(1)),
+            ("total_commits", serde_json::json!(250)),
+            ("base_commit", serde_json::json!({"sha": "b".repeat(40)})),
+            (
+                "merge_base_commit",
+                serde_json::json!({"sha": "b".repeat(40)}),
+            ),
+            ("commits", serde_json::json!([])),
+            ("files", serde_json::json!([])),
+            (
+                "files",
+                serde_json::json!([
+                    {"filename": "crates/okx-research-worker/src/source_api.rs", "status": "renamed", "previous_filename": "crates/okx-agent/src/main.rs"}
+                ]),
+            ),
+            (
+                "files",
+                serde_json::json!([
+                    {"filename": "crates/okx-research-worker/src/source_api.rs", "status": "modified"},
+                    {"filename": "crates/okx-research-worker/src/source_api.rs", "status": "modified"}
+                ]),
+            ),
+        ];
+        for (field, value) in cases {
+            let mut comparison = valid.clone();
+            comparison[field] = value;
+            assert!(!accepts(comparison), "fail-open comparison field: {field}");
+        }
+        let mut truncated = valid;
+        truncated["files"] = serde_json::json!(
+            (0..300)
+                .map(|index| serde_json::json!({
+                    "filename": format!("crates/okx-research-worker/src/test_{index}.rs"),
+                    "status": "added"
+                }))
+                .collect::<Vec<_>>()
+        );
+        assert!(!accepts(truncated));
     }
 
     /// One local HTTP response, no credentials/network dependencies or daemon.
