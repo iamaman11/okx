@@ -30,9 +30,9 @@ function validate(yaml, fileNames) {
   const map = new Map(entries.map((m, i) => [m[1], jobs.slice(m.index,
     i + 1 < entries.length ? entries[i + 1].index : undefined)]));
   assert.equal(map.size, entries.length, 'DUPLICATE_JOB_ID');
-  // The 15th job is only an explicitly requested, trusted-main cache seed.
-  // It never executes as part of ordinary PR/main CI or financial acceptance.
-  assert.ok(map.size <= 15, 'OBSOLETE_JOB_GRAPH_REGRESSION');
+  // One release builder runs in parallel with financial tests. The only
+  // additional job seeds the debug/test profile on explicit accepted main.
+  assert.ok(map.size <= 16, 'OBSOLETE_JOB_GRAPH_REGRESSION');
   for (const unused of ['required_classify', 'draft-trading-migration-512',
     'draft-riskbook-migration-510', 'cloudflare_deploy', 'readonly_observer',
     'production_recovery_promote', 'named_validate', 'all26_windows_targeted']) {
@@ -53,6 +53,8 @@ function validate(yaml, fileNames) {
   const names = {
     rust_tests_linux: 'rust-tests-linux',
     trading_engine_acceptance_windows: 'trading-engine-acceptance-windows',
+    trading_engine_build_windows: 'trading-engine-build-windows',
+    trusted_main_test_cache_prime: 'trusted-main-windows-test-cache-prime',
     trading_safety_acceptance_windows: 'trading-safety-acceptance-windows',
     research_service_tests_windows: 'research-service-tests-windows',
     host_controller_launcher_checks: 'host-controller-launcher-checks',
@@ -66,20 +68,40 @@ function validate(yaml, fileNames) {
   assert.match(engine, /\$collector = Join-Path \$targetDir 'debug\\examples\\native_finance_acceptance\.exe'/);
   assert.match(engine, /\$manifestJson = & \$collector --list/);
   assert.doesNotMatch(engine, /cargo run[^\n]*-- --list/, 'REDUNDANT_CARGO_FINANCIAL_LIST');
-  assert.match(engine, /shared-key: trading-engine-windows/);
-  const prime = job('trusted_main_cache_prime');
-  assert.match(prime, /^    name: trusted-main-windows-cargo-cache-prime$/m);
+  assert.match(engine, /shared-key: trading-engine-tests-windows/);
+  assert.doesNotMatch(engine, /cargo build --locked --release|name: okx-windows-bundle-/);
+  const build = job('trading_engine_build_windows');
+  assert.match(build, /\(github.event_name == 'workflow_dispatch' &&\n         inputs.prime_windows_cargo_cache == true &&/);
+  assert.match(build, /inputs.prime_windows_cargo_cache == true &&/);
+  assert.match(build, /github.ref == 'refs\/heads\/main' &&/);
+  assert.match(build, /needs.component_impact.outputs.build_required == 'false'/);
+  assert.match(build, /merged tree exactly matches successful PR head tree/);
+  assert.match(build, /needs.component_impact.outputs.native_required != 'false'/);
+  assert.match(build, /shared-key: trading-engine-release-windows/);
+  assert.doesNotMatch(build, /shared-key: trading-engine-tests-windows/);
+  assert.match(build, /cache-on-failure: false/);
+  assert.match(build, /cargo build --locked --release/);
+  assert.match(build, /name: okx-windows-bundle-\$\{\{ github.event.pull_request.head.sha \}\}/);
+  assert.match(build, /if: github.event_name == 'pull_request'\n        uses: actions\/upload-artifact/);
+  assert.match(build, /source_head_sha = \$sourceHead/);
+  assert.doesNotMatch(build, /gh release|cargo run|cargo test --locked .* -- --nocapture/);
+  assert.match(build, /FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED/);
+  const prime = job('trusted_main_test_cache_prime');
   assert.match(prime, /github.event_name == 'workflow_dispatch' &&/);
   assert.match(prime, /inputs.prime_windows_cargo_cache == true &&/);
   assert.match(prime, /github.ref == 'refs\/heads\/main' &&/);
   assert.match(prime, /needs.component_impact.outputs.build_required == 'false'/);
   assert.match(prime, /merged tree exactly matches successful PR head tree/);
-  assert.match(prime, /shared-key: trading-engine-windows/);
+  assert.match(prime, /shared-key: trading-engine-tests-windows/);
+  assert.doesNotMatch(prime, /shared-key: trading-engine-release-windows/);
   assert.match(prime, /cache-on-failure: false/);
   assert.match(prime, /cargo test --locked --no-run --all-targets/);
-  assert.match(prime, /cargo build --locked --release/);
-  assert.doesNotMatch(prime, /gh release|actions\/upload-artifact|cargo run|cargo test --locked .* -- --nocapture/);
+  assert.match(prime, /cargo build --locked -p okx-trading-engine --example native_finance_acceptance/);
+  assert.doesNotMatch(prime, /gh release|actions\/upload-artifact|cargo run|cargo build --locked --release/);
   assert.match(prime, /FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED/);
+  const windows = job('required_windows');
+  assert.match(windows, /needs: \[component_impact, trading_engine_acceptance_windows, trading_engine_build_windows,/);
+  assert.match(windows, /test "\$\{\{ needs.trading_engine_build_windows.result \}\}" = "success"/);
   const publish = job('publish_accepted_windows_release');
   assert.match(publish, /^    name: publish-accepted-windows-release$/m);
   assert.match(publish,
@@ -96,7 +118,7 @@ function validate(yaml, fileNames) {
   assert.match(publish, /group: native-base-publication/);
   assert.match(publish, /ACCEPTED_MAIN: \$\{\{ github\.sha \}\}/);
   assert.doesNotMatch(publish, /github\.event\.workflow_run/);
-  assert.match(publish, /"trading-engine-acceptance-windows","trading-safety-acceptance-windows","linux-core","windows-native"/);
+  assert.match(publish, /"trading-engine-acceptance-windows","trading-engine-build-windows","trading-safety-acceptance-windows","linux-core","windows-native"/);
 
   for (const [id, block] of map) {
     if (id !== 'publish_accepted_windows_release') {
@@ -116,6 +138,9 @@ assert.throws(() => validate(source.replace('always() &&\n        github.event_n
   'github.event_name'), workflows));
 assert.throws(() => validate(source.replace("inputs.prime_windows_cargo_cache == true &&", "true &&"), workflows));
 assert.throws(() => validate(source.replace("github.event_name == 'workflow_dispatch' &&", "github.event_name == 'push' &&"), workflows));
+assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_build_windows.result }}" = "success"', 'true'), workflows));
+assert.throws(() => validate(source.replace('shared-key: trading-engine-release-windows', 'shared-key: trading-engine-tests-windows'), workflows));
+assert.throws(() => validate(source.replace('shared-key: trading-engine-tests-windows', 'shared-key: trading-engine-release-windows'), workflows));
 assert.throws(() => validate(source.replace('$manifestJson = & $collector --list',
   '$manifestJson = & cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list'), workflows));
 console.log('CI_LEAN_MAIN_ROUTING_CONTROLS=PASS');

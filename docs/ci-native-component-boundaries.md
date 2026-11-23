@@ -17,7 +17,7 @@ jobs were removed from the main workflow.
 | --- | --- | --- | --- |
 | Only `crates/okx-host-launcher/src/**/*.rs` (+ docs) | Launcher, plus Host Controller consumer | `host-controller-launcher-checks`; no Trading Engine/SQL compilation | None: host identities are not an installable four-component bundle |
 | Only `crates/okx-host-controller/src/**/*.rs` and optional Launcher Rust source (+ docs) | Host Controller and Launcher | `host-controller-launcher-checks`; no Trading Engine/SQL compilation | None |
-| Trading Engine/TradeService, `okx-trade-execution` or financial SQL | Trading Engine, RiskBook, SQL and trade-side consumers | Mandatory `trading-engine-acceptance-windows`, B1 and Linux financial regressions | Full verified Windows bundle on qualifying PR |
+| Trading Engine/TradeService, `okx-trade-execution` or financial SQL | Trading Engine, RiskBook, SQL and trade-side consumers | Mandatory `trading-engine-acceptance-windows`, parallel `trading-engine-build-windows`, B1 and Linux financial regressions | Full verified Windows bundle on qualifying PR |
 | Shared `okx-api`, `okx-market-runtime`, `okx-ipc-contracts`, root Cargo files, any `Cargo.toml`, build scripts, installer/packaging scripts or CI workflow | All affected consumers | Full Native matrix (fail closed) | Full only after acceptance |
 | Research-only + accepted immutable Native base | Research/IPC consumers | Separate Research gate with independently verified Cargo closure | Composed Research-only bundle |
 | Documentation only / Cloudflare-only | Documentation / MCP | Existing scoped gates | No fresh Native build |
@@ -39,8 +39,10 @@ TradeService/Engine consumers remain in `okx-trading-engine`; this stage does **
 claim separate financial SQL and Engine release cycles.
 
 For a full Native change, the protected `windows-native` aggregate requires
-**both** `trading-engine-acceptance-windows` and
-`trading-safety-acceptance-windows` to succeed. Scoped Research, host,
+**all three** `trading-engine-acceptance-windows`, `trading-engine-build-windows`
+and `trading-safety-acceptance-windows` to succeed. The full Windows package is
+built in parallel with the financial tests from the **same exact source tree**;
+publication waits for their combined success. Scoped Research, host,
 Cloudflare and exact merged-tree reuse require the B1 prerequisite to be
 `skipped`, never falsely counted as executed. The five recorded-source B1
 fixtures are run sequentially to avoid unrelated fixture readiness timeouts;
@@ -52,9 +54,19 @@ CONTROL and Launcher. Its exact source HEAD, tree, component scope and binary
 hashes are retained as **non-deployable** evidence. It never publishes a new
 Native base; `publish-accepted-windows-release` inside the **same** protected
 `.github/workflows/ci.yml` runs after successful main checks and continues
-to require fresh `trading-engine-acceptance-windows` plus B1 and a complete
+to require fresh `trading-engine-acceptance-windows`, `trading-engine-build-windows`,
+B1 and a complete
 four-component Windows artifact. It publishes a GitHub release but never
 installs or restarts the Trading Engine.
+
+To warm dependencies for the **next** PR, an explicit `workflow_dispatch` on
+the accepted `main` can set `prime_windows_cargo_cache=true`. The classifier
+must prove that `main` is the exact tree of a successful Ready PR. Two separate
+Windows runners then seed the test/collector and release Cargo profiles using
+their respective cache keys. This manual compilation executes **no financial
+tests**, creates no candidate release artifact and deploys nothing. An ordinary
+PR cache cannot prime the default branch; cold and warm PR timings remain
+separate measurements for #560.
 
 Draft PRs with only host Rust sources run direct Launcher and CONTROL Cargo
 tests of library and binary targets via `scripts/check_p0.py`, reusing the
