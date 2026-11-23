@@ -81,6 +81,60 @@ fn ordinary_market_cursor_reads_exact_persisted_pages() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test]
+async fn queued_market_page_zero_reads_the_original_job_after_its_time_bucket() {
+    let (root, service) = super::artifact_job_fixtures::service();
+    let request: MarketRequest = serde_json::from_value(json!({
+        "action":"screen","instruments":["BTC-USDT-SWAP"],
+        "fields":["returns"],"timeframe_ms":60000,
+        "start_ms":0,"end_ms":6000000,"limit":1
+    }))
+    .unwrap();
+    assert!(request.valid());
+    let job_id = "a".repeat(64);
+    let fingerprint =
+        okx_research::canonical_sha256(&("market/448.cursor-v1", &request, &Option::<Value>::None))
+            .unwrap();
+    let first_page = json!({
+        "job_id":job_id,"market_request_fingerprint":fingerprint,
+        "rows":[{"instrument":"BTC-USDT-SWAP","metrics":{"returns":0.1}}],
+        "total_rows":1,"returned_rows":1,"next_cursor":null
+    });
+    let artifact = service.artifacts.publish_evidence(&first_page).unwrap().0;
+    let (_, created, _) = service
+        .jobs
+        .enqueue(format!("market-{job_id}"), job_id.clone())
+        .unwrap();
+    assert!(created);
+    assert!(
+        service
+            .jobs
+            .update(&job_id, jobs::State::Completed, Some(artifact), None)
+            .unwrap()
+    );
+
+    let mut resumed = request.clone();
+    resumed.cursor = Some(format!("{job_id}:0"));
+    assert_eq!(
+        service.market(resumed.clone(), None, None).await.unwrap(),
+        first_page
+    );
+    assert_eq!(
+        service.jobs.snapshot().len(),
+        1,
+        "resume must not enqueue again"
+    );
+
+    // A job ID alone does not authorize a different typed query to read its result.
+    resumed.fields = vec!["log_returns".into()];
+    assert_eq!(
+        service.market(resumed, None, None).await.unwrap_err(),
+        "MARKET_CURSOR_REQUEST_MISMATCH"
+    );
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn t13_t14_retention_traverses_market_source_pages_and_preserves_pinned_twin() {
     let (root, service) = super::artifact_job_fixtures::service();

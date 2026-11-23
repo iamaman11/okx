@@ -33,3 +33,10 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 okx-api = { path = "../okx-api" }
 okx-runtime = { path = "../okx-runtime" }
 reqwest = { version = "0.12", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

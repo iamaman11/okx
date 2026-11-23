@@ -10,6 +10,8 @@ import subprocess
 import sys
 import time
 
+from check_ci_native_scope import category
+
 ROOT = Path(__file__).resolve().parents[1]
 MCP = ROOT / "cloudflare/okx-mcp"
 PLAN_TEST = "query_plan::tests::k7_invalid_operator_bounds_or_parameter_fail_closed"
@@ -19,7 +21,7 @@ WORKER_TESTS = (
     "analytics::market::tests::interior_gap_never_imputed",
     "analytics::market::tests::c20_rolling_mean_reuses_existing_market_pipeline_without_new_routing",
 )
-SCOPES = {"kernel", "strategy", "analysis", "research", "worker", "wire", "ipc", "mcp", "expanded"}
+SCOPES = {"kernel", "strategy", "analysis", "research", "worker", "wire", "ipc", "mcp", "host", "expanded"}
 
 
 def git(*args):
@@ -42,7 +44,11 @@ def select(status, path):
         return set()
     if path.startswith("crates/okx-strategy-core/src/") and path.endswith(".rs"):
         return {"strategy", "research", "worker", "analysis"}
-    if path == "crates/okx-kernel/src/time_series.rs":
+    # Use the exact fail-closed Ready classifier for host-only Rust ownership.
+    # Cargo manifests, installer changes and mixed diffs still expand tests.
+    if category(path) in {"host-control", "host-launcher"}:
+        return {"host"}
+    if path in {"crates/okx-kernel/src/" + f for f in ("operators.rs", "query_plan.rs", "time_series.rs")}:
         return {"kernel"}
     if path.startswith("crates/okx-analysis/src/") and path.endswith(".rs"):
         return {"analysis", "kernel"}
@@ -337,6 +343,11 @@ def execute(scopes):
         subprocess.run(["cargo", "check", "--locked", "--workspace", "--all-targets"], cwd=ROOT, check=True)
         subprocess.run([sys.executable, "scripts/check_architecture.py"], cwd=ROOT, check=True)
         scopes = SCOPES
+    if "host" in scopes:
+        # Run all default targets (library plus shipping binary) for both
+        # crates. CONTROL consumes Launcher, even for a Launcher-only edit.
+        tests("okx-host-launcher", ())
+        tests("okx-host-control", ())
     if "kernel" in scopes:
         tests("okx-kernel", required=(GAP_TEST,))
     if "strategy" in scopes or "analysis" in scopes or "research" in scopes or "kernel" in scopes:

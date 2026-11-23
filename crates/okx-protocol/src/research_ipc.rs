@@ -481,16 +481,28 @@ impl PublicSourceRequest {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicSourceHttpDelivery {
+    /// Explicit host HttpTransport::send calls, not redirects or wire-level sends.
+    pub transport_send_invocations: u64,
+    pub response_status: u16,
+    /// Body bytes returned by the host transport, not total network traffic.
+    pub response_body_bytes: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicCandleCapture {
     pub raw_body: Vec<u8>,
     pub rows: Vec<HistoryCandle>,
     pub acquired_at_ms: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_delivery: Option<PublicSourceHttpDelivery>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicFundingCapture {
     pub raw_body: Vec<u8>,
     pub rows: Vec<FundingHistoryEvent>,
     pub acquired_at_ms: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_delivery: Option<PublicSourceHttpDelivery>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicReferenceInstrument {
@@ -511,6 +523,45 @@ pub struct PublicReferenceCapture {
     pub instrument: PublicReferenceInstrument,
     pub reference_generation: String,
     pub acquired_at_ms: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_delivery: Option<PublicSourceHttpDelivery>,
+}
+#[cfg(test)]
+mod t10_http_delivery_contract_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_candle_reply_is_unmeasured_and_new_receipt_is_additive() {
+        let old_reply = serde_json::json!({
+            "type": "candles",
+            "data": {"raw_body": [1, 2, 3], "rows": [], "acquired_at_ms": "1"}
+        });
+        let legacy: PublicSourceReply = serde_json::from_value(old_reply.clone()).unwrap();
+        let PublicSourceReply::Candles(capture) = legacy else {
+            panic!("expected candles");
+        };
+        assert!(capture.http_delivery.is_none());
+        assert_eq!(
+            serde_json::to_value(PublicSourceReply::Candles(capture)).unwrap(),
+            old_reply
+        );
+
+        let mut new_reply = old_reply.clone();
+        new_reply["data"]["http_delivery"] = serde_json::json!({
+            "transport_send_invocations": 1,
+            "response_status": 200,
+            "response_body_bytes": 3
+        });
+        let modern: PublicSourceReply = serde_json::from_value(new_reply.clone()).unwrap();
+        let PublicSourceReply::Candles(capture) = modern else {
+            panic!("expected candles");
+        };
+        assert_eq!(capture.http_delivery.unwrap().response_body_bytes, 3);
+        assert_eq!(
+            serde_json::to_value(new_reply).unwrap()["data"]["raw_body"],
+            old_reply["data"]["raw_body"]
+        );
+    }
 }
 #[cfg(test)]
 mod reference_unit_contract_tests {
@@ -528,6 +579,7 @@ mod reference_unit_contract_tests {
             },
             reference_generation: "sha256:example".into(),
             acquired_at_ms: "123456789".into(),
+            http_delivery: None,
         };
         let wire = serde_json::to_value(&capture).unwrap();
         assert_eq!(wire["instrument"]["contract_value_currency"], "BTC");

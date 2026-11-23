@@ -50,6 +50,16 @@ fn build_http_client() -> Result<Client, reqwest::Error> {
 pub struct CapturedPublicRows<T> {
     pub rows: Vec<T>,
     pub raw_body: Vec<u8>,
+    pub http_delivery: CapturedHttpDelivery,
+}
+
+/// Receipt for one successful call to the host's HTTP transport boundary.
+/// This is NOT an on-wire venue request count: reqwest may follow redirects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapturedHttpDelivery {
+    pub transport_send_invocations: u64,
+    pub response_status: u16,
+    pub response_body_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -191,12 +201,14 @@ impl OkxPublicClient {
         if self.environment.demo {
             request = request.header("x-simulated-trading", "1");
         }
-        let (envelope, raw_body) = decode_envelope_captured(
-            send_request(&self.transport, request).await?,
-            &self.rate_budget,
-            &plan,
-        )
-        .await?;
+        let response = send_request(&self.transport, request).await?;
+        let http_delivery = CapturedHttpDelivery {
+            transport_send_invocations: 1,
+            response_status: response.status.as_u16(),
+            response_body_bytes: response.body.len() as u64,
+        };
+        let (envelope, raw_body) =
+            decode_envelope_captured(response, &self.rate_budget, &plan).await?;
         if envelope.code != "0" {
             return Err(OkxError::Api {
                 code: envelope.code,
@@ -206,6 +218,7 @@ impl OkxPublicClient {
         Ok(CapturedPublicRows {
             rows: envelope.data,
             raw_body,
+            http_delivery,
         })
     }
 }
@@ -722,6 +735,31 @@ mod tests {
             headers: reqwest::header::HeaderMap::new(),
             body: body.to_vec(),
         }
+    }
+    #[tokio::test]
+    async fn captured_public_rows_receipt_matches_one_real_transport_invocation() {
+        let wire = Arc::new(ScriptedDelivery::default());
+        let body = br#"{"code":"0","msg":"","data":[{"value":1}]}"#;
+        wire.responses.lock().unwrap().push_back((
+            "/api/v5/market/history-candles",
+            reply(StatusCode::OK, body),
+        ));
+        let api = OkxPublicClient::with_http_transport(
+            OkxEnvironment::new(crate::config::Region::Global, false),
+            RateBudget::new(),
+            wire.clone(),
+        )
+        .unwrap();
+        let capture: CapturedPublicRows<serde_json::Value> = api
+            .public_get_captured("/api/v5/market/history-candles", &[])
+            .await
+            .unwrap();
+        assert_eq!(capture.raw_body, body);
+        assert_eq!(capture.rows[0]["value"], 1);
+        assert_eq!(capture.http_delivery.transport_send_invocations, 1);
+        assert_eq!(capture.http_delivery.response_status, 200);
+        assert_eq!(capture.http_delivery.response_body_bytes, body.len() as u64);
+        assert_eq!(wire.requests.lock().unwrap().len(), 1);
     }
     #[tokio::test]
     async fn signed_private_request_and_real_decode_use_the_same_delivery_port() {

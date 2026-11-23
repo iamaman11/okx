@@ -2230,6 +2230,9 @@ mod tests {
         assert!(unknown["missing_field"].is_null());
         assert!(!unknown.to_string().contains("futureField"));
     }
+    // Native cutover process containment uses Windows Job Objects and cmd.exe.
+    // The portable diagnostic tests above remain exercised on every host.
+    #[cfg(windows)]
     #[test]
     fn native_cutover_child_has_bounded_output_and_one_terminal_result() {
         let mut command = Command::new("cmd");
