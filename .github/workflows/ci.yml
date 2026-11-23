@@ -718,7 +718,13 @@ jobs:
             $head = (git rev-parse HEAD).Trim()
             $tree = (git rev-parse 'HEAD^{tree}').Trim()
             if ($proof.overall -cne 'FULL_PASS' -or $proof.git_clean -ne $true -or $proof.head -cne $head -or $proof.tree -cne $tree) { throw 'CURRENT_FINANCIAL_PROOF_REQUIRED' }
-            $manifestJson = & cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list
+            # The financial acceptance step above already built and executed
+            # this exact example. Listing its contracts must not re-enter Cargo
+            # and spend another dependency/fingerprint evaluation cycle.
+            $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path (Get-Location) 'target' }
+            $collector = Join-Path $targetDir 'debug\examples\native_finance_acceptance.exe'
+            if (-not (Test-Path -LiteralPath $collector -PathType Leaf)) { throw 'MISSING_VERIFIED_FINANCIAL_COLLECTOR_BINARY' }
+            $manifestJson = & $collector --list
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $manifest = $manifestJson | ConvertFrom-Json
             if (@($proof.contracts).Count -ne @($manifest.contracts).Count -or @($proof.contracts | Where-Object status -ne 'PASS').Count -ne 0) { throw 'COMPLETE_FINANCIAL_CONTRACTS_REQUIRED' }
@@ -1202,7 +1208,19 @@ jobs:
     concurrency:
       group: native-base-publication
       cancel-in-progress: false
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Explicit status guard is required: the protected aggregators succeed
+    # even when intentionally skipped component jobs appear in their ancestry.
+    # GitHub's implicit success() would otherwise skip publication on main.
+    if: >-
+      ${{
+        always() &&
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        needs['dependency-audit'].result == 'success' &&
+        needs.component_impact.result == 'success' &&
+        needs.required_linux.result == 'success' &&
+        needs.required_windows.result == 'success'
+      }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
