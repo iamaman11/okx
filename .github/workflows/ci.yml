@@ -113,6 +113,7 @@ jobs:
           set -euo pipefail
           node scripts/test-ci-main-routing.cjs
           node scripts/test-ci-component-impact.cjs
+          node scripts/test-ci-cargo-closure-proof.cjs "$RUNNER_TEMP/dependency-graph.json"
           files=()
           if [[ "${{ github.event_name }}" == 'pull_request' ]]; then
             if gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" > "$RUNNER_TEMP/ci-impact-files.json"; then
@@ -148,7 +149,7 @@ jobs:
       reason: ${{ steps.classify.outputs.reason }}
       native_required: ${{ steps.classify.outputs.native_required }}
       native_proof: ${{ steps.classify.outputs.native_proof }}
-      component_scope: ${{ steps.file_scope.outputs.scope }}
+      component_scope: ${{ steps.proven_scope.outputs.scope }}
       research_only: ${{ steps.research_scope.outputs.research_only }}
       research_base_head: ${{ steps.research_scope.outputs.base_head }}
       research_base_run: ${{ steps.research_scope.outputs.base_run }}
@@ -174,9 +175,11 @@ jobs:
         run: |
           set -euo pipefail
           scope=full
+          candidate=none
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" > "$RUNNER_TEMP/ci-files.json"
             scope="$(python3 -B scripts/check_ci_native_scope.py < "$RUNNER_TEMP/ci-files.json")"
+            candidate="$(python3 -B scripts/check_ci_native_scope.py --dependency-candidate < "$RUNNER_TEMP/ci-files.json")"
           elif [[ "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ && "$FORCED_PUSH" != "true" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
             gh api "/repos/$GITHUB_REPOSITORY/compare/$BEFORE_SHA...$GITHUB_SHA" > "$RUNNER_TEMP/ci-compare.json"
             if jq -e --arg before "$BEFORE_SHA" '.status == "ahead" and .base_commit.sha == $before and .ahead_by > 0 and .total_commits < 250 and (.files | type == "array" and length > 0 and length < 300)' "$RUNNER_TEMP/ci-compare.json" >/dev/null; then
@@ -185,11 +188,80 @@ jobs:
             fi
           fi
           case "$scope" in docs|cloudflare|research|host-controller|host-launcher|full) ;; *) exit 1;; esac
+          case "$candidate" in none|research|host-controller|host-launcher) ;; *) exit 1;; esac
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+          echo "manifest_candidate=$candidate" >> "$GITHUB_OUTPUT"
+          echo "FILE_SCOPE=$scope; MANIFEST_CANDIDATE=$candidate"
+      # Only a narrow manifest+optional lock candidate incurs an extra Cargo
+      # resolver check. Every other Ready PR keeps its existing fast selector.
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        if: github.event_name == 'pull_request' && github.event.pull_request.draft != true && steps.file_scope.outputs.manifest_candidate != 'none'
+        with:
+          toolchain: 1.95.0
+      - name: Prove Windows Cargo closure before narrowing manifest changes
+        id: cargo_closure
+        if: github.event_name == 'pull_request' && github.event.pull_request.draft != true && steps.file_scope.outputs.manifest_candidate != 'none'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CANDIDATE: ${{ steps.file_scope.outputs.manifest_candidate }}
+        run: |
+          set -euo pipefail
+          # Failure is a conservative full matrix, never a skipped finance gate.
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ || ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ||
+                "$(git rev-parse HEAD)" != "$HEAD_SHA" ]]; then
+            echo 'CARGO_PROOF=HEAD_OR_BASE_UNVERIFIED; fallback=full'
+            exit 0
+          fi
+          pr="$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" 2>/dev/null)" || exit 0
+          if ! jq -e --arg base "$BASE_SHA" --arg head "$HEAD_SHA" \
+              '.head.sha == $head and .base.sha == $base and .base.ref == "main"' <<<"$pr" >/dev/null; then
+            echo 'CARGO_PROOF=PR_MOVED; fallback=full'
+            exit 0
+          fi
+          if ! git fetch --no-tags --depth=1 origin "$BASE_SHA"; then
+            echo 'CARGO_PROOF=BASE_UNAVAILABLE; fallback=full'
+            exit 0
+          fi
+          temp="$(mktemp -d "$RUNNER_TEMP/ci-cargo-base.XXXXXX")"
+          base="$temp/base"
+          trap 'git worktree remove "$base" 2>/dev/null || true; rmdir "$temp" 2>/dev/null || true' EXIT
+          if ! git worktree add --detach "$base" "$BASE_SHA"; then
+            echo 'CARGO_PROOF=BASE_WORKTREE_UNAVAILABLE; fallback=full'
+            exit 0
+          fi
+          if ! cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc > "$temp/head.json" ||
+             ! (cd "$base" && cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc) > "$temp/base.json"; then
+            echo 'CARGO_PROOF=WINDOWS_RESOLVER_FAILED; fallback=full'
+            exit 0
+          fi
+          if node scripts/ci-cargo-closure-proof.cjs "$temp/base.json" "$temp/head.json" \
+              "$RUNNER_TEMP/ci-files.json" "$CANDIDATE" > "$RUNNER_TEMP/ci-windows-closure-proof.json"; then
+            echo "scope=$CANDIDATE" >> "$GITHUB_OUTPUT"
+            echo "CARGO_PROOF=IDENTICAL_PROTECTED_WINDOWS_CLOSURE; scope=$CANDIDATE"
+          else
+            echo 'CARGO_PROOF=CHANGED_OR_UNVERIFIED; fallback=full'
+          fi
+      - name: Select only proven component scope
+        id: proven_scope
+        if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
+        shell: bash
+        run: |
+          set -euo pipefail
+          scope='${{ steps.file_scope.outputs.scope }}'
+          if [[ -n '${{ steps.cargo_closure.outputs.scope }}' ]]; then
+            test "$scope" = full
+            scope='${{ steps.cargo_closure.outputs.scope }}'
+          fi
+          case "$scope" in docs|cloudflare|research|host-controller|host-launcher|full) ;; *) exit 1;; esac
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
           echo "COMPONENT_SCOPE=$scope"
       - name: Verify Research-only scope and immutable accepted base
         id: research_scope
-        if: (github.event_name == 'push' || github.event.pull_request.draft != true) && steps.file_scope.outputs.scope == 'research'
+        if: (github.event_name == 'push' || github.event.pull_request.draft != true) && steps.proven_scope.outputs.scope == 'research'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -236,7 +308,7 @@ jobs:
           # An isolated Research PR additionally requires an independently
           # checked Cargo dependency graph and immutable accepted binary base.
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            scope="${{ steps.file_scope.outputs.scope }}"
+            scope="${{ steps.proven_scope.outputs.scope }}"
             if [[ "$scope" == "research" && "${{ steps.research_scope.outputs.research_only }}" == "true" ]]; then
               echo "build_required=true" >> "$GITHUB_OUTPUT"
               echo "native_required=false" >> "$GITHUB_OUTPUT"
@@ -301,7 +373,7 @@ jobs:
             echo "reason=merged tree exactly matches successful PR head tree" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          scope="${{ steps.file_scope.outputs.scope }}"
+          scope="${{ steps.proven_scope.outputs.scope }}"
           echo "build_required=true" >> "$GITHUB_OUTPUT"
           if [[ "$scope" == "research" && "${{ steps.research_scope.outputs.research_only }}" == "true" ]]; then
             echo "native_required=false" >> "$GITHUB_OUTPUT"

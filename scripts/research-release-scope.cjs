@@ -1,5 +1,6 @@
 'use strict';
 const path = require('node:path');
+const {verify} = require('./ci-cargo-closure-proof.cjs');
 // These are the CI-only changes introduced *after* the last fully tested
 // Windows binary baseline. They cannot affect Rust production crate output.
 // They still trigger full CI if changed in the current PR (file classifier).
@@ -12,7 +13,7 @@ const baselineCiOnly = new Set([
 ]);
 const safe = file => typeof file === 'string' && file.length <= 512 && !file.startsWith('/') && !file.includes('\\') && file.split('/').every(p => /^[A-Za-z0-9_.-]+$/.test(p) && p !== '.' && p !== '..');
 const nonNative = file => file === 'README.md' || (file.startsWith('docs/') && file.endsWith('.md')) || file.startsWith('cloudflare/okx-mcp/') || baselineCiOnly.has(file);
-function check(metadata, changed) {
+function check(metadata, changed, cargoProof = null) {
   if (!metadata.resolve || !Array.isArray(metadata.packages) || !Array.isArray(metadata.resolve.nodes)) throw Error('METADATA_RESOLUTION_REQUIRED');
   const packages = new Map(metadata.packages.map(p => [p.id, p]));
   const nodes = new Map(metadata.resolve.nodes.map(n => [n.id, n]));
@@ -35,11 +36,20 @@ function check(metadata, changed) {
     return relative + '/';
   });
   if (!Array.isArray(changed) || !changed.length || changed.length > 500) throw Error('EMPTY_OR_UNBOUNDED_RESEARCH_DIFF');
+  const manifests = new Set(['crates/okx-research/Cargo.toml',
+    'crates/okx-research-service/Cargo.toml', 'crates/okx-strategy-core/Cargo.toml']);
+  const dependencyChange = changed.some(file => file === 'Cargo.lock' || file.endsWith('/Cargo.toml'));
+  if (dependencyChange && (!cargoProof || cargoProof.schema !== 'okx.560.windows-cargo-closure-proof/v1' ||
+      cargoProof.scope !== 'research' || cargoProof.target !== 'x86_64-pc-windows-msvc' ||
+      cargoProof.protected_closures_identical !== true ||
+      !changed.some(file => manifests.has(file)))) throw Error('RESEARCH_MANIFEST_WITHOUT_PROTECTED_WINDOWS_CLOSURE_PROOF');
   let touchedResearch = false;
   for (const file of changed) {
     if (!safe(file)) throw Error('INVALID_DIFF_PATH');
     // Release selector is outside the Research tree and never exempted in a
     // new PR. The baseline itself is now a permanent GitHub Release.
+    if (file === 'Cargo.lock' && cargoProof) continue;
+    if (manifests.has(file) && cargoProof) { touchedResearch = true; continue; }
     if (file === 'Cargo.lock' || file.endsWith('/Cargo.toml') || file === 'Cargo.toml' || file.startsWith('.cargo/')) throw Error('DEPENDENCY_CONFIGURATION_CHANGED');
     if (protectedDirs.some(dir => file.startsWith(dir))) throw Error('PRODUCTION_DEPENDENCY_CHANGED');
     if (file.startsWith('crates/okx-research-service/') || file.startsWith('crates/okx-research/') || file.startsWith('crates/okx-strategy-core/')) {
@@ -54,7 +64,14 @@ function check(metadata, changed) {
 }
 if (require.main === module) {
   const fs = require('node:fs');
-  try { const metadata = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')); const changed = JSON.parse(fs.readFileSync(process.argv[3], 'utf8')); process.stdout.write(JSON.stringify(check(metadata, changed)) + '\n'); }
+  try {
+    if (![4, 5].includes(process.argv.length)) throw Error('RESEARCH_SCOPE_ARGUMENTS_INVALID');
+    const metadata = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+    const changed = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+    const proof = process.argv[4] ? verify(JSON.parse(fs.readFileSync(process.argv[4], 'utf8')),
+      metadata, changed, 'research') : null;
+    process.stdout.write(JSON.stringify(check(metadata, changed, proof)) + '\n');
+  }
   catch (e) { console.error(e.message); process.exitCode = 1; }
 }
 module.exports = { check };

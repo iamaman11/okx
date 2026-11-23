@@ -22,6 +22,15 @@ _RESEARCH_DIRS = ("crates/okx-research/", "crates/okx-research-service/", "crate
 _CLOUDFLARE_DIR = "cloudflare/okx-mcp/"
 _HOST_CONTROL_SRC = "crates/okx-host-controller/src/"
 _HOST_LAUNCHER_SRC = "crates/okx-host-launcher/src/"
+_RESEARCH_MANIFESTS = {
+    "crates/okx-research/Cargo.toml",
+    "crates/okx-research-service/Cargo.toml",
+    "crates/okx-strategy-core/Cargo.toml",
+}
+_HOST_MANIFESTS = {
+    "crates/okx-host-controller/Cargo.toml",
+    "crates/okx-host-launcher/Cargo.toml",
+}
 
 
 def category(path):
@@ -47,32 +56,43 @@ def category(path):
     return "full"
 
 
-def classify(pages):
-    """Classify complete GH paginated changed-file pages; fail closed."""
+def verified_entries(pages):
+    """Validate the complete GitHub paginated diff before using any scope."""
     if not isinstance(pages, list) or not 1 <= len(pages) <= 30:
-        return "full"
+        return None
     files = []
     for page in pages:
         if not isinstance(page, list) or len(page) > 100:
-            return "full"
+            return None
         files.extend(page)
     if not 1 <= len(files) <= 500:
-        return "full"
+        return None
     paths = set()
-    categories = set()
     for item in files:
         if not isinstance(item, dict):
-            return "full"
+            return None
         path = item.get("filename")
         if (
             not isinstance(path, str)
-            or
-            item.get("status") not in {"added", "modified", "removed"}
+            or not 1 <= len(path) <= 512 or "\\" in path
+            or not all(_PART.fullmatch(p) and p not in ("", ".", "..") for p in path.split("/"))
+            or item.get("status") not in {"added", "modified", "removed"}
             or "previous_filename" in item
             or path in paths
         ):
-            return "full"
+            return None
         paths.add(path)
+    return files
+
+
+def classify(pages):
+    """Classify complete GH paginated changed-file pages; fail closed."""
+    files = verified_entries(pages)
+    if files is None:
+        return "full"
+    categories = set()
+    for item in files:
+        path = item["filename"]
         kind = category(path)
         if kind == "full":
             return "full"
@@ -92,6 +112,42 @@ def classify(pages):
     return "docs"
 
 
+def dependency_candidate(pages):
+    """Tentative owner only; NEVER authorizes skipping Native by itself.
+
+    The resolved Windows Cargo closure must separately prove this candidate.
+    A missing manifest, changed CI/build script, or mixed owner is full.
+    """
+    files = verified_entries(pages)
+    if files is None:
+        return "none"
+    manifests = [entry["filename"] for entry in files
+                 if entry["filename"] in _RESEARCH_MANIFESTS | _HOST_MANIFESTS]
+    if not manifests or any(entry["status"] != "modified" for entry in files
+                            if entry["filename"] in _RESEARCH_MANIFESTS | _HOST_MANIFESTS | {"Cargo.lock"}):
+        return "none"
+    kinds = set()
+    for entry in files:
+        path = entry["filename"]
+        if path == "Cargo.lock":
+            continue
+        if path in _RESEARCH_MANIFESTS or category(path) == "research":
+            kinds.add("research")
+        elif path in _HOST_MANIFESTS or category(path) in {"host-controller", "host-launcher"}:
+            kinds.add("host")
+        elif category(path) in {"docs", "cloudflare"}:
+            if category(path) == "cloudflare" and "host" in kinds:
+                return "none"
+        else:
+            return "none"
+    if kinds == {"research"}:
+        return "research"
+    if kinds == {"host"} and not any(category(entry["filename"]) == "cloudflare" for entry in files):
+        return "host-controller" if any(path.startswith("crates/okx-host-controller/") for path in manifests +
+                                   [entry["filename"] for entry in files]) else "host-launcher"
+    return "none"
+
+
 def _self_test() -> None:
     # Post-merge reuse must skip Research compilation, not just full Native.
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
@@ -100,10 +156,15 @@ def _self_test() -> None:
     # source changes before their dedicated short Windows job could start.
     expected_scopes = {"docs", "cloudflare", "research", "host-controller", "host-launcher", "full"}
     scope_guards = re.findall(r'case "\$scope" in ([a-z|-]+)\)', workflow)
-    assert len(scope_guards) == 1, "CI_SCOPE_GUARD_MISSING_OR_AMBIGUOUS"
-    guard_scopes = scope_guards[0].split("|")
-    assert len(guard_scopes) == len(set(guard_scopes))
-    assert set(guard_scopes) == expected_scopes, "CI_SCOPE_GUARD_DRIFT"
+    assert len(scope_guards) == 2, "CI_SCOPE_GUARD_MISSING_OR_AMBIGUOUS"
+    for entry in scope_guards:  # raw file scope and final Cargo-proven scope
+        guard_scopes = entry.split("|")
+        assert len(guard_scopes) == len(set(guard_scopes))
+        assert set(guard_scopes) == expected_scopes, "CI_SCOPE_GUARD_DRIFT"
+    assert "component_scope: ${{ steps.proven_scope.outputs.scope }}" in workflow
+    assert "steps.proven_scope.outputs.scope == 'research'" in workflow
+    assert 'scope="${{ steps.proven_scope.outputs.scope }}"' in workflow
+    assert "--filter-platform x86_64-pc-windows-msvc" in workflow
     windows = workflow.split("\n  required_windows:\n", 1)[1].split("\n  trading_safety_acceptance_windows:\n", 1)[0]
     assert "needs: [component_impact, trading_engine_acceptance_windows, trading_engine_build_windows, trading_safety_acceptance_windows," in windows
     assert 'test "${{ needs.trading_safety_acceptance_windows.result }}" = "success"' in windows
@@ -168,6 +229,25 @@ def _self_test() -> None:
         [[{"filename": [], "status": "modified"}]],
     ]
     assert all(classify(pages) == "full" for pages in unsafe)
+    for wanted, selection in (
+        ("research", files("crates/okx-research-service/Cargo.toml", "Cargo.lock")),
+        ("research", files("crates/okx-strategy-core/Cargo.toml", "crates/okx-research/src/lib.rs")),
+        ("host-controller", files("crates/okx-host-controller/Cargo.toml", "Cargo.lock")),
+        ("host-controller", files("crates/okx-host-controller/Cargo.toml", "crates/okx-host-launcher/Cargo.toml")),
+        ("host-launcher", files("crates/okx-host-launcher/Cargo.toml", "Cargo.lock")),
+    ):
+        assert classify(selection) == "full"  # never grant scope before Cargo proof
+        assert dependency_candidate(selection) == wanted
+    for selection in (
+        files("Cargo.lock"), files("Cargo.toml", "crates/okx-research-service/Cargo.toml"),
+        files("crates/okx-ipc-contracts/Cargo.toml", "Cargo.lock"),
+        files("crates/okx-host-launcher/Cargo.toml", "crates/okx-research-service/Cargo.toml"),
+        files("crates/okx-host-launcher/Cargo.toml", "cloudflare/okx-mcp/src/mcp.ts"),
+        files("crates/okx-research-service/Cargo.toml", ".github/workflows/ci.yml"),
+        [[{"filename": "crates/okx-research-service/Cargo.toml", "status": "removed"}]],
+        [[{"filename": "crates/okx-research-service/Cargo.toml", "status": "renamed", "previous_filename": "x"}]],
+    ):
+        assert dependency_candidate(selection) == "none"
     assert classify([[{"filename": "docs/obsolete.md", "status": "removed"}]]) == "docs"
     print("CI_COMPONENT_SCOPE_NEGATIVE_CONTROLS=PASS")
 
@@ -175,6 +255,7 @@ def _self_test() -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--dependency-candidate", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         _self_test()
@@ -183,7 +264,7 @@ def main() -> int:
         pages = json.load(sys.stdin)
     except (ValueError, UnicodeError):
         return 1
-    print(classify(pages))
+    print(dependency_candidate(pages) if args.dependency_candidate else classify(pages))
     return 0
 
 

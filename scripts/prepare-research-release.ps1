@@ -85,12 +85,34 @@ $changed = @(& git -c core.quotepath=false diff --name-only --no-renames $mergeS
 if ($LASTEXITCODE -ne 0) { throw 'BASE_DIFF_FAILED' }
 $metadataFile = Join-Path $env:RUNNER_TEMP 'research-release-metadata.json'
 $changedFile = Join-Path $env:RUNNER_TEMP 'research-release-changed.json'
-& cargo metadata --locked --format-version 1 | Set-Content -LiteralPath $metadataFile -Encoding utf8NoBOM
+& cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc |
+    Set-Content -LiteralPath $metadataFile -Encoding utf8NoBOM
 if ($LASTEXITCODE -ne 0) { throw 'CARGO_METADATA_FAILED' }
 ConvertTo-Json -InputObject $changed -Compress | Set-Content -LiteralPath $changedFile -Encoding utf8NoBOM
 & node scripts/test-research-release-scope.cjs
 if ($LASTEXITCODE -ne 0) { throw 'SCOPE_NEGATIVE_TESTS_FAILED' }
-$scope = & node scripts/research-release-scope.cjs $metadataFile $changedFile
+$scopeArgs = @($metadataFile, $changedFile)
+if (@($changed | Where-Object { $_ -ceq 'Cargo.lock' -or $_ -cmatch '/Cargo\.toml$' }).Count -gt 0) {
+    # Reprove against the actual published binary base, not merely the PR's
+    # previous HEAD. A later dependency change cannot silently reuse Agent.
+    $baselineDir = Join-Path $env:RUNNER_TEMP 'research-accepted-cargo-baseline'
+    & git worktree add --detach $baselineDir $mergeSha
+    if ($LASTEXITCODE -ne 0) { throw 'ACCEPTED_CARGO_BASE_WORKTREE_FAILED' }
+    try {
+        $baselineMetadata = Join-Path $env:RUNNER_TEMP 'research-accepted-cargo-metadata.json'
+        Push-Location $baselineDir
+        try {
+            & cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc |
+                Set-Content -LiteralPath $baselineMetadata -Encoding utf8NoBOM
+            if ($LASTEXITCODE -ne 0) { throw 'ACCEPTED_WINDOWS_CARGO_RESOLVER_FAILED' }
+        } finally { Pop-Location }
+        $scopeArgs += $baselineMetadata
+    } finally {
+        & git worktree remove $baselineDir
+        if ($LASTEXITCODE -ne 0) { throw 'ACCEPTED_CARGO_BASE_WORKTREE_CLEANUP_FAILED' }
+    }
+}
+$scope = & node scripts/research-release-scope.cjs @scopeArgs
 if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_DIFF_NOT_ISOLATED' }
 $zip = Join-Path $env:RUNNER_TEMP 'research-release-base.zip'
 & gh release download $baseRelease.tag_name --repo iamaman11/okx --pattern 'okx-windows-base.zip' --dir $releaseDir
