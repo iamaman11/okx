@@ -10,6 +10,7 @@ data always require the full native financial gate.
 
 import argparse
 import json
+from pathlib import Path
 import re
 import sys
 
@@ -92,6 +93,14 @@ def classify(pages):
 
 
 def _self_test() -> None:
+    # Post-merge reuse must skip Research compilation, not just full Native.
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
+    research = workflow.split("\n  research-only-windows:\n", 1)[1].split("\n  windows-agent:\n", 1)[0]
+    assert "if: needs.classify.outputs.build_required == 'true' && needs.classify.outputs.research_only == 'true'" in research
+    # Reuse the same established Cargo cache action and one target directory.
+    assert "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6" in research
+    assert research.count("Join-Path $env:GITHUB_WORKSPACE 'target'") == 2
+
     def files(*paths):
         return [[{"filename": path, "status": "modified"} for path in paths]]
 
