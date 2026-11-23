@@ -62,3 +62,28 @@ Acceptance controls:
 
 Measured elapsed times and the possible future separation of Engine vs SQL
 test jobs remain open acceptance work, not completed by this routing change.
+
+## Cargo consumer inventory (#560, diagnostic phase)
+
+The existing `dependency-audit` job already runs `cargo metadata --locked`. The
+same resolved graph is now reused by `scripts/ci-component-impact.cjs` to record
+which deployable Windows binaries consume each changed workspace crate via
+normal/build dependencies. This includes *transitive* consumers; for example,
+changing `okx-domain-core` impacts both the Engine/finance and Research release
+roots. A Launcher implementation change reaches the Host Controller but not
+the financial Engine. Dev-only dependencies are excluded from **release** impact,
+not from the tests that may need to run.
+
+The report lists actual dependency paths, affected binary names and separate
+Cloudflare changes. It is retained in the existing dependency-audit artifact
+and GitHub job summary; no new CI workflow, Rust compilation or Windows runner
+is introduced for inventory. Any Cargo manifest, lock, build script, unknown
+path, unverified rename or incomplete diff is reported as potentially affecting
+all Windows binaries. An unavailable push diff is also explicitly unverified.
+
+**The inventory is diagnostic-only, not a skip authorization.** The existing
+fail-closed classifier and immutable-release checks alone select tests and
+builds. Before relaxing any manifest/lock rule, #560 still requires a verified
+before/after Windows-target Cargo resolver, version/feature closure comparison,
+negative controls and real warm-cache timings. A changed crate without an
+Engine source-file diff can still require Engine tests if Engine consumes it.
