@@ -1,7 +1,7 @@
 //! Terminal release frontier guards on the original fresh Native owner.
 use super::*;
 use crate::accounts::native_trade_contracts::{
-    filled_fixture::{INSTRUMENT, OPEN_ORDER, opened_market},
+    filled_fixture::{INSTRUMENT, OPEN_ORDER, opened_market, with_fresh_recorded_clock},
     fixture::{envelope, execute, fixture, record_fee, record_leverage},
 };
 use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
@@ -136,11 +136,12 @@ async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
     if let okx_protocol::trading::TradeRequest::Execute { expires_in_ms, .. } = &mut request {
         *expires_in_ms = 10_000;
     }
-    let sent = f
-        .trade
-        .trade(&f.config.alias, &request, Some(&f.authority))
-        .await
-        .unwrap();
+    let sent = with_fresh_recorded_clock(
+        &f.feed,
+        f.trade.trade(&f.config.alias, &request, Some(&f.authority)),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         sent["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
         "{sent}"

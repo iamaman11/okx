@@ -45,11 +45,14 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
     if let TradeRequest::Execute { expires_in_ms, .. } = &mut request {
         *expires_in_ms = 10_000;
     }
-    let first = fixture
-        .trade
-        .trade(&fixture.config.alias, &request, Some(&fixture.authority))
-        .await
-        .expect("original Native Execute before signed fill");
+    let first = with_fresh_recorded_clock(
+        &fixture.feed,
+        fixture
+            .trade
+            .trade(&fixture.config.alias, &request, Some(&fixture.authority)),
+    )
+    .await
+    .expect("original Native Execute before signed fill");
     assert_eq!(
         first["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
         "{first}"
