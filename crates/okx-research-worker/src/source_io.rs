@@ -59,6 +59,12 @@ pub(crate) async fn observe<T>(meter: Arc<SourceIoMeter>, future: impl Future<Ou
     ACTIVE.scope(meter, future).await
 }
 
+// These are observations, not financial totals. A long-running or corrupted
+// telemetry counter must never wrap to zero or panic in the Research worker.
+fn add_count(counter: &mut u64, amount: u64) {
+    *counter = counter.saturating_add(amount);
+}
+
 fn kind(request: &PublicSourceRequest) -> &'static str {
     match request {
         PublicSourceRequest::CatalogPage { .. } => "catalog_page",
@@ -72,14 +78,9 @@ fn kind(request: &PublicSourceRequest) -> &'static str {
 
 pub(crate) fn request_started(request: &PublicSourceRequest) {
     let _ = ACTIVE.try_with(|meter| {
-        meter
-            .0
-            .lock()
-            .unwrap()
-            .by_source
-            .entry(kind(request))
-            .or_default()
-            .proxy_requests_started += 1;
+        let mut state = meter.0.lock().unwrap();
+        let counts = state.by_source.entry(kind(request)).or_default();
+        add_count(&mut counts.proxy_requests_started, 1);
     });
 }
 
@@ -92,19 +93,25 @@ pub(crate) fn request_finished(
         let counts = state.by_source.entry(kind(request)).or_default();
         match result {
             Err(_) => {
-                counts.proxy_errors += 1;
+                add_count(&mut counts.proxy_errors, 1);
                 counts.host_transport_send_invocations = None;
                 counts.host_transport_response_body_bytes = None;
             }
             Ok(reply) => {
-                counts.proxy_replies += 1;
+                add_count(&mut counts.proxy_replies, 1);
                 match reply {
                     PublicSourceReply::CatalogPage(value) => {
-                        counts.captured_response_body_bytes += value.raw_body.len() as u64;
+                        add_count(
+                            &mut counts.captured_response_body_bytes,
+                            value.raw_body.len() as u64,
+                        );
                         account_delivery(counts, Some(&value.http_delivery), value.raw_body.len());
                     }
                     PublicSourceReply::Candles(value) => {
-                        counts.captured_response_body_bytes += value.raw_body.len() as u64;
+                        add_count(
+                            &mut counts.captured_response_body_bytes,
+                            value.raw_body.len() as u64,
+                        );
                         account_delivery(
                             counts,
                             value.http_delivery.as_ref(),
@@ -112,7 +119,10 @@ pub(crate) fn request_finished(
                         );
                     }
                     PublicSourceReply::Funding(value) => {
-                        counts.captured_response_body_bytes += value.raw_body.len() as u64;
+                        add_count(
+                            &mut counts.captured_response_body_bytes,
+                            value.raw_body.len() as u64,
+                        );
                         account_delivery(
                             counts,
                             value.http_delivery.as_ref(),
@@ -120,7 +130,10 @@ pub(crate) fn request_finished(
                         );
                     }
                     PublicSourceReply::Reference(value) => {
-                        counts.captured_response_body_bytes += value.raw_body.len() as u64;
+                        add_count(
+                            &mut counts.captured_response_body_bytes,
+                            value.raw_body.len() as u64,
+                        );
                         account_delivery(
                             counts,
                             value.http_delivery.as_ref(),
@@ -128,7 +141,7 @@ pub(crate) fn request_finished(
                         );
                     }
                     PublicSourceReply::Ticker(_) | PublicSourceReply::OpenInterest(_) => {
-                        counts.replies_without_raw_body += 1
+                        add_count(&mut counts.replies_without_raw_body, 1);
                     }
                 }
             }
@@ -147,7 +160,7 @@ fn account_delivery(
                 && (200..300).contains(&receipt.response_status)
                 && receipt.response_body_bytes == captured_bytes as u64 =>
         {
-            counts.host_transport_receipts += 1;
+            add_count(&mut counts.host_transport_receipts, 1);
             if counts.host_transport_receipts_missing == 0 && counts.proxy_errors == 0 {
                 counts.host_transport_send_invocations = Some(
                     counts
@@ -164,7 +177,7 @@ fn account_delivery(
             }
         }
         _ => {
-            counts.host_transport_receipts_missing += 1;
+            add_count(&mut counts.host_transport_receipts_missing, 1);
             counts.host_transport_send_invocations = None;
             counts.host_transport_response_body_bytes = None;
         }
@@ -172,7 +185,10 @@ fn account_delivery(
 }
 
 pub(crate) fn candle_cache_hit() {
-    let _ = ACTIVE.try_with(|meter| meter.0.lock().unwrap().candle_cache_hits += 1);
+    let _ = ACTIVE.try_with(|meter| {
+        let mut state = meter.0.lock().unwrap();
+        add_count(&mut state.candle_cache_hits, 1);
+    });
 }
 
 #[cfg(test)]
@@ -319,5 +335,65 @@ mod tests {
         assert_eq!(counts["host_transport_send_invocations"], 2);
         assert_eq!(counts["host_transport_response_body_bytes"], 6);
         assert!(meter.snapshot()["venue_http_requests"].is_null());
+    }
+
+    #[tokio::test]
+    async fn counters_saturate_at_u64_max_without_corrupting_source_diagnostics() {
+        let meter = Arc::new(SourceIoMeter::default());
+        {
+            let mut state = meter.0.lock().unwrap();
+            state.candle_cache_hits = u64::MAX;
+            state.by_source.insert(
+                "candles",
+                SourceCounts {
+                    proxy_requests_started: u64::MAX,
+                    proxy_replies: u64::MAX,
+                    proxy_errors: u64::MAX,
+                    captured_response_body_bytes: u64::MAX,
+                    host_transport_receipts: u64::MAX,
+                    host_transport_receipts_missing: u64::MAX,
+                    ..Default::default()
+                },
+            );
+        }
+        let req = PublicSourceRequest::Candles {
+            instrument: "BTC-USDT-SWAP".into(),
+            bar: "1m".into(),
+            after: None,
+            before: None,
+            limit: 100,
+            queued: false,
+        };
+        observe(meter.clone(), async {
+            request_started(&req);
+            request_finished(
+                &req,
+                &Ok(PublicSourceReply::Candles(
+                    okx_protocol::research_ipc::PublicCandleCapture {
+                        raw_body: vec![1],
+                        rows: vec![],
+                        acquired_at_ms: "1".into(),
+                        http_delivery: None,
+                    },
+                )),
+            );
+            request_finished(&req, &Err("failed".into()));
+            candle_cache_hit();
+        })
+        .await;
+        let snapshot = meter.snapshot();
+        let counts = &snapshot["source_calls"]["candles"];
+        for name in [
+            "proxy_requests_started",
+            "proxy_replies",
+            "proxy_errors",
+            "captured_response_body_bytes",
+            "host_transport_receipts",
+            "host_transport_receipts_missing",
+        ] {
+            assert_eq!(counts[name], u64::MAX, "counter wrapped: {name}");
+        }
+        assert_eq!(snapshot["candle_cache_hits"], u64::MAX);
+        assert!(counts["host_transport_send_invocations"].is_null());
     }
 }
