@@ -100,10 +100,8 @@ Production installation/update must retain all of these checks:
    Agent must belong to the accepted release set. Recover from failures before
    reporting the update successful.
 
-The `production_recovery_promote` job in the single `.github/workflows/ci.yml`
-publishes a versioned GitHub release from an already tested artifact after
-main promotion with equal trees and an explicit change to
-`.github/production-recovery-request.json`.
+`.github/workflows/promote-production-recovery.yml` publishes a versioned GitHub
+release from an already tested artifact after main promotion with equal trees.
 It does not rebuild or overwrite an existing release tag. Initial bootstrap must
 download the explicitly accepted GitHub package and verify its manifest/hashes
 before invoking the trusted controller; the bare `install` command is a copy
@@ -168,8 +166,8 @@ remotely. Perform one bounded local bootstrap, not another permanent service.
    operation on the workstation. Once it responds, use existing typed GitHub
    CONTROL to install the verified launcher/Agent, enable one canonical
    Scheduler task and read back the live PID, hashes and release identity.
-5. Deploy the same accepted main tree by selecting `cloudflare-mcp-deploy`
-   in the manual `CI` workflow on `main` and verify OAuth, MCP tools/list, WSS, Windows
+5. Deploy the same accepted main tree using the existing main-only
+   cloudflare-mcp-deploy.yml and verify OAuth, MCP tools/list, WSS, Windows
    read-only account and research workflows. CI or /health alone is not
    installed/physical acceptance.
 
@@ -182,9 +180,8 @@ WSS and MCP governance to the distinct named Durable Object
 nor copied. Deploying a Worker to that empty new object leaves tools fail-closed
 until a new governance installation is explicitly initialized.
 
-For the first v2 deployment only, run `.github/workflows/ci.yml` manually on
-`main`, selecting `operation=cloudflare-mcp-deploy` with
-`initialize_clean_v2=true`, the exact installation ID read back
+For the first v2 deployment only, dispatch `cloudflare-mcp-deploy.yml` on
+`main` with `initialize_clean_v2=true`, the exact installation ID read back
 from Windows CONTROL, and `accepted_bundle_sha256` from the verified GitHub
 Windows artifact. The protected GitHub environment provides the existing owner
 secret; never paste it into dispatch inputs or logs. The workflow first checks

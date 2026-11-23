@@ -1,0 +1,81 @@
+name: OKX named account read-only attestation
+
+on:
+  workflow_dispatch:
+    inputs:
+      account_id:
+        description: Registered account ID (lower-case ASCII)
+        type: string
+        required: true
+      expected_uid_fingerprint:
+        description: Exact expected SHA256 UID fingerprint
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      environment_name: ${{ steps.naming.outputs.name }}
+    steps:
+      - name: Validate metadata
+        id: naming
+        shell: bash
+        env:
+          ACCOUNT_ID: ${{ inputs.account_id }}
+          EXPECTED_UID: ${{ inputs.expected_uid_fingerprint }}
+        run: |
+          set -euo pipefail
+          [[ "$ACCOUNT_ID" =~ ^[a-z][a-z0-9-]{0,31}$ ]]
+          [[ "$ACCOUNT_ID" != *- ]]
+          [[ "$ACCOUNT_ID" != "production" && "$ACCOUNT_ID" != "demo_acceptance" ]]
+          [[ "$EXPECTED_UID" =~ ^[0-9a-f]{64}$ ]]
+          printf 'name=okx-%s-global-observer\n' "$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+          echo "ACCOUNT_REQUEST_VALID=PASS"
+
+  observer:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.validate.outputs.environment_name }}
+    env:
+      ACCOUNT_ID: ${{ inputs.account_id }}
+      EXPECTED_UID: ${{ inputs.expected_uid_fingerprint }}
+      OKX_ACCOUNT_ID: ${{ vars.OKX_ACCOUNT_ID }}
+      OKX_ACCESS_ROLE: ${{ vars.OKX_ACCESS_ROLE }}
+      OKX_REGION: ${{ vars.OKX_REGION }}
+      OKX_DEMO: ${{ vars.OKX_DEMO }}
+      OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+      OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+      OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # Rust 1.95.0
+      - name: Verify authenticated ReadOnly UID
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$OKX_ACCOUNT_ID" = "$ACCOUNT_ID"
+          test "$OKX_ACCESS_ROLE" = "observer"
+          test "$OKX_REGION" = "global"
+          [[ "$OKX_DEMO" = "true" || "$OKX_DEMO" = "false" ]]
+          test -n "$OKX_API_KEY"
+          test -n "$OKX_API_SECRET"
+          test -n "$OKX_API_PASSPHRASE"
+          args=(--region global --instrument BTC-USDT-SWAP --margin cross)
+          if [[ "$OKX_DEMO" == "true" ]]; then args+=(--demo); fi
+          cargo run --locked --quiet -p okx-cli -- "${args[@]}" > "$RUNNER_TEMP/okx-private-account.json"
+          jq -e --arg uid "$EXPECTED_UID" --argjson demo "$OKX_DEMO" '
+            .authenticated == true and
+            .region == "global" and
+            .demo == $demo and
+            .account_uid_fingerprint == $uid and
+            (.api_key_permissions | index("read_only")) != null and
+            (.api_key_permissions | index("trade")) == null and
+            (.api_key_permissions | index("withdraw")) == null
+          ' "$RUNNER_TEMP/okx-private-account.json" > /dev/null
+          rm -f "$RUNNER_TEMP/okx-private-account.json"
+          echo "GITHUB_ENVIRONMENT_READ_ONLY_UID=PASS"

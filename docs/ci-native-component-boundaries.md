@@ -4,21 +4,14 @@ The protected checks `classify`, `linux-core` and `windows-native` stay required
 aggregate different **executed** jobs; a skipped financial matrix is not
 reported as a successful financial test run.
 
-Only **one GitHub Actions workflow** is defined: `.github/workflows/ci.yml`
-(`name: CI`). A pull request or protected `main` push creates one CI run;
-publishing an accepted Native base is a dependent `native_base_publish` job
-inside that run, not a second `workflow_run`. It verifies the exact successful
-Ready artifact and does not deploy or install an application. An explicit
-production-recovery request can separately enable `production_recovery_promote`
-in the same successful main run. Historical WIP branches retain their bounded
-All26 job when that branch's workflow definition is updated.
-
-Manual `CI` runs use the required `operation` choice. `credentials-check`,
-`readonly-account-acceptance` and `named-account-attestation` only inspect
-account/environment state; `cloudflare-mcp-deploy` is the separately authorized
-production Worker deployment on `main` with its protected executor environment.
-Normal code pushes cannot select any of these operations. The historical
-individual workflow dispatch URLs are replaced by the `CI` dispatch selection.
+**One automatic CI for `main`:** `.github/workflows/ci.yml` runs the protected
+checks and, only after their success, the optional Native-base publication job.
+No second `workflow_run` is started on completion. GitHub Actions has separate
+manual operational workflows for protected account access and Cloudflare
+deployment; those operations do not appear as permanently skipped CI jobs.
+The historical All26 branch-only workflow and explicit recovery promotion
+remain separate from the normal `main` CI path. Closed #510/#512 migration
+jobs were removed from the main workflow.
 
 | Changed files (complete GitHub diff) | Direct owner and consumers | Ready CI | Native release artifact |
 | --- | --- | --- | --- |
@@ -57,11 +50,11 @@ The host job runs the existing installation-root safety fixture, architecture
 guard, formatting, clippy, Rust tests and Windows release builds for both
 CONTROL and Launcher. Its exact source HEAD, tree, component scope and binary
 hashes are retained as **non-deployable** evidence. It never publishes a new
-Native base; the `native_base_publish` job in the single
-`.github/workflows/ci.yml` runs only after successful protected main CI and
-continues to require fresh `trading-engine-windows-full` plus B1 and a
-complete four-component Windows artifact. It does not install or restart the
-Trading Engine.
+Native base; `publish_accepted_native_base` inside the **same** protected
+`.github/workflows/ci.yml` runs after successful main checks and continues
+to require fresh `trading-engine-windows-full` plus B1 and a complete
+four-component Windows artifact. It publishes a GitHub release but never
+installs or restarts the Trading Engine.
 
 Draft PRs with only host Rust sources run direct Launcher and CONTROL Cargo
 tests of library and binary targets via `scripts/check_p0.py`, reusing the

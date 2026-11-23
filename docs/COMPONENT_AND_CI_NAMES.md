@@ -69,7 +69,7 @@ means proven reusable binary bytes, not a runtime library. Existing
 
 | Job | Purpose |
 | --- | --- |
-| `component-impact` | Fail-closed changed-file/Cargo boundary classifier |
+| `classify` | Protected fail-closed changed-file/Cargo boundary classifier |
 | `draft-component-tests` | Scoped feedback for Draft pull requests |
 | `trading-engine-windows-full` | Full Trading Engine/SQLite/finance Windows acceptance and four-EXE bundle |
 | `trading-safety-windows-prerequisite` | Separate B1 financial-safety prerequisites |
@@ -80,17 +80,15 @@ means proven reusable binary bytes, not a runtime library. Existing
 | `dependency-audit` | Dependency security, licence and origin checks |
 | `cloudflare-mcp-contracts` | MCP transport and public contract checks |
 | `verified-research-bundle-assembly` | Draft proof of a composed accepted Research candidate, not a deploy |
-| `draft-trading-migration-512` | Branch-specific legacy #512 validation only |
-| `draft-riskbook-migration-510` | Branch-specific legacy #510 validation only |
+| `publish_accepted_native_base` | After successful protected main CI, publish only the exact verified Windows artifact; no installation |
 
-The required check **display names** `classify`, `windows-native` and `linux-core` are
-temporarily retained because existing branch protection and accepted-CI reuse
-depend on those exact values. Their implementation IDs are `required_windows`
-and `required_linux` for the platform gates, and `required_classify` for a
-fail-closed alias of `component_impact`. Platform gates aggregate and verify
-evidence; they do not necessarily rerun the whole suite. Change branch-protection
-settings *after*
-a verified parallel transition, never by silently losing the required checks.
+The required check **display names** `classify`, `windows-native` and `linux-core`
+are retained for branch protection and accepted-CI reuse. `classify` is the
+actual `component_impact` job, without a redundant alias; the platform
+aggregators keep implementation IDs `required_windows` and `required_linux`.
+They verify executed evidence or an explicitly proved safe reuse, never claim
+that skipped financial tests ran. The old branch-only Draft jobs for closed
+issues #510 and #512 have been removed; normal Draft owner tests remain.
 
 ## Release acceptance for a future executable rename
 
