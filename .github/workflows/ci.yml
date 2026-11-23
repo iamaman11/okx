@@ -292,6 +292,19 @@ jobs:
           echo "BUILD_REQUIRED=${{ steps.classify.outputs.build_required }}"
           echo "REASON=${{ steps.classify.outputs.reason }}"
 
+  required_classify:
+    # Existing main protection requires this display name. The canonical owner
+    # job is component-impact; this alias fails if that real classifier fails.
+    name: classify
+    needs: component_impact
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify component impact classification
+        env:
+          CLASSIFIER_RESULT: ${{ needs.component_impact.result }}
+        run: test "$CLASSIFIER_RESULT" = "success"
+
   draft-component-tests:
     name: draft-component-tests
     if: github.event_name == 'pull_request' && github.event.pull_request.draft

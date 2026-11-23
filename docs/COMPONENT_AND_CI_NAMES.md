@@ -64,11 +64,13 @@ means proven reusable binary bytes, not a runtime library. Existing
 | `draft-trading-migration-512` | Branch-specific legacy #512 validation only |
 | `draft-riskbook-migration-510` | Branch-specific legacy #510 validation only |
 
-The required check **display names** `windows-native` and `linux-core` are
+The required check **display names** `classify`, `windows-native` and `linux-core` are
 temporarily retained because existing branch protection and accepted-CI reuse
 depend on those exact values. Their implementation IDs are `required_windows`
-and `required_linux`: they aggregate and verify evidence, not necessarily run
-the full Windows or Linux suite. Change branch-protection settings *after*
+and `required_linux` for the platform gates, and `required_classify` for a
+fail-closed alias of `component_impact`. Platform gates aggregate and verify
+evidence; they do not necessarily rerun the whole suite. Change branch-protection
+settings *after*
 a verified parallel transition, never by silently losing the required checks.
 
 ## Release acceptance for a future executable rename
