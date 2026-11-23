@@ -34,12 +34,17 @@ replacement. Do not retry the incompatible release, rename files in the
 archive, or replace installed binaries manually. The existing CI packager
 supports a single tree-pinned `.github/windows-legacy-control-bridge.txt`
 marker that emits a verified *v1 three-EXE* bundle for the old CONTROL to
-stage the updated controller and install Agent/Launcher. This bridge contains
-no Research executable and cannot certify Research activation. Remove the
-marker in a subsequent accepted release to restore the ordinary v2 Service
-artifact, then verify Research update and rollback separately. Full CI is
-required for this one-time migration; Engine PID continuity begins at the
-new installed baseline, not at the pre-migration process.
+stage the updated controller. Agent/Launcher can be deferred until the next
+accepted full v2 release, avoiding a redundant Agent installation. This bridge
+contains no Research executable and cannot certify Research activation. After
+the Controller handoff is physically confirmed, remove the marker on a newly
+tested source tree to restore the ordinary v2 Service artifact. That release
+must pass the full Native/financial gate; stage its matching Controller, then
+install Launcher, Agent, and Research through authenticated CONTROL and verify
+all four installed identities. Finally test a separate Research-only update
+and rollback. Engine PID continuity begins at the post-migration baseline,
+not at the pre-migration process: a Controller handoff can replace the Agent's
+owned process even without changing Agent executable bytes.
 
 `HostControlOperation::DeployResearch` takes `run_id`, `artifact_id`, and
 `expected_source_tree`. CONTROL fetches the accepted GitHub archive and verifies
