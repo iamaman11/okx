@@ -3,8 +3,6 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{AgentError, AgentResult};
 
 #[cfg(windows)]
-const WINDOWS_GITHUB_CREDENTIAL_SERVICE: &str = "iamaman11.okx-trading-engine.github";
-#[cfg(windows)]
 const WINDOWS_GITHUB_CREDENTIAL_ACCOUNT: &str = "mailbox-token";
 
 pub fn store_native_github_token(token: &str) -> AgentResult<()> {
@@ -13,7 +11,7 @@ pub fn store_native_github_token(token: &str) -> AgentResult<()> {
     #[cfg(windows)]
     {
         let entry = crate::windows_credentials::entry(
-            WINDOWS_GITHUB_CREDENTIAL_SERVICE,
+            crate::windows_credentials::GITHUB_SERVICE,
             WINDOWS_GITHUB_CREDENTIAL_ACCOUNT,
         )
         .map_err(secret_store_error)?;
@@ -36,7 +34,7 @@ pub fn load_native_github_token() -> AgentResult<Zeroizing<String>> {
     #[cfg(windows)]
     {
         let entry = crate::windows_credentials::entry(
-            WINDOWS_GITHUB_CREDENTIAL_SERVICE,
+            crate::windows_credentials::GITHUB_SERVICE,
             WINDOWS_GITHUB_CREDENTIAL_ACCOUNT,
         )
         .map_err(secret_store_error)?;

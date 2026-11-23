@@ -31,7 +31,8 @@ pub fn default_root() -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(r"C:\okx\runtime")
     } else {
-        PathBuf::from(".okx-trading-engine")
+        // Preserve existing local state across Cargo package renames.
+        PathBuf::from(".okx-agent")
     }
 }
 
@@ -55,6 +56,13 @@ mod tests {
             assert_eq!(default_root(), PathBuf::from(r"C:\okx\runtime"));
             assert!(!default_root().starts_with(r"C:\okx\workspace"));
             assert!(!default_root().starts_with(r"C:\okx\control"));
+        }
+    }
+
+    #[test]
+    fn unix_default_root_preserves_existing_agent_state() {
+        if !cfg!(windows) {
+            assert_eq!(default_root(), PathBuf::from(".okx-agent"));
         }
     }
 

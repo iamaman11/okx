@@ -2,6 +2,14 @@
 //! and default service/user mapping as keyring v1.
 use keyring::api::CredentialStoreApi;
 
+// Persistent Windows Credential Manager targets. These remain bound to the
+// installed okx-agent identity even when the source Cargo crate is renamed.
+// Changing them would hide existing identity keys and API tokens.
+pub(crate) const IDENTITY_SERVICE: &str = "iamaman11.okx-agent";
+pub(crate) const GITHUB_SERVICE: &str = "iamaman11.okx-agent.github";
+pub(crate) const CLOUDFLARE_SERVICE: &str = "iamaman11.okx-agent.cloudflare";
+pub(crate) const ACCOUNT_SERVICE_PREFIX: &str = "iamaman11.okx-agent.account.";
+
 pub(crate) fn entry(service: &str, user: &str) -> keyring::Result<keyring::Entry> {
     let store = windows_native_keyring_store::Store::new()?;
     entry_from_store(store.as_ref(), service, user)
@@ -24,7 +32,7 @@ mod tests {
         let store = keyring::mock::Store::new().unwrap();
         let first = entry_from_store(
             store.as_ref(),
-            "iamaman11.okx-trading-engine.github",
+            GITHUB_SERVICE,
             "mailbox-token",
         )
         .unwrap();
@@ -32,14 +40,14 @@ mod tests {
         first.set_secret(b"test-only-bytes\0").unwrap();
         let same = entry_from_store(
             store.as_ref(),
-            "iamaman11.okx-trading-engine.github",
+            GITHUB_SERVICE,
             "mailbox-token",
         )
         .unwrap();
         assert_eq!(same.get_secret().unwrap(), b"test-only-bytes\0");
         let different = entry_from_store(
             store.as_ref(),
-            "iamaman11.okx-trading-engine.github",
+            GITHUB_SERVICE,
             "other",
         )
         .unwrap();
@@ -53,26 +61,28 @@ mod tests {
     fn native_store_constructs_original_target_without_accessing_credentials() {
         let store = windows_native_keyring_store::Store::new().unwrap();
         assert_eq!(store.delimiters, ["", ".", ""]);
+        let account_service = format!("{ACCOUNT_SERVICE_PREFIX}example");
+        assert_eq!(account_service, "iamaman11.okx-agent.account.example");
         for (service, user, target) in [
             (
-                "iamaman11.okx-trading-engine",
+                IDENTITY_SERVICE,
                 "agent-key",
-                "agent-key.iamaman11.okx-trading-engine",
+                "agent-key.iamaman11.okx-agent",
             ),
             (
-                "iamaman11.okx-trading-engine.github",
+                GITHUB_SERVICE,
                 "mailbox-token",
-                "mailbox-token.iamaman11.okx-trading-engine.github",
+                "mailbox-token.iamaman11.okx-agent.github",
             ),
             (
-                "iamaman11.okx-trading-engine.cloudflare",
+                CLOUDFLARE_SERVICE,
                 "runtime-token",
-                "runtime-token.iamaman11.okx-trading-engine.cloudflare",
+                "runtime-token.iamaman11.okx-agent.cloudflare",
             ),
             (
-                "iamaman11.okx-trading-engine.account.example",
+                account_service.as_str(),
                 "credentials",
-                "credentials.iamaman11.okx-trading-engine.account.example",
+                "credentials.iamaman11.okx-agent.account.example",
             ),
         ] {
             let built = entry_from_store(store.as_ref(), service, user).unwrap();

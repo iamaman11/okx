@@ -9,7 +9,8 @@ use crate::{HostControlError, HostControlResult, background_process::hidden_comm
 
 const TASK_NAME: &str = r"\iamaman11-okx-host-control";
 const ENTRYPOINT_PATH: &str = okx_host_launcher::ENTRYPOINT_PATH;
-const TASK_XML_PATH: &str = r"C:\okx\control\okx-host-controller-task.xml";
+// Installed scheduler configuration path is not a Cargo crate identity.
+const TASK_XML_PATH: &str = r"C:\okx\control\okx-host-control-task.xml";
 
 pub fn install() -> HostControlResult<Value> {
     install_action(ENTRYPOINT_PATH, "run", okx_host_launcher::CONTROL_ROOT)?;
@@ -297,6 +298,7 @@ mod tests {
 
     #[test]
     fn canonical_task_keeps_one_fixed_entrypoint_forever() {
+        assert_eq!(TASK_XML_PATH, r"C:\okx\control\okx-host-control-task.xml");
         let xml = task_xml(
             r"HOST\User",
             TEST_START,
