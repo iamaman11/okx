@@ -172,6 +172,53 @@ const mcpResponse=async(tool:string,args:unknown,response:unknown,releaseTree?:s
  if(reply.error)throw Error(JSON.stringify(reply.error));
  return reply.result.structuredContent;
 };
+
+// P0 #537: an optional user graph must reach the Native request unchanged.
+// Otherwise different hypotheses can silently reuse the flat market job.
+const graphBase={action:'screen',instruments:['BTC-USDT'],fields:['returns'],
+ timeframe_ms:60_000,start_ms:1795366800000,end_ms:1795374000000,limit:50};
+const graphVariants=[
+ graphBase,
+ {...graphBase,composition:{version:'okx.market.composition/v1',
+  steps:[{id:'width',op:'rolling_range',input:'close',period:3}],result_steps:['width']}},
+ {...graphBase,composition:{version:'okx.market.composition/v1',steps:[
+  {id:'change',op:'returns_series',input:'close'},
+  {id:'avg3',op:'rolling_mean',input:'change',period:3},
+  {id:'positive',op:'greater_than',input:'avg3',threshold:0},
+  {id:'turn_on',op:'rising_edge',input:'positive'}],result_steps:['avg3','turn_on']}},
+];
+const graphCalls:any[]=[];
+const graphEnv:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:RequestInit)=>{
+ const native=JSON.parse(String(init.body));graphCalls.push(native);
+ const fields=native.operation.request.composition?.result_steps??[];
+ return Response.json({schema:'okx.agent.response/v1',request_id:native.request_id,
+  status:'completed',quality:'FRESH',warnings:[],result:{kind:'market',
+   job_id:'job-'+(fields.join('-')||'flat'),market_request_fingerprint:'hash-'+(fields.join('-')||'flat'),
+   result_artifact:'artifact-'+(fields.join('-')||'flat'),query_plan:{composition:native.operation.request.composition??null},
+   rows:[{metrics:{returns:-0.0073745589964719915,...(fields.includes('width')?{width:46.5}:{}),
+    ...(fields.includes('avg3')?{avg3:-0.00031571803975194435,turn_on:false}:{})}}]}});
+}})}};
+const graphResults:any[]=[];
+for(const args of graphVariants){
+ const reply:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
+  body:JSON.stringify({jsonrpc:'2.0',id:91,method:'tools/call',params:{name:'market',arguments:args}})}),graphEnv,ctx)).json();
+ if(reply.error)throw Error('MCP graph rejected: '+JSON.stringify(reply.error));
+ graphResults.push(reply.result.structuredContent);
+ const sent=graphCalls.at(-1);
+ if(sent.schema!=='okx.agent.request/v1'||sent.operation.type!=='market'||
+   JSON.stringify(sent.operation.request)!==JSON.stringify(args))
+  throw Error('MCP graph definition lost before Native dispatch');
+}
+if(new Set(graphResults.map(r=>r.data.job_id)).size!==3||
+ new Set(graphResults.map(r=>r.data.market_request_fingerprint)).size!==3||
+ new Set(graphResults.map(r=>r.data.result_artifact)).size!==3||
+ graphResults[0].data.rows[0].metrics.width!==undefined||
+ graphResults[1].data.rows[0].metrics.width!==46.5||
+ graphResults[2].data.rows[0].metrics.avg3!==-0.00031571803975194435||
+ graphResults[2].data.rows[0].metrics.turn_on!==false||
+ !body.result.tools.find((tool:any)=>tool.name==='market')?.description.includes('composition'))
+ throw Error('MCP graph projection or public invocation guidance lost');
+console.log('P0_mcp_three_graphs_forwarded_and_distinct PASS');
 // Exercise the real Worker MCP projection/dispatch for 100 independent read-only
 // requests. The Durable Object is a deterministic fixture, not a physical network SLA.
 let inFlightRead=0,maxInFlightRead=0,nativeReadCount=0;
