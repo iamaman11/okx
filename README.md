@@ -7,8 +7,8 @@ directories. See [installation, migration and verified GitHub updates](docs/wind
 **Single implementation cursor:** [#449](https://github.com/iamaman11/okx/issues/449).
 Issue #398 records historical **read-only** acceptance; it is not a competing roadmap or proof of Real execution.
 
-The product has one **`okx-agent` financial Engine** for accounts and trading.
-Research runs in an on-demand **`okx-research-worker`**, with its own jobs and
+The product has one **`okx-trading-engine` financial Engine** for accounts and trading.
+Research runs in an on-demand **`okx-research-service`**, with its own jobs and
 artifacts. Both are Rust components of the same Windows application. Cloudflare
 provides authenticated MCP/WSS routing; financial authority is Rust with one
 shared financial SQLite. Existing Windows CONTROL owns verified component
@@ -26,16 +26,16 @@ does not claim that the complete acceptance campaign finishes in seconds.
 
 | Module | Owns | Does not own |
 | --- | --- | --- |
-| `crates/okx-agent` | One runtime and request orchestration | A second venue execution state machine |
-| `crates/okx-agent/src/research_client.rs` | Typed child communication and verified worker activation | Research calculations or financial decisions |
-| `crates/okx-research-worker/src/analytics/market.rs` | Market queries and computations using host-owned public observations | Trading decisions and account SQL |
-| `crates/okx-research-worker/src/analytics/result.rs` | Verified immutable result reads, page cursors and export integrity | Research CPU execution or SQL mutations |
-| `crates/okx-research-worker/src/analytics/{jobs,executor,budget,benchmark}.rs` | Research catalog, CPU/memory admission and benchmark jobs | Financial storage and live permissions |
-| `crates/okx-runtime/src/{market_bootstrap,live_source}.rs` | Shared public source admission and live closed candles | Research job ownership |
+| `crates/okx-trading-engine` | One runtime and request orchestration | A second venue execution state machine |
+| `crates/okx-trading-engine/src/research_client.rs` | Typed child communication and verified worker activation | Research calculations or financial decisions |
+| `crates/okx-research-service/src/analytics/market.rs` | Market queries and computations using host-owned public observations | Trading decisions and account SQL |
+| `crates/okx-research-service/src/analytics/result.rs` | Verified immutable result reads, page cursors and export integrity | Research CPU execution or SQL mutations |
+| `crates/okx-research-service/src/analytics/{jobs,executor,budget,benchmark}.rs` | Research catalog, CPU/memory admission and benchmark jobs | Financial storage and live permissions |
+| `crates/okx-market-runtime/src/{market_bootstrap,live_source}.rs` | Shared public source admission and live closed candles | Research job ownership |
 | `crates/okx-research` / `crates/okx-analysis` | Replay, research artifacts and analytics formulas | Transport permissions or exchange orders |
-| `crates/okx-execution` | Scoped orders/fills/bills, NAV and RiskBook in one SQLite writer | Network requests or research jobs |
+| `crates/okx-trade-execution` | Scoped orders/fills/bills, NAV and RiskBook in one SQLite writer | Network requests or research jobs |
 | `cloudflare/okx-mcp` | Public MCP schema, authorization and routing | Native financial grants or a second trading engine |
-| `crates/okx-host-control` | Verified GitHub artifact install, lifecycle and Windows diagnostics | Research/strategy calculation or venue execution |
+| `crates/okx-host-controller` | Verified GitHub artifact install, lifecycle and Windows diagnostics | Research/strategy calculation or venue execution |
 
 **Market:** `market` MCP → gateway/WSS → Agent `ResearchClient` → local research
 IPC → worker planner and market handler → bounded result and immutable artifact.
@@ -175,8 +175,8 @@ cargo fmt --all -- --check
 python scripts/check_architecture.py --self-test
 python scripts/check_architecture.py
 python scripts/check_product_contract.py
-cargo clippy --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --all-targets -- -D warnings
-cargo test --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution
+cargo clippy --locked -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-trade-execution --all-targets -- -D warnings
+cargo test --locked -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-trade-execution
 ```
 
 On Linux the same canonical CI also checks portable crates and the Worker
@@ -187,7 +187,7 @@ or the existing typed `status` request to Windows CONTROL issue #12; follow
 the returned request ID and source reason, not a manual SQL inspection.
 
 **Architecture guard:** canonical normalized models and deterministic fee math
-live in `okx-kernel`; venue-dependent constructors stay in `okx-observation`.
+live in `okx-domain-core`; venue-dependent constructors stay in `okx-observation`.
 `okx-analysis` and `okx-research` no longer depend on observation/API adapters.
 The default guard checks the complete resolved production dependency graph for
 all three pure crates; negative fixtures reject transitive I/O dependencies.

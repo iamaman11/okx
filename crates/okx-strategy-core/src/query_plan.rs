@@ -1,8 +1,8 @@
 //! Typed K7 analysis plan, independent of storage, transport and venue.
 use crate::operators::{Operator, registry};
 use crate::stream::{MonotoneWindow, RollingMean, scalar_value};
-pub use okx_kernel::strategy_contract::{CompositionRequest, SeriesOp, SeriesStep};
-use okx_kernel::time_series::ClosedRange;
+pub use okx_domain_core::strategy_contract::{CompositionRequest, SeriesOp, SeriesStep};
+use okx_domain_core::time_series::ClosedRange;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 

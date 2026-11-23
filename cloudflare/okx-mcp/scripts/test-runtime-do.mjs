@@ -358,7 +358,7 @@ try {
     const originalNative = launchNative(
       "cargo",
       [
-        "test", "--locked", "-p", "okx-agent", "--lib",
+        "test", "--locked", "-p", "okx-trading-engine", "--lib",
         ...(nativeUnsentCrashMode
           ? ["cloudflare_transport::raw_native_session_tests::native_crash_unsent_boundary",
             "--","--ignored","--exact","--nocapture"]

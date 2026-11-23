@@ -59,7 +59,7 @@ jobs:
             jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/jobs?per_page=100")"
             # Require the *fresh* 4-EXE financial gate, never an aggregate
             # that reused older proof or the isolated Research-only worker.
-            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["windows-native-full","windows-b1-native-prerequisite","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
+            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-windows-full","trading-safety-windows-prerequisite","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
               continue
             fi
             artifacts="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts?per_page=100")"

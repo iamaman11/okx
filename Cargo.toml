@@ -3,21 +3,21 @@ resolver = "2"
 members = [
     "crates/okx-api",
     "crates/okx-cli",
-    "crates/okx-protocol",
+    "crates/okx-ipc-contracts",
     "crates/okx-github",
-    "crates/okx-agent",
-    "crates/okx-host-control",
+    "crates/okx-trading-engine",
+    "crates/okx-host-controller",
     "crates/okx-host-launcher",
     "crates/okx-bridge-mcp",
     "crates/okx-observation",
     "crates/okx-ws",
-    "crates/okx-runtime",
-    "crates/okx-kernel",
+    "crates/okx-market-runtime",
+    "crates/okx-domain-core",
     "crates/okx-strategy-core",
     "crates/okx-analysis",
     "crates/okx-research",
-    "crates/okx-research-worker",
-    "crates/okx-execution",
+    "crates/okx-research-service",
+    "crates/okx-trade-execution",
 ]
 
 [workspace.package]

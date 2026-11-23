@@ -1129,7 +1129,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "okx-agent"
+name = "okx-trading-engine"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
@@ -1140,11 +1140,11 @@ dependencies = [
  "jiff",
  "keyring-core",
  "okx-api",
- "okx-execution",
+ "okx-trade-execution",
  "okx-github",
  "okx-observation",
- "okx-protocol",
- "okx-runtime",
+ "okx-ipc-contracts",
+ "okx-market-runtime",
  "reqwest",
  "rusqlite",
  "rust_decimal",
@@ -1165,7 +1165,7 @@ dependencies = [
 name = "okx-analysis"
 version = "0.1.0"
 dependencies = [
- "okx-kernel",
+ "okx-domain-core",
  "okx-strategy-core",
  "rust_decimal",
  "serde",
@@ -1180,7 +1180,7 @@ dependencies = [
  "futures-util",
  "hmac",
  "jiff",
- "okx-kernel",
+ "okx-domain-core",
  "reqwest",
  "rust_decimal",
  "serde",
@@ -1203,7 +1203,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "okx-github",
- "okx-protocol",
+ "okx-ipc-contracts",
  "serde",
  "serde_json",
  "thiserror",
@@ -1222,10 +1222,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "okx-execution"
+name = "okx-trade-execution"
 version = "0.1.0"
 dependencies = [
- "okx-kernel",
+ "okx-domain-core",
  "proptest",
  "rusqlite",
  "rust_decimal",
@@ -1250,7 +1250,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "okx-host-control"
+name = "okx-host-controller"
 version = "0.1.0"
 dependencies = [
  "clap",
@@ -1259,7 +1259,7 @@ dependencies = [
  "keyring-core",
  "okx-github",
  "okx-host-launcher",
- "okx-protocol",
+ "okx-ipc-contracts",
  "serde",
  "serde_json",
  "sha2",
@@ -1283,7 +1283,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "okx-kernel"
+name = "okx-domain-core"
 version = "0.1.0"
 dependencies = [
  "num-bigint",
@@ -1299,7 +1299,7 @@ name = "okx-observation"
 version = "0.1.0"
 dependencies = [
  "okx-api",
- "okx-kernel",
+ "okx-domain-core",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -1308,13 +1308,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "okx-protocol"
+name = "okx-ipc-contracts"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
  "hkdf",
- "okx-kernel",
+ "okx-domain-core",
  "proptest",
  "prost",
  "serde",
@@ -1337,7 +1337,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "okx-research-worker"
+name = "okx-research-service"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
@@ -1347,10 +1347,10 @@ dependencies = [
  "jiff",
  "okx-analysis",
  "okx-api",
- "okx-kernel",
- "okx-protocol",
+ "okx-domain-core",
+ "okx-ipc-contracts",
  "okx-research",
- "okx-runtime",
+ "okx-market-runtime",
  "okx-strategy-core",
  "reqwest",
  "rusqlite",
@@ -1366,13 +1366,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "okx-runtime"
+name = "okx-market-runtime"
 version = "0.1.0"
 dependencies = [
  "jiff",
  "okx-api",
  "okx-observation",
- "okx-protocol",
+ "okx-ipc-contracts",
  "okx-ws",
  "serde",
  "serde_json",
@@ -1385,7 +1385,7 @@ dependencies = [
 name = "okx-strategy-core"
 version = "0.1.0"
 dependencies = [
- "okx-kernel",
+ "okx-domain-core",
  "serde",
  "serde_json",
 ]

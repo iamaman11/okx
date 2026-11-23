@@ -155,10 +155,10 @@ test("unsafe or already advanced F2 boundaries are rejected before taskkill",()=
 });
 test("an early Native failure retains its first Rust boundary before Node wraps it",()=>{
   const failure=nativeCrashFailure({stderr:
-    "thread 'native_crash_unsent_boundary' panicked at crates/okx-agent/src/trade_integration_t10_11.rs:70:4:\n"+
+    "thread 'native_crash_unsent_boundary' panicked at crates/okx-trading-engine/src/trade_integration_t10_11.rs:70:4:\n"+
     "F2_STORE_NOT_READY\n"});
   assert.equal(failure.rust_assertion,
-    "crates/okx-agent/src/trade_integration_t10_11.rs:70:4: F2_STORE_NOT_READY");
+    "crates/okx-trading-engine/src/trade_integration_t10_11.rs:70:4: F2_STORE_NOT_READY");
   assert.equal(failure.rust_failures.count,1);
 });
 

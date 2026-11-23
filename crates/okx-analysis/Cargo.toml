@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-okx-kernel = { path = "../okx-kernel" }
+okx-domain-core = { path = "../okx-domain-core" }
 okx-strategy-core = { path = "../okx-strategy-core" }
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }

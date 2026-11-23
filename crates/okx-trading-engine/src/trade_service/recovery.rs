@@ -1,0 +1,874 @@
+use super::*;
+use crate::execution_store::ExecutionStore;
+use std::str::FromStr;
+
+// Conservative bound for OKX's short-lived canceled/unfilled order
+// history. An expired archive cannot establish absence of lost POSTs.
+fn verify_recovery_order_history_window(backup: i64, observed: i64) -> Result<(), String> {
+    if backup <= 0 || observed < backup || observed - backup >= 119 * 60_000 {
+        return Err("STORAGE_RECOVERY_ORDER_HISTORY_NOT_PROVEN".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod recovery_history_tests {
+    use super::verify_recovery_order_history_window;
+
+    #[test]
+    fn crash_history_window_never_certifies_expired_or_future_backup() {
+        let observed = 1_800_000_000_000;
+        assert!(verify_recovery_order_history_window(observed - 60_000, observed).is_ok());
+        assert!(verify_recovery_order_history_window(observed - 119 * 60_000, observed).is_err());
+        assert!(
+            verify_recovery_order_history_window(observed - 89 * 86_400_000, observed).is_err()
+        );
+        assert!(verify_recovery_order_history_window(observed + 1, observed).is_err());
+        assert!(verify_recovery_order_history_window(0, observed).is_err());
+    }
+}
+
+fn recovery_matches(
+    local: &okx_trade_execution::RecoverySnapshot,
+    central: &RiskAccountBudget,
+) -> Result<(), String> {
+    if !local.coverage_complete
+        || local.unresolved_intents
+        || central.active_reservations != local.active_receipts.len() as u64
+        || dec(&central.occupied_usd)?
+            != local
+                .active_receipts
+                .iter()
+                .map(|r| r.requested_loss_usd)
+                .sum::<Decimal>()
+        || dec(&central.cumulative_loss_usd)? > local.cumulative_loss_usd
+    {
+        return Err("STORAGE_RECOVERY_INCOMPLETE".into());
+    }
+    Ok(())
+}
+type ProtectionRecoveryCheck = (String, String, Option<Decimal>, String, Decimal);
+async fn fresh_recovery_protection(
+    trade: okx_api::TradeApi,
+    (client, instrument, stop, side, owned): ProtectionRecoveryCheck,
+) -> Result<(String, i64), String> {
+    let value = trade.algo_order_by_client_id(&client).await.map_err(err)?;
+    let received = now();
+    if value.instrument_id != instrument
+        || value.client_order_id != client
+        || value.state != "live"
+        || !value.failure_code.is_empty()
+        || value.stop_loss_trigger_price_type != "mark"
+        || Some(dec(&value.stop_loss_trigger_price)?) != stop
+        || dec(&value.size)? < owned
+        || value.side == side
+    {
+        return Err("STORAGE_RECOVERY_PROTECTION_UNVERIFIED".into());
+    }
+    Ok((digest(&value)?, received))
+}
+fn recovery_positions(rows: &[okx_observation::AccountPositionState]) -> Result<String, String> {
+    let mut identity = Vec::new();
+    for p in rows {
+        let qty = dec(&p.position)?;
+        if qty != Decimal::ZERO {
+            identity.push((
+                &p.instrument_id,
+                &p.position_side,
+                &p.margin_mode,
+                exact(qty),
+                p.average_price.clone(),
+            ));
+        }
+    }
+    identity.sort();
+    digest(&identity)
+}
+fn recovery_fresh(observed: i64, received: i64) -> Result<(), String> {
+    if !crate::config::evidence_fresh(received, observed, crate::config::ACCOUNT_MAX_AGE_MS) {
+        return Err("STORAGE_RECOVERY_SOURCE_STALE".into());
+    }
+    Ok(())
+}
+fn recovery_generation(expected: u64, actual: u64, ready: bool) -> Result<(), String> {
+    if expected == 0 || expected != actual || !ready {
+        return Err("STORAGE_RECOVERY_GENERATION_CHANGED".into());
+    }
+    Ok(())
+}
+#[cfg(test)]
+fn commit_recovery(
+    store: &mut okx_trade_execution::AccountStore,
+    local: &okx_trade_execution::RecoverySnapshot,
+    central: &RiskAccountBudget,
+    observed: i64,
+    exchange: &str,
+    evidence: &str,
+) -> okx_trade_execution::StoreResult<()> {
+    recovery_fresh(now(), observed)
+        .map_err(|_| okx_trade_execution::StoreError::Invalid("STORAGE_RECOVERY_SOURCE_STALE"))?;
+    let current = store.recovery_snapshot(now())?;
+    recovery_matches(&current, central)
+        .map_err(|_| okx_trade_execution::StoreError::Invalid("STORAGE_RECOVERY_INCOMPLETE"))?;
+    if digest(&current.active_receipts)
+        .map_err(|_| okx_trade_execution::StoreError::Invalid("STORAGE_RECOVERY_INCOMPLETE"))?
+        != digest(&local.active_receipts)
+            .map_err(|_| okx_trade_execution::StoreError::Invalid("STORAGE_RECOVERY_INCOMPLETE"))?
+    {
+        return Err(okx_trade_execution::StoreError::Invalid(
+            "STORAGE_RECOVERY_INCOMPLETE",
+        ));
+    }
+    // Clearing this storage gate never authorizes POST: the normal fresh
+    // all-account central reserve still charges any newer observed loss first.
+    store.mark_storage_reconciled(observed, exchange, evidence)
+}
+impl TradeService {
+    async fn recovery_central(
+        &self,
+        state: &CentralGovernanceSnapshot,
+        account: &str,
+    ) -> Result<RiskAccountBudget, String> {
+        let result = self
+            .risk
+            .request(self.risk_command(
+                state,
+                format!("recovery_{}", now()),
+                RiskCommandAction::AccountSummary {
+                    account_key: account.into(),
+                },
+            ))
+            .await
+            .map_err(str::to_owned)?;
+        if result.status != RiskDecisionStatus::Observed {
+            return Err("STORAGE_RECOVERY_CENTRAL_UNAVAILABLE".into());
+        }
+        let result = result
+            .account_budget
+            .ok_or("STORAGE_RECOVERY_CENTRAL_MISSING")?;
+        if result.account_key != account {
+            return Err("STORAGE_RECOVERY_ACCOUNT_MISMATCH".into());
+        }
+        Ok(result)
+    }
+    pub(super) async fn reconcile_restored(&self, r: &Arc<AccountResources>) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(60), self.reconcile_restored_bounded(r))
+            .await
+            .map_err(|_| "STORAGE_RECOVERY_AUDIT_TIMEOUT".to_owned())?
+    }
+    async fn reconcile_restored_bounded(&self, r: &Arc<AccountResources>) -> Result<(), String> {
+        let local = recovery_snapshot(&r.execution.store).await?;
+        if !local.required {
+            return Ok(());
+        }
+        let backup = local.backup_at.ok_or("STORAGE_RECOVERY_BACKUP_MISSING")?;
+        let started = now();
+        // A post-crash audit cannot claim coverage from the last 100
+        // completed orders: OKX also drops some canceled/unfilled orders
+        // after two hours. Full recent+archive history must be exhaustively
+        // paginated since the backup. Older recovery needs an independent
+        // retained source and stays blocked instead of treating missing
+        // orders as evidence of absence.
+        verify_recovery_order_history_window(backup, started)?;
+        if !r.source_identity_ready().await {
+            return Err("STORAGE_RECOVERY_SOURCE_UNVERIFIED".into());
+        }
+        let generation = r.private_ws.status().await.connection_generation;
+        let (state, _) = self.authority(r, None).await?;
+        // One native account-wide source, one cutoff, and one content hash.
+        // It exhausts both order endpoints for every instrument class,
+        // all fills and every account bill. Source joins establish complete
+        // economic identities without inventing an opening USD cost.
+        let history = r
+            .execution
+            .history
+            .complete_campaign_account_history(
+                backup,
+                started,
+                jiff::Timestamp::now().as_millisecond(),
+            )
+            .await
+            .map_err(|_| "STORAGE_RECOVERY_ACCOUNT_HISTORY_NOT_PROVEN")?;
+        if history.from_ms != backup || history.through_ms != started {
+            return Err("STORAGE_RECOVERY_ACCOUNT_HISTORY_SCOPE_MISMATCH".into());
+        }
+        let history_proofs = vec![history.source_digest];
+        for order in history.orders {
+            let client = order.client_order_id.clone();
+            let known = r
+                .execution
+                .store
+                .lookup_intent(
+                    deadline(),
+                    crate::execution_store::IntentLookup::new(
+                        okx_trade_execution::TradeIntentLookup::ClientOrderId(client),
+                    )
+                    .map_err(err)?,
+                )
+                .await
+                .map_err(err)?
+                .ok_or("STORAGE_RECOVERY_LOST_ORDER_FACT")?;
+            if known.instrument_id != order.instrument_id
+                || known
+                    .exchange_order_id
+                    .as_ref()
+                    .is_some_and(|id| id != &order.order_id)
+            {
+                return Err("STORAGE_RECOVERY_ORDER_IDENTITY_MISMATCH".into());
+            }
+        }
+        let snapshot = crate::source_capture::capture_account_sources(
+            &r.observer,
+            &r.private_ws,
+            &r.execution,
+        )
+        .await
+        .map_err(err)?;
+        let algos = r
+            .observer
+            .pending_derivative_risk_algos()
+            .await
+            .map_err(err)?;
+        if !algos.complete_within_bound || snapshot.account_uid_fingerprint != r.execution.uid() {
+            return Err("STORAGE_RECOVERY_SOURCE_INCOMPLETE".into());
+        }
+        let mut managed = std::collections::BTreeSet::new();
+        for position in &snapshot.positions {
+            let Some((direction, qty)) = super::reconcile::verified_venue_position_direction(
+                &position.position_side,
+                &position.position,
+            )?
+            else {
+                continue;
+            };
+            let instrument = position.instrument_id.clone();
+            let lots = r
+                .execution
+                .store
+                .active_lots(deadline(), instrument)
+                .await
+                .map_err(err)?;
+            let owned = lots
+                .iter()
+                .filter(|l| l.side == direction)
+                .collect::<Vec<_>>();
+            let total = owned.iter().try_fold(Decimal::ZERO, |total, lot| {
+                if lot.remaining_qty <= Decimal::ZERO {
+                    return Err("STORAGE_RECOVERY_LOT_QUANTITY_INVALID".to_owned());
+                }
+                total
+                    .checked_add(lot.remaining_qty)
+                    .ok_or("STORAGE_RECOVERY_LOT_QUANTITY_OVERFLOW".to_owned())
+            })?;
+            if total != qty {
+                return Err("STORAGE_RECOVERY_UNATTRIBUTED_POSITION".into());
+            }
+            let mut seen_intents = std::collections::BTreeSet::new();
+            for lot in &owned {
+                let id = lot
+                    .intent_id
+                    .clone()
+                    .ok_or("STORAGE_RECOVERY_LOT_OWNER_MISSING")?;
+                if !seen_intents.insert(id.clone()) {
+                    continue;
+                }
+                let owned_intent_qty = owned
+                    .iter()
+                    .filter(|entry| entry.intent_id.as_deref() == Some(id.as_str()))
+                    .try_fold(Decimal::ZERO, |total, entry| {
+                        if entry.remaining_qty <= Decimal::ZERO {
+                            return Err("STORAGE_RECOVERY_LOT_QUANTITY_INVALID".to_owned());
+                        }
+                        total
+                            .checked_add(entry.remaining_qty)
+                            .ok_or("STORAGE_RECOVERY_LOT_QUANTITY_OVERFLOW".to_owned())
+                    })?;
+                let (protection, intent) = recovery_position_owner(&r.execution.store, id).await?;
+                let protection = protection.ok_or("STORAGE_RECOVERY_PROTECTION_MISSING")?;
+                let intent = intent.ok_or("STORAGE_RECOVERY_PROTECTION_INTENT_MISSING")?;
+                if protection.quantity < owned_intent_qty || intent.plan.position_side != lot.side {
+                    return Err("STORAGE_RECOVERY_PROTECTION_INCOMPLETE".into());
+                }
+                // Inventory proves only that an algo ID exists. It cannot
+                // attest a live trigger, correct side or current quantity.
+                // Use the same exact venue-source gate as trade.status.
+                let client = intent
+                    .client_order_id
+                    .get(..31)
+                    .map(|v| format!("s{v}"))
+                    .ok_or("STORAGE_RECOVERY_PROTECTION_CLIENT_INVALID")?;
+                let algo = r
+                    .execution
+                    .trade
+                    .algo_order_by_client_id(&client)
+                    .await
+                    .map_err(|_| "STORAGE_RECOVERY_PROTECTION_READBACK_UNAVAILABLE")?;
+                super::reconcile::verified_live_protection(&intent, owned_intent_qty, &algo)
+                    .map_err(|_| "STORAGE_RECOVERY_PROTECTION_LIVE_UNVERIFIED")?;
+                if algo.algo_order_id != protection.algo_id {
+                    return Err("STORAGE_RECOVERY_PROTECTION_IDENTITY_MISMATCH".into());
+                }
+                managed.insert(protection.algo_id);
+            }
+        }
+        if managed
+            != algos
+                .samples
+                .iter()
+                .map(|a| a.algo_order_id.clone())
+                .collect()
+        {
+            return Err("STORAGE_RECOVERY_UNATTRIBUTED_ALGO".into());
+        }
+        for pending in &snapshot.pending_orders {
+            let client = pending
+                .client_order_id
+                .clone()
+                .ok_or("STORAGE_RECOVERY_UNATTRIBUTED_ORDER")?;
+            if r.execution
+                .store
+                .lookup_intent(
+                    deadline(),
+                    crate::execution_store::IntentLookup::new(
+                        okx_trade_execution::TradeIntentLookup::ClientOrderId(client),
+                    )
+                    .map_err(err)?,
+                )
+                .await
+                .map_err(err)?
+                .is_none()
+            {
+                return Err("STORAGE_RECOVERY_UNATTRIBUTED_ORDER".into());
+            }
+        }
+        recovery_generation(
+            generation,
+            r.private_ws.status().await.connection_generation,
+            r.source_identity_ready().await,
+        )?;
+        recovery_ingest(
+            &r.execution.store,
+            okx_trade_execution::IngestPage {
+                cursor: Some(okx_trade_execution::SourceCursor {
+                    source: "recovery_audit".into(),
+                    stream_partition: "account".into(),
+                    cursor: String::new(),
+                    watermark: started,
+                    generation: i64::try_from(generation)
+                        .map_err(|_| "STORAGE_RECOVERY_GENERATION_CHANGED")?,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let local = recovery_snapshot(&r.execution.store).await?;
+        let central = self
+            .recovery_central(&state, &r.configuration.account_key.wire())
+            .await?;
+        let mut protection_checks = Vec::new();
+        for receipt in &local.active_receipts {
+            let id = receipt.intent_id.clone();
+            let intent = r
+                .execution
+                .store
+                .lookup_intent(
+                    deadline(),
+                    crate::execution_store::IntentLookup::new(
+                        okx_trade_execution::TradeIntentLookup::IntentId(id),
+                    )
+                    .map_err(err)?,
+                )
+                .await
+                .map_err(err)?
+                .ok_or("STORAGE_RECOVERY_INTENT_MISSING")?;
+            let instrument = intent.instrument_id.clone();
+            let lots = r
+                .execution
+                .store
+                .active_lots(deadline(), instrument)
+                .await
+                .map_err(err)?;
+            let owned = lots
+                .iter()
+                .filter(|l| l.intent_id.as_deref() == Some(&receipt.intent_id))
+                .map(|l| l.remaining_qty)
+                .sum::<Decimal>();
+            let actual = snapshot
+                .positions
+                .iter()
+                .filter(|p| {
+                    p.instrument_id == intent.instrument_id
+                        && p.position_side == intent.plan.position_side
+                })
+                .map(|p| dec(&p.position).map(|q| q.abs()))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .sum::<Decimal>();
+            if owned <= Decimal::ZERO || actual < owned || intent.client_order_id.len() < 31 {
+                return Err("STORAGE_RECOVERY_LOT_COVERAGE_MISSING".into());
+            }
+            let client = format!("s{}", &intent.client_order_id[..31]);
+            protection_checks.push((
+                client,
+                intent.instrument_id.clone(),
+                intent.plan.stop_price,
+                intent.plan.side.clone(),
+                owned,
+            ));
+            let result = self
+                .risk
+                .request(self.risk_command(
+                    &state,
+                    format!("recover_{}", receipt.intent_id),
+                    RiskCommandAction::Inspect {
+                        reservation_key: receipt.reservation_key.clone(),
+                        plan_sha256: receipt.plan_hash.clone(),
+                    },
+                ))
+                .await
+                .map_err(str::to_owned)?;
+            if result.status != RiskDecisionStatus::Observed
+                || result.reservation_key.as_deref() != Some(&receipt.reservation_key)
+                || result.reservation_state != Some(RiskReservationState::Open)
+            {
+                return Err("STORAGE_RECOVERY_RESERVATION_UNRESOLVED".into());
+            }
+        }
+        use futures_util::{StreamExt, TryStreamExt, stream};
+        // A single bounded refresh follows the slower historical audit. Each
+        // response retains its real receipt time; audit start is not freshness.
+        let protection_calls = protection_checks
+            .into_iter()
+            .map(|check| fresh_recovery_protection(r.execution.trade.clone(), check))
+            .collect::<Vec<_>>();
+        let protections = stream::iter(protection_calls)
+            .buffer_unordered(4)
+            .try_collect::<Vec<_>>();
+        let (fresh_snapshot, fresh_algos, (after, central_received), protections) = tokio::try_join!(
+            async { r.observer.snapshot().await.map_err(err) },
+            async {
+                r.observer
+                    .pending_derivative_risk_algos()
+                    .await
+                    .map_err(err)
+            },
+            async {
+                let value = self
+                    .recovery_central(&state, &r.configuration.account_key.wire())
+                    .await?;
+                Ok::<_, String>((value, now()))
+            },
+            protections,
+        )?;
+        let observed = now();
+        let account_received = jiff::Timestamp::from_str(&fresh_snapshot.source_received_at)
+            .map_err(|_| "STORAGE_RECOVERY_ACCOUNT_TIME_INVALID")?
+            .as_millisecond();
+        recovery_fresh(observed, account_received)?;
+        recovery_fresh(
+            observed,
+            i64::try_from(fresh_algos.received_at_ms)
+                .map_err(|_| "STORAGE_RECOVERY_ALGO_TIME_INVALID")?,
+        )?;
+        recovery_fresh(observed, central_received)?;
+        for (_, received) in &protections {
+            recovery_fresh(observed, *received)?;
+        }
+        recovery_generation(
+            generation,
+            r.private_ws.status().await.connection_generation,
+            r.source_identity_ready().await,
+        )?;
+        if after != central
+            || !fresh_algos.complete_within_bound
+            || fresh_snapshot.account_uid_fingerprint != r.execution.uid()
+            || recovery_positions(&snapshot.positions)?
+                != recovery_positions(&fresh_snapshot.positions)?
+            || digest(&snapshot.pending_orders)? != digest(&fresh_snapshot.pending_orders)?
+            || digest(&algos.samples)? != digest(&fresh_algos.samples)?
+        {
+            return Err("STORAGE_RECOVERY_PROOF_CHANGED".into());
+        }
+        for source in ["account_snapshot", "orders"] {
+            recovery_ingest(
+                &r.execution.store,
+                okx_trade_execution::IngestPage {
+                    cursor: Some(okx_trade_execution::SourceCursor {
+                        source: source.into(),
+                        stream_partition: "account".into(),
+                        cursor: String::new(),
+                        watermark: account_received,
+                        generation: i64::try_from(generation)
+                            .map_err(|_| "STORAGE_RECOVERY_GENERATION_CHANGED")?,
+                        coverage_gaps: String::new(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
+        let proof_floor = protections
+            .iter()
+            .map(|(_, received)| *received)
+            .chain([
+                account_received,
+                fresh_algos.received_at_ms as i64,
+                central_received,
+            ])
+            .min()
+            .ok_or("STORAGE_RECOVERY_SOURCE_MISSING")?;
+        let local = recovery_snapshot(&r.execution.store).await?;
+        recovery_matches(&local, &central)?;
+        let exchange = digest(&(
+            fresh_snapshot,
+            fresh_algos,
+            history_proofs,
+            generation,
+            protections,
+        ))?;
+        let evidence = digest(
+            &json!({"central":central,"storage_gate_only":true,"post_requires_fresh_all_account_reserve":true,"local_cumulative_loss_usd":exact(local.cumulative_loss_usd)}),
+        )?;
+        {
+            let (owner, account) = r.execution.store.scope();
+
+            return owner
+                .commit_storage_recovery(
+                    deadline(),
+                    account.to_owned(),
+                    okx_trade_execution::account_worker::NativeRecoveryProof {
+                        generation: i64::try_from(generation)
+                            .map_err(|_| "STORAGE_RECOVERY_GENERATION_CHANGED")?,
+                        observed_at_ms: proof_floor,
+                        expected_receipts_digest: digest(&local.active_receipts)?,
+                        active_reservations: central.active_reservations,
+                        occupied_loss_usd: central.occupied_usd.clone(),
+                        cumulative_loss_usd: central.cumulative_loss_usd.clone(),
+                        exchange_evidence: exchange,
+                        financial_evidence: evidence,
+                    },
+                )
+                .await
+                .map_err(err);
+        }
+        // The historical standalone SQL store is not a production recovery
+        // backend. A missing Native owner cannot clear a recovery gate.
+    }
+}
+
+async fn recovery_snapshot(
+    store: &ExecutionStore,
+) -> Result<okx_trade_execution::RecoverySnapshot, String> {
+    store.recovery_snapshot(deadline()).await.map_err(err)
+}
+async fn recovery_ingest(
+    store: &ExecutionStore,
+    page: okx_trade_execution::IngestPage,
+) -> Result<(), String> {
+    store
+        .ingest_source_page(deadline(), page)
+        .await
+        .map_err(err)
+}
+async fn recovery_position_owner(
+    store: &ExecutionStore,
+    id: String,
+) -> Result<
+    (
+        Option<okx_trade_execution::ProtectionReceipt>,
+        Option<okx_trade_execution::StoredIntent>,
+    ),
+    String,
+> {
+    store
+        .recovery_position_owner(deadline(), id)
+        .await
+        .map_err(err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn restored() -> okx_trade_execution::AccountStore {
+        let directory = std::env::temp_dir().join(format!(
+            "okx-recovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let key = format!("okx:real:{}", "a".repeat(64));
+        let meta = okx_trade_execution::AccountMeta {
+            initialize_operation_id: "initialize_recovery".into(),
+            release_id: "release".into(),
+            account_key: key.clone(),
+            installation_id: "installation".into(),
+            initialized_at: 1,
+            opening_source: "authenticated".into(),
+        };
+        let opening = okx_trade_execution::OpeningSnapshot {
+            opening_equity_usd: Decimal::from(100),
+            source_ref: "authenticated".into(),
+            observed_at: 1,
+            positions: 0,
+            orders: 0,
+            conditional_orders: 0,
+            liabilities: Decimal::ZERO,
+            balances: vec![("USDT".into(), Decimal::from(100))],
+        };
+        let source = okx_trade_execution::AccountStore::initialize_flat(
+            directory.join("source.db"),
+            meta,
+            &opening,
+        )
+        .unwrap();
+        source.backup(directory.join("restored.db")).unwrap();
+        let mut store = okx_trade_execution::AccountStore::open_existing(
+            directory.join("restored.db"),
+            &key,
+            "installation",
+        )
+        .unwrap();
+        let at = now();
+        for (source, part) in [
+            ("fills", "SPOT"),
+            ("fills", "SWAP"),
+            ("fills", "FUTURES"),
+            ("fills", "OPTION"),
+            ("bills", "account"),
+            ("orders", "account"),
+            ("account_snapshot", "account"),
+            ("recovery_audit", "account"),
+        ] {
+            store
+                .ingest_page(&okx_trade_execution::IngestPage {
+                    cursor: Some(okx_trade_execution::SourceCursor {
+                        source: source.into(),
+                        stream_partition: part.into(),
+                        cursor: String::new(),
+                        watermark: at,
+                        generation: 1,
+                        coverage_gaps: String::new(),
+                    }),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        store
+    }
+    fn flat() -> RiskAccountBudget {
+        RiskAccountBudget {
+            account_key: format!("okx:real:{}", "a".repeat(64)),
+            active_reservations: 0,
+            occupied_usd: "0".into(),
+            cumulative_loss_usd: "0".into(),
+            latest_activity_ms: 0,
+        }
+    }
+    #[test]
+    fn restored_flat_clears() {
+        let mut store = restored();
+        let local = store.recovery_snapshot(now()).unwrap();
+        assert!(local.required);
+        commit_recovery(
+            &mut store,
+            &local,
+            &flat(),
+            now(),
+            "fresh-exchange",
+            "addressed-central",
+        )
+        .unwrap();
+        assert!(!store.storage_recovery_required().unwrap());
+    }
+    #[test]
+    fn unknown_central_never_clears() {
+        let mut store = restored();
+        let local = store.recovery_snapshot(now()).unwrap();
+        let mut central = flat();
+        central.active_reservations = 1;
+        central.occupied_usd = "1".into();
+        assert!(commit_recovery(&mut store, &local, &central, now(), "fresh", "central").is_err());
+        assert!(store.storage_recovery_required().unwrap());
+    }
+    #[test]
+    fn fresh_generation_required() {
+        assert!(recovery_generation(2, 2, true).is_ok());
+        assert!(recovery_generation(2, 3, true).is_err());
+        assert!(recovery_generation(2, 2, false).is_err());
+        assert!(recovery_generation(0, 0, true).is_err());
+        let mut store = restored();
+        store
+            .ingest_page(&okx_trade_execution::IngestPage {
+                cursor: Some(okx_trade_execution::SourceCursor {
+                    source: "orders".into(),
+                    stream_partition: "account".into(),
+                    cursor: String::new(),
+                    watermark: now(),
+                    generation: 2,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        let local = store.recovery_snapshot(now()).unwrap();
+        assert!(
+            commit_recovery(
+                &mut store,
+                &local,
+                &flat(),
+                now(),
+                "mixed-generation",
+                "central"
+            )
+            .is_err()
+        );
+        assert!(store.storage_recovery_required().unwrap());
+    }
+    #[test]
+    fn partial_source_never_clears() {
+        let mut store = restored();
+        store
+            .ingest_page(&okx_trade_execution::IngestPage {
+                cursor: Some(okx_trade_execution::SourceCursor {
+                    source: "orders".into(),
+                    stream_partition: "account".into(),
+                    cursor: "more".into(),
+                    watermark: now(),
+                    generation: 1,
+                    coverage_gaps: String::new(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        let local = store.recovery_snapshot(now()).unwrap();
+        assert!(commit_recovery(&mut store, &local, &flat(), now(), "fresh", "central").is_err());
+        assert!(store.storage_recovery_required().unwrap());
+    }
+    #[test]
+    fn newer_local_loss_recovers_without_resetting_central() {
+        let mut store = restored();
+        store
+            .ingest_page_with_usd(
+                &okx_trade_execution::IngestPage {
+                    finance: vec![okx_trade_execution::FinanceEntry {
+                        entry_id: "recovery-fee".into(),
+                        economic_event_key: "recovery-trade-fee".into(),
+                        component: "FEE".into(),
+                        allocation_leg: "account".into(),
+                        amount: -Decimal::ONE,
+                        currency: "USD".into(),
+                        instance_id: None,
+                        source_ref: "venue-bill".into(),
+                        time: now(),
+                        reverses_entry_id: None,
+                    }],
+                    ..Default::default()
+                },
+                &okx_trade_execution::UsdConversionEvidence {
+                    observed_at: now(),
+                    source_digest: "attested-usd".into(),
+                    usd_per_currency: std::collections::BTreeMap::from([(
+                        "USD".into(),
+                        Decimal::ONE,
+                    )]),
+                },
+            )
+            .unwrap();
+        // Finance ingest on a contended Windows runner can exceed the
+        // production 5s recovery freshness window. The test must provide
+        // fresh source cursors before asserting that recovery is permitted,
+        // never weaken the fail-closed production TTL.
+        let fresh_observation = now();
+        for source in ["orders", "account_snapshot"] {
+            store
+                .ingest_page(&okx_trade_execution::IngestPage {
+                    cursor: Some(okx_trade_execution::SourceCursor {
+                        source: source.into(),
+                        stream_partition: "account".into(),
+                        cursor: String::new(),
+                        watermark: fresh_observation,
+                        generation: 1,
+                        coverage_gaps: String::new(),
+                    }),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let local = store.recovery_snapshot(now()).unwrap();
+        assert!(
+            local.coverage_complete,
+            "recovery test requires fresh source cursors"
+        );
+        let expired = store.recovery_snapshot(fresh_observation + 5_001).unwrap();
+        assert!(
+            !expired.coverage_complete,
+            "the same recovery evidence must fail closed once its 5s source TTL expires"
+        );
+        assert_eq!(
+            recovery_matches(&expired, &flat()).unwrap_err(),
+            "STORAGE_RECOVERY_INCOMPLETE",
+            "production recovery authorization must refuse expired source evidence"
+        );
+        assert_eq!(local.cumulative_loss_usd, Decimal::ONE);
+        commit_recovery(
+            &mut store,
+            &local,
+            &flat(),
+            now(),
+            "fresh-exchange",
+            "central-with-earlier-loss",
+        )
+        .unwrap();
+        assert!(!store.storage_recovery_required().unwrap());
+        assert_eq!(store.policy().unwrap().4, Decimal::ONE);
+        let mut central = flat();
+        central.cumulative_loss_usd = "2".into();
+        assert!(recovery_matches(&local, &central).is_err());
+    }
+    #[test]
+    fn slow_historical_audit_accepts_fresh_final_receipts() {
+        let audit_started = 1000;
+        let observed = audit_started + 20_000;
+        for receipt in [observed - 1000, observed - 4000, observed] {
+            assert!(recovery_fresh(observed, receipt).is_ok());
+        }
+        assert!(recovery_fresh(observed, audit_started).is_err());
+        assert!(recovery_fresh(observed, observed - 5001).is_err());
+        assert!(recovery_fresh(observed, observed + 1).is_err());
+        assert!(recovery_fresh(observed, 0).is_err());
+        let mut store = restored();
+        let local = store.recovery_snapshot(now()).unwrap();
+        assert!(
+            commit_recovery(
+                &mut store,
+                &local,
+                &flat(),
+                now() - 5001,
+                "expired-final-receipt",
+                "central"
+            )
+            .is_err()
+        );
+        assert!(store.storage_recovery_required().unwrap());
+    }
+    #[test]
+    fn fresh_position_identity_ignores_market_mark_changes() {
+        let p:okx_observation::AccountPositionState=serde_json::from_value(json!({"instrument_type":"SWAP","instrument_id":"BTC-USDT-SWAP","position":"1","position_side":"long","margin_mode":"isolated","average_price":"100","mark_price":"101"})).unwrap();
+        let mut fresh = p.clone();
+        fresh.mark_price = Some("102".into());
+        fresh.unrealized_pnl = Some("2".into());
+        assert_eq!(
+            recovery_positions(std::slice::from_ref(&p)).unwrap(),
+            recovery_positions(&[fresh.clone()]).unwrap()
+        );
+        fresh.position = "2".into();
+        assert_ne!(
+            recovery_positions(&[p]).unwrap(),
+            recovery_positions(&[fresh]).unwrap()
+        );
+    }
+}

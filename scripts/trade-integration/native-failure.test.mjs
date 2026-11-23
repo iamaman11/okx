@@ -53,12 +53,12 @@ test("malformed duplicate oversized and untyped Native teardown markers fail clo
 
 test("a recovery-task panic survives the later public Status timeout", () => {
   const result = summarizeRustPanics({stderr:
-    "thread 'tokio-runtime-worker' (10) panicked at crates\\okx-agent\\src\\trade_integration_t10_12.rs:381:5:\n" +
+    "thread 'tokio-runtime-worker' (10) panicked at crates\\okx-trading-engine\\src\\trade_integration_t10_12.rs:381:5:\n" +
     "assertion failed: OLD_REPLY_PROBE_LOST\n\n" +
-    "thread 'cloudflare_transport::tests::campaign' (11) panicked at crates\\okx-agent\\src\\cloudflare_transport.rs:2943:14:\n" +
+    "thread 'cloudflare_transport::tests::campaign' (11) panicked at crates\\okx-trading-engine\\src\\cloudflare_transport.rs:2943:14:\n" +
     "T10-12 original public Status never reconciled after Worker reconnect: Elapsed(())\n"});
   assert.equal(result.count, 2);
-  assert.equal(result.panics[0].location, "crates/okx-agent/src/trade_integration_t10_12.rs:381:5");
+  assert.equal(result.panics[0].location, "crates/okx-trading-engine/src/trade_integration_t10_12.rs:381:5");
   assert.match(result.panics[0].reason, /OLD_REPLY_PROBE_LOST/);
   assert.match(result.panics[1].reason, /Elapsed/);
   assert.equal(result.cross_stream_order, "UNKNOWN");
@@ -66,7 +66,7 @@ test("a recovery-task panic survives the later public Status timeout", () => {
 
 test("Rust failure evidence is bounded and never emits private assertion payloads", () => {
   const sentinel = "PRIVATE_SENTINEL_87654321";
-  const header = "thread 'worker' panicked at C:\\private\\repo\\crates\\okx-agent\\src\\risk_bridge.rs:39:9:\n";
+  const header = "thread 'worker' panicked at C:\\private\\repo\\crates\\okx-trading-engine\\src\\risk_bridge.rs:39:9:\n";
   const result = summarizeRustPanics({stdout:(header + "raw_response={\"token\":\"" + sentinel + "\"}\n").repeat(30)});
   assert.equal(result.count, 30);
   assert.equal(result.panics.length, 16);
@@ -87,7 +87,7 @@ test("separate stdout and stderr failures do not acquire invented causal orderin
 
 test("redacted source payload retains its fixed diagnostic code, never the route or body", () => {
   const x=summarizeRustPanics({stderr:
-    "thread 'campaign' panicked at crates/okx-agent/src/trade_integration_t10_09.rs:400:13:\n"+
+    "thread 'campaign' panicked at crates/okx-trading-engine/src/trade_integration_t10_09.rs:400:13:\n"+
     // OkxError::Response Display in crates/okx-api/src/error.rs and the
     // RecordedAccountHttp exhausted-source error in accounts.rs.
     'T10-09 authenticated terminal B order readback: "OKX response error: TRANSCRIPT_SOURCE_PAGE_UNEXPECTED_OR_EXHAUSTED:fixture-observer-b:/api/v5/account/balance?ccy=USDT:method=GET:task=Some(Id(42)):clOrdId=None"\n'});
@@ -125,7 +125,7 @@ test("secret and source-bearing diagnostic lines must not be emitted", () => {
 });
 test("a wrapper-only exit is not mistaken for a Rust failure", () => {
   const x=summarizeNativeWorkerdFailure({code:"ETIMEDOUT",
-    stderr:"Command failed: C:\\Program Files\\nodejs\\node.exe\nCompiling okx-agent v0.1",
+    stderr:"Command failed: C:\\Program Files\\nodejs\\node.exe\nCompiling okx-trading-engine v0.1",
     stdout:"T09_2_PHASE_V1:AFTER_WORKER_READBACK"});
   assert.equal(x.error_class,"UNCLASSIFIED");
   assert.equal(x.outer_exit_code,"UNKNOWN");
@@ -137,7 +137,7 @@ test("managed Add missing intent retains the exact safe refusal without response
     rejection_origin:"CENTRAL",send_state:"NOT_STARTED",intent_id:"a".repeat(64)},
     raw_response:{api_key:"PRIVATE_SENTINEL_87654321"}};
   const result=summarizeRustPanics({stderr:
-    "thread 'campaign' panicked at crates/okx-agent/src/trade_integration_t09_4.rs:959:13:\n"+
+    "thread 'campaign' panicked at crates/okx-trading-engine/src/trade_integration_t09_4.rs:959:13:\n"+
     "T09_4_MANAGED_ADD_MISSING_INTENT_V1:"+JSON.stringify(response)+"\n"});
   assert.match(result.panics[0].reason,/REJECTED:BUDGET_BOUND_BREACH:CENTRAL:NOT_STARTED/);
   assert.deepEqual(result.panics[0].detail,{marker:"T09_4_MANAGED_ADD_MISSING_INTENT_V1",parse_state:"PARSED",
@@ -165,7 +165,7 @@ test("managed Add diagnostic rejects arbitrary values even in selected fields", 
 });
 
 test("Rust count assertion preserves integers but never string assertion payloads", () => {
-  const header="thread 'campaign' panicked at crates/okx-agent/src/trade_integration_t10_02.rs:123:5:\n";
+  const header="thread 'campaign' panicked at crates/okx-trading-engine/src/trade_integration_t10_02.rs:123:5:\n";
   const numeric=summarizeRustPanics({stderr:header+
     "assertion `left == right` failed: T10-02 follows one real managed Add\n  left: 6\n right: 5\n"});
   assert.deepEqual(numeric.panics[0].integer_comparison,{left:6,right:5});
@@ -180,7 +180,7 @@ test("unexpected T10-02 posts preserve only bounded typed identities before the 
     posts:[{ordinal:6,route:"/api/v5/trade/cancel-order",client_id_sha256:"a".repeat(64),algo_id_sha256:null,
       reduce_only:true,side:"sell",size:"0.20",raw_body:{api_key:"SECRET_SENTINEL"}}]};
   const result=summarizeRustPanics({stderr:"T10_02_UNEXPECTED_POSTS_V1:"+JSON.stringify(record)+"\n"+
-    "thread 'campaign' panicked at crates/okx-agent/src/trade_integration_t10_02.rs:168:5:\n"+
+    "thread 'campaign' panicked at crates/okx-trading-engine/src/trade_integration_t10_02.rs:168:5:\n"+
     "assertion `left == right` failed\n left: 6\n right: 5\n"});
   const detail=result.diagnostics[0].detail;
   assert.equal(detail.posts_before,5);assert.equal(detail.posts_after,6);

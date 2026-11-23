@@ -1,6 +1,6 @@
 //! Venue normalization adapters and compatibility exports for canonical facts.
 //!
-//! Shared facts now live in `okx-kernel`; their types, field order and serde
+//! Shared facts now live in `okx-domain-core`; their types, field order and serde
 //! representation remain available through this crate's existing exports.
 //! API-dependent constructors moved to free functions in the adapter modules.
 //! This changes the Rust source API; callers should migrate as follows:

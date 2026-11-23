@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use okx_github::{GitHubClient, IssueCommentCursor, OWNER_USER_ID, REPOSITORY_ID};
-use okx_protocol::{
+use okx_ipc_contracts::{
     AGENT_REQUEST_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponse,
     HOST_CONTROL_REQUEST_SCHEMA_V1, HostControlOperation, HostControlRequest, HostControlResult,
     InstrumentTypeFilter, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection, MailboxEnvelope,
@@ -29,13 +29,13 @@ pub enum BridgeError {
     #[error("GitHub transport failed: {0}")]
     Github(#[from] okx_github::GitHubError),
     #[error("protocol validation failed: {0}")]
-    Protocol(#[from] okx_protocol::ProtocolError),
+    Protocol(#[from] okx_ipc_contracts::ProtocolError),
     #[error("JSON failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("base64 failed: {0}")]
     Base64(#[from] base64::DecodeError),
     #[error("crypto failed: {0}")]
-    Crypto(#[from] okx_protocol::crypto::CryptoError),
+    Crypto(#[from] okx_ipc_contracts::crypto::CryptoError),
     #[error("agent mailbox identity was not found in the bounded tail")]
     AgentIdentityMissing,
     #[error("agent mailbox identity is invalid")]
@@ -183,7 +183,7 @@ impl Bridge {
             })
             .ok_or(BridgeError::AgentIdentityMissing)?;
 
-        okx_protocol::validate_agent_key_id(&identity.key_id)?;
+        okx_ipc_contracts::validate_agent_key_id(&identity.key_id)?;
         let public = STANDARD.decode(&identity.public_key)?;
         let public: [u8; 32] = public
             .try_into()

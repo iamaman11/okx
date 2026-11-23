@@ -6,10 +6,10 @@ reported as a successful financial test run.
 
 | Changed files (complete GitHub diff) | Direct owner and consumers | Ready CI | Native release artifact |
 | --- | --- | --- | --- |
-| Only `crates/okx-host-launcher/src/**/*.rs` (+ docs) | Launcher, plus CONTROL consumer | `windows-host-components`; no Engine/SQL compilation | None: host identities are not an installable four-EXE bundle |
-| Only `crates/okx-host-control/src/**/*.rs` and optional Launcher Rust source (+ docs) | CONTROL and Launcher | `windows-host-components`; no Engine/SQL compilation | None |
-| Agent/TradeService, `okx-execution` or financial SQL | Engine, RiskBook, SQL and trade-side consumers | Mandatory `windows-native-full`, B1, Linux financial regressions | Full verified Windows bundle on qualifying PR |
-| Shared `okx-api`, `okx-runtime`, `okx-protocol`, root Cargo files, any `Cargo.toml`, build scripts, installer/packaging scripts or CI workflow | All affected consumers | Full Native matrix (fail closed) | Full only after acceptance |
+| Only `crates/okx-host-launcher/src/**/*.rs` (+ docs) | Launcher, plus Host Controller consumer | `host-lifecycle-windows`; no Engine/SQL compilation | None: host identities are not an installable four-EXE bundle |
+| Only `crates/okx-host-controller/src/**/*.rs` and optional Launcher Rust source (+ docs) | Host Controller and Launcher | `host-lifecycle-windows`; no Engine/SQL compilation | None |
+| Trading Engine/TradeService, `okx-trade-execution` or financial SQL | Engine, RiskBook, SQL and trade-side consumers | Mandatory `trading-engine-windows-full`, B1, Linux financial regressions | Full verified Windows bundle on qualifying PR |
+| Shared `okx-api`, `okx-market-runtime`, `okx-ipc-contracts`, root Cargo files, any `Cargo.toml`, build scripts, installer/packaging scripts or CI workflow | All affected consumers | Full Native matrix (fail closed) | Full only after acceptance |
 | Research-only + accepted immutable Native base | Research/IPC consumers | Separate Research gate with independently verified Cargo closure | Composed Research-only bundle |
 | Documentation only / Cloudflare-only | Documentation / MCP | Existing scoped gates | No fresh Native build |
 | Mixed host + Research or Cloudflare, unknown paths, renames, incomplete diff | Unknown/shared impact | Full Native matrix | Only if accepted |
@@ -23,8 +23,8 @@ in `scripts/check_ci_native_scope.py --self-test`.
 `scripts/check_architecture.py` separately rejects direct and transitive
 financial/market dependencies from CONTROL or Launcher, as well as a Launcher
 dependency on CONTROL. CONTROL may depend on Launcher and the versioned
-protocol. The financial SQLite owner remains in `okx-execution` and its
-TradeService/Engine consumers remain in `okx-agent`; this stage does **not**
+protocol. The financial SQLite owner remains in `okx-trade-execution` and its
+TradeService/Engine consumers remain in `okx-trading-engine`; this stage does **not**
 claim separate financial SQL and Engine release cycles.
 
 The host job runs the existing installation-root safety fixture, architecture
@@ -32,7 +32,7 @@ guard, formatting, clippy, Rust tests and Windows release builds for both
 CONTROL and Launcher. Its exact source HEAD, tree, component scope and binary
 hashes are retained as **non-deployable** evidence. It never publishes a new
 Native base; `.github/workflows/publish-native-base.yml` continues to require
-fresh `windows-native-full` plus B1 and a complete four-EXE artifact.
+fresh `trading-engine-windows-full` plus B1 and a complete four-EXE artifact.
 
 Draft PRs with only host Rust sources run direct Launcher and CONTROL Cargo
 tests of library and binary targets via `scripts/check_p0.py`, reusing the

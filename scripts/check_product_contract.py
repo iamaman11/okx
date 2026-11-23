@@ -18,7 +18,7 @@ def check_source(text):
     return sorted(set(FORBIDDEN.findall(text)))
 def check(root):
     errors=[]
-    for base in ['crates/okx-agent/src','crates/okx-execution/src','crates/okx-protocol/src','crates/okx-host-control/src','cloudflare/okx-mcp/src']:
+    for base in ['crates/okx-trading-engine/src','crates/okx-trade-execution/src','crates/okx-ipc-contracts/src','crates/okx-host-controller/src','cloudflare/okx-mcp/src']:
         for path in (root/base).rglob('*'):
             if path.suffix not in {'.rs','.ts'} or '.test.' in path.name:continue
             for symbol in check_source(path.read_text(encoding='utf-8-sig')):errors.append(f'{path.relative_to(root)}: obsolete production API {symbol}')

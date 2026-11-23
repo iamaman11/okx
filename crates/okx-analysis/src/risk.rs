@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use okx_kernel::observation_model::{
+use okx_domain_core::observation_model::{
     AccountLedgerSummary, AccountPositionState, AccountSnapshot, CurrencyAggregate,
 };
 use rust_decimal::Decimal;
@@ -1878,7 +1878,7 @@ mod tests {
         );
     }
 
-    use okx_kernel::observation_model::{
+    use okx_domain_core::observation_model::{
         AccountAuthorityEvidence, AccountBalanceState, AccountLedgerSummary, AccountPositionState,
         AccountSnapshot, CurrencyAggregate,
     };
