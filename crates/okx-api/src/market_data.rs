@@ -322,6 +322,39 @@ impl MarketDataApi {
         Self { client }
     }
 
+    /// Fixed public GET catalog for the separate Research process. All routes
+    /// use this client's existing shared RateBudget and unauthenticated HTTP.
+    /// Unknown routes fail before transport, including direct in-process calls.
+    pub async fn research_catalog_page(
+        &self,
+        route: &str,
+        instrument_id: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: u16,
+    ) -> Result<CapturedPublicRows<serde_json::Value>, OkxError> {
+        if !(1..=100).contains(&limit) {
+            return Err(OkxError::Response("invalid research catalog limit".into()));
+        }
+        let path = match route {
+            "recent_trades" if after.is_none() && before.is_none() => "/api/v5/market/trades",
+            "history_trades" => "/api/v5/market/history-trades",
+            _ => return Err(OkxError::Response("unknown research public route".into())),
+        };
+        let mut params = vec![("instId", instrument_id.to_owned())];
+        if route == "history_trades" {
+            params.push(("type", "1".to_owned()));
+        }
+        if let Some(value) = after {
+            params.push(("after", value.to_owned()));
+        }
+        if let Some(value) = before {
+            params.push(("before", value.to_owned()));
+        }
+        params.push(("limit", limit.to_string()));
+        self.client.public_get_captured(path, &params).await
+    }
+
     pub async fn ticker(&self, instrument_id: &str) -> Result<PublicTicker, OkxError> {
         one(
             self.client
