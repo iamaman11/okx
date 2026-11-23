@@ -79,7 +79,7 @@ the separate Worker build and existing verification/staging/handoff contracts.
 The first release requires full CI, merge and the existing accepted manifest;
 later Research-only releases reuse that verified, merged base. The successful
 first full-build CI on `dacab8c5` does not itself exercise the separate
-`research-service-windows` branch, which requires an explicitly selected accepted
+`research-service-tests-windows` branch, which requires an explicitly selected accepted
 base. Actual host installation, process/PID continuity and physical/live acceptance
 remain under #449. An expired or missing origin artifact is rejected; there is
 no additional credential-backed archive cache or recovery installer.

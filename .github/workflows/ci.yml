@@ -8,8 +8,10 @@ on:
       - main
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # The release step is part of this main CI run. A later main commit must not
+  # cancel an in-flight verified publication; stale commits are checked by SHA.
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -17,10 +19,10 @@ permissions:
   actions: read
 
 jobs:
-  verified-research-bundle-assembly:
+  research_package_proof:
     # Supplementary Draft proof for #537 T10. Does not compile or deploy an
     # Engine/Worker and never substitutes for mandatory Ready Native CI.
-    name: verified-research-bundle-assembly
+    name: research-package-proof
     if: github.event_name == 'pull_request' && github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'research-composition-evidence')
     runs-on: windows-latest
     steps:
@@ -102,6 +104,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          node scripts/test-ci-main-routing.cjs
           node scripts/test-ci-component-impact.cjs
           files=()
           if [[ "${{ github.event_name }}" == 'pull_request' ]]; then
@@ -130,7 +133,8 @@ jobs:
           retention-days: 14
 
   component_impact:
-    name: component-impact
+    # This is the protected classifier itself; no redundant alias job.
+    name: classify
     runs-on: ubuntu-latest
     outputs:
       build_required: ${{ steps.classify.outputs.build_required }}
@@ -315,19 +319,6 @@ jobs:
           echo "BUILD_REQUIRED=${{ steps.classify.outputs.build_required }}"
           echo "REASON=${{ steps.classify.outputs.reason }}"
 
-  required_classify:
-    # Existing main protection requires this display name. The canonical owner
-    # job is component-impact; this alias fails if that real classifier fails.
-    name: classify
-    needs: component_impact
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify component impact classification
-        env:
-          CLASSIFIER_RESULT: ${{ needs.component_impact.result }}
-        run: test "$CLASSIFIER_RESULT" = "success"
-
   draft-component-tests:
     name: draft-component-tests
     if: github.event_name == 'pull_request' && github.event.pull_request.draft
@@ -348,6 +339,7 @@ jobs:
         run: |
           python3 -B scripts/check_ci_native_scope.py --self-test
           python3 -B scripts/test_check_p0.py
+          node scripts/test-ci-main-routing.cjs
           node scripts/test-ci-component-impact.cjs
           python3 scripts/check_p0.py --base "$BASE_SHA" --plan
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
@@ -371,200 +363,6 @@ jobs:
         run: |
           echo "Cargo cache exact hit: $CACHE_HIT" >> "$GITHUB_STEP_SUMMARY"
           python3 scripts/check_p0.py --base "$BASE_SHA"
-
-  # #512: one bounded compiler/test cycle while its PR is Draft. This job
-  # verifies real production and test configurations; it is NOT full acceptance.
-  draft-trading-migration-512:
-    name: draft-trading-migration-512
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.pull_request.head.ref == 'work/512-rust-boundaries-20261116' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 18
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
-        with:
-          toolchain: 1.95.0
-          components: rustfmt
-      - name: Fast formatting gate before any Cargo build
-        run: cargo fmt --all -- --check
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          cache-on-failure: true
-      - name: Existing architecture rules and negative self-tests
-        run: |
-          python3 scripts/check_architecture.py --self-test
-          python3 scripts/check_architecture.py
-          python3 scripts/acceptance_product.py --self-test
-      - name: Compile shipping Engine without retired finance path
-        run: |
-          cargo check --locked -p okx-trade-execution --lib
-          cargo check --locked -p okx-trading-engine --bin okx-agent
-      - name: Compile exact Agent Rust unit-test source
-        run: cargo test --locked -p okx-trading-engine --lib --no-run
-      - name: Compile all Agent targets including examples and integration targets
-        run: cargo check --locked -p okx-trading-engine --all-targets
-      - name: Negative compile contracts for retired public financial APIs
-        run: |
-          cargo test --locked -p okx-trade-execution --doc
-          cargo test --locked -p okx-trading-engine --doc
-      - name: Finance owner durable diagnostic restore and both indexed query plans
-        run: |
-          cargo test --locked -p okx-trade-execution --lib risk_book_contract_native_durable_operation_diagnostics_scoped_readback -- --nocapture
-          cargo test --locked -p okx-trade-execution --lib terminal_diagnostics_ -- --nocapture
-      - name: Current finance owner startup queue and busy diagnostics, not legacy workers
-        run: |
-          cargo test --locked -p okx-trade-execution --lib risk_book_contract_new_owner_exact_replay_reopen_and_no_trade_permission -- --nocapture
-          cargo test --locked -p okx-trade-execution --lib risk_book_contract_fresh_owner_queue_bounded_128_fifo_and_shutdown -- --nocapture
-          cargo test --locked -p okx-trade-execution --lib risk_book_contract_native_diagnostic_busy_deadline_preserves_identity_across_reopen -- --nocapture
-      - name: Original failed SQL job and unchanged receipt on current finance owner
-        run: cargo test --locked -p okx-trade-execution --lib risk_book_contract_fresh_owner_failed_job_counts_and_preserves_installation -- --nocapture
-      - name: Build actual research child for draft session contracts
-        run: |
-          cargo build --locked -p okx-research-service --bin okx-research-service
-          echo "OKX_RESEARCH_SERVICE_TEST_EXE=$GITHUB_WORKSPACE/target/debug/okx-research-service" >> "$GITHUB_ENV"
-      - name: Production startup, source independence and correlated research failures
-        shell: bash
-        run: |
-          set -euo pipefail
-          required_contract() {
-            local output
-            output=$(mktemp)
-            cargo test --locked "$@" 2>&1 | tee "$output"
-            grep -Eq 'test result: ok\. +[1-9][0-9]* passed;' "$output"
-          }
-          required_contract -p okx-trading-engine finance_startup
-          required_contract -p okx-trading-engine --lib query::public_dispatch_tests::
-          required_contract -p okx-market-runtime --lib public::reference_refresh::tests::
-          required_contract -p okx-ipc-contracts --lib research_ipc::reply_contract_tests::
-          required_contract -p okx-research-service --lib ipc::correlation_tests::
-          required_contract -p okx-research-service --lib analytics::jobs::tests::producer
-          required_contract -p okx-research-service --lib analytics::jobs::tests::historical_rows_keep_unknown_producer
-      - name: Existing risk client and bound raw-frame regressions
-        run: |
-          cargo test --locked -p okx-trading-engine --lib risk_bridge::tests -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_initialize_account -- --nocapture
-          set -o pipefail
-          session_output=$(mktemp)
-          cargo test --locked -p okx-trading-engine --lib cloudflare_transport::session_tests -- --nocapture 2>&1 | tee "$session_output"
-          grep -Eq 'test result: ok\. +[1-9][0-9]* passed;' "$session_output"
-      - name: Status and Recovery direct operation regressions
-        run: |
-          cargo test --locked -p okx-trading-engine --lib trade_service::reconcile::entry_cost_status_tests -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib trade_service::recovery::tests -- --nocapture
-      - name: Original Native campaign, governance and Execute operation contracts
-        run: |
-          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_maintenance_ -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_public_execute_lost_ack_and_replay_send_once -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_execute_bound_rejection_preserves_code_and_reserve -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner -- --nocapture
-      - name: Current-owner POST replay UNKNOWN and two-account replacements
-        run: |
-          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_public_cancel_after_held_replays_and_cold_reopens_without_send -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_os_kill_after_create_recovers_original_unknown -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_two_accounts_share_budget_and_isolate_public_capital_receipts -- --nocapture
-      - name: Native connected-account identity and original shared finance owner
-        run: |
-          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_connect_two_accounts_and_reopen_one_original_sqlite -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_connect_wrong_uid_does_not_create_account_or_publish_catalog -- --nocapture
-      - name: Current Native scope and source-generation witnesses
-        run: |
-          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_intent_diagnostic_is_account_scoped_and_refuses_foreign_installation -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_changed_post_held_fee_releases_unsent_and_replans -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib stale_generation_rejects_before_financial_or_venue_action -- --nocapture
-      - name: Census original source, scope, receipt and post-HELD regressions
-        run: |
-          cargo test --locked -p okx-trading-engine --lib trade_service::execute::tests::e2_ -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib trade_service::execute::tests::e1_ -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib trade_service::execute::tests::t10_native_ -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib trade_service::execute::tests::k4_ -- --nocapture
-      - name: Native diagnostic snapshot and stopped finance-mode exclusion
-        run: |
-          cargo test --locked -p okx-trade-execution --lib risk_book_contract_native_account_diagnostics_one_scoped_read_no_mutation -- --nocapture
-          cargo test --locked -p okx-trade-execution --lib legacy_stopped_maintenance_uses_same_cross_process_mode_and_rejects_import -- --nocapture
-
-  draft-riskbook-migration-510:
-    # Fast, real-source feedback for the active Rust RiskBook draft. Final
-    # acceptance remains the existing full required CI after Ready for review.
-    name: draft-riskbook-migration-510
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.pull_request.head.ref == 'work/510-riskbook-rust-20261113' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
-        with:
-          toolchain: 1.95.0
-          components: rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Verify existing architecture guard and its negative self-tests
-        run: |
-          python3 scripts/check_architecture.py --self-test
-          python3 scripts/check_architecture.py
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-      - name: Direct RiskBook Rust/SQLite regression target
-        run: cargo test --locked -p okx-domain-core -p okx-trade-execution --lib risk_book_contract -- --nocapture
-      - name: Verify original AccountStore fill/bill source partial receipt
-        run: cargo test --locked -p okx-trade-execution --lib e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted -- --nocapture
-      # The full original AccountStore API (including begin_post) is touched
-      # by #510. One reusable compilation, same job and same draft gate;
-      # 74 filtered risk contracts alone cannot prove zero regressions.
-      - name: Regression of complete original execution Rust library
-        run: cargo test --locked -p okx-trade-execution --lib
-      - name: Native startup and stopped unified finance readback (no trading)
-        run: |
-          cargo test --locked -p okx-trading-engine --lib finance_staged_import_never_falls_back_to_old_trade_or_cloudflare_finance -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib finance_inspection::tests -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib native_finance_risk::tests -- --nocapture
-          cargo test --locked -p okx-trading-engine --lib risk_bridge::tests -- --nocapture
-          cargo test --locked -p okx-trading-engine --bin okx-agent --no-run
-          cargo test --locked -p okx-trading-engine --bin okx-agent native_finance_startup_tests -- --nocapture
-      - name: Strict price and bounded derivative context regression
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test --locked -p okx-observation --lib risk_market_uses_strict_price_and_bounded_derivative_context -- --nocapture | tee "$RUNNER_TEMP/native-market-contract.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-market-contract.log"
-      - name: Build real research child for native Engine regressions
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo build --locked -p okx-research-service --bin okx-research-service
-          echo "OKX_RESEARCH_SERVICE_TEST_EXE=$PWD/target/debug/okx-research-service" >> "$GITHUB_ENV"
-      - name: Native admission and existing trading boundary regressions
-        shell: bash
-        run: |
-          set -euo pipefail
-          for contract in native_connect_contracts native_trade_contracts native_acceptance_coverage account_opening_capture storage_commands::tests storage_commands::native_backup::tests admission_source::tests native_finance_admission::tests source_capture::tests trade_service::plan::tests entry_settlement::direct_tests strategy_contract_tests protection_cleanup_direct_tests terminal_release::tests unsent_release::tests; do
-            log="$RUNNER_TEMP/native-boundary-${contract//:/_}.log"
-            cargo test --locked -p okx-trading-engine --lib "$contract" -- --skip accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect --nocapture | tee "$log"
-            grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$log"
-          done
-      - name: Worker transport and retired financial RPC boundary
-        working-directory: cloudflare/okx-mcp
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm run check
-          node scripts/test-native-finance-retirement-do.mjs
-      - name: Fresh Rust property collector self-tests and known witnesses
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test --locked -p okx-trading-engine --example native_finance_acceptance
-          cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --known > "$RUNNER_TEMP/native-finance-known.json"
-          python3 -c 'import json,os; r=json.load(open(os.path.join(os.environ["RUNNER_TEMP"],"native-finance-known.json"))); assert r["overall"] == "PARTIAL"; assert r["observed_witnesses"]; print("FRESH_NATIVE_PROPERTIES=PARTIAL_NOT_FULL")'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        with:
-          name: native-finance-properties-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}/native-finance-known.json
-          if-no-files-found: error
-          retention-days: 14
-
 
   architecture_contracts:
     name: architecture-contracts
@@ -622,8 +420,8 @@ jobs:
         run: python3 scripts/acceptance_product.py --self-test
 
 
-  trading_rust_linux:
-    name: trading-rust-linux
+  rust_tests_linux:
+    name: rust-tests-linux
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required == 'true' && needs.component_impact.outputs.research_only != 'true'
     runs-on: ubuntu-latest
@@ -727,7 +525,7 @@ jobs:
   required_linux:
     # Legacy required-check name is kept until branch protection is migrated.
     name: linux-core
-    needs: [component_impact, architecture_contracts, trading_rust_linux, cloudflare_mcp_contracts, research_service_windows]
+    needs: [component_impact, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, research_service_tests_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -742,19 +540,19 @@ jobs:
           fi
           test "${{ needs.architecture_contracts.result }}" = "success"
           if [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
-            test "${{ needs.trading_rust_linux.result }}" = "skipped"
-            test "${{ needs.research_service_windows.result }}" = "success"
+            test "${{ needs.rust_tests_linux.result }}" = "skipped"
+            test "${{ needs.research_service_tests_windows.result }}" = "success"
             echo "LINUX_FINANCE_REUSED_BASE=${{ needs.component_impact.outputs.research_base_head }}"
           elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
-            test "${{ needs.trading_rust_linux.result }}" = "skipped"
+            test "${{ needs.rust_tests_linux.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
             echo "LINUX_FINANCE_UNCHANGED_HOST_SOURCE_ONLY=true"
           elif [[ "${{ needs.component_impact.outputs.native_required }}" == "false" ]]; then
-            test "${{ needs.trading_rust_linux.result }}" = "skipped"
+            test "${{ needs.rust_tests_linux.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
             echo "LINUX_FINANCE_UNCHANGED_NATIVE_SOURCE=true"
           else
-            test "${{ needs.trading_rust_linux.result }}" = "success"
+            test "${{ needs.rust_tests_linux.result }}" = "success"
           fi
           if [[ "${{ needs.component_impact.outputs.component_scope }}" == "docs" || "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
             test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
@@ -764,12 +562,12 @@ jobs:
           echo "REPOSITORY_GUARD_AND_LINUX=PASS"
 
 
-  host_lifecycle_windows:
+  host_controller_launcher_checks:
     # Source-only lifecycle changes never compile a new trading Engine or SQL
     # owner. Every host change tests CONTROL and Launcher together because
     # CONTROL is a real consumer of the Launcher crate. This is NOT a complete
     # four-EXE release; publishing a new Native base still requires full CI.
-    name: host-lifecycle-windows
+    name: host-controller-launcher-checks
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.component_scope == 'host-controller' || needs.component_impact.outputs.component_scope == 'host-launcher')
     runs-on: windows-latest
@@ -823,8 +621,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  trading_windows_full:
-    name: trading-engine-windows-full
+  trading_engine_acceptance_windows:
+    name: trading-engine-acceptance-windows
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     runs-on: windows-latest
@@ -1159,8 +957,8 @@ jobs:
           compression-level: 9
           retention-days: 14
 
-  research_service_windows:
-    name: research-service-windows
+  research_service_tests_windows:
+    name: research-service-tests-windows
     needs: component_impact
     # A successful, identical PR tree is already accepted; main must reuse it.
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'
@@ -1277,7 +1075,7 @@ jobs:
     # on a real Windows gate or on the narrowly proven identical native tree;
     # it never reports a newly executed 26/26 on the reuse path.
     name: windows-native
-    needs: [component_impact, trading_windows_full, trading_safety_windows, host_lifecycle_windows, cloudflare_mcp_contracts, research_service_windows]
+    needs: [component_impact, trading_engine_acceptance_windows, trading_safety_acceptance_windows, host_controller_launcher_checks, cloudflare_mcp_contracts, research_service_tests_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -1287,32 +1085,32 @@ jobs:
           set -euo pipefail
           test "${{ needs.component_impact.result }}" = "success"
           if [[ "${{ needs.component_impact.outputs.build_required }}" == "false" ]]; then
-            test "${{ needs.trading_safety_windows.result }}" = "skipped"
+            test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.reason }}" = "merged tree exactly matches successful PR head tree"
             echo "WINDOWS_NATIVE_PROOF=EXACT_SUCCESSFUL_MERGED_TREE"
           elif [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
-            test "${{ needs.trading_safety_windows.result }}" = "skipped"
-            test "${{ needs.trading_windows_full.result }}" = "skipped"
-            test "${{ needs.research_service_windows.result }}" = "success"
+            test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.research_service_tests_windows.result }}" = "success"
             test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_BASE_${{ needs.component_impact.outputs.research_base_head }}"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
-            test "${{ needs.trading_safety_windows.result }}" = "skipped"
+            test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
-            test "${{ needs.trading_windows_full.result }}" = "skipped"
-            test "${{ needs.host_lifecycle_windows.result }}" = "success"
-            test "${{ needs.research_service_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.host_controller_launcher_checks.result }}" = "success"
+            test "${{ needs.research_service_tests_windows.result }}" = "skipped"
             test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
             echo "WINDOWS_NATIVE_PROOF=HOST_COMPONENTS_TESTED_NO_ENGINE_REBUILD"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.component_impact.outputs.native_required }}" == "false" ]]; then
-            test "${{ needs.trading_safety_windows.result }}" = "skipped"
+            test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
             scope="${{ needs.component_impact.outputs.component_scope }}"
             [[ "$scope" == "docs" || "$scope" == "cloudflare" ]]
-            test "${{ needs.trading_windows_full.result }}" = "skipped"
-            test "${{ needs.research_service_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.research_service_tests_windows.result }}" = "skipped"
             if [[ "$scope" == "docs" ]]; then
               test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
             else
@@ -1321,18 +1119,18 @@ jobs:
             echo "WINDOWS_NATIVE_PROOF=COMPONENT_${scope}_NO_NATIVE_SOURCE_CHANGED"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           else
-            test "${{ needs.trading_safety_windows.result }}" = "success"
-            test "${{ needs.trading_windows_full.result }}" = "success"
+            test "${{ needs.trading_safety_acceptance_windows.result }}" = "success"
+            test "${{ needs.trading_engine_acceptance_windows.result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=FULL_WINDOWS_NATIVE_SUCCESS"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
           fi
 
   # Current Native A/B and semantic/CAS prerequisite on an isolated runner.
-  # Full property/physical/resource acceptance remains trading-engine-windows-full.
-  trading_safety_windows:
-    # Preserve the existing check name; its obsolete remote-finance driver is
+  # Full property/physical/resource acceptance remains trading-engine-acceptance-windows.
+  trading_safety_acceptance_windows:
+    # This is the parallel B1 financial safety acceptance; its old remote-finance driver is
     # replaced by the actual current Native public contracts, not an exemption.
-    name: trading-safety-windows-prerequisite
+    name: trading-safety-acceptance-windows
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     runs-on: windows-latest
@@ -1392,3 +1190,155 @@ jobs:
             ${{ runner.temp }}\native-queue-current.log
           if-no-files-found: error
           retention-days: 14
+
+  # Successful protected main checks publish the verified PR artifact here.
+  publish_accepted_windows_release:
+    name: publish-accepted-windows-release
+    needs: [dependency-audit, component_impact, required_linux, required_windows]
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    concurrency:
+      group: native-base-publication
+      cancel-in-progress: false
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ACCEPTED_MAIN: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Select exact successful full Native PR release
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f .github/windows-legacy-control-bridge.txt ]]; then
+            echo "One-time v1 CONTROL migration bridge: preserve the existing v2 Native base; deploy only the exact accepted PR CI artifact through CONTROL."
+            exit 0
+          fi
+          [[ "$ACCEPTED_MAIN" =~ ^[0-9a-f]{40}$ ]]
+          current="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
+          if [[ "$current" != "$ACCEPTED_MAIN" ]]; then
+            echo "Main advanced; a newer successful CI will publish the base."
+            exit 0
+          fi
+          prs="$(gh api "/repos/$GITHUB_REPOSITORY/commits/$ACCEPTED_MAIN/pulls")"
+          head="$(jq -r --arg main "$ACCEPTED_MAIN" '[.[] | select(.merged_at != null and .merge_commit_sha == $main and .base.ref == "main")] | first | .head.sha // empty' <<<"$prs")"
+          [[ "$head" =~ ^[0-9a-f]{40}$ ]] || exit 0
+          main_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$ACCEPTED_MAIN" --jq .tree.sha)"
+          head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head" --jq .tree.sha)"
+          test "$main_tree" = "$head_tree"
+          runs="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" -f head_sha="$head" -f event=pull_request -f status=completed -f per_page=100)"
+          run_id=""
+          artifact_id=""
+          artifact_digest=""
+          while read -r candidate; do
+            [[ -n "$candidate" ]] || continue
+            jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/jobs?per_page=100")"
+            # Require the *fresh* 4-EXE financial gate, never an aggregate
+            # that reused older proof or the isolated Research-only worker.
+            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-acceptance-windows","trading-safety-acceptance-windows","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
+              continue
+            fi
+            artifacts="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts?per_page=100")"
+            candidate_artifact="$(jq -r --arg name "okx-windows-bundle-$head" '[.artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0].id else empty end' <<<"$artifacts")"
+            candidate_digest="$(jq -r --arg name "okx-windows-bundle-$head" '[.artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0].digest else empty end' <<<"$artifacts")"
+            if [[ "$candidate_artifact" =~ ^[1-9][0-9]*$ && "$candidate_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              run_id="$candidate"
+              artifact_id="$candidate_artifact"
+              artifact_digest="$candidate_digest"
+              break
+            fi
+          done < <(jq -r '[.workflow_runs[] | select(.name == "CI" and .conclusion == "success" and .event == "pull_request")] | .[].id' <<<"$runs")
+          if [[ -z "$run_id" ]]; then
+            echo "No fresh accepted full Windows bundle: non-Native merge, no new release."
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "tree=$head_tree" >> "$GITHUB_OUTPUT"
+          echo "run=$run_id" >> "$GITHUB_OUTPUT"
+          echo "artifact=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "digest=$artifact_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Verify complete four-component source and archive
+        if: steps.select.outputs.publish == 'true'
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip="$RUNNER_TEMP/okx-windows-base.zip"
+          extract="$RUNNER_TEMP/native-base"
+          mkdir -p "$extract"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/${{ steps.select.outputs.artifact }}/zip" > "$zip"
+          digest="$(sha256sum "$zip" | cut -d' ' -f1)"
+          test "sha256:$digest" = "${{ steps.select.outputs.digest }}"
+          test "$(unzip -Z1 "$zip" | sort | paste -sd'|' -)" = 'Cargo.lock|manifest.json|okx-agent.exe|okx-host-control.exe|okx-host-launcher.exe|okx-research-service.exe'
+          unzip -q "$zip" -d "$extract"
+          jq -e --arg head '${{ steps.select.outputs.head }}' --arg tree '${{ steps.select.outputs.tree }}' '
+            .schema == "okx.windows.bundle/v2" and .repository_id == 1388071566 and
+            .source_head_sha == $head and .source_tree == $tree and
+            (.components | length == 4) and (.rust_version | type == "string" and length > 0)
+          ' "$extract/manifest.json" >/dev/null
+          for file in okx-agent.exe okx-host-control.exe okx-host-launcher.exe okx-research-service.exe; do
+            jq -e --arg f "$file" --arg head '${{ steps.select.outputs.head }}' --arg tree '${{ steps.select.outputs.tree }}' '
+              .components[$f] | .source_head_sha == $head and .source_tree == $tree and .run_id == 0 and
+              .artifact_id == 0 and .protocol_version == 1 and .storage_version == 1
+            ' "$extract/manifest.json" >/dev/null
+            test "$(sha256sum "$extract/$file" | cut -d' ' -f1)" = "$(jq -r --arg f "$file" '.components[$f].sha256' "$extract/manifest.json")"
+            test "$(stat -c %s "$extract/$file")" = "$(jq -r --arg f "$file" '.components[$f].size' "$extract/manifest.json")"
+          done
+          input="$RUNNER_TEMP/native-base-origin-input.json"
+          jq -n --arg head '${{ steps.select.outputs.head }}' --arg tree '${{ steps.select.outputs.tree }}' \
+            --arg merge "$ACCEPTED_MAIN" --argjson run '${{ steps.select.outputs.run }}' \
+            --argjson artifact '${{ steps.select.outputs.artifact }}' --arg digest "$digest" \
+            '{repository_id:1388071566,source_head_sha:$head,source_tree:$tree,merged_main_sha:$merge,run_id:$run,artifact_id:$artifact,artifact_sha256:$digest}' > "$input"
+          node scripts/test-published-release-origin.cjs
+          node scripts/published-release-origin.cjs "$input" "$extract/manifest.json" "$zip" "$RUNNER_TEMP/published-origin.json"
+          {
+            (cd "$RUNNER_TEMP" && sha256sum okx-windows-base.zip published-origin.json)
+            (cd "$extract" && sha256sum Cargo.lock manifest.json okx-agent.exe okx-host-control.exe okx-host-launcher.exe okx-research-service.exe)
+          } > "$RUNNER_TEMP/SHA256SUMS.txt"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+
+      - name: Publish current base and prune only superseded Native bases
+        if: steps.select.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Each tag has immutable commit identity; only one *native-base-*
+          # release remains after a new complete release was verified.
+          tag="native-base-$ACCEPTED_MAIN"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              '${{ steps.verify.outputs.zip }}' \
+              "$RUNNER_TEMP/published-origin.json" \
+              "$RUNNER_TEMP/SHA256SUMS.txt" \
+              --target "$ACCEPTED_MAIN" --title "OKX accepted Native base $ACCEPTED_MAIN" \
+              --notes "Automatically accepted after full financial/Windows CI. Download assets with checked SHA256; this is not a production deployment."
+          fi
+          release="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+          jq -e --arg tag "$tag" --arg main "$ACCEPTED_MAIN" '
+            .tag_name == $tag and .target_commitish == $main and .draft == false and .prerelease == false and
+            ([.assets[].name] | sort) == ["SHA256SUMS.txt","okx-windows-base.zip","published-origin.json"]
+          ' <<<"$release" >/dev/null
+          for name in okx-windows-base.zip published-origin.json SHA256SUMS.txt; do
+            expected="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest' <<<"$release")"
+            actual="$(sha256sum "$RUNNER_TEMP/$name" | cut -d' ' -f1)"
+            test "$expected" = "sha256:$actual"
+          done
+          current="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
+          test "$current" = "$ACCEPTED_MAIN"
+          gh api --paginate "/repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | [.tag_name,.immutable] | @tsv' |
+          while IFS=$'\t' read -r old immutable; do
+            if [[ "$old" =~ ^native-base-[0-9a-f]{40}$ && "$old" != "$tag" ]]; then
+              test "$immutable" = "false"
+              gh release delete "$old" --cleanup-tag --yes
+            fi
+          done

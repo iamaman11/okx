@@ -12,8 +12,8 @@ class FeedbackTests(unittest.TestCase):
     def test_ready_windows_runs_math_owner_tests_not_just_worker(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
         owner_commands = {
-            "research_service_windows": "cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service",
-            "trading_windows_full": "cargo test --locked -p okx-strategy-core -p okx-research",
+            "research_service_tests_windows": "cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service",
+            "trading_engine_acceptance_windows": "cargo test --locked -p okx-strategy-core -p okx-research",
         }
         for job, command in owner_commands.items():
             match = re.search(rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  [a-z_-]+:|\Z)", workflow)
