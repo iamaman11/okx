@@ -87,7 +87,7 @@ ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['
 const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  accounts:{description:'Accounts.',readOnlyHint:false,destructiveHint:true},
  strategies:{description:'Strategies; may trade.',readOnlyHint:false,destructiveHint:true},
- market:{description:'Market.',readOnlyHint:true,destructiveHint:false},
+ market:{description:'Market: graphs via screen + composition.',readOnlyHint:true,destructiveHint:false},
  research:{description:'Research.',readOnlyHint:false,destructiveHint:true},
  portfolio:{description:'Portfolio.',readOnlyHint:true,destructiveHint:false},
  diagnostics:{description:'Diagnostics.',readOnlyHint:true,destructiveHint:false},

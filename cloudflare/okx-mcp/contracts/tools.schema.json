@@ -494,7 +494,7 @@
     },
     {
       "name": "market",
-      "description": "Market.",
+      "description": "Market: graphs via screen + composition.",
       "inputSchema": {
         "oneOf": [
           {
