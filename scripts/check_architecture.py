@@ -157,6 +157,11 @@ def pure_dependency_violations(
 BOUNDARY_FORBIDDEN = {
     "okx-agent": {"okx-research", "okx-research-worker", "okx-strategy-core", "okx-analysis"},
     "okx-research-worker": {"okx-agent", "okx-execution", "okx-api", "okx-runtime", "okx-host-control", "okx-bridge-mcp"},
+    # Host lifecycle processes cannot acquire financial/market capabilities
+    # through a direct or transitive production dependency. CONTROL may use
+    # the Launcher and versioned protocol; neither may import Engine/SQL.
+    "okx-host-control": {"okx-agent", "okx-execution", "okx-api", "okx-runtime", "okx-observation", "okx-research", "okx-research-worker"},
+    "okx-host-launcher": {"okx-host-control", "okx-agent", "okx-execution", "okx-api", "okx-runtime", "okx-observation", "okx-research", "okx-research-worker"},
 }
 
 def production_boundary_violations(graph: dict[str, set[str]], names: dict[str, str]) -> list[str]:
@@ -245,8 +250,8 @@ def self_test() -> int:
         if not validate(dirty):
             print(f"self-test failed: agent edge {dep} accepted", file=sys.stderr)
             return 1
-    transitive = {"worker": {"helper"}, "helper": {"api"}, "api": set(), "agent": set()}
-    transitive_names = {"worker": "okx-research-worker", "helper": "helper", "api": "okx-api", "agent": "okx-agent"}
+    transitive = {"worker": {"helper"}, "helper": {"api"}, "api": set(), "agent": set(), "control": set(), "launcher": set()}
+    transitive_names = {"worker": "okx-research-worker", "helper": "helper", "api": "okx-api", "agent": "okx-agent", "control": "okx-host-control", "launcher": "okx-host-launcher"}
     if not production_boundary_violations(transitive, transitive_names):
         print("self-test failed: transitive worker API leak passed", file=sys.stderr)
         return 1
@@ -262,6 +267,17 @@ def self_test() -> int:
     transitive_names["api"] = "okx-strategy-core"
     if not production_boundary_violations(transitive, transitive_names):
         print("self-test failed: transitive Agent mathematical core leak passed", file=sys.stderr)
+        return 1
+    transitive["agent"] = set()
+    transitive["control"] = {"helper"}
+    transitive_names["api"] = "okx-execution"
+    if not production_boundary_violations(transitive, transitive_names):
+        print("self-test failed: transitive CONTROL -> financial SQL leak passed", file=sys.stderr)
+        return 1
+    transitive["control"] = set()
+    transitive["launcher"] = {"control"}
+    if not production_boundary_violations(transitive, transitive_names):
+        print("self-test failed: Launcher -> CONTROL reverse dependency passed", file=sys.stderr)
         return 1
 
     pure_source = {"money.rs": "use std::fmt;\nfn one() {}"}

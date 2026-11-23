@@ -41,6 +41,15 @@ async fn run() -> Result<(), String> {
             return Err("INVALID_ARGUMENT".into());
         }
     }
+    // Scoped to this Research process. Do not run the Worker without its OS
+    // memory fence on Windows; native Finance/Engine retains its own owner.
+    let _memory_guard = okx_research_worker::process_memory::JobMemoryGuard::enforce()?;
+    #[cfg(windows)]
+    tracing::info!(
+        commit_limit_bytes = okx_research_worker::process_memory::limit_bytes(),
+        isolation = "nested_windows_job_object",
+        "research worker OS commit fence verified"
+    );
     okx_research_worker::ipc::serve(
         tokio::io::stdin(),
         tokio::io::stdout(),

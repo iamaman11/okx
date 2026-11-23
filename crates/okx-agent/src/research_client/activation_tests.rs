@@ -109,6 +109,7 @@ async fn installed_worker_drains_and_replays_across_actual_child_handoff() {
                     raw_body: b"fixture".to_vec(),
                     rows,
                     acquired_at_ms: "1".into(),
+                    http_delivery: None,
                 }))
             })
         }

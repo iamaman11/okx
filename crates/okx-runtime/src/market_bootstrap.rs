@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use jiff::Timestamp;
 use okx_api::{
-    InstrumentType, MarketDataApi, OkxPublicClient, PublicDataApi, PublicMarketDataHistory,
+    CapturedHttpDelivery, InstrumentType, MarketDataApi, OkxPublicClient, PublicDataApi,
+    PublicMarketDataHistory,
 };
 use okx_observation::{
     FundingHistoryEvent, FundingHistorySnapshot, FundingRequirement, HistoryCandle, InstrumentSpec,
@@ -26,6 +27,7 @@ pub struct ResearchCandleCapture {
     pub raw_body: Vec<u8>,
     pub rows: Vec<HistoryCandle>,
     pub acquired_at_ms: String,
+    pub http_delivery: CapturedHttpDelivery,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +42,7 @@ pub struct ResearchFundingCapture {
     pub raw_body: Vec<u8>,
     pub rows: Vec<FundingHistoryEvent>,
     pub acquired_at_ms: String,
+    pub http_delivery: CapturedHttpDelivery,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +58,17 @@ pub struct ResearchReferenceCapture {
     pub instrument: InstrumentSpec,
     pub reference_generation: String,
     pub acquired_at_ms: String,
+    pub http_delivery: CapturedHttpDelivery,
+}
+
+fn source_delivery(
+    receipt: CapturedHttpDelivery,
+) -> okx_protocol::research_ipc::PublicSourceHttpDelivery {
+    okx_protocol::research_ipc::PublicSourceHttpDelivery {
+        transport_send_invocations: receipt.transport_send_invocations,
+        response_status: receipt.response_status,
+        response_body_bytes: receipt.response_body_bytes,
+    }
 }
 
 #[derive(Debug, Error)]
@@ -121,6 +135,7 @@ impl MarketBootstrapper {
                     raw_body: value.raw_body,
                     rows: value.rows,
                     acquired_at_ms: value.acquired_at_ms,
+                    http_delivery: Some(source_delivery(value.http_delivery)),
                 }))
             }
             PublicSourceRequest::Funding {
@@ -137,6 +152,7 @@ impl MarketBootstrapper {
                     raw_body: value.raw_body,
                     rows: value.rows,
                     acquired_at_ms: value.acquired_at_ms,
+                    http_delivery: Some(source_delivery(value.http_delivery)),
                 }))
             }
             PublicSourceRequest::Reference { instrument } => {
@@ -154,6 +170,7 @@ impl MarketBootstrapper {
                     },
                     reference_generation: value.reference_generation,
                     acquired_at_ms: value.acquired_at_ms,
+                    http_delivery: Some(source_delivery(value.http_delivery)),
                 }))
             }
             PublicSourceRequest::Ticker { instrument } => {
@@ -274,6 +291,7 @@ impl MarketBootstrapper {
             raw_body: captured.raw_body,
             rows,
             acquired_at_ms,
+            http_delivery: captured.http_delivery,
         })
     }
 
@@ -314,6 +332,7 @@ impl MarketBootstrapper {
             raw_body: captured.raw_body,
             rows,
             acquired_at_ms,
+            http_delivery: captured.http_delivery,
         })
     }
 
@@ -360,6 +379,7 @@ impl MarketBootstrapper {
             instrument,
             reference_generation: registry.generation().as_str().to_owned(),
             acquired_at_ms,
+            http_delivery: captured.http_delivery,
         })
     }
 

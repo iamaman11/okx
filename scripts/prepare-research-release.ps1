@@ -1,6 +1,28 @@
-param([string]$Dist, [switch]$VerifyOnly)
+param([string]$Dist, [switch]$VerifyOnly, [string]$AcceptedCompositionSpec, [string]$ProofFile)
 if (-not $VerifyOnly -and [string]::IsNullOrWhiteSpace($Dist)) { throw "DIST_REQUIRED" }
 $ErrorActionPreference = 'Stop'
+if (-not [string]::IsNullOrWhiteSpace($AcceptedCompositionSpec)) {
+    if ($VerifyOnly) { throw 'COMPOSITION_CANNOT_BYPASS_RELEASE_SCOPE_CHECK' }
+    $spec = Get-Content -LiteralPath $AcceptedCompositionSpec -Raw | ConvertFrom-Json
+    if ($spec.schema -cne 'okx.537.accepted-research-composition/v1' -or
+        $spec.installed_baseline -cnotmatch '^docs/acceptance/537/[A-Za-z0-9_.-]+\.json$') {
+        throw 'INVALID_ACCEPTED_COMPOSITION_SPEC'
+    }
+    $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+    $baselineFile = Join-Path $repositoryRoot $spec.installed_baseline
+    $baseline = Get-Content -LiteralPath $baselineFile -Raw | ConvertFrom-Json
+    $head = (& git -C $repositoryRoot rev-parse HEAD).Trim()
+    $tree = (& git -C $repositoryRoot rev-parse 'HEAD^{tree}').Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'CANDIDATE_TREE_UNAVAILABLE' }
+    if ([string]::IsNullOrWhiteSpace($ProofFile)) {
+        $ProofFile = Join-Path (Split-Path -Parent $Dist) 'research-composition-proof.json'
+    }
+    & (Join-Path $PSScriptRoot 'prepare-accepted-research-composition.ps1') `
+        -BaseRunId ([long]$baseline.run_id) -BaseArtifactId ([long]$baseline.artifact_id) `
+        -ResearchRunId ([long]$spec.research_run_id) -ResearchArtifactId ([long]$spec.research_artifact_id) `
+        -BaselineFile $baselineFile -CandidateHead $head -CandidateTree $tree -Dist $Dist -ProofFile $ProofFile
+    return
+}
 if ($env:GITHUB_REPOSITORY -cne 'iamaman11/okx') { throw 'INVALID_REPOSITORY' }
 function Api([string]$endpoint) {
     $json = & gh api $endpoint

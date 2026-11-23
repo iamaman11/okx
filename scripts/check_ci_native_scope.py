@@ -3,8 +3,9 @@
 
 The classifier decides which component changed. Research release reuse requires
 separate Cargo dependency-closure and immutable-artifact proof.
-Unknown paths, workflow/dependency edits and malformed/truncated API data
-always require the full native financial gate.
+CONTROL/Launcher Rust source changes have a separate Windows host/consumer
+gate. Unknown paths, workflow/dependency edits and malformed/truncated API
+data always require the full native financial gate.
 """
 
 import argparse
@@ -18,6 +19,8 @@ _PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 # rejects any transitive Native Agent dependency before this fast path is used.
 _RESEARCH_DIRS = ("crates/okx-research/", "crates/okx-research-worker/", "crates/okx-strategy-core/")
 _CLOUDFLARE_DIR = "cloudflare/okx-mcp/"
+_HOST_CONTROL_SRC = "crates/okx-host-control/src/"
+_HOST_LAUNCHER_SRC = "crates/okx-host-launcher/src/"
 
 
 def category(path):
@@ -30,6 +33,12 @@ def category(path):
         return "docs"
     if path.startswith(_CLOUDFLARE_DIR):
         return "cloudflare"
+    # Only Rust implementation files may use the host-only gate. Changes to
+    # manifests, assets, scripts, protocols or packaging still require full CI.
+    if path.startswith(_HOST_CONTROL_SRC) and path.endswith(".rs"):
+        return "host-control"
+    if path.startswith(_HOST_LAUNCHER_SRC) and path.endswith(".rs"):
+        return "host-launcher"
     if path.startswith(_RESEARCH_DIRS):
         if path.endswith("/Cargo.toml") or path.endswith("/build.rs"):
             return "full"
@@ -68,7 +77,15 @@ def classify(pages):
             return "full"
         categories.add(kind)
     if "research" in categories:
+        if categories & {"host-control", "host-launcher"}:
+            return "full"
         return "research"
+    if categories & {"host-control", "host-launcher"}:
+        if "cloudflare" in categories:
+            return "full"
+        # CONTROL consumes Launcher: either change needs both owner and
+        # consumer checks; the distinct scope remains visible in CI evidence.
+        return "host-control" if "host-control" in categories else "host-launcher"
     if "cloudflare" in categories:
         return "cloudflare"
     return "docs"
@@ -82,6 +99,8 @@ def _self_test() -> None:
         "docs": [files("docs/acceptance/518/t01-t15-evidence-matrix.md"), files("README.md", "docs/arch.md")],
         "cloudflare": [files("cloudflare/okx-mcp/src/runtime_session.ts"), files("cloudflare/okx-mcp/src/mcp.test.ts", "docs/okx.md")],
         "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-research-worker/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md"), files("crates/okx-strategy-core/src/operators.rs"), files("crates/okx-strategy-core/src/query_plan.rs", "docs/a.md")],
+        "host-control": [files("crates/okx-host-control/src/main.rs"), files("crates/okx-host-control/src/activation/tests.rs", "crates/okx-host-launcher/src/main.rs", "docs/a.md")],
+        "host-launcher": [files("crates/okx-host-launcher/src/main.rs"), files("crates/okx-host-launcher/src/verify.rs", "README.md")],
     }
     for wanted, selections in cases.items():
         assert all(classify(pages) == wanted for pages in selections)
@@ -91,6 +110,15 @@ def _self_test() -> None:
         files("crates/okx-protocol/src/lib.rs"),
         files("crates/okx-agent/src/trade_service/execute.rs"),
         files("crates/okx-execution/src/lib.rs"),
+        files("crates/okx-host-control/Cargo.toml"),
+        files("crates/okx-host-launcher/Cargo.toml"),
+        files("crates/okx-host-control/build.rs"),
+        files("crates/okx-host-control/assets/config.json"),
+        files("crates/okx-host-control/src/migration.json"),
+        files("crates/okx-host-launcher/src/main.rs", "crates/okx-agent/src/main.rs"),
+        files("crates/okx-host-control/src/main.rs", "crates/okx-protocol/src/lib.rs"),
+        files("crates/okx-host-control/src/main.rs", "cloudflare/okx-mcp/src/mcp.ts"),
+        files("crates/okx-host-launcher/src/main.rs", "crates/okx-research-worker/src/analytics/market.rs"),
         files("Cargo.toml"), files("Cargo.lock"),
         files("crates/okx-research-worker/Cargo.toml"),
         files("crates/okx-strategy-core/Cargo.toml"),

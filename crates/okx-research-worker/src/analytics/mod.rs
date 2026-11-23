@@ -1,5 +1,6 @@
 mod benchmark;
 mod budget;
+pub const RESEARCH_MEMORY_ADMISSION_MIB: u32 = budget::MEMORY_TOTAL_MIB;
 pub mod cache;
 pub mod candidate_progress;
 mod cursor;

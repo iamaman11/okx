@@ -73,6 +73,7 @@ fn heavy_research(root: std::path::PathBuf, reads: Arc<SourceReadWitness>) -> Re
                 rows,
                 raw_body: b"synthetic closed candles".to_vec(),
                 acquired_at_ms: "1".into(),
+                http_delivery: None,
             }))
         })
     });

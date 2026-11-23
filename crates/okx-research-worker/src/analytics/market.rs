@@ -3,7 +3,7 @@ use okx_analysis::operators::{Operator, registry, scalar};
 use replay::Bar;
 use serde::{Serialize, de::DeserializeOwned, ser::SerializeSeq};
 use sha2::Digest;
-use std::{io::Write, marker::PhantomData};
+use std::{cell::Cell, io::Write, marker::PhantomData};
 use tracing::Instrument;
 #[derive(Clone)]
 struct Loaded {
@@ -34,28 +34,25 @@ fn market_source_rate_deferred(loaded: &[Loaded]) -> bool {
     })
 }
 
-// Completed market jobs survive Worker releases. A changed result contract must
-// use a new job namespace, or the old immutable evidence is replayed instead
-// of being recalculated. T13's lossless f64 parsing changes source semantics
-// across all operators, so every new Market request uses a fresh namespace.
-// Existing job IDs remain directly readable from the historical catalog.
+// Completed market jobs survive Worker releases. Each changed result contract
+// needs a new namespace; older immutable jobs remain readable by their IDs.
+// This revision adds per-job source I/O evidence to every new Market result.
 fn market_job_schema(fields: &[String]) -> &'static str {
     let funding = fields.iter().any(|field| field == "funding_sum");
     let correlation = fields.iter().any(|field| field == "pearson_correlation");
     if funding && correlation {
-        "market/518.10.float-roundtrip-funding-correlation-v1"
+        "market/518.11.source-io-funding-correlation-v1"
     } else if correlation {
-        "market/518.10.float-roundtrip-correlation-v1"
+        "market/518.11.source-io-correlation-v1"
     } else if funding {
-        "market/518.10.float-roundtrip-funding-v1"
+        "market/518.11.source-io-funding-v1"
     } else {
-        "market/518.10.float-roundtrip-flat-v1"
+        "market/518.11.source-io-flat-v1"
     }
 }
 
-// Composed results now retain immutable normalized observations as well as
-// their capture hashes. Completed old jobs cannot provide this witness, so
-// isolate the new contract without invalidating legacy flat queries.
+// Composition retains immutable normalized observations and per-source storage
+// proof. It has a distinct namespace from legacy and current flat queries.
 fn market_request_schema(
     fields: &[String],
     has_composition: bool,
@@ -63,7 +60,7 @@ fn market_request_schema(
     funding_composition: bool,
 ) -> &'static str {
     if has_composition || oi_composition || funding_composition {
-        "market/518.10.float-roundtrip-composition-v1"
+        "market/518.11.source-io-composition-v1"
     } else {
         market_job_schema(fields)
     }
@@ -202,7 +199,15 @@ impl AnalyticsService {
                     {
                         return Err("MARKET_CURSOR_REQUEST_MISMATCH".into());
                     }
-                    global_rank_page(&store, value, &offset, &job_id)
+                    // A queued request may finish after its live-source time
+                    // bucket expires. Let the caller resume page zero of that
+                    // exact completed job, without admitting another job or
+                    // fetching the same venue sources a second time.
+                    if offset == "0" {
+                        Ok(value)
+                    } else {
+                        global_rank_page(&store, value, &offset, &job_id)
+                    }
                 })
                 .await;
         }
@@ -333,9 +338,13 @@ impl AnalyticsService {
         {
             return Err("MARKET_LIMIT:BOUNDED_INSTRUMENTS_AND_ROWS".into());
         }
-        let (rows, correlation_matrix) = self
-            .market_rows(&request, cancel.clone(), global_rank, plan.clone())
-            .await?;
+        let meter = Arc::new(crate::source_io::SourceIoMeter::default());
+        let (rows, correlation_matrix) = crate::source_io::observe(
+            meter.clone(),
+            self.market_rows(&request, cancel.clone(), global_rank, plan.clone()),
+        )
+        .await?;
+        let source_io = meter.snapshot();
         let store = self.artifacts.clone();
         let producer = self.producer.clone();
         self.cpu.run(cancel,move |cancel| {
@@ -353,7 +362,7 @@ impl AnalyticsService {
                     .0,
             );
         }
-        let result_artifact=store.publish_evidence(&json!({"kind":"market_pages","producer":producer,"row_pages":row_pages,"total_rows":total,"sources":plan.sources,"correlation_matrix":correlation_matrix})).map_err(|e|e.to_string())?.0;
+        let result_artifact=store.publish_evidence(&json!({"kind":"market_pages","producer":producer,"row_pages":row_pages,"total_rows":total,"sources":plan.sources,"correlation_matrix":correlation_matrix,"source_io":source_io})).map_err(|e|e.to_string())?.0;
         let mut page = rows
             .into_iter()
             .skip(offset)
@@ -364,7 +373,7 @@ impl AnalyticsService {
         }
         let returned = page.len();
         Ok(
-            json!({"kind":"market","result_artifact":result_artifact,"rows":page,"returned_rows":returned,"total_rows":total,"next_cursor":if offset+returned<total{Some((offset+returned).to_string())}else{None},"sources":plan.sources,"correlation_matrix":correlation_matrix}),
+            json!({"kind":"market","result_artifact":result_artifact,"rows":page,"returned_rows":returned,"total_rows":total,"next_cursor":if offset+returned<total{Some((offset+returned).to_string())}else{None},"sources":plan.sources,"correlation_matrix":correlation_matrix,"source_io":source_io}),
         )
         }).await
     }
@@ -772,6 +781,8 @@ struct VerifiedSourcePages<'a, T> {
     chunks: &'a [String],
     expected: usize,
     cancel: &'a super::executor::Cancel,
+    successful_file_reads: &'a Cell<u64>,
+    bytes_read: &'a Cell<u64>,
     row: PhantomData<T>,
 }
 
@@ -783,10 +794,15 @@ impl<T: Serialize + DeserializeOwned> Serialize for VerifiedSourcePages<'_, T> {
             if self.cancel.load(Ordering::Acquire) {
                 return Err(serde::ser::Error::custom("CANCELLED"));
             }
-            let rows: Vec<T> = self
+            let bytes = self
                 .store
-                .read_evidence_json(id)
+                .read_evidence(id)
                 .map_err(serde::ser::Error::custom)?;
+            self.successful_file_reads
+                .set(self.successful_file_reads.get() + 1);
+            self.bytes_read
+                .set(self.bytes_read.get() + bytes.len() as u64);
+            let rows: Vec<T> = serde_json::from_slice(&bytes).map_err(serde::ser::Error::custom)?;
             if rows.is_empty()
                 || rows.len() > MARKET_SOURCE_EVIDENCE_CHUNK
                 || (index + 1 < self.chunks.len() && rows.len() != MARKET_SOURCE_EVIDENCE_CHUNK)
@@ -840,9 +856,8 @@ fn verify_one_source_pages<T: Serialize + DeserializeOwned>(
     let (source, hash_domain, time_basis) = source_spec;
     let invalid = || "COMPOSITION_SOURCE_EVIDENCE_MISMATCH".to_owned();
     let manifest_id = capture["evidence_artifact"].as_str().ok_or_else(invalid)?;
-    let manifest: Value = store
-        .read_evidence_json(manifest_id)
-        .map_err(|_| invalid())?;
+    let manifest_bytes = store.read_evidence(manifest_id).map_err(|_| invalid())?;
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).map_err(|_| invalid())?;
     let expected = manifest["observed_points"].as_u64().ok_or_else(invalid)?;
     if expected > 1_000_000
         || manifest["schema"] != "okx.market.normalized-source/v1"
@@ -882,11 +897,17 @@ fn verify_one_source_pages<T: Serialize + DeserializeOwned>(
         .iter()
         .map(|value| value.as_str().map(str::to_owned).ok_or_else(invalid))
         .collect::<Result<Vec<_>, _>>()?;
+    // These counters represent successful artifact fs::read operations during
+    // source hash reconstruction, not physical disk reads or all job storage I/O.
+    let file_reads = Cell::new(1u64);
+    let bytes_read = Cell::new(manifest_bytes.len() as u64);
     let rows = VerifiedSourcePages::<T> {
         store,
         chunks: &ids,
         expected,
         cancel,
+        successful_file_reads: &file_reads,
+        bytes_read: &bytes_read,
         row: PhantomData,
     };
     let mut writer = SourceHashWriter(sha2::Sha256::new());
@@ -919,7 +940,13 @@ fn verify_one_source_pages<T: Serialize + DeserializeOwned>(
     Ok(
         json!({"source":source,"quality":"verified_normalized_capture",
         "pages":ids.len(),"observed_points":expected,"capture_hash":reconstructed_hash,
-        "publication_time_verified":false}),
+        "publication_time_verified":false,
+        "verified_storage_io":{
+            "scope":"source_hash_reconstruction_only",
+            "successful_artifact_file_reads":file_reads.get(),
+            "artifact_bytes_read":bytes_read.get(),
+            "os_physical_disk_reads":null
+        }}),
     )
 }
 
@@ -2117,15 +2144,17 @@ mod tests {
             retry["rows"].is_null(),
             "cancelled job cannot claim published market rows"
         );
-        let mut cancelled_cursor = cancelled_request.clone();
-        cancelled_cursor.cursor = Some(format!("{cancelled_id}:1"));
-        assert_eq!(
-            service
-                .market(cancelled_cursor, None, None)
-                .await
-                .unwrap_err(),
-            "MARKET_CURSOR_NOT_READY"
-        );
+        for offset in [0, 1] {
+            let mut cancelled_cursor = cancelled_request.clone();
+            cancelled_cursor.cursor = Some(format!("{cancelled_id}:{offset}"));
+            assert_eq!(
+                service
+                    .market(cancelled_cursor, None, None)
+                    .await
+                    .unwrap_err(),
+                "MARKET_CURSOR_NOT_READY"
+            );
+        }
         assert_eq!(
             service
                 .result_page(cancelled_id.clone(), None, 1, ResearchResultView::Trades)
@@ -2222,13 +2251,13 @@ mod tests {
         let oi_fields = vec!["pearson_correlation".to_owned()];
         assert_eq!(
             market_request_schema(&fields, false, false, false),
-            "market/518.10.float-roundtrip-flat-v1"
+            "market/518.11.source-io-flat-v1"
         );
         let composed = market_request_schema(&fields, true, false, false);
         let oi_composed = market_request_schema(&fields, true, true, false);
         let oi_correlated = market_request_schema(&oi_fields, true, true, false);
         let funding_composed = market_request_schema(&fields, true, false, true);
-        assert_eq!(composed, "market/518.10.float-roundtrip-composition-v1");
+        assert_eq!(composed, "market/518.11.source-io-composition-v1");
         assert_eq!(oi_composed, composed);
         assert_ne!(composed, "market/518.2.composition-quality-v1");
         assert_ne!(oi_composed, "market/518.2.oi-composition-quality-v1");
@@ -2237,17 +2266,14 @@ mod tests {
             market_request_schema(&fields, false, false, false)
         );
         assert_eq!(oi_correlated, oi_composed);
-        assert_eq!(
-            funding_composed,
-            "market/518.10.float-roundtrip-composition-v1"
-        );
+        assert_eq!(funding_composed, "market/518.11.source-io-composition-v1");
         assert_eq!(
             funding_composed,
             market_request_schema(&fields, true, true, true)
         );
         assert_eq!(
             market_request_schema(&oi_fields, false, false, false),
-            "market/518.10.float-roundtrip-correlation-v1"
+            "market/518.11.source-io-correlation-v1"
         );
     }
 
@@ -2264,11 +2290,11 @@ mod tests {
         );
         assert_eq!(
             market_job_schema(&returns.fields),
-            "market/518.10.float-roundtrip-flat-v1"
+            "market/518.11.source-io-flat-v1"
         );
         assert_eq!(
             market_job_schema(&correlation.fields),
-            "market/518.10.float-roundtrip-correlation-v1"
+            "market/518.11.source-io-correlation-v1"
         );
         assert_ne!(
             market_job_schema(&combined.fields),

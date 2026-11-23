@@ -36,6 +36,54 @@ const PACKAGES: [&str; 5] = [
     "okx-protocol",
     "okx-runtime",
 ];
+// Keep the ordinary finance workload concurrent as in the measured baseline.
+// Four real-clock fixtures can expire under unrelated concurrent OS/SQL work;
+// execute those witnesses in a separate, serial child without skipping any.
+const FINANCIAL_WITNESS_TEST_THREADS: u64 = 4;
+const CLOCK_SENSITIVE_TEST_THREADS: u64 = 1;
+const CLOCK_SENSITIVE_AGENT_WITNESSES: [&str; 4] = [
+    "accounts::native_trade_contracts::native_fee_correction::risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutable_revisions",
+    "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_failed_stop_emergency_close_and_verified_remediation",
+    "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_filled_close_settlement_release_and_cold_reopen",
+    "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_stop_after_fill_blocks_open_but_closes_and_releases",
+];
+struct LibtestGroup {
+    label: &'static str,
+    threads: u64,
+    names: BTreeSet<String>,
+}
+fn libtest_groups(package: &str, names: &BTreeSet<String>) -> Result<Vec<LibtestGroup>> {
+    if package != "okx-agent" {
+        return Ok(vec![LibtestGroup {
+            label: "all",
+            threads: FINANCIAL_WITNESS_TEST_THREADS,
+            names: names.clone(),
+        }]);
+    }
+    if !CLOCK_SENSITIVE_AGENT_WITNESSES
+        .iter()
+        .all(|name| names.contains(*name))
+    {
+        return Err("CLOCK_SENSITIVE_WITNESS_MISSING");
+    }
+    let clock_sensitive: BTreeSet<String> = CLOCK_SENSITIVE_AGENT_WITNESSES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let parallel = names.difference(&clock_sensitive).cloned().collect();
+    Ok(vec![
+        LibtestGroup {
+            label: "parallel",
+            threads: FINANCIAL_WITNESS_TEST_THREADS,
+            names: parallel,
+        },
+        LibtestGroup {
+            label: "clock_sensitive",
+            threads: CLOCK_SENSITIVE_TEST_THREADS,
+            names: clock_sensitive,
+        },
+    ])
+}
 type Witnesses = BTreeSet<(String, String)>;
 type Result<T> = std::result::Result<T, &'static str>;
 fn timing_distribution(mut times: Vec<u64>) -> Value {
@@ -59,6 +107,44 @@ mod timing_tests {
         assert_eq!(r["p50_ms"], 10);
         assert_eq!(r["p95_ms"], 19);
         assert_eq!(r["max_ms"], 20);
+    }
+    #[test]
+    fn clock_sensitive_partition_is_exact_and_never_drops_a_witness() {
+        let mut names: BTreeSet<String> = CLOCK_SENSITIVE_AGENT_WITNESSES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        names.insert("another-financial-witness".into());
+        let groups = libtest_groups("okx-agent", &names).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!((groups[0].label, groups[0].threads), ("parallel", 4));
+        assert_eq!((groups[1].label, groups[1].threads), ("clock_sensitive", 1));
+        assert!(groups[0].names.is_disjoint(&groups[1].names));
+        assert_eq!(
+            groups[0]
+                .names
+                .union(&groups[1].names)
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            names
+        );
+        names.remove(CLOCK_SENSITIVE_AGENT_WITNESSES[0]);
+        assert!(matches!(
+            libtest_groups("okx-agent", &names),
+            Err("CLOCK_SENSITIVE_WITNESS_MISSING")
+        ));
+        let agent_names: BTreeSet<String> = selected()
+            .unwrap()
+            .into_iter()
+            .filter(|(package, _)| package == "okx-agent")
+            .map(|(_, name)| name)
+            .collect();
+        let actual = libtest_groups("okx-agent", &agent_names).unwrap();
+        assert_eq!(
+            actual[0].names.len() + actual[1].names.len(),
+            agent_names.len()
+        );
+        assert_eq!(actual[1].names.len(), 4);
     }
 }
 async fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -171,70 +257,77 @@ async fn execute(
             if names.is_empty() {
                 continue;
             }
-            if snapshot(repo).await? != *baseline {
-                return Err("GIT_TREE_CHANGED");
-            }
-            let mut cmd = Command::new(&binaries[package]);
-            cmd.current_dir(repo)
-                .args([
-                    "--exact",
-                    "--format",
-                    "pretty",
-                    "--color",
-                    "never",
-                    "--test-threads",
-                    "4",
-                ])
-                .args(&names);
-            cmd.env(
-                "OKX_NATIVE_ACCEPTANCE_RUN_ID",
-                report["run_id"].as_str().unwrap(),
-            );
-            cmd.env("OKX_NATIVE_ACCEPTANCE_WORKLOAD_DIR", measurements.path());
-            let stage_started = Instant::now();
-            let out = command(cmd, Duration::from_secs(180)).await;
-            report["stages"].as_array_mut().unwrap().push(json!({
-                "stage":"libtest", "package":package, "witness_count":names.len(),
-                "wall_ms":stage_started.elapsed().as_millis(),
-                "success":out.as_ref().is_ok_and(|o|o.success),
-                "direct_process_resources":out.as_ref().ok().map(|o|&o.resources)
-            }));
-            match &out {
-                Ok(out) if !out.success => failure(
-                    report,
-                    "libtest",
-                    Some(package),
-                    out.failure.unwrap_or("LIBTEST_PROCESS_FAILED"),
-                    Some(out),
-                ),
-                Err(code) => failure(report, "libtest", Some(package), code, None),
-                _ => {}
-            }
-            if let Ok(output) = &out
-                && !output.success
-            {
-                reporting::record_failures(report, package, &output.stdout, &names);
-            }
-            if snapshot(repo).await? != *baseline {
-                return Err("GIT_TREE_CHANGED");
-            }
-            let out = out?;
-            if !out.success {
-                return Err(out.failure.unwrap_or("LIBTEST_PROCESS_FAILED"));
-            }
-            let verified = verify_output(&out.stdout, &names).inspect_err(|code| {
-                failure(
-                    report,
-                    "libtest_output_verification",
-                    Some(package),
-                    code,
-                    Some(&out),
+            for group in libtest_groups(package, &names)? {
+                if group.names.is_empty() {
+                    return Err("EMPTY_LIBTEST_GROUP");
+                }
+                if snapshot(repo).await? != *baseline {
+                    return Err("GIT_TREE_CHANGED");
+                }
+                let mut cmd = Command::new(&binaries[package]);
+                let thread_count = group.threads.to_string();
+                cmd.current_dir(repo)
+                    .args([
+                        "--exact",
+                        "--format",
+                        "pretty",
+                        "--color",
+                        "never",
+                        "--test-threads",
+                        &thread_count,
+                    ])
+                    .args(&group.names);
+                cmd.env(
+                    "OKX_NATIVE_ACCEPTANCE_RUN_ID",
+                    report["run_id"].as_str().unwrap(),
                 );
-            })?;
-            for name in verified {
-                observed.insert((package.to_owned(), name));
+                cmd.env("OKX_NATIVE_ACCEPTANCE_WORKLOAD_DIR", measurements.path());
+                let stage_started = Instant::now();
+                let out = command(cmd, Duration::from_secs(180)).await;
+                report["stages"].as_array_mut().unwrap().push(json!({
+                    "stage":"libtest", "package":package, "group":group.label,
+                    "test_threads":group.threads,"witness_count":group.names.len(),
+                    "wall_ms":stage_started.elapsed().as_millis(),
+                    "success":out.as_ref().is_ok_and(|o|o.success),
+                    "direct_process_resources":out.as_ref().ok().map(|o|&o.resources)
+                }));
+                match &out {
+                    Ok(out) if !out.success => failure(
+                        report,
+                        "libtest",
+                        Some(package),
+                        out.failure.unwrap_or("LIBTEST_PROCESS_FAILED"),
+                        Some(out),
+                    ),
+                    Err(code) => failure(report, "libtest", Some(package), code, None),
+                    _ => {}
+                }
+                if let Ok(output) = &out
+                    && !output.success
+                {
+                    reporting::record_failures(report, package, &output.stdout, &group.names);
+                }
+                if snapshot(repo).await? != *baseline {
+                    return Err("GIT_TREE_CHANGED");
+                }
+                let out = out?;
+                if !out.success {
+                    return Err(out.failure.unwrap_or("LIBTEST_PROCESS_FAILED"));
+                }
+                let verified = verify_output(&out.stdout, &group.names).inspect_err(|code| {
+                    failure(
+                        report,
+                        "libtest_output_verification",
+                        Some(package),
+                        code,
+                        Some(&out),
+                    );
+                })?;
+                for name in verified {
+                    observed.insert((package.to_owned(), name));
+                }
+                reporting::record_verified(report, &observed);
             }
-            reporting::record_verified(report, &observed);
         }
         if wanted.contains(&("repository".into(), repository_guards::WITNESS.into())) {
             if snapshot(repo).await? != *baseline {
@@ -333,7 +426,8 @@ async fn main() {
     let run_id: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
     let mut report = json!({"schema":"okx.native-finance-acceptance/v1", "run_id":run_id,"mode":mode,
         "head":null,"tree":null,"git_clean":false,"build_ms":null,"runtime_setup_to_teardown_ms":null,
-        "observed_witnesses":[],"repository_guards":[],"stages":[],"contracts":[],"overall":"FAIL","timeout_guards_seconds":{"build":1800,"per_package_libtest":180},"test_threads":4});
+        "observed_witnesses":[],"repository_guards":[],"stages":[],"contracts":[],"overall":"FAIL","timeout_guards_seconds":{"build":1800,"per_libtest_group":180},"test_threads":FINANCIAL_WITNESS_TEST_THREADS,"clock_sensitive_test_threads":CLOCK_SENSITIVE_TEST_THREADS,
+        "test_schedule":"parallel_4_then_clock_sensitive_1"});
     let result: Result<Witnesses> = async {
         collector_sources_match(repo)?;
         report["collector_source_binding"] = json!("VERIFIED");
@@ -349,7 +443,8 @@ async fn main() {
             "logical_processors":std::thread::available_parallelism().ok().map(|n|n.get()),
             "processor_identifier":std::env::var("PROCESSOR_IDENTIFIER").ok(),
             "toolchain":String::from_utf8_lossy(&compiler.stdout).trim(),
-            "profile":"Cargo test debug","test_threads":4});
+            "profile":"Cargo test debug","test_threads":FINANCIAL_WITNESS_TEST_THREADS,
+            "clock_sensitive_test_threads":CLOCK_SENSITIVE_TEST_THREADS});
         let wanted = selected()?;
         if mode == "full" && incomplete() {
             report["overall"] = json!("BLOCKED");

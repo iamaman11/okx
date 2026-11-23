@@ -17,6 +17,51 @@ permissions:
   actions: read
 
 jobs:
+  accepted-research-composition:
+    # Supplementary Draft proof for #537 T10. Does not compile or deploy an
+    # Engine/Worker and never substitutes for mandatory Ready Native CI.
+    name: accepted-research-composition
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'research-composition-evidence')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Reject mixed-origin substitution and unsupported names
+        run: node scripts/test-compose-accepted-research-v2.cjs
+      - name: Compose two accepted GitHub artifacts for installed CONTROL
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dist = Join-Path $env:RUNNER_TEMP 'okx-research-composition-v2'
+          $proof = Join-Path $env:RUNNER_TEMP 'research-composition-proof.json'
+          & ./scripts/prepare-research-release.ps1 `
+            -AcceptedCompositionSpec 'docs/acceptance/537/t10-composition-spec.json' `
+            -Dist $dist -ProofFile $proof
+          if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_COMPOSITION_FAILED' }
+          $result = Get-Content -LiteralPath $proof -Raw | ConvertFrom-Json
+          if ($result.control_candidate_rules -cne 'PASS_OFFLINE_NOT_ACTIVATED' -or
+              $result.candidate_head -cne '${{ github.event.pull_request.head.sha }}' -or
+              $result.candidate_tree -cne (git rev-parse 'HEAD^{tree}').Trim()) {
+            throw 'CANDIDATE_PROOF_NOT_EXACT_TREE'
+          }
+      - name: Retain exact v2 candidate for later Ready/promotion review
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/okx-research-composition-v2
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 14
+      - name: Retain composition identities and negative-test proof
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: research-composition-proof-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/research-composition-proof.json
+          if-no-files-found: error
+          retention-days: 14
+
   dependency-policy:
     name: dependency-policy
     runs-on: ubuntu-latest
@@ -105,7 +150,7 @@ jobs:
               scope="$(python3 -B scripts/check_ci_native_scope.py < "$RUNNER_TEMP/ci-files.json")"
             fi
           fi
-          case "$scope" in docs|cloudflare|research|full) ;; *) exit 1;; esac
+          case "$scope" in docs|cloudflare|research|host-control|host-launcher|full) ;; *) exit 1;; esac
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
           echo "COMPONENT_SCOPE=$scope"
       - name: Verify Research-only scope and immutable accepted base
@@ -172,6 +217,13 @@ jobs:
               echo "reason=$scope-only PR; no native Rust or common dependency changed" >> "$GITHUB_OUTPUT"
               exit 0
             fi
+            if [[ "$scope" == "host-control" || "$scope" == "host-launcher" ]]; then
+              echo "build_required=true" >> "$GITHUB_OUTPUT"
+              echo "native_required=false" >> "$GITHUB_OUTPUT"
+              echo "native_proof=HOST_WINDOWS_OWNER_AND_CONSUMER" >> "$GITHUB_OUTPUT"
+              echo "reason=$scope Rust source only; dedicated Windows host/consumer build required" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             echo "build_required=true" >> "$GITHUB_OUTPUT"
             echo "native_required=true" >> "$GITHUB_OUTPUT"
             echo "native_proof=NONE" >> "$GITHUB_OUTPUT"
@@ -225,6 +277,10 @@ jobs:
             echo "native_required=false" >> "$GITHUB_OUTPUT"
             echo "native_proof=COMPONENT_SCOPED_UNCHANGED_NATIVE" >> "$GITHUB_OUTPUT"
             echo "reason=$scope-only main delta; accepted Native source unaffected" >> "$GITHUB_OUTPUT"
+          elif [[ "$scope" == "host-control" || "$scope" == "host-launcher" ]]; then
+            echo "native_required=false" >> "$GITHUB_OUTPUT"
+            echo "native_proof=HOST_WINDOWS_OWNER_AND_CONSUMER" >> "$GITHUB_OUTPUT"
+            echo "reason=$scope-only main delta; dedicated Windows host/consumer build required" >> "$GITHUB_OUTPUT"
           else
             echo "native_required=true" >> "$GITHUB_OUTPUT"
             echo "native_proof=NONE" >> "$GITHUB_OUTPUT"
@@ -485,14 +541,17 @@ jobs:
         run: |
           python3 -B scripts/check_ci_native_scope.py --self-test
           node scripts/test-research-release-scope.cjs
+          node scripts/test-compose-accepted-research-v2.cjs
 
       - name: Parse permanent Native-base release verifier
         shell: pwsh
         run: |
           $tokens = $null
           $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'scripts/prepare-research-release.ps1').Path, [ref]$tokens, [ref]$errors) | Out-Null
-          if ($errors.Count -ne 0) { throw "NATIVE_BASE_POWERSHELL_PARSE_FAILED: $($errors -join '; ')" }
+          foreach ($file in @('scripts/prepare-research-release.ps1', 'scripts/prepare-accepted-research-composition.ps1')) {
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file).Path, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -ne 0) { throw "RESEARCH_COMPOSITION_POWERSHELL_PARSE_FAILED: $file $($errors -join '; ')" }
+          }
 
       - name: Architecture checker self-test
         run: python3 scripts/check_architecture.py --self-test
@@ -591,7 +650,7 @@ jobs:
   cloudflare-mcp:
     name: cloudflare-mcp
     needs: classify
-    if: needs.classify.outputs.build_required == 'true' && needs.classify.outputs.component_scope != 'docs'
+    if: needs.classify.outputs.build_required == 'true' && !contains(fromJSON('["docs","host-control","host-launcher"]'), needs.classify.outputs.component_scope)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -643,6 +702,10 @@ jobs:
             test "${{ needs.linux-rust.result }}" = "skipped"
             test "${{ needs['research-only-windows'].result }}" = "success"
             echo "LINUX_FINANCE_REUSED_BASE=${{ needs.classify.outputs.research_base_head }}"
+          elif [[ "${{ needs.classify.outputs.component_scope }}" == "host-control" || "${{ needs.classify.outputs.component_scope }}" == "host-launcher" ]]; then
+            test "${{ needs.linux-rust.result }}" = "skipped"
+            test "${{ needs.classify.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
+            echo "LINUX_FINANCE_UNCHANGED_HOST_SOURCE_ONLY=true"
           elif [[ "${{ needs.classify.outputs.native_required }}" == "false" ]]; then
             test "${{ needs.linux-rust.result }}" = "skipped"
             test "${{ needs.classify.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
@@ -650,13 +713,72 @@ jobs:
           else
             test "${{ needs.linux-rust.result }}" = "success"
           fi
-          if [[ "${{ needs.classify.outputs.component_scope }}" == "docs" ]]; then
+          if [[ "${{ needs.classify.outputs.component_scope }}" == "docs" || "${{ needs.classify.outputs.component_scope }}" == "host-control" || "${{ needs.classify.outputs.component_scope }}" == "host-launcher" ]]; then
             test "${{ needs['cloudflare-mcp'].result }}" = "skipped"
           else
             test "${{ needs['cloudflare-mcp'].result }}" = "success"
           fi
           echo "REPOSITORY_GUARD_AND_LINUX=PASS"
 
+
+  windows-host-components:
+    # Source-only lifecycle changes never compile a new trading Engine or SQL
+    # owner. Every host change tests CONTROL and Launcher together because
+    # CONTROL is a real consumer of the Launcher crate. This is NOT a complete
+    # four-EXE release; publishing a new Native base still requires full CI.
+    name: windows-host-components
+    needs: classify
+    if: needs.classify.outputs.build_required == 'true' && (needs.classify.outputs.component_scope == 'host-control' || needs.classify.outputs.component_scope == 'host-launcher')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.95.0
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+      - name: Verify architecture and formatting
+        shell: pwsh
+        run: |
+          python3 scripts/check_architecture.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows installation root and lifecycle contracts
+        shell: pwsh
+        run: ./scripts/test-windows-unify-root.ps1
+      - name: Clippy and test Launcher owner plus CONTROL consumer
+        shell: pwsh
+        run: |
+          cargo clippy --locked -p okx-host-launcher -p okx-host-control --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p okx-host-launcher -p okx-host-control -- --test-threads 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build both Windows host executables without Engine
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p okx-host-launcher -p okx-host-control
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $head = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          $proof = @("scope=${{ needs.classify.outputs.component_scope }}", "head=$head", "tree=$tree", 'release_is_complete=false')
+          foreach ($name in @('okx-host-launcher.exe', 'okx-host-control.exe')) {
+            $path = Join-Path 'target/release' $name
+            if (!(Test-Path -LiteralPath $path)) { throw "MISSING_HOST_BINARY_$name" }
+            $proof += "$name=$((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant())"
+          }
+          $proof | Set-Content -LiteralPath "$env:RUNNER_TEMP/host-component-proof.txt" -Encoding utf8NoBOM
+      - name: Retain host-only build identities (not a deployable bundle)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: host-component-proof-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/host-component-proof.txt
+          if-no-files-found: error
+          retention-days: 14
 
   windows_native_full:
     name: windows-native-full
@@ -761,11 +883,20 @@ jobs:
           }
           foreach ($package in @('okx-agent','okx-host-control','okx-host-launcher','okx-execution')) {
             $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--skip','accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research','--skip','trade_service::protection_cleanup::protection_cleanup_direct_tests::','--test-threads','2')
+            # This OS-kill fixture spawns a second Native process with its own
+            # bounded SQL deadlines. Exercise it alone, not beside other fixtures.
+            if ($package -eq 'okx-agent') { $testArgs += @('--skip','accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once') }
             foreach ($witness in @($covered | Where-Object package -eq $package)) { $testArgs += @('--skip',$witness.test) }
             Write-Host "Remaining regression: $package; exact property witnesses already verified: $(@($covered | Where-Object package -eq $package).Count)"
             cargo test --locked -p $package -- @testArgs
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+
+      - name: Isolated Native pending-fill crash recovery
+        shell: pwsh
+        run: |
+          cargo test --locked -p okx-agent --lib accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once -- --exact --test-threads 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # The seven real SQL-owner cleanup transitions have bounded deadlines.
       # Run them separately so unrelated fixtures cannot age campaign-opening
@@ -1085,7 +1216,7 @@ jobs:
     # on a real Windows gate or on the narrowly proven identical native tree;
     # it never reports a newly executed 26/26 on the reuse path.
     name: windows-native
-    needs: [classify, windows_native_full, cloudflare-mcp, research-only-windows]
+    needs: [classify, windows_native_full, windows-host-components, cloudflare-mcp, research-only-windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -1102,6 +1233,14 @@ jobs:
             test "${{ needs['research-only-windows'].result }}" = "success"
             test "${{ needs['cloudflare-mcp'].result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_BASE_${{ needs.classify.outputs.research_base_head }}"
+            echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
+          elif [[ "${{ needs.classify.outputs.component_scope }}" == "host-control" || "${{ needs.classify.outputs.component_scope }}" == "host-launcher" ]]; then
+            test "${{ needs.classify.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
+            test "${{ needs.windows_native_full.result }}" = "skipped"
+            test "${{ needs['windows-host-components'].result }}" = "success"
+            test "${{ needs['research-only-windows'].result }}" = "skipped"
+            test "${{ needs['cloudflare-mcp'].result }}" = "skipped"
+            echo "WINDOWS_NATIVE_PROOF=HOST_COMPONENTS_TESTED_NO_ENGINE_REBUILD"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.classify.outputs.native_required }}" == "false" ]]; then
             test "${{ needs.classify.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
