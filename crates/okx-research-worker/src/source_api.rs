@@ -69,7 +69,12 @@ impl PublicSourceClient {
             || capture.rows.len() > usize::from(limit)
             || capture.raw_body.is_empty()
             || capture.raw_body.len() > MAX_FRAME_BYTES / 8
-            || capture.acquired_at_ms.parse::<u64>().ok().filter(|ts| *ts > 0).is_none()
+            || capture
+                .acquired_at_ms
+                .parse::<u64>()
+                .ok()
+                .filter(|ts| *ts > 0)
+                .is_none()
             || capture.http_delivery.transport_send_invocations != 1
             || !(200..300).contains(&capture.http_delivery.response_status)
             || capture.http_delivery.response_body_bytes != capture.raw_body.len() as u64
@@ -97,10 +102,10 @@ impl PublicSourceClient {
                 .timestamp_ms
                 .parse::<u64>()
                 .map_err(|_| "RESEARCH_TRADE_ROW_INVALID")?;
-            let price = Decimal::from_str_exact(&row.price)
-                .map_err(|_| "RESEARCH_TRADE_ROW_INVALID")?;
-            let size = Decimal::from_str_exact(&row.size)
-                .map_err(|_| "RESEARCH_TRADE_ROW_INVALID")?;
+            let price =
+                Decimal::from_str_exact(&row.price).map_err(|_| "RESEARCH_TRADE_ROW_INVALID")?;
+            let size =
+                Decimal::from_str_exact(&row.size).map_err(|_| "RESEARCH_TRADE_ROW_INVALID")?;
             if timestamp_ms == 0 || price <= Decimal::ZERO || size <= Decimal::ZERO {
                 return Err("RESEARCH_TRADE_ROW_INVALID".into());
             }
@@ -397,13 +402,15 @@ mod catalog_adapter_tests {
             format!(
                 "{:x}",
                 Sha256::digest(
-                    serde_json::to_vec(&json!({"code":"0","data":provider.rows}))
-                        .unwrap()
+                    serde_json::to_vec(&json!({"code":"0","data":provider.rows})).unwrap()
                 )
             )
         );
         assert_eq!(page.http_delivery.transport_send_invocations, 1);
-        assert_eq!(meter.snapshot()["source_calls"]["catalog_page"]["proxy_replies"], 1);
+        assert_eq!(
+            meter.snapshot()["source_calls"]["catalog_page"]["proxy_replies"],
+            1
+        );
         assert_eq!(
             meter.snapshot()["source_calls"]["catalog_page"]["host_transport_receipts"],
             1
@@ -424,12 +431,17 @@ mod catalog_adapter_tests {
         });
         let client = PublicSourceClient::new(provider.clone());
         assert_eq!(
-            client.recent_trades("https://evil.invalid", 10).await.unwrap_err(),
+            client
+                .recent_trades("https://evil.invalid", 10)
+                .await
+                .unwrap_err(),
             "INVALID_RESEARCH_SOURCE_REQUEST"
         );
         assert_eq!(
-            client.history_trades("BTC-USDT-SWAP", Some("1&route=evil"), None, 10)
-                .await.unwrap_err(),
+            client
+                .history_trades("BTC-USDT-SWAP", Some("1&route=evil"), None, 10)
+                .await
+                .unwrap_err(),
             "INVALID_RESEARCH_SOURCE_REQUEST"
         );
         assert_eq!(provider.calls.lock().unwrap().len(), 0);
@@ -453,7 +465,10 @@ mod catalog_adapter_tests {
                 rows: vec![bad],
             }));
             assert_eq!(
-                faulty.recent_trades("BTC-USDT-SWAP", 100).await.unwrap_err(),
+                faulty
+                    .recent_trades("BTC-USDT-SWAP", 100)
+                    .await
+                    .unwrap_err(),
                 "RESEARCH_TRADE_ROW_INVALID"
             );
         }
@@ -463,7 +478,10 @@ mod catalog_adapter_tests {
             rows: vec![row()],
         }));
         assert_eq!(
-            mismatched.recent_trades("BTC-USDT-SWAP", 100).await.unwrap_err(),
+            mismatched
+                .recent_trades("BTC-USDT-SWAP", 100)
+                .await
+                .unwrap_err(),
             "RESEARCH_TRADE_SOURCE_RECEIPT_INVALID"
         );
     }
