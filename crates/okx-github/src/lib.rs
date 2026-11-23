@@ -592,9 +592,8 @@ impl GitHubClient {
             return Ok(true);
         }
 
-        let url = format!(
-            "{GITHUB_API_BASE}/repos/{REPOSITORY}/compare/{accepted_head}...{main_sha}"
-        );
+        let url =
+            format!("{GITHUB_API_BASE}/repos/{REPOSITORY}/compare/{accepted_head}...{main_sha}");
         let response = self
             .send_checked(
                 self.http
@@ -1320,9 +1319,9 @@ fn safe_research_delta(path: &str) -> bool {
         || path.split('/').any(|part| {
             part.is_empty()
                 || matches!(part, "." | "..")
-                || !part.bytes().all(|b| {
-                    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')
-                })
+                || !part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
         })
     {
         return false;
@@ -1491,7 +1490,9 @@ mod tests {
         ]));
         assert!(research_only_descendant(&head, &accepted));
         assert!(safe_research_delta("crates/okx-research/src/query_plan.rs"));
-        assert!(safe_research_delta("crates/okx-research-worker/src/source_api.rs"));
+        assert!(safe_research_delta(
+            "crates/okx-research-worker/src/source_api.rs"
+        ));
         assert!(safe_research_delta("README.md"));
 
         for path in [
@@ -1527,10 +1528,12 @@ mod tests {
             "commits": [{"sha": "b".repeat(40)}],
             "files": [{"filename": "crates/okx-research-worker/src/source_api.rs", "status": "modified"}]
         });
-        let accepts = |value| research_only_descendant(
-            &head,
-            &serde_json::from_value::<RepositoryComparison>(value).unwrap(),
-        );
+        let accepts = |value| {
+            research_only_descendant(
+                &head,
+                &serde_json::from_value::<RepositoryComparison>(value).unwrap(),
+            )
+        };
         assert!(accepts(valid.clone()));
         let cases = [
             ("status", serde_json::json!("diverged")),
@@ -1539,16 +1542,25 @@ mod tests {
             ("behind_by", serde_json::json!(1)),
             ("total_commits", serde_json::json!(250)),
             ("base_commit", serde_json::json!({"sha": "b".repeat(40)})),
-            ("merge_base_commit", serde_json::json!({"sha": "b".repeat(40)})),
+            (
+                "merge_base_commit",
+                serde_json::json!({"sha": "b".repeat(40)}),
+            ),
             ("commits", serde_json::json!([])),
             ("files", serde_json::json!([])),
-            ("files", serde_json::json!([
-                {"filename": "crates/okx-research-worker/src/source_api.rs", "status": "renamed", "previous_filename": "crates/okx-agent/src/main.rs"}
-            ])),
-            ("files", serde_json::json!([
-                {"filename": "crates/okx-research-worker/src/source_api.rs", "status": "modified"},
-                {"filename": "crates/okx-research-worker/src/source_api.rs", "status": "modified"}
-            ])),
+            (
+                "files",
+                serde_json::json!([
+                    {"filename": "crates/okx-research-worker/src/source_api.rs", "status": "renamed", "previous_filename": "crates/okx-agent/src/main.rs"}
+                ]),
+            ),
+            (
+                "files",
+                serde_json::json!([
+                    {"filename": "crates/okx-research-worker/src/source_api.rs", "status": "modified"},
+                    {"filename": "crates/okx-research-worker/src/source_api.rs", "status": "modified"}
+                ]),
+            ),
         ];
         for (field, value) in cases {
             let mut comparison = valid.clone();
