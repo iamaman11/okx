@@ -6,10 +6,57 @@ on:
   push:
     branches:
       - main
+      # Legacy All26 WIP cohorts remain scoped to their exact historical refs.
+      - work/all26-one-slice-20261104
+      - work/b-seven-causal-consolidation-20261105
+      - work/b-first-source-diagnostics-20261105
+      - work/b-readonly-source-admission-20261105
+      - work/b-t09-protection-causal-20261105
+      - work/b-seven-readback-consolidation-20261105
+      - work/b-source-owner-causal-fixes-20261105
+      - work/b-replay-source-isolation-20261105
+      - work/deterministic-recorded-source-phases-20261105
+      - work/recorded-capture-scheduler-20261105
+      - work/recorded-event-source-controller-20261105
+      - work/b-census-sql-owner-batch-20261105
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Select the explicit manual operation (never deploy from a code push)'
+        type: choice
+        required: true
+        options:
+          - credentials-check
+          - readonly-account-acceptance
+          - named-account-attestation
+          - cloudflare-mcp-deploy
+      account_id:
+        description: 'Registered account ID (named-account attestation only)'
+        type: string
+        required: false
+      expected_uid_fingerprint:
+        description: 'SHA256 UID fingerprint (named-account attestation only)'
+        type: string
+        required: false
+      initialize_clean_v2:
+        description: 'One-time owner initialization of clean-v2 Durable Object (Cloudflare only)'
+        type: boolean
+        default: false
+      installation_id:
+        description: 'Verified native installation ID (Cloudflare initialization only)'
+        type: string
+        required: false
+      accepted_bundle_sha256:
+        description: 'SHA256 of accepted Windows bundle (Cloudflare initialization only)'
+        type: string
+        required: false
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Main pushes use a commit identity: a newer push must not cancel a job
+  # currently publishing an immutable accepted release. Manual operations
+  # never cancel each other, and PRs still cancel stale revisions.
+  group: ci-${{ github.event_name }}-${{ inputs.operation || github.event.pull_request.number || (github.ref != 'refs/heads/main' && github.ref) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/main') }}
 
 permissions:
   contents: read
@@ -64,6 +111,7 @@ jobs:
 
   dependency-audit:
     name: dependency-audit
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -102,6 +150,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          node scripts/test-ci-workflow-routing.cjs
           node scripts/test-ci-component-impact.cjs
           files=()
           if [[ "${{ github.event_name }}" == 'pull_request' ]]; then
@@ -131,6 +180,7 @@ jobs:
 
   component_impact:
     name: component-impact
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     outputs:
       build_required: ${{ steps.classify.outputs.build_required }}
@@ -320,7 +370,7 @@ jobs:
     # job is component-impact; this alias fails if that real classifier fails.
     name: classify
     needs: component_impact
-    if: always()
+    if: always() && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     steps:
       - name: Verify component impact classification
@@ -348,6 +398,7 @@ jobs:
         run: |
           python3 -B scripts/check_ci_native_scope.py --self-test
           python3 -B scripts/test_check_p0.py
+          node scripts/test-ci-workflow-routing.cjs
           node scripts/test-ci-component-impact.cjs
           python3 scripts/check_p0.py --base "$BASE_SHA" --plan
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
@@ -728,7 +779,7 @@ jobs:
     # Legacy required-check name is kept until branch protection is migrated.
     name: linux-core
     needs: [component_impact, architecture_contracts, trading_rust_linux, cloudflare_mcp_contracts, research_service_windows]
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
+    if: always() && (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'pull_request' && github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate required Linux, architecture and Cloudflare gates
@@ -1278,7 +1329,7 @@ jobs:
     # it never reports a newly executed 26/26 on the reuse path.
     name: windows-native
     needs: [component_impact, trading_windows_full, trading_safety_windows, host_lifecycle_windows, cloudflare_mcp_contracts, research_service_windows]
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
+    if: always() && (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'pull_request' && github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
       - name: Enforce native gate or exact accepted evidence reuse
@@ -1392,3 +1443,886 @@ jobs:
             ${{ runner.temp }}\native-queue-current.log
           if-no-files-found: error
           retention-days: 14
+  # Consolidated from all26-slice-targeted.yml; credential/operation boundaries remain job-scoped.
+  all26_windows_targeted:
+    if: github.event_name == 'push' && contains(fromJSON('["work/all26-one-slice-20261104","work/b-seven-causal-consolidation-20261105","work/b-first-source-diagnostics-20261105","work/b-readonly-source-admission-20261105","work/b-t09-protection-causal-20261105","work/b-seven-readback-consolidation-20261105","work/b-source-owner-causal-fixes-20261105","work/b-replay-source-isolation-20261105","work/deterministic-recorded-source-phases-20261105","work/recorded-capture-scheduler-20261105","work/recorded-event-source-controller-20261105","work/b-census-sql-owner-batch-20261105"]'), github.ref_name)
+    name: all26-${{ matrix.cohort }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cohort: t09-core
+            ids: 'T09.0 T09.1 T09.2 T09.3 T09.4 T09.5 T09.6 T09.7 T09.8'
+          - cohort: t09-multi-and-t10-entry
+            ids: 'T09-MA T09-SPEC T10-01 T10-02 T10-03 T10-04 T10-05'
+          - cohort: t10-concurrent-and-finance
+            ids: 'T10-06 T10-07 T10-08 T10-09 T10-10'
+          - cohort: t10-durability-and-control
+            ids: 'T10-11 T10-12 T10-13 T10-14 T10-15'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          cache-on-failure: true
+      - name: Report repository formatting debt (required CI still enforces format)
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+      - name: Validate unchanged 26 mandatory IDs and evidence oracle
+        shell: pwsh
+        run: |
+          node scripts/run-trade-integration.mjs --list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/run-trade-integration.mjs --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify stage B case adapters parse
+        shell: pwsh
+        run: |
+          foreach ($id in @('T09.8','T09-MA','T09-SPEC','T10-01','T10-02','T10-07','T10-14','T10-15')) {
+            node --check "scripts/trade-integration/cases/$id.mjs"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Install locked persisted Worker runtime
+        shell: pwsh
+        run: |
+          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile Native integration binary once before bounded child deadlines
+        shell: pwsh
+        timeout-minutes: 12
+        run: |
+          cargo test --locked -p okx-trading-engine --lib --no-run
+          if ($LASTEXITCODE -ne 0) { throw 'B_STAGE_NATIVE_PRECOMPILE_FAILED' }
+      - name: Prove deterministic immutable signed-source phase isolation
+        shell: pwsh
+        run: |
+          cargo test --locked -p okx-trading-engine --lib immutable_signed_ -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'SIGNED_SOURCE_PHASE_UNIT_PROOF_FAILED' }
+      - name: Verify identical, late-bound and foreign Worker reply identities
+        if: matrix.cohort == 't10-concurrent-and-finance'
+        shell: pwsh
+        run: |
+          $joined = cargo test --locked -p okx-trading-engine --lib identical_inflight_risk_commands_get_one_worker_call_and_two_bound_replies -- --nocapture 2>&1
+          $joined | Out-String | Write-Output
+          if ($LASTEXITCODE -ne 0 -or (($joined | Out-String) -notmatch '1 passed')) {
+            throw 'RISK_IDENTICAL_WORKER_COMMAND_FANOUT_FAILED'
+          }
+          $conflict = cargo test --locked -p okx-trading-engine --lib same_risk_command_id_with_different_payload_never_inherits_worker_result -- --nocapture 2>&1
+          $conflict | Out-String | Write-Output
+          if ($LASTEXITCODE -ne 0 -or (($conflict | Out-String) -notmatch '1 passed')) {
+            throw 'RISK_IDENTICAL_ID_DIFFERENT_PAYLOAD_REJECTION_FAILED'
+          }
+          cargo test --locked -p okx-trading-engine --lib late_bound_risk_reply_after_cancelled_native_wait_does_not_close_session -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'RISK_KNOWN_LATE_REPLY_UNIT_PROOF_FAILED' }
+          cargo test --locked -p okx-trading-engine --lib foreign_risk_reply_command_never_authorizes_pending_reserve -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'RISK_FOREIGN_REPLY_UNIT_PROOF_FAILED' }
+      - name: Mandatory 26-case partition — per-case Native and Worker evidence on exact SHA
+        shell: pwsh
+        timeout-minutes: 52
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP ('all26-' + '${{ matrix.cohort }}')
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          # Every one of the 26 mandatory IDs belongs to exactly one matrix
+          # partition. Parallel independent Windows workers use the same
+          # immutable github.sha and retain individual SQL/Worker readbacks.
+          # No historical case PASS and no Worker-only component count.
+          $ids = '${{ matrix.ids }}' -split ' '
+          if (@($ids).Count -eq 0) { throw 'ALL26_EMPTY_PARTITION' }
+          $env:OKX_B_CENSUS_CAUSE_PROBE = '1'
+          $env:OKX_T09_4_SOURCE_COHERENCE_PROBE = '1'
+          $env:OKX_T10_01_MAINT_SHUTDOWN_PROBE = '1'
+          $rows = @()
+          $attempt = 0
+          foreach ($id in $ids) {
+            $attempt++
+            $out = Join-Path $dir "$id-$attempt"
+            Write-Output "B_STAGE_START:${id}:attempt=$attempt"
+            node scripts/run-trade-integration.mjs --case "$id" --artifacts "$out"
+            $code = $LASTEXITCODE
+            $file = Join-Path $out 'summary.json'
+            if (Test-Path -LiteralPath $file) {
+              $report = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+              $ok = $code -eq 0 -and
+                $report.exact_commit -eq $env:GITHUB_SHA -and
+                $report.spec_revision -eq '#449-r9' -and
+                $report.required.Count -eq 26 -and
+                $report.selected.Count -eq 1 -and
+                $report.selected[0] -eq $id -and
+                $report.executed_pass -eq 1 -and
+                $report.executed_failures.Count -eq 0 -and
+                $report.gate -eq 'PASS'
+              $reason = if ($ok) { 'PASS' } elseif ($report.outcomes.Count -gt 0) {
+                [string]$report.outcomes[0].reason
+              } else { 'INVALID_RUNNER_SUMMARY' }
+            } else {
+              $ok = $false
+              $reason = 'SUMMARY_MISSING'
+            }
+            $rows += [pscustomobject]@{id=$id;status= $(if($ok){'PASS'}else{'FAIL'});reason=$reason;exit_code=$code;sha=$env:GITHUB_SHA}
+            Write-Output "B_STAGE_RESULT:${id}:attempt=${attempt}:${reason}"
+          }
+          $rows | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $dir 'b-stage-results.json') -Encoding utf8NoBOM
+          $passed = @($rows | Where-Object status -eq 'PASS').Count
+          Write-Output "ALL26_PARTITION_RESULT:${{ matrix.cohort }}:$passed/$($ids.Count):$env:GITHUB_SHA"
+          if ($passed -ne $ids.Count) { throw 'ALL26_PARTITION_ACCEPTANCE_NOT_COMPLETE' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: all26-${{ matrix.cohort }}-${{ github.sha }}
+          path: ${{ runner.temp }}\\all26-${{ matrix.cohort }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Consolidated from environment-credentials-check.yml; credential/operation boundaries remain job-scoped.
+  credentials_observer:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'credentials-check'
+    runs-on: ubuntu-latest
+    environment: okx-succession-global-observer
+    env:
+      OKX_REGION: ${{ vars.OKX_REGION }}
+      OKX_ACCOUNT: ${{ vars.OKX_ACCOUNT }}
+      OKX_ACCESS_ROLE: ${{ vars.OKX_ACCESS_ROLE }}
+      OKX_DEMO: ${{ vars.OKX_DEMO }}
+      OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+      OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+      OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+    steps:
+      - name: Verify observer environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$OKX_REGION" = "global"
+          test "$OKX_ACCOUNT" = "Succession"
+          test "$OKX_ACCESS_ROLE" = "observer"
+          test "$OKX_DEMO" = "false"
+          test -n "$OKX_API_KEY"
+          test -n "$OKX_API_SECRET"
+          test -n "$OKX_API_PASSPHRASE"
+          echo "OBSERVER_ENVIRONMENT=PASS"
+
+  credentials_executor:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'credentials-check'
+    runs-on: ubuntu-latest
+    environment: okx-succession-global-executor
+    env:
+      OKX_REGION: ${{ vars.OKX_REGION }}
+      OKX_ACCOUNT: ${{ vars.OKX_ACCOUNT }}
+      OKX_ACCESS_ROLE: ${{ vars.OKX_ACCESS_ROLE }}
+      OKX_DEMO: ${{ vars.OKX_DEMO }}
+      ALLOW_LIVE_TRADING: ${{ vars.ALLOW_LIVE_TRADING }}
+      OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+      OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+      OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+    steps:
+      - name: Verify executor environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$OKX_REGION" = "global"
+          test "$OKX_ACCOUNT" = "Succession"
+          test "$OKX_ACCESS_ROLE" = "executor"
+          test "$OKX_DEMO" = "false"
+          test "$ALLOW_LIVE_TRADING" = "false"
+          test -n "$OKX_API_KEY"
+          test -n "$OKX_API_SECRET"
+          test -n "$OKX_API_PASSPHRASE"
+          echo "EXECUTOR_ENVIRONMENT=PASS"
+
+  # Consolidated from okx-readonly-acceptance.yml; credential/operation boundaries remain job-scoped.
+  readonly_observer:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'readonly-account-acceptance'
+    runs-on: ubuntu-latest
+    outputs:
+      fingerprint: ${{ steps.probe.outputs.fingerprint }}
+    environment: okx-succession-global-observer
+    env:
+      OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+      OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+      OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Verify observer account contract
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked --quiet -p okx-cli -- --region global --instrument BTC-USDT-SWAP --margin cross > /tmp/c.json
+          jq -e '
+            .authenticated == true and
+            .region == "global" and
+            .demo == false and
+            .account_mode == "futures" and
+            .position_mode == "long_short_mode" and
+            .is_subaccount == true and
+            .account_type == "standard_subaccount" and
+            .account_stp_mode == "cancel_maker" and
+            .auto_loan == false and
+            .greeks_type == "PA" and
+            (.api_key_permissions | index("read_only")) != null and
+            (.api_key_permissions | index("trade")) == null and
+            (.api_key_permissions | index("withdraw")) == null and
+            .requested_instrument_available == true
+          ' /tmp/c.json > /dev/null
+          echo "fingerprint=$(jq -r .account_uid_fingerprint /tmp/c.json)" >> "$GITHUB_OUTPUT"
+          jq '{
+            authenticated, region, demo, account_mode, position_mode,
+            is_subaccount, account_type, account_stp_mode, auto_loan,
+            greeks_type, fee_type, api_key_label, api_key_permissions,
+            api_key_ip_bound, requested_instrument,
+            requested_instrument_available, requested_instrument_max_leverage,
+            configured_leverage, fee_rates, warnings
+          }' /tmp/c.json
+
+  readonly_executor:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'readonly-account-acceptance'
+    runs-on: ubuntu-latest
+    outputs:
+      fingerprint: ${{ steps.probe.outputs.fingerprint }}
+    environment: okx-succession-global-executor
+    env:
+      OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+      OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+      OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Verify executor account contract without trading
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked --quiet -p okx-cli -- --region global --instrument BTC-USDT-SWAP --margin cross > /tmp/c.json
+          jq -e '
+            .authenticated == true and
+            .region == "global" and
+            .demo == false and
+            .account_mode == "futures" and
+            .position_mode == "long_short_mode" and
+            .is_subaccount == true and
+            .account_type == "standard_subaccount" and
+            .account_stp_mode == "cancel_maker" and
+            .auto_loan == false and
+            .greeks_type == "PA" and
+            (.api_key_permissions | index("read_only")) != null and
+            (.api_key_permissions | index("trade")) != null and
+            (.api_key_permissions | index("withdraw")) == null
+          ' /tmp/c.json > /dev/null
+          echo "fingerprint=$(jq -r .account_uid_fingerprint /tmp/c.json)" >> "$GITHUB_OUTPUT"
+          jq '{
+            authenticated, region, demo, account_mode, position_mode,
+            is_subaccount, account_type, account_stp_mode, auto_loan,
+            greeks_type, fee_type, api_key_label, api_key_permissions,
+            api_key_ip_bound
+          }' /tmp/c.json
+
+  readonly_identity_match:
+    runs-on: ubuntu-latest
+    needs: [readonly_observer, readonly_executor]
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'readonly-account-acceptance' && (always() && needs.readonly_observer.outputs.fingerprint != '' && needs.readonly_executor.outputs.fingerprint != '')
+    steps:
+      - name: Verify both credentials target the same OKX account
+        env:
+          OBSERVER_FINGERPRINT: ${{ needs.readonly_observer.outputs.fingerprint }}
+          EXECUTOR_FINGERPRINT: ${{ needs.readonly_executor.outputs.fingerprint }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$OBSERVER_FINGERPRINT" = "$EXECUTOR_FINGERPRINT"
+          echo "ACCOUNT_IDENTITY_MATCH=PASS"
+
+  readonly_opening_inventory:
+    name: authenticated-observer-opening-inventory
+    needs: [readonly_observer, readonly_executor, readonly_identity_match]
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'readonly-account-acceptance' && (needs.readonly_identity_match.result == 'success')
+    runs-on: ubuntu-latest
+    environment: okx-succession-global-observer
+    env:
+      OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+      OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+      OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Signed GET-only full-account derivative opening census
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="$RUNNER_TEMP/opening-inventory.json"
+          trap 'rm -f "$file"' EXIT
+          cargo run --locked --quiet -p okx-cli -- --region global --opening-inventory > "$file"
+          jq -e '
+            .schema == "okx.readonly-opening-inventory/v1" and
+            .authenticated_reads_only == true and
+            (.state == "INCOMPLETE" or .state == "EXPOSURE_PRESENT" or .state == "DERIVATIVES_EXPOSURE_EMPTY") and
+            (.complete == true or .state == "INCOMPLETE") and
+            .algo_scopes_checked == 16 and
+            .algo_received_at_ms > 0 and
+            (.position_rows | type == "number") and
+            (.pending_order_rows | type == "number") and
+            (.pending_derivative_algo_rows | type == "number")
+          ' "$file" > /dev/null
+          jq -c '{schema,state,complete,position_rows,pending_order_rows,pending_derivative_algo_rows,algo_scopes_checked,algo_received_at_ms,authenticated_reads_only}' "$file"
+          echo "READONLY_OPENING_INVENTORY_RECORDED=PASS"
+          # Important: a complete nonempty inventory is a valid observation,
+          # NOT authorization to retire an owner or enable real trading.
+
+  # Consolidated from okx-named-account-readonly-attestation.yml; credential/operation boundaries remain job-scoped.
+  named_validate:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'named-account-attestation'
+    runs-on: ubuntu-latest
+    outputs:
+      environment_name: ${{ steps.naming.outputs.name }}
+    steps:
+      - name: Validate metadata
+        id: naming
+        shell: bash
+        env:
+          ACCOUNT_ID: ${{ inputs.account_id }}
+          EXPECTED_UID: ${{ inputs.expected_uid_fingerprint }}
+        run: |
+          set -euo pipefail
+          [[ "$ACCOUNT_ID" =~ ^[a-z][a-z0-9-]{0,31}$ ]]
+          [[ "$ACCOUNT_ID" != *- ]]
+          [[ "$ACCOUNT_ID" != "production" && "$ACCOUNT_ID" != "demo_acceptance" ]]
+          [[ "$EXPECTED_UID" =~ ^[0-9a-f]{64}$ ]]
+          printf 'name=okx-%s-global-observer\n' "$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+          echo "ACCOUNT_REQUEST_VALID=PASS"
+
+  named_observer:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'named-account-attestation'
+    needs: named_validate
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.named_validate.outputs.environment_name }}
+    env:
+      ACCOUNT_ID: ${{ inputs.account_id }}
+      EXPECTED_UID: ${{ inputs.expected_uid_fingerprint }}
+      OKX_ACCOUNT_ID: ${{ vars.OKX_ACCOUNT_ID }}
+      OKX_ACCESS_ROLE: ${{ vars.OKX_ACCESS_ROLE }}
+      OKX_REGION: ${{ vars.OKX_REGION }}
+      OKX_DEMO: ${{ vars.OKX_DEMO }}
+      OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+      OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+      OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # Rust 1.95.0
+      - name: Verify authenticated ReadOnly UID
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$OKX_ACCOUNT_ID" = "$ACCOUNT_ID"
+          test "$OKX_ACCESS_ROLE" = "observer"
+          test "$OKX_REGION" = "global"
+          [[ "$OKX_DEMO" = "true" || "$OKX_DEMO" = "false" ]]
+          test -n "$OKX_API_KEY"
+          test -n "$OKX_API_SECRET"
+          test -n "$OKX_API_PASSPHRASE"
+          args=(--region global --instrument BTC-USDT-SWAP --margin cross)
+          if [[ "$OKX_DEMO" == "true" ]]; then args+=(--demo); fi
+          cargo run --locked --quiet -p okx-cli -- "${args[@]}" > "$RUNNER_TEMP/okx-private-account.json"
+          jq -e --arg uid "$EXPECTED_UID" --argjson demo "$OKX_DEMO" '
+            .authenticated == true and
+            .region == "global" and
+            .demo == $demo and
+            .account_uid_fingerprint == $uid and
+            (.api_key_permissions | index("read_only")) != null and
+            (.api_key_permissions | index("trade")) == null and
+            (.api_key_permissions | index("withdraw")) == null
+          ' "$RUNNER_TEMP/okx-private-account.json" > /dev/null
+          rm -f "$RUNNER_TEMP/okx-private-account.json"
+          echo "GITHUB_ENVIRONMENT_READ_ONLY_UID=PASS"
+
+  # Consolidated from cloudflare-mcp-deploy.yml; credential/operation boundaries remain job-scoped.
+  cloudflare_deploy:
+    concurrency:
+      group: cloudflare-mcp-production
+      cancel-in-progress: false
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'cloudflare-mcp-deploy'
+    name: deploy-okx-cloudflare-mcp
+    runs-on: ubuntu-latest
+    environment: okx-succession-global-executor
+    defaults:
+      run:
+        working-directory: cloudflare/okx-mcp
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Secret preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN missing"; exit 20; }
+
+      - name: One-time v2 installation input preflight
+        shell: bash
+        env:
+          INITIALIZE_V2: ${{ inputs.initialize_clean_v2 }}
+          INSTALLATION_ID: ${{ inputs.installation_id }}
+          BUNDLE_SHA256: ${{ inputs.accepted_bundle_sha256 }}
+          OKX_MCP_OWNER_SECRET: ${{ secrets.OKX_MCP_OWNER_SECRET }}
+        run: |
+          set -euo pipefail
+          if [[ "$INITIALIZE_V2" == "true" ]]; then
+            [[ "$INSTALLATION_ID" =~ ^[A-Za-z][A-Za-z0-9_-]{7,63}$ ]] || { echo 'invalid native installation identity'; exit 23; }
+            [[ "$BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'accepted GitHub bundle fingerprint required'; exit 24; }
+            test -n "$OKX_MCP_OWNER_SECRET" || { echo 'MCP owner secret missing'; exit 25; }
+          fi
+
+      - name: Install locked package surface
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck and release bindings regression
+        run: npm run check
+
+      - name: Deploy Worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/main" || { echo "must deploy exact main"; exit 21; }
+          SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')"
+          [[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid tree"; exit 22; }
+          echo "WORKER_DEPLOY_SOURCE_TREE=$SOURCE_TREE"
+          # Build one complete, checked configuration. --var replaces config vars.
+          node scripts/release-config.mjs "$SOURCE_TREE" wrangler.release.jsonc
+          trap 'rm -f wrangler.release.jsonc' EXIT
+          npx wrangler deploy --config wrangler.release.jsonc
+
+      - name: Initialize isolated clean-v2 governance once
+        if: ${{ inputs.initialize_clean_v2 }}
+        shell: bash
+        env:
+          INSTALLATION_ID: ${{ inputs.installation_id }}
+          BUNDLE_SHA256: ${{ inputs.accepted_bundle_sha256 }}
+          OKX_MCP_OWNER_SECRET: ${{ secrets.OKX_MCP_OWNER_SECRET }}
+        run: |
+          set -euo pipefail
+          expected_tree="$(git rev-parse 'HEAD^{tree}')"
+          # Wait for the actual published Worker before calling the owner API.
+          ready=false
+          for attempt in 1 2 3 4 5 6 7 8; do
+            health="$(curl -fsS https://okx-cloudflare-mcp.okx-794.workers.dev/health || true)"
+            if jq -e --arg tree "$expected_tree" '.status == "ok" and .release_source_tree == $tree' >/dev/null 2>&1 <<< "$health"; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          [[ "$ready" == "true" ]] || { echo 'Worker source provenance not yet current'; exit 27; }
+          campaign_hash="$(printf 'okx-clean-v2:%s' "$INSTALLATION_ID" | sha256sum | cut -d' ' -f1)"
+          payload="$(jq -cn \
+            --arg installation "$INSTALLATION_ID" \
+            --arg sha "$BUNDLE_SHA256" \
+            --arg campaign "sha256:$campaign_hash" \
+            '{contract:"okx.direct-transport.frame/v2",release_sha256:$sha,operation_id:("clean_v2_init_"+$installation),configuration:{schema:"okx.governance/v3",revision:0,installation_id:$installation,campaign_id:$campaign,campaign_loss_limit_usd:"10",campaign_entry_limit_usd:"10",max_total_modelled_loss_usdt:"5",accounts:[]}}')"
+          response="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $OKX_MCP_OWNER_SECRET" \
+            -H 'Content-Type: application/json' \
+            --data-binary "$payload" \
+            https://okx-cloudflare-mcp.okx-794.workers.dev/installation/initialize)"
+          jq -e --arg installation "$INSTALLATION_ID" \
+            '.status == "CONFIGURED" and .installation_id == $installation and .revision == 0 and (.accounts | length) == 0' \
+            >/dev/null <<< "$response"
+          echo 'ISOLATED_V2_OWNER_INIT=PASS'
+
+      - name: Owner-only read-only installation inspection
+        shell: bash
+        env:
+          OKX_MCP_OWNER_SECRET: ${{ secrets.OKX_MCP_OWNER_SECRET }}
+          INITIALIZE_V2: ${{ inputs.initialize_clean_v2 }}
+          INSTALLATION_ID: ${{ inputs.installation_id }}
+        run: |
+          set -euo pipefail
+          test -n "$OKX_MCP_OWNER_SECRET" || { echo "MCP owner secret missing"; exit 25; }
+          # New Worker version propagation is not instantaneous. HTTP 200
+          # plus jq's object construction is NOT evidence that new fields exist:
+          # missing fields become null and previously passed deploy acceptance.
+          expected_tree="$(git rev-parse 'HEAD^{tree}')"
+          for attempt in 1 2 3 4 5 6 7 8; do
+            health="$(curl -fsS https://okx-cloudflare-mcp.okx-794.workers.dev/health || true)"
+            if ! jq -e --arg tree "$expected_tree" '
+              .status == "ok" and
+              .service == "okx-cloudflare-mcp" and
+              .release_source_tree == $tree
+            ' >/dev/null 2>&1 <<< "$health"; then
+              sleep 2
+              continue
+            fi
+            inspected="$(curl -fsS -H "Authorization: Bearer $OKX_MCP_OWNER_SECRET" \
+              https://okx-cloudflare-mcp.okx-794.workers.dev/installation/inspect || true)"
+            if jq -e --arg installation "$INSTALLATION_ID" --arg init "$INITIALIZE_V2" '
+              .schema == "okx.installation-inspection/v1" and
+              .state == "BOUND" and
+              (.installation_id | type) == "string" and
+              (if $init == "true" then .installation_id == $installation and .accounts_total == 0 and .revision == 0 else true end) and
+              (.accounts_total | type) == "number" and
+              (.revision | type) == "number" and
+              .release_present == true and
+              (.account_access | type) == "array" and
+              (.account_access | length) == .accounts_total and
+              (.real_accounts_enabled | type) == "number" and
+              (.all_new_real_risk_paused | type) == "boolean" and
+                .finance_authority == "native" and
+                (has("risk") | not) and
+              (.account_access | all(.[];
+                (.id | type) == "string" and
+                (.enabled | type) == "boolean" and
+                (.explicit_pause | type) == "boolean" and
+                (.identity_verified | type) == "boolean"))
+            ' >/dev/null 2>&1 <<< "$inspected"; then
+              jq -e -c '{schema,state,installation_id,accounts_total,revision,release_present,account_access,real_accounts_enabled,all_new_real_risk_paused,risk}' <<< "$inspected"
+              echo "OWNER_POLICY_READBACK_CURRENT=PASS"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "OWNER_POLICY_READBACK_CURRENT=FAIL" >&2
+          exit 26
+
+      - name: Health check
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --retry 8 --retry-delay 2 --retry-all-errors \
+            https://okx-cloudflare-mcp.okx-794.workers.dev/health |
+            jq -e '.status == "ok" and .service == "okx-cloudflare-mcp"'
+
+  recovery_request_change:
+    name: Detect explicit production recovery request change
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Require actual request-file delta (never publish on routine CI edits)
+        id: diff
+        shell: bash
+        env:
+          PREVIOUS_MAIN: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$PREVIOUS_MAIN" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          git cat-file -e "$PREVIOUS_MAIN^{commit}"
+          if git diff --name-only "$PREVIOUS_MAIN" "$GITHUB_SHA" -- .github/production-recovery-request.json |
+            grep -Fxq .github/production-recovery-request.json; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  # Consolidated from promote-production-recovery.yml; credential/operation boundaries remain job-scoped.
+  production_recovery_promote:
+    needs: [recovery_request_change, required_linux, required_windows, dependency-audit]
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.recovery_request_change.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Resolve exact accepted PR artifact
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq -e '.schema == "okx.production-recovery.request/v1" and .promote == true' \
+            .github/production-recovery-request.json >/dev/null
+
+          prs_json="$(gh api -H "Accept: application/vnd.github+json" "/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls")"
+          head_sha="$(jq -r '[.[] | select(.merged_at != null and .base.ref == "main")] | first | .head.sha // empty' <<<"$prs_json")"
+          test -n "$head_sha"
+
+          merge_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq '.tree.sha')"
+          head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head_sha" --jq '.tree.sha')"
+          test "$merge_tree" = "$head_tree"
+
+          runs_json="$(gh api --method GET -H "Accept: application/vnd.github+json" \
+            "/repos/$GITHUB_REPOSITORY/actions/runs" \
+            -f head_sha="$head_sha" -f event="pull_request" -f status="completed" -f per_page=100)"
+          run_id="$(jq -r '[.workflow_runs[] | select(.name == "CI" and .conclusion == "success")] | first | .id // empty' <<<"$runs_json")"
+          test -n "$run_id"
+
+          artifacts_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100")"
+          artifact_name="okx-windows-bundle-$head_sha"
+          artifact_id="$(jq -r --arg name "$artifact_name" '[.artifacts[] | select(.name == $name and .expired == false)] | first | .id // empty' <<<"$artifacts_json")"
+          artifact_digest="$(jq -r --arg name "$artifact_name" '[.artifacts[] | select(.name == $name and .expired == false)] | first | .digest // empty' <<<"$artifacts_json")"
+          test -n "$artifact_id"
+          test -n "$artifact_digest"
+
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "source_tree=$head_tree" >> "$GITHUB_OUTPUT"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "artifact_digest=$artifact_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify bundle
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bundle="$RUNNER_TEMP/okx-windows-recovery-${GITHUB_SHA}.zip"
+          extract="$RUNNER_TEMP/recovery-bundle"
+          mkdir -p "$extract"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/${{ steps.resolve.outputs.artifact_id }}/zip" > "$bundle"
+          bundle_sha256="$(sha256sum "$bundle" | awk '{print $1}')"
+          test "sha256:$bundle_sha256" = "${{ steps.resolve.outputs.artifact_digest }}"
+          unzip -q "$bundle" -d "$extract"
+
+          manifest="$extract/manifest.json"
+          test -f "$manifest"
+          jq -e --arg head "${{ steps.resolve.outputs.head_sha }}" \
+            --arg tree "${{ steps.resolve.outputs.source_tree }}" \
+            '(.schema == "okx.windows.bundle/v1" or .schema == "okx.windows.bundle/v2") and .repository_id == 1388071566 and .source_head_sha == $head and .source_tree == $tree' \
+            "$manifest" >/dev/null
+          schema="$(jq -r '.schema' "$manifest")"
+          files=(okx-agent.exe okx-host-control.exe okx-host-launcher.exe)
+          if [[ "$schema" == okx.windows.bundle/v2 ]]; then
+            files+=(okx-research-service.exe)
+            jq -e '(.components | length) == 4 and (.rust_version | type == "string" and length > 0)' "$manifest" >/dev/null
+          else
+            test ! -e "$extract/okx-research-service.exe"
+          fi
+          for file in "${files[@]}"; do
+            test -f "$extract/$file"
+            if [[ "$schema" == okx.windows.bundle/v2 ]]; then
+              jq -e --arg file "$file" --arg head "${{ steps.resolve.outputs.head_sha }}" --arg tree "${{ steps.resolve.outputs.source_tree }}" \
+                '.components[$file] | .source_head_sha == $head and .source_tree == $tree and .run_id == 0 and .artifact_id == 0 and .protocol_version == 1 and .storage_version == 1' "$manifest" >/dev/null
+              expected="$(jq -r --arg file "$file" '.components[$file].sha256' "$manifest")"
+              test "$(stat -c %s "$extract/$file")" = "$(jq -r --arg file "$file" '.components[$file].size' "$manifest")"
+            else
+              expected="$(jq -r --arg file "$file" '.files[$file].sha256' "$manifest")"
+            fi
+            actual="$(sha256sum "$extract/$file" | awk '{print $1}')"
+            test -n "$expected"
+            test "$actual" = "$expected"
+          done
+
+          test -f "$extract/Cargo.lock"
+          origin_input="$RUNNER_TEMP/published-origin-input.json"
+          origin="$RUNNER_TEMP/published-origin.json"
+          jq -n --arg head "${{ steps.resolve.outputs.head_sha }}" --arg tree "${{ steps.resolve.outputs.source_tree }}" \
+            --arg merge "$GITHUB_SHA" --argjson run "${{ steps.resolve.outputs.run_id }}" \
+            --argjson artifact "${{ steps.resolve.outputs.artifact_id }}" --arg digest "$bundle_sha256" \
+            '{repository_id:1388071566,source_head_sha:$head,source_tree:$tree,merged_main_sha:$merge,run_id:$run,artifact_id:$artifact,artifact_sha256:$digest}' > "$origin_input"
+          node scripts/test-published-release-origin.cjs
+          node scripts/published-release-origin.cjs "$origin_input" "$manifest" "$bundle" "$origin"
+          checksums="$RUNNER_TEMP/SHA256SUMS.txt"
+          {
+            printf '%s  %s\n' "$bundle_sha256" "$(basename "$bundle")"
+            (cd "$extract" && sha256sum "${files[@]}" Cargo.lock manifest.json)
+            (cd "$RUNNER_TEMP" && sha256sum published-origin.json)
+          } > "$checksums"
+
+          echo "origin=$origin" >> "$GITHUB_OUTPUT"
+          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+          echo "checksums=$checksums" >> "$GITHUB_OUTPUT"
+          echo "bundle_sha256=$bundle_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Publish versioned recovery release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA:0:12}"
+          tag="production-recovery-$short_sha"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists; refusing replacement" >&2
+            exit 1
+          fi
+
+          notes="$RUNNER_TEMP/recovery-notes.md"
+          cat > "$notes" <<EOF
+          Production recovery bundle for exact merged tree.
+
+          - repository: $GITHUB_REPOSITORY
+          - accepted merge SHA: $GITHUB_SHA
+          - tested PR head: ${{ steps.resolve.outputs.head_sha }}
+          - source tree: ${{ steps.resolve.outputs.source_tree }}
+          - CI run: ${{ steps.resolve.outputs.run_id }}
+          - Actions artifact: ${{ steps.resolve.outputs.artifact_id }}
+          - Actions artifact digest: ${{ steps.resolve.outputs.artifact_digest }}
+          - promoted ZIP SHA-256: ${{ steps.verify.outputs.bundle_sha256 }}
+
+          The embedded manifest and SHA256SUMS.txt must be verified before recovery install.
+          EOF
+
+          gh release create "$tag" \
+            "${{ steps.verify.outputs.bundle }}" \
+            "${{ steps.verify.outputs.checksums }}" \
+            "${{ steps.verify.outputs.origin }}" \
+            --target "$GITHUB_SHA" \
+            --title "OKX production recovery $short_sha" \
+            --notes-file "$notes"
+
+          gh release view "$tag" --json tagName,targetCommitish,url,assets
+
+  # Consolidated from publish-native-base.yml; credential/operation boundaries remain job-scoped.
+  native_base_publish:
+    needs: [dependency-audit, required_classify, required_linux, required_windows]
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    concurrency:
+      group: native-base-publication
+      cancel-in-progress: false
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ACCEPTED_MAIN: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Select exact successful full Native PR release
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f .github/windows-legacy-control-bridge.txt ]]; then
+            echo "One-time v1 CONTROL migration bridge: preserve the existing v2 Native base; deploy only the exact accepted PR CI artifact through CONTROL."
+            exit 0
+          fi
+          [[ "$ACCEPTED_MAIN" =~ ^[0-9a-f]{40}$ ]]
+          current="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
+          if [[ "$current" != "$ACCEPTED_MAIN" ]]; then
+            echo "Main advanced; a newer successful CI will publish the base."
+            exit 0
+          fi
+          prs="$(gh api "/repos/$GITHUB_REPOSITORY/commits/$ACCEPTED_MAIN/pulls")"
+          head="$(jq -r --arg main "$ACCEPTED_MAIN" '[.[] | select(.merged_at != null and .merge_commit_sha == $main and .base.ref == "main")] | first | .head.sha // empty' <<<"$prs")"
+          [[ "$head" =~ ^[0-9a-f]{40}$ ]] || exit 0
+          main_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$ACCEPTED_MAIN" --jq .tree.sha)"
+          head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head" --jq .tree.sha)"
+          test "$main_tree" = "$head_tree"
+          runs="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" -f head_sha="$head" -f event=pull_request -f status=completed -f per_page=100)"
+          run_id=""
+          artifact_id=""
+          artifact_digest=""
+          while read -r candidate; do
+            [[ -n "$candidate" ]] || continue
+            jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/jobs?per_page=100")"
+            # Require the *fresh* 4-EXE financial gate, never an aggregate
+            # that reused older proof or the isolated Research-only worker.
+            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-windows-full","trading-safety-windows-prerequisite","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
+              continue
+            fi
+            artifacts="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts?per_page=100")"
+            candidate_artifact="$(jq -r --arg name "okx-windows-bundle-$head" '[.artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0].id else empty end' <<<"$artifacts")"
+            candidate_digest="$(jq -r --arg name "okx-windows-bundle-$head" '[.artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0].digest else empty end' <<<"$artifacts")"
+            if [[ "$candidate_artifact" =~ ^[1-9][0-9]*$ && "$candidate_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              run_id="$candidate"
+              artifact_id="$candidate_artifact"
+              artifact_digest="$candidate_digest"
+              break
+            fi
+          done < <(jq -r '[.workflow_runs[] | select(.name == "CI" and .conclusion == "success" and .event == "pull_request")] | .[].id' <<<"$runs")
+          if [[ -z "$run_id" ]]; then
+            echo "No fresh accepted full Windows bundle: non-Native merge, no new release."
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "tree=$head_tree" >> "$GITHUB_OUTPUT"
+          echo "run=$run_id" >> "$GITHUB_OUTPUT"
+          echo "artifact=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "digest=$artifact_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Verify complete four-component source and archive
+        if: steps.select.outputs.publish == 'true'
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip="$RUNNER_TEMP/okx-windows-base.zip"
+          extract="$RUNNER_TEMP/native-base"
+          mkdir -p "$extract"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/${{ steps.select.outputs.artifact }}/zip" > "$zip"
+          digest="$(sha256sum "$zip" | cut -d' ' -f1)"
+          test "sha256:$digest" = "${{ steps.select.outputs.digest }}"
+          test "$(unzip -Z1 "$zip" | sort | paste -sd'|' -)" = 'Cargo.lock|manifest.json|okx-agent.exe|okx-host-control.exe|okx-host-launcher.exe|okx-research-service.exe'
+          unzip -q "$zip" -d "$extract"
+          jq -e --arg head '${{ steps.select.outputs.head }}' --arg tree '${{ steps.select.outputs.tree }}' '
+            .schema == "okx.windows.bundle/v2" and .repository_id == 1388071566 and
+            .source_head_sha == $head and .source_tree == $tree and
+            (.components | length == 4) and (.rust_version | type == "string" and length > 0)
+          ' "$extract/manifest.json" >/dev/null
+          for file in okx-agent.exe okx-host-control.exe okx-host-launcher.exe okx-research-service.exe; do
+            jq -e --arg f "$file" --arg head '${{ steps.select.outputs.head }}' --arg tree '${{ steps.select.outputs.tree }}' '
+              .components[$f] | .source_head_sha == $head and .source_tree == $tree and .run_id == 0 and
+              .artifact_id == 0 and .protocol_version == 1 and .storage_version == 1
+            ' "$extract/manifest.json" >/dev/null
+            test "$(sha256sum "$extract/$file" | cut -d' ' -f1)" = "$(jq -r --arg f "$file" '.components[$f].sha256' "$extract/manifest.json")"
+            test "$(stat -c %s "$extract/$file")" = "$(jq -r --arg f "$file" '.components[$f].size' "$extract/manifest.json")"
+          done
+          input="$RUNNER_TEMP/native-base-origin-input.json"
+          jq -n --arg head '${{ steps.select.outputs.head }}' --arg tree '${{ steps.select.outputs.tree }}' \
+            --arg merge "$ACCEPTED_MAIN" --argjson run '${{ steps.select.outputs.run }}' \
+            --argjson artifact '${{ steps.select.outputs.artifact }}' --arg digest "$digest" \
+            '{repository_id:1388071566,source_head_sha:$head,source_tree:$tree,merged_main_sha:$merge,run_id:$run,artifact_id:$artifact,artifact_sha256:$digest}' > "$input"
+          node scripts/test-published-release-origin.cjs
+          node scripts/published-release-origin.cjs "$input" "$extract/manifest.json" "$zip" "$RUNNER_TEMP/published-origin.json"
+          {
+            (cd "$RUNNER_TEMP" && sha256sum okx-windows-base.zip published-origin.json)
+            (cd "$extract" && sha256sum Cargo.lock manifest.json okx-agent.exe okx-host-control.exe okx-host-launcher.exe okx-research-service.exe)
+          } > "$RUNNER_TEMP/SHA256SUMS.txt"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+
+      - name: Publish current base and prune only superseded Native bases
+        if: steps.select.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Each tag has immutable commit identity; only one *native-base-*
+          # release remains after a new complete release was verified.
+          tag="native-base-$ACCEPTED_MAIN"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              '${{ steps.verify.outputs.zip }}' \
+              "$RUNNER_TEMP/published-origin.json" \
+              "$RUNNER_TEMP/SHA256SUMS.txt" \
+              --target "$ACCEPTED_MAIN" --title "OKX accepted Native base $ACCEPTED_MAIN" \
+              --notes "Automatically accepted after full financial/Windows CI. Download assets with checked SHA256; this is not a production deployment."
+          fi
+          release="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+          jq -e --arg tag "$tag" --arg main "$ACCEPTED_MAIN" '
+            .tag_name == $tag and .target_commitish == $main and .draft == false and .prerelease == false and
+            ([.assets[].name] | sort) == ["SHA256SUMS.txt","okx-windows-base.zip","published-origin.json"]
+          ' <<<"$release" >/dev/null
+          for name in okx-windows-base.zip published-origin.json SHA256SUMS.txt; do
+            expected="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest' <<<"$release")"
+            actual="$(sha256sum "$RUNNER_TEMP/$name" | cut -d' ' -f1)"
+            test "$expected" = "sha256:$actual"
+          done
+          current="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
+          test "$current" = "$ACCEPTED_MAIN"
+          gh api --paginate "/repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | [.tag_name,.immutable] | @tsv' |
+          while IFS=$'\t' read -r old immutable; do
+            if [[ "$old" =~ ^native-base-[0-9a-f]{40}$ && "$old" != "$tag" ]]; then
+              test "$immutable" = "false"
+              gh release delete "$old" --cleanup-tag --yes
+            fi
+          done
