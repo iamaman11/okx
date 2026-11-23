@@ -30,27 +30,12 @@ mod tests {
     #[test]
     fn injected_store_preserves_entry_names_and_bytes() {
         let store = keyring::mock::Store::new().unwrap();
-        let first = entry_from_store(
-            store.as_ref(),
-            GITHUB_SERVICE,
-            "mailbox-token",
-        )
-        .unwrap();
+        let first = entry_from_store(store.as_ref(), GITHUB_SERVICE, "mailbox-token").unwrap();
         assert!(matches!(first.get_secret(), Err(keyring::Error::NoEntry)));
         first.set_secret(b"test-only-bytes\0").unwrap();
-        let same = entry_from_store(
-            store.as_ref(),
-            GITHUB_SERVICE,
-            "mailbox-token",
-        )
-        .unwrap();
+        let same = entry_from_store(store.as_ref(), GITHUB_SERVICE, "mailbox-token").unwrap();
         assert_eq!(same.get_secret().unwrap(), b"test-only-bytes\0");
-        let different = entry_from_store(
-            store.as_ref(),
-            GITHUB_SERVICE,
-            "other",
-        )
-        .unwrap();
+        let different = entry_from_store(store.as_ref(), GITHUB_SERVICE, "other").unwrap();
         assert!(matches!(
             different.get_secret(),
             Err(keyring::Error::NoEntry)

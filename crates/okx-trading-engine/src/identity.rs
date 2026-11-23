@@ -33,11 +33,9 @@ pub fn initialize_native_identity(key_id: &str) -> AgentResult<AgentIdentity> {
 
     #[cfg(windows)]
     {
-        let entry = crate::windows_credentials::entry(
-            crate::windows_credentials::IDENTITY_SERVICE,
-            key_id,
-        )
-        .map_err(secret_store_error)?;
+        let entry =
+            crate::windows_credentials::entry(crate::windows_credentials::IDENTITY_SERVICE, key_id)
+                .map_err(secret_store_error)?;
 
         match entry.get_secret() {
             Ok(mut existing) => {
@@ -69,11 +67,9 @@ pub fn load_native_private_key(key_id: &str) -> AgentResult<[u8; 32]> {
 
     #[cfg(windows)]
     {
-        let entry = crate::windows_credentials::entry(
-            crate::windows_credentials::IDENTITY_SERVICE,
-            key_id,
-        )
-        .map_err(secret_store_error)?;
+        let entry =
+            crate::windows_credentials::entry(crate::windows_credentials::IDENTITY_SERVICE, key_id)
+                .map_err(secret_store_error)?;
         let mut secret = match entry.get_secret() {
             Ok(secret) => secret,
             Err(keyring::Error::NoEntry) => {
