@@ -1,0 +1,11 @@
+One-time P0 migration bridge for the installed #545 CONTROL.
+
+The accepted Windows CI bundle for this exact source tree intentionally uses
+okx.windows.bundle/v1 with Agent, CONTROL, and Launcher only. Installed #545
+CONTROL cannot parse a v2 bundle that names okx-research-service.exe. This
+marker is consumed by the existing ci.yml bundle packager; do not copy or
+modify installed executables outside authenticated GitHub CONTROL.
+
+After a verified controller handoff and Agent/Launcher installation, remove
+this marker in the next accepted change to restore v2 Research-only delivery.
+The bridge does not itself deploy, rename, or roll back Research.

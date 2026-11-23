@@ -34,6 +34,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -f .github/windows-legacy-control-bridge.txt ]]; then
+            echo "One-time v1 CONTROL migration bridge: preserve the existing v2 Native base; deploy only the exact accepted PR CI artifact through CONTROL."
+            exit 0
+          fi
           [[ "$ACCEPTED_MAIN" =~ ^[0-9a-f]{40}$ ]]
           current="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
           if [[ "$current" != "$ACCEPTED_MAIN" ]]; then
