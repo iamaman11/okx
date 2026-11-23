@@ -377,11 +377,22 @@ def execute(scopes):
         subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=MCP, check=True)
     if "ipc" in scopes:
         tests("okx-research-worker", ("--test", "ipc_process"))
+        # Binary renaming must preserve content-addressed legacy installations
+        # and stage only the verified new Research Service image.
+        tests("okx-agent", required=(
+            "research_client::installed::tests::existing_verified_worker_image_remains_usable_after_service_rename",
+        ), exact=True)
+        tests("okx-host-control", required=(
+            "artifact::research_component::tests::research_staging_publishes_only_verified_version_and_preserves_agent_state",
+        ), exact=True)
+        tests("okx-host-control", required=(
+            "artifact::research_component::tests::legacy_bundle_cannot_carry_research_worker",
+        ), exact=True)
         metadata = subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
                                            cwd=ROOT, text=True)
         suffix = ".exe" if os.name == "nt" else ""
-        worker = Path(json.loads(metadata)["target_directory"]) / "debug" / ("okx-research-worker" + suffix)
-        os.environ["OKX_RESEARCH_WORKER_TEST_EXE"] = str(worker)
+        worker = Path(json.loads(metadata)["target_directory"]) / "debug" / ("okx-research-service" + suffix)
+        os.environ["OKX_RESEARCH_SERVICE_TEST_EXE"] = str(worker)
         tests("okx-agent", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t06_t09_real_worker_causality_and_economics_are_isolated",), exact=True)
         tests("okx-agent", required=("research_dispatch_tests::t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated",), exact=True)

@@ -111,7 +111,17 @@ pub(super) fn candidate(runtime: &Path) -> Result<PathBuf, String> {
         .join("versions")
         .join(&record.worker_sha256);
     directory_chain(&version)?;
-    let binary = version.join("okx-research-worker.exe");
+    // Existing installations remain valid across the product-name migration.
+    // A newly staged image always uses the Service name, but a previously
+    // verified pointer can still reference the historical Worker filename.
+    let service = version.join("okx-research-service.exe");
+    let binary = match fs::symlink_metadata(&service) {
+        Ok(_) => service,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            version.join("okx-research-worker.exe")
+        }
+        Err(_) => return Err("RESEARCH_INSTALL_MISSING".into()),
+    };
     let meta = plain(&binary, false)?;
     if meta.len() == 0 || meta.len() > MAX_BINARY_BYTES {
         return Err("RESEARCH_INSTALL_INVALID_BINARY".into());
@@ -193,7 +203,7 @@ mod tests {
         assert!(resolve(&root).is_err());
         let dir = root.join("research/versions").join(&hash);
         fs::create_dir_all(&dir).unwrap();
-        let binary = dir.join("okx-research-worker.exe");
+        let binary = dir.join("okx-research-service.exe");
         fs::write(&binary, b"wrong").unwrap();
         assert_eq!(candidate(&root).unwrap(), binary);
         assert_eq!(
@@ -202,6 +212,33 @@ mod tests {
         );
         fs::write(&binary, b"test worker").unwrap();
         assert_eq!(resolve(&root).unwrap(), binary);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_verified_worker_image_remains_usable_after_service_rename() {
+        let (root, hash) = setup();
+        fs::write(
+            root.join("installed-research.json"),
+            pointer(&hash).to_string(),
+        )
+        .unwrap();
+        let dir = root.join("research/versions").join(&hash);
+        fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("okx-research-worker.exe");
+        fs::write(&legacy, b"test worker").unwrap();
+        assert_eq!(resolve(&root).unwrap(), legacy);
+
+        // Prefer a present new-name path, without silently running the old
+        // image if the new file fails content verification.
+        let preferred = dir.join("okx-research-service.exe");
+        fs::write(&preferred, b"wrong").unwrap();
+        assert_eq!(
+            resolve(&root).unwrap_err(),
+            "RESEARCH_INSTALL_HASH_MISMATCH"
+        );
+        fs::write(&preferred, b"test worker").unwrap();
+        assert_eq!(resolve(&root).unwrap(), preferred);
         fs::remove_dir_all(root).unwrap();
     }
 }

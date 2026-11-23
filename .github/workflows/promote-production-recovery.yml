@@ -82,10 +82,10 @@ jobs:
           schema="$(jq -r '.schema' "$manifest")"
           files=(okx-agent.exe okx-host-control.exe okx-host-launcher.exe)
           if [[ "$schema" == okx.windows.bundle/v2 ]]; then
-            files+=(okx-research-worker.exe)
+            files+=(okx-research-service.exe)
             jq -e '(.components | length) == 4 and (.rust_version | type == "string" and length > 0)' "$manifest" >/dev/null
           else
-            test ! -e "$extract/okx-research-worker.exe"
+            test ! -e "$extract/okx-research-service.exe"
           fi
           for file in "${files[@]}"; do
             test -f "$extract/$file"

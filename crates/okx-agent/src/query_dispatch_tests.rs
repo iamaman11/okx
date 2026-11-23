@@ -331,7 +331,7 @@ async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero
     };
     let mut fixture = Fixture::new(empty_reference()).await;
     let calls = Arc::new(AtomicUsize::new(0));
-    let executable = std::env::var_os("OKX_RESEARCH_WORKER_TEST_EXE")
+    let executable = std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
         .map(PathBuf::from)
         .expect("real worker executable must be built before process contracts");
     use sha2::{Digest, Sha256};
