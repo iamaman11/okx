@@ -95,6 +95,28 @@ jobs:
           # Offline check fixes the fetched DB revision and fails if it is missing
           # or stale; cargo metadata above populated the locked crate graph.
           "$deny" --locked --offline --color never check advisories licenses sources 2>&1 | tee -a "$RUNNER_TEMP/dependency-audit.log"
+      - name: Report actual Cargo release consumers without changing CI selection
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          node scripts/test-ci-component-impact.cjs
+          files=()
+          if [[ "${{ github.event_name }}" == 'pull_request' ]]; then
+            if gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" > "$RUNNER_TEMP/ci-impact-files.json"; then
+              files=("$RUNNER_TEMP/ci-impact-files.json")
+            else
+              # A failed secondary diagnostic lookup cannot weaken or block
+              # the already fail-closed authoritative component-impact job.
+              echo 'Diagnostic diff unavailable; report full uncertain impact.' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          # Reuse cargo metadata already produced by dependency-audit. No
+          # additional Cargo build, check, test, metadata or Windows runner.
+          node scripts/ci-component-impact.cjs "$RUNNER_TEMP/dependency-graph.json" "${files[@]}" > "$RUNNER_TEMP/ci-component-impact.json"
+          node scripts/ci-component-impact.cjs "$RUNNER_TEMP/dependency-graph.json" "${files[@]}" --markdown >> "$GITHUB_STEP_SUMMARY"
       - name: Retain dependency policy report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -103,6 +125,7 @@ jobs:
           path: |
             ${{ runner.temp }}/dependency-audit.log
             ${{ runner.temp }}/advisory-db-commit.txt
+            ${{ runner.temp }}/ci-component-impact.json
           if-no-files-found: error
           retention-days: 14
 
@@ -325,6 +348,7 @@ jobs:
         run: |
           python3 -B scripts/check_ci_native_scope.py --self-test
           python3 -B scripts/test_check_p0.py
+          node scripts/test-ci-component-impact.cjs
           python3 scripts/check_p0.py --base "$BASE_SHA" --plan
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         if: steps.scope.outputs.code == 'true'
