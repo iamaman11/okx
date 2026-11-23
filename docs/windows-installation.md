@@ -36,6 +36,23 @@ the verified candidate; installation and active worker are distinct states. A
 failed validation does not authorize activation or a financial Engine restart.
 Use the existing authenticated CONTROL operation, not an unverified local EXE.
 
+When an already verified Research image is replaced, CONTROL first validates
+its saved provenance and content-addressed binary, then persists
+`runtime/rollback-research.json` before atomically publishing the new
+`runtime/installed-research.json`. An exact redeploy retains the rollback slot.
+The typed `RollbackResearch` operation requires both the exact current Worker
+SHA-256 and the exact saved rollback Worker SHA-256. It validates both images,
+rejects an absent, corrupted, linked, or mismatched rollback image, and
+atomically restores the saved pointer without touching Agent, Controller,
+Launcher, Engine lifecycle, or financial state. This operation intentionally
+does not compare the old image's tree with the *current* `main`: older verified
+Research versions would otherwise become impossible to restore. CONTROL
+records a terminal ACK; the Agent independently verifies the selected bytes
+before the next child activation. A rollback ACK alone does **not** prove that
+the old child became active, nor does it certify unchanged running Engine
+SHA-256/PID: obtain both physical readbacks before and after a Research-only
+update and its rollback.
+
 This describes the implemented path, not installed acceptance. #512 r15 checks
 the separate Worker build and existing verification/staging/handoff contracts.
 The first release requires full CI, merge and the existing accepted manifest;

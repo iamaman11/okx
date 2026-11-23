@@ -27,9 +27,10 @@ struct BundleManifestV2 {
     components: BTreeMap<String, ComponentManifest>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct InstalledResearch {
-    schema: &'static str,
+    schema: String,
     repository_id: u64,
     run_id: u64,
     artifact_id: u64,
@@ -47,6 +48,9 @@ const COMPONENT_NAMES: [&str; 4] = [
     "okx-research-service.exe",
 ];
 const MAX_COMPONENT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_RESEARCH_POINTER_BYTES: u64 = 64 * 1024;
+const CURRENT_RESEARCH_POINTER: &str = "installed-research.json";
+const ROLLBACK_RESEARCH_POINTER: &str = "rollback-research.json";
 
 fn valid_hex(value: &str, len: usize) -> bool {
     value.len() == len
@@ -270,7 +274,7 @@ pub async fn deploy_research(
         "research component missing",
     ))?;
     let record = InstalledResearch {
-        schema: "okx.host-control.installed-research/v1",
+        schema: "okx.host-control.installed-research/v1".into(),
         repository_id: REPOSITORY_ID,
         run_id: c.run_id,
         artifact_id: c.artifact_id,
@@ -282,6 +286,49 @@ pub async fn deploy_research(
     };
     stage_research(Path::new(okx_host_launcher::RUNTIME_ROOT), &record, &worker)?;
     Ok(json!({"installed": true, "provenance": record, "agent_lifecycle_changed": false}))
+}
+
+/// Restore only the preceding image that CONTROL itself saved while deploying
+/// the current one. Do not require the historical composition to equal today's
+/// main tree; both on-disk images and the requested transition are hash-fenced.
+pub fn rollback_research(
+    expected_current_worker_sha256: &str,
+    expected_rollback_worker_sha256: &str,
+) -> HostControlResult<Value> {
+    rollback_research_at(
+        Path::new(okx_host_launcher::RUNTIME_ROOT),
+        expected_current_worker_sha256,
+        expected_rollback_worker_sha256,
+    )
+}
+
+fn rollback_research_at(
+    root: &Path,
+    expected_current_worker_sha256: &str,
+    expected_rollback_worker_sha256: &str,
+) -> HostControlResult<Value> {
+    validate_existing_ancestors(root)?;
+    existing_plain_directory(root)?;
+    let current = read_research_pointer(root, CURRENT_RESEARCH_POINTER)?.ok_or(
+        HostControlError::ArtifactVerification("current research provenance missing"),
+    )?;
+    let previous = read_research_pointer(root, ROLLBACK_RESEARCH_POINTER)?.ok_or(
+        HostControlError::ArtifactVerification("research rollback image missing"),
+    )?;
+    if current.worker_sha256 != expected_current_worker_sha256
+        || previous.worker_sha256 != expected_rollback_worker_sha256
+        || current.worker_sha256 == previous.worker_sha256
+    {
+        return Err(HostControlError::ArtifactVerification(
+            "research rollback identity mismatch",
+        ));
+    }
+    verify_staged_research(root, &current)?;
+    verify_staged_research(root, &previous)?;
+    // One atomic pointer switch. Preserve the saved rollback image so a
+    // repeated or interrupted request cannot accidentally roll forward.
+    write_research_pointer(root, CURRENT_RESEARCH_POINTER, &previous)?;
+    Ok(json!({"rolled_back": true, "provenance": previous, "agent_lifecycle_changed": false}))
 }
 
 fn is_reparse(metadata: &fs::Metadata) -> bool {
@@ -323,6 +370,123 @@ fn plain_directory(path: &Path) -> HostControlResult<()> {
     }
 }
 
+fn existing_plain_directory(path: &Path) -> HostControlResult<()> {
+    let m = fs::symlink_metadata(path)?;
+    if !m.is_dir() || is_reparse(&m) {
+        return Err(HostControlError::ArtifactVerification(
+            "research image path is not a plain directory",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_research_record(record: &InstalledResearch) -> HostControlResult<()> {
+    if record.schema != "okx.host-control.installed-research/v1"
+        || record.repository_id != REPOSITORY_ID
+        || record.run_id == 0
+        || record.artifact_id == 0
+        || !valid_hex(&record.source_head_sha, 40)
+        || !valid_hex(&record.source_tree, 40)
+        || !valid_hex(&record.worker_sha256, 64)
+        || record.protocol_version != 1
+        || record.storage_version != 1
+    {
+        return Err(HostControlError::ArtifactVerification(
+            "invalid saved research provenance",
+        ));
+    }
+    Ok(())
+}
+
+fn read_research_pointer(root: &Path, name: &str) -> HostControlResult<Option<InstalledResearch>> {
+    let path = root.join(name);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(m) if m.is_file() && !is_reparse(&m) => m,
+        Ok(_) => {
+            return Err(HostControlError::ArtifactVerification(
+                "research pointer is not a plain file",
+            ));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if metadata.len() == 0 || metadata.len() > MAX_RESEARCH_POINTER_BYTES {
+        return Err(HostControlError::ArtifactVerification(
+            "research pointer size invalid",
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let file = options.open(&path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || is_reparse(&opened) || opened.len() > MAX_RESEARCH_POINTER_BYTES {
+        return Err(HostControlError::ArtifactVerification(
+            "research pointer changed during read",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_RESEARCH_POINTER_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_RESEARCH_POINTER_BYTES {
+        return Err(HostControlError::ArtifactVerification(
+            "research pointer size invalid",
+        ));
+    }
+    let record: InstalledResearch = serde_json::from_slice(&bytes)?;
+    validate_research_record(&record)?;
+    Ok(Some(record))
+}
+
+fn verify_staged_research(root: &Path, record: &InstalledResearch) -> HostControlResult<()> {
+    validate_research_record(record)?;
+    existing_plain_directory(root)?;
+    let research = root.join("research");
+    existing_plain_directory(&research)?;
+    let versions = research.join("versions");
+    existing_plain_directory(&versions)?;
+    let version = versions.join(&record.worker_sha256);
+    existing_plain_directory(&version)?;
+    let service = version.join("okx-research-service.exe");
+    let binary = match fs::symlink_metadata(&service) {
+        Ok(_) => service,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            version.join("okx-research-worker.exe")
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let metadata = fs::symlink_metadata(&binary)?;
+    if !metadata.is_file()
+        || is_reparse(&metadata)
+        || metadata.len() == 0
+        || metadata.len() > MAX_COMPONENT_BYTES
+        || okx_host_launcher::sha256_file(&binary)? != record.worker_sha256
+    {
+        return Err(HostControlError::ArtifactHashMismatch);
+    }
+    Ok(())
+}
+
+fn write_research_pointer(
+    root: &Path,
+    name: &str,
+    record: &InstalledResearch,
+) -> HostControlResult<()> {
+    validate_research_record(record)?;
+    let _ = read_research_pointer(root, name)?;
+    let pointer = root.join(name);
+    let temp = write_stage_file(root, &serde_json::to_vec_pretty(record)?)?;
+    let result = crate::provenance::atomic_replace(&temp, &pointer);
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
 fn write_stage_file(directory: &Path, bytes: &[u8]) -> HostControlResult<std::path::PathBuf> {
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -346,7 +510,8 @@ fn write_stage_file(directory: &Path, bytes: &[u8]) -> HostControlResult<std::pa
 }
 
 fn stage_research(root: &Path, record: &InstalledResearch, bytes: &[u8]) -> HostControlResult<()> {
-    if !valid_hex(&record.worker_sha256, 64) || sha256_hex(bytes) != record.worker_sha256 {
+    validate_research_record(record)?;
+    if sha256_hex(bytes) != record.worker_sha256 {
         return Err(HostControlError::ArtifactHashMismatch);
     }
     // Never traverse an existing link or publish a pointer until the complete
@@ -384,23 +549,25 @@ fn stage_research(root: &Path, record: &InstalledResearch, bytes: &[u8]) -> Host
         }
         Err(e) => return Err(e.into()),
     }
-    let pointer = root.join("installed-research.json");
-    match fs::symlink_metadata(&pointer) {
-        Ok(m) if m.is_file() && !is_reparse(&m) => {}
-        Ok(_) => {
+    let current = read_research_pointer(root, CURRENT_RESEARCH_POINTER)?;
+    let previous = read_research_pointer(root, ROLLBACK_RESEARCH_POINTER)?;
+    if let Some(old) = &current {
+        verify_staged_research(root, old)?;
+        if old == record {
+            return Ok(());
+        }
+        if old.worker_sha256 == record.worker_sha256 {
             return Err(HostControlError::ArtifactVerification(
-                "research pointer is not a plain file",
+                "same research bytes with different provenance",
             ));
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
+        write_research_pointer(root, ROLLBACK_RESEARCH_POINTER, old)?;
+    } else if previous.is_some() {
+        return Err(HostControlError::ArtifactVerification(
+            "orphaned research rollback pointer",
+        ));
     }
-    let temp = write_stage_file(root, &serde_json::to_vec_pretty(record)?)?;
-    let result = crate::provenance::atomic_replace(&temp, &pointer);
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
+    write_research_pointer(root, CURRENT_RESEARCH_POINTER, record)
 }
 
 pub(super) fn parse_persisted_manifest(bytes: &[u8]) -> HostControlResult<BundleManifest> {
@@ -539,7 +706,7 @@ mod tests {
         assert!(status.success(), "create junction fixture");
         let bytes = b"worker";
         let record = InstalledResearch {
-            schema: "okx.host-control.installed-research/v1",
+            schema: "okx.host-control.installed-research/v1".into(),
             repository_id: REPOSITORY_ID,
             run_id: 1,
             artifact_id: 2,
@@ -571,7 +738,7 @@ mod tests {
         fs::write(root.join("desired-state"), b"unchanged").unwrap();
         let bytes = b"research worker";
         let record = InstalledResearch {
-            schema: "okx.host-control.installed-research/v1",
+            schema: "okx.host-control.installed-research/v1".into(),
             repository_id: REPOSITORY_ID,
             run_id: 1,
             artifact_id: 2,
@@ -613,6 +780,89 @@ mod tests {
             serde_json::from_slice(&fs::read(root.join("installed-research.json")).unwrap())
                 .unwrap();
         assert_eq!(pointer["worker_sha256"], record.worker_sha256);
+        assert!(!root.join(ROLLBACK_RESEARCH_POINTER).exists());
+
+        let mut next = record.clone();
+        next.worker_sha256 = sha256_hex(b"research worker v2");
+        next.run_id = 3;
+        next.artifact_id = 4;
+        next.source_head_sha = "c".repeat(40);
+        stage_research(&root, &next, b"research worker v2").unwrap();
+        assert_eq!(
+            read_research_pointer(&root, ROLLBACK_RESEARCH_POINTER).unwrap(),
+            Some(record.clone())
+        );
+        // An exact redeploy cannot erase the preceding safe rollback slot.
+        stage_research(&root, &next, b"research worker v2").unwrap();
+        assert_eq!(
+            read_research_pointer(&root, ROLLBACK_RESEARCH_POINTER).unwrap(),
+            Some(record.clone())
+        );
+        assert!(rollback_research_at(&root, &"0".repeat(64), &record.worker_sha256).is_err());
+        assert_eq!(
+            read_research_pointer(&root, CURRENT_RESEARCH_POINTER).unwrap(),
+            Some(next.clone())
+        );
+        let old_binary = root
+            .join("research/versions")
+            .join(&record.worker_sha256)
+            .join("okx-research-service.exe");
+        fs::write(&old_binary, b"tampered").unwrap();
+        assert!(rollback_research_at(&root, &next.worker_sha256, &record.worker_sha256).is_err());
+        assert_eq!(
+            read_research_pointer(&root, CURRENT_RESEARCH_POINTER).unwrap(),
+            Some(next.clone())
+        );
+        fs::write(old_binary, bytes).unwrap();
+        let receipt =
+            rollback_research_at(&root, &next.worker_sha256, &record.worker_sha256).unwrap();
+        assert_eq!(receipt["agent_lifecycle_changed"], false);
+        assert_eq!(receipt["provenance"]["worker_sha256"], record.worker_sha256);
+        assert_eq!(
+            read_research_pointer(&root, CURRENT_RESEARCH_POINTER).unwrap(),
+            Some(record.clone())
+        );
+        assert!(rollback_research_at(&root, &next.worker_sha256, &record.worker_sha256).is_err());
+        assert_eq!(fs::read(root.join("okx-agent.exe")).unwrap(), b"agent");
+        assert_eq!(fs::read(root.join("desired-state")).unwrap(), b"unchanged");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollback_fails_closed_for_corrupt_or_missing_previous_provenance() {
+        let root = std::env::temp_dir().join(format!(
+            "research-rollback-negative-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let original = InstalledResearch {
+            schema: "okx.host-control.installed-research/v1".into(),
+            repository_id: REPOSITORY_ID,
+            run_id: 1,
+            artifact_id: 2,
+            source_head_sha: "a".repeat(40),
+            source_tree: "b".repeat(40),
+            worker_sha256: sha256_hex(b"old"),
+            protocol_version: 1,
+            storage_version: 1,
+        };
+        let mut next = original.clone();
+        next.worker_sha256 = sha256_hex(b"new");
+        next.run_id = 3;
+        stage_research(&root, &original, b"old").unwrap();
+        assert!(rollback_research_at(&root, &next.worker_sha256, &original.worker_sha256).is_err());
+        stage_research(&root, &next, b"new").unwrap();
+        fs::write(root.join(ROLLBACK_RESEARCH_POINTER), b"{}").unwrap();
+        assert!(rollback_research_at(&root, &next.worker_sha256, &original.worker_sha256).is_err());
+        assert!(stage_research(&root, &original, b"old").is_err());
+        assert_eq!(
+            read_research_pointer(&root, CURRENT_RESEARCH_POINTER).unwrap(),
+            Some(next)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -375,6 +375,16 @@ async fn process_control_batch(
                     .await,
                     ProcessTransition::None,
                 ),
+                HostControlOperation::RollbackResearch {
+                    expected_current_worker_sha256,
+                    expected_rollback_worker_sha256,
+                } => (
+                    crate::artifact::rollback_research(
+                        expected_current_worker_sha256,
+                        expected_rollback_worker_sha256,
+                    ),
+                    ProcessTransition::None,
+                ),
                 HostControlOperation::DeployAgent {
                     run_id,
                     artifact_id,

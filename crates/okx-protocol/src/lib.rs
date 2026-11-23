@@ -729,6 +729,10 @@ pub enum HostControlOperation {
         artifact_id: u64,
         expected_source_tree: String,
     },
+    RollbackResearch {
+        expected_current_worker_sha256: String,
+        expected_rollback_worker_sha256: String,
+    },
     InstallLauncherRoot {
         run_id: u64,
         artifact_id: u64,
@@ -870,6 +874,17 @@ impl HostControlOperation {
                 } = self
                 {
                     validate_sha256(expected_current_launcher_sha256)?;
+                }
+                Ok(())
+            }
+            Self::RollbackResearch {
+                expected_current_worker_sha256,
+                expected_rollback_worker_sha256,
+            } => {
+                validate_sha256(expected_current_worker_sha256)?;
+                validate_sha256(expected_rollback_worker_sha256)?;
+                if expected_current_worker_sha256 == expected_rollback_worker_sha256 {
+                    return Err(ProtocolError::InvalidRequestId);
                 }
                 Ok(())
             }
@@ -1080,6 +1095,36 @@ fn validate_instrument(value: &str) -> Result<(), ProtocolError> {
 #[cfg(test)]
 mod product_contract_tests {
     use super::*;
+    #[test]
+    fn typed_research_rollback_requires_two_distinct_exact_hashes() {
+        let command = serde_json::json!({
+            "type": "rollback_research",
+            "expected_current_worker_sha256": "a".repeat(64),
+            "expected_rollback_worker_sha256": "b".repeat(64)
+        });
+        let parsed: HostControlOperation = serde_json::from_value(command.clone()).unwrap();
+        assert!(parsed.validate().is_ok());
+        assert_eq!(serde_json::to_value(parsed).unwrap(), command);
+        let mut same = command.clone();
+        same["expected_rollback_worker_sha256"] = serde_json::json!("a".repeat(64));
+        assert!(
+            serde_json::from_value::<HostControlOperation>(same)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        let mut malformed = command.clone();
+        malformed["expected_current_worker_sha256"] = serde_json::json!("../bad");
+        assert!(
+            serde_json::from_value::<HostControlOperation>(malformed)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        let mut extra = command;
+        extra["run_id"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<HostControlOperation>(extra).is_err());
+    }
     #[test]
     fn removed_period_and_activation_operations_are_rejected() {
         for operation in [
