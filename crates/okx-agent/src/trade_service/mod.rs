@@ -49,6 +49,9 @@ pub struct TradeService {
     risk: NativeRiskClient,
     governance: RwLock<Option<CentralGovernanceSnapshot>>,
     live_source: RwLock<Option<okx_runtime::live_source::LiveCandleSource>>,
+    /// Optional separately installed Research computation service.
+    /// Unavailable Research must never synthesize a financial decision.
+    signal_research: RwLock<Option<crate::research_client::ResearchClient>>,
     /// Non-authoritative polling schedule only; SQLite and RiskBook retain
     /// all decision, reservation, order, and financial state.
     recovery_schedule: Mutex<RecoverySchedule>,
@@ -247,11 +250,15 @@ impl TradeService {
             risk,
             governance: RwLock::new(None),
             live_source: RwLock::new(None),
+            signal_research: RwLock::new(None),
             recovery_schedule: Mutex::new(RecoverySchedule::default()),
         }
     }
     pub async fn set_live_source(&self, source: okx_runtime::live_source::LiveCandleSource) {
         *self.live_source.write().await = Some(source);
+    }
+    pub async fn set_signal_research(&self, client: crate::research_client::ResearchClient) {
+        *self.signal_research.write().await = Some(client);
     }
     pub async fn update_governance(
         &self,

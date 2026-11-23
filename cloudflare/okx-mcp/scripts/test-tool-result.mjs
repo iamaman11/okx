@@ -33,7 +33,7 @@ try {
   const risk=await import(pathToFileURL(join(output,"decimal.js")));
   const semantic=await import(pathToFileURL(join(output,"execution_tools.js")));
   // T01: fail CI if public MCP and Rust operator lists drift.
-  const rustRegistry=readFileSync(resolve("../../crates/okx-kernel/src/operators.rs"),"utf8");
+  const rustRegistry=readFileSync(resolve("../../crates/okx-strategy-core/src/operators.rs"),"utf8");
   const registryBlock=rustRegistry.match(/pub const SUPPORTED_OPERATORS:[\s\S]*?=\s*&\[([\s\S]*?)\];/);
   assert.ok(registryBlock,"Rust public operator registry exists");
   const rustNames=[...registryBlock[1].matchAll(/Operator::([A-Za-z]+)/g)]
@@ -43,7 +43,7 @@ try {
   console.log("T01 Rust/MCP operator catalog parity PASS",rustNames.length);
   // The composition graph has its own finite Rust enum. Every new primitive
   // must reach the strict public wire schema in the same slice.
-  const rustPlan=readFileSync(resolve("../../crates/okx-kernel/src/query_plan.rs"),"utf8");
+  const rustPlan=readFileSync(resolve("../../crates/okx-kernel/src/strategy_contract.rs"),"utf8");
   const variants=rustPlan.match(/pub enum SeriesOp\s*\{([\s\S]*?)\}/);
   assert.ok(variants,"T15 Rust composition enum exists");
   const rustComposition=[...variants[1].matchAll(/^\s+([A-Z][A-Za-z]+),/gm)]

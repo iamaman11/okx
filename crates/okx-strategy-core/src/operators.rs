@@ -1,92 +1,9 @@
-//! Typed, finite-only, causal operators shared by live and replay.
+//! Typed, finite-only, causal operators for replay and live evaluation.
+pub use okx_kernel::strategy_contract::{
+    BREAKOUT_STRATEGY_ID, BreakoutParameters, EmaParameters, StrategyParameters,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-
-pub const BREAKOUT_STRATEGY_ID: &str = "close_breakout_v1";
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(deny_unknown_fields)]
-pub struct EmaParameters {
-    pub fast: usize,
-    pub slow: usize,
-}
-impl EmaParameters {
-    pub fn validate(self) -> Result<Self, String> {
-        if self.fast < 1 || self.fast >= self.slow || self.slow > 1000 {
-            Err("EMA requires 1 <= fast < slow <= 1000".into())
-        } else {
-            Ok(self)
-        }
-    }
-}
-
-/// Research definitions share this exact parameter contract with the signal
-/// kernel. Untagged wire serialization preserves existing `{fast,slow}` EMA
-/// requests, while each new definition has a disjoint, strict parameter type.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(deny_unknown_fields)]
-pub struct BreakoutParameters {
-    pub lookback: usize,
-}
-
-impl BreakoutParameters {
-    pub fn validate(self) -> Result<Self, String> {
-        if !(2..=1000).contains(&self.lookback) {
-            Err("BREAKOUT_LOOKBACK_OUT_OF_RANGE:2..1000".into())
-        } else {
-            Ok(self)
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(untagged)]
-pub enum StrategyParameters {
-    Ema(EmaParameters),
-    Breakout(BreakoutParameters),
-}
-
-impl From<EmaParameters> for StrategyParameters {
-    fn from(value: EmaParameters) -> Self {
-        Self::Ema(value)
-    }
-}
-
-impl From<BreakoutParameters> for StrategyParameters {
-    fn from(value: BreakoutParameters) -> Self {
-        Self::Breakout(value)
-    }
-}
-
-impl StrategyParameters {
-    pub fn warmup_for(self, strategy_id: &str) -> Result<usize, String> {
-        match (strategy_id, self) {
-            (BREAKOUT_STRATEGY_ID, Self::Breakout(p)) => Ok(p.validate()?.lookback),
-            ("ema_cross_v1" | "ema_momentum_confirm_v1", Self::Ema(p)) => Ok(p.validate()?.slow),
-            ("close_momentum", Self::Ema(p)) => {
-                p.validate()?;
-                Ok(1)
-            }
-            ("two_bar_momentum", Self::Ema(p)) => {
-                p.validate()?;
-                Ok(2)
-            }
-            ("no_trade", Self::Ema(p)) => {
-                p.validate()?;
-                Ok(0)
-            }
-            (
-                BREAKOUT_STRATEGY_ID
-                | "ema_cross_v1"
-                | "ema_momentum_confirm_v1"
-                | "close_momentum"
-                | "two_bar_momentum"
-                | "no_trade",
-                _,
-            ) => Err("STRATEGY_PARAMETERS_MISMATCH".into()),
-            _ => Err("UNSUPPORTED_STRATEGY".into()),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct BreakoutKernel {

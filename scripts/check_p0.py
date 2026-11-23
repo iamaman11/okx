@@ -21,7 +21,7 @@ WORKER_TESTS = (
     "analytics::market::tests::interior_gap_never_imputed",
     "analytics::market::tests::c20_rolling_mean_reuses_existing_market_pipeline_without_new_routing",
 )
-SCOPES = {"kernel", "analysis", "research", "worker", "wire", "ipc", "mcp", "host", "expanded"}
+SCOPES = {"kernel", "strategy", "analysis", "research", "worker", "wire", "ipc", "mcp", "host", "expanded"}
 
 
 def git(*args):
@@ -42,6 +42,8 @@ def select(status, path):
         return {"expanded"}
     if path == "README.md" or (path.startswith("docs/") and path.endswith(".md")):
         return set()
+    if path.startswith("crates/okx-strategy-core/src/") and path.endswith(".rs"):
+        return {"strategy", "research", "worker", "analysis"}
     # Use the exact fail-closed Ready classifier for host-only Rust ownership.
     # Cargo manifests, installer changes and mixed diffs still expand tests.
     if category(path) in {"host-control", "host-launcher"}:
@@ -52,10 +54,15 @@ def select(status, path):
         return {"analysis", "kernel"}
     if path.startswith("crates/okx-research/src/") and path.endswith(".rs"):
         return {"research", "worker"}
-    if path.startswith("crates/okx-research-worker/src/analytics/") and path.endswith(".rs"):
-        return {"worker"}
     if path.startswith("crates/okx-research-worker/") and path.endswith(".rs") and not path.endswith("/build.rs"):
-        return {"ipc", "worker"}
+        # The Worker owns its source adapters, telemetry and calculations.
+        # Running Agent process/financial tests for such internal changes
+        # defeats the Research-only editing boundary.  Only Worker transport
+        # and entrypoint changes must also exercise the consuming Agent.
+        if (path in {"crates/okx-research-worker/src/ipc.rs", "crates/okx-research-worker/src/main.rs"}
+                or path.startswith("crates/okx-research-worker/src/ipc/")):
+            return {"ipc", "worker"}
+        return {"worker"}
     if path.startswith("crates/okx-protocol/src/") and path.endswith(".rs"):
         return {"wire", "ipc", "worker", "mcp"}
     if path.startswith(("cloudflare/okx-mcp/src/", "cloudflare/okx-mcp/contracts/")):
@@ -347,7 +354,9 @@ def execute(scopes):
         tests("okx-host-launcher", ())
         tests("okx-host-control", ())
     if "kernel" in scopes:
-        tests("okx-kernel", required=(PLAN_TEST, GAP_TEST))
+        tests("okx-kernel", required=(GAP_TEST,))
+    if "strategy" in scopes or "analysis" in scopes or "research" in scopes or "kernel" in scopes:
+        tests("okx-strategy-core", required=(PLAN_TEST,))
     if "analysis" in scopes:
         tests("okx-analysis")
     if "research" in scopes:

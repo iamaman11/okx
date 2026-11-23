@@ -42,7 +42,7 @@ function check(metadata, changed) {
     // new PR. The baseline itself is now a permanent GitHub Release.
     if (file === 'Cargo.lock' || file.endsWith('/Cargo.toml') || file === 'Cargo.toml' || file.startsWith('.cargo/')) throw Error('DEPENDENCY_CONFIGURATION_CHANGED');
     if (protectedDirs.some(dir => file.startsWith(dir))) throw Error('PRODUCTION_DEPENDENCY_CHANGED');
-    if (file.startsWith('crates/okx-research-worker/') || file.startsWith('crates/okx-research/')) {
+    if (file.startsWith('crates/okx-research-worker/') || file.startsWith('crates/okx-research/') || file.startsWith('crates/okx-strategy-core/')) {
       if (file.endsWith('/build.rs')) throw Error('RESEARCH_BUILD_SCRIPT_CHANGED');
       touchedResearch = true;
       continue;

@@ -80,6 +80,10 @@ pub enum ResearchCommand {
         universe_page: Option<Value>,
         resolved_instruments: Option<Vec<String>>,
     },
+    /// Legacy read-only strategy calculation; no financial authority.
+    EvaluateSignal {
+        request: SignalRequest,
+    },
     Capabilities,
     Drain,
     Explain {
@@ -227,8 +231,71 @@ pub enum WorkerFrame {
 )]
 pub enum WorkerReply {
     Product(Value),
+    Signal(SignalDecision),
     Draining(DrainStatus),
     Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignalRequest {
+    pub strategy_id: String,
+    pub parameters: crate::analytics::EmaParameters,
+    pub closes: Vec<ClosedPrice>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosedPrice {
+    pub time_ms: u64,
+    pub close: f64,
+}
+
+impl SignalRequest {
+    pub fn valid(&self) -> bool {
+        !self.closes.is_empty()
+            && self.closes.len() <= 10_000
+            && self.parameters.validate().is_ok()
+            && !self.strategy_id.is_empty()
+            && self.strategy_id.len() <= 128
+            && self
+                .closes
+                .iter()
+                .all(|bar| bar.close.is_finite() && bar.close > 0.0 && bar.time_ms > 0)
+            && self
+                .closes
+                .windows(2)
+                .all(|pair| pair[0].time_ms < pair[1].time_ms)
+    }
+}
+
+/// A mathematical result, never an authorization for trade execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalPosition {
+    Long,
+    Short,
+    Flat,
+    Warmup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignalDecision {
+    pub schema: String,
+    pub last_closed_ms: u64,
+    pub observed_bars: usize,
+    pub position: SignalPosition,
+}
+
+impl SignalDecision {
+    pub const SCHEMA: &'static str = "okx.research.signal/v1";
+
+    pub fn matches_request(&self, request: &SignalRequest) -> bool {
+        self.schema == Self::SCHEMA
+            && self.last_closed_ms == request.closes.last().map_or(0, |bar| bar.time_ms)
+            && self.observed_bars == request.closes.len()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,6 +308,12 @@ impl WorkerReply {
     pub fn product(self) -> Result<Value, String> {
         match self {
             Self::Product(value) => Ok(value),
+            _ => Err("WORKER_REPLY_KIND_MISMATCH".into()),
+        }
+    }
+    pub fn signal(self) -> Result<SignalDecision, String> {
+        match self {
+            Self::Signal(value) => Ok(value),
             _ => Err("WORKER_REPLY_KIND_MISMATCH".into()),
         }
     }
@@ -261,6 +334,46 @@ impl WorkerReply {
 #[cfg(test)]
 mod reply_contract_tests {
     use super::*;
+
+    #[test]
+    fn signal_ipc_rejects_noncausal_inputs_and_has_no_financial_commands() {
+        let request = SignalRequest {
+            strategy_id: "ema_cross_v1".into(),
+            parameters: crate::analytics::EmaParameters { fast: 2, slow: 4 },
+            closes: (1..=4)
+                .map(|time_ms| ClosedPrice {
+                    time_ms,
+                    close: 100.0,
+                })
+                .collect(),
+        };
+        assert!(request.valid());
+        let outcome = SignalDecision {
+            schema: SignalDecision::SCHEMA.into(),
+            last_closed_ms: 4,
+            observed_bars: 4,
+            position: SignalPosition::Flat,
+        };
+        assert!(outcome.matches_request(&request));
+        let decoded = serde_json::from_slice::<WorkerReply>(
+            &serde_json::to_vec(&WorkerReply::Signal(outcome)).unwrap(),
+        )
+        .unwrap()
+        .signal()
+        .unwrap();
+        assert_eq!(decoded.position, SignalPosition::Flat);
+        let mut invalid = request.clone();
+        invalid.closes[1].time_ms = invalid.closes[0].time_ms;
+        assert!(!invalid.valid());
+        invalid = request;
+        invalid.closes[0].close = f64::INFINITY;
+        assert!(!invalid.valid());
+        assert!(
+            WorkerReply::Product(serde_json::json!({"position":"long"}))
+                .signal()
+                .is_err()
+        );
+    }
 
     #[test]
     fn control_replies_have_explicit_kinds_and_product_cannot_authorize_drain() {

@@ -90,6 +90,7 @@ where
     let mut tasks = tokio::task::JoinSet::new();
     if let Ok(trade) = dispatch.finance.trade() {
         let trade = trade.clone();
+        trade.set_signal_research(dispatch.research.clone()).await;
         let signal = shutdown.clone();
         tasks.spawn(async move {
             trade.run(signal).await;

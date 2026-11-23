@@ -1,4 +1,32 @@
 use super::*;
+use okx_protocol::research_ipc::ClosedPrice;
+
+#[tokio::test]
+async fn legacy_ema_signal_is_computed_by_research_cpu_with_exact_warmup() {
+    let (root, service) = super::artifact_job_fixtures::service();
+    for (prices, expected) in [
+        (vec![1.0, 2.0], SignalPosition::Warmup),
+        (vec![1.0, 2.0, 3.0], SignalPosition::Long),
+    ] {
+        let request = SignalRequest {
+            strategy_id: "ema_cross_v1".into(),
+            parameters: okx_protocol::analytics::EmaParameters { fast: 2, slow: 3 },
+            closes: prices
+                .into_iter()
+                .enumerate()
+                .map(|(index, close)| ClosedPrice {
+                    time_ms: index as u64 + 1,
+                    close,
+                })
+                .collect(),
+        };
+        let decision = service.evaluate_signal(request.clone()).await.unwrap();
+        assert!(decision.matches_request(&request));
+        assert_eq!(decision.position, expected);
+    }
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
 #[test]
 fn market_capabilities_discloses_supported_operator_names_and_units() {
     let (root, service) = super::artifact_job_fixtures::service();
@@ -70,7 +98,10 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
         extension,
         &serde_json::to_value(okx_analysis::query_plan::ROLLING_RANGE_DESCRIPTOR).unwrap()
     );
-    assert_eq!(extension["owner"], "okx-kernel::query_plan::rolling_range");
+    assert_eq!(
+        extension["owner"],
+        "okx-strategy-core::query_plan::rolling_range"
+    );
     assert_eq!(extension["effects"], "pure_no_io");
     assert_eq!(extension["version"], 1);
     let stddev = operations
