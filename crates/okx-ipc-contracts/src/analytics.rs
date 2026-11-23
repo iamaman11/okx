@@ -1,6 +1,8 @@
 //! Public compact analytics contract. No transport or financial logic.
 use okx_domain_core::strategy_contract::CompositionRequest;
-pub use okx_domain_core::strategy_contract::{BreakoutParameters, EmaParameters, StrategyParameters};
+pub use okx_domain_core::strategy_contract::{
+    BreakoutParameters, EmaParameters, StrategyParameters,
+};
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -3,10 +3,10 @@ mod budget;
 pub const RESEARCH_MEMORY_ADMISSION_MIB: u32 = budget::MEMORY_TOTAL_MIB;
 pub mod cache;
 pub mod candidate_progress;
+pub mod cpu_executor;
 mod cursor;
 mod decision;
 mod economic_scenario;
-pub mod cpu_executor;
 pub mod jobs;
 mod market;
 pub mod planner;
@@ -155,7 +155,9 @@ impl AnalyticsService {
         service.apply_retention(jiff::Timestamp::now().as_millisecond().max(0) as u64)?;
         Ok(service)
     }
-    pub async fn begin_drain(&self) -> Result<okx_ipc_contracts::research_ipc::DrainStatus, String> {
+    pub async fn begin_drain(
+        &self,
+    ) -> Result<okx_ipc_contracts::research_ipc::DrainStatus, String> {
         let jobs = self.jobs.clone();
         let active_jobs = tokio::task::spawn_blocking(move || jobs.begin_drain())
             .await

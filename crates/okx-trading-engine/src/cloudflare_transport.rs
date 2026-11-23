@@ -290,8 +290,9 @@ where
     };
     let mut challenges: HashMap<String, Instant> = HashMap::new();
     let mut active = HashSet::new();
-    let mut flights: FuturesUnordered<BoxFuture<'static, (String, okx_ipc_contracts::AgentResponse)>> =
-        FuturesUnordered::new();
+    let mut flights: FuturesUnordered<
+        BoxFuture<'static, (String, okx_ipc_contracts::AgentResponse)>,
+    > = FuturesUnordered::new();
     let read_capacity = Arc::new(tokio::sync::Semaphore::new(7));
     let finance_capacity = Arc::new(tokio::sync::Semaphore::new(1));
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));

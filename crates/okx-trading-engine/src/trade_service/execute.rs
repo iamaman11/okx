@@ -493,11 +493,9 @@ impl TradeService {
         if through <= from {
             return Err("ENTRY_OPENING_CAPTURE_PENDING".into());
         }
-        for account in
-            state.state.accounts.iter().filter(|a| {
-                a.environment == okx_ipc_contracts::account_governance::AccountEnvironment::Real
-            })
-        {
+        for account in state.state.accounts.iter().filter(|a| {
+            a.environment == okx_ipc_contracts::account_governance::AccountEnvironment::Real
+        }) {
             if Instant::now() >= until {
                 return Err("COMMAND_EXPIRED".into());
             }
@@ -589,7 +587,8 @@ impl TradeService {
             .accounts
             .iter()
             .filter(|account| {
-                account.environment == okx_ipc_contracts::account_governance::AccountEnvironment::Real
+                account.environment
+                    == okx_ipc_contracts::account_governance::AccountEnvironment::Real
             })
             .collect::<Vec<_>>();
         if cohort.is_empty() || cohort.len() > 32 {
@@ -850,7 +849,8 @@ impl TradeService {
             return Err("ACCOUNT_NEW_RISK_PAUSED".into());
         }
         if increase
-            && r.configuration.account_key.environment == okx_ipc_contracts::accounts::Environment::Real
+            && r.configuration.account_key.environment
+                == okx_ipc_contracts::accounts::Environment::Real
             && self.ensure_campaign_opening(&state, until).await?
                 == CampaignOpeningDecision::RefuseBoundBreach
         {
@@ -956,7 +956,8 @@ impl TradeService {
 
         let native_send_claim;
         if increase
-            && r.configuration.account_key.environment == okx_ipc_contracts::accounts::Environment::Real
+            && r.configuration.account_key.environment
+                == okx_ipc_contracts::accounts::Environment::Real
         {
             // E1 staging: persist exactly what the live venue price, fee and
             // conversion sources can prove before requesting central risk.
@@ -1424,7 +1425,8 @@ impl TradeService {
         // removes two redundant private GET sequences; no pre-HELD snapshot
         // or cache may cross the distributed reservation boundary.
         let (post_account, post_snapshot) = if increase
-            && r.configuration.account_key.environment == okx_ipc_contracts::accounts::Environment::Real
+            && r.configuration.account_key.environment
+                == okx_ipc_contracts::accounts::Environment::Real
         {
             let witness = post_held_selected
                 .as_ref()

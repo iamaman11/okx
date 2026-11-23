@@ -50,7 +50,9 @@ pub(super) fn collector_sources_match(repo: &Path) -> Result<()> {
             include_bytes!("reporting.rs").as_slice(),
         ),
     ] {
-        let path = repo.join("crates/okx-trading-engine/examples").join(relative);
+        let path = repo
+            .join("crates/okx-trading-engine/examples")
+            .join(relative);
         let actual = std::fs::read(path).map_err(|_| "COLLECTOR_SOURCE_UNAVAILABLE")?;
         check_source_bytes(&actual, embedded)?;
     }
@@ -232,7 +234,11 @@ mod tests {
             artifacts(repo, format!("{artifact}\n{artifact}\n").as_bytes()),
             Err("BUILD_DUPLICATE_EXECUTABLE")
         ));
-        artifact["manifest_path"] = json!(repo.join("crates").join("okx-trading-engine").join("Cargo.toml"));
+        artifact["manifest_path"] = json!(
+            repo.join("crates")
+                .join("okx-trading-engine")
+                .join("Cargo.toml")
+        );
         assert!(matches!(
             artifacts(repo, artifact.to_string().as_bytes()),
             Err("BUILD_PACKAGE_SCOPE_MISMATCH")

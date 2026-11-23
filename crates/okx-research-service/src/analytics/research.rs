@@ -137,7 +137,8 @@ impl AnalyticsService {
             .remove("idempotency_key");
         let semantic_hash = okx_research::canonical_sha256(&(semantic_version, semantic))
             .map_err(|e| e.to_string())?;
-        let key = okx_ipc_contracts::research_ipc::IdempotencyKey::new(key).map_err(str::to_owned)?;
+        let key =
+            okx_ipc_contracts::research_ipc::IdempotencyKey::new(key).map_err(str::to_owned)?;
         let runner = RunnerGuard::new(self.runners.clone());
         let (job, new, cancel) = self
             .jobs

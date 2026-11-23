@@ -57,9 +57,9 @@ pub(super) struct EntrySettlementError {
 
 fn store_failure_kind(error: &okx_trade_execution::StoreError) -> SettlementFailureKind {
     match error {
-        okx_trade_execution::StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY") => {
-            SettlementFailureKind::AwaitingEvidence
-        }
+        okx_trade_execution::StoreError::Invalid(
+            "UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY",
+        ) => SettlementFailureKind::AwaitingEvidence,
         okx_trade_execution::StoreError::Sql(_) | okx_trade_execution::StoreError::Io(_) => {
             SettlementFailureKind::Unavailable
         }

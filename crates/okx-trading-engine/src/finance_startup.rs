@@ -5,8 +5,8 @@ use crate::{
     risk_bridge::NativeRiskClient, trade_service::TradeService,
 };
 use okx_api::RateBudget;
-use okx_trade_execution::{StoreError, account_worker::UnifiedFinanceHandle};
 use okx_market_runtime::public::PublicWsHandle;
+use okx_trade_execution::{StoreError, account_worker::UnifiedFinanceHandle};
 use std::{path::Path, sync::Arc};
 
 /// The cause remains available for diagnostics; only the stable code crosses dispatch.
@@ -141,9 +141,9 @@ impl FinanceSelection {
                         };
                         let trade = Arc::new(TradeService::new(accounts.clone(), public_ws, risk));
                         trade
-                            .set_live_source(okx_market_runtime::live_source::LiveCandleSource::new(
-                                market,
-                            ))
+                            .set_live_source(
+                                okx_market_runtime::live_source::LiveCandleSource::new(market),
+                            )
                             .await;
                         if stopped {
                             FinanceDispatch::stopped(accounts, trade)
@@ -236,7 +236,8 @@ mod tests {
         okx_ipc_contracts::account_catalog_proto::initialize(&root, "installation_test").unwrap();
         assert_eq!(select_code(&root).await, "UNIFIED_FINANCE_WRITER_BUSY");
         close(owner).await;
-        std::fs::remove_file(root.join(okx_ipc_contracts::account_catalog_proto::CATALOG_FILE)).unwrap();
+        std::fs::remove_file(root.join(okx_ipc_contracts::account_catalog_proto::CATALOG_FILE))
+            .unwrap();
         okx_ipc_contracts::account_catalog_proto::initialize(&root, "installation_other").unwrap();
         assert_eq!(
             select_code(&root).await,

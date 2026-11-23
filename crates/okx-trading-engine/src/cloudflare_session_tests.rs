@@ -366,7 +366,10 @@ async fn native_session_public_data_is_acked_and_dispatched() {
                     ),
                     (SESSION, GENERATION, id)
                 );
-                assert_eq!(result.status, okx_ipc_contracts::AgentResponseStatus::Completed);
+                assert_eq!(
+                    result.status,
+                    okx_ipc_contracts::AgentResponseStatus::Completed
+                );
                 assert!(result.result.unwrap()["data"]["instances"].is_array());
                 response = true;
             }
@@ -397,7 +400,9 @@ async fn native_session_rejects_foreign_session_and_generation() {
 
 #[tokio::test]
 async fn native_session_rejects_bound_retired_financial_result() {
-    use okx_ipc_contracts::risk_authority::{RISK_RESULT_SCHEMA_V1, RiskDecisionStatus, RiskResult};
+    use okx_ipc_contracts::risk_authority::{
+        RISK_RESULT_SCHEMA_V1, RiskDecisionStatus, RiskResult,
+    };
     let s = Session::new().await;
     s.send(F::RiskControlResult {
         schema: SCHEMA.into(),

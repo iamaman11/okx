@@ -3255,10 +3255,11 @@ mod performance_fixtures {
                         funding_rate: None,
                     })
                     .collect();
-                let ticker: okx_ipc_contracts::research_ipc::ResearchTicker = serde_json::from_value(
-                    json!({"instId":format!("fixture-{symbol}"),"bidPx":"100","askPx":"100.1"}),
-                )
-                .unwrap();
+                let ticker: okx_ipc_contracts::research_ipc::ResearchTicker =
+                    serde_json::from_value(
+                        json!({"instId":format!("fixture-{symbol}"),"bidPx":"100","askPx":"100.1"}),
+                    )
+                    .unwrap();
                 rows.push(
                     compute_row(
                         Loaded {

@@ -107,7 +107,9 @@ mod tests {
             WINDOWS_CREDENTIAL_ACCOUNT,
         )
         .unwrap();
-        assert!(format!("{built:?}").contains("control-token.iamaman11.okx-host-controller.github"));
+        assert!(
+            format!("{built:?}").contains("control-token.iamaman11.okx-host-controller.github")
+        );
         let mock = keyring::mock::Store::new().unwrap();
         let entry = entry_from_store(
             mock.as_ref(),

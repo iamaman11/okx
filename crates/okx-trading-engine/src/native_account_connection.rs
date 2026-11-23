@@ -1,7 +1,7 @@
 //! Verified account source -> one durable opening. Never a trading grant.
 use crate::{AgentError, AgentResult, account_bootstrap::AccountBootstrapper};
-use okx_trade_execution::{AccountMeta, account_worker::UnifiedFinanceHandle};
 use okx_ipc_contracts::accounts::VerifiedAccountConfig;
+use okx_trade_execution::{AccountMeta, account_worker::UnifiedFinanceHandle};
 use std::time::{Duration, Instant};
 
 fn error(reason: &str) -> AgentError {

@@ -37,8 +37,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(same.get_secret().unwrap(), b"test-only-bytes\0");
-        let different =
-            entry_from_store(store.as_ref(), "iamaman11.okx-trading-engine.github", "other").unwrap();
+        let different = entry_from_store(
+            store.as_ref(),
+            "iamaman11.okx-trading-engine.github",
+            "other",
+        )
+        .unwrap();
         assert!(matches!(
             different.get_secret(),
             Err(keyring::Error::NoEntry)

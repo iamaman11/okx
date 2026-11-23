@@ -3,8 +3,10 @@
 use super::reconcile::{verified_order_readback, verified_terminal_order_update_time};
 use super::{AccountResources, StoredIntent, TradeService, deadline, err, exact};
 use crate::execution_store::ExecutionStore;
+use okx_ipc_contracts::risk_authority::{
+    RiskCommandAction, RiskDecisionStatus, RiskReservationState,
+};
 use okx_trade_execution::{CentralReceipt, IntentState, SourceCursor};
-use okx_ipc_contracts::risk_authority::{RiskCommandAction, RiskDecisionStatus, RiskReservationState};
 
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -98,7 +100,8 @@ impl TradeService {
         };
         observe(stage, None, "running", None, &facts);
         let result: Result<(), String> = async {
-            if r.configuration.account_key.environment != okx_ipc_contracts::accounts::Environment::Real
+            if r.configuration.account_key.environment
+                != okx_ipc_contracts::accounts::Environment::Real
             {
                 return Ok(());
             }

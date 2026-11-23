@@ -2,9 +2,9 @@
 //! A stopped owner supports inspection and never grants write permission.
 use crate::admission_failure::{AdmissionFailure, AdmissionStage};
 use crate::native_finance_risk::{NativeFinanceRisk, NativePolicyObservation};
-use okx_trade_execution::account_worker::UnifiedFinanceHandle;
 use okx_ipc_contracts::account_governance::CentralGovernanceSnapshot;
 use okx_ipc_contracts::risk_authority::{RiskCommand, RiskResult};
+use okx_trade_execution::account_worker::UnifiedFinanceHandle;
 
 /// No constructor can route financial commands to a remote worker.
 /// ```compile_fail,E0599

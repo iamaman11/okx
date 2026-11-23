@@ -168,8 +168,7 @@ mod tests {
             .iter()
             .find(|w| w.test.contains("native_second_instrument"))
             .unwrap();
-        let mut report =
-            json!({"overall":"FAIL","stages":[{"package":"okx-domain-core"},{"package":"okx-trading-engine"}]});
+        let mut report = json!({"overall":"FAIL","stages":[{"package":"okx-domain-core"},{"package":"okx-trading-engine"}]});
         let verified = golden
             .witnesses
             .iter()

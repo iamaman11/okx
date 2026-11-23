@@ -13558,7 +13558,10 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(held.state, okx_domain_core::risk::model::RiskEntryState::Held);
+    assert_eq!(
+        held.state,
+        okx_domain_core::risk::model::RiskEntryState::Held
+    );
     assert_eq!(held.reservation_sequence, 1);
     assert_eq!(held.current_book_sequence, 2);
     let public_held = owner

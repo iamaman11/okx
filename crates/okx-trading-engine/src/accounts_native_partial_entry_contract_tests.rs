@@ -87,7 +87,10 @@ async fn risk_book_contract_native_partial_sources_missing_bill_then_terminal_st
         .observe_intent_order(&account, original)
         .await
         .unwrap();
-    assert_eq!(partial.state, okx_trade_execution::IntentState::PartiallyFilled);
+    assert_eq!(
+        partial.state,
+        okx_trade_execution::IntentState::PartiallyFilled
+    );
     assert_eq!(observed.unwrap().accumulated_fill_size, "0.04");
 
     // 0.04 * 0.01 * 1000 = 0.4 USD, plus the real 0.0002 fee.

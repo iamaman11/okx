@@ -103,7 +103,9 @@ pub(super) fn verify(report: &mut Value, observed: &Witnesses) -> Result<bool> {
                 stage["group"].as_str(),
                 stage["test_threads"].as_u64(),
             ) {
-                (Some("okx-trading-engine"), Some("parallel"), Some(4)) => "lib:okx-trading-engine:parallel".into(),
+                (Some("okx-trading-engine"), Some("parallel"), Some(4)) => {
+                    "lib:okx-trading-engine:parallel".into()
+                }
                 (Some("okx-trading-engine"), Some("clock_sensitive"), Some(1)) => {
                     "lib:okx-trading-engine:clock_sensitive".into()
                 }

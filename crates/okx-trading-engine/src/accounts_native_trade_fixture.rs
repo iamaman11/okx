@@ -5,7 +5,8 @@ use super::*;
 // two Execute inventory scans. No periodic publisher or source freshness bypass.
 pub(super) struct ExecuteMarketBoundary {
     pub(crate) feed: Arc<RecordedAccountHttp>,
-    pub(super) market: Mutex<Option<(Arc<RecordedWsConnector>, okx_market_runtime::PublicWsHandle)>>,
+    pub(super) market:
+        Mutex<Option<(Arc<RecordedWsConnector>, okx_market_runtime::PublicWsHandle)>>,
     pub(super) market_quote: Mutex<Option<ExecuteMarketQuote>>,
     pub(super) updates: AtomicUsize,
     // Hold one real planner before intent preparation. Other public callers
@@ -506,7 +507,8 @@ pub(super) async fn fixture_for_accounts(labels: &[&str]) -> NativeFixture {
     wrong_installation.state.installation_id = "foreign-installation".into();
     assert!(trade.update_governance(&wrong_installation).await.is_err());
     let mut demo = authority.clone();
-    demo.state.accounts[0].environment = okx_ipc_contracts::account_governance::AccountEnvironment::Demo;
+    demo.state.accounts[0].environment =
+        okx_ipc_contracts::account_governance::AccountEnvironment::Demo;
     demo.state.accounts[0].account_key = demo.state.accounts[0]
         .account_key
         .replace(":real:", ":demo:");

@@ -9,8 +9,9 @@ use okx_github::GitHubClient;
 use okx_host_controller::{
     HostControlResult,
     auth::{load_native_github_token, store_native_github_token},
+    legacy_bootstrap,
     lifecycle_executor::{HostExecutor, install_current_executable, recover_existing_controller},
-    legacy_bootstrap, root_migration,
+    root_migration,
     runtime::{DEFAULT_CONTROL_POLL_SECONDS, process_pending, run_until_shutdown},
     single_instance::SingleInstanceGuard,
 };

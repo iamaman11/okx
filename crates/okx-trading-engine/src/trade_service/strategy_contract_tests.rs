@@ -2,7 +2,9 @@
 //! HTTP/WS ports provide delivery only; no strategy or money owner is replaced.
 use super::*;
 use crate::accounts::{native_trade_contracts::fixture as native, recorded_support};
-use okx_ipc_contracts::{AgentOperation, AgentRequest, AgentResponse, AgentResponseStatus, DataQuality};
+use okx_ipc_contracts::{
+    AgentOperation, AgentRequest, AgentResponse, AgentResponseStatus, DataQuality,
+};
 
 const INSTANCE: &str = "ema_contract";
 

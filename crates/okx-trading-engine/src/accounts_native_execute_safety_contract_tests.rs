@@ -42,7 +42,9 @@ async fn original_intent(fixture: &NativeFixture) -> okx_trade_execution::Stored
         .owner
         .lookup_intent(
             fixture.config.account_key.wire(),
-            okx_trade_execution::TradeIntentLookup::IdempotencyKey("native_opening_required_001".into()),
+            okx_trade_execution::TradeIntentLookup::IdempotencyKey(
+                "native_opening_required_001".into(),
+            ),
             Instant::now() + Duration::from_secs(3),
         )
         .await

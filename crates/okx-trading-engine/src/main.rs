@@ -1,4 +1,9 @@
 use clap::{Parser, Subcommand};
+use okx_api::{OkxEnvironment, OkxPublicClient, OkxRestClient, RateBudget, Region};
+use okx_ipc_contracts::{
+    DirectRuntimeProfile, MailboxEnvelope, account_catalog_proto, accounts::Environment,
+};
+use okx_market_runtime::PublicWsCoordinator;
 use okx_trading_engine::{
     AgentError, AgentResult,
     account_bootstrap::AccountBootstrapper,
@@ -16,11 +21,6 @@ use okx_trading_engine::{
     research_client::ResearchClient,
     runtime::{EngineContext, run_engine},
 };
-use okx_api::{OkxEnvironment, OkxPublicClient, OkxRestClient, RateBudget, Region};
-use okx_ipc_contracts::{
-    DirectRuntimeProfile, MailboxEnvelope, account_catalog_proto, accounts::Environment,
-};
-use okx_market_runtime::PublicWsCoordinator;
 use std::{
     fs::OpenOptions,
     io::{self, Read},
@@ -331,7 +331,8 @@ async fn run(cli: Cli) -> AgentResult<()> {
                 reservation_key,
                 plan_sha256,
             };
-            let result = okx_trading_engine::finance_inspection::inspect(&config.root, request).await?;
+            let result =
+                okx_trading_engine::finance_inspection::inspect(&config.root, request).await?;
             println!("{}", serde_json::to_string(&result)?);
         }
         Command::InspectVenue { account } => {
@@ -363,7 +364,8 @@ async fn run(cli: Cli) -> AgentResult<()> {
         Command::BackupAccount { account_key } => {
             println!(
                 "{}",
-                okx_trading_engine::storage_commands::backup_account(&config.root, &account_key).await?
+                okx_trading_engine::storage_commands::backup_account(&config.root, &account_key)
+                    .await?
             );
         }
         Command::RestoreAccount {

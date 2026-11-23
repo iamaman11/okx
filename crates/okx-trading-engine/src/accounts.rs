@@ -7,12 +7,12 @@ use crate::{
     okx_credentials::{NamedAccountCredentials, load_native_account_credentials},
 };
 use okx_api::{AccountApi, Credentials, OkxEnvironment, OkxRestClient, RateBudget};
-use okx_trade_execution::account_worker::UnifiedFinanceHandle;
 use okx_ipc_contracts::{
     account_catalog_proto,
     accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
 };
 use okx_market_runtime::{LiveWsConnector, PrivateWsCoordinator, PrivateWsHandle, WsConnector};
+use okx_trade_execution::account_worker::UnifiedFinanceHandle;
 #[cfg(test)]
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
@@ -6828,9 +6828,9 @@ pub(crate) mod tests {
             "SOURCE_CAPTURE_FAILED"
         );
         assert_eq!(
-            source_capture_reason(&AgentError::Store(okx_trade_execution::StoreError::Invalid(
-                "SOURCE_CURSOR_REGRESSION"
-            ))),
+            source_capture_reason(&AgentError::Store(
+                okx_trade_execution::StoreError::Invalid("SOURCE_CURSOR_REGRESSION")
+            )),
             "SOURCE_CURSOR_REGRESSION"
         );
     }

@@ -711,7 +711,8 @@ async fn account_diagnostics(
     }
     let (stage, reason, retry, next) = if let Some(i) = &intent {
         match i.state {
-            okx_trade_execution::IntentState::Posting | okx_trade_execution::IntentState::Unknown => (
+            okx_trade_execution::IntentState::Posting
+            | okx_trade_execution::IntentState::Unknown => (
                 "reconciliation",
                 "PENDING_EXCHANGE_READBACK",
                 true,
@@ -820,16 +821,17 @@ mod tests {
             u128::from_le_bytes(nonce)
         ));
         accounts::initialize_installation(&root, "installation-operation-diagnostic-test").unwrap();
-        let initial_owner = okx_trade_execution::account_worker::UnifiedFinanceHandle::initialize_new(
-            root.clone(),
-            okx_trade_execution::NewFinanceInstallation {
-                installation_id: "installation-operation-diagnostic-test".into(),
-                initialize_request_id: "initialize_operation_diagnostic_001".into(),
-                source_tree: "a".repeat(40),
-            },
-        )
-        .await
-        .unwrap();
+        let initial_owner =
+            okx_trade_execution::account_worker::UnifiedFinanceHandle::initialize_new(
+                root.clone(),
+                okx_trade_execution::NewFinanceInstallation {
+                    installation_id: "installation-operation-diagnostic-test".into(),
+                    initialize_request_id: "initialize_operation_diagnostic_001".into(),
+                    source_tree: "a".repeat(40),
+                },
+            )
+            .await
+            .unwrap();
         let mut initial_closed = initial_owner.termination_signal();
         drop(initial_owner);
         tokio::time::timeout(Duration::from_secs(3), initial_closed.wait_for(|v| *v))

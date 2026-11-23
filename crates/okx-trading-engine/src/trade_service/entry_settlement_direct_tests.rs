@@ -14,8 +14,8 @@
 use super::*;
 use crate::accounts::native_trade_contracts::fixture as native;
 use crate::native_finance_risk::NativeFinanceRisk;
-use okx_trade_execution::{Decision, IntentPlan, NewIntent};
 use okx_ipc_contracts::accounts::Environment;
+use okx_trade_execution::{Decision, IntentPlan, NewIntent};
 
 fn deadline() -> Instant {
     Instant::now() + std::time::Duration::from_secs(3)

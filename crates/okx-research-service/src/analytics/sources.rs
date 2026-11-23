@@ -1,8 +1,8 @@
 use super::cache::{SourceCache, SourceKey};
 use crate::source_api::{PublicSourceClient, ResearchTradePage};
-use okx_research::strategy_registry::Bar;
 #[cfg(test)]
 use okx_market_runtime::market_bootstrap::MarketBootstrapper;
+use okx_research::strategy_registry::Bar;
 use std::sync::Arc;
 #[derive(Clone)]
 pub struct Sources {

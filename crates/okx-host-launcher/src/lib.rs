@@ -1612,7 +1612,13 @@ mod tests {
     #[test]
     fn launcher_dependency_boundary_has_no_product_or_transport_crates() {
         let cargo = include_str!("../Cargo.toml");
-        for forbidden in ["okx-github", "okx-api", "okx-trading-engine", "tokio", "reqwest"] {
+        for forbidden in [
+            "okx-github",
+            "okx-api",
+            "okx-trading-engine",
+            "tokio",
+            "reqwest",
+        ] {
             assert!(
                 !cargo.contains(forbidden),
                 "forbidden launcher dependency: {forbidden}"

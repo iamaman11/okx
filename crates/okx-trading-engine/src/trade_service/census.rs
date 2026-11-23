@@ -164,7 +164,9 @@ impl TradeService {
             .state
             .accounts
             .iter()
-            .filter(|a| a.environment == okx_ipc_contracts::account_governance::AccountEnvironment::Real)
+            .filter(|a| {
+                a.environment == okx_ipc_contracts::account_governance::AccountEnvironment::Real
+            })
             .cloned()
             .collect::<Vec<_>>();
         let pages = stream::iter(cohort)

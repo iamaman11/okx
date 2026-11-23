@@ -1,9 +1,9 @@
 //! Account-scoped access to the installation's sole financial SQL owner.
+use okx_ipc_contracts::accounts::AccountKey;
 use okx_trade_execution::account_worker::{
     AccountMaintenanceTimingV1, AccountSqlTimingV1, AccountStorageReadback, UnifiedFinanceHandle,
 };
 use okx_trade_execution::{StoreError, StoreResult};
-use okx_ipc_contracts::accounts::AccountKey;
 use std::time::Instant;
 
 /// Canonical wire identity with its protocol shape checked. This does not

@@ -6,12 +6,12 @@ use crate::{
     okx_credentials::load_native_account_credentials,
 };
 use okx_api::{OkxRestClient, RateBudget};
-use okx_trade_execution::AccountStore;
-use okx_trade_execution::account_worker::UnifiedFinanceHandle;
 use okx_ipc_contracts::{
     account_catalog_proto,
     accounts::{AccountKey, Environment, VerifiedAccountConfig, valid_reference},
 };
+use okx_trade_execution::AccountStore;
+use okx_trade_execution::account_worker::UnifiedFinanceHandle;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -109,7 +109,8 @@ fn legacy_account_maintenance_lease(
     key: &AccountKey,
 ) -> AgentResult<okx_trade_execution::LegacyAccountMaintenanceLease> {
     let account_sql = account_root(root, key).join("account.sqlite");
-    okx_trade_execution::hold_legacy_account_maintenance(root, &account_sql).map_err(AgentError::from)
+    okx_trade_execution::hold_legacy_account_maintenance(root, &account_sql)
+        .map_err(AgentError::from)
 }
 
 fn parse_key(wire: &str) -> AgentResult<AccountKey> {

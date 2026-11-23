@@ -36,7 +36,10 @@ async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutabl
         .observe_intent_order(&account, original)
         .await
         .unwrap();
-    assert_eq!(partial.state, okx_trade_execution::IntentState::PartiallyFilled);
+    assert_eq!(
+        partial.state,
+        okx_trade_execution::IntentState::PartiallyFilled
+    );
     assert_eq!(observed.unwrap().accumulated_fill_size, "0.04");
     snapshot(&fixture.feed, "99.9998", "0.04");
     history_amount(
@@ -164,7 +167,8 @@ async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutabl
         .unwrap()
         .unwrap();
     assert_eq!(
-        serde_json::from_str::<okx_trade_execution::EntrySettlementEvidence>(&old.result_ref).unwrap(),
+        serde_json::from_str::<okx_trade_execution::EntrySettlementEvidence>(&old.result_ref)
+            .unwrap(),
         first
     );
 

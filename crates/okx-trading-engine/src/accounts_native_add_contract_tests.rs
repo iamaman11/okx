@@ -249,7 +249,10 @@ async fn public_add(external_increment: bool) {
             "the external position cannot create or rewrite an attributed lot"
         );
         let denied_intent = lookup(&fixture, add["data"]["intent_id"].as_str().unwrap()).await;
-        assert_eq!(denied_intent.state, okx_trade_execution::IntentState::Rejected);
+        assert_eq!(
+            denied_intent.state,
+            okx_trade_execution::IntentState::Rejected
+        );
         assert!(
             fixture
                 .owner

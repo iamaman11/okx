@@ -30,7 +30,10 @@ fn adjustment(feed: &RecordedAccountHttp, bill: &str, at: i64, fee: &str) {
     );
 }
 
-async fn operation(account: &AccountResources, id: String) -> okx_trade_execution::OperationReceipt {
+async fn operation(
+    account: &AccountResources,
+    id: String,
+) -> okx_trade_execution::OperationReceipt {
     account
         .execution
         .store
@@ -140,9 +143,10 @@ pub(super) async fn verify_post_release_correction(
     );
     let late_key = format!("entry-late:{entry}:r{}", original.settlement_revision + 1);
     let late_receipt = operation(account, late_key.clone()).await;
-    let late =
-        serde_json::from_str::<okx_trade_execution::EntrySettlementEvidence>(&late_receipt.result_ref)
-            .unwrap();
+    let late = serde_json::from_str::<okx_trade_execution::EntrySettlementEvidence>(
+        &late_receipt.result_ref,
+    )
+    .unwrap();
     assert_eq!(late.schema, "okx.entry-late-settlement/v1");
     assert_eq!(late.settlement_revision, original.settlement_revision + 1);
     assert_eq!(late.cumulative_entry_usd, Decimal::new(20005, 4));
@@ -301,8 +305,10 @@ pub(super) async fn verify_reopened_correction(
         );
         if id.starts_with("entry-late:") {
             late = Some(
-                serde_json::from_str::<okx_trade_execution::EntrySettlementEvidence>(&actual.result_ref)
-                    .unwrap(),
+                serde_json::from_str::<okx_trade_execution::EntrySettlementEvidence>(
+                    &actual.result_ref,
+                )
+                .unwrap(),
             );
         }
     }

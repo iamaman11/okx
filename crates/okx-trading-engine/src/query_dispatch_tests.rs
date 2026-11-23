@@ -43,16 +43,17 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         initialize_installation(&root, "query-dispatch-installation").unwrap();
-        let initial_owner = okx_trade_execution::account_worker::UnifiedFinanceHandle::initialize_new(
-            root.clone(),
-            okx_trade_execution::NewFinanceInstallation {
-                installation_id: "query-dispatch-installation".into(),
-                initialize_request_id: "initialize_readonly_dispatch_001".into(),
-                source_tree: "a".repeat(40),
-            },
-        )
-        .await
-        .unwrap();
+        let initial_owner =
+            okx_trade_execution::account_worker::UnifiedFinanceHandle::initialize_new(
+                root.clone(),
+                okx_trade_execution::NewFinanceInstallation {
+                    installation_id: "query-dispatch-installation".into(),
+                    initialize_request_id: "initialize_readonly_dispatch_001".into(),
+                    source_tree: "a".repeat(40),
+                },
+            )
+            .await
+            .unwrap();
         let mut initial_closed = initial_owner.termination_signal();
         drop(initial_owner);
         tokio::time::timeout(
@@ -189,8 +190,11 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
             okx_api::OkxPublicClient::with_http_transport(env, RateBudget::new(), network.clone())
                 .unwrap();
         let market = crate::market_bootstrap::MarketBootstrapper::new(client.clone());
-        let (_coordinator, public_ws) =
-            okx_market_runtime::PublicWsCoordinator::new_uninitialized(env, RateBudget::new(), client);
+        let (_coordinator, public_ws) = okx_market_runtime::PublicWsCoordinator::new_uninitialized(
+            env,
+            RateBudget::new(),
+            client,
+        );
         let finance = crate::finance_startup::select(&root, RateBudget::new(), false, None)
             .await
             .finish(public_ws.clone(), market.clone())

@@ -123,10 +123,13 @@ impl TradeService {
                 .await?
             {
                 if old.request_hash != request_hash {
-                    return Err(okx_trade_execution::StoreError::Invalid("IDEMPOTENCY_CONFLICT"));
+                    return Err(okx_trade_execution::StoreError::Invalid(
+                        "IDEMPOTENCY_CONFLICT",
+                    ));
                 }
-                return serde_json::from_str::<StrategyInstance>(&old.result_ref)
-                    .map_err(|_| okx_trade_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"));
+                return serde_json::from_str::<StrategyInstance>(&old.result_ref).map_err(|_| {
+                    okx_trade_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT")
+                });
             }
             let instances = r.execution.store.strategy_instances(deadline()).await?;
             let (operation, action, instance, expected) = match &body {
@@ -170,8 +173,9 @@ impl TradeService {
                         parameters,
                         enabled: false,
                         policy_revision: 1,
-                        budget: Decimal::from_str(budget_usd)
-                            .map_err(|_| okx_trade_execution::StoreError::Invalid("INVALID_BUDGET"))?,
+                        budget: Decimal::from_str(budget_usd).map_err(|_| {
+                            okx_trade_execution::StoreError::Invalid("INVALID_BUDGET")
+                        })?,
                         last_decision_key: None,
                     };
                     (idempotency_key.clone(), "create", instance, None)

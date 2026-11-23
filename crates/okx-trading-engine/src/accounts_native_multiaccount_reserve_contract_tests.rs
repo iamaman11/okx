@@ -217,10 +217,14 @@ async fn risk_book_contract_native_two_accounts_concurrent_owner_reserves_share_
         let request = NativeReserveRequest {
             venue: "okx".into(),
             uid: account.configuration.account_key.verified_uid.clone(),
-            run_id: okx_trade_execution::account_worker::AdmissionRunId::new("continuous_engine".into())
-                .unwrap(),
-            intent_id: okx_trade_execution::account_worker::AdmissionIntentId::new(intent_id.clone())
-                .unwrap(),
+            run_id: okx_trade_execution::account_worker::AdmissionRunId::new(
+                "continuous_engine".into(),
+            )
+            .unwrap(),
+            intent_id: okx_trade_execution::account_worker::AdmissionIntentId::new(
+                intent_id.clone(),
+            )
+            .unwrap(),
             strategy_id: "manual".into(),
             instrument_id: "BTC-USDT-SWAP".into(),
             plan_sha256: plan_hash,

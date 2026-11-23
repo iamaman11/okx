@@ -718,7 +718,8 @@ fn producer_and_origin_survive_replay_failure_and_reopen() {
         crate::producer::Producer::new("a".repeat(64), Some("b".repeat(40)), Some("c".repeat(40)))
             .unwrap();
     let second = crate::producer::Producer::new("d".repeat(64), None, None).unwrap();
-    let origin = okx_ipc_contracts::research_ipc::InvocationId::new("first-invocation".into()).unwrap();
+    let origin =
+        okx_ipc_contracts::research_ipc::InvocationId::new("first-invocation".into()).unwrap();
     let jobs = Jobs::open(file.clone())
         .unwrap()
         .with_producer(Some(first.clone()));

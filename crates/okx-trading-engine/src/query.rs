@@ -67,7 +67,9 @@ fn find_instruments_response(
 ) -> Value {
     let instrument_type = instrument_type.map(|kind| match kind {
         okx_ipc_contracts::InstrumentTypeFilter::Swap => okx_observation::InstrumentType::Swap,
-        okx_ipc_contracts::InstrumentTypeFilter::Futures => okx_observation::InstrumentType::Futures,
+        okx_ipc_contracts::InstrumentTypeFilter::Futures => {
+            okx_observation::InstrumentType::Futures
+        }
     });
     let mut search = reference.find_instruments(asset, settle_currency, instrument_type);
     search.instruments.truncate(50);

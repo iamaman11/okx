@@ -2029,8 +2029,10 @@ mod tests {
 
     #[test]
     fn runtime_log_summary_returns_only_structured_bounded_diagnostics() {
-        let root =
-            std::env::temp_dir().join(format!("okx-market-runtime-diagnostics-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "okx-market-runtime-diagnostics-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("root");
         let stdout = root.join("stdout.log");

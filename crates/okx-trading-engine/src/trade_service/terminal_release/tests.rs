@@ -185,9 +185,9 @@ async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
     let original = store
         .lookup_intent(
             deadline(),
-            crate::execution_store::IntentLookup::new(okx_trade_execution::TradeIntentLookup::IntentId(
-                id.clone(),
-            ))
+            crate::execution_store::IntentLookup::new(
+                okx_trade_execution::TradeIntentLookup::IntentId(id.clone()),
+            )
             .unwrap(),
         )
         .await
@@ -377,7 +377,9 @@ async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
     assert_eq!(operation["trace_health"]["dropped_event_count"], 0);
     assert_eq!(operation["trace_health"]["evicted_operation_count"], 0);
     let mut unknown_request = request.clone();
-    if let okx_ipc_contracts::AgentOperation::Diagnostics { request } = &mut unknown_request.operation {
+    if let okx_ipc_contracts::AgentOperation::Diagnostics { request } =
+        &mut unknown_request.operation
+    {
         request.reference = Some("terminal_release:unknown-after-restart".into());
     }
     let unknown = tokio::time::timeout(

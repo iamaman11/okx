@@ -83,7 +83,8 @@ impl TradeService {
         let mut i = self.find_intent(r, reference).await?;
         // Historical fee/notional is a recorded fact, not an authorized entry.
         let entry_costs = if i.risk_increase
-            && r.configuration.account_key.environment == okx_ipc_contracts::accounts::Environment::Real
+            && r.configuration.account_key.environment
+                == okx_ipc_contracts::accounts::Environment::Real
         {
             let id = i.intent_id.clone();
             let (quote, admission) = r

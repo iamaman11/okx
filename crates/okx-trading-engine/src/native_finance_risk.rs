@@ -2,13 +2,13 @@
 //! The local backend never forwards to Cloudflare and never synthesizes a
 //! budget/venue grant. Trading mutations require independently accepted
 //! account, policy and original financial opening receipts on the same owner.
-use okx_trade_execution::account_worker::{
-    UnifiedFinanceBoundSettlement, UnifiedFinanceBoundUnsent, UnifiedFinanceHandle,
-};
 use okx_ipc_contracts::account_governance::{AccountEnvironment, CentralGovernanceSnapshot};
 use okx_ipc_contracts::risk_authority::{
     RISK_RESULT_SCHEMA_V1, RiskAccountBudget, RiskBudgetSnapshot, RiskCommand, RiskCommandAction,
     RiskDecisionStatus, RiskReservationState, RiskResult,
+};
+use okx_trade_execution::account_worker::{
+    UnifiedFinanceBoundSettlement, UnifiedFinanceBoundUnsent, UnifiedFinanceHandle,
 };
 
 /// Observing authorized configuration is not an SQL financial permission.
@@ -512,7 +512,9 @@ impl NativeFinanceRisk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_ipc_contracts::risk_authority::{NativeRiskCensus, RISK_COMMAND_SCHEMA_V1, RiskCommand};
+    use okx_ipc_contracts::risk_authority::{
+        NativeRiskCensus, RISK_COMMAND_SCHEMA_V1, RiskCommand,
+    };
 
     #[test]
     fn all_six_mutating_actions_have_one_local_fail_closed_match() {
