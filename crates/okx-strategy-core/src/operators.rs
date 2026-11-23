@@ -179,7 +179,10 @@ pub fn returns(values: &[f64], log: bool) -> Vec<Option<f64>> {
             && values[i - 1] > 0.0
         {
             let r = values[i] / values[i - 1];
-            out[i] = Some(if log { r.ln() } else { r - 1.0 })
+            let estimate = if log { r.ln() } else { r - 1.0 };
+            if estimate.is_finite() {
+                out[i] = Some(estimate);
+            }
         }
     }
     out
@@ -561,6 +564,12 @@ mod tests {
             returns(&[1.0, f64::NAN, 2.0, 4.0], false),
             vec![None, None, None, Some(1.0)]
         );
+    }
+    #[test]
+    fn finite_input_overflow_cannot_publish_infinite_returns() {
+        let extreme = [1e-300, 1e300, 1e-300];
+        assert_eq!(returns(&extreme, false), vec![None, None, Some(-1.0)]);
+        assert_eq!(returns(&extreme, true), vec![None, None, None]);
     }
     #[test]
     fn ema_warmup_and_instances() {
