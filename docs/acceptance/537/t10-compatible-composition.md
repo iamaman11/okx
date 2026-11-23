@@ -49,7 +49,7 @@ activation are separate tasks in #537 §1.1.
 
 ## Negative acceptance and exact boundary
 
-`node scripts/test-compose-accepted-research-v2.cjs` proves that the candidate
+`node scripts/test-compose-verified-research-v2.cjs` proves that the candidate
 validator rejects a different installed base, matching bytes with forged
 artifact/source origin, damaged EXE, unknown Research filename, altered source
 tree, incompatible protocol/storage version and mismatched `Cargo.lock`.

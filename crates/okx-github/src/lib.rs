@@ -1337,10 +1337,10 @@ fn safe_research_delta(path: &str) -> bool {
     {
         return true;
     }
-    path.starts_with("crates/okx-research-worker/src/")
-        && path != "crates/okx-research-worker/src/main.rs"
-        && path != "crates/okx-research-worker/src/ipc.rs"
-        && !path.starts_with("crates/okx-research-worker/src/ipc/")
+    path.starts_with("crates/okx-research-service/src/")
+        && path != "crates/okx-research-service/src/main.rs"
+        && path != "crates/okx-research-service/src/ipc.rs"
+        && !path.starts_with("crates/okx-research-service/src/ipc/")
 }
 
 fn research_only_descendant(head: &str, c: &RepositoryComparison) -> bool {
@@ -1484,32 +1484,32 @@ mod tests {
             .unwrap()
         };
         let accepted = parse(serde_json::json!([
-            {"filename": "crates/okx-research-worker/src/analytics/source_io.rs", "status": "modified"},
+            {"filename": "crates/okx-research-service/src/analytics/source_io.rs", "status": "modified"},
             {"filename": "crates/okx-strategy-core/src/operators.rs", "status": "added"},
             {"filename": "docs/acceptance/537/proof.md", "status": "modified"}
         ]));
         assert!(research_only_descendant(&head, &accepted));
         assert!(safe_research_delta("crates/okx-research/src/query_plan.rs"));
         assert!(safe_research_delta(
-            "crates/okx-research-worker/src/source_api.rs"
+            "crates/okx-research-service/src/source_api.rs"
         ));
         assert!(safe_research_delta("README.md"));
 
         for path in [
-            "crates/okx-agent/src/main.rs",
+            "crates/okx-trading-engine/src/main.rs",
             "crates/okx-github/src/lib.rs",
-            "crates/okx-host-control/src/artifact.rs",
-            "crates/okx-protocol/src/lib.rs",
-            "crates/okx-research-worker/Cargo.toml",
-            "crates/okx-research-worker/src/main.rs",
-            "crates/okx-research-worker/src/ipc.rs",
-            "crates/okx-research-worker/src/ipc/message.rs",
+            "crates/okx-host-controller/src/artifact.rs",
+            "crates/okx-ipc-contracts/src/lib.rs",
+            "crates/okx-research-service/Cargo.toml",
+            "crates/okx-research-service/src/main.rs",
+            "crates/okx-research-service/src/ipc.rs",
+            "crates/okx-research-service/src/ipc/message.rs",
             ".github/workflows/ci.yml",
             "scripts/check_ci_native_scope.py",
             "cloudflare/okx-mcp/src/mcp.ts",
-            "crates/okx-research-worker/src/../ipc.rs",
-            "crates//okx-research-worker/src/source_api.rs",
-            "crates\\okx-research-worker\\src\\source_api.rs",
+            "crates/okx-research-service/src/../ipc.rs",
+            "crates//okx-research-service/src/source_api.rs",
+            "crates\\okx-research-service\\src\\source_api.rs",
         ] {
             assert!(!safe_research_delta(path), "unsafe path accepted: {path}");
             let candidate = parse(serde_json::json!([{"filename": path, "status": "modified"}]));
@@ -1526,7 +1526,7 @@ mod tests {
             "base_commit": {"sha": head},
             "merge_base_commit": {"sha": head},
             "commits": [{"sha": "b".repeat(40)}],
-            "files": [{"filename": "crates/okx-research-worker/src/source_api.rs", "status": "modified"}]
+            "files": [{"filename": "crates/okx-research-service/src/source_api.rs", "status": "modified"}]
         });
         let accepts = |value| {
             research_only_descendant(
@@ -1551,14 +1551,14 @@ mod tests {
             (
                 "files",
                 serde_json::json!([
-                    {"filename": "crates/okx-research-worker/src/source_api.rs", "status": "renamed", "previous_filename": "crates/okx-agent/src/main.rs"}
+                    {"filename": "crates/okx-research-service/src/source_api.rs", "status": "renamed", "previous_filename": "crates/okx-trading-engine/src/main.rs"}
                 ]),
             ),
             (
                 "files",
                 serde_json::json!([
-                    {"filename": "crates/okx-research-worker/src/source_api.rs", "status": "modified"},
-                    {"filename": "crates/okx-research-worker/src/source_api.rs", "status": "modified"}
+                    {"filename": "crates/okx-research-service/src/source_api.rs", "status": "modified"},
+                    {"filename": "crates/okx-research-service/src/source_api.rs", "status": "modified"}
                 ]),
             ),
         ];
@@ -1571,7 +1571,7 @@ mod tests {
         truncated["files"] = serde_json::json!(
             (0..300)
                 .map(|index| serde_json::json!({
-                    "filename": format!("crates/okx-research-worker/src/test_{index}.rs"),
+                    "filename": format!("crates/okx-research-service/src/test_{index}.rs"),
                     "status": "added"
                 }))
                 .collect::<Vec<_>>()

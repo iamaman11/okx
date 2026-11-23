@@ -1,12 +1,15 @@
 # Current architecture
 
+For canonical package, executable and CI terminology (including compatibility
+names), see [component and CI names](COMPONENT_AND_CI_NAMES.md).
+
 See [the implemented clean Engine contract](ARCHITECTURE_CONTRACT_V1.md), [#398](https://github.com/iamaman11/okx/issues/398) and [the operational runbook](PRODUCT_ACCEPTANCE.md).
 
 [The earlier architecture document](history/ARCHITECTURE-before-398.md) is historical evidence only.
 
 ## Finding an operation's owner
 
-`okx-protocol::AgentOperation` is the public command model. `query::dispatch`
+`okx-ipc-contracts::AgentOperation` is the public command model. `query::dispatch`
 validates it and routes to the existing account, trade, analytics or portfolio
 owner. Background recovery uses those same operations. The executable mapping
 and exact direct-test commands are in [testing.md](testing.md).
@@ -129,7 +132,7 @@ limited to256 revisions; expiry/pinning follows the job and reachable graph.
 An interrupted or losing publication can leave an unreachable metadata file;
 the current reachable-root retention does not collect those orphan files.
 
-For a calculation extension, start at `okx-kernel::operators`: ordinary Rust
+For a calculation extension, start at `okx-domain-core::operators`: ordinary Rust
 types/functions own the rule, while `StrategyKernel::from_id` selects a named
 composition. `ema_momentum_confirm_v1` reuses the EMA and momentum kernels;
 `okx-research::strategy_registry` keeps the same closed-bar/next-open replay.

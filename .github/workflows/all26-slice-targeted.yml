@@ -74,30 +74,30 @@ jobs:
         shell: pwsh
         timeout-minutes: 12
         run: |
-          cargo test --locked -p okx-agent --lib --no-run
+          cargo test --locked -p okx-trading-engine --lib --no-run
           if ($LASTEXITCODE -ne 0) { throw 'B_STAGE_NATIVE_PRECOMPILE_FAILED' }
       - name: Prove deterministic immutable signed-source phase isolation
         shell: pwsh
         run: |
-          cargo test --locked -p okx-agent --lib immutable_signed_ -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib immutable_signed_ -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'SIGNED_SOURCE_PHASE_UNIT_PROOF_FAILED' }
       - name: Verify identical, late-bound and foreign Worker reply identities
         if: matrix.cohort == 't10-concurrent-and-finance'
         shell: pwsh
         run: |
-          $joined = cargo test --locked -p okx-agent --lib identical_inflight_risk_commands_get_one_worker_call_and_two_bound_replies -- --nocapture 2>&1
+          $joined = cargo test --locked -p okx-trading-engine --lib identical_inflight_risk_commands_get_one_worker_call_and_two_bound_replies -- --nocapture 2>&1
           $joined | Out-String | Write-Output
           if ($LASTEXITCODE -ne 0 -or (($joined | Out-String) -notmatch '1 passed')) {
             throw 'RISK_IDENTICAL_WORKER_COMMAND_FANOUT_FAILED'
           }
-          $conflict = cargo test --locked -p okx-agent --lib same_risk_command_id_with_different_payload_never_inherits_worker_result -- --nocapture 2>&1
+          $conflict = cargo test --locked -p okx-trading-engine --lib same_risk_command_id_with_different_payload_never_inherits_worker_result -- --nocapture 2>&1
           $conflict | Out-String | Write-Output
           if ($LASTEXITCODE -ne 0 -or (($conflict | Out-String) -notmatch '1 passed')) {
             throw 'RISK_IDENTICAL_ID_DIFFERENT_PAYLOAD_REJECTION_FAILED'
           }
-          cargo test --locked -p okx-agent --lib late_bound_risk_reply_after_cancelled_native_wait_does_not_close_session -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib late_bound_risk_reply_after_cancelled_native_wait_does_not_close_session -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'RISK_KNOWN_LATE_REPLY_UNIT_PROOF_FAILED' }
-          cargo test --locked -p okx-agent --lib foreign_risk_reply_command_never_authorizes_pending_reserve -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib foreign_risk_reply_command_never_authorizes_pending_reserve -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'RISK_FOREIGN_REPLY_UNIT_PROOF_FAILED' }
       - name: Mandatory 26-case partition — per-case Native and Worker evidence on exact SHA
         shell: pwsh

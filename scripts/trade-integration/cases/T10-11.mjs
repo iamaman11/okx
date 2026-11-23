@@ -63,7 +63,7 @@ export async function run({caseId,root,signal,artifactsDir}) {
   let stdout;
   try {
     const result=await exec("cargo",[
-      "test","--locked","-p","okx-agent","--lib",
+      "test","--locked","-p","okx-trading-engine","--lib",
       `trade_service::execute::tests::${exactTest}`,
       "--","--exact","--nocapture",
     ],{cwd:root,signal,timeout:270000,windowsHide:true,maxBuffer:8*1024*1024});

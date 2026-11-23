@@ -79,7 +79,7 @@ The response comment uses the same envelope schema with
 Normal clients must not hand-edit Base64, ciphertext, nonce or ephemeral public-key fields.
 
 Before publishing a client-to-agent envelope, the exact final envelope must pass
-`okx_protocol::crypto::preflight_client_request_envelope`. The helper validates
+`okx_ipc_contracts::crypto::preflight_client_request_envelope`. The helper validates
 the typed request, request-id equality, transport encoding and dimensions,
 client key consistency, authenticated decryption of the exact ciphertext, and
 equality of the decrypted request with the original typed request.

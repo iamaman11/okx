@@ -43,7 +43,7 @@ try {
   console.log("T01 Rust/MCP operator catalog parity PASS",rustNames.length);
   // The composition graph has its own finite Rust enum. Every new primitive
   // must reach the strict public wire schema in the same slice.
-  const rustPlan=readFileSync(resolve("../../crates/okx-kernel/src/strategy_contract.rs"),"utf8");
+  const rustPlan=readFileSync(resolve("../../crates/okx-domain-core/src/strategy_contract.rs"),"utf8");
   const variants=rustPlan.match(/pub enum SeriesOp\s*\{([\s\S]*?)\}/);
   assert.ok(variants,"T15 Rust composition enum exists");
   const rustComposition=[...variants[1].matchAll(/^\s+([A-Z][A-Za-z]+),/gm)]

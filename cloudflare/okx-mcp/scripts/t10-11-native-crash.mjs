@@ -155,7 +155,7 @@ export async function killAndRecoverUnsentNative({nativeProcess,handoffPath,cwd}
   );
   assert.notEqual(termination.code,0);
   const recovered=await exec("cargo",[
-    "test","--locked","-p","okx-agent","--lib",
+    "test","--locked","-p","okx-trading-engine","--lib",
     "cloudflare_transport::raw_native_session_tests::native_crash_unsent_recover",
     "--","--ignored","--exact","--nocapture",
   ],{cwd,env:{...process.env,RUST_MIN_STACK:"16777216",

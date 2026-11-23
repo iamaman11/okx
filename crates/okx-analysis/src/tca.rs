@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use okx_kernel::observation_model::ExchangeFillIdentity;
+use okx_domain_core::observation_model::ExchangeFillIdentity;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 

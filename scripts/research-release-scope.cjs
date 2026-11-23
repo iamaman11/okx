@@ -16,7 +16,7 @@ function check(metadata, changed) {
   if (!metadata.resolve || !Array.isArray(metadata.packages) || !Array.isArray(metadata.resolve.nodes)) throw Error('METADATA_RESOLUTION_REQUIRED');
   const packages = new Map(metadata.packages.map(p => [p.id, p]));
   const nodes = new Map(metadata.resolve.nodes.map(n => [n.id, n]));
-  const roots = ['okx-agent', 'okx-host-control', 'okx-host-launcher'].map(name => {
+  const roots = ['okx-trading-engine', 'okx-host-controller', 'okx-host-launcher'].map(name => {
     const found = metadata.packages.filter(p => p.name === name && metadata.workspace_members.includes(p.id));
     if (found.length !== 1) throw Error('PRODUCTION_ROOT_MISSING');
     return found[0].id;
@@ -42,7 +42,7 @@ function check(metadata, changed) {
     // new PR. The baseline itself is now a permanent GitHub Release.
     if (file === 'Cargo.lock' || file.endsWith('/Cargo.toml') || file === 'Cargo.toml' || file.startsWith('.cargo/')) throw Error('DEPENDENCY_CONFIGURATION_CHANGED');
     if (protectedDirs.some(dir => file.startsWith(dir))) throw Error('PRODUCTION_DEPENDENCY_CHANGED');
-    if (file.startsWith('crates/okx-research-worker/') || file.startsWith('crates/okx-research/') || file.startsWith('crates/okx-strategy-core/')) {
+    if (file.startsWith('crates/okx-research-service/') || file.startsWith('crates/okx-research/') || file.startsWith('crates/okx-strategy-core/')) {
       if (file.endsWith('/build.rs')) throw Error('RESEARCH_BUILD_SCRIPT_CHANGED');
       touchedResearch = true;
       continue;

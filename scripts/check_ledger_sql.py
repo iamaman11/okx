@@ -5,7 +5,7 @@ import sqlite3
 import tempfile
 from decimal import Decimal
 
-DDL = pathlib.Path(__file__).resolve().parents[1] / "crates/okx-execution/schema/account-v2.sql"
+DDL = pathlib.Path(__file__).resolve().parents[1] / "crates/okx-trade-execution/schema/account-v2.sql"
 
 
 def main():

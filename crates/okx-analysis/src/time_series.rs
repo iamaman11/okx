@@ -1,2 +1,2 @@
-//! Stable public module path. The only compute implementation lives in okx-kernel.
-pub use okx_kernel::time_series::*;
+//! Stable public module path. The only compute implementation lives in okx-domain-core.
+pub use okx_domain_core::time_series::*;

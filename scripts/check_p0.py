@@ -46,24 +46,24 @@ def select(status, path):
         return {"strategy", "research", "worker", "analysis"}
     # Use the exact fail-closed Ready classifier for host-only Rust ownership.
     # Cargo manifests, installer changes and mixed diffs still expand tests.
-    if category(path) in {"host-control", "host-launcher"}:
+    if category(path) in {"host-controller", "host-launcher"}:
         return {"host"}
-    if path in {"crates/okx-kernel/src/" + f for f in ("operators.rs", "query_plan.rs", "time_series.rs")}:
+    if path in {"crates/okx-domain-core/src/" + f for f in ("operators.rs", "query_plan.rs", "time_series.rs")}:
         return {"kernel"}
     if path.startswith("crates/okx-analysis/src/") and path.endswith(".rs"):
         return {"analysis", "kernel"}
     if path.startswith("crates/okx-research/src/") and path.endswith(".rs"):
         return {"research", "worker"}
-    if path.startswith("crates/okx-research-worker/") and path.endswith(".rs") and not path.endswith("/build.rs"):
+    if path.startswith("crates/okx-research-service/") and path.endswith(".rs") and not path.endswith("/build.rs"):
         # The Worker owns its source adapters, telemetry and calculations.
         # Running Agent process/financial tests for such internal changes
         # defeats the Research-only editing boundary.  Only Worker transport
         # and entrypoint changes must also exercise the consuming Agent.
-        if (path in {"crates/okx-research-worker/src/ipc.rs", "crates/okx-research-worker/src/main.rs"}
-                or path.startswith("crates/okx-research-worker/src/ipc/")):
+        if (path in {"crates/okx-research-service/src/ipc.rs", "crates/okx-research-service/src/main.rs"}
+                or path.startswith("crates/okx-research-service/src/ipc/")):
             return {"ipc", "worker"}
         return {"worker"}
-    if path.startswith("crates/okx-protocol/src/") and path.endswith(".rs"):
+    if path.startswith("crates/okx-ipc-contracts/src/") and path.endswith(".rs"):
         return {"wire", "ipc", "worker", "mcp"}
     if path.startswith(("cloudflare/okx-mcp/src/", "cloudflare/okx-mcp/contracts/")):
         return {"mcp", "wire", "worker"}
@@ -352,9 +352,9 @@ def execute(scopes):
         # Run all default targets (library plus shipping binary) for both
         # crates. CONTROL consumes Launcher, even for a Launcher-only edit.
         tests("okx-host-launcher", ())
-        tests("okx-host-control", ())
+        tests("okx-host-controller", ())
     if "kernel" in scopes:
-        tests("okx-kernel", required=(GAP_TEST,))
+        tests("okx-domain-core", required=(GAP_TEST,))
     if "strategy" in scopes or "analysis" in scopes or "research" in scopes or "kernel" in scopes:
         tests("okx-strategy-core", required=(PLAN_TEST,))
     if "analysis" in scopes:
@@ -362,30 +362,30 @@ def execute(scopes):
     if "research" in scopes:
         tests("okx-research")
     if "wire" in scopes:
-        tests("okx-protocol")
+        tests("okx-ipc-contracts")
     if "worker" in scopes:
-        tests("okx-research-worker", required=WORKER_TESTS)
-        perf = tests("okx-research-worker", required=(
-            "analytics::executor::heavy_fixtures::two_heavy_research_jobs_ingestion_stop_and_cancel_latency",
+        tests("okx-research-service", required=WORKER_TESTS)
+        perf = tests("okx-research-service", required=(
+            "analytics::cpu_executor::heavy_fixtures::two_heavy_research_jobs_ingestion_stop_and_cancel_latency",
         ), exact=True, show_output=True)
         report_t10(measured_t10(perf))
     elif "kernel" in scopes:
-        tests("okx-research-worker", required=WORKER_TESTS, exact=True)
+        tests("okx-research-service", required=WORKER_TESTS, exact=True)
     if "mcp" in scopes:
         # The exact Agent IPC test below spawns a separate, actual Miniflare
         # process. Install its existing locked dependencies before that test.
         subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=MCP, check=True)
     if "ipc" in scopes:
-        tests("okx-research-worker", ("--test", "ipc_process"))
+        tests("okx-research-service", ("--test", "ipc_process"))
         # Binary renaming must preserve content-addressed legacy installations
         # and stage only the verified new Research Service image.
-        tests("okx-agent", required=(
+        tests("okx-trading-engine", required=(
             "research_client::installed::tests::existing_verified_worker_image_remains_usable_after_service_rename",
         ), exact=True)
-        tests("okx-host-control", required=(
+        tests("okx-host-controller", required=(
             "artifact::research_component::tests::research_staging_publishes_only_verified_version_and_preserves_agent_state",
         ), exact=True)
-        tests("okx-host-control", required=(
+        tests("okx-host-controller", required=(
             "artifact::research_component::tests::legacy_bundle_cannot_carry_research_worker",
         ), exact=True)
         metadata = subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
@@ -393,15 +393,15 @@ def execute(scopes):
         suffix = ".exe" if os.name == "nt" else ""
         worker = Path(json.loads(metadata)["target_directory"]) / "debug" / ("okx-research-service" + suffix)
         os.environ["OKX_RESEARCH_SERVICE_TEST_EXE"] = str(worker)
-        tests("okx-agent", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
-        tests("okx-agent", required=("research_dispatch_tests::t06_t09_real_worker_causality_and_economics_are_isolated",), exact=True)
-        tests("okx-agent", required=("research_dispatch_tests::t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated",), exact=True)
-        tests("okx-agent", required=("research_dispatch_tests::t07_t08_real_worker_intraday_event_and_holdout_stay_separate",), exact=True)
-        tests("okx-agent", required=("research_client::transport_tests::t11_t12_cancel_is_dispatchable_while_work_and_observation_lanes_are_full",), exact=True)
-        native = tests("okx-agent", required=("accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect",), exact=True, show_output=True)
+        tests("okx-trading-engine", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
+        tests("okx-trading-engine", required=("research_dispatch_tests::t06_t09_real_worker_causality_and_economics_are_isolated",), exact=True)
+        tests("okx-trading-engine", required=("research_dispatch_tests::t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated",), exact=True)
+        tests("okx-trading-engine", required=("research_dispatch_tests::t07_t08_real_worker_intraday_event_and_holdout_stay_separate",), exact=True)
+        tests("okx-trading-engine", required=("research_client::transport_tests::t11_t12_cancel_is_dispatchable_while_work_and_observation_lanes_are_full",), exact=True)
+        native = tests("okx-trading-engine", required=("accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect",), exact=True, show_output=True)
         report_native_under_research(measured_native_under_research(native))
         if "mcp" in scopes:
-            mcp_native = tests("okx-agent", required=(
+            mcp_native = tests("okx-trading-engine", required=(
                 "accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research",
             ), exact=True, show_output=True,
                 extra_env={"OKX_CONTROL_AGENT_INCAR": "ctl_" + "a" * 32})

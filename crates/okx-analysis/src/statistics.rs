@@ -1,4 +1,4 @@
-use okx_kernel::observation_model::MarketHistorySnapshot;
+use okx_domain_core::observation_model::MarketHistorySnapshot;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -527,7 +527,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(
-                    |(index, close)| okx_kernel::observation_model::HistoryCandle {
+                    |(index, close)| okx_domain_core::observation_model::HistoryCandle {
                         open_time_ms: ((index as u64 + 1) * 3_600_000).to_string(),
                         open: (*close).to_owned(),
                         high: (*close).to_owned(),

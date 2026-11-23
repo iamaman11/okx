@@ -9,35 +9,35 @@ import subprocess
 import sys
 
 ALLOWED = {
-    "okx-api": {"okx-kernel"},
+    "okx-api": {"okx-domain-core"},
     "okx-ws": {"okx-api"},
-    "okx-observation": {"okx-api", "okx-kernel"},
-    "okx-runtime": {"okx-api", "okx-observation", "okx-protocol", "okx-ws"},
-    "okx-kernel": set(),
-    "okx-strategy-core": {"okx-kernel"},
-    "okx-analysis": {"okx-kernel", "okx-strategy-core"},
+    "okx-observation": {"okx-api", "okx-domain-core"},
+    "okx-market-runtime": {"okx-api", "okx-observation", "okx-ipc-contracts", "okx-ws"},
+    "okx-domain-core": set(),
+    "okx-strategy-core": {"okx-domain-core"},
+    "okx-analysis": {"okx-domain-core", "okx-strategy-core"},
     "okx-research": {"okx-analysis"},
-    "okx-execution": {"okx-api", "okx-analysis", "okx-kernel", "okx-observation"},
-    "okx-protocol": {"okx-kernel"},
+    "okx-trade-execution": {"okx-api", "okx-analysis", "okx-domain-core", "okx-observation"},
+    "okx-ipc-contracts": {"okx-domain-core"},
     "okx-github": set(),
     "okx-cli": {"okx-api"},
     "okx-host-launcher": set(),
-    "okx-host-control": {"okx-github", "okx-host-launcher", "okx-protocol"},
-    "okx-bridge-mcp": {"okx-github", "okx-protocol"},
-    "okx-research-worker": {"okx-analysis", "okx-kernel", "okx-protocol", "okx-research", "okx-strategy-core"},
-    "okx-agent": {
+    "okx-host-controller": {"okx-github", "okx-host-launcher", "okx-ipc-contracts"},
+    "okx-bridge-mcp": {"okx-github", "okx-ipc-contracts"},
+    "okx-research-service": {"okx-analysis", "okx-domain-core", "okx-ipc-contracts", "okx-research", "okx-strategy-core"},
+    "okx-trading-engine": {
         "okx-api",
-        "okx-execution",
+        "okx-trade-execution",
         "okx-github",
         "okx-observation",
-        "okx-protocol",
-        "okx-runtime",
+        "okx-ipc-contracts",
+        "okx-market-runtime",
     },
 }
 
 
 # Additional test-only edges; these never authorize normal/build dependencies.
-ALLOWED_DEV = {"okx-research-worker": {"okx-api", "okx-runtime"}}
+ALLOWED_DEV = {"okx-research-service": {"okx-api", "okx-market-runtime"}}
 
 # Scoped supplemental source guard: the Cargo DAG cannot see std::fs/network/
 # wall-clock use. This does not replace Rust visibility/compile-fail checks.
@@ -58,7 +58,7 @@ def pure_risk_source_violations(sources: dict[str, str]) -> list[str]:
 
 
 def load_risk_sources() -> dict[str, str]:
-    folder = Path(__file__).resolve().parents[1] / "crates/okx-kernel/src/risk"
+    folder = Path(__file__).resolve().parents[1] / "crates/okx-domain-core/src/risk"
     if not folder.is_dir():
         return {"missing": "use std::fs;"}
     return {
@@ -115,10 +115,10 @@ def load_graph() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
 
 # K10 pure crates must be free of network/storage/runtime dependencies through
 # the complete resolved production graph, including external package edges.
-K10_TARGET_PURE = ("okx-kernel", "okx-strategy-core", "okx-analysis", "okx-research")
+K10_TARGET_PURE = ("okx-domain-core", "okx-strategy-core", "okx-analysis", "okx-research")
 K10_ENFORCED_PURE = K10_TARGET_PURE
 K10_FORBIDDEN = {
-    "okx-api", "okx-ws", "okx-runtime", "okx-github",
+    "okx-api", "okx-ws", "okx-market-runtime", "okx-github",
     "reqwest", "tokio", "rusqlite", "hyper", "axum", "tonic", "sqlx",
 }
 
@@ -155,13 +155,13 @@ def pure_dependency_violations(
 
 
 BOUNDARY_FORBIDDEN = {
-    "okx-agent": {"okx-research", "okx-research-worker", "okx-strategy-core", "okx-analysis"},
-    "okx-research-worker": {"okx-agent", "okx-execution", "okx-api", "okx-runtime", "okx-host-control", "okx-bridge-mcp"},
+    "okx-trading-engine": {"okx-research", "okx-research-service", "okx-strategy-core", "okx-analysis"},
+    "okx-research-service": {"okx-trading-engine", "okx-trade-execution", "okx-api", "okx-market-runtime", "okx-host-controller", "okx-bridge-mcp"},
     # Host lifecycle processes cannot acquire financial/market capabilities
     # through a direct or transitive production dependency. CONTROL may use
     # the Launcher and versioned protocol; neither may import Engine/SQL.
-    "okx-host-control": {"okx-agent", "okx-execution", "okx-api", "okx-runtime", "okx-observation", "okx-research", "okx-research-worker"},
-    "okx-host-launcher": {"okx-host-control", "okx-agent", "okx-execution", "okx-api", "okx-runtime", "okx-observation", "okx-research", "okx-research-worker"},
+    "okx-host-controller": {"okx-trading-engine", "okx-trade-execution", "okx-api", "okx-market-runtime", "okx-observation", "okx-research", "okx-research-service"},
+    "okx-host-launcher": {"okx-host-controller", "okx-trading-engine", "okx-trade-execution", "okx-api", "okx-market-runtime", "okx-observation", "okx-research", "okx-research-service"},
 }
 
 def production_boundary_violations(graph: dict[str, set[str]], names: dict[str, str]) -> list[str]:
@@ -216,42 +216,42 @@ def self_test() -> int:
 
     # Removing an old dependency reduces coupling and is always permitted.
     simplified = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
-    simplified["okx-agent"].remove("okx-api")
+    simplified["okx-trading-engine"].remove("okx-api")
     if validate(simplified):
         print("self-test failed: a removed dependency was rejected", file=sys.stderr)
         return 1
 
     reverse = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
-    reverse["okx-kernel"].add("okx-execution")
-    if "forbidden local dependency: okx-kernel -> okx-execution" not in validate(reverse):
+    reverse["okx-domain-core"].add("okx-trade-execution")
+    if "forbidden local dependency: okx-domain-core -> okx-trade-execution" not in validate(reverse):
         print("self-test failed: reverse risk domain dependency passed", file=sys.stderr)
         return 1
 
     research_escape = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
-    research_escape["okx-research"].add("okx-execution")
-    if "forbidden local dependency: okx-research -> okx-execution" not in validate(research_escape):
+    research_escape["okx-research"].add("okx-trade-execution")
+    if "forbidden local dependency: okx-research -> okx-trade-execution" not in validate(research_escape):
         print("self-test failed: research gained write capability", file=sys.stderr)
         return 1
 
     dev = {name: set() for name in ALLOWED}
-    dev["okx-research-worker"].update({"okx-api", "okx-runtime"})
+    dev["okx-research-service"].update({"okx-api", "okx-market-runtime"})
     if validate(accepted, dev):
         print("self-test failed: worker fixture dependencies rejected", file=sys.stderr)
         return 1
-    for dep in ("okx-api", "okx-runtime", "okx-agent", "okx-execution", "okx-host-control"):
+    for dep in ("okx-api", "okx-market-runtime", "okx-trading-engine", "okx-trade-execution", "okx-host-controller"):
         dirty = {name: set(deps) for name, deps in accepted.items()}
-        dirty["okx-research-worker"].add(dep)
+        dirty["okx-research-service"].add(dep)
         if not validate(dirty, dev):
             print(f"self-test failed: worker normal edge {dep} accepted", file=sys.stderr)
             return 1
-    for dep in ("okx-research", "okx-research-worker", "okx-strategy-core", "okx-analysis"):
+    for dep in ("okx-research", "okx-research-service", "okx-strategy-core", "okx-analysis"):
         dirty = {name: set(deps) for name, deps in accepted.items()}
-        dirty["okx-agent"].add(dep)
+        dirty["okx-trading-engine"].add(dep)
         if not validate(dirty):
             print(f"self-test failed: agent edge {dep} accepted", file=sys.stderr)
             return 1
     transitive = {"worker": {"helper"}, "helper": {"api"}, "api": set(), "agent": set(), "control": set(), "launcher": set()}
-    transitive_names = {"worker": "okx-research-worker", "helper": "helper", "api": "okx-api", "agent": "okx-agent", "control": "okx-host-control", "launcher": "okx-host-launcher"}
+    transitive_names = {"worker": "okx-research-service", "helper": "helper", "api": "okx-api", "agent": "okx-trading-engine", "control": "okx-host-controller", "launcher": "okx-host-launcher"}
     if not production_boundary_violations(transitive, transitive_names):
         print("self-test failed: transitive worker API leak passed", file=sys.stderr)
         return 1
@@ -270,7 +270,7 @@ def self_test() -> int:
         return 1
     transitive["agent"] = set()
     transitive["control"] = {"helper"}
-    transitive_names["api"] = "okx-execution"
+    transitive_names["api"] = "okx-trade-execution"
     if not production_boundary_violations(transitive, transitive_names):
         print("self-test failed: transitive CONTROL -> financial SQL leak passed", file=sys.stderr)
         return 1
@@ -305,21 +305,21 @@ def self_test() -> int:
     if must_find not in violations:
         print("self-test failed: K10 transitive adapter leak passed", file=sys.stderr)
         return 1
-    clean = {"okx-kernel": {"serde"}, "okx-strategy-core": {"okx-kernel"}, "okx-analysis": {"rust_decimal"}, "okx-research": {"okx-analysis"}}
+    clean = {"okx-domain-core": {"serde"}, "okx-strategy-core": {"okx-domain-core"}, "okx-analysis": {"rust_decimal"}, "okx-research": {"okx-analysis"}}
     if pure_dependency_violations(clean):
         print("self-test failed: clean K10 pure graph rejected", file=sys.stderr)
         return 1
 
-    dirty_kernel = {"okx-kernel": {"okx-api"}, "okx-api": {"reqwest"}}
-    if not pure_dependency_violations(dirty_kernel, ("okx-kernel",)):
+    dirty_kernel = {"okx-domain-core": {"okx-api"}, "okx-api": {"reqwest"}}
+    if not pure_dependency_violations(dirty_kernel, ("okx-domain-core",)):
         print("self-test failed: new kernel network violation went unnoticed", file=sys.stderr)
         return 1
 
     # An external helper may hide a runtime dependency. Preserve exact IDs so
     # an unrelated version of that helper cannot overwrite the leaking path.
     external = {"kernel-id": {"helper-v1"}, "helper-v1": {"tokio-id"}, "helper-v2": set(), "tokio-id": set()}
-    external_names = {"kernel-id": "okx-kernel", "helper-v1": "helper", "helper-v2": "helper", "tokio-id": "tokio"}
-    if not pure_dependency_violations(external, ("okx-kernel",), external_names):
+    external_names = {"kernel-id": "okx-domain-core", "helper-v1": "helper", "helper-v2": "helper", "tokio-id": "tokio"}
+    if not pure_dependency_violations(external, ("okx-domain-core",), external_names):
         print("self-test failed: external package runtime leak passed", file=sys.stderr)
         return 1
 

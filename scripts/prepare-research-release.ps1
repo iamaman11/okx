@@ -17,7 +17,7 @@ if (-not [string]::IsNullOrWhiteSpace($AcceptedCompositionSpec)) {
     if ([string]::IsNullOrWhiteSpace($ProofFile)) {
         $ProofFile = Join-Path (Split-Path -Parent $Dist) 'research-composition-proof.json'
     }
-    & (Join-Path $PSScriptRoot 'prepare-accepted-research-composition.ps1') `
+    & (Join-Path $PSScriptRoot 'prepare-verified-research-bundle.ps1') `
         -BaseRunId ([long]$baseline.run_id) -BaseArtifactId ([long]$baseline.artifact_id) `
         -ResearchRunId ([long]$spec.research_run_id) -ResearchArtifactId ([long]$spec.research_artifact_id) `
         -BaselineFile $baselineFile -CandidateHead $head -CandidateTree $tree -Dist $Dist -ProofFile $ProofFile

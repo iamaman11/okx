@@ -1,0 +1,456 @@
+//! One campaign-side entry debit per original native SQL revision.
+//! The original AccountStore proves fill/bill/FX economics, never the
+//! target reservation's transitional POSTED/UNKNOWN/OPEN label.
+//! This module does NOT calculate fill, bill, fee, FX or venue facts; those
+//! economic facts are produced and sealed by the existing AccountStore owner.
+//! No arbitrary network settlement or capital release is accepted.
+/// Named row decoded by the explicit SELECT below; column order stays unchanged.
+type SettlementReservationRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+);
+
+use super::{
+    LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, amount, integrity,
+    read_meta_for_scope, reserve_scope_values, valid_digest,
+};
+use crate::account_store::EntrySettlementEvidence;
+use crate::risk::book::EntrySettlementSource;
+use okx_domain_core::risk::{
+    money::RiskAmount,
+    settlement::{
+        EntrySettlementChange, EntrySettlementError, EntrySettlementInput,
+        calculate_entry_settlement, entry_overage,
+    },
+};
+#[cfg(test)]
+use rusqlite::TransactionBehavior;
+use rusqlite::{OptionalExtension, Transaction, params_from_iter, types::Value};
+
+#[derive(Debug, Clone)]
+pub(in crate::risk::book) struct PartialEntrySqlProof {
+    account_key: String,
+    reservation_key: String,
+    plan_sha256: String,
+    revision: u64,
+    cumulative_usd: RiskAmount,
+    source_digest: String,
+    source: EntrySettlementSource,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::risk::book) struct EntrySettlementReceipt {
+    pub reservation_key: String,
+    pub book_sequence: u64,
+    pub cumulative_entry_usd: String,
+    pub entry_bound_breach_usd: String,
+    pub replayed: bool,
+}
+impl PartialEntrySqlProof {
+    pub(in crate::risk::book) fn from_account_receipt(
+        evidence: EntrySettlementEvidence,
+    ) -> Result<Self> {
+        let source = match evidence.schema.as_str() {
+            "okx.entry-partial-settlement/v1" => EntrySettlementSource::Partial,
+            "okx.entry-terminal-settlement/v1" => EntrySettlementSource::Terminal,
+            "okx.entry-late-settlement/v1" => EntrySettlementSource::Late,
+            _ => return Err(RiskStoreError::Invalid("ENTRY_SQL_PROOF_SCHEMA_INVALID")),
+        };
+        if !evidence.account_key.starts_with("okx:real:")
+            || !valid_digest(evidence.account_key.strip_prefix("okx:real:").unwrap_or(""))
+            || evidence.reservation_key.is_empty()
+            || evidence.reservation_key.len() > 512
+            || !valid_digest(&evidence.plan_hash)
+            || !valid_digest(&evidence.source_digest)
+            || evidence.settlement_revision == 0
+            || evidence.settlement_revision > LEGACY_MAX_SAFE_INTEGER
+        {
+            return Err(RiskStoreError::Invalid("ENTRY_SQL_PROOF_INVALID"));
+        }
+        // A verified terminal no-fill is the ONE valid zero-cost revision.
+        // Partial and late costs must be strictly positive.
+        let cumulative = if source == EntrySettlementSource::Terminal {
+            RiskAmount::parse(&evidence.cumulative_entry_usd.normalize().to_string())?
+        } else {
+            RiskAmount::parse_positive(&evidence.cumulative_entry_usd.normalize().to_string())?
+        };
+        Ok(Self {
+            account_key: evidence.account_key,
+            reservation_key: evidence.reservation_key,
+            plan_sha256: evidence.plan_hash,
+            revision: evidence.settlement_revision,
+            cumulative_usd: cumulative,
+            source_digest: evidence.source_digest,
+            source,
+        })
+    }
+}
+impl RiskBookStore {
+    /// Idempotent partial entry settlement, only from current native AccountStore.
+    /// A lost campaign reply does not debit again; a newer revision has one CAS.
+    #[cfg(test)]
+    pub(in crate::risk::book) fn settle_partial_entry(
+        &mut self,
+        proof: &PartialEntrySqlProof,
+        expected_sequence: u64,
+        generation: u64,
+    ) -> Result<EntrySettlementReceipt> {
+        if proof.source != EntrySettlementSource::Partial {
+            return Err(RiskStoreError::EntrySqlUnproven);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result = Self::settle_partial_entry_sql_transaction(
+            &tx,
+            None,
+            proof,
+            expected_sequence,
+            generation,
+        )?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Original AccountStore SQL financial-source proof and original RiskBook
+    /// entry-budget debit inside ONE installation-owned SQLite transaction.
+    /// The source is queried from the very SAME snapshot, not reconstructed
+    /// from caller-provided money, flags or network JSON. No COMMIT here.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep SQL scope, original proof and CAS fields explicit at this bounded boundary."
+    )]
+    pub(in crate::risk::book) fn settle_unified_entry_from_account_sql_transaction(
+        tx: &Transaction<'_>,
+        installation: &str,
+        campaign: &str,
+        account_key: &str,
+        intent_id: &str,
+        expected_sequence: u64,
+        generation: u64,
+        source: EntrySettlementSource,
+    ) -> Result<EntrySettlementReceipt> {
+        if installation.is_empty()
+            || campaign.is_empty()
+            || account_key.is_empty()
+            || intent_id.is_empty()
+        {
+            return Err(RiskStoreError::Invalid(
+                "UNIFIED_ENTRY_SOURCE_SCOPE_INVALID",
+            ));
+        }
+        let assigned: Option<String> = tx
+            .query_row(
+                "SELECT campaign_id FROM account_policy
+             WHERE installation_id=?1 AND account_key=?2 AND singleton=1",
+                rusqlite::params![installation, account_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if assigned.as_deref() != Some(campaign) {
+            return Err(RiskStoreError::EntrySqlUnproven);
+        }
+        let original = match source {
+            EntrySettlementSource::Partial => {
+                crate::account_store::AccountStore::partial_entry_settlement_receipt_sql(
+                    tx,
+                    Some(installation),
+                    account_key,
+                    intent_id,
+                )
+            }
+            EntrySettlementSource::Terminal => {
+                crate::account_store::AccountStore::final_entry_settlement_receipt_sql(
+                    tx,
+                    installation,
+                    account_key,
+                    intent_id,
+                    false,
+                )
+            }
+            EntrySettlementSource::Late => {
+                crate::account_store::AccountStore::final_entry_settlement_receipt_sql(
+                    tx,
+                    installation,
+                    account_key,
+                    intent_id,
+                    true,
+                )
+            }
+        }
+        .map_err(|error| match error {
+            crate::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),
+            crate::StoreError::Sql(error) => RiskStoreError::Sql(error),
+            crate::StoreError::Io(error) => RiskStoreError::Io(error),
+        })?
+        .ok_or(RiskStoreError::EntrySqlUnproven)?;
+        let proof = PartialEntrySqlProof::from_account_receipt(original.clone())?;
+        if proof.account_key != account_key || proof.source != source {
+            return Err(RiskStoreError::EntrySqlUnproven);
+        }
+        let accepted = Self::settle_partial_entry_sql_transaction(
+            tx,
+            Some((installation, campaign)),
+            &proof,
+            expected_sequence,
+            generation,
+        )?;
+        let acknowledgement = match source {
+            EntrySettlementSource::Partial => {
+                crate::account_store::AccountStore::acknowledge_unified_partial_entry_sql(
+                    tx,
+                    installation,
+                    account_key,
+                    &original,
+                )
+            }
+            EntrySettlementSource::Terminal => {
+                crate::account_store::AccountStore::acknowledge_unified_final_entry_sql(
+                    tx,
+                    installation,
+                    account_key,
+                    &original,
+                    false,
+                )
+            }
+            EntrySettlementSource::Late => {
+                crate::account_store::AccountStore::acknowledge_unified_final_entry_sql(
+                    tx,
+                    installation,
+                    account_key,
+                    &original,
+                    true,
+                )
+            }
+        };
+        acknowledgement.map_err(|error| match error {
+            crate::StoreError::Invalid(reason) => RiskStoreError::Invalid(reason),
+            crate::StoreError::Sql(error) => RiskStoreError::Sql(error),
+            crate::StoreError::Io(error) => RiskStoreError::Io(error),
+        })?;
+        Ok(accepted)
+    }
+
+    /// The ORIGINAL partial-entry arithmetic shared between v5 and scoped v6.
+    /// The caller owns one transaction/COMMIT, never a parallel SQL writer.
+    pub(in crate::risk::book) fn settle_partial_entry_sql_transaction(
+        tx: &Transaction<'_>,
+        scope: Option<(&str, &str)>,
+        proof: &PartialEntrySqlProof,
+        expected_sequence: u64,
+        generation: u64,
+    ) -> Result<EntrySettlementReceipt> {
+        if expected_sequence == 0 || expected_sequence > LEGACY_MAX_SAFE_INTEGER {
+            return Err(RiskStoreError::StaleSequence);
+        }
+        let meta = read_meta_for_scope(tx, scope)?;
+        integrity::verify_reservation_aggregates_for_scope(tx, &meta, scope)?;
+        if generation != meta.generation {
+            return Err(RiskStoreError::StaleGeneration);
+        }
+        let read_sql = if scope.is_some() {
+            "SELECT account_key,plan_sha256,state,entry_upper_usd,
+                    reserved_entry_usd,entry_settled_usd,entry_settlement_revision,
+                    entry_settlement_digest,entry_bound_breach_usd
+             FROM risk_entries WHERE reservation_key=?1
+               AND installation_id=?2 AND campaign_id=?3"
+        } else {
+            "SELECT account_key,plan_sha256,state,entry_upper_usd,
+                    reserved_entry_usd,entry_settled_usd,entry_settlement_revision,
+                    entry_settlement_digest,entry_bound_breach_usd
+             FROM risk_entries WHERE reservation_key=?1"
+        };
+        let read_args =
+            reserve_scope_values(vec![Value::Text(proof.reservation_key.clone())], scope);
+        let entry: Option<SettlementReservationRow> = tx
+            .query_row(read_sql, params_from_iter(read_args.iter()), |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            })
+            .optional()?;
+        let Some((
+            account,
+            plan,
+            state,
+            upper,
+            remaining,
+            previous,
+            prior_revision,
+            digest,
+            prior_breach,
+        )) = entry
+        else {
+            return Err(RiskStoreError::Invalid("PARTIAL_RESERVATION_MISSING"));
+        };
+        if account != proof.account_key || plan != proof.plan_sha256 {
+            return Err(RiskStoreError::IdempotencyConflict);
+        }
+        // The original AccountStore can prove partial fills while a venue
+        // ACK is lost (UNKNOWN) or after the same SQL owner has acknowledged
+        // the order (OPEN). These states retain the SAME held money. A
+        // HELD cannot record fills. RELEASED may only accept a *late*
+        // immutable fee revision, never a partial/terminal claim or POST.
+        if !(matches!(state.as_str(), "POSTED" | "UNKNOWN" | "OPEN")
+            || state == "RELEASED" && proof.source == EntrySettlementSource::Late)
+        {
+            return Err(RiskStoreError::AlreadyResolved);
+        }
+        let prior_revision = u64::try_from(prior_revision)
+            .map_err(|_| RiskStoreError::Corrupt("ENTRY_SETTLEMENT_REVISION"))?;
+        let before = amount(previous)?;
+        let upper = amount(upper)?;
+        let previous_reserved = amount(remaining)?;
+        let previous_over = entry_overage(&before, &upper)?;
+        if amount(prior_breach)? != previous_over {
+            return Err(RiskStoreError::Corrupt("ENTRY_SETTLEMENT_BOUND"));
+        }
+        if proof.revision == prior_revision {
+            if prior_revision == 0
+                || digest != proof.source_digest
+                || before != proof.cumulative_usd
+                || expected_sequence > meta.sequence
+            {
+                return Err(RiskStoreError::IdempotencyConflict);
+            }
+            return Ok(EntrySettlementReceipt {
+                reservation_key: proof.reservation_key.clone(),
+                book_sequence: meta.sequence,
+                cumulative_entry_usd: before.canonical()?,
+                entry_bound_breach_usd: previous_over.canonical()?,
+                replayed: true,
+            });
+        }
+        if expected_sequence != meta.sequence {
+            return Err(RiskStoreError::StaleSequence);
+        }
+        if proof.revision
+            != prior_revision
+                .checked_add(1)
+                .ok_or(RiskStoreError::Corrupt(
+                    "ENTRY_SETTLEMENT_REVISION_OVERFLOW",
+                ))?
+            || proof.cumulative_usd < before
+            || digest == proof.source_digest
+        {
+            return Err(RiskStoreError::Invalid(
+                "ENTRY_SETTLEMENT_REVISION_CONFLICT",
+            ));
+        }
+        let calculated = calculate_entry_settlement(&EntrySettlementInput {
+            released: state == "RELEASED",
+            upper: &upper,
+            previous_cumulative: &before,
+            cumulative: &proof.cumulative_usd,
+            previous_reserved: &previous_reserved,
+            previous_overage: &previous_over,
+            consumed: &meta.entry_consumed,
+            reserved: &meta.entry_reserved,
+            limit: &meta.entry_limit,
+            breach: &meta.entry_breach,
+        })
+        .map_err(|error| match error {
+            EntrySettlementError::ReservedMismatch => {
+                RiskStoreError::Corrupt("ENTRY_RESERVED_PRIMARY_MISMATCH")
+            }
+            EntrySettlementError::Money(error) => RiskStoreError::Money(error),
+        })?;
+        let EntrySettlementChange {
+            remaining_after,
+            consumed_after,
+            reserved_after,
+            current_over,
+            breach_after,
+        } = calculated;
+        let next = meta
+            .sequence
+            .checked_add(1)
+            .filter(|v| *v <= LEGACY_MAX_SAFE_INTEGER)
+            .ok_or(RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+        let next_i64 =
+            i64::try_from(next).map_err(|_| RiskStoreError::Corrupt("SEQUENCE_OVERFLOW"))?;
+        let entry_update = if scope.is_some() {
+            "UPDATE risk_entries SET reserved_entry_usd=?1,entry_settled_usd=?2,
+                    entry_settlement_revision=?3,entry_settlement_digest=?4,entry_bound_breach_usd=?5
+             WHERE reservation_key=?6 AND state IN ('POSTED','UNKNOWN','OPEN','RELEASED') AND entry_settlement_revision=?7
+               AND installation_id=?8 AND campaign_id=?9"
+        } else {
+            "UPDATE risk_entries SET reserved_entry_usd=?1,entry_settled_usd=?2,
+                    entry_settlement_revision=?3,entry_settlement_digest=?4,entry_bound_breach_usd=?5
+             WHERE reservation_key=?6 AND state IN ('POSTED','UNKNOWN','OPEN','RELEASED') AND entry_settlement_revision=?7"
+        };
+        let entry_args = reserve_scope_values(
+            vec![
+                Value::Text(remaining_after.canonical()?),
+                Value::Text(proof.cumulative_usd.canonical()?),
+                Value::Integer(
+                    i64::try_from(proof.revision)
+                        .map_err(|_| RiskStoreError::Invalid("ENTRY_REVISION_RANGE"))?,
+                ),
+                Value::Text(proof.source_digest.clone()),
+                Value::Text(current_over.canonical()?),
+                Value::Text(proof.reservation_key.clone()),
+                Value::Integer(
+                    i64::try_from(prior_revision)
+                        .map_err(|_| RiskStoreError::Corrupt("ENTRY_REVISION_RANGE"))?,
+                ),
+            ],
+            scope,
+        );
+        let changed = tx.execute(entry_update, params_from_iter(entry_args.iter()))?;
+        if changed != 1 {
+            return Err(RiskStoreError::StaleSequence);
+        }
+        let meta_update = if scope.is_some() {
+            "UPDATE risk_meta SET book_sequence=?1,entry_consumed_usd=?2,
+                    entry_reserved_usd=?3,entry_bound_breach_usd=?4
+             WHERE singleton=1 AND book_sequence=?5 AND generation=?6
+               AND installation_id=?7 AND campaign_id=?8"
+        } else {
+            "UPDATE risk_meta SET book_sequence=?1,entry_consumed_usd=?2,
+                    entry_reserved_usd=?3,entry_bound_breach_usd=?4
+             WHERE singleton=1 AND book_sequence=?5 AND generation=?6"
+        };
+        let meta_args = reserve_scope_values(
+            vec![
+                Value::Integer(next_i64),
+                Value::Text(consumed_after.canonical()?),
+                Value::Text(reserved_after.canonical()?),
+                Value::Text(breach_after.canonical()?),
+                Value::Integer(
+                    i64::try_from(meta.sequence)
+                        .map_err(|_| RiskStoreError::Corrupt("SEQUENCE_RANGE"))?,
+                ),
+                Value::Integer(
+                    i64::try_from(meta.generation).map_err(|_| RiskStoreError::StaleGeneration)?,
+                ),
+            ],
+            scope,
+        );
+        let changed = tx.execute(meta_update, params_from_iter(meta_args.iter()))?;
+        if changed != 1 {
+            return Err(RiskStoreError::StaleSequence);
+        }
+        Ok(EntrySettlementReceipt {
+            reservation_key: proof.reservation_key.clone(),
+            book_sequence: next,
+            cumulative_entry_usd: proof.cumulative_usd.canonical()?,
+            entry_bound_breach_usd: current_over.canonical()?,
+            replayed: false,
+        })
+    }
+}

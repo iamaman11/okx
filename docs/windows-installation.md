@@ -17,8 +17,8 @@ checkout must never contain the product's control or financial data.
 ## GitHub is the distribution authority
 
 The source owner is `iamaman11/okx`, pinned repository ID `1388071566`.
-`.github/workflows/ci.yml` builds all four EXEs (`okx-agent`, `okx-host-control`,
-`okx-host-launcher`, `okx-research-worker`) in one Windows bundle and records
+`.github/workflows/ci.yml` builds all four EXEs (`okx-trading-engine`, `okx-host-controller`,
+`okx-host-launcher`, `okx-research-service`) in one Windows bundle and records
 their SHA-256, exact source HEAD/tree and Rust version in `manifest.json`.
 The existing CONTROL operations deploy Agent, stage/activate controller and
 upgrade Launcher from an explicitly identified GitHub run/artifact.
@@ -79,7 +79,7 @@ the separate Worker build and existing verification/staging/handoff contracts.
 The first release requires full CI, merge and the existing accepted manifest;
 later Research-only releases reuse that verified, merged base. The successful
 first full-build CI on `dacab8c5` does not itself exercise the separate
-`research-only-windows` branch, which requires an explicitly selected accepted
+`research-service-windows` branch, which requires an explicitly selected accepted
 base. Actual host installation, process/PID continuity and physical/live acceptance
 remain under #449. An expired or missing origin artifact is rejected; there is
 no additional credential-backed archive cache or recovery installer.
@@ -219,7 +219,7 @@ for unknown or inconsistent host state.
 ## Native whole-finance maintenance (#510 candidate)
 
 The new Native format has one `runtime/finance/finance.sqlite` for all accounts
-and campaigns. A verified release provides `okx-agent --root <runtime-root>
+and campaigns. A verified release provides `okx-trading-engine --root <runtime-root>
 backup-finance` and `restore-finance --snapshot-id finance-<32-lowercase-hex>
 --expected-release <accepted-release> --operation-id <unique-operation>`.
 These are stopped-Engine maintenance operations, not install/update commands.

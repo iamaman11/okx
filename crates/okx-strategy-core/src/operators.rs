@@ -1,5 +1,5 @@
 //! Typed, finite-only, causal operators for replay and live evaluation.
-pub use okx_kernel::strategy_contract::{
+pub use okx_domain_core::strategy_contract::{
     BREAKOUT_STRATEGY_ID, BreakoutParameters, EmaParameters, StrategyParameters,
 };
 use serde::{Deserialize, Serialize};

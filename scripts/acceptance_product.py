@@ -13,7 +13,7 @@ REQUIRED={
     "FIN-01":{"account_store::tests::fee_fill_bill_counted_once","account_store::tests::sql_ingest_retry_exactly_once","finance::attribution::tests::funding_allocation_sums_to_account","finance::nav::tests::deposit_is_not_profit"},
     "MULTI-01":{"accounts::native_connect_contracts::risk_book_contract_native_connect_two_accounts_and_reopen_one_original_sqlite","accounts::native_trade_contracts::native_multiaccount::risk_book_contract_native_two_accounts_share_budget_and_isolate_public_capital_receipts","finance::attribution::tests::two_instances_same_instrument_lot_attribution"},
     "ANALYTICS-01":{"strategy_registry::tests::ema_cross_next_bar_no_lookahead","operators::tests::correlation_timestamp_alignment","strategy_registry::tests::test_partition_not_used_for_selection"},
-    "OPS-01":{"analytics::jobs::tests::restart_marks_job_interrupted","analytics::executor::tests::cancel_releases_queue_capacity","account_store::tests::disk_full_before_post"},
+    "OPS-01":{"analytics::jobs::tests::restart_marks_job_interrupted","analytics::cpu_executor::tests::cancel_releases_queue_capacity","account_store::tests::disk_full_before_post"},
     "F01":{"account_governance_lower_campaign_limit_monotonic"},
     "F02":{"trade_service::plan::tests::auto_fok_buy_rounds_inside_slippage","trade_service::plan::tests::auto_fok_sell_rounds_inside_slippage"},
     "F03":{"mcp_nested_failure_preserves_reason_code","mcp_queued_job_remains_accepted","native_completed_business_envelope_once"},

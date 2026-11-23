@@ -17,10 +17,10 @@ permissions:
   actions: read
 
 jobs:
-  accepted-research-composition:
+  verified-research-bundle-assembly:
     # Supplementary Draft proof for #537 T10. Does not compile or deploy an
     # Engine/Worker and never substitutes for mandatory Ready Native CI.
-    name: accepted-research-composition
+    name: verified-research-bundle-assembly
     if: github.event_name == 'pull_request' && github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'research-composition-evidence')
     runs-on: windows-latest
     steps:
@@ -28,7 +28,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - name: Reject mixed-origin substitution and unsupported names
-        run: node scripts/test-compose-accepted-research-v2.cjs
+        run: node scripts/test-compose-verified-research-v2.cjs
       - name: Compose two accepted GitHub artifacts for installed CONTROL
         shell: pwsh
         env:
@@ -62,8 +62,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  dependency-policy:
-    name: dependency-policy
+  dependency-audit:
+    name: dependency-audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -84,30 +84,30 @@ jobs:
           mkdir "$RUNNER_TEMP/cargo-deny"
           tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/cargo-deny" --strip-components=1
           deny="$RUNNER_TEMP/cargo-deny/cargo-deny"
-          "$deny" --version | tee "$RUNNER_TEMP/dependency-policy.log"
+          "$deny" --version | tee "$RUNNER_TEMP/dependency-audit.log"
           cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/dependency-graph.json"
-          "$deny" fetch 2>&1 | tee -a "$RUNNER_TEMP/dependency-policy.log"
+          "$deny" fetch 2>&1 | tee -a "$RUNNER_TEMP/dependency-audit.log"
           mapfile -t dbs < <(find "$CARGO_HOME/advisory-dbs" -mindepth 1 -maxdepth 1 -type d)
           test "${#dbs[@]}" -eq 1
           git -C "${dbs[0]}" rev-parse HEAD | tee "$RUNNER_TEMP/advisory-db-commit.txt"
           python3 scripts/check_dependency_policy.py --self-test
-          python3 scripts/check_dependency_policy.py --graph "$RUNNER_TEMP/dependency-graph.json" --advisory-db "${dbs[0]}" 2>&1 | tee -a "$RUNNER_TEMP/dependency-policy.log"
+          python3 scripts/check_dependency_policy.py --graph "$RUNNER_TEMP/dependency-graph.json" --advisory-db "${dbs[0]}" 2>&1 | tee -a "$RUNNER_TEMP/dependency-audit.log"
           # Offline check fixes the fetched DB revision and fails if it is missing
           # or stale; cargo metadata above populated the locked crate graph.
-          "$deny" --locked --offline --color never check advisories licenses sources 2>&1 | tee -a "$RUNNER_TEMP/dependency-policy.log"
+          "$deny" --locked --offline --color never check advisories licenses sources 2>&1 | tee -a "$RUNNER_TEMP/dependency-audit.log"
       - name: Retain dependency policy report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: dependency-policy-${{ github.event.pull_request.head.sha || github.sha }}
+          name: dependency-audit-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
-            ${{ runner.temp }}/dependency-policy.log
+            ${{ runner.temp }}/dependency-audit.log
             ${{ runner.temp }}/advisory-db-commit.txt
           if-no-files-found: error
           retention-days: 14
 
-  classify:
-    name: classify
+  component_impact:
+    name: component-impact
     runs-on: ubuntu-latest
     outputs:
       build_required: ${{ steps.classify.outputs.build_required }}
@@ -217,7 +217,7 @@ jobs:
               echo "reason=$scope-only PR; no native Rust or common dependency changed" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            if [[ "$scope" == "host-control" || "$scope" == "host-launcher" ]]; then
+            if [[ "$scope" == "host-controller" || "$scope" == "host-launcher" ]]; then
               echo "build_required=true" >> "$GITHUB_OUTPUT"
               echo "native_required=false" >> "$GITHUB_OUTPUT"
               echo "native_proof=HOST_WINDOWS_OWNER_AND_CONSUMER" >> "$GITHUB_OUTPUT"
@@ -277,7 +277,7 @@ jobs:
             echo "native_required=false" >> "$GITHUB_OUTPUT"
             echo "native_proof=COMPONENT_SCOPED_UNCHANGED_NATIVE" >> "$GITHUB_OUTPUT"
             echo "reason=$scope-only main delta; accepted Native source unaffected" >> "$GITHUB_OUTPUT"
-          elif [[ "$scope" == "host-control" || "$scope" == "host-launcher" ]]; then
+          elif [[ "$scope" == "host-controller" || "$scope" == "host-launcher" ]]; then
             echo "native_required=false" >> "$GITHUB_OUTPUT"
             echo "native_proof=HOST_WINDOWS_OWNER_AND_CONSUMER" >> "$GITHUB_OUTPUT"
             echo "reason=$scope-only main delta; dedicated Windows host/consumer build required" >> "$GITHUB_OUTPUT"
@@ -292,8 +292,8 @@ jobs:
           echo "BUILD_REQUIRED=${{ steps.classify.outputs.build_required }}"
           echo "REASON=${{ steps.classify.outputs.reason }}"
 
-  draft-feedback:
-    name: draft-feedback
+  draft-component-tests:
+    name: draft-component-tests
     if: github.event_name == 'pull_request' && github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -320,7 +320,7 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         id: cache
         with:
-          shared-key: draft-feedback
+          shared-key: draft-component-tests
           cache-workspace-crates: true
       - name: Run selected owner and consumer checks
         if: steps.scope.outputs.code == 'true'
@@ -332,8 +332,8 @@ jobs:
 
   # #512: one bounded compiler/test cycle while its PR is Draft. This job
   # verifies real production and test configurations; it is NOT full acceptance.
-  draft-512-rust:
-    name: draft-512-rust
+  draft-trading-migration-512:
+    name: draft-trading-migration-512
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.pull_request.head.ref == 'work/512-rust-boundaries-20261116' }}
     runs-on: ubuntu-latest
     timeout-minutes: 18
@@ -357,30 +357,30 @@ jobs:
           python3 scripts/acceptance_product.py --self-test
       - name: Compile shipping Engine without retired finance path
         run: |
-          cargo check --locked -p okx-execution --lib
-          cargo check --locked -p okx-agent --bin okx-agent
+          cargo check --locked -p okx-trade-execution --lib
+          cargo check --locked -p okx-trading-engine --bin okx-agent
       - name: Compile exact Agent Rust unit-test source
-        run: cargo test --locked -p okx-agent --lib --no-run
+        run: cargo test --locked -p okx-trading-engine --lib --no-run
       - name: Compile all Agent targets including examples and integration targets
-        run: cargo check --locked -p okx-agent --all-targets
+        run: cargo check --locked -p okx-trading-engine --all-targets
       - name: Negative compile contracts for retired public financial APIs
         run: |
-          cargo test --locked -p okx-execution --doc
-          cargo test --locked -p okx-agent --doc
+          cargo test --locked -p okx-trade-execution --doc
+          cargo test --locked -p okx-trading-engine --doc
       - name: Finance owner durable diagnostic restore and both indexed query plans
         run: |
-          cargo test --locked -p okx-execution --lib risk_book_contract_native_durable_operation_diagnostics_scoped_readback -- --nocapture
-          cargo test --locked -p okx-execution --lib terminal_diagnostics_ -- --nocapture
+          cargo test --locked -p okx-trade-execution --lib risk_book_contract_native_durable_operation_diagnostics_scoped_readback -- --nocapture
+          cargo test --locked -p okx-trade-execution --lib terminal_diagnostics_ -- --nocapture
       - name: Current finance owner startup queue and busy diagnostics, not legacy workers
         run: |
-          cargo test --locked -p okx-execution --lib risk_book_contract_new_owner_exact_replay_reopen_and_no_trade_permission -- --nocapture
-          cargo test --locked -p okx-execution --lib risk_book_contract_fresh_owner_queue_bounded_128_fifo_and_shutdown -- --nocapture
-          cargo test --locked -p okx-execution --lib risk_book_contract_native_diagnostic_busy_deadline_preserves_identity_across_reopen -- --nocapture
+          cargo test --locked -p okx-trade-execution --lib risk_book_contract_new_owner_exact_replay_reopen_and_no_trade_permission -- --nocapture
+          cargo test --locked -p okx-trade-execution --lib risk_book_contract_fresh_owner_queue_bounded_128_fifo_and_shutdown -- --nocapture
+          cargo test --locked -p okx-trade-execution --lib risk_book_contract_native_diagnostic_busy_deadline_preserves_identity_across_reopen -- --nocapture
       - name: Original failed SQL job and unchanged receipt on current finance owner
-        run: cargo test --locked -p okx-execution --lib risk_book_contract_fresh_owner_failed_job_counts_and_preserves_installation -- --nocapture
+        run: cargo test --locked -p okx-trade-execution --lib risk_book_contract_fresh_owner_failed_job_counts_and_preserves_installation -- --nocapture
       - name: Build actual research child for draft session contracts
         run: |
-          cargo build --locked -p okx-research-worker --bin okx-research-service
+          cargo build --locked -p okx-research-service --bin okx-research-service
           echo "OKX_RESEARCH_SERVICE_TEST_EXE=$GITHUB_WORKSPACE/target/debug/okx-research-service" >> "$GITHUB_ENV"
       - name: Production startup, source independence and correlated research failures
         shell: bash
@@ -392,61 +392,61 @@ jobs:
             cargo test --locked "$@" 2>&1 | tee "$output"
             grep -Eq 'test result: ok\. +[1-9][0-9]* passed;' "$output"
           }
-          required_contract -p okx-agent finance_startup
-          required_contract -p okx-agent --lib query::public_dispatch_tests::
-          required_contract -p okx-runtime --lib public::reference_refresh::tests::
-          required_contract -p okx-protocol --lib research_ipc::reply_contract_tests::
-          required_contract -p okx-research-worker --lib ipc::correlation_tests::
-          required_contract -p okx-research-worker --lib analytics::jobs::tests::producer
-          required_contract -p okx-research-worker --lib analytics::jobs::tests::historical_rows_keep_unknown_producer
+          required_contract -p okx-trading-engine finance_startup
+          required_contract -p okx-trading-engine --lib query::public_dispatch_tests::
+          required_contract -p okx-market-runtime --lib public::reference_refresh::tests::
+          required_contract -p okx-ipc-contracts --lib research_ipc::reply_contract_tests::
+          required_contract -p okx-research-service --lib ipc::correlation_tests::
+          required_contract -p okx-research-service --lib analytics::jobs::tests::producer
+          required_contract -p okx-research-service --lib analytics::jobs::tests::historical_rows_keep_unknown_producer
       - name: Existing risk client and bound raw-frame regressions
         run: |
-          cargo test --locked -p okx-agent --lib risk_bridge::tests -- --nocapture
-          cargo test --locked -p okx-agent --lib risk_book_contract_native_initialize_account -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_bridge::tests -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_initialize_account -- --nocapture
           set -o pipefail
           session_output=$(mktemp)
-          cargo test --locked -p okx-agent --lib cloudflare_transport::session_tests -- --nocapture 2>&1 | tee "$session_output"
+          cargo test --locked -p okx-trading-engine --lib cloudflare_transport::session_tests -- --nocapture 2>&1 | tee "$session_output"
           grep -Eq 'test result: ok\. +[1-9][0-9]* passed;' "$session_output"
       - name: Status and Recovery direct operation regressions
         run: |
-          cargo test --locked -p okx-agent --lib trade_service::reconcile::entry_cost_status_tests -- --nocapture
-          cargo test --locked -p okx-agent --lib trade_service::recovery::tests -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib trade_service::reconcile::entry_cost_status_tests -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib trade_service::recovery::tests -- --nocapture
       - name: Original Native campaign, governance and Execute operation contracts
         run: |
-          cargo test --locked -p okx-agent --lib risk_book_contract_native_maintenance_ -- --nocapture
-          cargo test --locked -p okx-agent --lib risk_book_contract_native_public_execute_lost_ack_and_replay_send_once -- --nocapture
-          cargo test --locked -p okx-agent --lib risk_book_contract_native_execute_bound_rejection_preserves_code_and_reserve -- --nocapture
-          cargo test --locked -p okx-agent --lib risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_maintenance_ -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_public_execute_lost_ack_and_replay_send_once -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_execute_bound_rejection_preserves_code_and_reserve -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner -- --nocapture
       - name: Current-owner POST replay UNKNOWN and two-account replacements
         run: |
-          cargo test --locked -p okx-agent --lib risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict -- --nocapture
-          cargo test --locked -p okx-agent --lib risk_book_contract_native_public_cancel_after_held_replays_and_cold_reopens_without_send -- --nocapture
-          cargo test --locked -p okx-agent --lib risk_book_contract_native_os_kill_after_create_recovers_original_unknown -- --nocapture
-          cargo test --locked -p okx-agent --lib risk_book_contract_native_two_accounts_share_budget_and_isolate_public_capital_receipts -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_public_cancel_after_held_replays_and_cold_reopens_without_send -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_os_kill_after_create_recovers_original_unknown -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_two_accounts_share_budget_and_isolate_public_capital_receipts -- --nocapture
       - name: Native connected-account identity and original shared finance owner
         run: |
-          cargo test --locked -p okx-agent --lib risk_book_contract_native_connect_two_accounts_and_reopen_one_original_sqlite -- --nocapture
-          cargo test --locked -p okx-agent --lib risk_book_contract_native_connect_wrong_uid_does_not_create_account_or_publish_catalog -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_connect_two_accounts_and_reopen_one_original_sqlite -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_connect_wrong_uid_does_not_create_account_or_publish_catalog -- --nocapture
       - name: Current Native scope and source-generation witnesses
         run: |
-          cargo test --locked -p okx-agent --lib risk_book_contract_native_intent_diagnostic_is_account_scoped_and_refuses_foreign_installation -- --nocapture
-          cargo test --locked -p okx-agent --lib risk_book_contract_native_changed_post_held_fee_releases_unsent_and_replans -- --nocapture
-          cargo test --locked -p okx-agent --lib stale_generation_rejects_before_financial_or_venue_action -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_intent_diagnostic_is_account_scoped_and_refuses_foreign_installation -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_book_contract_native_changed_post_held_fee_releases_unsent_and_replans -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib stale_generation_rejects_before_financial_or_venue_action -- --nocapture
       - name: Census original source, scope, receipt and post-HELD regressions
         run: |
-          cargo test --locked -p okx-agent --lib trade_service::execute::tests::e2_ -- --nocapture
-          cargo test --locked -p okx-agent --lib trade_service::execute::tests::e1_ -- --nocapture
-          cargo test --locked -p okx-agent --lib trade_service::execute::tests::t10_native_ -- --nocapture
-          cargo test --locked -p okx-agent --lib trade_service::execute::tests::k4_ -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib trade_service::execute::tests::e2_ -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib trade_service::execute::tests::e1_ -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib trade_service::execute::tests::t10_native_ -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib trade_service::execute::tests::k4_ -- --nocapture
       - name: Native diagnostic snapshot and stopped finance-mode exclusion
         run: |
-          cargo test --locked -p okx-execution --lib risk_book_contract_native_account_diagnostics_one_scoped_read_no_mutation -- --nocapture
-          cargo test --locked -p okx-execution --lib legacy_stopped_maintenance_uses_same_cross_process_mode_and_rejects_import -- --nocapture
+          cargo test --locked -p okx-trade-execution --lib risk_book_contract_native_account_diagnostics_one_scoped_read_no_mutation -- --nocapture
+          cargo test --locked -p okx-trade-execution --lib legacy_stopped_maintenance_uses_same_cross_process_mode_and_rejects_import -- --nocapture
 
-  riskbook-draft-rust:
+  draft-riskbook-migration-510:
     # Fast, real-source feedback for the active Rust RiskBook draft. Final
     # acceptance remains the existing full required CI after Ready for review.
-    name: riskbook-draft-rust
+    name: draft-riskbook-migration-510
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.pull_request.head.ref == 'work/510-riskbook-rust-20261113' }}
     runs-on: ubuntu-latest
     steps:
@@ -465,22 +465,22 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Direct RiskBook Rust/SQLite regression target
-        run: cargo test --locked -p okx-kernel -p okx-execution --lib risk_book_contract -- --nocapture
+        run: cargo test --locked -p okx-domain-core -p okx-trade-execution --lib risk_book_contract -- --nocapture
       - name: Verify original AccountStore fill/bill source partial receipt
-        run: cargo test --locked -p okx-execution --lib e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted -- --nocapture
+        run: cargo test --locked -p okx-trade-execution --lib e1_partial_and_final_entry_settlement_are_monotone_and_not_double_counted -- --nocapture
       # The full original AccountStore API (including begin_post) is touched
       # by #510. One reusable compilation, same job and same draft gate;
       # 74 filtered risk contracts alone cannot prove zero regressions.
       - name: Regression of complete original execution Rust library
-        run: cargo test --locked -p okx-execution --lib
+        run: cargo test --locked -p okx-trade-execution --lib
       - name: Native startup and stopped unified finance readback (no trading)
         run: |
-          cargo test --locked -p okx-agent --lib finance_staged_import_never_falls_back_to_old_trade_or_cloudflare_finance -- --nocapture
-          cargo test --locked -p okx-agent --lib finance_inspection::tests -- --nocapture
-          cargo test --locked -p okx-agent --lib native_finance_risk::tests -- --nocapture
-          cargo test --locked -p okx-agent --lib risk_bridge::tests -- --nocapture
-          cargo test --locked -p okx-agent --bin okx-agent --no-run
-          cargo test --locked -p okx-agent --bin okx-agent native_finance_startup_tests -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib finance_staged_import_never_falls_back_to_old_trade_or_cloudflare_finance -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib finance_inspection::tests -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib native_finance_risk::tests -- --nocapture
+          cargo test --locked -p okx-trading-engine --lib risk_bridge::tests -- --nocapture
+          cargo test --locked -p okx-trading-engine --bin okx-agent --no-run
+          cargo test --locked -p okx-trading-engine --bin okx-agent native_finance_startup_tests -- --nocapture
       - name: Strict price and bounded derivative context regression
         shell: bash
         run: |
@@ -491,7 +491,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked -p okx-research-worker --bin okx-research-service
+          cargo build --locked -p okx-research-service --bin okx-research-service
           echo "OKX_RESEARCH_SERVICE_TEST_EXE=$PWD/target/debug/okx-research-service" >> "$GITHUB_ENV"
       - name: Native admission and existing trading boundary regressions
         shell: bash
@@ -499,7 +499,7 @@ jobs:
           set -euo pipefail
           for contract in native_connect_contracts native_trade_contracts native_acceptance_coverage account_opening_capture storage_commands::tests storage_commands::native_backup::tests admission_source::tests native_finance_admission::tests source_capture::tests trade_service::plan::tests entry_settlement::direct_tests strategy_contract_tests protection_cleanup_direct_tests terminal_release::tests unsent_release::tests; do
             log="$RUNNER_TEMP/native-boundary-${contract//:/_}.log"
-            cargo test --locked -p okx-agent --lib "$contract" -- --skip accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect --nocapture | tee "$log"
+            cargo test --locked -p okx-trading-engine --lib "$contract" -- --skip accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect --nocapture | tee "$log"
             grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$log"
           done
       - name: Worker transport and retired financial RPC boundary
@@ -512,8 +512,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p okx-agent --example native_finance_acceptance
-          cargo run --locked -p okx-agent --example native_finance_acceptance -- --known > "$RUNNER_TEMP/native-finance-known.json"
+          cargo test --locked -p okx-trading-engine --example native_finance_acceptance
+          cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --known > "$RUNNER_TEMP/native-finance-known.json"
           python3 -c 'import json,os; r=json.load(open(os.path.join(os.environ["RUNNER_TEMP"],"native-finance-known.json"))); assert r["overall"] == "PARTIAL"; assert r["observed_witnesses"]; print("FRESH_NATIVE_PROPERTIES=PARTIAL_NOT_FULL")'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
@@ -524,10 +524,10 @@ jobs:
           retention-days: 14
 
 
-  architecture:
-    name: architecture
-    needs: classify
-    if: needs.classify.outputs.build_required == 'true'
+  architecture_contracts:
+    name: architecture-contracts
+    needs: component_impact
+    if: needs.component_impact.outputs.build_required == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -541,14 +541,14 @@ jobs:
         run: |
           python3 -B scripts/check_ci_native_scope.py --self-test
           node scripts/test-research-release-scope.cjs
-          node scripts/test-compose-accepted-research-v2.cjs
+          node scripts/test-compose-verified-research-v2.cjs
 
       - name: Parse permanent Native-base release verifier
         shell: pwsh
         run: |
           $tokens = $null
           $errors = $null
-          foreach ($file in @('scripts/prepare-research-release.ps1', 'scripts/prepare-accepted-research-composition.ps1')) {
+          foreach ($file in @('scripts/prepare-research-release.ps1', 'scripts/prepare-verified-research-bundle.ps1')) {
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file).Path, [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count -ne 0) { throw "RESEARCH_COMPOSITION_POWERSHELL_PARSE_FAILED: $file $($errors -join '; ')" }
           }
@@ -580,10 +580,10 @@ jobs:
         run: python3 scripts/acceptance_product.py --self-test
 
 
-  linux-rust:
-    name: linux-rust
-    needs: classify
-    if: needs.classify.outputs.build_required == 'true' && needs.classify.outputs.native_required == 'true' && needs.classify.outputs.research_only != 'true'
+  trading_rust_linux:
+    name: trading-rust-linux
+    needs: component_impact
+    if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required == 'true' && needs.component_impact.outputs.research_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -603,32 +603,32 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy portable crates
-        run: cargo clippy --locked --workspace --exclude okx-agent --exclude okx-host-control --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --exclude okx-trading-engine --exclude okx-host-controller --all-targets -- -D warnings
 
       - name: Test portable crates
         # Research has its own complete run below, including real IPC children.
-        run: cargo test --locked --workspace --exclude okx-agent --exclude okx-host-control --exclude okx-research-worker
+        run: cargo test --locked --workspace --exclude okx-trading-engine --exclude okx-host-controller --exclude okx-research-service
 
       - name: Research worker process and Agent dispatch contracts
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked -p okx-research-worker --bin okx-research-service
+          cargo build --locked -p okx-research-service --bin okx-research-service
           export OKX_RESEARCH_SERVICE_TEST_EXE="$PWD/target/debug/okx-research-service"
-          cargo test --locked -p okx-research-worker --lib -- --test-threads 2 | tee "$RUNNER_TEMP/research-worker-unit.log"
+          cargo test --locked -p okx-research-service --lib -- --test-threads 2 | tee "$RUNNER_TEMP/research-worker-unit.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-worker-unit.log"
-          cargo test --locked -p okx-research-worker --test ipc_process -- --nocapture | tee "$RUNNER_TEMP/research-worker-ipc.log"
+          cargo test --locked -p okx-research-service --test ipc_process -- --nocapture | tee "$RUNNER_TEMP/research-worker-ipc.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-worker-ipc.log"
-          cargo test --locked -p okx-research-worker --doc
-          cargo test --locked -p okx-agent --lib research_dispatch_tests:: -- --test-threads 2 | tee "$RUNNER_TEMP/research-dispatch.log"
+          cargo test --locked -p okx-research-service --doc
+          cargo test --locked -p okx-trading-engine --lib research_dispatch_tests:: -- --test-threads 2 | tee "$RUNNER_TEMP/research-dispatch.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-dispatch.log"
 
       - name: Accept one million native SQLite terminal intents
         timeout-minutes: 30
-        run: cargo test --locked -p okx-execution --lib sqlite_million_history_bounded_rss -- --ignored --nocapture
+        run: cargo test --locked -p okx-trade-execution --lib sqlite_million_history_bounded_rss -- --ignored --nocapture
 
       - name: Measure two-account 100-parallel native SQL (not WSS)
-        run: cargo test --locked -p okx-execution --lib two_account_100_parallel_sql_readonly_isolation -- --nocapture
+        run: cargo test --locked -p okx-trade-execution --lib two_account_100_parallel_sql_readonly_isolation -- --nocapture
 
       # #510: finances now commit inside the Native SQLite owner. Old Worker
       # monetary CAS traces are retired; they cannot witness the current owner.
@@ -636,9 +636,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p okx-execution --lib risk_book_contract_native_campaign_policy_ -- --nocapture | tee "$RUNNER_TEMP/native-policy.log"
+          cargo test --locked -p okx-trade-execution --lib risk_book_contract_native_campaign_policy_ -- --nocapture | tee "$RUNNER_TEMP/native-policy.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-policy.log"
-          cargo test --locked -p okx-execution --lib e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten -- --nocapture
+          cargo test --locked -p okx-trade-execution --lib e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten -- --nocapture
       - name: Actual Worker authenticated transport without financial authority
         timeout-minutes: 8
         working-directory: cloudflare/okx-mcp
@@ -647,10 +647,10 @@ jobs:
           npm run check
           node scripts/test-native-finance-retirement-do.mjs
 
-  cloudflare-mcp:
-    name: cloudflare-mcp
-    needs: classify
-    if: needs.classify.outputs.build_required == 'true' && !contains(fromJSON('["docs","host-control","host-launcher"]'), needs.classify.outputs.component_scope)
+  cloudflare_mcp_contracts:
+    name: cloudflare-mcp-contracts
+    needs: component_impact
+    if: needs.component_impact.outputs.build_required == 'true' && !contains(fromJSON('["docs","host-controller","host-launcher"]'), needs.component_impact.outputs.component_scope)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -682,9 +682,10 @@ jobs:
 
 
 
-  linux:
+  required_linux:
+    # Legacy required-check name is kept until branch protection is migrated.
     name: linux-core
-    needs: [classify, architecture, linux-rust, cloudflare-mcp, research-only-windows]
+    needs: [component_impact, architecture_contracts, trading_rust_linux, cloudflare_mcp_contracts, research_service_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -692,43 +693,43 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "${{ needs.classify.result }}" = "success"
-          if [[ "${{ needs.classify.outputs.build_required }}" == "false" ]]; then
+          test "${{ needs.component_impact.result }}" = "success"
+          if [[ "${{ needs.component_impact.outputs.build_required }}" == "false" ]]; then
             echo "REUSED_SUCCESSFUL_PR_CI=true"
             exit 0
           fi
-          test "${{ needs.architecture.result }}" = "success"
-          if [[ "${{ needs.classify.outputs.research_only }}" == "true" ]]; then
-            test "${{ needs.linux-rust.result }}" = "skipped"
-            test "${{ needs['research-only-windows'].result }}" = "success"
-            echo "LINUX_FINANCE_REUSED_BASE=${{ needs.classify.outputs.research_base_head }}"
-          elif [[ "${{ needs.classify.outputs.component_scope }}" == "host-control" || "${{ needs.classify.outputs.component_scope }}" == "host-launcher" ]]; then
-            test "${{ needs.linux-rust.result }}" = "skipped"
-            test "${{ needs.classify.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
+          test "${{ needs.architecture_contracts.result }}" = "success"
+          if [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
+            test "${{ needs.trading_rust_linux.result }}" = "skipped"
+            test "${{ needs.research_service_windows.result }}" = "success"
+            echo "LINUX_FINANCE_REUSED_BASE=${{ needs.component_impact.outputs.research_base_head }}"
+          elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
+            test "${{ needs.trading_rust_linux.result }}" = "skipped"
+            test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
             echo "LINUX_FINANCE_UNCHANGED_HOST_SOURCE_ONLY=true"
-          elif [[ "${{ needs.classify.outputs.native_required }}" == "false" ]]; then
-            test "${{ needs.linux-rust.result }}" = "skipped"
-            test "${{ needs.classify.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
+          elif [[ "${{ needs.component_impact.outputs.native_required }}" == "false" ]]; then
+            test "${{ needs.trading_rust_linux.result }}" = "skipped"
+            test "${{ needs.component_impact.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
             echo "LINUX_FINANCE_UNCHANGED_NATIVE_SOURCE=true"
           else
-            test "${{ needs.linux-rust.result }}" = "success"
+            test "${{ needs.trading_rust_linux.result }}" = "success"
           fi
-          if [[ "${{ needs.classify.outputs.component_scope }}" == "docs" || "${{ needs.classify.outputs.component_scope }}" == "host-control" || "${{ needs.classify.outputs.component_scope }}" == "host-launcher" ]]; then
-            test "${{ needs['cloudflare-mcp'].result }}" = "skipped"
+          if [[ "${{ needs.component_impact.outputs.component_scope }}" == "docs" || "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
+            test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
           else
-            test "${{ needs['cloudflare-mcp'].result }}" = "success"
+            test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
           fi
           echo "REPOSITORY_GUARD_AND_LINUX=PASS"
 
 
-  windows-host-components:
+  host_lifecycle_windows:
     # Source-only lifecycle changes never compile a new trading Engine or SQL
     # owner. Every host change tests CONTROL and Launcher together because
     # CONTROL is a real consumer of the Launcher crate. This is NOT a complete
     # four-EXE release; publishing a new Native base still requires full CI.
-    name: windows-host-components
-    needs: classify
-    if: needs.classify.outputs.build_required == 'true' && (needs.classify.outputs.component_scope == 'host-control' || needs.classify.outputs.component_scope == 'host-launcher')
+    name: host-lifecycle-windows
+    needs: component_impact
+    if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.component_scope == 'host-controller' || needs.component_impact.outputs.component_scope == 'host-launcher')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -754,18 +755,18 @@ jobs:
       - name: Clippy and test Launcher owner plus CONTROL consumer
         shell: pwsh
         run: |
-          cargo clippy --locked -p okx-host-launcher -p okx-host-control --all-targets -- -D warnings
+          cargo clippy --locked -p okx-host-launcher -p okx-host-controller --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p okx-host-launcher -p okx-host-control -- --test-threads 2
+          cargo test --locked -p okx-host-launcher -p okx-host-controller -- --test-threads 2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build both Windows host executables without Engine
         shell: pwsh
         run: |
-          cargo build --locked --release -p okx-host-launcher -p okx-host-control
+          cargo build --locked --release -p okx-host-launcher -p okx-host-controller
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $head = (git rev-parse HEAD).Trim()
           $tree = (git rev-parse 'HEAD^{tree}').Trim()
-          $proof = @("scope=${{ needs.classify.outputs.component_scope }}", "head=$head", "tree=$tree", 'release_is_complete=false')
+          $proof = @("scope=${{ needs.component_impact.outputs.component_scope }}", "head=$head", "tree=$tree", 'release_is_complete=false')
           foreach ($name in @('okx-host-launcher.exe', 'okx-host-control.exe')) {
             $path = Join-Path 'target/release' $name
             if (!(Test-Path -LiteralPath $path)) { throw "MISSING_HOST_BINARY_$name" }
@@ -780,10 +781,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  windows_native_full:
-    name: windows-native-full
-    needs: classify
-    if: needs.classify.outputs.build_required == 'true' && needs.classify.outputs.native_required != 'false' && needs.classify.outputs.research_only != 'true'
+  trading_windows_full:
+    name: trading-engine-windows-full
+    needs: component_impact
+    if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -804,7 +805,7 @@ jobs:
         run: ./scripts/test-windows-unify-root.ps1
 
       - name: Clippy native Windows crates
-        run: cargo clippy --locked -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-execution --all-targets -- -D warnings
+        run: cargo clippy --locked -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-trade-execution --all-targets -- -D warnings
 
       - name: Strategy Core and Research owner regressions on full Windows
         shell: pwsh
@@ -831,7 +832,7 @@ jobs:
       - name: Current Rust collector negative controls
         shell: pwsh
         run: |
-          cargo test --locked -p okx-agent --example native_finance_acceptance
+          cargo test --locked -p okx-trading-engine --example native_finance_acceptance
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Mandatory current Rust financial property acceptance
@@ -842,7 +843,7 @@ jobs:
           # The old Native/Worker finance driver is retired. Its properties
           # remain in the reviewed current Rust map; missing evidence BLOCKS
           # this full gate rather than falling back to historical26 results.
-          cargo run --locked -p okx-agent --example native_finance_acceptance > "$env:RUNNER_TEMP\native-finance-full.json"
+          cargo run --locked -p okx-trading-engine --example native_finance_acceptance > "$env:RUNNER_TEMP\native-finance-full.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $report = Get-Content -Raw "$env:RUNNER_TEMP\native-finance-full.json" | ConvertFrom-Json
           if ($report.overall -ne 'FULL_PASS') { throw 'FULL_NATIVE_PROPERTIES_NOT_PROVEN' }
@@ -864,7 +865,7 @@ jobs:
       - name: Build research worker for process contracts
         shell: pwsh
         run: |
-          cargo build --locked -p okx-research-worker --bin okx-research-service
+          cargo build --locked -p okx-research-service --bin okx-research-service
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Native trading, SQL, CONTROL and Launcher regression
@@ -877,7 +878,7 @@ jobs:
             $head = (git rev-parse HEAD).Trim()
             $tree = (git rev-parse 'HEAD^{tree}').Trim()
             if ($proof.overall -cne 'FULL_PASS' -or $proof.git_clean -ne $true -or $proof.head -cne $head -or $proof.tree -cne $tree) { throw 'CURRENT_FINANCIAL_PROOF_REQUIRED' }
-            $manifestJson = & cargo run --locked -p okx-agent --example native_finance_acceptance -- --list
+            $manifestJson = & cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $manifest = $manifestJson | ConvertFrom-Json
             if (@($proof.contracts).Count -ne @($manifest.contracts).Count -or @($proof.contracts | Where-Object status -ne 'PASS').Count -ne 0) { throw 'COMPLETE_FINANCIAL_CONTRACTS_REQUIRED' }
@@ -889,11 +890,11 @@ jobs:
             } | Sort-Object -Unique)
             if ($actual.Count -eq 0 -or $actual.Count -ne $covered.Count -or @(Compare-Object $expected $actual).Count -ne 0) { throw 'FINANCIAL_WITNESS_SET_MISMATCH' }
           }
-          foreach ($package in @('okx-agent','okx-host-control','okx-host-launcher','okx-execution')) {
+          foreach ($package in @('okx-trading-engine','okx-host-controller','okx-host-launcher','okx-trade-execution')) {
             $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--skip','accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research','--skip','trade_service::protection_cleanup::protection_cleanup_direct_tests::','--test-threads','2')
             # This OS-kill fixture spawns a second Native process with its own
             # bounded SQL deadlines. Exercise it alone, not beside other fixtures.
-            if ($package -eq 'okx-agent') { $testArgs += @('--skip','accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once') }
+            if ($package -eq 'okx-trading-engine') { $testArgs += @('--skip','accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once') }
             foreach ($witness in @($covered | Where-Object package -eq $package)) { $testArgs += @('--skip',$witness.test) }
             Write-Host "Remaining regression: $package; exact property witnesses already verified: $(@($covered | Where-Object package -eq $package).Count)"
             cargo test --locked -p $package -- @testArgs
@@ -903,7 +904,7 @@ jobs:
       - name: Isolated Native pending-fill crash recovery
         shell: pwsh
         run: |
-          cargo test --locked -p okx-agent --lib accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once -- --exact --test-threads 1
+          cargo test --locked -p okx-trading-engine --lib accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once -- --exact --test-threads 1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # The seven real SQL-owner cleanup transitions have bounded deadlines.
@@ -912,7 +913,7 @@ jobs:
       - name: Isolated native protection cleanup SQL regressions
         shell: pwsh
         run: |
-          $output = & cargo test --locked -p okx-agent --lib trade_service::protection_cleanup::protection_cleanup_direct_tests:: -- --nocapture --test-threads 1 2>&1
+          $output = & cargo test --locked -p okx-trading-engine --lib trade_service::protection_cleanup::protection_cleanup_direct_tests:: -- --nocapture --test-threads 1 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
@@ -925,7 +926,7 @@ jobs:
         shell: pwsh
         run: |
           $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
-          $output = & cargo test --locked -p okx-agent --lib accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect -- --exact --nocapture 2>&1
+          $output = & cargo test --locked -p okx-trading-engine --lib accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect -- --exact --nocapture 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\b-process-tree.log" | Out-Host
           if ($code -ne 0) { exit $code }
@@ -958,7 +959,7 @@ jobs:
           OKX_CONTROL_AGENT_INCAR: ctl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         run: |
           $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
-          $output = & cargo test --locked -p okx-agent --lib accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research -- --exact --nocapture --test-threads 1 2>&1
+          $output = & cargo test --locked -p okx-trading-engine --lib accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research -- --exact --nocapture --test-threads 1 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\mcp-native-load.log" | Out-Host
           if ($code -ne 0) { exit $code }
@@ -987,12 +988,12 @@ jobs:
       - name: Worker library regression and actual IPC child
         shell: pwsh
         run: |
-          $output = & cargo test --locked -p okx-research-worker --lib -- --skip analytics::executor::heavy_fixtures::two_heavy_research_jobs_ingestion_stop_and_cancel_latency --test-threads 2 2>&1
+          $output = & cargo test --locked -p okx-research-service --lib -- --skip analytics::cpu_executor::heavy_fixtures::two_heavy_research_jobs_ingestion_stop_and_cancel_latency --test-threads 2 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
           if (($output -join "`n") -notmatch 'test result: ok\. [1-9][0-9]* passed;') { throw 'WORKER_ANALYTICS_TESTS_MISSING' }
-          $output = & cargo test --locked -p okx-research-worker --test ipc_process -- --nocapture 2>&1
+          $output = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
@@ -1002,7 +1003,7 @@ jobs:
         shell: pwsh
         run: |
           $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
-          $output = & cargo test --locked -p okx-agent --lib research_dispatch_tests:: -- --test-threads 2 2>&1
+          $output = & cargo test --locked -p okx-trading-engine --lib research_dispatch_tests:: -- --test-threads 2 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
@@ -1013,7 +1014,7 @@ jobs:
       - name: K9 worker two-heavy cancellation latency evidence
         shell: pwsh
         run: |
-          cargo test --locked -p okx-research-worker --lib two_heavy_research_jobs_ingestion_stop_and_cancel_latency -- --nocapture | Tee-Object -FilePath "$env:RUNNER_TEMP\k9-two-heavy.txt"
+          cargo test --locked -p okx-research-service --lib two_heavy_research_jobs_ingestion_stop_and_cancel_latency -- --nocapture | Tee-Object -FilePath "$env:RUNNER_TEMP\k9-two-heavy.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $log = Get-Content -Raw -LiteralPath "$env:RUNNER_TEMP\k9-two-heavy.txt"
           if ($log -notmatch 'test result: ok\. [1-9][0-9]* passed;') { throw 'K9_WORKER_TEST_MISSING' }
@@ -1050,7 +1051,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # The full native gate ALWAYS produces fresh binaries, even when a
           # pinned Research reuse base exists. Reuse is isolated to its job.
-          cargo build --locked --release -p okx-agent -p okx-host-control -p okx-host-launcher -p okx-research-worker
+          cargo build --locked --release -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-research-service
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           foreach ($name in $names) { Copy-Item (Join-Path 'target\release' $name) (Join-Path $dist $name) }
           $freshNames = $names
@@ -1116,11 +1117,11 @@ jobs:
           compression-level: 9
           retention-days: 14
 
-  research-only-windows:
-    name: research-only-windows
-    needs: classify
+  research_service_windows:
+    name: research-service-windows
+    needs: component_impact
     # A successful, identical PR tree is already accepted; main must reuse it.
-    if: needs.classify.outputs.build_required == 'true' && needs.classify.outputs.research_only == 'true'
+    if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -1133,7 +1134,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: research-cache
         with:
-          shared-key: research-only-windows
+          shared-key: research-service-windows
           cache-workspace-crates: true
       - name: Fresh Strategy Core, Research and Worker owner checks
         shell: pwsh
@@ -1143,9 +1144,9 @@ jobs:
           "Research Cargo cache exact hit: ${{ steps.research-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
           # This is the REQUIRED Ready gate for all three Research owners.
           # A failing primitive unit test must fail this job before packaging.
-          cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-worker --all-targets -- -D warnings
+          cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-worker
+          cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build deployable Windows binaries
@@ -1165,7 +1166,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & ./scripts/prepare-research-release.ps1 -Dist $dist
           $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
-          cargo build --locked --release -p okx-research-worker --bin okx-research-service 2>&1 |
+          cargo build --locked --release -p okx-research-service --bin okx-research-service 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'research-only-build.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $proof = Get-Content -Raw -LiteralPath (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') | ConvertFrom-Json
@@ -1223,18 +1224,18 @@ jobs:
         run: |
           $proof = Get-Content -Raw (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') | ConvertFrom-Json
           if ($proof.current_head_sha -cne '${{ github.event.pull_request.head.sha || github.sha }}' -or
-              $proof.base_head_sha -cne '${{ needs.classify.outputs.research_base_head }}' -or
-              "$($proof.base_run_id)" -cne '${{ needs.classify.outputs.research_base_run }}' -or
-              "$($proof.base_artifact_id)" -cne '${{ needs.classify.outputs.research_base_artifact }}' -or
-              $proof.base_archive_digest -cne '${{ needs.classify.outputs.research_base_digest }}') { throw 'BASE_PROOF_CHANGED' }
+              $proof.base_head_sha -cne '${{ needs.component_impact.outputs.research_base_head }}' -or
+              "$($proof.base_run_id)" -cne '${{ needs.component_impact.outputs.research_base_run }}' -or
+              "$($proof.base_artifact_id)" -cne '${{ needs.component_impact.outputs.research_base_artifact }}' -or
+              $proof.base_archive_digest -cne '${{ needs.component_impact.outputs.research_base_digest }}') { throw 'BASE_PROOF_CHANGED' }
 
 
-  windows-agent:
+  required_windows:
     # This exact name remains the protected main required check. It succeeds
     # on a real Windows gate or on the narrowly proven identical native tree;
     # it never reports a newly executed 26/26 on the reuse path.
     name: windows-native
-    needs: [classify, windows_native_full, windows-host-components, cloudflare-mcp, research-only-windows]
+    needs: [component_impact, trading_windows_full, host_lifecycle_windows, cloudflare_mcp_contracts, research_service_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -1242,51 +1243,51 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "${{ needs.classify.result }}" = "success"
-          if [[ "${{ needs.classify.outputs.build_required }}" == "false" ]]; then
-            test "${{ needs.classify.outputs.reason }}" = "merged tree exactly matches successful PR head tree"
+          test "${{ needs.component_impact.result }}" = "success"
+          if [[ "${{ needs.component_impact.outputs.build_required }}" == "false" ]]; then
+            test "${{ needs.component_impact.outputs.reason }}" = "merged tree exactly matches successful PR head tree"
             echo "WINDOWS_NATIVE_PROOF=EXACT_SUCCESSFUL_MERGED_TREE"
-          elif [[ "${{ needs.classify.outputs.research_only }}" == "true" ]]; then
-            test "${{ needs.windows_native_full.result }}" = "skipped"
-            test "${{ needs['research-only-windows'].result }}" = "success"
-            test "${{ needs['cloudflare-mcp'].result }}" = "success"
-            echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_BASE_${{ needs.classify.outputs.research_base_head }}"
+          elif [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
+            test "${{ needs.trading_windows_full.result }}" = "skipped"
+            test "${{ needs.research_service_windows.result }}" = "success"
+            test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
+            echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_BASE_${{ needs.component_impact.outputs.research_base_head }}"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
-          elif [[ "${{ needs.classify.outputs.component_scope }}" == "host-control" || "${{ needs.classify.outputs.component_scope }}" == "host-launcher" ]]; then
-            test "${{ needs.classify.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
-            test "${{ needs.windows_native_full.result }}" = "skipped"
-            test "${{ needs['windows-host-components'].result }}" = "success"
-            test "${{ needs['research-only-windows'].result }}" = "skipped"
-            test "${{ needs['cloudflare-mcp'].result }}" = "skipped"
+          elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
+            test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
+            test "${{ needs.trading_windows_full.result }}" = "skipped"
+            test "${{ needs.host_lifecycle_windows.result }}" = "success"
+            test "${{ needs.research_service_windows.result }}" = "skipped"
+            test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
             echo "WINDOWS_NATIVE_PROOF=HOST_COMPONENTS_TESTED_NO_ENGINE_REBUILD"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
-          elif [[ "${{ needs.classify.outputs.native_required }}" == "false" ]]; then
-            test "${{ needs.classify.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
-            scope="${{ needs.classify.outputs.component_scope }}"
+          elif [[ "${{ needs.component_impact.outputs.native_required }}" == "false" ]]; then
+            test "${{ needs.component_impact.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
+            scope="${{ needs.component_impact.outputs.component_scope }}"
             [[ "$scope" == "docs" || "$scope" == "cloudflare" ]]
-            test "${{ needs.windows_native_full.result }}" = "skipped"
-            test "${{ needs['research-only-windows'].result }}" = "skipped"
+            test "${{ needs.trading_windows_full.result }}" = "skipped"
+            test "${{ needs.research_service_windows.result }}" = "skipped"
             if [[ "$scope" == "docs" ]]; then
-              test "${{ needs['cloudflare-mcp'].result }}" = "skipped"
+              test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
             else
-              test "${{ needs['cloudflare-mcp'].result }}" = "success"
+              test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
             fi
             echo "WINDOWS_NATIVE_PROOF=COMPONENT_${scope}_NO_NATIVE_SOURCE_CHANGED"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           else
-            test "${{ needs.windows_native_full.result }}" = "success"
+            test "${{ needs.trading_windows_full.result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=FULL_WINDOWS_NATIVE_SUCCESS"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
           fi
 
   # Current Native A/B and semantic/CAS prerequisite on an isolated runner.
-  # Full property/physical/resource acceptance remains windows-native-full.
-  b1-native:
+  # Full property/physical/resource acceptance remains trading-engine-windows-full.
+  trading_safety_windows:
     # Preserve the existing check name; its obsolete remote-finance driver is
     # replaced by the actual current Native public contracts, not an exemption.
-    name: windows-b1-native-prerequisite
-    needs: classify
-    if: github.event_name == 'pull_request' && needs.classify.outputs.build_required == 'true' && needs.classify.outputs.native_required != 'false' && needs.classify.outputs.research_only != 'true'
+    name: trading-safety-windows-prerequisite
+    needs: component_impact
+    if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     runs-on: windows-latest
     timeout-minutes: 18
     steps:
@@ -1300,7 +1301,7 @@ jobs:
         with:
           cache-on-failure: true
       - name: Precompile current Rust property targets
-        run: cargo test --locked -p okx-agent -p okx-execution -p okx-kernel -p okx-protocol -p okx-runtime --lib --no-run
+        run: cargo test --locked -p okx-trading-engine -p okx-trade-execution -p okx-domain-core -p okx-ipc-contracts -p okx-market-runtime --lib --no-run
       - name: Public Native A/B cap, independent progress, replay and policy CAS
         shell: pwsh
         run: |
@@ -1311,7 +1312,7 @@ jobs:
             'accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict'
             'accounts::native_trade_contracts::native_strategies::risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner'
           )
-          $packages = @('-p','okx-agent','-p','okx-execution','-p','okx-kernel','-p','okx-protocol','-p','okx-runtime')
+          $packages = @('-p','okx-trading-engine','-p','okx-trade-execution','-p','okx-domain-core','-p','okx-ipc-contracts','-p','okx-market-runtime')
           $output = & cargo test --locked @packages --lib -- --exact --test-threads 4 --nocapture @names 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\native-b1-current.log" | Out-Host
@@ -1323,7 +1324,7 @@ jobs:
       - name: Current single-writer queue deadlines and FIFO drain
         shell: pwsh
         run: |
-          $packages = @('-p','okx-agent','-p','okx-execution','-p','okx-kernel','-p','okx-protocol','-p','okx-runtime')
+          $packages = @('-p','okx-trading-engine','-p','okx-trade-execution','-p','okx-domain-core','-p','okx-ipc-contracts','-p','okx-market-runtime')
           $output = & cargo test --locked @packages --lib owner_queue_tests:: -- --nocapture 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\native-queue-current.log" | Out-Host

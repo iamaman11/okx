@@ -7,16 +7,16 @@ are Cargo dependencies, Rust visibility, the IPC enums, and the SQL owners.
 
 | Responsibility | Production entrypoint / owner |
 |---|---|
-| Authenticated product command | `okx-agent::query::dispatch_with_governance` |
-| Available or unavailable finance | `okx-agent::finance_dispatch::FinanceDispatch` |
-| Existing finance startup and exact rejection cause | `okx-agent::finance_startup::select` |
-| Live execution, protection, reconciliation | `okx-agent::trade_service::TradeService` |
+| Authenticated product command | `okx-trading-engine::query::dispatch_with_governance` |
+| Available or unavailable finance | `okx-trading-engine::finance_dispatch::FinanceDispatch` |
+| Existing finance startup and exact rejection cause | `okx-trading-engine::finance_startup::select` |
+| Live execution, protection, reconciliation | `okx-trading-engine::trade_service::TradeService` |
 | Financial persistence and RiskBook | Existing `UnifiedFinanceHandle`, one financial SQLite |
-| Live closed candles | `okx-runtime::live_source::LiveCandleSource` |
-| Public market HTTP and shared rate budget | `okx-runtime::market_bootstrap::MarketBootstrapper` |
-| Research child, request correlation, activation | `okx-agent::research_client::ResearchClient` |
-| Framing and typed public-source requests | `okx-protocol::research_ipc` |
-| Research command handler | `okx-research-worker::analytics::AnalyticsService` |
+| Live closed candles | `okx-market-runtime::live_source::LiveCandleSource` |
+| Public market HTTP and shared rate budget | `okx-market-runtime::market_bootstrap::MarketBootstrapper` |
+| Research child, request correlation, activation | `okx-trading-engine::research_client::ResearchClient` |
+| Framing and typed public-source requests | `okx-ipc-contracts::research_ipc` |
+| Research command handler | `okx-research-service::analytics::AnalyticsService` |
 | Research jobs, identity, cancellation, root lease | Worker `analytics::jobs::Jobs` |
 | Pure calculations | Existing `okx-analysis` and `okx-research` libraries |
 | Verified component staging | Existing CONTROL `artifact::research_component` |
@@ -58,7 +58,7 @@ stored-job access do not perform that fetch.
 
 ## Installation versus activation
 
-`HostControlOperation::DeployResearch` dispatches through `okx-host-control::runtime`
+`HostControlOperation::DeployResearch` dispatches through `okx-host-controller::runtime`
 to `artifact::research_component::deploy_research`. CONTROL verifies the source,
 component origins, compatibility and installed non-Research components, stages a
 verified content-addressed worker and publishes
@@ -92,15 +92,15 @@ Admission freshness remains independently enforced and negatively tested.
 ## Direct checks after building
 
 ```powershell
-cargo build --locked -p okx-research-worker --bin okx-research-service
+cargo build --locked -p okx-research-service --bin okx-research-service
 $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path target/debug/okx-research-service.exe).Path
-cargo test --locked -p okx-research-worker
-cargo test --locked -p okx-agent --lib research_dispatch_tests::
-cargo test --locked -p okx-agent --lib research_client::
-cargo test --locked -p okx-agent --lib query::public_dispatch_tests::
-cargo test --locked -p okx-agent --lib cloudflare_transport::session_tests::
-cargo test --locked -p okx-agent --lib finance_startup::
-cargo test --locked -p okx-runtime --lib public::reference_refresh::tests::
+cargo test --locked -p okx-research-service
+cargo test --locked -p okx-trading-engine --lib research_dispatch_tests::
+cargo test --locked -p okx-trading-engine --lib research_client::
+cargo test --locked -p okx-trading-engine --lib query::public_dispatch_tests::
+cargo test --locked -p okx-trading-engine --lib cloudflare_transport::session_tests::
+cargo test --locked -p okx-trading-engine --lib finance_startup::
+cargo test --locked -p okx-market-runtime --lib public::reference_refresh::tests::
 ```
 
 The dedicated Engine-under-Research-load check runs in its own test process so
@@ -132,7 +132,7 @@ planner. Financial state and CONTROL do not belong to that calculation change.
 Research-only CI needs a previously successful, accepted and **merged** complete
 base, an unexpired exact GitHub bundle and its explicit
 `.github/research-release-base.json` selection. The first full-build PR has no
-such prior merged base, so its skipped `research-only-windows` step does not
+such prior merged base, so its skipped `research-service-windows` step does not
 prove the next independent update. The separate Worker Cargo build, scope
 negative controls, real child handoff and CONTROL staging checks provide CODE
 evidence for the implemented route; actual use of a subsequent Worker release
