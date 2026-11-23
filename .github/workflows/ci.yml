@@ -316,6 +316,10 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         with:
           toolchain: 1.95.0
+          components: rustfmt
+      - name: Verify Rust formatting before compilation
+        if: steps.scope.outputs.code == 'true'
+        run: cargo fmt --all -- --check
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         if: steps.scope.outputs.code == 'true'
         id: cache
