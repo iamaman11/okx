@@ -46,7 +46,20 @@ function validate(yaml, fileNames) {
     assert.match(job(id), new RegExp(`^    name: ${display}$`, 'm'));
     assert.match(job(id), /needs: \[component_impact,/);
   }
-  const publish = job('publish_accepted_native_base');
+  const names = {
+    rust_tests_linux: 'rust-tests-linux',
+    trading_engine_acceptance_windows: 'trading-engine-acceptance-windows',
+    trading_safety_acceptance_windows: 'trading-safety-acceptance-windows',
+    research_service_tests_windows: 'research-service-tests-windows',
+    host_controller_launcher_checks: 'host-controller-launcher-checks',
+    'research_package_proof': 'research-package-proof',
+  };
+  for (const [id, display] of Object.entries(names)) {
+    assert.match(job(id), new RegExp(`^    name: ${display}$`, 'm'),
+      `AMBIGUOUS_CI_JOB_NAME:${id}`);
+  }
+  const publish = job('publish_accepted_windows_release');
+  assert.match(publish, /^    name: publish-accepted-windows-release$/m);
   assert.match(publish,
     /needs: \[dependency-audit, component_impact, required_linux, required_windows\]/);
   assert.match(publish,
@@ -55,9 +68,10 @@ function validate(yaml, fileNames) {
   assert.match(publish, /group: native-base-publication/);
   assert.match(publish, /ACCEPTED_MAIN: \$\{\{ github\.sha \}\}/);
   assert.doesNotMatch(publish, /github\.event\.workflow_run/);
+  assert.match(publish, /"trading-engine-acceptance-windows","trading-safety-acceptance-windows","linux-core","windows-native"/);
 
   for (const [id, block] of map) {
-    if (id !== 'publish_accepted_native_base') {
+    if (id !== 'publish_accepted_windows_release') {
       assert.doesNotMatch(block, /^      contents: write$/m, `UNEXPECTED_WRITE_SCOPE:${id}`);
     }
   }
@@ -69,4 +83,5 @@ assert.throws(() => validate(source.replace(
   'needs: [dependency-audit, component_impact, required_linux, required_windows]',
   'needs: [component_impact]'), workflows));
 assert.throws(() => validate(source.replace('name: classify', 'name: impact-only'), workflows));
+assert.throws(() => validate(source.replace('name: rust-tests-linux', 'name: linux-trader'), workflows));
 console.log('CI_LEAN_MAIN_ROUTING_CONTROLS=PASS');

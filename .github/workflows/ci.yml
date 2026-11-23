@@ -19,10 +19,10 @@ permissions:
   actions: read
 
 jobs:
-  verified-research-bundle-assembly:
+  research_package_proof:
     # Supplementary Draft proof for #537 T10. Does not compile or deploy an
     # Engine/Worker and never substitutes for mandatory Ready Native CI.
-    name: verified-research-bundle-assembly
+    name: research-package-proof
     if: github.event_name == 'pull_request' && github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'research-composition-evidence')
     runs-on: windows-latest
     steps:
@@ -420,8 +420,8 @@ jobs:
         run: python3 scripts/acceptance_product.py --self-test
 
 
-  trading_rust_linux:
-    name: trading-rust-linux
+  rust_tests_linux:
+    name: rust-tests-linux
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required == 'true' && needs.component_impact.outputs.research_only != 'true'
     runs-on: ubuntu-latest
@@ -525,7 +525,7 @@ jobs:
   required_linux:
     # Legacy required-check name is kept until branch protection is migrated.
     name: linux-core
-    needs: [component_impact, architecture_contracts, trading_rust_linux, cloudflare_mcp_contracts, research_service_windows]
+    needs: [component_impact, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, research_service_tests_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -540,19 +540,19 @@ jobs:
           fi
           test "${{ needs.architecture_contracts.result }}" = "success"
           if [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
-            test "${{ needs.trading_rust_linux.result }}" = "skipped"
-            test "${{ needs.research_service_windows.result }}" = "success"
+            test "${{ needs.rust_tests_linux.result }}" = "skipped"
+            test "${{ needs.research_service_tests_windows.result }}" = "success"
             echo "LINUX_FINANCE_REUSED_BASE=${{ needs.component_impact.outputs.research_base_head }}"
           elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
-            test "${{ needs.trading_rust_linux.result }}" = "skipped"
+            test "${{ needs.rust_tests_linux.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
             echo "LINUX_FINANCE_UNCHANGED_HOST_SOURCE_ONLY=true"
           elif [[ "${{ needs.component_impact.outputs.native_required }}" == "false" ]]; then
-            test "${{ needs.trading_rust_linux.result }}" = "skipped"
+            test "${{ needs.rust_tests_linux.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
             echo "LINUX_FINANCE_UNCHANGED_NATIVE_SOURCE=true"
           else
-            test "${{ needs.trading_rust_linux.result }}" = "success"
+            test "${{ needs.rust_tests_linux.result }}" = "success"
           fi
           if [[ "${{ needs.component_impact.outputs.component_scope }}" == "docs" || "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
             test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
@@ -562,12 +562,12 @@ jobs:
           echo "REPOSITORY_GUARD_AND_LINUX=PASS"
 
 
-  host_lifecycle_windows:
+  host_controller_launcher_checks:
     # Source-only lifecycle changes never compile a new trading Engine or SQL
     # owner. Every host change tests CONTROL and Launcher together because
     # CONTROL is a real consumer of the Launcher crate. This is NOT a complete
     # four-EXE release; publishing a new Native base still requires full CI.
-    name: host-lifecycle-windows
+    name: host-controller-launcher-checks
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.component_scope == 'host-controller' || needs.component_impact.outputs.component_scope == 'host-launcher')
     runs-on: windows-latest
@@ -621,8 +621,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  trading_windows_full:
-    name: trading-engine-windows-full
+  trading_engine_acceptance_windows:
+    name: trading-engine-acceptance-windows
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     runs-on: windows-latest
@@ -957,8 +957,8 @@ jobs:
           compression-level: 9
           retention-days: 14
 
-  research_service_windows:
-    name: research-service-windows
+  research_service_tests_windows:
+    name: research-service-tests-windows
     needs: component_impact
     # A successful, identical PR tree is already accepted; main must reuse it.
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'
@@ -1075,7 +1075,7 @@ jobs:
     # on a real Windows gate or on the narrowly proven identical native tree;
     # it never reports a newly executed 26/26 on the reuse path.
     name: windows-native
-    needs: [component_impact, trading_windows_full, trading_safety_windows, host_lifecycle_windows, cloudflare_mcp_contracts, research_service_windows]
+    needs: [component_impact, trading_engine_acceptance_windows, trading_safety_acceptance_windows, host_controller_launcher_checks, cloudflare_mcp_contracts, research_service_tests_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -1085,32 +1085,32 @@ jobs:
           set -euo pipefail
           test "${{ needs.component_impact.result }}" = "success"
           if [[ "${{ needs.component_impact.outputs.build_required }}" == "false" ]]; then
-            test "${{ needs.trading_safety_windows.result }}" = "skipped"
+            test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.reason }}" = "merged tree exactly matches successful PR head tree"
             echo "WINDOWS_NATIVE_PROOF=EXACT_SUCCESSFUL_MERGED_TREE"
           elif [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
-            test "${{ needs.trading_safety_windows.result }}" = "skipped"
-            test "${{ needs.trading_windows_full.result }}" = "skipped"
-            test "${{ needs.research_service_windows.result }}" = "success"
+            test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.research_service_tests_windows.result }}" = "success"
             test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_BASE_${{ needs.component_impact.outputs.research_base_head }}"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
-            test "${{ needs.trading_safety_windows.result }}" = "skipped"
+            test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
-            test "${{ needs.trading_windows_full.result }}" = "skipped"
-            test "${{ needs.host_lifecycle_windows.result }}" = "success"
-            test "${{ needs.research_service_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.host_controller_launcher_checks.result }}" = "success"
+            test "${{ needs.research_service_tests_windows.result }}" = "skipped"
             test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
             echo "WINDOWS_NATIVE_PROOF=HOST_COMPONENTS_TESTED_NO_ENGINE_REBUILD"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.component_impact.outputs.native_required }}" == "false" ]]; then
-            test "${{ needs.trading_safety_windows.result }}" = "skipped"
+            test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
             scope="${{ needs.component_impact.outputs.component_scope }}"
             [[ "$scope" == "docs" || "$scope" == "cloudflare" ]]
-            test "${{ needs.trading_windows_full.result }}" = "skipped"
-            test "${{ needs.research_service_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.research_service_tests_windows.result }}" = "skipped"
             if [[ "$scope" == "docs" ]]; then
               test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
             else
@@ -1119,18 +1119,18 @@ jobs:
             echo "WINDOWS_NATIVE_PROOF=COMPONENT_${scope}_NO_NATIVE_SOURCE_CHANGED"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           else
-            test "${{ needs.trading_safety_windows.result }}" = "success"
-            test "${{ needs.trading_windows_full.result }}" = "success"
+            test "${{ needs.trading_safety_acceptance_windows.result }}" = "success"
+            test "${{ needs.trading_engine_acceptance_windows.result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=FULL_WINDOWS_NATIVE_SUCCESS"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
           fi
 
   # Current Native A/B and semantic/CAS prerequisite on an isolated runner.
-  # Full property/physical/resource acceptance remains trading-engine-windows-full.
-  trading_safety_windows:
-    # Preserve the existing check name; its obsolete remote-finance driver is
+  # Full property/physical/resource acceptance remains trading-engine-acceptance-windows.
+  trading_safety_acceptance_windows:
+    # This is the parallel B1 financial safety acceptance; its old remote-finance driver is
     # replaced by the actual current Native public contracts, not an exemption.
-    name: trading-safety-windows-prerequisite
+    name: trading-safety-acceptance-windows
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     runs-on: windows-latest
@@ -1192,7 +1192,8 @@ jobs:
           retention-days: 14
 
   # Successful protected main checks publish the verified PR artifact here.
-  publish_accepted_native_base:
+  publish_accepted_windows_release:
+    name: publish-accepted-windows-release
     needs: [dependency-audit, component_impact, required_linux, required_windows]
     permissions:
       contents: write
@@ -1242,7 +1243,7 @@ jobs:
             jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/jobs?per_page=100")"
             # Require the *fresh* 4-EXE financial gate, never an aggregate
             # that reused older proof or the isolated Research-only worker.
-            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-windows-full","trading-safety-windows-prerequisite","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
+            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-acceptance-windows","trading-safety-acceptance-windows","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
               continue
             fi
             artifacts="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts?per_page=100")"

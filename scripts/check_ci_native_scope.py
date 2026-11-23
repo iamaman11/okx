@@ -104,16 +104,16 @@ def _self_test() -> None:
     guard_scopes = scope_guards[0].split("|")
     assert len(guard_scopes) == len(set(guard_scopes))
     assert set(guard_scopes) == expected_scopes, "CI_SCOPE_GUARD_DRIFT"
-    windows = workflow.split("\n  required_windows:\n", 1)[1].split("\n  trading_safety_windows:\n", 1)[0]
-    assert "needs: [component_impact, trading_windows_full, trading_safety_windows," in windows
-    assert 'test "${{ needs.trading_safety_windows.result }}" = "success"' in windows
-    assert windows.count('test "${{ needs.trading_safety_windows.result }}" = "skipped"') == 4
-    host = workflow.split("\n  host_lifecycle_windows:\n", 1)[1].split("\n  trading_windows_full:\n", 1)[0]
+    windows = workflow.split("\n  required_windows:\n", 1)[1].split("\n  trading_safety_acceptance_windows:\n", 1)[0]
+    assert "needs: [component_impact, trading_engine_acceptance_windows, trading_safety_acceptance_windows," in windows
+    assert 'test "${{ needs.trading_safety_acceptance_windows.result }}" = "success"' in windows
+    assert windows.count('test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"') == 4
+    host = workflow.split("\n  host_controller_launcher_checks:\n", 1)[1].split("\n  trading_engine_acceptance_windows:\n", 1)[0]
     assert "needs.component_impact.outputs.component_scope == 'host-controller'" in host
     assert "needs.component_impact.outputs.component_scope == 'host-launcher'" in host
     assert "cargo build --locked --release -p okx-host-launcher -p okx-host-controller" in host
     assert "cargo build --locked --release -p okx-trading-engine" not in host
-    research = workflow.split("\n  research_service_windows:\n", 1)[1].split("\n  required_windows:\n", 1)[0]
+    research = workflow.split("\n  research_service_tests_windows:\n", 1)[1].split("\n  required_windows:\n", 1)[0]
     assert "if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'" in research
     assert "cargo build --locked --release -p okx-research-service --bin okx-research-service" in research
     # Reuse the same established Cargo cache action and one target directory.

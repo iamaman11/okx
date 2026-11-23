@@ -132,7 +132,7 @@ planner. Financial state and CONTROL do not belong to that calculation change.
 Research-only CI needs a previously successful, accepted and **merged** complete
 base, an unexpired exact GitHub bundle and its explicit
 `.github/research-release-base.json` selection. The first full-build PR has no
-such prior merged base, so its skipped `research-service-windows` step does not
+such prior merged base, so its skipped `research-service-tests-windows` step does not
 prove the next independent update. The separate Worker Cargo build, scope
 negative controls, real child handoff and CONTROL staging checks provide CODE
 evidence for the implemented route; actual use of a subsequent Worker release

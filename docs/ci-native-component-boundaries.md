@@ -15,9 +15,9 @@ jobs were removed from the main workflow.
 
 | Changed files (complete GitHub diff) | Direct owner and consumers | Ready CI | Native release artifact |
 | --- | --- | --- | --- |
-| Only `crates/okx-host-launcher/src/**/*.rs` (+ docs) | Launcher, plus Host Controller consumer | `host-lifecycle-windows`; no Engine/SQL compilation | None: host identities are not an installable four-EXE bundle |
-| Only `crates/okx-host-controller/src/**/*.rs` and optional Launcher Rust source (+ docs) | Host Controller and Launcher | `host-lifecycle-windows`; no Engine/SQL compilation | None |
-| Trading Engine/TradeService, `okx-trade-execution` or financial SQL | Engine, RiskBook, SQL and trade-side consumers | Mandatory `trading-engine-windows-full`, B1, Linux financial regressions | Full verified Windows bundle on qualifying PR |
+| Only `crates/okx-host-launcher/src/**/*.rs` (+ docs) | Launcher, plus Host Controller consumer | `host-controller-launcher-checks`; no Trading Engine/SQL compilation | None: host identities are not an installable four-component bundle |
+| Only `crates/okx-host-controller/src/**/*.rs` and optional Launcher Rust source (+ docs) | Host Controller and Launcher | `host-controller-launcher-checks`; no Trading Engine/SQL compilation | None |
+| Trading Engine/TradeService, `okx-trade-execution` or financial SQL | Trading Engine, RiskBook, SQL and trade-side consumers | Mandatory `trading-engine-acceptance-windows`, B1 and Linux financial regressions | Full verified Windows bundle on qualifying PR |
 | Shared `okx-api`, `okx-market-runtime`, `okx-ipc-contracts`, root Cargo files, any `Cargo.toml`, build scripts, installer/packaging scripts or CI workflow | All affected consumers | Full Native matrix (fail closed) | Full only after acceptance |
 | Research-only + accepted immutable Native base | Research/IPC consumers | Separate Research gate with independently verified Cargo closure | Composed Research-only bundle |
 | Documentation only / Cloudflare-only | Documentation / MCP | Existing scoped gates | No fresh Native build |
@@ -39,8 +39,8 @@ TradeService/Engine consumers remain in `okx-trading-engine`; this stage does **
 claim separate financial SQL and Engine release cycles.
 
 For a full Native change, the protected `windows-native` aggregate requires
-**both** `trading-engine-windows-full` and
-`trading-safety-windows-prerequisite` to succeed. Scoped Research, host,
+**both** `trading-engine-acceptance-windows` and
+`trading-safety-acceptance-windows` to succeed. Scoped Research, host,
 Cloudflare and exact merged-tree reuse require the B1 prerequisite to be
 `skipped`, never falsely counted as executed. The five recorded-source B1
 fixtures are run sequentially to avoid unrelated fixture readiness timeouts;
@@ -50,9 +50,9 @@ The host job runs the existing installation-root safety fixture, architecture
 guard, formatting, clippy, Rust tests and Windows release builds for both
 CONTROL and Launcher. Its exact source HEAD, tree, component scope and binary
 hashes are retained as **non-deployable** evidence. It never publishes a new
-Native base; `publish_accepted_native_base` inside the **same** protected
+Native base; `publish-accepted-windows-release` inside the **same** protected
 `.github/workflows/ci.yml` runs after successful main checks and continues
-to require fresh `trading-engine-windows-full` plus B1 and a complete
+to require fresh `trading-engine-acceptance-windows` plus B1 and a complete
 four-component Windows artifact. It publishes a GitHub release but never
 installs or restarts the Trading Engine.
 

@@ -71,16 +71,16 @@ means proven reusable binary bytes, not a runtime library. Existing
 | --- | --- |
 | `classify` | Protected fail-closed changed-file/Cargo boundary classifier |
 | `draft-component-tests` | Scoped feedback for Draft pull requests |
-| `trading-engine-windows-full` | Full Trading Engine/SQLite/finance Windows acceptance and four-EXE bundle |
-| `trading-safety-windows-prerequisite` | Separate B1 financial-safety prerequisites |
-| `research-service-windows` | Fresh Research tests/build with accepted unchanged Engine baseline |
-| `host-lifecycle-windows` | CONTROL and Launcher owner/consumer checks, no Engine build |
-| `trading-rust-linux` | Portable Rust and native financial regression suite |
+| `trading-engine-acceptance-windows` | Trading Engine/financial SQLite and complete Windows release acceptance |
+| `trading-safety-acceptance-windows` | Independent mandatory B1 financial safety checks |
+| `research-service-tests-windows` | Research Service tests and build against the accepted unchanged Trading Engine |
+| `host-controller-launcher-checks` | Host Controller and Host Launcher tests/build without the Trading Engine |
+| `rust-tests-linux` | Rust library, Research Service IPC and financial SQLite tests executed on Linux (not a Linux trading service) |
 | `architecture-contracts` | Dependency, architecture, product and acceptance contract guards |
 | `dependency-audit` | Dependency security, licence and origin checks |
 | `cloudflare-mcp-contracts` | MCP transport and public contract checks |
-| `verified-research-bundle-assembly` | Draft proof of a composed accepted Research candidate, not a deploy |
-| `publish_accepted_native_base` | After successful protected main CI, publish only the exact verified Windows artifact; no installation |
+| `research-package-proof` | Draft proof of a composed accepted Research candidate, not a deploy |
+| `publish-accepted-windows-release` | After successful protected main CI, publish only the exact verified Windows artifact; no installation |
 
 The required check **display names** `classify`, `windows-native` and `linux-core`
 are retained for branch protection and accepted-CI reuse. `classify` is the
