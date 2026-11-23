@@ -58,12 +58,22 @@ function validate(yaml, fileNames) {
     assert.match(job(id), new RegExp(`^    name: ${display}$`, 'm'),
       `AMBIGUOUS_CI_JOB_NAME:${id}`);
   }
+  const engine = job('trading_engine_acceptance_windows');
+  assert.match(engine, /\$collector = Join-Path \$targetDir 'debug\\examples\\native_finance_acceptance\.exe'/);
+  assert.match(engine, /\$manifestJson = & \$collector --list/);
+  assert.doesNotMatch(engine, /cargo run[^\n]*-- --list/, 'REDUNDANT_CARGO_FINANCIAL_LIST');
   const publish = job('publish_accepted_windows_release');
   assert.match(publish, /^    name: publish-accepted-windows-release$/m);
   assert.match(publish,
     /needs: \[dependency-audit, component_impact, required_linux, required_windows\]/);
-  assert.match(publish,
-    /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
+  assert.match(publish, /if: >-\n\s+\$\{\{\n\s+always\(\)/,
+    'MAIN_PUBLICATION_MUST_IGNORE_TRANSITIVE_SKIPS');
+  assert.match(publish, /github\.event_name == 'push' &&/);
+  assert.match(publish, /github\.ref == 'refs\/heads\/main' &&/);
+  for (const name of ["['dependency-audit']", '.component_impact', '.required_linux', '.required_windows']) {
+    assert.ok(publish.includes(`needs${name}.result == 'success'`),
+      `PUBLICATION_NEEDS_SUCCESS:${name}`);
+  }
   assert.match(publish, /^    permissions:\n      contents: write$/m);
   assert.match(publish, /group: native-base-publication/);
   assert.match(publish, /ACCEPTED_MAIN: \$\{\{ github\.sha \}\}/);
@@ -84,4 +94,8 @@ assert.throws(() => validate(source.replace(
   'needs: [component_impact]'), workflows));
 assert.throws(() => validate(source.replace('name: classify', 'name: impact-only'), workflows));
 assert.throws(() => validate(source.replace('name: rust-tests-linux', 'name: linux-trader'), workflows));
+assert.throws(() => validate(source.replace('always() &&\n        github.event_name',
+  'github.event_name'), workflows));
+assert.throws(() => validate(source.replace('$manifestJson = & $collector --list',
+  '$manifestJson = & cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list'), workflows));
 console.log('CI_LEAN_MAIN_ROUTING_CONTROLS=PASS');
