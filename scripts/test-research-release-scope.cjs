@@ -6,6 +6,12 @@ const root = process.cwd();
 const packages = ['okx-trading-engine','okx-host-controller','okx-host-launcher','okx-ipc-contracts','okx-research-service','okx-analysis','okx-strategy-core'].map(name => ({id:name,name,manifest_path:require('node:path').join(root,'crates',name,'Cargo.toml')}));
 const meta = {workspace_root:root,workspace_members:packages.map(p=>p.id),packages,resolve:{nodes:packages.map(p=>({id:p.id,deps:p.id==='okx-trading-engine'?[{pkg:'okx-ipc-contracts',dep_kinds:[{kind:null}]}]:[]}))}};
 assert.equal(check(meta,['crates/okx-research-service/src/ipc.rs']).changed_files,1);
+const verifiedManifest = {schema:'okx.560.windows-cargo-closure-proof/v1',
+  scope:'research',target:'x86_64-pc-windows-msvc',protected_closures_identical:true};
+assert.equal(check(meta,['crates/okx-research-service/Cargo.toml','Cargo.lock'],verifiedManifest).changed_files,2);
+assert.throws(()=>check(meta,['Cargo.lock'],verifiedManifest),/RESEARCH_MANIFEST_WITHOUT/);
+assert.throws(()=>check(meta,['crates/okx-research-service/Cargo.toml'],
+  {...verifiedManifest,protected_closures_identical:false}),/RESEARCH_MANIFEST_WITHOUT/);
 const pureCoreFile = 'crates/okx-strategy-core/src/operators.rs';
 assert.equal(check(meta,[pureCoreFile]).changed_files,1);
 // Both Ready classifiers must agree on the same changed-file evidence.

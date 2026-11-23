@@ -18,14 +18,17 @@ jobs were removed from the main workflow.
 | Only `crates/okx-host-launcher/src/**/*.rs` (+ docs) | Launcher, plus Host Controller consumer | `host-controller-launcher-checks`; no Trading Engine/SQL compilation | None: host identities are not an installable four-component bundle |
 | Only `crates/okx-host-controller/src/**/*.rs` and optional Launcher Rust source (+ docs) | Host Controller and Launcher | `host-controller-launcher-checks`; no Trading Engine/SQL compilation | None |
 | Trading Engine/TradeService, `okx-trade-execution` or financial SQL | Trading Engine, RiskBook, SQL and trade-side consumers | Mandatory `trading-engine-acceptance-windows`, parallel `trading-engine-build-windows`, B1 and Linux financial regressions | Full verified Windows bundle on qualifying PR |
-| Shared `okx-api`, `okx-market-runtime`, `okx-ipc-contracts`, root Cargo files, any `Cargo.toml`, build scripts, installer/packaging scripts or CI workflow | All affected consumers | Full Native matrix (fail closed) | Full only after acceptance |
+| Shared `okx-api`, `okx-market-runtime`, `okx-ipc-contracts`, root Cargo files, build scripts, installer/packaging scripts or CI workflow | All affected consumers | Full Native matrix (fail closed) | Full only after acceptance |
+| Narrow Research/Host `Cargo.toml` with optional `Cargo.lock` | Only that owner and its actual consumers | Scoped **only after exact before/after Windows Cargo closure proof**, including versions/features/dev dependencies; otherwise full Native | Research accepted-base composition or host-only nondeployable evidence |
 | Research-only + accepted immutable Native base | Research/IPC consumers | Separate Research gate with independently verified Cargo closure | Composed Research-only bundle |
 | Documentation only / Cloudflare-only | Documentation / MCP | Existing scoped gates | No fresh Native build |
 | Mixed host + Research or Cloudflare, unknown paths, renames, incomplete diff | Unknown/shared impact | Full Native matrix | Only if accepted |
 
-The host-only exception is intentionally **narrow**: just Rust implementation
-files inside the two host crates. Changes to dependencies or installation
-contracts cannot claim source-only independence. The classifier reads every
+The host-only source exception remains intentionally **narrow**: just Rust
+implementation files inside the two host crates. A Host or Research manifest
+change takes the corresponding scoped route **only if a separate resolver proof
+establishes** that all protected Windows dependency closures are identical.
+Unverified dependency changes and installation contracts stay full. The classifier reads every
 GitHub diff page, rejects renames and ambiguous paths, and has negative tests
 in `scripts/check_ci_native_scope.py --self-test`.
 The same self-test checks that the shell scope guard accepts exactly the
@@ -106,8 +109,21 @@ path, unverified rename or incomplete diff is reported as potentially affecting
 all Windows binaries. An unavailable push diff is also explicitly unverified.
 
 **The inventory is diagnostic-only, not a skip authorization.** The existing
-fail-closed classifier and immutable-release checks alone select tests and
-builds. Before relaxing any manifest/lock rule, #560 still requires a verified
-before/after Windows-target Cargo resolver, version/feature closure comparison,
-negative controls and real warm-cache timings. A changed crate without an
-Engine source-file diff can still require Engine tests if Engine consumes it.
+fail-closed classifier and immutable-release checks still select tests and
+builds. Narrow manifest candidates pass through a *separate* pre/post resolver
+in the existing `classify` job: both Cargo versions use the same pinned toolchain,
+`--locked`, and `--filter-platform x86_64-pc-windows-msvc`. The proof compares
+the resolved package identities, checksums, enabled and declared features,
+dependency aliases/kinds/targets and crate target definitions across complete
+protected transitive closures. It conservatively includes dev dependencies to
+protect Windows tests. A missing node, mixed owner, unsupported path, changed
+protected dependency, failed resolver or stale PR HEAD/base means **full**.
+No separate workflow or Windows runner is added to classify the change.
+
+For Research release reuse, `prepare-research-release.ps1` repeats this proof
+against the **accepted Native release's own merge commit** before composing its
+immutable Engine/Host binaries with a fresh Research worker. The PR comparison
+alone is not sufficient to trust older installed binaries. Financial tests and
+full packaging still run whenever Engine's closure changes. Real CI evidence
+for positive/negative manifest changes and warm-cache timings remains an open
+acceptance item in #560.

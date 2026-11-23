@@ -9,6 +9,7 @@ const path = require('node:path');
 const root = path.join(__dirname, '..', '.github', 'workflows');
 const workflows = fs.readdirSync(root).filter(x => /\.ya?ml$/.test(x));
 const source = fs.readFileSync(path.join(root, 'ci.yml'), 'utf8');
+const researchRelease = fs.readFileSync(path.join(root, '..', '..', 'scripts', 'prepare-research-release.ps1'), 'utf8');
 
 function validate(yaml, fileNames) {
   assert.ok(!fileNames.includes('publish-native-base.yml'), 'SECOND_PUBLICATION_WORKFLOW');
@@ -44,7 +45,22 @@ function validate(yaml, fileNames) {
   }
 
   // Keep the existing branch-protection display name without an alias runner.
-  assert.match(job('component_impact'), /^    name: classify$/m);
+  const classify = job('component_impact');
+  assert.match(classify, /^    name: classify$/m);
+  assert.match(classify, /component_scope: \$\{\{ steps.proven_scope.outputs.scope \}\}/);
+  assert.match(classify, /--dependency-candidate < "\$RUNNER_TEMP\/ci-files.json"/);
+  assert.match(classify, /if: github.event_name == 'pull_request' && github.event.pull_request.draft != true && steps.file_scope.outputs.manifest_candidate != 'none'/);
+  assert.match(classify, /git fetch --no-tags --depth=1 origin "\$BASE_SHA"/);
+  assert.match(classify, /git worktree add --detach "\$base" "\$BASE_SHA"/);
+  assert.equal((classify.match(/cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc/g) || []).length, 2);
+  assert.match(classify, /node scripts\/ci-cargo-closure-proof.cjs "\$temp\/base.json" "\$temp\/head.json"/);
+  assert.match(classify, /if \[\[ -n '\$\{\{ steps.cargo_closure.outputs.scope \}\}' \]\]; then/);
+  assert.match(classify, /scope="\$\{\{ steps.proven_scope.outputs.scope \}\}"/);
+  assert.match(classify, /steps.proven_scope.outputs.scope == 'research'/);
+  assert.doesNotMatch(classify, /native_required=false[^\n]*CARGO/);
+  assert.match(researchRelease, /git worktree add --detach \$baselineDir \$mergeSha/);
+  assert.match(researchRelease, /cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc/);
+  assert.match(researchRelease, /node scripts\/research-release-scope.cjs @scopeArgs/);
   for (const [id, display] of [['required_linux', 'linux-core'],
     ['required_windows', 'windows-native']]) {
     assert.match(job(id), new RegExp(`^    name: ${display}$`, 'm'));
@@ -133,6 +149,12 @@ assert.throws(() => validate(source.replace(
   'needs: [dependency-audit, component_impact, required_linux, required_windows]',
   'needs: [component_impact]'), workflows));
 assert.throws(() => validate(source.replace('name: classify', 'name: impact-only'), workflows));
+assert.throws(() => validate(source.replace('component_scope: ${{ steps.proven_scope.outputs.scope }}',
+  'component_scope: ${{ steps.file_scope.outputs.scope }}'), workflows));
+assert.throws(() => validate(source.replace('if [[ -n \'${{ steps.cargo_closure.outputs.scope }}\' ]]; then',
+  'if [[ -n \'${{ steps.file_scope.outputs.scope }}\' ]]; then'), workflows));
+assert.throws(() => validate(source.replace('git fetch --no-tags --depth=1 origin "$BASE_SHA"',
+  'git fetch --no-tags --depth=1 origin main'), workflows));
 assert.throws(() => validate(source.replace('name: rust-tests-linux', 'name: linux-trader'), workflows));
 assert.throws(() => validate(source.replace('always() &&\n        github.event_name',
   'github.event_name'), workflows));

@@ -69,7 +69,7 @@ means proven reusable binary bytes, not a runtime library. Existing
 
 | Job | Purpose |
 | --- | --- |
-| `classify` | Protected fail-closed changed-file/Cargo boundary classifier |
+| `classify` | Protected fail-closed changed-file boundary plus before/after Windows Cargo closure proof for narrow Research/Host manifest candidates |
 | `draft-component-tests` | Scoped feedback for Draft pull requests |
 | `trading-engine-acceptance-windows` | Mandatory Trading Engine, financial SQLite, regression and resource-budget acceptance |
 | `trading-engine-build-windows` | Parallel fresh four-component Windows release build and artifact on full Ready PRs; manual accepted-`main` release cache seed |
