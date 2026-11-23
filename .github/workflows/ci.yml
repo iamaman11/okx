@@ -1119,7 +1119,9 @@ jobs:
   research-only-windows:
     name: research-only-windows
     needs: classify
-    if: needs.classify.outputs.research_only == 'true'
+    # Successful PR proof is reused on an identical merged main tree;
+    # do not rebuild even Research Worker for the same source twice.
+    if: needs.classify.outputs.build_required == 'true' && needs.classify.outputs.research_only == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5

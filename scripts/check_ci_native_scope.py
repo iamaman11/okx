@@ -10,6 +10,7 @@ data always require the full native financial gate.
 
 import argparse
 import json
+from pathlib import Path
 import re
 import sys
 
@@ -92,6 +93,15 @@ def classify(pages):
 
 
 def _self_test() -> None:
+    # The main exact-merge-tree fast path must skip both full Native and
+    # Research-only compilation after a green PR. Guard against accidentally
+    # launching the same Research Worker build twice (PR and main).
+    workflow = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text()
+    assert (
+        "    if: needs.classify.outputs.build_required == 'true' && needs.classify.outputs.research_only == 'true'"
+        in workflow
+    )
+
     def files(*paths):
         return [[{"filename": path, "status": "modified"} for path in paths]]
 
