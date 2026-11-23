@@ -20,7 +20,9 @@ function validate(yaml, fileNames) {
   assert.match(header, /^      - main$/m);
   assert.match(header, /^  pull_request:$/m);
   assert.doesNotMatch(header, /^  workflow_run:$/m);
-  assert.doesNotMatch(header, /^  workflow_dispatch:$/m);
+  assert.match(header, /^  workflow_dispatch:$/m);
+  assert.match(header, /^      prime_windows_cargo_cache:$/m);
+  assert.match(header, /^        default: false$/m);
   assert.doesNotMatch(header, /^  contents: write$/m);
   assert.match(header, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
 
@@ -28,7 +30,9 @@ function validate(yaml, fileNames) {
   const map = new Map(entries.map((m, i) => [m[1], jobs.slice(m.index,
     i + 1 < entries.length ? entries[i + 1].index : undefined)]));
   assert.equal(map.size, entries.length, 'DUPLICATE_JOB_ID');
-  assert.ok(map.size <= 14, 'OBSOLETE_JOB_GRAPH_REGRESSION');
+  // The 15th job is only an explicitly requested, trusted-main cache seed.
+  // It never executes as part of ordinary PR/main CI or financial acceptance.
+  assert.ok(map.size <= 15, 'OBSOLETE_JOB_GRAPH_REGRESSION');
   for (const unused of ['required_classify', 'draft-trading-migration-512',
     'draft-riskbook-migration-510', 'cloudflare_deploy', 'readonly_observer',
     'production_recovery_promote', 'named_validate', 'all26_windows_targeted']) {
@@ -62,6 +66,20 @@ function validate(yaml, fileNames) {
   assert.match(engine, /\$collector = Join-Path \$targetDir 'debug\\examples\\native_finance_acceptance\.exe'/);
   assert.match(engine, /\$manifestJson = & \$collector --list/);
   assert.doesNotMatch(engine, /cargo run[^\n]*-- --list/, 'REDUNDANT_CARGO_FINANCIAL_LIST');
+  assert.match(engine, /shared-key: trading-engine-windows/);
+  const prime = job('trusted_main_cache_prime');
+  assert.match(prime, /^    name: trusted-main-windows-cargo-cache-prime$/m);
+  assert.match(prime, /github.event_name == 'workflow_dispatch' &&/);
+  assert.match(prime, /inputs.prime_windows_cargo_cache == true &&/);
+  assert.match(prime, /github.ref == 'refs\/heads\/main' &&/);
+  assert.match(prime, /needs.component_impact.outputs.build_required == 'false'/);
+  assert.match(prime, /merged tree exactly matches successful PR head tree/);
+  assert.match(prime, /shared-key: trading-engine-windows/);
+  assert.match(prime, /cache-on-failure: false/);
+  assert.match(prime, /cargo test --locked --no-run --all-targets/);
+  assert.match(prime, /cargo build --locked --release/);
+  assert.doesNotMatch(prime, /gh release|actions\/upload-artifact|cargo run|cargo test --locked .* -- --nocapture/);
+  assert.match(prime, /FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED/);
   const publish = job('publish_accepted_windows_release');
   assert.match(publish, /^    name: publish-accepted-windows-release$/m);
   assert.match(publish,
@@ -96,6 +114,8 @@ assert.throws(() => validate(source.replace('name: classify', 'name: impact-only
 assert.throws(() => validate(source.replace('name: rust-tests-linux', 'name: linux-trader'), workflows));
 assert.throws(() => validate(source.replace('always() &&\n        github.event_name',
   'github.event_name'), workflows));
+assert.throws(() => validate(source.replace("inputs.prime_windows_cargo_cache == true &&", "true &&"), workflows));
+assert.throws(() => validate(source.replace("github.event_name == 'workflow_dispatch' &&", "github.event_name == 'push' &&"), workflows));
 assert.throws(() => validate(source.replace('$manifestJson = & $collector --list',
   '$manifestJson = & cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list'), workflows));
 console.log('CI_LEAN_MAIN_ROUTING_CONTROLS=PASS');

@@ -6,6 +6,13 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      prime_windows_cargo_cache:
+        description: 'One-time trusted main Windows Cargo test/release cache seed (no acceptance or publish)'
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
   # The release step is part of this main CI run. A later main commit must not
@@ -639,6 +646,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          shared-key: trading-engine-windows
 
       - name: Windows installation root migration contracts
         shell: pwsh
@@ -1196,6 +1204,63 @@ jobs:
             ${{ runner.temp }}\native-queue-current.log
           if-no-files-found: error
           retention-days: 14
+
+  # #560 E1: manual, trusted main-scope seed for future *new* PRs. This is
+  # compilation only; it is not a Windows/finance acceptance or deployment.
+  # Never seed main caches from a PR merge ref or unaccepted main source tree.
+  trusted_main_cache_prime:
+    name: trusted-main-windows-cargo-cache-prime
+    needs: component_impact
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        inputs.prime_windows_cargo_cache == true &&
+        github.ref == 'refs/heads/main' &&
+        needs.component_impact.outputs.build_required == 'false' &&
+        needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree'
+      }}
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require exact trusted main checkout
+        shell: pwsh
+        run: |
+          if ('${{ github.ref }}' -cne 'refs/heads/main' -or
+              (git rev-parse HEAD).Trim() -cne '${{ github.sha }}' -or
+              @(git status --porcelain).Count -ne 0) { throw 'UNTRUSTED_CACHE_SEED_CHECKOUT' }
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.95.0
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        id: cargo-cache
+        with:
+          shared-key: trading-engine-windows
+          cache-on-failure: false
+      - name: Seed only missing Windows debug/test and release build outputs
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo clippy --locked -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-trade-execution --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_CLIPPY_BUILD_FAILED' }
+          cargo test --locked --no-run --all-targets -p okx-trading-engine -p okx-trade-execution -p okx-host-controller -p okx-host-launcher -p okx-strategy-core -p okx-research -p okx-research-service
+          if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_TEST_BUILD_FAILED' }
+          cargo build --locked --release -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-research-service
+          if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_RELEASE_BUILD_FAILED' }
+      - name: Record non-acceptance cache-seed evidence
+        shell: pwsh
+        run: |
+          "CACHE_SEED=TRUSTED_MAIN_COMPILATION_ONLY" >> $env:GITHUB_STEP_SUMMARY
+          "MAIN_SHA=${{ github.sha }}" >> $env:GITHUB_STEP_SUMMARY
+          "EXACT_CACHE_HIT=${{ steps.cargo-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+          "FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED" >> $env:GITHUB_STEP_SUMMARY
 
   # Successful protected main checks publish the verified PR artifact here.
   publish_accepted_windows_release:
