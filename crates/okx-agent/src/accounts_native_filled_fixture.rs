@@ -6,6 +6,37 @@ pub(crate) const OPEN_ORDER: &str = "native-filled-open-001";
 pub(super) const CLOSE_ORDER: &str = "native-filled-close-001";
 pub(crate) const STOP: &str = "900000002";
 
+/// A finite scripted external clock publisher for Native contract tests that
+/// may spend several seconds in the original SQL admission path on Windows.
+/// Only the one not-yet-delivered raw venue response can be refreshed; the
+/// production adapter still parses that response and enforces its unchanged
+/// five-second mutation-clock bound. No response is created on demand.
+pub(crate) async fn with_fresh_recorded_clock<F: std::future::Future>(
+    feed: &RecordedAccountHttp,
+    execution: F,
+) -> F::Output {
+    assert_eq!(feed.unconsumed_public_clock(), 1);
+    let mut publisher = tokio::time::interval(Duration::from_millis(250));
+    publisher.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut publisher_ticks = 0;
+    tokio::pin!(execution);
+    loop {
+        tokio::select! {
+            biased;
+            _ = publisher.tick(), if publisher_ticks < 80 => {
+                publisher_ticks += 1;
+                let now = jiff::Timestamp::now().as_millisecond().to_string();
+                // A delivered clock sample cannot be replaced or multiplied.
+                let _ = feed.refresh_unconsumed_public_clock(
+                    0,
+                    envelope(json!([{"ts": now}])),
+                );
+            }
+            outcome = &mut execution => return outcome,
+        }
+    }
+}
+
 /// Exercise the original production campaign-readiness refresh while a
 /// different account is deliberately held at an external HTTP boundary.
 /// `opened_market` stops bootstrap maintenance before installing finite market
