@@ -641,12 +641,18 @@ mod tests {
                     Ok(RawHttpResponse {
                         status: okx_api::HttpStatusCode::OK,
                         headers: Default::default(),
-                        body: concat!(
-                            r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP",",
-                            r#""tradeId":"1","px":"100.5","sz":"2","ts":"1234"}]}"#,
-                        )
-                        .as_bytes()
-                        .to_vec(),
+                        body: serde_json::to_vec(&serde_json::json!({
+                            "code": "0",
+                            "msg": "",
+                            "data": [{
+                                "instId": "BTC-USDT-SWAP",
+                                "tradeId": "1",
+                                "px": "100.5",
+                                "sz": "2",
+                                "ts": "1234",
+                            }],
+                        }))
+                        .unwrap(),
                     })
                 })
             }
