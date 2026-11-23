@@ -291,11 +291,16 @@ async fn verified_bundle(
         ));
     }
 
-    // Keep the accepted-main policy, but resolve immutable source identity
-    // through GitHub instead of requiring Git/source on the installed host.
-    let tested_tree = github.repository_commit_tree(&run.head_sha).await?;
-    let main_tree = github.repository_commit_tree("main").await?;
-    if tested_tree != bundle.manifest.source_tree || main_tree != bundle.manifest.source_tree {
+    // The archive must have fresh, self-origin Native components (enforced by
+    // parse_bundle_compatible) and its tested head must be present on main.
+    // Later, *isolated* Research edits may advance main without invalidating
+    // the still-accepted Native base. All other changes fail closed and need
+    // another full Windows/B1 artifact. Never attribute borrowed binaries to
+    // the Research composition's own PR run.
+    if !github
+        .native_base_on_research_only_main(&run.head_sha, &bundle.manifest.source_tree)
+        .await?
+    {
         return Err(HostControlError::ArtifactSourceTreeMismatch);
     }
 
