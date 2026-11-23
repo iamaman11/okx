@@ -87,24 +87,33 @@ pub(super) fn validate_workload(v: &Value, run_id: &str) -> Result<()> {
     Ok(())
 }
 pub(super) fn verify(report: &mut Value, observed: &Witnesses) -> Result<bool> {
-    // All five libraries, three static guards and retained transport must have
-    // real completion/measurements, in addition to their exact witness checks.
+    // Five libraries (Agent has two disjoint measured groups), three static
+    // guards and retained transport require real completion/measurements.
     let stages = report["stages"]
         .as_array()
         .ok_or("RESOURCE_STAGES_MISSING")?;
-    if stages.len() != 9 || stages.iter().any(|s| s["success"] != true) {
+    if stages.len() != 10 || stages.iter().any(|s| s["success"] != true) {
         return Err("RESOURCE_STAGES_INCOMPLETE");
     }
     let mut identities = BTreeSet::new();
     for stage in stages {
         let identity = match stage["stage"].as_str() {
-            Some("libtest")
-                if stage["package"]
-                    .as_str()
-                    .is_some_and(|p| super::PACKAGES.contains(&p)) =>
-            {
-                format!("lib:{}", stage["package"].as_str().unwrap())
-            }
+            Some("libtest") => match (
+                stage["package"].as_str(),
+                stage["group"].as_str(),
+                stage["test_threads"].as_u64(),
+            ) {
+                (Some("okx-agent"), Some("parallel"), Some(4)) => "lib:okx-agent:parallel".into(),
+                (Some("okx-agent"), Some("clock_sensitive"), Some(1)) => {
+                    "lib:okx-agent:clock_sensitive".into()
+                }
+                (Some(p), Some("all"), Some(4))
+                    if super::PACKAGES.contains(&p) && p != "okx-agent" =>
+                {
+                    format!("lib:{p}:all")
+                }
+                _ => return Err("RESOURCE_STAGE_IDENTITY_INVALID"),
+            },
             Some("retained_transport") => "transport".into(),
             Some("repository_guard")
                 if [
@@ -157,7 +166,10 @@ pub(super) fn verify(report: &mut Value, observed: &Witnesses) -> Result<bool> {
         .collect::<Vec<_>>()
         .join("\n");
     let workload_hash = format!("{:x}", Sha256::digest(workload_identity.as_bytes()));
-    let comparable = std::env::consts::OS == "windows"
+    // Historical 4-thread baseline ran Agent in one process. Splitting that
+    // process changes timing methodology; do not claim same-workload speedup.
+    let comparable = report["test_schedule"] == "uniform_4"
+        && std::env::consts::OS == "windows"
         && std::env::var("PROCESSOR_IDENTIFIER").unwrap_or_default()
             == "Intel64 Family 6 Model 60 Stepping 3, GenuineIntel"
         && std::thread::available_parallelism().is_ok_and(|n| n.get() == 8)
@@ -174,7 +186,7 @@ pub(super) fn verify(report: &mut Value, observed: &Witnesses) -> Result<bool> {
         "baseline":{"head":"d35565e06f478bb83ef2699bee90cabeafd4c1d1",
             "wall_samples_ms":[89091,81798,82765],"same_hardware_class":comparable,
             "regression_ceiling_ms":if comparable{Some(111364)}else{None},
-            "basis":"25% above observed max for same hardware; no cross-hardware speedup claim"},
+            "basis":"25% above observed max for identical test schedule and hardware; no cross-schedule speedup claim"},
         "percentiles":"64 operation latencies; whole-run p95 requires a separate sufficient sample"});
     let mut violations = Vec::new();
     for (field, actual, limit) in [
@@ -231,8 +243,13 @@ mod tests {
     fn measured_report() -> Value {
         let mut stages: Vec<Value> = super::super::PACKAGES
             .iter()
-            .map(|p| json!({"stage":"libtest","package":p}))
+            .map(|p| {
+                json!({"stage":"libtest","package":p,
+                "group":if *p=="okx-agent"{"parallel"}else{"all"},"test_threads":4})
+            })
             .collect();
+        stages.push(json!({"stage":"libtest","package":"okx-agent",
+            "group":"clock_sensitive","test_threads":1}));
         stages.push(json!({"stage":"retained_transport"}));
         for command in [
             json!(["scripts/check_architecture.py"]),
@@ -255,6 +272,12 @@ mod tests {
         let mut duplicate = measured_report();
         duplicate["stages"][1] = duplicate["stages"][0].clone();
         assert!(verify(&mut duplicate, &Witnesses::new()).is_err());
+        let mut unisolated = measured_report();
+        unisolated["stages"][5]["test_threads"] = json!(4);
+        assert!(verify(&mut unisolated, &Witnesses::new()).is_err());
+        let mut wrong_group = measured_report();
+        wrong_group["stages"][5]["group"] = json!("parallel");
+        assert!(verify(&mut wrong_group, &Witnesses::new()).is_err());
         let mut foreign = measured_report();
         foreign["stages"][0]["package"] = json!("foreign");
         assert!(verify(&mut foreign, &Witnesses::new()).is_err());

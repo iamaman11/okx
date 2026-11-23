@@ -71,6 +71,7 @@ pub(super) fn candle_source(calls: Arc<AtomicUsize>) -> SourceHandler {
                 raw_body: b"fixture".to_vec(),
                 rows,
                 acquired_at_ms: "1".into(),
+                http_delivery: None,
             }))
         })
     })
@@ -308,6 +309,7 @@ async fn t06_t09_real_worker_causality_and_economics_are_isolated() {
                             raw_body: b"closed-candles".to_vec(),
                             rows,
                             acquired_at_ms: "9000000".into(),
+                            http_delivery: None,
                         }))
                     }
                     PublicSourceRequest::OpenInterest { .. } => {
@@ -338,6 +340,7 @@ async fn t06_t09_real_worker_causality_and_economics_are_isolated() {
                             raw_body: b"realized-funding".to_vec(),
                             rows,
                             acquired_at_ms: "9000000".into(),
+                            http_delivery: None,
                         }))
                     }
                     _ => Err("UNEXPECTED_SOURCE".into()),
@@ -501,6 +504,7 @@ async fn t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated() 
                             raw_body: b"two-instrument-candles".to_vec(),
                             rows,
                             acquired_at_ms: "9000000".into(),
+                            http_delivery: None,
                         }))
                     }
                     PublicSourceRequest::OpenInterest { instrument, .. } => {
@@ -541,7 +545,9 @@ async fn t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated() 
     if result["rows"].is_null() {
         let id = result["id"].as_str().expect("queued market job ID");
         assert_eq!(terminal(&client, id).await["state"], "completed");
-        result = client.market(request.clone(), None, None).await.unwrap();
+        let mut first_page = request.clone();
+        first_page.cursor = Some(format!("{id}:0"));
+        result = client.market(first_page, None, None).await.unwrap();
     }
     // A full provenance row may exceed the response byte budget. Cursor
     // pagination must replay the immutable artifact, never refetch venues.
@@ -693,6 +699,7 @@ async fn t07_t08_real_worker_intraday_event_and_holdout_stay_separate() {
                     raw_body: b"intraday-train-holdout".to_vec(),
                     rows,
                     acquired_at_ms: "90000000".into(),
+                    http_delivery: None,
                 }))
             })
         }

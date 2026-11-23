@@ -70,7 +70,9 @@ async fn completed_market(
     })
     .await
     .expect("original market job must publish its artifact");
-    let result = service.market(request, None, None).await.unwrap();
+    let mut first_page = request;
+    first_page.cursor = Some(format!("{id}:0"));
+    let result = service.market(first_page, None, None).await.unwrap();
     assert_eq!(result["job_id"], id, "same completed market identity");
     result
 }

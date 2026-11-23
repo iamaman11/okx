@@ -199,7 +199,15 @@ impl AnalyticsService {
                     {
                         return Err("MARKET_CURSOR_REQUEST_MISMATCH".into());
                     }
-                    global_rank_page(&store, value, &offset, &job_id)
+                    // A queued request may finish after its live-source time
+                    // bucket expires. Let the caller resume page zero of that
+                    // exact completed job, without admitting another job or
+                    // fetching the same venue sources a second time.
+                    if offset == "0" {
+                        Ok(value)
+                    } else {
+                        global_rank_page(&store, value, &offset, &job_id)
+                    }
                 })
                 .await;
         }
@@ -2136,15 +2144,17 @@ mod tests {
             retry["rows"].is_null(),
             "cancelled job cannot claim published market rows"
         );
-        let mut cancelled_cursor = cancelled_request.clone();
-        cancelled_cursor.cursor = Some(format!("{cancelled_id}:1"));
-        assert_eq!(
-            service
-                .market(cancelled_cursor, None, None)
-                .await
-                .unwrap_err(),
-            "MARKET_CURSOR_NOT_READY"
-        );
+        for offset in [0, 1] {
+            let mut cancelled_cursor = cancelled_request.clone();
+            cancelled_cursor.cursor = Some(format!("{cancelled_id}:{offset}"));
+            assert_eq!(
+                service
+                    .market(cancelled_cursor, None, None)
+                    .await
+                    .unwrap_err(),
+                "MARKET_CURSOR_NOT_READY"
+            );
+        }
         assert_eq!(
             service
                 .result_page(cancelled_id.clone(), None, 1, ResearchResultView::Trades)

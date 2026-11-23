@@ -154,6 +154,7 @@ mod source_observation_tests {
                     raw_body: vec![0, 1, 2],
                     rows: Vec::new(),
                     acquired_at_ms: "1".into(),
+                    http_delivery: None,
                 }))
             })
         }
