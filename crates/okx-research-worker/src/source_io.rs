@@ -101,11 +101,7 @@ pub(crate) fn request_finished(
                 match reply {
                     PublicSourceReply::CatalogPage(value) => {
                         counts.captured_response_body_bytes += value.raw_body.len() as u64;
-                        account_delivery(
-                            counts,
-                            Some(&value.http_delivery),
-                            value.raw_body.len(),
-                        );
+                        account_delivery(counts, Some(&value.http_delivery), value.raw_body.len());
                     }
                     PublicSourceReply::Candles(value) => {
                         counts.captured_response_body_bytes += value.raw_body.len() as u64;

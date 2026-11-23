@@ -691,7 +691,12 @@ mod research_catalog_boundary_tests {
     fn finite_public_catalog_accepts_only_registered_gets_and_bounded_fields() {
         assert!(request("recent_trades").valid());
         assert!(request("history_trades").valid());
-        for forbidden in ["", "private_account", "/api/v5/trade/order", "https://example.com"] {
+        for forbidden in [
+            "",
+            "private_account",
+            "/api/v5/trade/order",
+            "https://example.com",
+        ] {
             assert!(!request(forbidden).valid());
         }
         let mut recent = request("recent_trades");

@@ -678,18 +678,31 @@ mod tests {
             assert_eq!(capture.rows.len(), 1);
             assert_eq!(capture.rows[0]["tradeId"], "1");
             assert_eq!(capture.http_delivery.transport_send_invocations, 1);
-            assert_eq!(capture.http_delivery.response_body_bytes, capture.raw_body.len() as u64);
+            assert_eq!(
+                capture.http_delivery.response_body_bytes,
+                capture.raw_body.len() as u64
+            );
             assert!(!capture.acquired_at_ms.is_empty());
         }
         assert!(rate.snapshot().tracked_domains >= 2);
         assert_eq!(
-            transport.0.lock().unwrap().iter().map(String::as_str).collect::<Vec<_>>(),
+            transport
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             vec![
                 "/api/v5/market/trades?instId=BTC-USDT-SWAP&limit=2",
                 "/api/v5/market/history-trades?instId=BTC-USDT-SWAP&type=1&limit=2",
             ]
         );
-        for forbidden in ["https://evil.invalid", "/api/v5/trade/order", "private_account"] {
+        for forbidden in [
+            "https://evil.invalid",
+            "/api/v5/trade/order",
+            "private_account",
+        ] {
             assert!(source.research_source(call(forbidden)).await.is_err());
         }
         assert_eq!(transport.0.lock().unwrap().len(), 2);
