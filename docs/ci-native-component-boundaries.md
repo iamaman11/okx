@@ -1,6 +1,6 @@
 # Native CI ownership and build boundaries (#537)
 
-The protected checks `linux-core` and `windows-native` stay required. They
+The protected checks `classify`, `linux-core` and `windows-native` stay required. They
 aggregate different **executed** jobs; a skipped financial matrix is not
 reported as a successful financial test run.
 
@@ -19,6 +19,8 @@ files inside the two host crates. Changes to dependencies or installation
 contracts cannot claim source-only independence. The classifier reads every
 GitHub diff page, rejects renames and ambiguous paths, and has negative tests
 in `scripts/check_ci_native_scope.py --self-test`.
+The same self-test checks that the shell scope guard accepts exactly the
+classifier's output tokens; it runs on Draft PRs before Rust compilation.
 
 `scripts/check_architecture.py` separately rejects direct and transitive
 financial/market dependencies from CONTROL or Launcher, as well as a Launcher
@@ -26,6 +28,14 @@ dependency on CONTROL. CONTROL may depend on Launcher and the versioned
 protocol. The financial SQLite owner remains in `okx-trade-execution` and its
 TradeService/Engine consumers remain in `okx-trading-engine`; this stage does **not**
 claim separate financial SQL and Engine release cycles.
+
+For a full Native change, the protected `windows-native` aggregate requires
+**both** `trading-engine-windows-full` and
+`trading-safety-windows-prerequisite` to succeed. Scoped Research, host,
+Cloudflare and exact merged-tree reuse require the B1 prerequisite to be
+`skipped`, never falsely counted as executed. The five recorded-source B1
+fixtures are run sequentially to avoid unrelated fixture readiness timeouts;
+the 100-caller CAS test keeps its internal concurrency.
 
 The host job runs the existing installation-root safety fixture, architecture
 guard, formatting, clippy, Rust tests and Windows release builds for both
