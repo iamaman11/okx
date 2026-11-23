@@ -1,5 +1,7 @@
 import unittest
 from unittest.mock import patch
+from pathlib import Path
+import re
 
 from check_ci_native_scope import classify as ready_classify
 from check_p0 import (check_counts, measured_mcp_native_under_research,
@@ -7,6 +9,20 @@ from check_p0 import (check_counts, measured_mcp_native_under_research,
 
 
 class FeedbackTests(unittest.TestCase):
+    def test_ready_windows_runs_math_owner_tests_not_just_worker(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
+        owner_commands = {
+            "research-only-windows": "cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-worker",
+            "windows_native_full": "cargo test --locked -p okx-strategy-core -p okx-research",
+        }
+        for job, command in owner_commands.items():
+            match = re.search(rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  [a-z_-]+:|\Z)", workflow)
+            self.assertIsNotNone(match, f"missing mandatory Windows job {job}")
+            self.assertIn(
+                command,
+                match.group(1), f"{job} must execute owner unit tests, not just compile them",
+            )
+
     @staticmethod
     def source_witness():
         return {"source_reads": {
@@ -38,6 +54,36 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(select("M", "crates/okx-research-worker/src/analytics/jobs.rs"), {"worker"})
         self.assertEqual(select("M", "crates/okx-protocol/src/research_ipc.rs"), {"wire", "worker", "ipc", "mcp"})
         self.assertFalse(select("M", "docs/testing.md"))
+
+    def test_worker_internal_changes_never_select_agent(self):
+        for path in ("source_io.rs", "source_api.rs", "producer.rs", "invocation.rs", "process_memory.rs"):
+            source = f"crates/okx-research-worker/src/{path}"
+            self.assertEqual(select("M", source), {"worker"})
+            with (patch("check_p0.tests", return_value="") as run_tests,
+                  patch("check_p0.measured_t10", return_value={}),
+                  patch("check_p0.report_t10")):
+                execute(select("M", source))
+            packages = [call.args[0] for call in run_tests.call_args_list]
+            self.assertEqual(set(packages), {"okx-research-worker"})
+
+    def test_shared_ipc_and_worker_transport_select_both_sides(self):
+        for path in ("crates/okx-protocol/src/research_ipc.rs",
+                     "crates/okx-research-worker/src/ipc.rs",
+                     "crates/okx-research-worker/src/ipc/correlation_tests.rs",
+                     "crates/okx-research-worker/src/main.rs"):
+            self.assertIn("ipc", select("M", path))
+            self.assertIn("worker", select("M", path))
+            with (patch("check_p0.tests", return_value="") as run_tests,
+                  patch("check_p0.measured_t10", return_value={}),
+                  patch("check_p0.report_t10"),
+                  patch("check_p0.measured_native_under_research", return_value={}),
+                  patch("check_p0.report_native_under_research"),
+                  patch("check_p0.subprocess.check_output", return_value='{"target_directory":"/tmp/no-exec"}'),
+                  patch.dict("check_p0.os.environ")):
+                execute(select("M", path) - {"mcp"})
+            packages = [call.args[0] for call in run_tests.call_args_list]
+            self.assertIn("okx-research-worker", packages)
+            self.assertIn("okx-agent", packages)
 
     def test_host_source_uses_owner_and_consumer_not_expanded(self):
         for path in (
