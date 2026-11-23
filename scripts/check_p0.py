@@ -54,10 +54,15 @@ def select(status, path):
         return {"analysis", "kernel"}
     if path.startswith("crates/okx-research/src/") and path.endswith(".rs"):
         return {"research", "worker"}
-    if path.startswith("crates/okx-research-worker/src/analytics/") and path.endswith(".rs"):
-        return {"worker"}
     if path.startswith("crates/okx-research-worker/") and path.endswith(".rs") and not path.endswith("/build.rs"):
-        return {"ipc", "worker"}
+        # The Worker owns its source adapters, telemetry and calculations.
+        # Running Agent process/financial tests for such internal changes
+        # defeats the Research-only editing boundary.  Only Worker transport
+        # and entrypoint changes must also exercise the consuming Agent.
+        if (path in {"crates/okx-research-worker/src/ipc.rs", "crates/okx-research-worker/src/main.rs"}
+                or path.startswith("crates/okx-research-worker/src/ipc/")):
+            return {"ipc", "worker"}
+        return {"worker"}
     if path.startswith("crates/okx-protocol/src/") and path.endswith(".rs"):
         return {"wire", "ipc", "worker", "mcp"}
     if path.startswith(("cloudflare/okx-mcp/src/", "cloudflare/okx-mcp/contracts/")):
