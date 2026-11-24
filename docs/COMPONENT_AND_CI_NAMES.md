@@ -4,12 +4,11 @@ Names describe **ownership**, not historical implementation details. A Cargo
 package is a compilation boundary, a Windows executable is a release artifact,
 and a CI job is evidence. They are not interchangeable.
 
-## Four application owners (current `main`)
+## Four application owners
 
-The deployed product has four logical owners; **17 Cargo packages do not mean
-17 services**. Shared libraries are compile-time dependencies, never extra
-financial authorities. Source paths in this table refer to the current code,
-not evidence that all intended runtime boundaries have already been achieved.
+The product has four logical owners across 18 Cargo packages. Shared
+libraries are compile-time dependencies. The source paths describe ownership
+in the workspace. Runtime boundaries are tracked separately.
 
 | Owner | Code and durable state | Exclusive effect | Must not own |
 | --- | --- | --- | --- |
@@ -18,13 +17,17 @@ not evidence that all intended runtime boundaries have already been achieved.
 | **Control** | `okx-host-controller` and `okx-host-launcher`; installed component manifests and lifecycle evidence | Authorized start/stop/install/rollback/doctor | Trading decisions, finance ledger, research computations |
 | **Edge** | `cloudflare/okx-mcp`, `okx-bridge-mcp`; transport/session/identity state | Authenticated MCP/API delivery to the matching owner | Financial or research source-of-truth state, venue mutation |
 
-`okx-domain-core` and `okx-ipc-contracts` are shared pure facts and typed
-Engine/Research contracts. Host-control messages live in `okx-host-protocol`;
-only the child shutdown request/reply remain in the shared Engine/Host IPC.
+`okx-domain-core` contains shared pure facts. `okx-ipc-contracts` carries
+typed Engine/Research contracts and shared Engine/Host contracts such as the
+child shutdown request/reply and the account catalog. Host-control mailbox
+messages live in `okx-host-protocol`.
 `okx-api`, `okx-market-runtime`, `okx-observation`, `okx-ws` and
 `okx-github` contain current adapters/support code; their current broad
 dependency fan-out is **not** a reason to grant another owner financial
 authority. `okx-cli` is a tool, not a fifth continuously running application.
+
+The [crate split map](crate-split-map.md) shows which modules moved, their
+Cargo dependencies and the CI acceptance checks.
 
 ### Confirmed remaining coupling and release rules
 
