@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import statistics
 import subprocess
 import sys
 import time
@@ -22,6 +23,21 @@ WORKER_TESTS = (
     "analytics::market::tests::c20_rolling_mean_reuses_existing_market_pipeline_without_new_routing",
 )
 SCOPES = {"kernel", "strategy", "analysis", "research", "worker", "wire", "ipc", "mcp", "host", "expanded"}
+LOCAL_COMPONENTS = {
+    "strategy": "okx-strategy-core",
+    "analysis": "okx-analysis",
+    "research": "okx-research",
+    "worker": "okx-research-service",
+    "ipc": "okx-ipc-contracts",
+    "engine": "okx-trading-engine",
+    "execution": "okx-trade-execution",
+    "controller": "okx-host-controller",
+    "launcher": "okx-host-launcher",
+}
+ENGINE_FEEDBACK = (
+    "trade_service::strategies::pending_strategy_turn_does_not_delay_a_second_recovery_turn",
+    "trade_service::strategies::budget_contract_tests::strategy_risk_budget_not_notional",
+)
 
 
 def git(*args):
@@ -414,12 +430,50 @@ def execute(scopes):
             raise ValueError("generated public MCP contracts differ from the input tree")
 
 
+def local_component(component, repeat, plan):
+    package = LOCAL_COMPONENTS.get(component)
+    command = f"cargo test --locked -p {package} --lib" if package else "npm run check"
+    if component == "engine":
+        command += " -- --exact " + " ".join(ENGINE_FEEDBACK)
+    checkout = git("rev-parse", "HEAD").decode().strip()
+    dirty = bool(git("status", "--porcelain"))
+    report(f"Local component check: {component}, HEAD={checkout}, dirty={str(dirty).lower()}, "
+           f"repetitions={repeat}, command={command}. Scope: code tests.")
+    if plan:
+        return
+    samples = []
+    for _ in range(repeat):
+        started = time.monotonic()
+        if component == "engine":
+            tests(package, required=ENGINE_FEEDBACK, exact=True)
+        elif package:
+            tests(package)
+        else:
+            subprocess.run(["npm", "run", "check"], cwd=MCP, check=True)
+        samples.append(time.monotonic() - started)
+    report(f"{component} first observed run: {samples[0]:.2f}s (initial cache state unspecified).")
+    if repeat > 1:
+        report(f"{component} follow-up runs: {', '.join(f'{s:.2f}s' for s in samples[1:])}; "
+               f"median {statistics.median(samples[1:]):.2f}s including build and tests.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="origin/main", help="compare working tree with merge base")
     parser.add_argument("--plan", action="store_true", help="print selection without building")
     parser.add_argument("--expanded", action="store_true", help="also check broader semantic impact")
+    parser.add_argument("--component", choices=sorted({*LOCAL_COMPONENTS, "mcp"}),
+                        help="test one component locally")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="repeat the local component check in the same build directory")
     args = parser.parse_args()
+    if args.component:
+        if args.expanded or args.repeat < 1:
+            parser.error("--component requires a positive --repeat and excludes --expanded")
+        local_component(args.component, args.repeat, args.plan)
+        return
+    if args.repeat != 1:
+        parser.error("--repeat requires --component")
     scopes = {"expanded"} if args.expanded else set()
     for status, path in changes(args.base):
         selected = select(status, path)

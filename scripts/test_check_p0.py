@@ -4,11 +4,22 @@ from pathlib import Path
 import re
 
 from check_ci_native_scope import classify as ready_classify
-from check_p0 import (check_counts, measured_mcp_native_under_research,
+from check_p0 import (check_counts, local_component, measured_mcp_native_under_research,
                       measured_native_under_research, measured_t10, execute, select)
 
 
 class FeedbackTests(unittest.TestCase):
+    def test_local_component_repeats_only_the_requested_package(self):
+        with (patch("check_p0.git", side_effect=[b"abc\n", b" M changed\n"]),
+              patch("check_p0.report") as report,
+              patch("check_p0.tests") as run_tests,
+              patch("check_p0.time.monotonic", side_effect=[0, 10, 10, 12, 13, 17])):
+            local_component("strategy", 3, False)
+        self.assertEqual([call.args for call in run_tests.call_args_list],
+                         [("okx-strategy-core",)] * 3)
+        self.assertIn("dirty=true", report.call_args_list[0].args[0])
+        self.assertIn("median 3.00s", report.call_args_list[-1].args[0])
+
     def test_ready_windows_runs_math_owner_tests_not_just_worker(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
         owner_commands = {
