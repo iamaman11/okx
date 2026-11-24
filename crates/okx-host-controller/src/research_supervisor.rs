@@ -135,9 +135,8 @@ impl ResearchStateStore {
             return Err(HostControlError::ResearchStateCorrupt);
         }
         let mut bytes = Vec::new();
-        file.by_ref()
-            .take(MAX_STATE_BYTES + 1)
-            .read_to_end(&mut bytes)?;
+        let mut limited = std::io::Read::by_ref(&mut file).take(MAX_STATE_BYTES + 1);
+        limited.read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_STATE_BYTES {
             return Err(HostControlError::ResearchStateCorrupt);
         }

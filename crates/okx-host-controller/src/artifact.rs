@@ -21,7 +21,7 @@ use crate::{
 };
 
 mod research_component;
-pub(crate) use research_component::{VerifiedResearchImage, resolve_verified_installed_research};
+pub(crate) use research_component::resolve_verified_installed_research;
 pub use research_component::{deploy_research, rollback_research};
 use research_component::{parse_bundle_compatible, parse_persisted_manifest};
 
