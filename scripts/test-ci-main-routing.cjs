@@ -138,6 +138,12 @@ function validate(yaml, fileNames) {
   assert.match(regression, /Clippy native Windows crates/);
   assert.match(regression, /Strategy Core and Research owner regressions on full Windows/);
   assert.match(regression, /Native trading, SQL, CONTROL and Launcher remaining regression/);
+  // The six 3s SQLite-writer/catalog fixtures are still mandatory, just not
+  // contending with the remaining 300 Engine libtests for the test-harness clock.
+  assert.match(regression, /\$testArgs \+= @\('--skip','accounts::native_connect_contracts::'\)/);
+  assert.match(regression, /name: Serial native account catalog and writer-termination regressions/);
+  assert.match(regression, /cargo test --locked -p okx-trading-engine --lib accounts::native_connect_contracts:: -- --test-threads 1/);
+  assert.match(regression, /NATIVE_ACCOUNT_CATALOG_ALL_SIX_TESTS_REQUIRED/);
   // Never make timed terminal-source frontiers vanish into --skip. Their
   // two original Engine tests are instead required to pass serially here.
   for (const witness of [
@@ -239,6 +245,10 @@ assert.throws(() => validate(source.replace('      - name: Test portable crates'
 assert.throws(() => validate(source.replace('        default: true', '        default: false'), workflows));
 assert.throws(() => validate(source.replace('BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED',
   'WE_DID_NOT_VERIFY_THE_TWO_TESTS'), workflows));
+assert.throws(() => validate(source.replace('NATIVE_ACCOUNT_CATALOG_ALL_SIX_TESTS_REQUIRED',
+  'WE_DID_NOT_VERIFY_THE_SIX_TESTS'), workflows));
+assert.throws(() => validate(source.replace("$testArgs += @('--skip','accounts::native_connect_contracts::')",
+  "# no catalog exclusion"), workflows));
 assert.throws(() => validate(source.replace('stale_bill_coverage_blocks_settlement_after_inspect',
   'stale_bill_not_covered'), workflows));
 assert.throws(() => validate(source.replace(/(name: trading-safety-acceptance-windows[\s\S]*?shared-key: )trading-engine-tests-windows/,

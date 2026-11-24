@@ -992,6 +992,10 @@ jobs:
             # OS-kill is checked exclusively in the finance/isolated job.
             if ($package -eq 'okx-trading-engine') {
               $testArgs += @('--skip','accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once')
+              # Six Native account/catalog fixtures verify the actual writer
+              # termination and SQLite lease within 3s. Do not race their
+              # clocks against hundreds of independent Engine fixtures.
+              $testArgs += @('--skip','accounts::native_connect_contracts::')
               # These two real-clock source-frontier tests must not race each
               # other for 2s market / 5s account freshness on a loaded runner.
               # They are mandatory in the explicitly counted serial step below.
@@ -1002,6 +1006,20 @@ jobs:
             Write-Host "Remaining regression: $package; financial witnesses routed to full collector: $(@($covered | Where-Object package -eq $package).Count)"
             cargo test --locked -p $package -- @testArgs
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Serial native account catalog and writer-termination regressions
+        shell: pwsh
+        run: |
+          # Keep the original 3s SQLite writer release deadlines and all six
+          # real file-lock/recovery tests; only the test-harness scheduling
+          # changes. A missing test cannot be counted as passed.
+          $output = & cargo test --locked -p okx-trading-engine --lib accounts::native_connect_contracts:: -- --test-threads 1 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\. 6 passed; 0 failed;') {
+            throw 'NATIVE_ACCOUNT_CATALOG_ALL_SIX_TESTS_REQUIRED'
           }
 
       - name: Serial terminal release source-frontier regression
