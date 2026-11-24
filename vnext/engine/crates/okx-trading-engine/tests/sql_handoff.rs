@@ -189,16 +189,24 @@ fn typed_manual_target_sqlite_lost_ack_reopen_and_no_second_simulated_post() {
         owner.intent(&intent.intent_id).unwrap().unwrap().state,
         IntentState::Reserved
     );
-    assert!(owner
-        .begin_post(&intent.intent_id, 1, 4)
-        .expect("durable begin-post"));
+    assert!(
+        owner
+            .begin_post(&intent.intent_id, 1, 4)
+            .expect("durable begin-post")
+    );
     assert_eq!(owner.post_fence_evidence(&intent.intent_id).unwrap().0, 4);
 
     // The simulated venue receives exactly one request; the ACK is lost.
     let mut venue = OfflineVenue::default();
     venue.post_and_lose_ack(&intent.client_order_id);
     owner
-        .record_outcome(&intent.intent_id, IntentState::Unknown, None, "s0-lost-ack", 5)
+        .record_outcome(
+            &intent.intent_id,
+            IntentState::Unknown,
+            None,
+            "s0-lost-ack",
+            5,
+        )
         .expect("persist UNKNOWN, never optimistically succeed");
     drop(owner);
 
@@ -209,7 +217,11 @@ fn typed_manual_target_sqlite_lost_ack_reopen_and_no_second_simulated_post() {
         IntentState::Unknown
     );
     assert!(!recovered.begin_post(&intent.intent_id, 1, 6).unwrap());
-    assert_eq!(venue.posted_client_ids.len(), 1, "no repost after lost ACK/reopen");
+    assert_eq!(
+        venue.posted_client_ids.len(),
+        1,
+        "no repost after lost ACK/reopen"
+    );
 
     // The reconciliation answer comes from the simulated venue's independent
     // client-order lookup, not a guessed ACK or the mutable SQLite row.
