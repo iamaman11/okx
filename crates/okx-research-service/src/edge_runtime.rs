@@ -10,7 +10,10 @@ use okx_ipc_contracts::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest, AgentResponse,
     AgentResponseStatus, DIRECT_TRANSPORT_FRAME_SCHEMA_V2 as SCHEMA,
     DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES as FRAME_LIMIT, DataQuality, DirectRuntimeProfile,
-    DirectTransportFrame as Frame, research_ipc::ResearchScope, trading::DiagnosticsView,
+    DirectTransportFrame as Frame,
+    analytics::{MarketRequest, PortfolioScenarioRequest, ResearchRequest},
+    research_ipc::ResearchScope,
+    trading::DiagnosticsView,
 };
 use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -296,17 +299,22 @@ async fn session(
                         if pending.contains(&id) {
                             continue;
                         }
-                        if operator_governance.is_some() || !research_only_permits(&request) {
-                            send(&mut sink, Frame::Response {
-                                schema: SCHEMA.into(), session_id: session_id.clone(), connection_generation,
-                                response: rejected(&id, "RESEARCH_OPERATION_FORBIDDEN"),
-                            }).await?;
-                        } else if request.validate().is_err() {
-                            send(&mut sink, Frame::Response {
-                                schema: SCHEMA.into(), session_id: session_id.clone(), connection_generation,
-                                response: rejected(&id, "INVALID_RESEARCH_REQUEST"),
-                            }).await?;
-                        } else if requests.len() >= MAX_RESEARCH_IN_FLIGHT {
+                        let command = if operator_governance.is_some() {
+                            Err("RESEARCH_OPERATION_FORBIDDEN")
+                        } else {
+                            ResearchCommand::try_from(request)
+                        };
+                        let command = match command {
+                            Ok(command) => command,
+                            Err(reason) => {
+                                send(&mut sink, Frame::Response {
+                                    schema: SCHEMA.into(), session_id: session_id.clone(), connection_generation,
+                                    response: rejected(&id, reason),
+                                }).await?;
+                                continue;
+                            }
+                        };
+                        if requests.len() >= MAX_RESEARCH_IN_FLIGHT {
                             send(&mut sink, Frame::Response {
                                 schema: SCHEMA.into(), session_id: session_id.clone(), connection_generation,
                                 response: rejected(&id, "RESEARCH_QUEUE_FULL"),
@@ -316,7 +324,7 @@ async fn session(
                             let executor = service.clone();
                             requests.push(Box::pin(async move {
                                 let result = tokio::time::timeout(
-                                    REQUEST_DEADLINE, dispatch(&executor, request.operation)
+                                    REQUEST_DEADLINE, dispatch(&executor, command)
                                 ).await.unwrap_or_else(|_| Err("RESEARCH_REQUEST_TIMEOUT".into()));
                                 (id.clone(), response_for(&id, result))
                             }));
@@ -329,44 +337,62 @@ async fn session(
     }
 }
 
-/// This is the only remote operation gateway. Adding a new `AgentOperation`
-/// variant cannot implicitly give it access to Research or finance.
-pub fn research_only_permits(request: &AgentRequest) -> bool {
-    request.account.is_none()
-        && match &request.operation {
-            AgentOperation::Market { .. }
-            | AgentOperation::MarketCapabilities
-            | AgentOperation::Research { .. }
-            | AgentOperation::PortfolioScenario { .. }
-            | AgentOperation::FindInstruments { .. }
-            | AgentOperation::MarketOverview { .. }
-            | AgentOperation::MarketMicrostructure { .. } => true,
-            AgentOperation::Diagnostics { request } => {
-                request.account.is_none() && request.view == Some(DiagnosticsView::Research)
-            }
-            _ => false,
+/// Only operations owned by Research enter its executor.
+enum ResearchCommand {
+    Market(MarketRequest),
+    MarketCapabilities,
+    Research(ResearchRequest),
+    PortfolioScenario(PortfolioScenarioRequest),
+    ExplainJob(Option<String>),
+    PublicLiveView,
+}
+
+impl TryFrom<AgentRequest> for ResearchCommand {
+    type Error = &'static str;
+
+    fn try_from(request: AgentRequest) -> Result<Self, Self::Error> {
+        if request.account.is_some() {
+            return Err("RESEARCH_OPERATION_FORBIDDEN");
         }
+        let valid = request.validate().is_ok();
+        let command = match request.operation {
+            AgentOperation::Market { request } => Self::Market(request),
+            AgentOperation::MarketCapabilities => Self::MarketCapabilities,
+            AgentOperation::Research { request } => Self::Research(request),
+            AgentOperation::PortfolioScenario { request } => Self::PortfolioScenario(request),
+            AgentOperation::Diagnostics { request }
+                if request.account.is_none() && request.view == Some(DiagnosticsView::Research) =>
+            {
+                Self::ExplainJob(request.reference)
+            }
+            AgentOperation::MarketMicrostructure { .. }
+            | AgentOperation::FindInstruments { .. }
+            | AgentOperation::MarketOverview { .. } => Self::PublicLiveView,
+            _ => return Err("RESEARCH_OPERATION_FORBIDDEN"),
+        };
+        if !valid {
+            return Err("INVALID_RESEARCH_REQUEST");
+        }
+        Ok(command)
+    }
 }
 
 async fn dispatch(
     service: &AnalyticsService,
-    operation: AgentOperation,
+    command: ResearchCommand,
 ) -> Result<serde_json::Value, String> {
-    match operation {
-        AgentOperation::Market { request } => {
+    match command {
+        ResearchCommand::Market(request) => {
             if request.universe.is_some() {
                 return Err("RESEARCH_MARKET_EXPLICIT_INSTRUMENTS_REQUIRED".into());
             }
             service.market(request, None, None).await
         }
-        AgentOperation::MarketCapabilities => Ok(service.market_capabilities()),
-        AgentOperation::Research { request } => service.research(request).await,
-        AgentOperation::PortfolioScenario { request } => portfolio_scenario_wire(&request),
-        AgentOperation::Diagnostics { request }
-            if request.view == Some(DiagnosticsView::Research) && request.account.is_none() =>
-        {
-            let id = request
-                .reference
+        ResearchCommand::MarketCapabilities => Ok(service.market_capabilities()),
+        ResearchCommand::Research(request) => service.research(request).await,
+        ResearchCommand::PortfolioScenario(request) => portfolio_scenario_wire(&request),
+        ResearchCommand::ExplainJob(reference) => {
+            let id = reference
                 .as_deref()
                 .ok_or("RESEARCH_DIAGNOSTICS_REFERENCE_REQUIRED")?;
             // The old deployment projection described a child observed by
@@ -386,12 +412,7 @@ async fn dispatch(
         // These originally used Engine's *WebSocket cache* and global
         // reference registry. Do not quietly claim equivalent independent
         // public evidence until their Research-owned source is implemented.
-        AgentOperation::MarketMicrostructure { .. }
-        | AgentOperation::FindInstruments { .. }
-        | AgentOperation::MarketOverview { .. } => {
-            Err("RESEARCH_PUBLIC_LIVE_VIEW_UNAVAILABLE".into())
-        }
-        _ => Err("RESEARCH_OPERATION_FORBIDDEN".into()),
+        ResearchCommand::PublicLiveView => Err("RESEARCH_PUBLIC_LIVE_VIEW_UNAVAILABLE".into()),
     }
 }
 
@@ -509,26 +530,48 @@ mod tests {
             json!({"type":"mailbox_telemetry"}),
             json!({"type":"strategies","request":{"action":"list"}}),
         ] {
-            assert!(!research_only_permits(&request(operation)));
+            assert!(matches!(
+                ResearchCommand::try_from(request(operation)),
+                Err("RESEARCH_OPERATION_FORBIDDEN")
+            ));
         }
-        assert!(research_only_permits(&request(
-            json!({"type":"market_capabilities"})
-        )));
-        assert!(research_only_permits(&request(
-            json!({"type":"research","request":{"action":"capabilities"}})
-        )));
+        assert!(matches!(
+            ResearchCommand::try_from(request(json!({"type":"market_capabilities"}))),
+            Ok(ResearchCommand::MarketCapabilities)
+        ));
+        assert!(matches!(
+            ResearchCommand::try_from(request(
+                json!({"type":"research","request":{"action":"capabilities"}})
+            )),
+            Ok(ResearchCommand::Research(_))
+        ));
         let mut with_account = request(json!({"type":"market_capabilities"}));
         with_account.account = Some("okx:real:account".into());
-        assert!(!research_only_permits(&with_account));
+        assert!(matches!(
+            ResearchCommand::try_from(with_account),
+            Err("RESEARCH_OPERATION_FORBIDDEN")
+        ));
         let diagnostics = request(json!({"type":"diagnostics","request":{
             "reference":"job_123","view":"research","account":null,"cycle_id":null,"limit":null
         }}));
-        assert!(research_only_permits(&diagnostics));
-        let mut nested = diagnostics.clone();
+        assert!(matches!(
+            ResearchCommand::try_from(diagnostics.clone()),
+            Ok(ResearchCommand::ExplainJob(Some(id))) if id == "job_123"
+        ));
+        let mut nested = diagnostics;
         if let AgentOperation::Diagnostics { request } = &mut nested.operation {
             request.account = Some("account".into());
         }
-        assert!(!research_only_permits(&nested));
+        assert!(matches!(
+            ResearchCommand::try_from(nested),
+            Err("RESEARCH_OPERATION_FORBIDDEN")
+        ));
+        let mut malformed = request(json!({"type":"market_capabilities"}));
+        malformed.schema = "unsupported".into();
+        assert!(matches!(
+            ResearchCommand::try_from(malformed),
+            Err("INVALID_RESEARCH_REQUEST")
+        ));
     }
 
     #[test]
