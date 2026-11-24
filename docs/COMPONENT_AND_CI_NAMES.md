@@ -29,6 +29,11 @@ authority. `okx-cli` is a tool, not a fifth continuously running application.
 The [crate split map](crate-split-map.md) shows which modules moved, their
 Cargo dependencies and the CI acceptance checks.
 
+Virtual portfolio stress scenarios run in Research through
+`okx-analysis::portfolio_scenario`, with the same public Engine command
+and response schema. The active Research Service advertises this command
+before Engine sends it. Account portfolio and NAV remain financial reads.
+
 ### Confirmed remaining coupling and release rules
 
 The Engine does **not** compile the Research crate, but

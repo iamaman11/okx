@@ -3,6 +3,7 @@ mod derivatives;
 mod history_features;
 mod market_query;
 mod microstructure;
+pub mod portfolio_scenario;
 pub mod query_plan;
 mod risk;
 mod scenario;

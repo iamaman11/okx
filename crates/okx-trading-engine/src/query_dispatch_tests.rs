@@ -833,6 +833,7 @@ use crate::accounts::tests::read_only_fixture_files as fixture_artifacts;
 #[tokio::test]
 async fn portfolio_scenario_public_dispatch_returns_independent_virtual_risk_values() {
     let fixture = Fixture::new(empty_reference()).await;
+    fixture.context.research.capabilities().await.unwrap();
     let before = fixture_artifacts(&fixture.root);
     let response = fixture
         .request(
@@ -880,6 +881,7 @@ async fn portfolio_scenario_public_dispatch_returns_independent_virtual_risk_val
 async fn portfolio_scenario_public_dispatch_rejects_non_psd_and_invalid_parameters() {
     use okx_ipc_contracts::trading::ScenarioCorrelation;
     let fixture = Fixture::new(empty_reference()).await;
+    fixture.context.research.capabilities().await.unwrap();
     let before = fixture_artifacts(&fixture.root);
     let mut non_psd = two_position_scenario();
     non_psd.positions.push(non_psd.positions[0].clone());

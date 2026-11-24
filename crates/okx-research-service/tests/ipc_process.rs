@@ -177,6 +177,108 @@ async fn child_round_trip_source_and_eof_restart() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test]
+async fn strategy_outbox_publishes_once_and_recovers_committed_proposal_after_restart() {
+    let root = test_root("strategy-outbox");
+    let session = WorkerSession::new("strategy-session".into()).unwrap();
+    let scope = ResearchScope::new("strategy-scope".into()).unwrap();
+    let now = jiff::Timestamp::now().as_millisecond() as u64;
+    let request = StrategySignalInput {
+        instance_id: SignalInstanceId::new("test-instance".into()).unwrap(),
+        definition_id: SignalDefinitionId::new("ema_cross_v1".into()).unwrap(),
+        definition_version: SignalDefinitionVersion::new("1".into()).unwrap(),
+        instrument: SignalInstrumentId::new("BTC-USDT-SWAP".into()).unwrap(),
+        timeframe_ms: 60_000,
+        available_at_ms: now,
+        prices: SignalRequest {
+            strategy_id: "ema_cross_v1".into(),
+            parameters: okx_ipc_contracts::analytics::EmaParameters { fast: 1, slow: 2 },
+            closes: (0..4)
+                .map(|i| ClosedPrice {
+                    time_ms: now - (4 - i) * 60_000,
+                    close: 100.0 + i as f64,
+                })
+                .collect(),
+        },
+    };
+    async fn poll_proposal(
+        input: &mut FramedWrite<ChildStdin, LengthDelimitedCodec>,
+        output: &mut FramedRead<ChildStdout, LengthDelimitedCodec>,
+        session: &WorkerSession,
+        number: u64,
+        request: &StrategySignalInput,
+    ) -> Option<StrategySignalProposal> {
+        let id = RequestId::new(format!("h{number}")).unwrap();
+        send(
+            input,
+            HostFrame::Request {
+                id: id.clone(),
+                session: session.clone(),
+                invocation: None,
+                command: Box::new(ResearchCommand::ProposeStrategySignal {
+                    request: request.clone(),
+                }),
+            },
+        )
+        .await;
+        match receive(output).await {
+            WorkerFrame::Response {
+                id: actual,
+                result: Ok(WorkerReply::StrategyProposal(value)),
+                ..
+            } => {
+                assert_eq!(actual, id);
+                value
+            }
+            other => panic!("unexpected outbox reply: {other:?}"),
+        }
+    }
+    let (mut child, mut input, mut output) = start(&root, &session, &scope).await;
+    assert!(
+        poll_proposal(&mut input, &mut output, &session, 1, &request)
+            .await
+            .is_none()
+    );
+    let proposal = tokio::time::timeout(Duration::from_secs(10), async {
+        for number in 2.. {
+            if let Some(proposal) =
+                poll_proposal(&mut input, &mut output, &session, number, &request).await
+            {
+                return proposal;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        unreachable!()
+    })
+    .await
+    .unwrap();
+    assert_ne!(proposal.position, SignalPosition::Warmup);
+    assert_eq!(proposal.last_closed_ms, now - 60_000);
+    drop(input);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+
+    let (mut child, mut input, mut output) = start(&root, &session, &scope).await;
+    assert_eq!(
+        poll_proposal(&mut input, &mut output, &session, 1, &request).await,
+        Some(proposal)
+    );
+    drop(input);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 use okx_ipc_contracts::analytics::ResearchRequest;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;

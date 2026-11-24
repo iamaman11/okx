@@ -23,7 +23,7 @@ use std::{
 };
 use tokio::{
     process::Command,
-    sync::{Mutex, Notify, Semaphore, mpsc, oneshot, watch},
+    sync::{Mutex, Notify, OnceCell, Semaphore, mpsc, oneshot, watch},
     task::JoinSet,
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -93,9 +93,15 @@ struct Connection {
     permits: Semaphore,
     control_permits: Semaphore,
     observation_permits: Semaphore,
+    features: OnceCell<WorkerFeatures>,
     source_permits: Arc<Semaphore>,
     stop: Notify,
     closed: watch::Sender<bool>,
+}
+#[derive(Clone, Copy)]
+struct WorkerFeatures {
+    portfolio_scenario: bool,
+    signal_outbox: bool,
 }
 struct PendingReply {
     pending: PendingReplies,
@@ -420,6 +426,7 @@ impl ResearchClient {
             permits: Semaphore::new(MAX_IN_FLIGHT),
             control_permits: Semaphore::new(CRITICAL_IN_FLIGHT),
             observation_permits: Semaphore::new(OBSERVATION_IN_FLIGHT),
+            features: OnceCell::new(),
             source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             stop: Notify::new(),
             closed,
@@ -643,6 +650,52 @@ impl ResearchClient {
             .await?
             .product()
     }
+    async fn worker_features(&self) -> Result<WorkerFeatures, String> {
+        tokio::time::timeout(Duration::from_millis(REQUEST_TIMEOUT_MS), async {
+            let owner = self.connect().await?;
+            let features = owner
+                .features
+                .get_or_try_init(|| async {
+                    let capabilities = Self::send(&owner, ResearchCommand::Capabilities, None)
+                        .await?
+                        .product()?;
+                    Ok::<_, String>(WorkerFeatures {
+                        portfolio_scenario: capabilities["portfolio_scenario"] == true,
+                        signal_outbox: capabilities["strategy_signal_outbox"] == true,
+                    })
+                })
+                .await?;
+            Ok(*features)
+        })
+        .await
+        .map_err(|_| "WORKER_CAPABILITIES_TIMEOUT")?
+    }
+    pub async fn supports_strategy_signal_outbox(&self) -> Result<bool, String> {
+        Ok(self.worker_features().await?.signal_outbox)
+    }
+    pub async fn portfolio_scenario(
+        &self,
+        request: okx_ipc_contracts::trading::PortfolioScenarioRequest,
+    ) -> Result<Value, String> {
+        if !self.worker_features().await?.portfolio_scenario {
+            return Err("RESEARCH_PORTFOLIO_SCENARIO_UNSUPPORTED".into());
+        }
+        self.call(ResearchCommand::PortfolioScenario { request }, true)
+            .await?
+            .product()
+    }
+    pub async fn stage_strategy_signal(
+        &self,
+        request: StrategySignalInput,
+    ) -> Result<Option<StrategySignalProposal>, String> {
+        match self
+            .call(ResearchCommand::ProposeStrategySignal { request }, true)
+            .await?
+        {
+            WorkerReply::StrategyProposal(proposal) => Ok(proposal),
+            _ => Err("WORKER_REPLY_KIND_MISMATCH".into()),
+        }
+    }
     pub async fn diagnostic_job(&self, id: &str) -> Result<Value, String> {
         self.call(
             ResearchCommand::Explain {
@@ -696,6 +749,7 @@ mod transport_tests {
             permits: Semaphore::new(MAX_IN_FLIGHT),
             control_permits: Semaphore::new(CRITICAL_IN_FLIGHT),
             observation_permits: Semaphore::new(OBSERVATION_IN_FLIGHT),
+            features: OnceCell::new(),
             source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             stop: Notify::new(),
             closed,
@@ -752,6 +806,7 @@ mod transport_tests {
             permits: Semaphore::new(MAX_IN_FLIGHT),
             control_permits: Semaphore::new(CRITICAL_IN_FLIGHT),
             observation_permits: Semaphore::new(OBSERVATION_IN_FLIGHT),
+            features: OnceCell::new(),
             source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             stop: Notify::new(),
             closed,
@@ -814,6 +869,7 @@ mod transport_tests {
             permits: Semaphore::new(MAX_IN_FLIGHT),
             control_permits: Semaphore::new(CRITICAL_IN_FLIGHT),
             observation_permits: Semaphore::new(OBSERVATION_IN_FLIGHT),
+            features: OnceCell::new(),
             source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             stop: Notify::new(),
             closed,

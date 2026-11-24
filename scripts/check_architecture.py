@@ -15,7 +15,7 @@ ALLOWED = {
     "okx-market-runtime": {"okx-api", "okx-observation", "okx-ipc-contracts", "okx-ws"},
     "okx-domain-core": set(),
     "okx-strategy-core": {"okx-domain-core"},
-    "okx-analysis": {"okx-domain-core", "okx-strategy-core"},
+    "okx-analysis": {"okx-domain-core", "okx-ipc-contracts", "okx-strategy-core"},
     "okx-research": {"okx-analysis"},
     "okx-trade-execution": {"okx-api", "okx-analysis", "okx-domain-core", "okx-observation"},
     "okx-ipc-contracts": {"okx-domain-core"},

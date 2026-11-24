@@ -16,6 +16,7 @@ mod resource_observation;
 mod result;
 mod result_reexecution;
 pub mod sources;
+mod strategy_signal;
 
 use futures_util::{StreamExt, stream};
 use okx_ipc_contracts::analytics::*;
@@ -61,6 +62,7 @@ pub struct AnalyticsService {
     heavy: Arc<tokio::sync::Semaphore>,
     research_memory: Arc<tokio::sync::Semaphore>,
     runners: Arc<AtomicUsize>,
+    signal_slots: Arc<tokio::sync::Semaphore>,
 }
 impl AnalyticsService {
     /// Legacy signal execution on the existing bounded Research CPU executor.
@@ -146,6 +148,7 @@ impl AnalyticsService {
             jobs,
             producer: None,
             runners: Arc::new(AtomicUsize::new(0)),
+            signal_slots: Arc::new(tokio::sync::Semaphore::new(8)),
             artifacts: ResearchArtifactStore::at(root),
             heavy: Arc::new(tokio::sync::Semaphore::new(2)),
             research_memory: Arc::new(tokio::sync::Semaphore::new(

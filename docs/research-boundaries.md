@@ -41,22 +41,21 @@ instruments are required. Candle-backed requests use the same analytics,
 coverage and artifact code as hosted requests. Universe, ticker, funding
 and open-interest requests require providers that implement those sources.
 
-The current live strategy turn in
-`okx-trading-engine/src/trade_service/strategies.rs` loads closed prices from
-the Engine's live source and awaits `ResearchClient::evaluate_signal` before
-claiming a decision in financial SQLite. Thus the Engine does invoke Research
-for **new strategy decisions**. This must not be mistaken for an independent
-trading strategy runtime, even though Research is a separate executable and
-is not a production Cargo dependency of the Engine. The existing financial
-writer, RiskBook, reconciliation and protection remain Engine-owned.
+The live strategy turn in `okx-trading-engine/src/trade_service/strategies.rs`
+captures closed prices from Engine's public source. With a compatible worker
+it stages the captured input in Research and checks for a committed proposal
+on a later strategy turn. Research evaluates the signal in the background
+and commits it to its SQLite outbox before returning it. A worker restart
+keeps committed proposals until expiry and drops pending computations.
+Workers with the previous protocol continue to use `EvaluateSignal`.
 
-The target split is: Research owns public data, numerical strategy evaluation
-and a durable proposed-signal outbox; Engine owns the authenticated, versioned
-signal inbox, policy/admission, financial SQLite and every venue mutation.
-`EvaluateSignal` must leave the synchronous trading turn only after a tested
-replacement exists. A proposed signal never constitutes risk authorization or
-a one-time venue-send right. Research failure must block unjustified new
-strategy risk without blocking manual trade commands or ongoing protection.
+Engine checks the proposal against its installed strategy, its own digest
+of the exact input, the policy revision and current time. The existing
+financial SQLite ledger serializes duplicate claims. RiskBook and Engine
+retain all admission and venue mutation authority. Manual trade commands
+and reconciliation continue independently of the strategy lane. A fully
+autonomous Research scheduler would also need to receive strategy
+configuration and capture its own input independently of Engine.
 
 ## Identity and recovery
 

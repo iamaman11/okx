@@ -112,6 +112,12 @@ pub enum ResearchCommand {
     EvaluateSignal {
         request: SignalRequest,
     },
+    ProposeStrategySignal {
+        request: StrategySignalInput,
+    },
+    PortfolioScenario {
+        request: crate::trading::PortfolioScenarioRequest,
+    },
     Capabilities,
     Drain,
     Explain {
@@ -260,6 +266,7 @@ pub enum WorkerFrame {
 pub enum WorkerReply {
     Product(Value),
     Signal(SignalDecision),
+    StrategyProposal(Option<StrategySignalProposal>),
     Draining(DrainStatus),
     Shutdown,
 }
@@ -349,6 +356,34 @@ pub struct StrategySignalProposal {
     pub source_digest: SignalSourceDigest,
     pub position: SignalPosition,
 }
+
+/// A confirmed public input snapshot and strategy identity. Financial context
+/// and account credentials never cross this request boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategySignalInput {
+    pub instance_id: SignalInstanceId,
+    pub definition_id: SignalDefinitionId,
+    pub definition_version: SignalDefinitionVersion,
+    pub instrument: SignalInstrumentId,
+    pub timeframe_ms: u64,
+    pub available_at_ms: u64,
+    pub prices: SignalRequest,
+}
+
+impl StrategySignalInput {
+    pub fn valid_at(&self, now_ms: u64) -> bool {
+        self.prices.valid()
+            && self.prices.strategy_id == self.definition_id.as_str()
+            && self.timeframe_ms >= 1_000
+            && self.available_at_ms <= now_ms
+            && self.prices.closes.last().is_some_and(|bar| {
+                bar.time_ms < self.available_at_ms
+                    && now_ms.saturating_sub(bar.time_ms) <= self.timeframe_ms.saturating_mul(2)
+            })
+    }
+}
+
 impl StrategySignalProposal {
     pub const SCHEMA: &'static str = "okx.research.strategy-proposal/v1";
     /// Only a fresh, closed-bar, bounded-lifetime proposal can reach Engine's

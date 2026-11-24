@@ -86,6 +86,13 @@ pub struct Jobs {
     diagnostic: Arc<job_diagnostics::Projection>,
     draining: Arc<AtomicBool>,
 }
+
+pub(super) enum SignalOutboxState {
+    Pending,
+    Start,
+    Ready(Option<okx_ipc_contracts::research_ipc::StrategySignalProposal>),
+}
+
 impl Jobs {
     #[cfg(test)]
     pub fn open(path: PathBuf) -> Result<Self, String> {
@@ -183,6 +190,13 @@ impl Jobs {
                     cancel_key TEXT PRIMARY KEY,
                     job_id TEXT NOT NULL REFERENCES research_jobs(id)
                  ) STRICT;
+                 CREATE TABLE IF NOT EXISTS research_signal_outbox(
+                    signal_key TEXT PRIMARY KEY,
+                    admitted_ms INTEGER NOT NULL,
+                    expires_ms INTEGER NOT NULL,
+                    result TEXT
+                 ) STRICT;
+                 DELETE FROM research_signal_outbox WHERE result IS NULL;
                  CREATE TABLE IF NOT EXISTS research_cursor_signing (
                     name TEXT PRIMARY KEY,
                     key BLOB NOT NULL CHECK(length(key)=32)
@@ -794,6 +808,71 @@ impl Jobs {
         )
         .map_err(|e| e.to_string())
     }
+
+    pub(super) fn stage_strategy_signal(
+        &self,
+        key: &str,
+        now: u64,
+        expires: u64,
+    ) -> Result<SignalOutboxState, String> {
+        let now = i64::try_from(now).map_err(|_| "RESEARCH_SIGNAL_TIME_INVALID")?;
+        let expires = i64::try_from(expires).map_err(|_| "RESEARCH_SIGNAL_TIME_INVALID")?;
+        let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
+        let existing: Option<Option<String>> = db
+            .query_row(
+                "SELECT result FROM research_signal_outbox WHERE signal_key=?1 AND expires_ms>?2",
+                params![key, now],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(result) = existing {
+            return match result {
+                None => Ok(SignalOutboxState::Pending),
+                Some(value) => serde_json::from_str(&value)
+                    .map(SignalOutboxState::Ready)
+                    .map_err(|_| "RESEARCH_SIGNAL_OUTBOX_CORRUPT".into()),
+            };
+        }
+        if self.draining.load(Ordering::Acquire) {
+            return Err("RESEARCH_DRAINING".into());
+        }
+        db.execute(
+            "DELETE FROM research_signal_outbox WHERE expires_ms<=?1",
+            [now],
+        )
+        .map_err(|e| e.to_string())?;
+        let inserted = db
+            .execute(
+                "INSERT INTO research_signal_outbox(signal_key,admitted_ms,expires_ms)
+                 SELECT ?1,?2,?3 WHERE (SELECT COUNT(*) FROM research_signal_outbox)<1024",
+                params![key, now, expires],
+            )
+            .map_err(|e| e.to_string())?;
+        if inserted != 1 {
+            return Err("RESEARCH_SIGNAL_OUTBOX_FULL".into());
+        }
+        Ok(SignalOutboxState::Start)
+    }
+
+    pub(super) fn publish_strategy_signal(
+        &self,
+        key: &str,
+        admitted: u64,
+        result: Option<&okx_ipc_contracts::research_ipc::StrategySignalProposal>,
+    ) -> Result<(), String> {
+        let admitted = i64::try_from(admitted).map_err(|_| "RESEARCH_SIGNAL_TIME_INVALID")?;
+        let value = serde_json::to_string(&result).map_err(|e| e.to_string())?;
+        let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
+        db.execute(
+            "UPDATE research_signal_outbox SET result=?3
+             WHERE signal_key=?1 AND admitted_ms=?2 AND result IS NULL",
+            params![key, admitted, value],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn pin(&self, id: &str, pinned: bool) -> Result<(), String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         if db

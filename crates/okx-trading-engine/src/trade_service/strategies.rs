@@ -1,5 +1,8 @@
 use super::*;
-use okx_ipc_contracts::research_ipc::{ClosedPrice, SignalPosition, SignalRequest};
+use okx_ipc_contracts::research_ipc::{
+    ClosedPrice, SignalDefinitionId, SignalDefinitionVersion, SignalInstanceId, SignalInstrumentId,
+    SignalPosition, SignalRequest, StrategySignalInput,
+};
 use okx_ipc_contracts::trading::{CapitalDirection, StrategyConfigurationV1, StrategyParametersV1};
 #[cfg(test)]
 #[path = "strategy_contract_tests.rs"]
@@ -480,37 +483,44 @@ impl TradeService {
             .ok_or("STRATEGY_RESEARCH_NOT_READY")?;
         let (fast, slow) = (config.parameters.fast, config.parameters.slow);
         let timeframe = config.timeframe_ms;
+        let use_outbox = research.supports_strategy_signal_outbox().await?;
         for instrument in &config.instruments {
             let bars = live_source
                 .load_closed_closes(instrument, timeframe, (slow * 4).clamp(100, 10000))
                 .await?;
             let last = bars.last().ok_or("STRATEGY_HISTORY_UNAVAILABLE")?.0;
-            let decision_key = format!(
-                "bar_{}",
-                &digest(&(
-                    r.configuration.account_key.wire(),
-                    &instance.instance_id,
-                    &instance.definition_id,
-                    &instance.definition_version,
-                    &instance.parameters,
-                    instrument,
-                    timeframe,
-                    last
-                ))?[..40]
-            );
-            let decision = research
-                .evaluate_signal(SignalRequest {
-                    strategy_id: instance.definition_id.clone(),
-                    parameters: okx_ipc_contracts::analytics::EmaParameters { fast, slow },
-                    closes: bars
-                        .iter()
-                        .map(|(time_ms, close)| ClosedPrice {
-                            time_ms: *time_ms,
-                            close: *close,
-                        })
-                        .collect(),
-                })
-                .await?;
+            let prices = SignalRequest {
+                strategy_id: instance.definition_id.clone(),
+                parameters: okx_ipc_contracts::analytics::EmaParameters { fast, slow },
+                closes: bars
+                    .iter()
+                    .map(|(time_ms, close)| ClosedPrice {
+                        time_ms: *time_ms,
+                        close: *close,
+                    })
+                    .collect(),
+            };
+            let (proposal, legacy_position) = if use_outbox {
+                let Some(proposal) = research
+                    .stage_strategy_signal(StrategySignalInput {
+                        instance_id: SignalInstanceId::new(instance.instance_id.clone())?,
+                        definition_id: SignalDefinitionId::new(instance.definition_id.clone())?,
+                        definition_version: SignalDefinitionVersion::new(
+                            instance.definition_version.clone(),
+                        )?,
+                        instrument: SignalInstrumentId::new(instrument.to_owned())?,
+                        timeframe_ms: timeframe,
+                        available_at_ms: u64::try_from(now()).map_err(err)?,
+                        prices,
+                    })
+                    .await?
+                else {
+                    continue;
+                };
+                (Some(proposal), None)
+            } else {
+                (None, Some(research.evaluate_signal(prices).await?.position))
+            };
             let decision_digest = digest(&(last, &bars))?;
             let (state, control) = self.authority(r, None).await?;
             if !control.access_enabled() {
@@ -519,26 +529,59 @@ impl TradeService {
             let input_for_execute = decision_digest.clone();
             let revision = i64::try_from(state.state.revision)
                 .map_err(|_| "STRATEGY_POLICY_REVISION_INVALID")?;
-            let claimed = r
-                .execution
-                .store
-                .claim_strategy_decision(
-                    deadline(),
+            let account = r.configuration.account_key.wire();
+            let (claim, position) = if let Some(proposal) = proposal {
+                strategy_signal::check_strategy_signal(
+                    &proposal,
+                    &strategy_signal::TrustedStrategySignalContext {
+                        instance,
+                        configuration: &config,
+                        authenticated_account_key: &account,
+                        instrument,
+                        last_closed_ms: last,
+                        source_digest: &decision_digest,
+                        policy_revision: revision,
+                        now_ms: now(),
+                    },
+                )?
+                .into_claim()
+            } else {
+                let decision_key = format!(
+                    "bar_{}",
+                    &digest(&(
+                        account,
+                        &instance.instance_id,
+                        &instance.definition_id,
+                        &instance.definition_version,
+                        &instance.parameters,
+                        instrument,
+                        timeframe,
+                        last
+                    ))?[..40]
+                );
+                (
                     okx_trade_execution::account_worker::StrategyDecisionClaimCommand {
                         instance_id: instance.instance_id.clone(),
-                        decision_key: decision_key.clone(),
+                        decision_key,
                         input_digest: decision_digest,
                         policy_revision: revision,
                         expected_version: instance.definition_version.clone(),
                         time: now(),
                     },
+                    legacy_position.expect("legacy evaluation yields a position"),
                 )
+            };
+            let decision_key = claim.decision_key.clone();
+            let claimed = r
+                .execution
+                .store
+                .claim_strategy_decision(deadline(), claim)
                 .await
                 .map_err(err)?;
             let Some(claimed_decision_id) = claimed else {
                 continue;
             };
-            let desired = match decision.position {
+            let desired = match position {
                 SignalPosition::Long => 1,
                 SignalPosition::Short => -1,
                 SignalPosition::Flat | SignalPosition::Warmup => 0,

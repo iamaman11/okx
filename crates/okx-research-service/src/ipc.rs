@@ -266,6 +266,8 @@ where
                                 ResearchCommand::Research { request } => service.research(request).await.map(WorkerReply::Product),
                                 ResearchCommand::Market { request, universe_page, resolved_instruments } => service.market(request, universe_page, resolved_instruments).await.map(WorkerReply::Product),
                                 ResearchCommand::EvaluateSignal { request } => service.evaluate_signal(request).await.map(WorkerReply::Signal),
+                                ResearchCommand::ProposeStrategySignal { request } => service.stage_strategy_signal(request).await.map(WorkerReply::StrategyProposal),
+                                ResearchCommand::PortfolioScenario { request } => okx_analysis::portfolio_scenario::evaluate(&request).map(WorkerReply::Product),
                                 ResearchCommand::Capabilities => Ok(WorkerReply::Product(service.market_capabilities())),
                                 ResearchCommand::Drain => service.begin_drain().await.map(WorkerReply::Draining),
                                 ResearchCommand::Explain { job_id } => Ok(WorkerReply::Product(service.diagnostic_job(job_id.as_str()))),
