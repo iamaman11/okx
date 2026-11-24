@@ -1,12 +1,15 @@
-//! Research-owned, public-only OKX candle source. No Engine, keys, private
+//! Research-owned, public-only OKX market source. No Engine, keys, private
 //! endpoints, arbitrary URLs or venue mutations are reachable from this API.
 use crate::source_api::{PublicSourceProvider, SourceFuture};
 use okx_ipc_contracts::research_ipc::{
-    HistoryCandle, MAX_FRAME_BYTES, PublicCandleCapture, PublicSourceHttpDelivery,
-    PublicSourceReply, PublicSourceRequest,
+    FundingHistoryEvent, HistoryCandle, MAX_FRAME_BYTES, PublicCandleCapture, PublicCatalogCapture,
+    PublicFundingCapture, PublicReferenceCapture, PublicReferenceInstrument,
+    PublicSourceHttpDelivery, PublicSourceReply, PublicSourceRequest, ResearchOpenInterest,
+    ResearchTicker,
 };
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     future::Future,
@@ -27,18 +30,28 @@ trait PublicGet: Send + Sync {
     fn get(&self, path: &'static str, parameters: Vec<(&'static str, String)>) -> GetFuture<'_>;
 }
 
-struct BoundedHttpsGet(reqwest::Client);
+struct BoundedHttpsGet {
+    client: reqwest::Client,
+    permits: tokio::sync::Semaphore,
+}
 
 impl PublicGet for BoundedHttpsGet {
     fn get(&self, path: &'static str, parameters: Vec<(&'static str, String)>) -> GetFuture<'_> {
         Box::pin(async move {
+            let _permit = tokio::time::timeout(Duration::from_secs(5), self.permits.acquire())
+                .await
+                .map_err(|_| "OKX rate/backpressure defer: standalone request capacity")?
+                .map_err(|_| "RESEARCH_PUBLIC_TRANSPORT_FAILED")?;
             let mut response = self
-                .0
+                .client
                 .get(format!("{PUBLIC_ORIGIN}{path}"))
                 .query(&parameters)
                 .send()
                 .await
                 .map_err(|_| "RESEARCH_PUBLIC_TRANSPORT_FAILED".to_owned())?;
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return Err("OKX rate/backpressure defer: HTTP 429".into());
+            }
             if response.status() != reqwest::StatusCode::OK {
                 return Err("RESEARCH_PUBLIC_HTTP_FAILED".into());
             }
@@ -78,7 +91,10 @@ impl IndependentOkxPublicSource {
             .build()
             .map_err(|_| "RESEARCH_PUBLIC_CLIENT_INIT_FAILED".to_owned())?;
         Ok(Self {
-            get: Arc::new(BoundedHttpsGet(client)),
+            get: Arc::new(BoundedHttpsGet {
+                client,
+                permits: tokio::sync::Semaphore::new(4),
+            }),
         })
     }
 
@@ -94,69 +110,297 @@ impl PublicSourceProvider for IndependentOkxPublicSource {
             if !request.valid() {
                 return Err("INVALID_RESEARCH_SOURCE_REQUEST".into());
             }
-            let PublicSourceRequest::Candles {
-                instrument,
-                bar,
-                after,
-                before,
-                limit,
-                queued: _,
-            } = request
-            else {
-                return Err("RESEARCH_PUBLIC_OPERATION_UNSUPPORTED".into());
-            };
-            let mut parameters = vec![("instId", instrument), ("bar", bar)];
-            if let Some(cursor) = after {
-                parameters.push(("after", cursor));
+            match request {
+                PublicSourceRequest::Candles {
+                    instrument,
+                    bar,
+                    after,
+                    before,
+                    limit,
+                    ..
+                } => {
+                    let mut parameters = page_parameters(instrument, after, before, limit);
+                    parameters.insert(1, ("bar", bar));
+                    let raw = self.get.get(PUBLIC_CANDLES_PATH, parameters).await?;
+                    let rows = parse_candles(&raw, usize::from(limit))?;
+                    let http_delivery = Some(delivery(&raw));
+                    Ok(PublicSourceReply::Candles(PublicCandleCapture {
+                        raw_body: raw,
+                        rows,
+                        acquired_at_ms: acquired_at()?,
+                        http_delivery,
+                    }))
+                }
+                PublicSourceRequest::CatalogPage {
+                    route,
+                    instrument,
+                    after,
+                    before,
+                    limit,
+                } => {
+                    let mut parameters = page_parameters(instrument, after, before, limit);
+                    let path = match route.as_str() {
+                        "recent_trades" => "/api/v5/market/trades",
+                        "history_trades" => {
+                            parameters.push(("type", "1".into()));
+                            "/api/v5/market/history-trades"
+                        }
+                        _ => return Err("INVALID_RESEARCH_SOURCE_REQUEST".into()),
+                    };
+                    let raw = self.get.get(path, parameters).await?;
+                    let rows = rows(&raw, usize::from(limit), "RESEARCH_PUBLIC_TRADES_INVALID")?;
+                    let http_delivery = delivery(&raw);
+                    Ok(PublicSourceReply::CatalogPage(PublicCatalogCapture {
+                        route,
+                        raw_body: raw,
+                        rows,
+                        acquired_at_ms: acquired_at()?,
+                        http_delivery,
+                    }))
+                }
+                PublicSourceRequest::Ticker { instrument } => {
+                    let raw = self
+                        .get
+                        .get(
+                            "/api/v5/market/ticker",
+                            vec![("instId", instrument.clone())],
+                        )
+                        .await?;
+                    let row: TickerRow = one(&raw, "RESEARCH_PUBLIC_TICKER_INVALID")?;
+                    if row.instrument != instrument {
+                        return Err("RESEARCH_PUBLIC_TICKER_INVALID".into());
+                    }
+                    Ok(PublicSourceReply::Ticker(row.ticker))
+                }
+                PublicSourceRequest::Reference { instrument } => {
+                    if !instrument.ends_with("-SWAP") {
+                        return Err("RESEARCH_PUBLIC_REFERENCE_REQUIRES_SWAP".into());
+                    }
+                    let params = vec![("instType", "SWAP".into()), ("instId", instrument.clone())];
+                    let raw = self.get.get("/api/v5/public/instruments", params).await?;
+                    let row: ReferenceRow = one(&raw, "RESEARCH_PUBLIC_REFERENCE_INVALID")?;
+                    if row.inst_id != instrument || row.inst_type != "SWAP" || row.state != "live" {
+                        return Err("RESEARCH_PUBLIC_REFERENCE_INVALID".into());
+                    }
+                    let http_delivery = Some(delivery(&raw));
+                    let reference_generation = format!("sha256:{:x}", Sha256::digest(&raw));
+                    Ok(PublicSourceReply::Reference(PublicReferenceCapture {
+                        raw_body: raw,
+                        instrument: PublicReferenceInstrument {
+                            contract_type: row.ct_type,
+                            contract_value: row.ct_val,
+                            contract_value_currency: row.ct_val_ccy,
+                            settle_currency: row.settle_ccy,
+                        },
+                        reference_generation,
+                        acquired_at_ms: acquired_at()?,
+                        http_delivery,
+                    }))
+                }
+                PublicSourceRequest::Funding {
+                    instrument,
+                    after,
+                    before,
+                    limit,
+                } => {
+                    let params = page_parameters(instrument.clone(), after, before, limit);
+                    let raw = self
+                        .get
+                        .get("/api/v5/public/funding-rate-history", params)
+                        .await?;
+                    let rows = funding_rows(&raw, &instrument, usize::from(limit))?;
+                    let http_delivery = Some(delivery(&raw));
+                    Ok(PublicSourceReply::Funding(PublicFundingCapture {
+                        raw_body: raw,
+                        rows,
+                        acquired_at_ms: acquired_at()?,
+                        http_delivery,
+                    }))
+                }
+                PublicSourceRequest::OpenInterest { instrument, period } => {
+                    let params = vec![
+                        ("instId", instrument),
+                        ("period", period),
+                        ("limit", "100".into()),
+                    ];
+                    let raw = self
+                        .get
+                        .get("/api/v5/rubik/stat/contracts/open-interest-history", params)
+                        .await?;
+                    let error = "RESEARCH_PUBLIC_OPEN_INTEREST_INVALID";
+                    let rows = rows::<OpenInterestRow>(&raw, 100, error)?;
+                    let mapped = rows
+                        .into_iter()
+                        .map(OpenInterestRow::normalize)
+                        .collect::<Result<_, _>>()?;
+                    Ok(PublicSourceReply::OpenInterest(mapped))
+                }
             }
-            if let Some(cursor) = before {
-                parameters.push(("before", cursor));
-            }
-            parameters.push(("limit", limit.to_string()));
-            let raw = self.get.get(PUBLIC_CANDLES_PATH, parameters).await?;
-            let rows = parse_candles(&raw, usize::from(limit))?;
-            let acquired_at_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|_| "RESEARCH_PUBLIC_CLOCK_INVALID".to_owned())?
-                .as_millis()
-                .max(1)
-                .to_string();
-            let response_body_bytes = raw.len() as u64;
-            Ok(PublicSourceReply::Candles(PublicCandleCapture {
-                raw_body: raw,
-                rows,
-                acquired_at_ms,
-                http_delivery: Some(PublicSourceHttpDelivery {
-                    transport_send_invocations: 1,
-                    response_status: 200,
-                    response_body_bytes,
-                }),
-            }))
         })
+    }
+}
+
+fn page_parameters(
+    instrument: String,
+    after: Option<String>,
+    before: Option<String>,
+    limit: u16,
+) -> Vec<(&'static str, String)> {
+    let mut parameters = vec![("instId", instrument)];
+    if let Some(cursor) = after.filter(|value| !value.is_empty()) {
+        parameters.push(("after", cursor));
+    }
+    if let Some(cursor) = before.filter(|value| !value.is_empty()) {
+        parameters.push(("before", cursor));
+    }
+    parameters.push(("limit", limit.to_string()));
+    parameters
+}
+
+fn acquired_at() -> Result<String, String> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "RESEARCH_PUBLIC_CLOCK_INVALID")?
+        .as_millis()
+        .max(1)
+        .to_string())
+}
+
+fn delivery(raw: &[u8]) -> PublicSourceHttpDelivery {
+    PublicSourceHttpDelivery {
+        transport_send_invocations: 1,
+        response_status: 200,
+        response_body_bytes: raw.len() as u64,
     }
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CandleEnvelope {
+struct Envelope<T> {
     code: String,
     #[serde(default)]
     msg: String,
-    data: Vec<Vec<String>>,
+    data: Vec<T>,
 }
 
-fn parse_candles(raw: &[u8], max_rows: usize) -> Result<Vec<HistoryCandle>, String> {
+fn rows<T: DeserializeOwned>(
+    raw: &[u8],
+    max_rows: usize,
+    error: &'static str,
+) -> Result<Vec<T>, String> {
     if raw.is_empty() || raw.len() > MAX_PUBLIC_BYTES {
         return Err("RESEARCH_PUBLIC_BODY_INVALID".into());
     }
-    let envelope: CandleEnvelope =
-        serde_json::from_slice(raw).map_err(|_| "RESEARCH_PUBLIC_CANDLES_INVALID")?;
+    let envelope: Envelope<T> = serde_json::from_slice(raw).map_err(|_| error)?;
     if envelope.code != "0" || !envelope.msg.is_empty() || envelope.data.len() > max_rows {
-        return Err("RESEARCH_PUBLIC_CANDLES_INVALID".into());
+        return Err(error.into());
     }
+    Ok(envelope.data)
+}
+
+fn one<T: DeserializeOwned>(raw: &[u8], error: &'static str) -> Result<T, String> {
+    rows(raw, 1, error)?.pop().ok_or_else(|| error.into())
+}
+
+#[derive(Deserialize)]
+struct TickerRow {
+    #[serde(rename = "instId")]
+    instrument: String,
+    #[serde(flatten)]
+    ticker: ResearchTicker,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceRow {
+    inst_id: String,
+    inst_type: String,
+    state: String,
+    ct_type: Option<String>,
+    ct_val: Option<String>,
+    ct_val_ccy: Option<String>,
+    settle_ccy: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FundingRow {
+    inst_id: String,
+    funding_time: String,
+    funding_rate: String,
+    realized_rate: Option<String>,
+    formula_type: Option<String>,
+    method: Option<String>,
+}
+
+fn funding_rows(
+    raw: &[u8],
+    instrument: &str,
+    limit: usize,
+) -> Result<Vec<FundingHistoryEvent>, String> {
+    let error = "RESEARCH_PUBLIC_FUNDING_INVALID";
+    let mut events = std::collections::BTreeMap::new();
+    for row in rows::<FundingRow>(raw, limit, error)? {
+        let time = row.funding_time.parse::<u64>().map_err(|_| error)?;
+        if row.inst_id != instrument || time == 0 || row.funding_rate.trim().is_empty() {
+            return Err(error.into());
+        }
+        if events
+            .insert(
+                time,
+                FundingHistoryEvent {
+                    funding_time_ms: row.funding_time,
+                    funding_rate: row.funding_rate,
+                    realized_rate: row.realized_rate.filter(|v| !v.trim().is_empty()),
+                    formula_type: row.formula_type.filter(|v| !v.trim().is_empty()),
+                    method: row.method.filter(|v| !v.trim().is_empty()),
+                },
+            )
+            .is_some()
+        {
+            return Err(error.into());
+        }
+    }
+    Ok(events.into_values().collect())
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OpenInterestRow {
+    Object {
+        ts: String,
+        oi: String,
+        #[serde(rename = "oiCcy")]
+        currency: String,
+    },
+    Array(Vec<String>),
+}
+
+impl OpenInterestRow {
+    fn normalize(self) -> Result<ResearchOpenInterest, String> {
+        match self {
+            Self::Object { ts, oi, currency } => Ok(ResearchOpenInterest {
+                ts,
+                oi,
+                oi_currency: currency,
+            }),
+            Self::Array(row) => match row.as_slice() {
+                [ts, oi, currency] | [ts, oi, currency, _] => Ok(ResearchOpenInterest {
+                    ts: ts.clone(),
+                    oi: oi.clone(),
+                    oi_currency: currency.clone(),
+                }),
+                _ => Err("RESEARCH_PUBLIC_OPEN_INTEREST_INVALID".into()),
+            },
+        }
+    }
+}
+
+fn parse_candles(raw: &[u8], max_rows: usize) -> Result<Vec<HistoryCandle>, String> {
+    let rows = rows::<Vec<String>>(raw, max_rows, "RESEARCH_PUBLIC_CANDLES_INVALID")?;
     let mut times = BTreeSet::new();
-    let mut output = Vec::with_capacity(envelope.data.len());
-    for row in envelope.data {
+    let mut output = Vec::with_capacity(rows.len());
+    for row in rows {
         if row.len() != 8 && row.len() != 9 {
             return Err("RESEARCH_PUBLIC_CANDLES_INVALID".into());
         }
@@ -321,14 +565,97 @@ mod tests {
         );
         assert_eq!(
             source
-                .request(PublicSourceRequest::Ticker {
-                    instrument: "BTC-USDT-SWAP".into(),
+                .request(PublicSourceRequest::Reference {
+                    instrument: "BTC-USDT".into(),
                 })
                 .await
                 .unwrap_err(),
-            "RESEARCH_PUBLIC_OPERATION_UNSUPPORTED"
+            "RESEARCH_PUBLIC_REFERENCE_REQUIRES_SWAP"
         );
         assert!(transport.routes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn standalone_routes_preserve_public_source_units_and_provenance() {
+        use serde_json::json;
+        let symbol = "BTC-USDT-SWAP";
+        let request_cases = [
+            (
+                PublicSourceRequest::CatalogPage {
+                    route: "history_trades".into(),
+                    instrument: symbol.into(),
+                    after: Some("123".into()),
+                    before: None,
+                    limit: 2,
+                },
+                "/api/v5/market/history-trades",
+                json!({"instId":symbol,"tradeId":"123"}),
+                "catalog_page",
+                "/data/route",
+                "history_trades",
+            ),
+            (
+                PublicSourceRequest::Reference {
+                    instrument: symbol.into(),
+                },
+                "/api/v5/public/instruments",
+                json!({"instType":"SWAP","instId":symbol,"state":"live","ctType":"linear",
+                    "ctVal":"0.01","ctValCcy":"BTC","settleCcy":"USDT"}),
+                "reference",
+                "/data/instrument/contract_value_currency",
+                "BTC",
+            ),
+            (
+                PublicSourceRequest::Funding {
+                    instrument: symbol.into(),
+                    after: None,
+                    before: None,
+                    limit: 1,
+                },
+                "/api/v5/public/funding-rate-history",
+                json!({"instId":symbol,"fundingTime":"123","fundingRate":"0.0001",
+                    "realizedRate":"-0.0002"}),
+                "funding",
+                "/data/rows/0/realized_rate",
+                "-0.0002",
+            ),
+            (
+                PublicSourceRequest::Ticker {
+                    instrument: symbol.into(),
+                },
+                "/api/v5/market/ticker",
+                json!({"instId":symbol,"bidPx":"99","askPx":"101"}),
+                "ticker",
+                "/data/bid_price",
+                "99",
+            ),
+            (
+                PublicSourceRequest::OpenInterest {
+                    instrument: symbol.into(),
+                    period: "5m".into(),
+                },
+                "/api/v5/rubik/stat/contracts/open-interest-history",
+                json!(["123", "99", "0.99", "100.0"]),
+                "open_interest",
+                "/data/0/oi_currency",
+                "0.99",
+            ),
+        ];
+        for (request, path, row, variant, field, expected) in request_cases {
+            let raw = serde_json::to_vec(&json!({"code":"0","msg":"","data":[row]})).unwrap();
+            let transport = Arc::new(RecordedGet {
+                raw,
+                routes: Mutex::new(Vec::new()),
+            });
+            let source = IndependentOkxPublicSource::with_get(transport.clone());
+            let response = serde_json::to_value(source.request(request).await.unwrap()).unwrap();
+            assert_eq!(response["type"], variant);
+            assert_eq!(
+                response.pointer(field).and_then(|value| value.as_str()),
+                Some(expected)
+            );
+            assert_eq!(*transport.routes.lock().unwrap()[0].0, *path);
+        }
     }
 
     #[test]

@@ -34,12 +34,13 @@ runtime dependency, not the desired independent Research boundary.**
 
 The Research executable can also serve the existing framed commands with
 `--independent-source --root <research-dir> --scope <scope>`. Its local
-provider reads public OKX candle history. It rejects parent source replies
+provider reads public OKX candles, recent and historical trades, SWAP
+reference data, tickers, historical funding and open interest. It rejects parent source replies
 in that mode. Use `--market-request --root <research-dir> --scope <scope>`
 to read one JSON `MarketRequest` from stdin and print the result. Explicit
-instruments are required. Candle-backed requests use the same analytics,
-coverage and artifact code as hosted requests. Universe, ticker, funding
-and open-interest requests require providers that implement those sources.
+instruments are required. These requests use the same analytics, coverage
+and artifact code as hosted requests. Engine still resolves instrument
+universe queries on its existing hosted route.
 
 The live strategy turn in `okx-trading-engine/src/trade_service/strategies.rs`
 captures closed prices from Engine's public source. With a compatible worker

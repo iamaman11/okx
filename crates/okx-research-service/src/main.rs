@@ -97,7 +97,10 @@ async fn run_market_request(root: PathBuf, scope: ResearchScope) -> Result<(), S
     }
     let request: MarketRequest =
         serde_json::from_slice(&bytes).map_err(|_| "INVALID_MARKET_REQUEST")?;
-    if !request.valid() || request.universe.is_some() {
+    if !request.valid() {
+        return Err("INVALID_MARKET_REQUEST".into());
+    }
+    if request.universe.is_some() {
         return Err("MARKET_REQUEST_REQUIRES_EXPLICIT_INSTRUMENTS".into());
     }
     std::fs::create_dir_all(&root).map_err(|_| "RESEARCH_ROOT_CREATE_FAILED")?;
