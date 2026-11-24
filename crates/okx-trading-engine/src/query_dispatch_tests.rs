@@ -531,6 +531,91 @@ async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero
 }
 
 #[tokio::test]
+async fn public_screen_distinguishes_flat_and_two_compositions_through_real_research() {
+    use crate::research_client::ResearchClientConfig;
+    use okx_ipc_contracts::research_ipc::ResearchScope;
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    let mut fixture = Fixture::new(empty_reference()).await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    fixture.context.research = ResearchClient::new(
+        ResearchClientConfig {
+            executable: std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
+                .expect("build Research before running child process contracts")
+                .into(),
+            root: fixture.root.join("composition-research"),
+            scope: ResearchScope::new("query-dispatch-installation".into()).unwrap(),
+        },
+        crate::research_dispatch_tests::candle_source(reads.clone()),
+    );
+
+    let flat = json!({"action":"screen", "instruments":["BTC-USDT"], "fields":["returns"],
+        "timeframe_ms":60_000, "start_ms":0, "end_ms":12_000_000, "limit":1});
+    let mut range = flat.clone();
+    range["composition"] = json!({"version":"okx.market.composition/v1", "steps":[
+        {"id":"width", "op":"rolling_range", "input":"close", "period":3}
+    ], "result_steps":["width"]});
+    let mut edge = flat.clone();
+    edge["composition"] = json!({"version":"okx.market.composition/v1", "steps":[
+        {"id":"change", "op":"returns_series", "input":"close"},
+        {"id":"avg3", "op":"rolling_mean", "input":"change", "period":3},
+        {"id":"positive", "op":"greater_than", "input":"avg3", "threshold":0},
+        {"id":"turn_on", "op":"rising_edge", "input":"positive"}
+    ], "result_steps":["avg3", "turn_on"]});
+
+    let mut results = Vec::new();
+    for input in [flat, range, edge] {
+        let operation = AgentOperation::Market {
+            request: serde_json::from_value(input).unwrap(),
+        };
+        let completed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let reply = fixture.request(operation.clone(), None).await;
+                assert_eq!(reply.status, AgentResponseStatus::Completed, "{reply:?}");
+                let result = reply.result.unwrap();
+                if result["rows"].is_array() {
+                    break result;
+                }
+                assert!(
+                    matches!(result["state"].as_str(), Some("queued" | "running")),
+                    "unexpected market result: {result}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Research screening did not complete");
+        let replay = fixture.request(operation, None).await.result.unwrap();
+        for key in [
+            "job_id",
+            "market_request_fingerprint",
+            "result_artifact",
+            "rows",
+        ] {
+            assert_eq!(replay[key], completed[key], "replay changed {key}");
+        }
+        results.push(completed);
+    }
+
+    for key in ["job_id", "market_request_fingerprint", "result_artifact"] {
+        let identifiers: BTreeSet<_> = results
+            .iter()
+            .map(|result| result[key].as_str().unwrap())
+            .collect();
+        assert_eq!(identifiers.len(), 3, "different graphs shared {key}");
+    }
+    assert!(results[0]["rows"][0]["metrics"].get("width").is_none());
+    assert_eq!(results[1]["rows"][0]["metrics"]["width"], 2.0);
+    let metrics = &results[2]["rows"][0]["metrics"];
+    let expected = (1.0 / 297.0 + 1.0 / 298.0 + 1.0 / 299.0) / 3.0;
+    assert!((metrics["avg3"].as_f64().unwrap() - expected).abs() < 1e-12);
+    assert_eq!(metrics["turn_on"], false);
+    assert!(reads.load(Ordering::Relaxed) > 0);
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn instrument_search_routes_type_filter_before_public_limit() {
     let instrument = |id: String, kind: &str| {
         serde_json::from_value(json!({
