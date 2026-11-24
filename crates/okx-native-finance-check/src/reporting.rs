@@ -34,7 +34,7 @@ pub(super) fn record_failures(
         })
         .collect();
     for test in failed {
-        let cause = failure_cause(text, &test);
+        let cause = failure_cause(text, test);
         rows.as_array_mut()
             .unwrap()
             .push(json!({"package":package,"test":test,
