@@ -6,8 +6,8 @@ use okx_host_protocol::{
     HOST_CONTROL_REQUEST_SCHEMA_V1, HostControlOperation, HostControlRequest, HostControlResult,
 };
 use okx_ipc_contracts::{
-    AGENT_REQUEST_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponse,
-    InstrumentTypeFilter, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection, MailboxEnvelope,
+    AGENT_REQUEST_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponse, InstrumentTypeFilter,
+    MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection, MailboxEnvelope,
     crypto::{decrypt, derive_directional_key, encrypt, public_key_from_private, shared_secret},
 };
 use serde::{Deserialize, Serialize};

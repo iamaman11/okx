@@ -270,11 +270,14 @@ mod tests {
         };
         assert!(request.validate().is_ok());
         let wire = serde_json::to_value(&request).unwrap();
-        assert_eq!(wire, serde_json::json!({
-            "schema":"okx.windows.control/v1",
-            "request_id":"ctl_controller_update_0123456789",
-            "operation":{"type":"status"}
-        }));
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "schema":"okx.windows.control/v1",
+                "request_id":"ctl_controller_update_0123456789",
+                "operation":{"type":"status"}
+            })
+        );
         let restored: HostControlRequest = serde_json::from_value(wire.clone()).unwrap();
         assert!(restored.validate().is_ok());
         for (field, value) in [
@@ -313,7 +316,12 @@ mod tests {
         assert!(serde_json::from_value::<HostControlResult>(unknown).is_err());
         let mut invalid = wire;
         invalid["request_id"] = serde_json::json!("ctl_bad!");
-        assert!(serde_json::from_value::<HostControlResult>(invalid).unwrap().validate().is_err());
+        assert!(
+            serde_json::from_value::<HostControlResult>(invalid)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
