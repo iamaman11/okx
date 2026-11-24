@@ -22,7 +22,10 @@ async fn main() {
 }
 async fn run() -> Result<(), String> {
     let all_args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if all_args.first().is_some_and(|arg| arg == "--public-candles") {
+    if all_args
+        .first()
+        .is_some_and(|arg| arg == "--public-candles")
+    {
         return run_public_candles(&all_args).await;
     }
     let mut args = all_args.into_iter();
@@ -80,8 +83,8 @@ async fn run_public_candles(args: &[std::ffi::OsString]) -> Result<(), String> {
     let capture = source
         .research_candles_page(instrument, bar, None, None, 100)
         .await?;
-    let encoded = serde_json::to_string(&capture)
-        .map_err(|_| "PUBLIC_CANDLES_SERIALIZATION_FAILED")?;
+    let encoded =
+        serde_json::to_string(&capture).map_err(|_| "PUBLIC_CANDLES_SERIALIZATION_FAILED")?;
     println!("{encoded}");
     Ok(())
 }

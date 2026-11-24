@@ -42,7 +42,10 @@ impl PublicGet for BoundedHttpsGet {
             if response.status() != reqwest::StatusCode::OK {
                 return Err("RESEARCH_PUBLIC_HTTP_FAILED".into());
             }
-            if response.content_length().is_some_and(|size| size > MAX_PUBLIC_BYTES as u64) {
+            if response
+                .content_length()
+                .is_some_and(|size| size > MAX_PUBLIC_BYTES as u64)
+            {
                 return Err("RESEARCH_PUBLIC_BODY_TOO_LARGE".into());
             }
             let mut raw = Vec::new();
@@ -164,8 +167,7 @@ fn parse_candles(raw: &[u8], max_rows: usize) -> Result<Vec<HistoryCandle>, Stri
             return Err("RESEARCH_PUBLIC_CANDLES_INVALID".into());
         }
         let decimal = |field: &str| -> Result<Decimal, String> {
-            Decimal::from_str_exact(field)
-                .map_err(|_| "RESEARCH_PUBLIC_CANDLES_INVALID".into())
+            Decimal::from_str_exact(field).map_err(|_| "RESEARCH_PUBLIC_CANDLES_INVALID".into())
         };
         let (open, high, low, close) = (
             decimal(&row[1])?,
@@ -219,7 +221,11 @@ mod tests {
         routes: Mutex<Vec<(String, Vec<(&'static str, String)>)>>,
     }
     impl PublicGet for RecordedGet {
-        fn get(&self, path: &'static str, parameters: Vec<(&'static str, String)>) -> GetFuture<'_> {
+        fn get(
+            &self,
+            path: &'static str,
+            parameters: Vec<(&'static str, String)>,
+        ) -> GetFuture<'_> {
             self.routes.lock().unwrap().push((path.into(), parameters));
             Box::pin(async { Ok(self.raw.clone()) })
         }
@@ -256,20 +262,26 @@ mod tests {
         });
         let source = IndependentOkxPublicSource::with_get(transport.clone());
         assert_eq!(
-            source.request(PublicSourceRequest::Candles {
-                instrument: "../BTC".into(),
-                bar: "1m".into(),
-                after: None,
-                before: None,
-                limit: 2,
-                queued: false,
-            }).await.unwrap_err(),
+            source
+                .request(PublicSourceRequest::Candles {
+                    instrument: "../BTC".into(),
+                    bar: "1m".into(),
+                    after: None,
+                    before: None,
+                    limit: 2,
+                    queued: false,
+                })
+                .await
+                .unwrap_err(),
             "INVALID_RESEARCH_SOURCE_REQUEST"
         );
         assert_eq!(
-            source.request(PublicSourceRequest::Ticker {
-                instrument: "BTC-USDT-SWAP".into(),
-            }).await.unwrap_err(),
+            source
+                .request(PublicSourceRequest::Ticker {
+                    instrument: "BTC-USDT-SWAP".into(),
+                })
+                .await
+                .unwrap_err(),
             "RESEARCH_PUBLIC_OPERATION_UNSUPPORTED"
         );
         assert!(transport.routes.lock().unwrap().is_empty());
@@ -277,7 +289,10 @@ mod tests {
 
     #[test]
     fn malformed_exchange_rows_are_fail_closed() {
-        assert_eq!(parse_candles(RECORDED.as_bytes(), 1).unwrap_err(), "RESEARCH_PUBLIC_CANDLES_INVALID");
+        assert_eq!(
+            parse_candles(RECORDED.as_bytes(), 1).unwrap_err(),
+            "RESEARCH_PUBLIC_CANDLES_INVALID"
+        );
         for raw in [
             r#"{"code":"1","data":[]}"#,
             r#"{"code":"0","data":[["1","100","90","95","110","1","1","1"]]}"#,

@@ -67,10 +67,9 @@ pub fn check_strategy_signal(
     if !instance.enabled || authenticated_account_key.is_empty() || policy_revision < 1 {
         return Err("STRATEGY_SIGNAL_AUTHORITY_REQUIRED");
     }
-    let installed_configuration = serde_json::from_str::<StrategyConfigurationV1>(
-        &instance.parameters,
-    )
-    .map_err(|_| "STRATEGY_SIGNAL_INSTALLED_CONFIG_INVALID")?;
+    let installed_configuration =
+        serde_json::from_str::<StrategyConfigurationV1>(&instance.parameters)
+            .map_err(|_| "STRATEGY_SIGNAL_INSTALLED_CONFIG_INVALID")?;
     if !configuration.valid()
         || installed_configuration != *configuration
         || instance.instance_id != proposal.instance_id.as_str()
@@ -288,7 +287,9 @@ mod tests {
     fn flat_keeps_legacy_no_new_entry_semantics() {
         let mut flat = proposal();
         flat.position = SignalPosition::Flat;
-        let (_, position) = check(&flat, &instance(), &configuration()).unwrap().into_claim();
+        let (_, position) = check(&flat, &instance(), &configuration())
+            .unwrap()
+            .into_claim();
         assert_eq!(position, SignalPosition::Flat);
         flat.position = SignalPosition::Warmup;
         assert!(check(&flat, &instance(), &configuration()).is_err());

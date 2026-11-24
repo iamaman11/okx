@@ -363,7 +363,8 @@ impl StrategySignalProposal {
             && now_ms < self.expires_at_ms
             && self.expires_at_ms.saturating_sub(self.produced_at_ms) <= 60_000
             && self.expires_at_ms > self.produced_at_ms
-            && self.last_closed_ms
+            && self
+                .last_closed_ms
                 .checked_add(self.timeframe_ms.saturating_mul(2))
                 .is_some_and(|limit| now_ms <= limit)
             && self.position != SignalPosition::Warmup
