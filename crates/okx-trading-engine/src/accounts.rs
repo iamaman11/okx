@@ -1418,6 +1418,11 @@ pub(crate) mod recorded_support {
         empty_complete_page: bool,
     }
 
+    enum RecordedPublicClock {
+        Raw(Vec<u8>),
+        AtDelivery,
+    }
+
     #[derive(Default)]
     pub(crate) struct RecordedAccountHttp {
         pub(crate) requests: Mutex<Vec<String>>,
@@ -1461,12 +1466,9 @@ pub(crate) mod recorded_support {
         immutable_signed_phases: Mutex<Vec<ImmutableSignedGetPhase>>,
         // Digest-only signed source events for exact-phase test evidence.
         pub(crate) immutable_phase_trace: Mutex<Vec<String>>,
-        // Raw public time responses, never a synthesized exchange clock.
-        public_clock_reads: Mutex<Vec<Vec<u8>>>,
-        // Test-only count of raw public-clock GET deliveries; the same
-        // queue lock linearizes a generated external sample against its
-        // exactly-once consumption by the real production OKX clock parser.
-        public_clock_deliveries: AtomicU64,
+        // One response per explicit expectation. Fixed transcripts retain
+        // their bytes; fixtures that need a current venue time opt in.
+        public_clock_reads: Mutex<Vec<RecordedPublicClock>>,
         strict_read_routes: Mutex<std::collections::BTreeSet<(String, String)>>,
         causal_algos: Mutex<Option<CausalAlgoScenario>>,
         causal_cancel_ack_changed: tokio::sync::Notify,
@@ -2564,31 +2566,21 @@ pub(crate) mod recorded_support {
         }
 
         pub(crate) fn expect_public_clock(&self, raw_response: Vec<u8>) {
-            self.public_clock_reads.lock().unwrap().push(raw_response);
+            self.public_clock_reads
+                .lock()
+                .unwrap()
+                .push(RecordedPublicClock::Raw(raw_response));
+        }
+
+        pub(crate) fn expect_current_public_clock(&self) {
+            self.public_clock_reads
+                .lock()
+                .unwrap()
+                .push(RecordedPublicClock::AtDelivery);
         }
 
         pub(crate) fn unconsumed_public_clock(&self) -> usize {
             self.public_clock_reads.lock().unwrap().len()
-        }
-
-        /// Only a scripted external clock publisher may replace an unused
-        /// raw sample before the FIRST requested clock GET. It never mints
-        /// a response on demand or changes clock policy/tolerances.
-        /// Once the recorded transport delivered a sample, the publisher
-        /// cannot rearm that delivery or inject an unsolicited second one.
-        pub(crate) fn refresh_unconsumed_public_clock(
-            &self,
-            expected_deliveries: u64,
-            sample: Vec<u8>,
-        ) -> bool {
-            let mut queued = self.public_clock_reads.lock().unwrap();
-            if queued.len() != 1
-                || self.public_clock_deliveries.load(Ordering::Acquire) != expected_deliveries
-            {
-                return false;
-            }
-            queued[0] = sample;
-            true
         }
 
         pub(crate) fn unconsumed_posts(&self) -> usize {
@@ -4073,8 +4065,15 @@ pub(crate) mod recorded_support {
                             .push("TRANSCRIPT_CLOCK_EXHAUSTED".into());
                         return Err(OkxError::Response("TRANSCRIPT_CLOCK_EXHAUSTED".into()));
                     }
-                    let body = queued.remove(0);
-                    self.public_clock_deliveries.fetch_add(1, Ordering::AcqRel);
+                    let body = match queued.remove(0) {
+                        RecordedPublicClock::Raw(body) => body,
+                        RecordedPublicClock::AtDelivery => serde_json::to_vec(&serde_json::json!({
+                            "code":"0","msg":"","data":[{
+                                "ts":jiff::Timestamp::now().as_millisecond().to_string()
+                            }]
+                        }))
+                        .unwrap(),
+                    };
                     drop(queued);
                     self.requests
                         .lock()
@@ -6530,19 +6529,30 @@ pub(crate) mod tests {
         assert!(feed.outbound_posts.lock().unwrap().is_empty());
     }
 
-    #[test]
-    fn recorded_clock_publisher_cannot_rearm_or_multiply_source_pages() {
+    #[tokio::test]
+    async fn recorded_clock_responses_are_finite_and_raw_samples_keep_their_bytes() {
         use super::recorded_support::RecordedAccountHttp;
+        use okx_api::HttpTransport;
         let feed = RecordedAccountHttp::default();
-        assert!(!feed.refresh_unconsumed_public_clock(0, b"unsolicited".to_vec()));
-        feed.expect_public_clock(b"recorded_first".to_vec());
-        assert!(feed.refresh_unconsumed_public_clock(0, b"recorded_new".to_vec()));
-        assert_eq!(feed.unconsumed_public_clock(), 1);
-        assert!(!feed.refresh_unconsumed_public_clock(1, b"wrong_generation".to_vec()));
-        assert_eq!(feed.unconsumed_public_clock(), 1);
-        feed.expect_public_clock(b"another_source".to_vec());
-        assert!(!feed.refresh_unconsumed_public_clock(0, b"multiply".to_vec()));
-        assert_eq!(feed.unconsumed_public_clock(), 2);
+        let request = || {
+            reqwest::Client::new()
+                .get("https://www.okx.com/api/v5/public/time")
+                .build()
+                .unwrap()
+        };
+        let deadline = || Instant::now() + std::time::Duration::from_secs(1);
+        let old = br#"{"code":"0","msg":"","data":[{"ts":"1000"}]}"#;
+        feed.expect_public_clock(old.to_vec());
+        feed.expect_current_public_clock();
+        assert_eq!(feed.send(request(), deadline()).await.unwrap().body, old);
+        let before = jiff::Timestamp::now().as_millisecond();
+        let response = feed.send(request(), deadline()).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        let observed: i64 = body["data"][0]["ts"].as_str().unwrap().parse().unwrap();
+        assert!((before..=jiff::Timestamp::now().as_millisecond()).contains(&observed));
+        assert_eq!(feed.unconsumed_public_clock(), 0);
+        assert!(feed.send(request(), deadline()).await.is_err());
+        assert_eq!(feed.requests.lock().unwrap().len(), 2);
     }
 
     /// Exercise the actual signed OKX adapter's POST through the raw

@@ -226,8 +226,7 @@ async fn send_close(
     position: &str,
     equity: &str,
 ) -> String {
-    fixture.feed.expect_public_clock(envelope(json!([{
-        "ts":jiff::Timestamp::now().as_millisecond().to_string()}])));
+    fixture.feed.expect_current_public_clock();
     snapshot(&fixture.feed, equity, position); // close plan
     snapshot(&fixture.feed, equity, position); // final signed position
     fixture.feed.expect_post(RecordedPost {
@@ -373,9 +372,7 @@ async fn refresh_second_close_market(
 
 async fn create_entry(fixture: &NativeFixture) -> String {
     let now = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture
-        .feed
-        .expect_public_clock(envelope(json!([{"ts":now}])));
+    fixture.feed.expect_current_public_clock();
     record_fee(&fixture.feed, &now);
     record_leverage(&fixture.feed);
     record_leverage(&fixture.feed);
@@ -399,14 +396,11 @@ async fn create_entry(fixture: &NativeFixture) -> String {
     if let TradeRequest::Execute { expires_in_ms, .. } = &mut request {
         *expires_in_ms = 10_000;
     }
-    let result = with_fresh_recorded_clock(
-        &fixture.feed,
-        fixture
-            .trade
-            .trade(&fixture.config.alias, &request, Some(&fixture.authority)),
-    )
-    .await
-    .unwrap();
+    let result = fixture
+        .trade
+        .trade(&fixture.config.alias, &request, Some(&fixture.authority))
+        .await
+        .unwrap();
     assert_eq!(
         result["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
         "{result}"

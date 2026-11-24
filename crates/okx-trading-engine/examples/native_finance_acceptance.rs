@@ -40,9 +40,9 @@ const PACKAGES: [&str; 5] = [
 ];
 // Keep the ordinary finance workload concurrent as in the measured baseline.
 // Real-clock fixtures can expire under unrelated concurrent OS/SQL work;
-// execute those witnesses in a separate, serial child without skipping any.
+// keep those witnesses in a separate child with bounded concurrency.
 const FINANCIAL_WITNESS_TEST_THREADS: u64 = 4;
-const CLOCK_SENSITIVE_TEST_THREADS: u64 = 1;
+const CLOCK_SENSITIVE_TEST_THREADS: u64 = 2;
 const CLOCK_SENSITIVE_AGENT_WITNESSES: [&str; 7] = [
     "accounts::native_trade_contracts::native_fee_correction::risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutable_revisions",
     "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_failed_stop_emergency_close_and_verified_remediation",
@@ -123,7 +123,10 @@ mod timing_tests {
         let groups = libtest_groups("okx-trading-engine", &names).unwrap();
         assert_eq!(groups.len(), 2);
         assert_eq!((groups[0].label, groups[0].threads), ("parallel", 4));
-        assert_eq!((groups[1].label, groups[1].threads), ("clock_sensitive", 1));
+        assert_eq!(
+            (groups[1].label, groups[1].threads),
+            ("clock_sensitive", CLOCK_SENSITIVE_TEST_THREADS)
+        );
         assert!(groups[0].names.is_disjoint(&groups[1].names));
         assert_eq!(
             groups[0]
@@ -257,19 +260,17 @@ async fn execute(
     // retaining their individual exit status, outputs and resource receipts.
     // Never overlap the two financial libtest groups with each other: the
     // real-clock and SQLite acceptance witnesses still run in isolation.
-    let mut guard_task = if wanted.contains(&(
-        "repository".into(),
-        repository_guards::WITNESS.into(),
-    )) {
-        let repo = repo.to_owned();
-        Some(tokio::spawn(async move {
-            let mut receipt = json!({"stages":[], "repository_guards":[], "failure":null});
-            let result = repository_guards::run(&repo, &mut receipt).await;
-            (result, receipt)
-        }))
-    } else {
-        None
-    };
+    let mut guard_task =
+        if wanted.contains(&("repository".into(), repository_guards::WITNESS.into())) {
+            let repo = repo.to_owned();
+            Some(tokio::spawn(async move {
+                let mut receipt = json!({"stages":[], "repository_guards":[], "failure":null});
+                let result = repository_guards::run(&repo, &mut receipt).await;
+                (result, receipt)
+            }))
+        } else {
+            None
+        };
     let execution: Result<()> = async {
         for package in PACKAGES {
             let names: BTreeSet<String> = wanted
@@ -347,9 +348,8 @@ async fn execute(
                     );
                 })?;
                 if group.label == "clock_sensitive" {
-                    // These four real-clock fixtures remain serial in exactly
-                    // one libtest child. Collect their fixed-name diagnostic
-                    // receipts only AFTER the complete libtest success proof;
+                    // Collect fixed-name diagnostic receipts from the isolated
+                    // clock-sensitive group only after the complete libtest proof;
                     // they never replace functional or resource witnesses.
                     let phases = phase_timing::collect(
                         measurements.path(),
@@ -421,7 +421,9 @@ async fn execute(
         Ok(())
     }
     .await;
-    if execution.is_err() && let Some(task) = guard_task.take() {
+    if execution.is_err()
+        && let Some(task) = guard_task.take()
+    {
         task.abort();
         let _ = task.await;
     }
@@ -486,7 +488,7 @@ async fn main() {
     let mut report = json!({"schema":"okx.native-finance-acceptance/v1", "run_id":run_id,"mode":mode,
         "head":null,"tree":null,"git_clean":false,"build_ms":null,"runtime_setup_to_teardown_ms":null,
         "observed_witnesses":[],"repository_guards":[],"stages":[],"clock_sensitive_phase_timings":[],"contracts":[],"overall":"FAIL","timeout_guards_seconds":{"build":1800,"per_libtest_group":180},"test_threads":FINANCIAL_WITNESS_TEST_THREADS,"clock_sensitive_test_threads":CLOCK_SENSITIVE_TEST_THREADS,
-        "test_schedule":"parallel_4_then_clock_sensitive_1"});
+        "test_schedule":format!("parallel_{FINANCIAL_WITNESS_TEST_THREADS}_then_clock_sensitive_{CLOCK_SENSITIVE_TEST_THREADS}")});
     let result: Result<Witnesses> = async {
         collector_sources_match(repo)?;
         report["collector_source_binding"] = json!("VERIFIED");

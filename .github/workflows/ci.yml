@@ -773,7 +773,7 @@ jobs:
       - name: Isolated native protection cleanup SQL regressions
         shell: pwsh
         run: |
-          $output = & cargo test --locked -p okx-trading-engine --lib trade_service::protection_cleanup::protection_cleanup_direct_tests:: -- --nocapture --test-threads 1 2>&1
+          $output = & cargo test --locked -p okx-trading-engine --lib trade_service::protection_cleanup::protection_cleanup_direct_tests:: -- --nocapture --test-threads 2 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }

@@ -28,9 +28,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool, fixture_id: ClockF
     phases.mark("market_open");
     let account = fixture._account.clone();
     let now = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture
-        .feed
-        .expect_public_clock(envelope(json!([{"ts":now}])));
+    fixture.feed.expect_current_public_clock();
     record_fee(&fixture.feed, &now);
     record_leverage(&fixture.feed);
     record_leverage(&fixture.feed);
@@ -48,14 +46,11 @@ async fn filled_close(stop_after_fill: bool, emergency: bool, fixture_id: ClockF
     if let TradeRequest::Execute { expires_in_ms, .. } = &mut request {
         *expires_in_ms = 10_000;
     }
-    let first = with_fresh_recorded_clock(
-        &fixture.feed,
-        fixture
-            .trade
-            .trade(&fixture.config.alias, &request, Some(&fixture.authority)),
-    )
-    .await
-    .expect("original Native Execute before signed fill");
+    let first = fixture
+        .trade
+        .trade(&fixture.config.alias, &request, Some(&fixture.authority))
+        .await
+        .expect("original Native Execute before signed fill");
     assert_eq!(
         first["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
         "{first}"
@@ -202,10 +197,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool, fixture_id: ClockF
     // Close is independently authorized from the actual SQL lot, fresh venue
     // exposure and its own public market observation. ACK loss cannot resend.
     close_market(&socket, &public).await;
-    let now = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture
-        .feed
-        .expect_public_clock(envelope(json!([{"ts":now}])));
+    fixture.feed.expect_current_public_clock();
     if emergency {
         order(&fixture.feed, OPEN_ORDER, "buy", opened_at);
         get(

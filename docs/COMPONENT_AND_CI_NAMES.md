@@ -155,6 +155,12 @@ and the Research crates are outside Trading Engine. Changes to `okx-domain-core`
 its binary or the contract it implements. The full route also covers changes
 to CI policy or inputs whose impact the classifier cannot verify.
 
+The financial collector runs the seven wall-clock scenarios in an isolated
+two-thread test group. Each test that expects a fresh public-time response
+queues one response, timestamped at delivery by the recorded venue. Tests for
+stale inputs still use their fixed recorded values. Production freshness,
+SQLite deadlines and the collector's financial resource budgets apply as before.
+
 ## Release acceptance for a future executable rename
 
 1. Keep binary names and v2 archive/manifest schema stable in this code-name

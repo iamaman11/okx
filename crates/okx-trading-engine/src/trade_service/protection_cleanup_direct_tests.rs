@@ -456,8 +456,7 @@ async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     let (market_stop, market_task, _socket, _public) = filled::opened_market(&mut f).await;
     let account = f._account.clone();
     let at = jiff::Timestamp::now().as_millisecond().to_string();
-    f.feed
-        .expect_public_clock(native::envelope(serde_json::json!([{"ts":at}])));
+    f.feed.expect_current_public_clock();
     native::record_fee(&f.feed, &at);
     native::record_leverage(&f.feed);
     native::record_leverage(&f.feed);
