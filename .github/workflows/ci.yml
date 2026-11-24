@@ -959,11 +959,32 @@ jobs:
           foreach ($package in @('okx-trading-engine','okx-host-controller','okx-host-launcher','okx-trade-execution')) {
             $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--skip','accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research','--skip','trade_service::protection_cleanup::protection_cleanup_direct_tests::','--test-threads','2')
             # OS-kill is checked exclusively in the finance/isolated job.
-            if ($package -eq 'okx-trading-engine') { $testArgs += @('--skip','accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once') }
+            if ($package -eq 'okx-trading-engine') {
+              $testArgs += @('--skip','accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once')
+              # These two real-clock source-frontier tests must not race each
+              # other for 2s market / 5s account freshness on a loaded runner.
+              # They are mandatory in the explicitly counted serial step below.
+              $testArgs += @('--skip','trade_service::terminal_release::tests::stale_fill_coverage_blocks_release_before_worker')
+              $testArgs += @('--skip','trade_service::terminal_release::tests::stale_bill_coverage_blocks_settlement_after_inspect')
+            }
             foreach ($witness in @($covered | Where-Object package -eq $package)) { $testArgs += @('--skip',$witness.test) }
             Write-Host "Remaining regression: $package; financial witnesses routed to full collector: $(@($covered | Where-Object package -eq $package).Count)"
             cargo test --locked -p $package -- @testArgs
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Serial terminal release source-frontier regression
+        shell: pwsh
+        run: |
+          # Still execute BOTH original real-clock tests on this exact tree.
+          # Their initial market and private-account sources must remain FRESH;
+          # no production timeouts, assertions or recorded bytes are changed.
+          $output = & cargo test --locked -p okx-trading-engine --lib trade_service::terminal_release::tests::stale_ -- --test-threads 1 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\. 2 passed; 0 failed;') {
+            throw 'BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED'
           }
 
       # K9 runs once on its own runner, not beside isolated OS/SQL clocks.
@@ -1217,6 +1238,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # Reuse the verified main TEST profile also used by finance/regressions.
+          # Cargo still checks the current tree's own fingerprints before run.
+          shared-key: trading-engine-tests-windows
       - name: Precompile current Rust property targets
         run: cargo test --locked -p okx-trading-engine -p okx-trade-execution -p okx-domain-core -p okx-ipc-contracts -p okx-market-runtime --lib --no-run
       - name: Public Native A/B cap, independent progress, replay and policy CAS
