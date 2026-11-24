@@ -1218,8 +1218,27 @@ jobs:
           cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $ownerLog = Join-Path $env:RUNNER_TEMP 'research-native-owner-tests.log'
-          cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis 2>&1 |
+          cargo test --locked -p okx-strategy-core -p okx-research -p okx-analysis 2>&1 |
             Tee-Object -FilePath $ownerLog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The Worker has real IPC child-process tests; never let Cargo's
+          # unbounded default test parallelism launch all Windows Workers at
+          # once. Keep the original 10s Hello/command budgets unchanged.
+          cargo test --locked -p okx-research-service --lib --bins -- --test-threads 2 2>&1 |
+            Tee-Object -FilePath $ownerLog -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p okx-research-service --test causal_release_smoke 2>&1 |
+            Tee-Object -FilePath $ownerLog -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ipcOutput = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1 2>&1
+          $code = $LASTEXITCODE
+          $ipcOutput | Tee-Object -FilePath $ownerLog -Append
+          if ($code -ne 0) { exit $code }
+          if (($ipcOutput -join "`n") -notmatch 'test result: ok\. 9 passed; 0 failed;') {
+            throw 'RESEARCH_IPC_ALL_NINE_TESTS_REQUIRED'
+          }
+          cargo test --locked -p okx-research-service --doc 2>&1 |
+            Tee-Object -FilePath $ownerLog -Append
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $passed = Get-Content -LiteralPath $ownerLog -Raw
           foreach ($witness in @(
@@ -1433,6 +1452,12 @@ jobs:
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     runs-on: windows-latest
+    env:
+      # Match the trusted-main release cache prime's full Cargo environment
+      # fingerprint. Without these, PR releases miss its accepted compiler
+      # cache and compile the same immutable Engine again for 8+ minutes.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     permissions:
       contents: read
     timeout-minutes: 30

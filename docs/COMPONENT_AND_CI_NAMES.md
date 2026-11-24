@@ -110,6 +110,25 @@ evidence must **not** be described as a fresh financial acceptance run. The
 target warmed 60–120-second ready cycle includes the relevant financial
 checks and usable artifact, and is not yet proved for Engine changes.
 
+The classifier follows **runtime effects as well as Cargo imports**. Research
+analytics and its own Edge adapter can use the Research-only Windows route;
+`research_supervisor.rs` can use Host owner tests. But the legacy Engine still
+starts the Research executable, so changes to the Worker's `main.rs` or
+`process_memory.rs` must run the full Engine/Finance acceptance. Likewise,
+Host `job.rs` and `lifecycle_executor.rs` own the Engine process and its
+Windows Job as well as Research: changing either must run the full native
+matrix. Shared IPC, Cargo lockfiles and CI build inputs remain full-scope.
+This is a temporary **explicit ownership boundary**, not a claim that all
+files under a crate belong to one runtime owner.
+
+The trusted `main` Windows release compiler cache and the full PR release
+builder must agree on Cargo profile environment values, or an otherwise
+unchanged Engine recompiles despite a successful main cache prime. Owner-only
+Windows cache reuse is a separate, unproven performance task: combining two
+`rust-cache` restores on one target can erase the first restore on a partial
+cache hit. Scope selection must also be verified against actual Windows jobs:
+a green classifier unit test alone does not prove a 1–2 minute owner-only run.
+
 ## Rust packages
 
 | Canonical Cargo package / directory | Previously called | Responsibility |

@@ -36,6 +36,22 @@ _HOST_MANIFESTS = {
     "crates/okx-host-controller/Cargo.toml",
     "crates/okx-host-launcher/Cargo.toml",
 }
+# The legacy Engine still launches this Research Worker inside its trading
+# process tree. Its Windows CPU/memory Job policy therefore changes the actual
+# Finance-vs-Research scheduling contract, even though Cargo does not link it.
+# Keep mandatory Engine load acceptance until the old child is retired.
+_ENGINE_RESEARCH_RUNTIME_POLICY = {
+    "crates/okx-research-service/src/process_memory.rs",
+    "crates/okx-research-service/src/main.rs",
+}
+# These Host implementation files own the trading Engine process/Job as well
+# as Research. Host-only CI would not exercise the Engine financial lifecycle
+# after an edit here. Keep them in the native matrix until that shared owner
+# is physically split into independently testable modules.
+_ENGINE_HOST_LIFECYCLE = {
+    "crates/okx-host-controller/src/job.rs",
+    "crates/okx-host-controller/src/lifecycle_executor.rs",
+}
 
 
 def category(path):
@@ -48,6 +64,8 @@ def category(path):
         return "docs"
     if path.startswith(_CLOUDFLARE_DIR):
         return "cloudflare"
+    if path in _ENGINE_RESEARCH_RUNTIME_POLICY or path in _ENGINE_HOST_LIFECYCLE:
+        return "full"
     # Only Rust implementation files may use the host-only gate. Changes to
     # manifests, assets, scripts, shared IPC or packaging still require full
     # CI. Only Host-owned protocol source under okx-host-protocol may be scoped.
@@ -283,6 +301,12 @@ def _self_test() -> None:
     unsafe = [
         [], [[]], [[{}]],
         files("crates/okx-domain-core/src/query_plan.rs"),
+        files("crates/okx-research-service/src/process_memory.rs"),
+        files("crates/okx-research-service/src/main.rs"),
+        files("crates/okx-research-service/src/process_memory.rs", "crates/okx-host-controller/src/research_supervisor.rs"),
+        files("crates/okx-host-controller/src/job.rs"),
+        files("crates/okx-host-controller/src/lifecycle_executor.rs"),
+        files("crates/okx-host-controller/src/lifecycle_executor.rs", "crates/okx-research-service/src/edge_runtime.rs"),
         files("crates/okx-ipc-contracts/src/lib.rs"),
         files("crates/okx-trading-engine/src/trade_service/execute.rs"),
         files("crates/okx-trade-execution/src/lib.rs"),
