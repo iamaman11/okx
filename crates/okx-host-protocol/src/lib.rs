@@ -571,7 +571,10 @@ mod tests {
     fn research_token_provision_command_has_no_bearer_fields() {
         let command = serde_json::json!({"type":"provision_research_runtime_token"});
         let parsed: HostControlOperation = serde_json::from_value(command.clone()).unwrap();
-        assert_eq!(parsed, HostControlOperation::ProvisionResearchRuntimeToken {});
+        assert_eq!(
+            parsed,
+            HostControlOperation::ProvisionResearchRuntimeToken {}
+        );
         assert!(parsed.validate().is_ok());
         assert_eq!(serde_json::to_value(parsed).unwrap(), command);
         for field in [
