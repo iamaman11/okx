@@ -2,10 +2,7 @@
 //! Inputs are independent inventory/position observations, not success flags.
 //! These tests exercise the exact durable decision called by TradeService.
 use super::*;
-use crate::accounts::native_trade_contracts::{
-    filled_fixture as filled,
-    fixture::{self as native, NativeFixture},
-};
+use crate::accounts::native_trade_contracts::fixture::{self as native, NativeFixture};
 use okx_api::{PendingDerivativeAlgoRiskInventory, PendingProtectiveAlgoSample};
 const INST: &str = "BTC-USDT-SWAP";
 const ALGO: &str = "owned-protection-001";
@@ -15,43 +12,13 @@ struct Fixture {
     native: NativeFixture,
 }
 async fn fixture() -> Fixture {
+    // pc_01..pc_06 test the original SQL owner's durable cleanup BEGIN and
+    // readback, which depend on a connected account/ExecutionStore, not on
+    // TradeService's unrelated campaign-opening maintenance scheduler.
+    // native::fixture still verifies private identity, source cursors,
+    // governance and the real SQL owner; pc_07 separately proves the full
+    // market/maintenance/HTTP cancellation flow on its original path.
     let native = native::fixture().await;
-    // Production maintenance must prove a CURRENT six-partition financial
-    // capture before opening the campaign. The original fixture established
-    // its first frontier during account connection; on a busy Windows owner
-    // the initial 5s source window can expire before this separate turn.
-    // Supply ONE new finite venue observation through the real parser/owner,
-    // never a fabricated SQL cursor, NAV grant, or relaxed freshness limit.
-    let capture = native._account.recorded_capture_gate.write().await;
-    filled::snapshot(&native.feed, "100", "0");
-    filled::history(&native.feed, None);
-    filled::capture(&native).await;
-    drop(capture);
-    let (shutdown, stopped) = tokio::sync::watch::channel(false);
-    let service = native.trade.clone();
-    let task = tokio::spawn(async move { service.run(stopped).await });
-    // The same bounded 15s startup budget as opened_market; all production
-    // financial clocks/queue deadlines remain unchanged and the opening
-    // still must be independently observed from the SQL owner.
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        loop {
-            if native
-                .owner
-                .campaign_summary(native.campaign.clone())
-                .await
-                .unwrap()
-                .opening
-                .is_some()
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("production maintenance establishes the campaign opening");
-    shutdown.send(true).unwrap();
-    task.await.unwrap();
     let store = native._account.execution.store.clone();
     Fixture { store, native }
 }
@@ -457,6 +424,7 @@ async fn pc_06_two_callers_share_one_begin_and_old_read_never_confirms() {
 #[tokio::test]
 async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     use crate::account_bootstrap::AccountBootstrapper;
+    use crate::accounts::native_trade_contracts::filled_fixture as filled;
     use crate::accounts::recorded_support::{RecordedAccountHttp, RecordedGet, RecordedPost};
     use okx_api::{
         Credentials, HttpTransport, OkxEnvironment, OkxRestClient, RateBudget, Region, TradeApi,
