@@ -246,10 +246,7 @@ mod tests {
         // Golden key from the historical `(account, instance, definition,
         // version, installed JSON, instrument, timeframe, bar)` preimage.
         // Comparing both new paths alone would miss a simultaneous drift.
-        assert_eq!(
-            legacy_key,
-            "bar_601fc2b5879d41104f179658981d7f7f3f2f3df0"
-        );
+        assert_eq!(legacy_key, "bar_601fc2b5879d41104f179658981d7f7f3f2f3df0");
         assert_eq!(legacy_key.len(), 44);
         assert_ne!(
             legacy_key,

@@ -80,9 +80,9 @@ pub(super) fn diagnostic_lines(report: &Value) -> Vec<String> {
         let safe = |name: &str, max: usize| {
             !name.is_empty()
                 && name.len() <= max
-                && name.bytes().all(|b| {
-                    b.is_ascii_alphanumeric() || matches!(b, b'_' | b':' | b'.' | b'-')
-                })
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b':' | b'.' | b'-'))
         };
         if !safe(package, 64)
             || !safe(test, 256)
@@ -274,7 +274,12 @@ mod tests {
              ---- {first} stdout ----\nthread 'x' panicked at 'unsafe mutation clock evidence: secret=TOKEN'\n\
              ---- {second} stdout ----\nthread 'x' panicked at 'Elapsed(()) secret=PASSWORD'\n"
         );
-        record_failures(&mut report, "okx-trading-engine", output.as_bytes(), &expected);
+        record_failures(
+            &mut report,
+            "okx-trading-engine",
+            output.as_bytes(),
+            &expected,
+        );
         let witnesses = report["failed_witnesses"].as_array().unwrap();
         assert_eq!(witnesses.len(), 2);
         assert_eq!(witnesses[0]["test"], first);
@@ -299,9 +304,17 @@ mod tests {
             "test {first} ... FAILED\ntest {second} ... FAILED\n\
              ---- {first} stdout ----\nthread 'test' panicked at arbitrary untrusted payload\n"
         );
-        record_failures(&mut report, "okx-trading-engine", output.as_bytes(), &expected);
+        record_failures(
+            &mut report,
+            "okx-trading-engine",
+            output.as_bytes(),
+            &expected,
+        );
         assert_eq!(report["failed_witnesses"][0]["cause_code"], "TEST_PANIC");
-        assert_eq!(report["failed_witnesses"][1]["cause_code"], "LIBTEST_FAILED");
+        assert_eq!(
+            report["failed_witnesses"][1]["cause_code"],
+            "LIBTEST_FAILED"
+        );
     }
 
     #[test]
@@ -314,10 +327,13 @@ mod tests {
             {"package":"okx-trading-engine\u{001b}[0m","test":"valid::other","cause_code":"TEST_PANIC"},
             {"package":"okx-trading-engine","test":"valid::other","cause_code":"CLOCK_EVIDENCE_REJECTED"}
         ]});
-        assert_eq!(diagnostic_lines(&report), vec![
-            "NATIVE_FINANCE_WITNESS_FAILED package=okx-trading-engine test=valid::witness cause=TEST_PANIC",
-            "NATIVE_FINANCE_WITNESS_FAILED package=okx-trading-engine test=valid::other cause=CLOCK_EVIDENCE_REJECTED",
-        ]);
+        assert_eq!(
+            diagnostic_lines(&report),
+            vec![
+                "NATIVE_FINANCE_WITNESS_FAILED package=okx-trading-engine test=valid::witness cause=TEST_PANIC",
+                "NATIVE_FINANCE_WITNESS_FAILED package=okx-trading-engine test=valid::other cause=CLOCK_EVIDENCE_REJECTED",
+            ]
+        );
         assert!(diagnostic_lines(&json!({"failed_witnesses":{"not":"an array"}})).is_empty());
     }
 

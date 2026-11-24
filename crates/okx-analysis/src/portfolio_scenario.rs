@@ -139,15 +139,11 @@ pub fn evaluate(input: &PortfolioScenarioInput) -> Result<PortfolioScenarioResul
             .checked_mul(Decimal::from(position.volatility_bps))
             .and_then(|value| value.checked_div(Decimal::from(10_000)))
             .ok_or(ScenarioError::Overflow)?;
-        gross = gross
-            .checked_add(notional)
-            .ok_or(ScenarioError::Overflow)?;
+        gross = gross.checked_add(notional).ok_or(ScenarioError::Overflow)?;
         margin = margin
             .checked_add(position.margin_usd)
             .ok_or(ScenarioError::Overflow)?;
-        move_pnl = move_pnl
-            .checked_add(pnl)
-            .ok_or(ScenarioError::Overflow)?;
+        move_pnl = move_pnl.checked_add(pnl).ok_or(ScenarioError::Overflow)?;
         liquidity = liquidity
             .checked_add(impact)
             .ok_or(ScenarioError::Overflow)?;
@@ -305,8 +301,7 @@ mod tests {
     #[test]
     fn typed_inputs_reject_invalid_bounds_without_wire_validation() {
         let check = |equity, position: ScenarioPosition| {
-            PortfolioScenarioInput::new(equity, vec![position], Vec::new())
-                .unwrap_err()
+            PortfolioScenarioInput::new(equity, vec![position], Vec::new()).unwrap_err()
         };
         assert_eq!(
             check(Decimal::ZERO, position()),

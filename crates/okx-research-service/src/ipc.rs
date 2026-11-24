@@ -416,28 +416,34 @@ mod tests {
         let mut result = portfolio_scenario_wire(&request).unwrap();
         let volatility = result["correlated_volatility_usd"].as_f64().unwrap();
         assert!((volatility - 3.577708764).abs() < 1e-8);
-        result.as_object_mut().unwrap().remove("correlated_volatility_usd");
-        assert_eq!(result, serde_json::json!({
-            "schema": "okx.portfolio.scenario/v1",
-            "quality": "assumed",
-            "execution": "virtual_read_only",
-            "exchange_post": false,
-            "venue_margin_verified": false,
-            "provenance": "caller_supplied",
-            "gross_notional_usd": "200",
-            "margin_usd": "20",
-            "stress_price_pnl_usd": "0",
-            "liquidity_loss_usd": "1",
-            "net_stress_pnl_usd": "-1",
-            "stressed_equity_usd": "49",
-            "drawdown_ratio": "0.02",
-            "gross_leverage_ratio": "4",
-            "correlation_basis": "caller_supplied_psd",
-            "positions": [
-                {"instrument":"BTC-USDT-SWAP", "side":"long", "price_pnl_usd":"-10", "liquidity_loss_usd":"0.5", "source":"caller_supplied"},
-                {"instrument":"BTC-USDT-SWAP", "side":"short", "price_pnl_usd":"10", "liquidity_loss_usd":"0.5", "source":"caller_supplied"},
-            ],
-        }));
+        result
+            .as_object_mut()
+            .unwrap()
+            .remove("correlated_volatility_usd");
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "schema": "okx.portfolio.scenario/v1",
+                "quality": "assumed",
+                "execution": "virtual_read_only",
+                "exchange_post": false,
+                "venue_margin_verified": false,
+                "provenance": "caller_supplied",
+                "gross_notional_usd": "200",
+                "margin_usd": "20",
+                "stress_price_pnl_usd": "0",
+                "liquidity_loss_usd": "1",
+                "net_stress_pnl_usd": "-1",
+                "stressed_equity_usd": "49",
+                "drawdown_ratio": "0.02",
+                "gross_leverage_ratio": "4",
+                "correlation_basis": "caller_supplied_psd",
+                "positions": [
+                    {"instrument":"BTC-USDT-SWAP", "side":"long", "price_pnl_usd":"-10", "liquidity_loss_usd":"0.5", "source":"caller_supplied"},
+                    {"instrument":"BTC-USDT-SWAP", "side":"short", "price_pnl_usd":"10", "liquidity_loss_usd":"0.5", "source":"caller_supplied"},
+                ],
+            })
+        );
     }
 
     #[test]
@@ -466,7 +472,9 @@ mod tests {
             "INVALID_PORTFOLIO_SCENARIO"
         );
         request.positions[0].notional_usd = "100".into();
-        request.positions.push(scenario_position(PositionSide::Long));
+        request
+            .positions
+            .push(scenario_position(PositionSide::Long));
         request.correlations = vec![
             ScenarioCorrelation {
                 left: 0,

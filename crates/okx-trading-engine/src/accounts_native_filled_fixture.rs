@@ -201,6 +201,64 @@ pub(super) async fn opened_market_with_public_client(
         .apply_governance(&fixture.authority)
         .await
         .expect("strict original finance policy applied before opening");
+    // The production financial SQL owner requires a nonempty *completed*
+    // opening interval: `through = now - 2s` must exceed the campaign's
+    // durable inception. The old background scheduler incidentally supplied
+    // this delay, but an immediate explicit call does not. Wait only for the
+    // remaining real time, measured from the owner's original receipt, and
+    // retain the unchanged SQL window validation.
+    let started_at_ms = fixture
+        .owner
+        .campaign_summary(fixture.campaign.clone())
+        .await
+        .expect("original finance owner returns durable campaign inception")
+        .campaign_started_at_ms
+        .expect("strict governance has established campaign inception");
+    let observed_ms = u64::try_from(jiff::Timestamp::now().as_millisecond())
+        .expect("positive native fixture wall-clock millis");
+    let earliest_opening_ms = started_at_ms.saturating_add(2_050);
+    if earliest_opening_ms > observed_ms {
+        tokio::time::sleep(Duration::from_millis(earliest_opening_ms - observed_ms)).await;
+    }
+    // Account capture is independently scheduled every two seconds. Wait for
+    // that *production* source owner to advance all six durable frontiers
+    // through the opening cutoff. This synchronizes to actual source evidence
+    // rather than racing the scheduler or manufacturing SQL readiness.
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let through_ms = jiff::Timestamp::now().as_millisecond().saturating_sub(1_900);
+            let state = fixture
+                ._account
+                .execution
+                .store
+                .source_capture_state(Instant::now() + Duration::from_secs(2))
+                .await
+                .expect("original account source state remains readable");
+            let complete = [
+                state.cursors.spot.as_ref(),
+                state.cursors.margin.as_ref(),
+                state.cursors.swap.as_ref(),
+                state.cursors.futures.as_ref(),
+                state.cursors.options.as_ref(),
+                state.cursors.bills.as_ref(),
+            ]
+            .into_iter()
+            .all(|cursor| {
+                cursor.is_some_and(|cursor| {
+                    cursor.generation > 0
+                        && cursor.cursor.is_empty()
+                        && cursor.coverage_gaps.is_empty()
+                        && cursor.watermark >= through_ms
+                })
+            });
+            if complete {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("six real captured source frontiers cover the opening interval");
     fixture
         .trade
         .install_captured_empty_campaign_opening(
