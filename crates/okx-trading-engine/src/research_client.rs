@@ -651,7 +651,7 @@ impl ResearchClient {
     }
     pub async fn portfolio_scenario(
         &self,
-        request: okx_ipc_contracts::trading::PortfolioScenarioRequest,
+        request: okx_ipc_contracts::analytics::PortfolioScenarioRequest,
     ) -> Result<Value, String> {
         if !self.worker_features().await?.portfolio_scenario {
             return Err("RESEARCH_PORTFOLIO_SCENARIO_UNSUPPORTED".into());

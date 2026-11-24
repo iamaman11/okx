@@ -989,10 +989,7 @@ fn risk_book_contract_real_account_sql_unsent_proof_bridges_campaign_sql() {
     assert!(campaign.release_unsent(&proof, 2, 7).unwrap().replayed);
     assert_eq!(proof.reservation_key, key);
     let observed = campaign.inspect(&key, &proof.plan_sha256).unwrap().unwrap();
-    assert_eq!(
-        observed.state,
-        crate::risk::model::RiskEntryState::Released
-    );
+    assert_eq!(observed.state, crate::risk::model::RiskEntryState::Released);
 }
 
 #[test]
@@ -1329,10 +1326,7 @@ fn risk_book_contract_sql_os_kill_after_post_fence_never_regrants() {
         .inspect(&input.reservation_key(), &input.plan_sha256)
         .unwrap()
         .unwrap();
-    assert_eq!(
-        observed.state,
-        crate::risk::model::RiskEntryState::Posted
-    );
+    assert_eq!(observed.state, crate::risk::model::RiskEntryState::Posted);
     assert_eq!(observed.current_book_sequence, 2);
     assert_eq!(reopened.readback().unwrap().global_reserved_usdt, "3");
     let mut same_post = post_fence(&input, 2);

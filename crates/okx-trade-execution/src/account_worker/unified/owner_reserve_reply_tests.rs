@@ -7,12 +7,12 @@ use super::{
     UnifiedFinanceHandle,
     owner_financial_reply_tests::{INSTALLATION, account, campaign, fresh},
 };
+use crate::risk::model::{PostAccountRead, PostCausalProof};
 use crate::{
     AccountNavSnapshot, AccountStore, CentralReceipt, CentralReceiptView, Decision,
     EntryAdmissionEvidence, EntryQuoteEvidence, IngestPage, IntentPlan, IntentState, NewIntent,
     SourceCursor, StoreError, TradeIntentLookup,
 };
-use crate::risk::model::{PostAccountRead, PostCausalProof};
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use std::{

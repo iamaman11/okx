@@ -793,16 +793,16 @@ async fn overview_without_reference_rejects_unavailable_source_instead_of_empty_
     fixture.finish().await;
 }
 
-fn two_position_scenario() -> okx_ipc_contracts::trading::PortfolioScenarioRequest {
-    use okx_ipc_contracts::trading::{
-        PortfolioScenarioRequest, PositionSide, ScenarioCorrelation, ScenarioPosition,
+fn two_position_scenario() -> okx_ipc_contracts::analytics::PortfolioScenarioRequest {
+    use okx_ipc_contracts::analytics::{
+        PortfolioScenarioRequest, ScenarioCorrelation, ScenarioPosition, ScenarioPositionSide,
     };
     PortfolioScenarioRequest {
         equity_usd: "100".into(),
         positions: vec![
             ScenarioPosition {
                 instrument: "BTC-USDT-SWAP".into(),
-                side: PositionSide::Long,
+                side: ScenarioPositionSide::Long,
                 notional_usd: "100".into(),
                 margin_usd: "10".into(),
                 price_shock_bps: -1000,
@@ -811,7 +811,7 @@ fn two_position_scenario() -> okx_ipc_contracts::trading::PortfolioScenarioReque
             },
             ScenarioPosition {
                 instrument: "ETH-USDT-SWAP".into(),
-                side: PositionSide::Short,
+                side: ScenarioPositionSide::Short,
                 notional_usd: "200".into(),
                 margin_usd: "20".into(),
                 price_shock_bps: 500,
@@ -879,7 +879,7 @@ async fn portfolio_scenario_public_dispatch_returns_independent_virtual_risk_val
 
 #[tokio::test]
 async fn portfolio_scenario_public_dispatch_rejects_non_psd_and_invalid_parameters() {
-    use okx_ipc_contracts::trading::ScenarioCorrelation;
+    use okx_ipc_contracts::analytics::ScenarioCorrelation;
     let fixture = Fixture::new(empty_reference()).await;
     fixture.context.research.capabilities().await.unwrap();
     let before = fixture_artifacts(&fixture.root);

@@ -1,9 +1,82 @@
 //! Public compact analytics contract. No transport or financial logic.
+use crate::numeric::positive_decimal;
 use okx_domain_core::strategy_contract::CompositionRequest;
 pub use okx_domain_core::strategy_contract::{
     BreakoutParameters, EmaParameters, StrategyParameters,
 };
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScenarioPositionSide {
+    Long,
+    Short,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioPosition {
+    pub instrument: String,
+    pub side: ScenarioPositionSide,
+    pub notional_usd: String,
+    pub margin_usd: String,
+    pub price_shock_bps: i32,
+    pub volatility_bps: u32,
+    pub liquidity_cost_bps: u32,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioCorrelation {
+    pub left: usize,
+    pub right: usize,
+    pub rho: f64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortfolioScenarioRequest {
+    pub equity_usd: String,
+    pub positions: Vec<ScenarioPosition>,
+    pub correlations: Vec<ScenarioCorrelation>,
+}
+impl PortfolioScenarioRequest {
+    pub fn valid(&self) -> bool {
+        if positive_decimal(&self.equity_usd).is_err()
+            || self.positions.is_empty()
+            || self.positions.len() > 8
+            || self.correlations.len() != self.positions.len() * (self.positions.len() - 1) / 2
+        {
+            return false;
+        }
+        let mut pairs = std::collections::BTreeSet::new();
+        for p in &self.positions {
+            if p.instrument.is_empty()
+                || p.instrument.len() > 128
+                || !p
+                    .instrument
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b':'))
+                || positive_decimal(&p.notional_usd).is_err()
+                || positive_decimal(&p.margin_usd).is_err()
+                || !(-10000..=10000).contains(&p.price_shock_bps)
+                || p.volatility_bps > 10000
+                || p.liquidity_cost_bps > 10000
+            {
+                return false;
+            }
+        }
+        for c in &self.correlations {
+            if c.left >= c.right
+                || c.right >= self.positions.len()
+                || !c.rho.is_finite()
+                || !(-1.0..=1.0).contains(&c.rho)
+                || !pairs.insert((c.left, c.right))
+            {
+                return false;
+            }
+        }
+        true
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RangeMode {

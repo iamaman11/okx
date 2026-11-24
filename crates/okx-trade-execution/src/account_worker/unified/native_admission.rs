@@ -1,11 +1,11 @@
 //! Actual producer observations are data; original SQL sources and activation
 //! remain mandatory. No public constructor for VerifiedCensus or send claims.
 use super::*;
-use crate::{AccountStore, CentralReceipt, CommittedVenueSend, StoreError, StoreResult};
 use crate::risk::{
     model::{PostCausalProof, RiskProposal},
     money::RiskAmount,
 };
+use crate::{AccountStore, CentralReceipt, CommittedVenueSend, StoreError, StoreResult};
 use std::collections::BTreeMap;
 #[derive(Debug, Clone)]
 pub struct ReportedRiskCensus {

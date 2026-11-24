@@ -1,7 +1,7 @@
 //! Full authorized policy enters the existing writer; no opening/source grant.
 use super::UnifiedFinanceHandle;
-use crate::{AccountStore, StoreError, StoreResult};
 use crate::risk::money::RiskAmount;
+use crate::{AccountStore, StoreError, StoreResult};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

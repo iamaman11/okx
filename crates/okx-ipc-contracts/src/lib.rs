@@ -253,7 +253,7 @@ pub enum AgentOperation {
         request: trading::PortfolioRequest,
     },
     PortfolioScenario {
-        request: trading::PortfolioScenarioRequest,
+        request: analytics::PortfolioScenarioRequest,
     },
     Diagnostics {
         request: trading::DiagnosticsRequest,

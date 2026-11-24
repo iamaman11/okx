@@ -116,7 +116,7 @@ pub enum ResearchCommand {
         request: StrategySignalInput,
     },
     PortfolioScenario {
-        request: crate::trading::PortfolioScenarioRequest,
+        request: crate::analytics::PortfolioScenarioRequest,
     },
     Capabilities,
     Drain,

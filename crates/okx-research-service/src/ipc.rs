@@ -31,12 +31,12 @@ fn codec() -> LengthDelimitedCodec {
 /// fields to pure, typed portfolio mathematics. The Analysis crate has no
 /// dependency on the Engine/Research IPC package or its crypto dependencies.
 pub(crate) fn portfolio_scenario_wire(
-    request: &okx_ipc_contracts::trading::PortfolioScenarioRequest,
+    request: &okx_ipc_contracts::analytics::PortfolioScenarioRequest,
 ) -> Result<serde_json::Value, String> {
     use okx_analysis::portfolio_scenario::{
         PortfolioScenarioInput, ScenarioCorrelation, ScenarioPosition, ScenarioSide, evaluate,
     };
-    use okx_ipc_contracts::trading::PositionSide;
+    use okx_ipc_contracts::analytics::ScenarioPositionSide;
     use rust_decimal::Decimal;
 
     if !request.valid() {
@@ -54,8 +54,8 @@ pub(crate) fn portfolio_scenario_wire(
             Ok(ScenarioPosition {
                 instrument: position.instrument.clone(),
                 side: match position.side {
-                    PositionSide::Long => ScenarioSide::Long,
-                    PositionSide::Short => ScenarioSide::Short,
+                    ScenarioPositionSide::Long => ScenarioSide::Long,
+                    ScenarioPositionSide::Short => ScenarioSide::Short,
                 },
                 notional_usd: decimal(&position.notional_usd)?,
                 margin_usd: decimal(&position.margin_usd)?,
@@ -382,12 +382,12 @@ where
 mod tests {
     use super::*;
     use okx_ipc_contracts::analytics::ResearchRequest;
-    use okx_ipc_contracts::trading::{
-        PortfolioScenarioRequest, PositionSide, ScenarioCorrelation, ScenarioPosition,
+    use okx_ipc_contracts::analytics::{
+        PortfolioScenarioRequest, ScenarioCorrelation, ScenarioPosition, ScenarioPositionSide,
     };
     use tokio::io::AsyncWriteExt;
 
-    fn scenario_position(side: PositionSide) -> ScenarioPosition {
+    fn scenario_position(side: ScenarioPositionSide) -> ScenarioPosition {
         ScenarioPosition {
             instrument: "BTC-USDT-SWAP".into(),
             side,
@@ -404,8 +404,8 @@ mod tests {
         let request = PortfolioScenarioRequest {
             equity_usd: "50".into(),
             positions: vec![
-                scenario_position(PositionSide::Long),
-                scenario_position(PositionSide::Short),
+                scenario_position(ScenarioPositionSide::Long),
+                scenario_position(ScenarioPositionSide::Short),
             ],
             correlations: vec![ScenarioCorrelation {
                 left: 0,
@@ -451,8 +451,8 @@ mod tests {
         let mut request = PortfolioScenarioRequest {
             equity_usd: "50".into(),
             positions: vec![
-                scenario_position(PositionSide::Long),
-                scenario_position(PositionSide::Long),
+                scenario_position(ScenarioPositionSide::Long),
+                scenario_position(ScenarioPositionSide::Long),
             ],
             correlations: vec![ScenarioCorrelation {
                 left: 0,
@@ -474,7 +474,7 @@ mod tests {
         request.positions[0].notional_usd = "100".into();
         request
             .positions
-            .push(scenario_position(PositionSide::Long));
+            .push(scenario_position(ScenarioPositionSide::Long));
         request.correlations = vec![
             ScenarioCorrelation {
                 left: 0,

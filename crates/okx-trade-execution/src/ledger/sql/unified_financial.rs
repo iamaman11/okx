@@ -11,9 +11,9 @@ type FixtureEntryRow = (String, String, String, String, String, String, i64, Str
 #[cfg(test)]
 type FixtureCampaignRow = (i64, i64, i64, String, String, String, String, String);
 
-use crate::{StoreError, StoreResult};
 #[cfg(test)]
 use crate::risk::money::RiskAmount;
+use crate::{StoreError, StoreResult};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 #[cfg(test)]
