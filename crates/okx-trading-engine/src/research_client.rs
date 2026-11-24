@@ -101,7 +101,6 @@ struct Connection {
 #[derive(Clone, Copy)]
 struct WorkerFeatures {
     portfolio_scenario: bool,
-    signal_outbox: bool,
 }
 struct PendingReply {
     pending: PendingReplies,
@@ -626,25 +625,6 @@ impl ResearchClient {
         .await?
         .product()
     }
-    /// Correlated read-only computation from the separate Research process.
-    pub async fn evaluate_signal(&self, request: SignalRequest) -> Result<SignalDecision, String> {
-        if !request.valid() {
-            return Err("INVALID_SIGNAL_REQUEST".into());
-        }
-        let decision = self
-            .call(
-                ResearchCommand::EvaluateSignal {
-                    request: request.clone(),
-                },
-                true,
-            )
-            .await?
-            .signal()?;
-        if !decision.matches_request(&request) {
-            return Err("SIGNAL_RESPONSE_MISMATCH".into());
-        }
-        Ok(decision)
-    }
     pub async fn capabilities(&self) -> Result<Value, String> {
         self.call(ResearchCommand::Capabilities, true)
             .await?
@@ -661,7 +641,6 @@ impl ResearchClient {
                         .product()?;
                     Ok::<_, String>(WorkerFeatures {
                         portfolio_scenario: capabilities["portfolio_scenario"] == true,
-                        signal_outbox: capabilities["strategy_signal_outbox"] == true,
                     })
                 })
                 .await?;
@@ -669,9 +648,6 @@ impl ResearchClient {
         })
         .await
         .map_err(|_| "WORKER_CAPABILITIES_TIMEOUT")?
-    }
-    pub async fn supports_strategy_signal_outbox(&self) -> Result<bool, String> {
-        Ok(self.worker_features().await?.signal_outbox)
     }
     pub async fn portfolio_scenario(
         &self,
@@ -683,18 +659,6 @@ impl ResearchClient {
         self.call(ResearchCommand::PortfolioScenario { request }, true)
             .await?
             .product()
-    }
-    pub async fn stage_strategy_signal(
-        &self,
-        request: StrategySignalInput,
-    ) -> Result<Option<StrategySignalProposal>, String> {
-        match self
-            .call(ResearchCommand::ProposeStrategySignal { request }, true)
-            .await?
-        {
-            WorkerReply::StrategyProposal(proposal) => Ok(proposal),
-            _ => Err("WORKER_REPLY_KIND_MISMATCH".into()),
-        }
     }
     pub async fn diagnostic_job(&self, id: &str) -> Result<Value, String> {
         self.call(

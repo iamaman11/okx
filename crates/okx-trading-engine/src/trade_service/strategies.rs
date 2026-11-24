@@ -1,20 +1,9 @@
+use super::strategy_signal::{self, Position};
 use super::*;
-use okx_ipc_contracts::research_ipc::{
-    ClosedPrice, SignalDefinitionId, SignalDefinitionVersion, SignalInstanceId, SignalInstrumentId,
-    SignalPosition, SignalRequest, StrategySignalInput, StrategySignalProposal,
-};
 use okx_ipc_contracts::trading::{CapitalDirection, StrategyConfigurationV1, StrategyParametersV1};
 #[cfg(test)]
 #[path = "strategy_contract_tests.rs"]
 mod strategy_contract_tests;
-
-/// Research output has exactly one provenance path. A proposal is untrusted
-/// until Engine checks it against its own source and authority; the legacy
-/// decision path is available only when the child explicitly lacks the outbox.
-enum ResearchSignal {
-    UntrustedProposal(StrategySignalProposal),
-    LegacyDecision(SignalPosition),
-}
 
 impl TradeService {
     pub async fn strategies(
@@ -484,53 +473,17 @@ impl TradeService {
         if !config.valid() {
             return Err("STRATEGY_CONFIGURATION_INVALID".into());
         }
-        let research = self
-            .signal_research
-            .read()
-            .await
-            .clone()
-            .ok_or("STRATEGY_RESEARCH_NOT_READY")?;
-        let (fast, slow) = (config.parameters.fast, config.parameters.slow);
         let timeframe = config.timeframe_ms;
-        let use_outbox = research.supports_strategy_signal_outbox().await?;
+        let history_limit = (config.parameters.slow * 4).clamp(100, 10_000);
         for instrument in &config.instruments {
             let bars = live_source
-                .load_closed_closes(instrument, timeframe, (slow * 4).clamp(100, 10000))
+                .load_closed_closes(instrument, timeframe, history_limit)
                 .await?;
             let last = bars.last().ok_or("STRATEGY_HISTORY_UNAVAILABLE")?.0;
-            let prices = SignalRequest {
-                strategy_id: instance.definition_id.clone(),
-                parameters: okx_ipc_contracts::analytics::EmaParameters { fast, slow },
-                closes: bars
-                    .iter()
-                    .map(|(time_ms, close)| ClosedPrice {
-                        time_ms: *time_ms,
-                        close: *close,
-                    })
-                    .collect(),
-            };
-            let research_signal = if use_outbox {
-                let Some(proposal) = research
-                    .stage_strategy_signal(StrategySignalInput {
-                        instance_id: SignalInstanceId::new(instance.instance_id.clone())?,
-                        definition_id: SignalDefinitionId::new(instance.definition_id.clone())?,
-                        definition_version: SignalDefinitionVersion::new(
-                            instance.definition_version.clone(),
-                        )?,
-                        instrument: SignalInstrumentId::new(instrument.to_owned())?,
-                        timeframe_ms: timeframe,
-                        available_at_ms: u64::try_from(now()).map_err(err)?,
-                        prices,
-                    })
-                    .await?
-                else {
-                    // An outbox-capable child declining to emit a proposal is
-                    // not a signal to downgrade to the legacy evaluation API.
-                    continue;
-                };
-                ResearchSignal::UntrustedProposal(proposal)
-            } else {
-                ResearchSignal::LegacyDecision(research.evaluate_signal(prices).await?.position)
+            let Some(position) =
+                strategy_signal::evaluate(&instance.definition_id, &config.parameters, &bars)?
+            else {
+                continue;
             };
             let decision_digest = digest(&(last, &bars))?;
             let (state, control) = self.authority(r, None).await?;
@@ -541,41 +494,19 @@ impl TradeService {
             let revision = i64::try_from(state.state.revision)
                 .map_err(|_| "STRATEGY_POLICY_REVISION_INVALID")?;
             let account = r.configuration.account_key.wire();
-            let (claim, position) = match research_signal {
-                ResearchSignal::UntrustedProposal(proposal) => {
-                    strategy_signal::check_strategy_signal(
-                        &proposal,
-                        &strategy_signal::TrustedStrategySignalContext {
-                            instance,
-                            configuration: &config,
-                            authenticated_account_key: &account,
-                            instrument,
-                            last_closed_ms: last,
-                            source_digest: &decision_digest,
-                            policy_revision: revision,
-                            now_ms: now(),
-                        },
-                    )?
-                    .into_claim()
-                }
-                ResearchSignal::LegacyDecision(position) => {
-                    let decision_key = strategy_signal::scoped_decision_key(
-                        &account, instance, instrument, timeframe, last,
-                    )?;
-                    (
-                        okx_trade_execution::account_worker::StrategyDecisionClaimCommand {
-                            instance_id: instance.instance_id.clone(),
-                            decision_key,
-                            input_digest: decision_digest,
-                            policy_revision: revision,
-                            expected_version: instance.definition_version.clone(),
-                            time: now(),
-                        },
-                        position,
-                    )
-                }
+            let decision_time = now();
+            strategy_signal::require_fresh_close(last, timeframe, decision_time)?;
+            let decision_key = strategy_signal::scoped_decision_key(
+                &account, instance, instrument, timeframe, last,
+            )?;
+            let claim = okx_trade_execution::account_worker::StrategyDecisionClaimCommand {
+                instance_id: instance.instance_id.clone(),
+                decision_key: decision_key.clone(),
+                input_digest: decision_digest,
+                policy_revision: revision,
+                expected_version: instance.definition_version.clone(),
+                time: decision_time,
             };
-            let decision_key = claim.decision_key.clone();
             let claimed = r
                 .execution
                 .store
@@ -586,9 +517,9 @@ impl TradeService {
                 continue;
             };
             let desired = match position {
-                SignalPosition::Long => 1,
-                SignalPosition::Short => -1,
-                SignalPosition::Flat | SignalPosition::Warmup => 0,
+                Position::Long => 1,
+                Position::Short => -1,
+                Position::Flat => 0,
             };
             if desired == 0 {
                 let id = instance.instance_id.clone();
