@@ -120,7 +120,8 @@ fn provision_research_edge_token() -> Result<(), String> {
         .read_to_end(&mut token)
         .map_err(|_| "RESEARCH_EDGE_TOKEN_STDIN_READ_FAILED")?;
     if token.ends_with(b"\r\n") {
-        token.truncate(token.len() - 2);
+        let without_crlf = token.len() - 2;
+        token.truncate(without_crlf);
     } else if token.ends_with(b"\n") {
         token.pop();
     }
