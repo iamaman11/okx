@@ -2012,22 +2012,22 @@ pub struct Rank {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "StoredQueryPlan")]
 pub struct QueryPlan {
-    pub version: String,
-    pub universe: Vec<String>,
-    pub dataset_refs: Vec<String>,
-    pub range: ClosedRange,
-    pub timeframe_ms: u64,
-    pub warmup_bars: u64,
-    pub sources: Vec<Source>,
-    pub operators: Vec<OperatorDescriptor>,
-    pub filters: Vec<Filter>,
-    pub ranking: Option<Rank>,
-    pub result_projection: Vec<Operator>,
-    pub parameters: BTreeMap<String, f64>,
-    pub assumptions: Vec<String>,
-    pub resource_budget_ref: String,
+    version: String,
+    universe: Vec<String>,
+    dataset_refs: Vec<String>,
+    range: ClosedRange,
+    timeframe_ms: u64,
+    warmup_bars: u64,
+    sources: Vec<Source>,
+    operators: Vec<OperatorDescriptor>,
+    filters: Vec<Filter>,
+    ranking: Option<Rank>,
+    result_projection: Vec<Operator>,
+    parameters: BTreeMap<String, f64>,
+    assumptions: Vec<String>,
+    resource_budget_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub composition: Option<CheckedComposition>,
+    composition: Option<CheckedComposition>,
 }
 
 /// Restore the existing artifact shape, then attest its cross-field bindings.
@@ -2035,6 +2035,7 @@ pub struct QueryPlan {
 /// this layer prevents a valid subgraph being paired with a forged cheap grid
 /// or a source manifest that omits one of its dependencies.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredQueryPlan {
     version: String,
     universe: Vec<String>,
@@ -2075,25 +2076,33 @@ impl TryFrom<StoredQueryPlan> for QueryPlan {
             resource_budget_ref: snapshot.resource_budget_ref,
             composition: snapshot.composition,
         };
+        // A serialized plan is evidence, not authority. Reconstruct all its
+        // derived metadata through the same compiler used for new requests;
+        // this also checks the operator versions, parameters, budget, source
+        // bindings, selected projection and optional composition as a unit.
+        let mut checked = Self::compile(
+            Vec::new(),
+            plan.range,
+            plan.operators.iter().map(|op| op.id).collect(),
+            plan.parameters.clone(),
+            plan.filters.clone(),
+            plan.ranking.clone(),
+        )?;
         if let Some(graph) = &plan.composition {
-            let cells = plan
-                .range
-                .expected_bars
-                .checked_mul(graph.steps().len() as u64)
-                .ok_or("query_plan.composition:CELLS_OVERFLOW")?;
-            if cells != graph.estimated_cells() || plan.timeframe_ms != plan.range.timeframe_ms {
-                return Err("query_plan.composition:RANGE_BINDING_MISMATCH".into());
-            }
-            let sources = graph.sources();
-            if !sources.iter().all(|source| plan.sources.contains(source)) {
-                return Err("query_plan.composition:SOURCE_BINDING_MISMATCH".into());
-            }
-            let total_bars = plan
-                .range
-                .expected_bars
-                .checked_mul(plan.universe.len().max(1) as u64)
-                .ok_or("query_plan.composition:GLOBAL_BARS_OVERFLOW")?;
-            graph.validate_global_budget(total_bars)?;
+            checked = checked.with_composition(Some(CompositionRequest {
+                version: graph.version().to_owned(),
+                steps: graph.steps().iter().map(|step| step.step.clone()).collect(),
+                result_steps: graph.result_steps().to_vec(),
+            }))?;
+        }
+        if !plan.universe.is_empty() {
+            checked = checked.with_resolved_universe(
+                plan.universe.clone(),
+                plan.universe.len() > 100,
+            )?;
+        }
+        if checked != plan {
+            return Err("query_plan:FORGED_VALIDATED_FIELDS".into());
         }
         Ok(plan)
     }
@@ -2132,6 +2141,32 @@ fn output_unit(op: Operator) -> Result<Unit, String> {
     })
 }
 impl QueryPlan {
+    /// A compiled plan is immutable. Callers inspect validated data through
+    /// read-only views and use the consuming builders to change its bindings.
+    pub fn universe(&self) -> &[String] {
+        &self.universe
+    }
+
+    pub fn sources(&self) -> &[Source] {
+        &self.sources
+    }
+
+    pub fn operators(&self) -> &[OperatorDescriptor] {
+        &self.operators
+    }
+
+    pub fn range(&self) -> ClosedRange {
+        self.range
+    }
+
+    pub fn parameters(&self) -> &BTreeMap<String, f64> {
+        &self.parameters
+    }
+
+    pub fn composition(&self) -> Option<&CheckedComposition> {
+        self.composition.as_ref()
+    }
+
     pub fn compile(
         universe: Vec<String>,
         range: ClosedRange,
@@ -2446,6 +2481,45 @@ mod tests {
         // Keep the original intact for legacy immutable artifact replay.
         let valid: QueryPlan = serde_json::from_value(wire.take()).unwrap();
         assert_eq!(valid.composition.unwrap().estimated_cells(), 14);
+    }
+
+    #[test]
+    fn serialized_query_plan_cannot_promote_forged_metadata_into_checked_state() {
+        let valid = QueryPlan::compile(
+            vec!["BTC-USDT".into()],
+            ClosedRange::strict(0, 20 * 60_000, 60_000).unwrap(),
+            vec![Operator::Ema],
+            BTreeMap::new(),
+            vec![],
+            None,
+        )
+        .unwrap();
+        let source = serde_json::to_value(&valid).unwrap();
+        let mutations = [
+            ("version", "version", serde_json::json!("future")),
+            ("timeframe", "timeframe_ms", serde_json::json!(120_000)),
+            ("warmup", "warmup_bars", serde_json::json!(0)),
+            ("sources", "sources", serde_json::json!([])),
+            ("projection", "result_projection", serde_json::json!([])),
+            ("defaults", "parameters", serde_json::json!({})),
+            ("budget", "resource_budget_ref", serde_json::json!("unbounded")),
+            ("assumptions", "assumptions", serde_json::json!([])),
+            ("datasets", "dataset_refs", serde_json::json!(["unverified"])),
+        ];
+        for (name, field, replacement) in mutations {
+            let mut forged = source.clone();
+            forged[field] = replacement;
+            assert!(
+                serde_json::from_value::<QueryPlan>(forged).is_err(),
+                "forged {name} cannot deserialize as a checked plan"
+            );
+        }
+        let mut forged = source.clone();
+        forged["operators"][0]["version"] = serde_json::json!(999);
+        assert!(serde_json::from_value::<QueryPlan>(forged).is_err());
+        let mut forged = source;
+        forged["unknown_authority"] = serde_json::json!("trade");
+        assert!(serde_json::from_value::<QueryPlan>(forged).is_err());
     }
 
     #[test]

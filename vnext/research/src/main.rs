@@ -12,6 +12,7 @@ use std::io::{self, Write};
 #[serde(deny_unknown_fields)]
 struct RecordedReplay {
     graph: CompositionRequest,
+    timeframe_ms: replay::TimeframeMs,
     bars: Vec<replay::InputBar>,
 }
 
@@ -31,13 +32,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     match args.as_slice() {
         [] => {
             let request: RecordedReplay = serde_json::from_reader(input)?;
-            serde_json::to_writer(&mut stdout, &replay::replay(request.graph, request.bars)?)?;
+            serde_json::to_writer(
+                &mut stdout,
+                &replay::replay(request.graph, request.timeframe_ms, request.bars)?,
+            )?;
         }
         [mode] if mode == "--okx" => {
             let request: PublicReplay = serde_json::from_reader(input)?;
+            let timeframe = replay::TimeframeMs::try_from(request.interval.milliseconds())?;
             let (source, bars) =
                 okx_candles::fetch(&request.instrument, request.interval, request.limit)?;
-            let result = replay::replay(request.graph, bars)?;
+            let result = replay::replay(request.graph, timeframe, bars)?;
             serde_json::to_writer(
                 &mut stdout,
                 &serde_json::json!({"source": source, "bars": result}),

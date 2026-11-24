@@ -42,8 +42,10 @@ export function workerReleaseSourceTree(env: Env): string | null {
   return typeof tree === "string" && /^[0-9a-f]{40}$/.test(tree) ? tree : null;
 }
 
-export type RuntimeProfile = "engine";
-export function decodeRuntimeProfile(value:unknown):RuntimeProfile|null{return value==="engine"?"engine":null;}
+export type RuntimeProfile = "engine" | "research";
+export function decodeRuntimeProfile(value:unknown):RuntimeProfile|null{
+  return value==="engine"||value==="research"?value:null;
+}
 
 export interface SocketAttachment {
   runtimeId: string;

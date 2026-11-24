@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/okx-host-launcher"]
+members = ["crates/okx-host-launcher", "crates/okx-host-controller"]
 
 [workspace.package]
 edition = "2024"

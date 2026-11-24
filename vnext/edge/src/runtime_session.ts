@@ -23,13 +23,27 @@ import {
   transportFailure,
 } from "./shared.js";
 
+const RESEARCH_OPERATIONS = new Set([
+  "market", "market_capabilities", "market_microstructure", "research", "find_instruments", "market_overview",
+]);
+
 // The scope is an authenticated host's namespace claim, not proof of a key.
 function researchOnlyPermits(request: any): boolean {
   if (request.account != null || !request.operation || typeof request.operation !== "object") return false;
   const op = request.operation;
-  if (["market", "market_capabilities", "market_microstructure", "research", "find_instruments", "market_overview"].includes(op.type)) return true;
+  if (RESEARCH_OPERATIONS.has(op.type)) return true;
   return op.type === "diagnostics" && op.request?.view === "research" && op.request?.account == null;
 }
+
+// Route by the operation's owner, not by the most recently connected host.
+// Validation is separate: a malformed research request must not fall back to Engine.
+function isResearchOperation(request: any): boolean {
+  const type = request?.operation?.type;
+  return RESEARCH_OPERATIONS.has(type)
+    || (type === "diagnostics" && request?.operation?.request?.view === "research");
+}
+
+type AttachedWebSocket = WebSocket & { deserializeAttachment(): SocketAttachment | null };
 
 export class RuntimeSession {
   private state: any;
@@ -184,10 +198,8 @@ export class RuntimeSession {
       return new Response("unauthorized", { status: 401 });
     }
 
-    for (const existing of this.state.getWebSockets("runtime") as WebSocket[]) {
-      try { existing.close(1012, "new generation"); } catch {}
-    }
-
+    // The peer's owner is not authenticated until its hello. Never evict the
+    // current Engine just because an independent Research socket connects.
     const generation = Number(await this.state.storage.get("generation") ?? 0) + 1;
     await this.state.storage.put("generation", generation);
     // A WSS generation is not a second owner of Windows installation proof.
@@ -243,7 +255,7 @@ export class RuntimeSession {
       }
       if (frame.type === "hello_research") {
         const fields = ["agent_binary_sha256","agent_incarnation","agent_pid","connection_id","contract","host_scope","runtime_id","runtime_profile","schema","type"];
-        if (Object.keys(frame).sort().join(",") !== fields.sort().join(",") || !/^[A-Za-z0-9_-]{16,128}$/.test(frame.connection_id) || typeof frame.host_scope !== "string" || !/^[0-9a-f]{64}$/.test(frame.host_scope) || frame.contract !== "okx.product/v1" || runtimeProfile !== "engine") {
+        if (Object.keys(frame).sort().join(",") !== fields.sort().join(",") || !/^[A-Za-z0-9_-]{16,128}$/.test(frame.connection_id) || typeof frame.host_scope !== "string" || !/^[0-9a-f]{64}$/.test(frame.host_scope) || frame.contract !== "okx.product/v1" || !["engine", "research"].includes(runtimeProfile)) {
           ws.close(1008, "invalid research hello"); return;
         }
         attachment.sessionMode = "research_only";
@@ -258,6 +270,18 @@ export class RuntimeSession {
         attachment.sessionMode = "finance";
         attachment.installationId = frame.installation_id;
         delete attachment.hostScope;
+      }
+      // Two owners may be online at once. Within one owner, only its newest
+      // authenticated generation survives (including out-of-order hellos).
+      for (const existing of this.state.getWebSockets("runtime") as AttachedWebSocket[]) {
+        if (existing === ws) continue;
+        const prior = existing.deserializeAttachment() as SocketAttachment | null;
+        if (!prior?.hello || (prior.sessionMode ?? "finance") !== attachment.sessionMode) continue;
+        if (prior.generation > attachment.generation) {
+          ws.close(1008, "stale generation"); return;
+        }
+        this.rejectGeneration(prior.generation, "RUNTIME_OFFLINE");
+        try { existing.close(1012, "new owner generation"); } catch {}
       }
       attachment.runtimeProfile = runtimeProfile;
       attachment.agentPid = frame.agent_pid;
@@ -341,12 +365,12 @@ export class RuntimeSession {
     }
   }
 
-  private activeSocket(): { ws: any; attachment: SocketAttachment } | null {
+  private activeSocket(mode: "finance" | "research_only" = "finance"): { ws: any; attachment: SocketAttachment } | null {
     const sockets = this.state.getWebSockets("runtime") as any[];
     let selected: { ws: any; attachment: SocketAttachment } | null = null;
     for (const ws of sockets) {
       const attachment = ws.deserializeAttachment() as SocketAttachment;
-      if (!attachment?.hello) continue;
+      if (!attachment?.hello || (attachment.sessionMode ?? "finance") !== mode) continue;
       if (!selected || attachment.generation > selected.attachment.generation) {
         selected = { ws, attachment };
       }
@@ -410,12 +434,16 @@ export class RuntimeSession {
     if (!request || request.schema !== "okx.agent.request/v1" || typeof request.request_id !== "string") {
       return transportFailure("INVALID_REQUEST", false);
     }
-    const active = this.activeSocket();
+    const research = isResearchOperation(request);
+    if (research && !researchOnlyPermits(request)) {
+      return transportFailure("RESEARCH_OPERATION_FORBIDDEN", false);
+    }
+    const active = this.activeSocket(research ? "research_only" : "finance");
     if (!active) return transportFailure("RUNTIME_OFFLINE");
     // OAuth/profile only authorizes delivery of a narrowly typed action.
     // The native Engine alone evaluates current account admission and
     // owns the actual exchange POST admission under the same ledger.
-    if (!executionProfilePermitsOperation(
+    if (!research && !executionProfilePermitsOperation(
       active.attachment.runtimeProfile,
       request.operation?.type,
     )) {
@@ -452,7 +480,7 @@ export class RuntimeSession {
         this.normalInflight++;this.inflight++;admitted=true;
       }
       // A waiting reader must never cross a native session generation.
-      const current=this.activeSocket();
+      const current=this.activeSocket(research ? "research_only" : "finance");
       if(!current||current.attachment.generation!==active.attachment.generation||
          current.attachment.sessionId!==active.attachment.sessionId)
         return transportFailure("RUNTIME_OFFLINE");
@@ -534,6 +562,11 @@ export class RuntimeSession {
 
   private async status(probe: boolean): Promise<Record<string,Json>> {
     const active = this.activeSocket();
+    const research = this.activeSocket("research_only");
+    const researchConnection = {
+      research_connected: research !== null,
+      research_connection_generation: research?.attachment.generation ?? null,
+    };
     if (!active) {
       return {
         schema: "okx.direct-transport.status/v1",
@@ -546,6 +579,7 @@ export class RuntimeSession {
         normal_inflight: this.normalInflight,
         readonly_queue_depth: this.readonlyWaiters.length,
         readonly_queue_capacity: MAX_READ_WAITERS,
+        ...researchConnection,
       };
     }
 
@@ -575,6 +609,7 @@ export class RuntimeSession {
       normal_inflight: this.normalInflight,
       readonly_queue_depth: this.readonlyWaiters.length,
       readonly_queue_capacity: MAX_READ_WAITERS,
+      ...researchConnection,
       connected_at_ms: active.attachment.connectedAtMs,
       installation_id: active.attachment.installationId ?? null,
       agent_pid: active.attachment.agentPid ?? null,

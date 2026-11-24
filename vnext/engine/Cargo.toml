@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/okx-engine-risk", "crates/okx-trade-execution"]
+members = ["crates/okx-engine-risk", "crates/okx-trade-execution", "crates/okx-trading-engine"]
 
 [workspace.package]
 edition = "2024"

@@ -4,18 +4,15 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-fn replay(timestamps: [i64; 3]) -> Output {
+fn run_replay(timeframe_ms: i64, bars: Value) -> Output {
     let request = json!({
+        "timeframe_ms": timeframe_ms,
         "graph": {
             "version": "okx.market.composition/v1",
             "steps": [{"id": "mean", "op": "rolling_mean", "input": "close", "period": 2}],
             "result_steps": ["mean"]
         },
-        "bars": [
-            {"timestamp_ms": timestamps[0], "close": 2.0},
-            {"timestamp_ms": timestamps[1], "close": 4.0},
-            {"timestamp_ms": timestamps[2], "close": 8.0}
-        ]
+        "bars": bars
     });
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_okx-research-replay"))
@@ -33,21 +30,96 @@ fn replay(timestamps: [i64; 3]) -> Output {
     child.wait_with_output().unwrap()
 }
 
+fn replay(timestamps: [i64; 3]) -> Output {
+    run_replay(
+        60_000,
+        json!([
+            {"timestamp_ms": timestamps[0], "available_at_ms": timestamps[0] + 60_000, "close": 2.0},
+            {"timestamp_ms": timestamps[1], "available_at_ms": timestamps[1] + 60_000, "close": 4.0},
+            {"timestamp_ms": timestamps[2], "available_at_ms": timestamps[2] + 60_000, "close": 8.0}
+        ]),
+    )
+}
+
 #[test]
 fn replays_closed_bars_with_a_numeric_oracle() {
-    let output = replay([1, 2, 3]);
+    let output = replay([60_000, 120_000, 180_000]);
     assert!(output.status.success(), "{:?}", output);
     let series: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(series[0]["values"]["mean"][0], Value::Null);
     assert_eq!(series[1]["values"]["mean"][0], json!(3.0));
     assert_eq!(series[2]["values"]["mean"][0], json!(6.0));
-    assert_eq!(series[2]["timestamp_ms"], 3);
+    assert_eq!(series[2]["timestamp_ms"], 180_000);
+    assert_eq!(series[2]["available_at_ms"], 240_000);
 }
 
 #[test]
 fn rejects_duplicate_bars_without_publishing_partial_results() {
-    let output = replay([1, 2, 2]);
+    let output = replay([60_000, 120_000, 120_000]);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(!output.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("GAP_OR_REORDER"));
+}
+
+#[test]
+fn rejects_missing_and_off_grid_bars_before_publishing_any_result() {
+    for timestamps in [
+        [60_000, 180_000, 240_000],
+        [60_000, 120_001, 180_000],
+        [60_000, 180_000, 120_000],
+    ] {
+        let output = replay(timestamps);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn rejects_future_unavailable_or_temporally_reordered_observations() {
+    let unavailable = run_replay(
+        60_000,
+        json!([{"timestamp_ms": 60_000, "available_at_ms": 119_999, "close": 2.0}]),
+    );
+    assert!(!unavailable.status.success());
+    assert!(unavailable.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&unavailable.stderr).contains("BAR_NOT_CLOSED_OR_AVAILABLE"));
+
+    let reordered = run_replay(
+        60_000,
+        json!([
+            {"timestamp_ms": 60_000, "available_at_ms": 600_000, "close": 2.0},
+            {"timestamp_ms": 120_000, "available_at_ms": 180_000, "close": 4.0}
+        ]),
+    );
+    assert!(!reordered.status.success());
+    assert!(reordered.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&reordered.stderr).contains("AVAILABILITY_REORDERED"));
+}
+
+#[test]
+fn rejects_unsupported_timeframe_at_deserialization_boundary() {
+    let output = run_replay(
+        1,
+        json!([{"timestamp_ms": 1, "available_at_ms": 2, "close": 2.0}]),
+    );
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("UNSUPPORTED_TIMEFRAME"));
+}
+
+#[test]
+fn missing_close_remains_unknown_through_a_real_replay() {
+    let output = run_replay(
+        60_000,
+        json!([
+            {"timestamp_ms": 60_000, "available_at_ms": 120_000, "close": 2.0},
+            {"timestamp_ms": 120_000, "available_at_ms": 180_000, "close": null},
+            {"timestamp_ms": 180_000, "available_at_ms": 240_000, "close": 8.0}
+        ]),
+    );
+    assert!(output.status.success(), "{:?}", output);
+    let values: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(values[1]["values"]["mean"][0], Value::Null);
+    assert_eq!(values[2]["values"]["mean"][0], Value::Null);
 }

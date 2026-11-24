@@ -123,6 +123,28 @@ async function session(mf) {
   assert.equal(policy.snapshot.state.installation_id, configuration.installation_id);
   return {ws,hello};
 }
+async function researchSession(mf) {
+  const reply = await mf.dispatchFetch("http://localhost/runtime", {
+    headers: { upgrade: "websocket", authorization: "Bearer " + token },
+  });
+  assert.equal(reply.status, 101);
+  const ws = frames(reply.webSocket);
+  ws.send({
+    type: "hello_research",
+    schema: FRAME_SCHEMA,
+    runtime_id: "windows-primary",
+    connection_id: "research_" + "a".repeat(32),
+    contract: "okx.product/v1",
+    runtime_profile: "research",
+    host_scope: "a".repeat(64),
+    agent_pid: 67890,
+    agent_binary_sha256: "c".repeat(64),
+    agent_incarnation: "ctl_" + "e".repeat(32),
+  });
+  const hello = await ws.next((f) => f.type === "hello_ack");
+  assert.ok(hello.connection_generation > 0);
+  return {ws,hello};
+}
 
 let mf;
 try {
@@ -136,6 +158,25 @@ try {
  }
  assert.equal((await request(mf,"/installation/initialize","POST",installation)).status,200);
  const first=await session(mf);
+ const research=await researchSession(mf);
+ assert.ok(research.hello.connection_generation>first.hello.connection_generation,
+   "independent Research generation accepted while Engine is live");
+ first.ws.send({type:"ping",schema:FRAME_SCHEMA,session_id:first.hello.session_id,
+   connection_generation:first.hello.connection_generation,nonce:"engine_stays_alive_after_research"});
+ assert.equal((await first.ws.next(f=>f.type==="pong"&&f.nonce==="engine_stays_alive_after_research")).nonce,
+   "engine_stays_alive_after_research");
+ const researchDispatch=request(mf,"/dispatch","POST",{schema:"okx.agent.request/v1",
+   request_id:"research_independent_001",operation:{type:"research",request:{action:"capabilities"}}});
+ const researchPing=await research.ws.next(f=>f.type==="ping");
+ research.ws.send({...researchPing,type:"pong"});
+ const researchRequest=await research.ws.next(f=>f.type==="request");
+ assert.equal(researchRequest.request.request_id,"research_independent_001");
+ const researchBound={schema:FRAME_SCHEMA,session_id:research.hello.session_id,
+   connection_generation:research.hello.connection_generation};
+ research.ws.send({...researchBound,type:"delivery_ack",request_id:researchRequest.request.request_id});
+ research.ws.send({...researchBound,type:"response",response:{request_id:researchRequest.request.request_id,
+   status:"completed",data:{research_fixture:true}}});
+ assert.equal((await researchDispatch).body.status,"completed","Research directly served without Engine proxy");
  for(const action of ["INSTALL_ENTRY_OPENING","SUMMARY","ACCOUNT_SUMMARY","INSPECT","RESERVE","BEGIN_POST","SETTLE_ENTRY","RELEASE_UNSENT","TRANSITION"]){
   const id="retired_"+action;
   first.ws.send({type:"risk_control",schema:FRAME_SCHEMA,session_id:first.hello.session_id,connection_generation:first.hello.connection_generation,command:{schema:"okx.risk-command/v1",command_id:id,installation_id:configuration.installation_id,action:{action}}});
@@ -159,6 +200,15 @@ try {
  const closed=first.ws.closed();
  first.ws.send({type:"risk_control",schema:FRAME_SCHEMA,session_id:first.hello.session_id,connection_generation:first.hello.connection_generation-1,command:{}});
  assert.equal(await closed,1008,"stale frame closed before RPC denial");
+ const independent=request(mf,"/dispatch","POST",{schema:"okx.agent.request/v1",
+  request_id:"research_after_engine_close_001",operation:{type:"research",request:{action:"capabilities"}}});
+ const anotherPing=await research.ws.next(f=>f.type==="ping");
+ research.ws.send({...anotherPing,type:"pong"});
+ const anotherRequest=await research.ws.next(f=>f.type==="request");
+ research.ws.send({...researchBound,type:"delivery_ack",request_id:anotherRequest.request.request_id});
+ research.ws.send({...researchBound,type:"response",response:{request_id:anotherRequest.request.request_id,status:"completed"}});
+ assert.equal((await independent).body.status,"completed","Research survives Engine transport close");
+ research.ws.close();
  await mf.dispose();mf=null;
  mf=new Miniflare(opts);
  const second=await session(mf);
@@ -167,7 +217,7 @@ try {
  assert.equal(inspected.body.state,"BOUND");assert.equal(inspected.body.finance_authority,"native");assert.ok(!("risk" in inspected.body));
  assert.equal((await mf.dispatchFetch("http://localhost/installation/disable-legacy-finance",{method:"POST"})).status,404);
  second.ws.close();
- console.log("actual_workerd_native_finance_retirement_transport PASS auth, session, typed denial, ping, dispatch ACK/response, SQLite generation restart; no financial lifecycle claim");
+ console.log("actual_workerd_native_finance_retirement_transport PASS auth, independent Engine/Research WSS, owner-routed dispatch, typed denial, ping, ACK/response, SQLite generation restart; no financial lifecycle claim");
 } finally {
  if(mf)await mf.dispose();
  await rm(root,{recursive:true,force:true});

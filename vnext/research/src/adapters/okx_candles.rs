@@ -44,7 +44,7 @@ impl Interval {
         }
     }
 
-    fn milliseconds(&self) -> i64 {
+    pub(crate) fn milliseconds(&self) -> i64 {
         match self {
             Self::Minute => 60_000,
             Self::ThreeMinutes => 180_000,
@@ -119,11 +119,15 @@ fn fetch_page(
         return Err("history candle response exceeds size limit".into());
     }
 
-    let bars = decode_closed_bars(&body, limit, interval.milliseconds())?;
+    // Record observed availability conservatively: confirmation proves the
+    // candle is closed, not that it was available at its theoretical close.
+    let acquired_at_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+    let available_at_ms = i64::try_from(acquired_at_ms)?;
+    let bars = decode_closed_bars(&body, limit, interval.milliseconds(), available_at_ms)?;
     let capture = Capture {
         instrument: instrument.into(),
         interval: interval.query_value(),
-        acquired_at_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+        acquired_at_ms,
         response_sha256: format!("{:x}", Sha256::digest(&body)),
     };
     Ok((capture, bars))
@@ -133,6 +137,7 @@ fn decode_closed_bars(
     body: &[u8],
     limit: u16,
     interval_ms: i64,
+    available_at_ms: i64,
 ) -> Result<Vec<InputBar>, Box<dyn Error>> {
     let page: CandlePage = serde_json::from_slice(body)?;
     if page.code != "0" {
@@ -154,11 +159,15 @@ fn decode_closed_bars(
             || timestamp_ms % interval_ms != 0
             || !close.is_finite()
             || close <= 0.0
+            || timestamp_ms
+                .checked_add(interval_ms)
+                .is_none_or(|closed_at| closed_at > available_at_ms)
         {
             return Err("invalid closed candle".into());
         }
         bars.push(InputBar {
             timestamp_ms,
+            available_at_ms,
             close: Some(close),
         });
     }
@@ -232,6 +241,7 @@ mod tests {
         assert_eq!(capture.response_sha256, expected_digest);
         assert_eq!(capture.instrument, "BTC-USDT");
         assert!(capture.acquired_at_ms > 0);
+        assert!(bars.iter().all(|bar| bar.available_at_ms as u128 == capture.acquired_at_ms));
         let series: Vec<_> = bars
             .iter()
             .map(|bar| (bar.timestamp_ms, bar.close))
@@ -249,14 +259,21 @@ mod tests {
             row("120000", "3", "unknown"),
         ] {
             let body = json!({"code":"0", "data":[row("60000", "2", "1"), second]});
-            assert!(decode_closed_bars(body.to_string().as_bytes(), 2, 60_000).is_err());
+            assert!(decode_closed_bars(body.to_string().as_bytes(), 2, 60_000, i64::MAX).is_err());
         }
     }
 
     #[test]
+    fn rejects_observations_not_closed_at_the_recorded_acquisition_time() {
+        let body = json!({"code":"0", "data":[row("60000", "2", "1")]});
+        assert!(decode_closed_bars(body.to_string().as_bytes(), 1, 60_000, 119_999).is_err());
+        assert!(decode_closed_bars(body.to_string().as_bytes(), 1, 60_000, 120_000).is_ok());
+    }
+
+    #[test]
     fn rejects_application_errors_and_oversized_pages() {
-        assert!(decode_closed_bars(br#"{"code":"50011","data":[]}"#, 1, 60_000).is_err());
+        assert!(decode_closed_bars(br#"{"code":"50011","data":[]}"#, 1, 60_000, i64::MAX).is_err());
         let body = json!({"code":"0","data":[row("60000","2","1"),row("120000","3","1")]});
-        assert!(decode_closed_bars(body.to_string().as_bytes(), 1, 60_000).is_err());
+        assert!(decode_closed_bars(body.to_string().as_bytes(), 1, 60_000, i64::MAX).is_err());
     }
 }

@@ -9,6 +9,8 @@ const generation=19;
 const attachment={runtimeId:'windows-primary',runtimeProfile:'engine',
  sessionId:'session_backpressure_398',generation,hello:true,
  connectedAtMs:Date.now(),lastPongAtMs:Date.now()};
+const researchAttachment={...attachment,runtimeProfile:'research',sessionMode:'research_only',
+ sessionId:'session_research_backpressure_398',generation:generation+1};
 const policyStore=new Map<string,any>([['account_access_v1',{...initial,revision:1,accounts:[account]}]]);
 const storage={
  async get(key:string){return structuredClone(policyStore.get(key));},
@@ -24,12 +26,11 @@ let sentReads=0,sentPriority=0,maxQueued=0,policyPublished=0,stopDuringLoad=fals
 const identifiers=new Set<string>();
 const latency:number[]=[];
 let delayMs=32;
-const ws={
- deserializeAttachment:()=>({...attachment}),serializeAttachment:()=>{},close:()=>{},
- send:(body:string)=>{
+const ownerDeliveries:{finance:number,research:number}={finance:0,research:0};
+function sendFrame(body:string,peerGeneration:number,owner:'finance'|'research'){
   const frame=JSON.parse(body);
   if(frame.type==='ping'){
-   queueMicrotask(()=>session.resolvePending('pong:'+frame.nonce,generation,{}));
+   queueMicrotask(()=>session.resolvePending('pong:'+frame.nonce,peerGeneration,{}));
    return;
   }
   if(frame.type==='policy_snapshot'){
@@ -38,6 +39,7 @@ const ws={
    return;
   }
   check(frame.type==='request','unexpected fixture WSS frame');
+  ownerDeliveries[owner]++;
   const id=frame.request.request_id as string;
   check(!identifiers.has(id),'same id delivered more than once');
   identifiers.add(id);
@@ -48,13 +50,21 @@ const ws={
   check(totalActive<=MAX_INFLIGHT,'real owner exceeded native delivery budget');
   check(readActive<=MAX_READ_INFLIGHT,'ordinary reads occupied priority lane');
   setTimeout(()=>{
-   session.resolvePending('ack:'+id,generation,{});
-   session.resolvePending('response:'+id,generation,{status:'completed',id});
+   session.resolvePending('ack:'+id,peerGeneration,{});
+   session.resolvePending('response:'+id,peerGeneration,{status:'completed',id});
    totalActive--;if(!privileged)readActive--;
   },delayMs);
- }};
+}
+const ws={
+ deserializeAttachment:()=>({...attachment}),serializeAttachment:()=>{},close:()=>{},
+ send:(body:string)=>sendFrame(body,generation,'finance'),
+};
+const researchWs={
+ deserializeAttachment:()=>({...researchAttachment}),serializeAttachment:()=>{},close:()=>{},
+ send:(body:string)=>sendFrame(body,researchAttachment.generation,'research'),
+};
 session=new RuntimeSession({
- storage,getWebSockets:()=>[ws],
+ storage,getWebSockets:()=>[ws,researchWs],
 },{RUNTIME_TOKEN_SHA256:'a'.repeat(64)} as any);
 const rpc=(id:string,operation:any,accountKey?:string)=>
  session.fetch(new Request('https://fixture/dispatch',{method:'POST',
@@ -152,4 +162,6 @@ check(observedResearch.filter((x:any)=>x.status==='completed').length===7&&
  'research overflow must not consume protective slot');
 check(sentReads-beforeResearch===7 && session.inflight===0 && session.normalInflight===0,
  'heavy research did not drain and release all normal capacity');
+check(ownerDeliveries.research===7&&ownerDeliveries.finance===sentReads+sentPriority-ownerDeliveries.research,
+ 'research WSS lane is distinct from protective Engine lane');
 console.log('runtime_session_research_cannot_starve_protective_close PASS seven heavy jobs + one protected WSS close, overflow refused before send');

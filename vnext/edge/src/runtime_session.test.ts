@@ -96,9 +96,9 @@ console.log('runtime_native_owner_and_wss_separation PASS');
  check(sent.some(f=>f.type==="hello_ack")&&!sent.some(f=>f.type==="policy_snapshot"),"no policy");
  instance.state.storage.get=async()=>{throw new Error("research must not read governance");};
  const req=(operation:any)=>({schema:"okx.agent.request/v1",request_id:"request_research_012345",operation});
- check((await instance.dispatch(req({type:"trade",request:{action:"status"}}))).reason==="RESEARCH_OPERATION_FORBIDDEN","trade status denied");
- check((await instance.dispatch(req({type:"portfolio",request:{action:"summary"}}))).reason==="RESEARCH_OPERATION_FORBIDDEN","portfolio denied");
- check((await instance.dispatch(req({type:"diagnostics",request:{view:"finance"}}))).reason==="RESEARCH_OPERATION_FORBIDDEN","finance diagnostics denied");
+ check((await instance.dispatch(req({type:"trade",request:{action:"status"}}))).reason==="RUNTIME_OFFLINE","trade never falls back to Research");
+ check((await instance.dispatch(req({type:"portfolio",request:{action:"summary"}}))).reason==="RUNTIME_OFFLINE","portfolio never falls back to Research");
+ check((await instance.dispatch(req({type:"diagnostics",request:{view:"finance"}}))).reason==="RUNTIME_OFFLINE","finance diagnostics never fall back to Research");
  check((await instance.dispatch(req({type:"research",request:{action:"capabilities"}}))).status==="completed","research reaches session");
  for(const action of ["backtest","grid","cancel","record_decision"]){
    check((await instance.dispatch(req({type:"research",request:{action}}))).status==="completed",`${action} reaches research session without finance`);
@@ -107,4 +107,82 @@ console.log('runtime_native_owner_and_wss_separation PASS');
  check(sent.filter(f=>f.type==="request").every(f=>!("operator_governance" in f)),"no governance delivered");
  await instance.webSocketMessage(ws,JSON.stringify({type:"ping",schema:FRAME_SCHEMA,session_id:stored.sessionId,connection_generation:8,nonce:"stale"}));
  check(closed==="stale generation","stale generation denied");
+}
+
+// Two authenticated owners may be online concurrently; reconnect is fenced
+// within its own lane, never across the financial/research boundary.
+{
+ const policy={...initial,revision:1,accounts:[account]};
+ let instance:any;
+ const sockets:any[]=[];
+ const received:{finance:string[],research:string[]}={finance:[],research:[]};
+ const socket=(generation:number)=>{
+  let stored:any={runtimeId:"windows-primary",sessionId:`session_owner_${generation}`,
+   generation,hello:false,connectedAtMs:Date.now(),lastPongAtMs:null};
+  let closed="";
+  const ws:any={
+   deserializeAttachment:()=>({...stored}),serializeAttachment:(next:any)=>{stored=next;},
+   close:(_code:number,reason:string)=>{closed=reason;},
+   send:(body:string)=>{
+    const frame=JSON.parse(body);
+    if(frame.type==="ping")queueMicrotask(()=>instance.resolvePending(`pong:${frame.nonce}`,generation,{}));
+    if(frame.type==="request"){
+     received[stored.sessionMode==="research_only"?"research":"finance"].push(frame.request.request_id);
+     queueMicrotask(()=>{
+      instance.resolvePending(`ack:${frame.request.request_id}`,generation,{});
+      instance.resolvePending(`response:${frame.request.request_id}`,generation,{status:"completed"});
+     });
+    }
+   },
+   get closed(){return closed;},
+  };
+  sockets.push(ws);
+  return ws;
+ };
+ const finance=socket(40);
+ const research=socket(41);
+ instance=new RuntimeSession({
+  storage:{get:async(key:string)=>key==="account_access_v1"?policy:null},
+  getWebSockets:()=>sockets.filter(ws=>!ws.closed),
+ },{} as any);
+ const common=(type:string,pid:number)=>({type,schema:FRAME_SCHEMA,
+  runtime_id:"windows-primary",connection_id:`native_${String(pid).padStart(32,"a")}`,
+  contract:"okx.product/v1",agent_pid:pid,agent_binary_sha256:"b".repeat(64),
+  agent_incarnation:"ctl_"+"c".repeat(32)});
+ const financeHello=(pid:number)=>({...common("hello",pid),runtime_profile:"engine",installation_id:policy.installation_id});
+ const researchHello=(pid:number)=>({...common("hello_research",pid),runtime_profile:"research",host_scope:"a".repeat(64)});
+ await instance.webSocketMessage(finance,JSON.stringify(financeHello(40)));
+ await instance.webSocketMessage(research,JSON.stringify(researchHello(41)));
+ check(!finance.closed&&!research.closed,"Research hello cannot evict Engine");
+ const both:any=await(await instance.fetch(new Request("https://runtime.internal/status"))).json();
+ check(both.connected&&both.research_connected&&both.research_connection_generation===41,
+  "status identifies both owner connections without equating connected to ready");
+ const rpc=(id:string,operation:any,account?:string)=>instance.dispatch({schema:"okx.agent.request/v1",request_id:id,
+  ...(account?{account}:{}),operation});
+ check((await rpc("test_direct_research",{type:"research",request:{action:"capabilities"}})).status==="completed",
+  "Research serves direct request while Engine connected");
+ check((await rpc("test_finance_still_live",{type:"portfolio",request:{action:"summary"}})).status==="completed",
+  "Engine serves finance read while Research connected");
+ check(received.research.join(",")==="test_direct_research"&&received.finance.join(",")==="test_finance_still_live",
+  "owner routing did not choose most recent socket");
+ check((await rpc("research_with_account",{type:"research",request:{action:"capabilities"}},"account_1")).reason===
+  "RESEARCH_OPERATION_FORBIDDEN","malformed Research command cannot fall back to Engine");
+ research.close(1000,"disconnected");
+ await instance.webSocketClose(research);
+ const onlyEngine:any=await(await instance.fetch(new Request("https://runtime.internal/status"))).json();
+ check(onlyEngine.connected&&!onlyEngine.research_connected,"Research disconnect is visible but does not hide Engine");
+ check((await rpc("research_offline",{type:"research",request:{action:"capabilities"}})).reason==="RUNTIME_OFFLINE",
+  "Research disconnect cannot route to Engine");
+ check((await rpc("finance_survives",{type:"portfolio",request:{action:"summary"}})).status==="completed",
+  "Engine persists after Research disconnect");
+ const researchReconnect=socket(42);
+ await instance.webSocketMessage(researchReconnect,JSON.stringify(researchHello(42)));
+ check(!finance.closed&&!researchReconnect.closed,"Research reconnect preserves Engine generation");
+ const engineReconnect=socket(43);
+ await instance.webSocketMessage(engineReconnect,JSON.stringify(financeHello(43)));
+ check(finance.closed==="new owner generation"&&!researchReconnect.closed&&!engineReconnect.closed,
+  "Engine reconnect replaces only Engine generation");
+ check((await rpc("research_after_engine_reconnect",{type:"research",request:{action:"capabilities"}})).status==="completed",
+  "Research remains functional across Engine reconnect");
+ console.log("runtime_engine_research_independent_lanes PASS");
 }

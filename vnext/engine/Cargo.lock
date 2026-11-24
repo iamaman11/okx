@@ -374,6 +374,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "okx-trading-engine"
+version = "0.1.0"
+dependencies = [
+ "okx-trade-execution",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
