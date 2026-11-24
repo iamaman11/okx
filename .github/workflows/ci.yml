@@ -759,7 +759,20 @@ jobs:
           # remain in the reviewed current Rust map; missing evidence BLOCKS
           # this full gate rather than falling back to historical26 results.
           cargo run --locked -p okx-native-finance-check > "$env:RUNNER_TEMP\native-finance-full.json"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $collectorExit = $LASTEXITCODE
+          if ($collectorExit -ne 0) {
+            $reason = "Collector exit $collectorExit"
+            try {
+              $report = Get-Content -Raw -LiteralPath "$env:RUNNER_TEMP\native-finance-full.json" | ConvertFrom-Json
+              $identities = @($report.error, $report.failure.stage, $report.failure.package, $report.failure.code) |
+                Where-Object { $_ -cmatch '^[A-Za-z0-9_.:-]{1,150}$' }
+              if ($identities.Count -gt 0) { $reason += " / " + ($identities -join ' / ') }
+            } catch {
+              $reason += ' / report unavailable'
+            }
+            Write-Host "::error title=Native financial acceptance::$reason"
+            exit $collectorExit
+          }
           # Exactly the roster excluded by the parallel regression step.
           $head = (git rev-parse HEAD).Trim()
           $tree = (git rev-parse 'HEAD^{tree}').Trim()

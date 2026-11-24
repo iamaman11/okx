@@ -6020,7 +6020,8 @@ pub(crate) mod tests {
                     assert!(meta.is_file());
                     let relative = path.strip_prefix(root).unwrap().to_owned();
                     let native_lock = relative == Path::new("finance/authority-mode.lock")
-                        || relative == Path::new("finance/finance.sqlite.writer.lock");
+                        || relative == Path::new("finance/finance.sqlite.writer.lock")
+                        || relative == Path::new("research/research-worker.lock");
                     let sqlite_shm = path
                         .file_name()
                         .and_then(|n| n.to_str())
@@ -6049,12 +6050,22 @@ pub(crate) mod tests {
         let db = root.join("finance/finance.sqlite");
         let wal = root.join("finance/finance.sqlite-wal");
         let shm = root.join("finance/finance.sqlite-shm");
+        std::fs::create_dir(root.join("research")).unwrap();
+        let research_lock = root.join("research/research-worker.lock");
         std::fs::write(&db, [1]).unwrap();
         std::fs::write(&wal, [2]).unwrap();
         std::fs::write(&shm, [0]).unwrap();
         std::fs::write(root.join("finance/authority-mode.lock"), []).unwrap();
+        std::fs::write(&research_lock, []).unwrap();
+        let locked = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&research_lock)
+            .unwrap();
+        locked.try_lock().unwrap();
         let original = read_only_fixture_files(&root);
         assert_eq!(original[Path::new("finance/finance.sqlite-shm")], None);
+        assert_eq!(original[Path::new("research/research-worker.lock")], None);
         std::fs::write(&shm, [9]).unwrap();
         assert_eq!(read_only_fixture_files(&root), original);
         std::fs::write(&wal, [3]).unwrap();
@@ -6069,6 +6080,7 @@ pub(crate) mod tests {
             root.parent().unwrap().canonicalize().unwrap(),
             std::env::temp_dir().canonicalize().unwrap()
         );
+        drop(locked);
         std::fs::remove_dir_all(root).unwrap();
     }
 
