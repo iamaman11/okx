@@ -80,13 +80,15 @@ async fn run() -> Result<(), String> {
         okx_research_service::edge_runtime::await_supervisor_job().await?;
     }
     // Scoped to this Research process. Do not run the Worker without its OS
-    // memory fence on Windows; native Finance/Engine retains its own owner.
+    // memory and CPU fences on Windows; Finance/Engine retain their own owners.
     let _memory_guard = okx_research_service::process_memory::JobMemoryGuard::enforce()?;
     #[cfg(windows)]
     tracing::info!(
         commit_limit_bytes = okx_research_service::process_memory::limit_bytes(),
+        cpu_rate_basis_points =
+            okx_research_service::process_memory::RESEARCH_CPU_RATE_BASIS_POINTS,
         isolation = "nested_windows_job_object",
-        "research worker OS commit fence verified"
+        "research worker OS memory and CPU fences verified"
     );
     let root = root.ok_or("MISSING_ROOT")?;
     let scope = scope.ok_or("MISSING_SCOPE")?;

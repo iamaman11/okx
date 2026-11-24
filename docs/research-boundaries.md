@@ -55,6 +55,11 @@ The standalone mode now has an **opt-in CONTROL code path**:
   sends a bounded startup receipt only after Job assignment, and persists an
   independent process generation. Research rejects startup if that receipt
   is absent or invalid; it does not race its own memory Job against CONTROL.
+  Inside that process the Worker installs and reads back a nested Windows Job
+  with a **4 GiB memory limit and 50% CPU hard cap**. Both are fail-closed:
+  inability to enforce either limit prevents Research startup. The cap applies
+  to the Worker, not Finance/Engine, so heavy grids cannot consume all available
+  CPU cycles; it intentionally trades Research throughput for trading headroom.
 - `StopResearch` requires the active worker SHA and matching process generation;
   status/desired state live in CONTROL's own `research-state.json` rather than
   Engine's `engine-state.pb`. The standalone SQLite catalog is rooted at

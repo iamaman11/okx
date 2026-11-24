@@ -178,6 +178,7 @@ function validate(yaml, fileNames) {
     'research_starts_only_after_finite_supervisor_job_receipt',
     'installed_research_bearer_is_pinned_to_control_edge_origin',
   ]) assert.match(regression, new RegExp(witness));
+  assert.match(regression, /cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1/);
   assert.match(regression, /'execution' \{ 'okx-trade-execution' \}/);
   // The six 3s SQLite-writer/catalog fixtures are still mandatory, just not
   // contending with the remaining 300 Engine libtests for the test-harness clock.

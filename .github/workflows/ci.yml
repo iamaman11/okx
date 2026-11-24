@@ -1137,7 +1137,9 @@ jobs:
               throw "WINDOWS_RESEARCH_SECRET_OWNER_WITNESS_NOT_RUN_$witness"
             }
           }
-          $output = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture 2>&1
+          # Each IPC case starts real Windows child processes and nested Jobs.
+          # Serialize cases; their own 10s Hello/command deadlines stay intact.
+          $output = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
