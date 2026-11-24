@@ -86,12 +86,18 @@ def validate(graph: dict[str, set[str]], dev_graph: dict[str, set[str]] | None =
     return errors
 
 
-def load_graph() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+def load_metadata() -> dict:
+    # One locked Cargo resolution is enough for both direct workspace edges
+    # and transitive production boundaries. The former previously incurred an
+    # extra --no-deps Cargo subprocess on every full architecture check.
     raw = subprocess.check_output(
-        ["cargo", "metadata", "--no-deps", "--locked", "--format-version", "1"],
+        ["cargo", "metadata", "--locked", "--format-version", "1"],
         text=True,
     )
-    metadata = json.loads(raw)
+    return json.loads(raw)
+
+
+def load_graph(metadata: dict) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     workspace_ids = set(metadata["workspace_members"])
     packages = {
         package["id"]: package
@@ -187,15 +193,10 @@ def production_boundary_violations(graph: dict[str, set[str]], names: dict[str, 
     return errors
 
 
-def load_complete_workspace_graph() -> tuple[dict[str, set[str]], dict[str, str]]:
+def load_complete_workspace_graph(metadata: dict) -> tuple[dict[str, set[str]], dict[str, str]]:
     # Exact package IDs keep different versions/features distinct. Only normal
     # dependencies enter the shipped graph; build tools and test-only helpers
     # do not turn unrelated workspace test infrastructure into runtime edges.
-    raw = subprocess.check_output(
-        ["cargo", "metadata", "--locked", "--format-version", "1"],
-        text=True,
-    )
-    metadata = json.loads(raw)
     names = {package["id"]: package["name"] for package in metadata["packages"]}
     graph = {
         node["id"]: {
@@ -209,6 +210,42 @@ def load_complete_workspace_graph() -> tuple[dict[str, set[str]], dict[str, str]
 
 
 def self_test() -> int:
+    metadata = {
+        "workspace_members": ["research-id", "engine-id", "analysis-id", "ipc-id", "api-id"],
+        "packages": [
+            {"id": "research-id", "name": "okx-research", "dependencies": [
+                {"name": "okx-analysis", "kind": None},
+                {"name": "okx-api", "kind": "dev"},
+            ]},
+            {"id": "engine-id", "name": "okx-trading-engine", "dependencies": [
+                {"name": "okx-ipc-contracts", "kind": None},
+            ]},
+            {"id": "analysis-id", "name": "okx-analysis", "dependencies": []},
+            {"id": "ipc-id", "name": "okx-ipc-contracts", "dependencies": []},
+            {"id": "api-id", "name": "okx-api", "dependencies": []},
+        ],
+        "resolve": {"nodes": [
+            {"id": "research-id", "deps": [
+                {"pkg": "analysis-id", "dep_kinds": [{"kind": None}]},
+                {"pkg": "api-id", "dep_kinds": [{"kind": "dev"}]},
+            ]},
+            {"id": "engine-id", "deps": [
+                {"pkg": "ipc-id", "dep_kinds": [{"kind": None}]},
+            ]},
+        ]},
+    }
+    direct, dev = load_graph(metadata)
+    resolved, names = load_complete_workspace_graph(metadata)
+    if (direct != {"okx-research": {"okx-analysis"},
+                   "okx-trading-engine": {"okx-ipc-contracts"},
+                   "okx-analysis": set(), "okx-ipc-contracts": set(), "okx-api": set()}
+        or dev != {"okx-research": {"okx-api"}, "okx-trading-engine": set(),
+                   "okx-analysis": set(), "okx-ipc-contracts": set(), "okx-api": set()}
+        or resolved != {"research-id": {"analysis-id"}, "engine-id": {"ipc-id"}}
+        or names["research-id"] != "okx-research"):
+        print("self-test failed: shared Cargo metadata graph boundaries", file=sys.stderr)
+        return 1
+
     accepted = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
     if validate(accepted):
         print("self-test failed: accepted graph was rejected", file=sys.stderr)
@@ -336,8 +373,9 @@ def main() -> int:
     if args.self_test:
         return self_test()
 
+    metadata = load_metadata()
     if args.k10_purity:
-        graph, names = load_complete_workspace_graph()
+        graph, names = load_complete_workspace_graph(metadata)
         errors = pure_dependency_violations(graph, package_names=names)
         errors.extend(pure_risk_source_violations(load_risk_sources()))
         if errors:
@@ -347,10 +385,10 @@ def main() -> int:
         print("K10_TRANSITIVE_PURITY=PASS")
         return 0
 
-    normal, dev = load_graph()
+    normal, dev = load_graph(metadata)
     errors = validate(normal, dev)
     errors.extend(pure_risk_source_violations(load_risk_sources()))
-    graph, names = load_complete_workspace_graph()
+    graph, names = load_complete_workspace_graph(metadata)
     errors.extend(pure_dependency_violations(graph, K10_ENFORCED_PURE, names))
     errors.extend(production_boundary_violations(graph, names))
     if errors:

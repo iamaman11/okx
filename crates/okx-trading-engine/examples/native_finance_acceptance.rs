@@ -252,6 +252,24 @@ async fn execute(
     let mut observed = Witnesses::new();
     let runtime_start = Instant::now();
     let measurements = budgets::Measurements::new(report["run_id"].as_str().unwrap())?;
+    // Repository guards are read-only and already independently gated by CI.
+    // Run them on the same clean source tree while financial witnesses execute,
+    // retaining their individual exit status, outputs and resource receipts.
+    // Never overlap the two financial libtest groups with each other: the
+    // real-clock and SQLite acceptance witnesses still run in isolation.
+    let mut guard_task = if wanted.contains(&(
+        "repository".into(),
+        repository_guards::WITNESS.into(),
+    )) {
+        let repo = repo.to_owned();
+        Some(tokio::spawn(async move {
+            let mut receipt = json!({"stages":[], "repository_guards":[], "failure":null});
+            let result = repository_guards::run(&repo, &mut receipt).await;
+            (result, receipt)
+        }))
+    } else {
+        None
+    };
     let execution: Result<()> = async {
         for package in PACKAGES {
             let names: BTreeSet<String> = wanted
@@ -354,11 +372,23 @@ async fn execute(
                 reporting::record_verified(report, &observed);
             }
         }
-        if wanted.contains(&("repository".into(), repository_guards::WITNESS.into())) {
+        if let Some(task) = guard_task.take() {
+            let (result, receipt) = task.await.map_err(|_| "REPOSITORY_GUARD_TASK_FAILED")?;
             if snapshot(repo).await? != *baseline {
                 return Err("GIT_TREE_CHANGED");
             }
-            repository_guards::run(repo, report).await?;
+            let guard_stages = receipt["stages"]
+                .as_array()
+                .ok_or("RESOURCE_STAGES_MISSING")?;
+            report["stages"]
+                .as_array_mut()
+                .unwrap()
+                .extend(guard_stages.iter().cloned());
+            report["repository_guards"] = receipt["repository_guards"].clone();
+            if !receipt["failure"].is_null() {
+                report["failure"] = receipt["failure"].clone();
+            }
+            result?;
             if snapshot(repo).await? != *baseline {
                 return Err("GIT_TREE_CHANGED");
             }
@@ -391,6 +421,10 @@ async fn execute(
         Ok(())
     }
     .await;
+    if execution.is_err() && let Some(task) = guard_task.take() {
+        task.abort();
+        let _ = task.await;
+    }
     let workload = if execution.is_ok() {
         measurements.finish(report["run_id"].as_str().unwrap())
     } else {
