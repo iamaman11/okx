@@ -80,7 +80,7 @@ def select(status, path):
                 or path.startswith("crates/okx-research-service/src/ipc/")):
             return {"ipc", "worker"}
         return {"worker"}
-    if path.startswith("crates/okx-ipc-contracts/src/") and path.endswith(".rs"):
+    if path.startswith(("crates/okx-ipc-contracts/src/", "crates/okx-research-protocol/src/")) and path.endswith(".rs"):
         return {"wire", "ipc", "worker", "mcp"}
     if path.startswith(("cloudflare/okx-mcp/src/", "cloudflare/okx-mcp/contracts/")):
         return {"mcp", "wire", "worker"}
@@ -387,6 +387,7 @@ def execute(scopes):
         tests("okx-research")
     if "wire" in scopes:
         tests("okx-ipc-contracts")
+        tests("okx-research-protocol")
     if "worker" in scopes:
         tests("okx-research-service", required=WORKER_TESTS)
         perf = tests("okx-research-service", required=(

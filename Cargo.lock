@@ -1378,6 +1378,7 @@ dependencies = [
  "chacha20poly1305",
  "hkdf",
  "okx-domain-core",
+ "okx-research-protocol",
  "proptest",
  "prost",
  "serde",
@@ -1439,6 +1440,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "okx-research-protocol"
+version = "0.1.0"
+dependencies = [
+ "okx-domain-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "okx-research-service"
 version = "0.1.0"
 dependencies = [
@@ -1451,6 +1461,7 @@ dependencies = [
  "okx-domain-core",
  "okx-ipc-contracts",
  "okx-research",
+ "okx-research-protocol",
  "okx-strategy-core",
  "reqwest",
  "rusqlite",
@@ -1481,7 +1492,6 @@ name = "okx-trade-execution"
 version = "0.1.0"
 dependencies = [
  "num-bigint",
- "okx-domain-core",
  "proptest",
  "rusqlite",
  "rust_decimal",

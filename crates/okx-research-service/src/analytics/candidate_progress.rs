@@ -119,7 +119,7 @@ mod tests {
     fn fixture() -> (
         Vec<replay::Bar>,
         replay::ReplaySpec,
-        Vec<okx_ipc_contracts::analytics::StrategyParameters>,
+        Vec<okx_research_protocol::analytics::StrategyParameters>,
     ) {
         let bars = (0..200)
             .map(|i| replay::Bar {
@@ -286,7 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn candidate_progress_actual_submitted_grid_aggregates_two_instruments_64_variants() {
-        use okx_ipc_contracts::analytics::*;
+        use okx_research_protocol::analytics::*;
         let (root, service) = super::super::artifact_job_fixtures::service();
         for symbol in ["BTC-USDT", "ETH-USDT"] {
             let (bars, _, _) = fixture();

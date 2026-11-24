@@ -117,7 +117,7 @@ async fn t08_public_breakout_grid_persists_typed_selection_and_rejects_65_before
         .unwrap();
 
     let variants = (2..66)
-        .map(|lookback| okx_ipc_contracts::analytics::BreakoutParameters { lookback }.into())
+        .map(|lookback| okx_research_protocol::analytics::BreakoutParameters { lookback }.into())
         .collect::<Vec<_>>();
     let mut request = ResearchRequest::Grid {
         idempotency_key: "typed-breakout-grid".into(),
@@ -138,7 +138,7 @@ async fn t08_public_breakout_grid_persists_typed_selection_and_rejects_65_before
     };
     assert!(request.valid());
     if let ResearchRequest::Grid { variants, .. } = &mut request {
-        variants.push(okx_ipc_contracts::analytics::BreakoutParameters { lookback: 66 }.into());
+        variants.push(okx_research_protocol::analytics::BreakoutParameters { lookback: 66 }.into());
     }
     assert!(!request.valid());
     assert_eq!(

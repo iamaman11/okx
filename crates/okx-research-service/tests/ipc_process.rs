@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use okx_ipc_contracts::{analytics::MarketRequest, research_ipc::*};
+use okx_research_protocol::{analytics::MarketRequest, research_ipc::*};
 use std::{path::Path, process::Stdio, time::Duration};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -192,7 +192,7 @@ async fn strategy_outbox_publishes_once_and_recovers_committed_proposal_after_re
         available_at_ms: now,
         prices: SignalRequest {
             strategy_id: "ema_cross_v1".into(),
-            parameters: okx_ipc_contracts::analytics::EmaParameters { fast: 1, slow: 2 },
+            parameters: okx_research_protocol::analytics::EmaParameters { fast: 1, slow: 2 },
             closes: (0..4)
                 .map(|i| ClosedPrice {
                     time_ms: now - (4 - i) * 60_000,
@@ -279,7 +279,7 @@ async fn strategy_outbox_publishes_once_and_recovers_committed_proposal_after_re
     std::fs::remove_dir_all(root).unwrap();
 }
 
-use okx_ipc_contracts::analytics::ResearchRequest;
+use okx_research_protocol::analytics::ResearchRequest;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 fn test_root(label: &str) -> PathBuf {
@@ -528,7 +528,7 @@ async fn lost_enqueue_ack_retry_preserves_job_and_rejects_conflict() {
                     job_id: durable_id.clone(),
                     cursor: None,
                     limit: 1,
-                    view: okx_ipc_contracts::analytics::ResearchResultView::Summary,
+                    view: okx_research_protocol::analytics::ResearchResultView::Summary,
                 },
             }),
         },

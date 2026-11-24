@@ -14,7 +14,6 @@ const names = [
 const e = (pkg, kind = null) => ({pkg, dep_kinds: [{kind, target: null}]});
 const edges = {
   'okx-trading-engine': [e('okx-trade-execution'), e('okx-ipc-contracts'), e('okx-api')],
-  'okx-trade-execution': [e('okx-domain-core')],
   'okx-ipc-contracts': [e('okx-domain-core')],
   'okx-research-service': [e('okx-research'), e('okx-strategy-core'), e('okx-ipc-contracts'), e('okx-api', 'dev')],
   'okx-research': [e('okx-analysis')],

@@ -21,6 +21,7 @@ okx-analysis = { path = "../okx-analysis" }
 okx-domain-core = { path = "../okx-domain-core" }
 okx-strategy-core = { path = "../okx-strategy-core" }
 okx-ipc-contracts = { path = "../okx-ipc-contracts" }
+okx-research-protocol = { path = "../okx-research-protocol" }
 okx-research = { path = "../okx-research" }
 rusqlite = { version = "=0.43.0", features = ["bundled"] }
 reqwest = { version = "0.13", default-features = false, features = ["query", "rustls"] }

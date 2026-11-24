@@ -214,7 +214,7 @@ mod extension_tests {
     use super::super::artifact_job_fixtures::service_with_source;
     use super::*;
     use crate::independent_source::test_support::RecordedGet;
-    use okx_ipc_contracts::analytics::{
+    use okx_research_protocol::analytics::{
         EmaParameters, FundingMode, MarketAction, MarketRequest, ResearchCosts, ResearchDataMode,
         ResearchRequest, ResearchResultView,
     };

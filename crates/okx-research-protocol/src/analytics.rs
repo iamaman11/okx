@@ -1,5 +1,5 @@
 //! Public compact analytics contract. No transport or financial logic.
-use crate::numeric::positive_decimal;
+use okx_domain_core::numeric::positive_decimal;
 use okx_domain_core::strategy_contract::CompositionRequest;
 pub use okx_domain_core::strategy_contract::{
     BreakoutParameters, EmaParameters, StrategyParameters,

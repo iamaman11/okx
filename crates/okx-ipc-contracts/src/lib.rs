@@ -1,11 +1,10 @@
 pub mod account_catalog_proto;
 pub mod account_governance;
 pub mod accounts;
-pub mod analytics;
 pub mod crypto;
 pub mod host_state_proto;
-pub mod numeric;
-pub mod research_ipc;
+pub use okx_domain_core::numeric;
+pub use okx_research_protocol::{analytics, research_ipc};
 pub mod risk_authority;
 pub mod trading;
 

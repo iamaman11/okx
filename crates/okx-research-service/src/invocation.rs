@@ -1,5 +1,5 @@
 //! Per-command correlation only; durable job identity remains with Jobs.
-use okx_ipc_contracts::research_ipc::InvocationId;
+use okx_research_protocol::research_ipc::InvocationId;
 use std::future::Future;
 
 tokio::task_local! {

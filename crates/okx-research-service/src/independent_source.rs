@@ -1,7 +1,7 @@
 //! Research-owned, public-only OKX market source. No Engine, keys, private
 //! endpoints, arbitrary URLs or venue mutations are reachable from this API.
 use crate::source_api::{PublicSourceProvider, SourceFuture};
-use okx_ipc_contracts::research_ipc::{
+use okx_research_protocol::research_ipc::{
     FundingHistoryEvent, HistoryCandle, MAX_FRAME_BYTES, PublicCandleCapture, PublicCatalogCapture,
     PublicFundingCapture, PublicReferenceCapture, PublicReferenceInstrument,
     PublicSourceHttpDelivery, PublicSourceReply, PublicSourceRequest, ResearchOpenInterest,

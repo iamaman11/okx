@@ -1,4 +1,4 @@
-use okx_ipc_contracts::research_ipc::{IdempotencyKey, JobId};
+use okx_research_protocol::research_ipc::{IdempotencyKey, JobId};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 #[path = "job_diagnostics.rs"]
 pub(super) mod job_diagnostics;
@@ -46,7 +46,7 @@ impl State {
     }
 }
 pub(super) fn is_transient_rate_defer(error: Option<&str>) -> bool {
-    error.is_some_and(okx_ipc_contracts::research_ipc::is_retryable_source_defer)
+    error.is_some_and(okx_research_protocol::research_ipc::is_retryable_source_defer)
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
@@ -54,7 +54,7 @@ pub struct Job {
     #[serde(default)]
     pub producer: Option<crate::producer::Producer>,
     #[serde(default)]
-    pub origin_invocation: Option<okx_ipc_contracts::research_ipc::InvocationId>,
+    pub origin_invocation: Option<okx_research_protocol::research_ipc::InvocationId>,
     pub request_hash: String,
     pub idempotency_key: String,
     #[serde(default)]
@@ -90,7 +90,7 @@ pub struct Jobs {
 pub(super) enum SignalOutboxState {
     Pending,
     Start,
-    Ready(Option<okx_ipc_contracts::research_ipc::StrategySignalProposal>),
+    Ready(Option<okx_research_protocol::research_ipc::StrategySignalProposal>),
 }
 
 impl Jobs {
@@ -100,13 +100,13 @@ impl Jobs {
     }
     pub fn open_scoped(
         path: PathBuf,
-        scope: &okx_ipc_contracts::research_ipc::ResearchScope,
+        scope: &okx_research_protocol::research_ipc::ResearchScope,
     ) -> Result<Self, String> {
         Self::open_impl(path, Some(scope))
     }
     fn open_impl(
         path: PathBuf,
-        scope: Option<&okx_ipc_contracts::research_ipc::ResearchScope>,
+        scope: Option<&okx_research_protocol::research_ipc::ResearchScope>,
     ) -> Result<Self, String> {
         std::fs::create_dir_all(path.parent().ok_or("INVALID_CATALOG_PATH")?)
             .map_err(|e| e.to_string())?;
@@ -402,7 +402,7 @@ impl Jobs {
         idempotency_key: IdempotencyKey,
         hash: String,
         semantic_hash: String,
-        origin: Option<okx_ipc_contracts::research_ipc::InvocationId>,
+        origin: Option<okx_research_protocol::research_ipc::InvocationId>,
     ) -> Result<(Job, bool, Arc<super::cpu_executor::Cancel>), String> {
         let mut db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         let tx = db
@@ -859,7 +859,7 @@ impl Jobs {
         &self,
         key: &str,
         admitted: u64,
-        result: Option<&okx_ipc_contracts::research_ipc::StrategySignalProposal>,
+        result: Option<&okx_research_protocol::research_ipc::StrategySignalProposal>,
     ) -> Result<(), String> {
         let admitted = i64::try_from(admitted).map_err(|_| "RESEARCH_SIGNAL_TIME_INVALID")?;
         let value = serde_json::to_string(&result).map_err(|e| e.to_string())?;

@@ -1,11 +1,11 @@
 //! Native Research result presentation: artifact integrity, export verification,
 //! bounded paging, and signed cursors. No SQL mutation or research execution.
 use super::{AnalyticsService, cursor, jobs, result_reexecution};
-use okx_ipc_contracts::analytics::ResearchResultView;
 use okx_research::{
     ResearchArtifactStore,
     strategy_registry::{Bar, ChunkedDataHash},
 };
+use okx_research_protocol::analytics::ResearchResultView;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 

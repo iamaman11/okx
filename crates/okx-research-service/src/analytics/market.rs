@@ -9,7 +9,7 @@ use tracing::Instrument;
 struct Loaded {
     instrument: String,
     bars: Result<Arc<Vec<Bar>>, String>,
-    ticker: Option<Result<okx_ipc_contracts::research_ipc::ResearchTicker, String>>,
+    ticker: Option<Result<okx_research_protocol::research_ipc::ResearchTicker, String>>,
     funding: Option<Result<Vec<(u64, f64)>, String>>,
     // Keep OI event timestamps; endpoint values alone cannot prove coverage.
     oi: Option<Result<Vec<(u64, f64)>, String>>,
@@ -220,7 +220,7 @@ impl AnalyticsService {
         let (job, new, cancel) = self
             .jobs
             .enqueue_async(
-                okx_ipc_contracts::research_ipc::IdempotencyKey::new(format!("market-{hash}"))
+                okx_research_protocol::research_ipc::IdempotencyKey::new(format!("market-{hash}"))
                     .map_err(str::to_owned)?,
                 hash.clone(),
             )
@@ -2540,7 +2540,7 @@ mod tests {
     #[test]
     fn t06_current_ticker_is_not_marked_as_historical_spread() {
         let mut source = row();
-        source.ticker = Some(Ok(okx_ipc_contracts::research_ipc::ResearchTicker {
+        source.ticker = Some(Ok(okx_research_protocol::research_ipc::ResearchTicker {
             bid_price: "100".into(),
             ask_price: "101".into(),
         }));
@@ -2594,7 +2594,7 @@ mod tests {
     fn t06_mixed_funding_ticker_and_candles_keep_distinct_time_evidence() {
         let mut source = row();
         source.funding = Some(Ok(vec![(60_000, 0.001)]));
-        source.ticker = Some(Ok(okx_ipc_contracts::research_ipc::ResearchTicker {
+        source.ticker = Some(Ok(okx_research_protocol::research_ipc::ResearchTicker {
             bid_price: "100".into(),
             ask_price: "101".into(),
         }));
@@ -3257,7 +3257,7 @@ mod performance_fixtures {
                         funding_rate: None,
                     })
                     .collect();
-                let ticker: okx_ipc_contracts::research_ipc::ResearchTicker =
+                let ticker: okx_research_protocol::research_ipc::ResearchTicker =
                     serde_json::from_value(
                         json!({"instId":format!("fixture-{symbol}"),"bidPx":"100","askPx":"100.1"}),
                     )

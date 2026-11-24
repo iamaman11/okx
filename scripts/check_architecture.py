@@ -17,10 +17,9 @@ ALLOWED = {
     "okx-strategy-core": {"okx-domain-core"},
     "okx-analysis": {"okx-domain-core", "okx-strategy-core"},
     "okx-research": {"okx-analysis"},
-    # Financial SQL may depend on the shared domain, never on Research code.
-    # Keeping stale permissions here could silently widen a future diff.
-    "okx-trade-execution": {"okx-domain-core"},
-    "okx-ipc-contracts": {"okx-domain-core"},
+    "okx-trade-execution": set(),
+    "okx-ipc-contracts": {"okx-domain-core", "okx-research-protocol"},
+    "okx-research-protocol": {"okx-domain-core"},
     "okx-github": set(),
     "okx-native-finance-check": set(),
     "okx-cli": {"okx-api"},
@@ -28,7 +27,7 @@ ALLOWED = {
     "okx-host-protocol": {"okx-ipc-contracts"},
     "okx-host-controller": {"okx-github", "okx-host-launcher", "okx-host-protocol", "okx-ipc-contracts"},
     "okx-bridge-mcp": {"okx-github", "okx-host-protocol", "okx-ipc-contracts"},
-    "okx-research-service": {"okx-analysis", "okx-domain-core", "okx-ipc-contracts", "okx-research", "okx-strategy-core"},
+    "okx-research-service": {"okx-analysis", "okx-domain-core", "okx-ipc-contracts", "okx-research-protocol", "okx-research", "okx-strategy-core"},
     "okx-trading-engine": {
         "okx-api",
         "okx-trade-execution",
@@ -123,7 +122,7 @@ def load_graph(metadata: dict) -> tuple[dict[str, set[str]], dict[str, set[str]]
 
 # K10 pure crates must be free of network/storage/runtime dependencies through
 # the complete resolved production graph, including external package edges.
-K10_TARGET_PURE = ("okx-domain-core", "okx-strategy-core", "okx-analysis", "okx-research")
+K10_TARGET_PURE = ("okx-domain-core", "okx-research-protocol", "okx-strategy-core", "okx-analysis", "okx-research")
 K10_ENFORCED_PURE = K10_TARGET_PURE
 K10_FORBIDDEN = {
     "okx-api", "okx-ws", "okx-market-runtime", "okx-github",
@@ -459,7 +458,7 @@ def self_test() -> int:
     if must_find not in violations:
         print("self-test failed: K10 transitive adapter leak passed", file=sys.stderr)
         return 1
-    clean = {"okx-domain-core": {"serde"}, "okx-strategy-core": {"okx-domain-core"}, "okx-analysis": {"rust_decimal"}, "okx-research": {"okx-analysis"}}
+    clean = {"okx-domain-core": {"serde"}, "okx-research-protocol": {"okx-domain-core"}, "okx-strategy-core": {"okx-domain-core"}, "okx-analysis": {"rust_decimal"}, "okx-research": {"okx-analysis"}}
     if pure_dependency_violations(clean):
         print("self-test failed: clean K10 pure graph rejected", file=sys.stderr)
         return 1

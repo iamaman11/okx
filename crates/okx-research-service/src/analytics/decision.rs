@@ -4,7 +4,7 @@ use super::{
     AnalyticsService, jobs,
     result::{read_verified_result, verify_export_manifest},
 };
-use okx_ipc_contracts::analytics::{ResearchDecisionStatus, ResearchRequest};
+use okx_research_protocol::analytics::{ResearchDecisionStatus, ResearchRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

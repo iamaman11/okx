@@ -1,5 +1,5 @@
 //! Narrow public-data source capability supplied by the authenticated host.
-use okx_ipc_contracts::research_ipc::*;
+use okx_research_protocol::research_ipc::*;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};

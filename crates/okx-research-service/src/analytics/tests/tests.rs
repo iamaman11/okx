@@ -1,5 +1,5 @@
 use super::*;
-use okx_ipc_contracts::research_ipc::ClosedPrice;
+use okx_research_protocol::research_ipc::ClosedPrice;
 
 #[tokio::test]
 async fn legacy_ema_signal_is_computed_by_research_cpu_with_exact_warmup() {
@@ -10,7 +10,7 @@ async fn legacy_ema_signal_is_computed_by_research_cpu_with_exact_warmup() {
     ] {
         let request = SignalRequest {
             strategy_id: "ema_cross_v1".into(),
-            parameters: okx_ipc_contracts::analytics::EmaParameters { fast: 2, slow: 3 },
+            parameters: okx_research_protocol::analytics::EmaParameters { fast: 2, slow: 3 },
             closes: prices
                 .into_iter()
                 .enumerate()

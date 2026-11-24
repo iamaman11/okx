@@ -1,6 +1,6 @@
 //! Per-execution observations at the Research public-source capability boundary.
 //! IPC calls and optional host transport receipts; neither measures venue wire HTTP.
-use okx_ipc_contracts::research_ipc::{
+use okx_research_protocol::research_ipc::{
     PublicSourceHttpDelivery, PublicSourceReply, PublicSourceRequest,
 };
 use serde::Serialize;
@@ -208,7 +208,7 @@ mod tests {
             queued: false,
         };
         let captured =
-            PublicSourceReply::Candles(okx_ipc_contracts::research_ipc::PublicCandleCapture {
+            PublicSourceReply::Candles(okx_research_protocol::research_ipc::PublicCandleCapture {
                 raw_body: vec![1, 2, 3, 4],
                 rows: vec![],
                 acquired_at_ms: "1".into(),
@@ -277,7 +277,7 @@ mod tests {
                 request_finished(
                     &req,
                     &Ok(PublicSourceReply::Candles(
-                        okx_ipc_contracts::research_ipc::PublicCandleCapture {
+                        okx_research_protocol::research_ipc::PublicCandleCapture {
                             raw_body: vec![1, 2, 3],
                             rows: vec![],
                             acquired_at_ms: "1".into(),
@@ -314,7 +314,7 @@ mod tests {
                 request_finished(
                     &req,
                     &Ok(PublicSourceReply::Candles(
-                        okx_ipc_contracts::research_ipc::PublicCandleCapture {
+                        okx_research_protocol::research_ipc::PublicCandleCapture {
                             raw_body: vec![1, 2, 3],
                             rows: vec![],
                             acquired_at_ms: "1".into(),
@@ -369,7 +369,7 @@ mod tests {
             request_finished(
                 &req,
                 &Ok(PublicSourceReply::Candles(
-                    okx_ipc_contracts::research_ipc::PublicCandleCapture {
+                    okx_research_protocol::research_ipc::PublicCandleCapture {
                         raw_body: vec![1],
                         rows: vec![],
                         acquired_at_ms: "1".into(),

@@ -10,10 +10,11 @@ use okx_ipc_contracts::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest, AgentResponse,
     AgentResponseStatus, DIRECT_TRANSPORT_FRAME_SCHEMA_V2 as SCHEMA,
     DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES as FRAME_LIMIT, DataQuality, DirectRuntimeProfile,
-    DirectTransportFrame as Frame,
+    DirectTransportFrame as Frame, trading::DiagnosticsView,
+};
+use okx_research_protocol::{
     analytics::{MarketRequest, PortfolioScenarioRequest, ResearchRequest},
     research_ipc::ResearchScope,
-    trading::DiagnosticsView,
 };
 use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -432,7 +433,8 @@ fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentRes
     let (status, result, failure) = match result {
         Ok(value) => (AgentResponseStatus::Completed, Some(value), None),
         Err(code) => {
-            let source_deferred = okx_ipc_contracts::research_ipc::is_retryable_source_defer(&code);
+            let source_deferred =
+                okx_research_protocol::research_ipc::is_retryable_source_defer(&code);
             let retryable = source_deferred
                 || code == "RESEARCH_QUEUE_FULL"
                 || code == "RESEARCH_REQUEST_TIMEOUT";

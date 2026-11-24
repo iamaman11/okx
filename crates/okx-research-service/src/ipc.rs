@@ -3,7 +3,7 @@ use crate::{
     source_api::{PublicSourceClient, PublicSourceProvider, SourceFuture},
 };
 use futures_util::{SinkExt, StreamExt};
-use okx_ipc_contracts::research_ipc::*;
+use okx_research_protocol::research_ipc::*;
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -31,12 +31,12 @@ fn codec() -> LengthDelimitedCodec {
 /// fields to pure, typed portfolio mathematics. The Analysis crate has no
 /// dependency on the Engine/Research IPC package or its crypto dependencies.
 pub(crate) fn portfolio_scenario_wire(
-    request: &okx_ipc_contracts::analytics::PortfolioScenarioRequest,
+    request: &okx_research_protocol::analytics::PortfolioScenarioRequest,
 ) -> Result<serde_json::Value, String> {
     use okx_analysis::portfolio_scenario::{
         PortfolioScenarioInput, ScenarioCorrelation, ScenarioPosition, ScenarioSide, evaluate,
     };
-    use okx_ipc_contracts::analytics::ScenarioPositionSide;
+    use okx_research_protocol::analytics::ScenarioPositionSide;
     use rust_decimal::Decimal;
 
     if !request.valid() {
@@ -381,8 +381,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_ipc_contracts::analytics::ResearchRequest;
-    use okx_ipc_contracts::analytics::{
+    use okx_research_protocol::analytics::ResearchRequest;
+    use okx_research_protocol::analytics::{
         PortfolioScenarioRequest, ScenarioCorrelation, ScenarioPosition, ScenarioPositionSide,
     };
     use tokio::io::AsyncWriteExt;

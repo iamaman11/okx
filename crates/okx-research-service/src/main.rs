@@ -1,4 +1,4 @@
-use okx_ipc_contracts::{
+use okx_research_protocol::{
     analytics::MarketRequest,
     research_ipc::{MAX_FRAME_BYTES, ResearchScope},
 };

@@ -110,8 +110,8 @@ fn scope_binds_legacy_catalog_and_mismatch_precedes_recovery() {
         .enqueue("scope-key".into(), "scope-hash".into())
         .unwrap();
     drop(legacy);
-    let alice = okx_ipc_contracts::research_ipc::ResearchScope::new("alice".into()).unwrap();
-    let bob = okx_ipc_contracts::research_ipc::ResearchScope::new("bob".into()).unwrap();
+    let alice = okx_research_protocol::research_ipc::ResearchScope::new("alice".into()).unwrap();
+    let bob = okx_research_protocol::research_ipc::ResearchScope::new("bob".into()).unwrap();
     let jobs = Jobs::open_scoped(file.clone(), &alice).unwrap();
     assert_eq!(jobs.get(&job.id).unwrap().id, job.id);
     jobs.db
@@ -719,7 +719,7 @@ fn producer_and_origin_survive_replay_failure_and_reopen() {
             .unwrap();
     let second = crate::producer::Producer::new("d".repeat(64), None, None).unwrap();
     let origin =
-        okx_ipc_contracts::research_ipc::InvocationId::new("first-invocation".into()).unwrap();
+        okx_research_protocol::research_ipc::InvocationId::new("first-invocation".into()).unwrap();
     let jobs = Jobs::open(file.clone())
         .unwrap()
         .with_producer(Some(first.clone()));

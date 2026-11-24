@@ -19,6 +19,7 @@ members = [
     "crates/okx-analysis",
     "crates/okx-research",
     "crates/okx-research-service",
+    "crates/okx-research-protocol",
     "crates/okx-trade-execution",
 ]
 

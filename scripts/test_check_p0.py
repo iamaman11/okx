@@ -79,7 +79,7 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(select("M", "crates/okx-strategy-core/src/operators.rs"), {"strategy", "research", "worker", "analysis"})
         self.assertEqual(select("M", "crates/okx-domain-core/src/strategy_contract.rs"), {"expanded"})
         self.assertEqual(select("M", "crates/okx-research-service/src/analytics/jobs.rs"), {"worker"})
-        self.assertEqual(select("M", "crates/okx-ipc-contracts/src/research_ipc.rs"), {"wire", "worker", "ipc", "mcp"})
+        self.assertEqual(select("M", "crates/okx-research-protocol/src/research_ipc.rs"), {"wire", "worker", "ipc", "mcp"})
         self.assertFalse(select("M", "docs/testing.md"))
 
     def test_worker_internal_changes_never_select_agent(self):
@@ -94,7 +94,7 @@ class FeedbackTests(unittest.TestCase):
             self.assertEqual(set(packages), {"okx-research-service"})
 
     def test_shared_ipc_and_worker_transport_select_both_sides(self):
-        for path in ("crates/okx-ipc-contracts/src/research_ipc.rs",
+        for path in ("crates/okx-research-protocol/src/research_ipc.rs",
                      "crates/okx-research-service/src/ipc.rs",
                      "crates/okx-research-service/src/ipc/correlation_tests.rs",
                      "crates/okx-research-service/src/main.rs"):
