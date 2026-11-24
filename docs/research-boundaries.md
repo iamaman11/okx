@@ -134,11 +134,13 @@ guarantee merely because the enclosing CI job succeeded.
 In the full CI, Linux runs the Worker library, real IPC children and doctests
 in the dedicated Research step; the portable workspace step excludes that
 package. Windows runs the Worker library once, except for the K9 workload which
-runs once in its dedicated evidence step. The Native regression excludes only
-exact property witnesses already verified by a FULL_PASS from this same clean
-SHA/tree and the current Rust manifest. Missing or mismatched proof blocks the
-exclusion. Without a property run, no property witnesses are excluded. Financial
-property acceptance and all remaining regressions are mandatory. Compare local
+runs once in its dedicated evidence step. The Native regression skips only
+exact property witnesses extracted from the current Rust source manifest.
+The parallel financial collector must execute FULL_PASS on the same clean
+SHA/tree and prove that its observed roster matches that manifest. Missing,
+failed or mismatched collector evidence makes the protected Windows gate RED;
+the source roster alone never grants financial acceptance. All remaining
+regressions are mandatory. Compare local
 and CI timings for the same command and include its build time; a financial
 execution time is not the duration of a complete Windows job.
 
@@ -147,9 +149,12 @@ To add an experiment with existing rules, submit another validated
 operator/replay registry and its direct tests, then connect it through the worker
 planner. Financial state and CONTROL do not belong to that calculation change.
 
-Research-only CI needs a previously successful, accepted and **merged** complete
-base, an unexpired exact GitHub bundle and its explicit
-`.github/research-release-base.json` selection. The first full-build PR has no
+Research-only Cargo tests run without rebuilding the financial Engine even if
+the accepted binary base is unavailable. Deployable **Research-only packaging**
+still needs a previously successful, accepted and **merged** complete base,
+an unexpired exact GitHub bundle and its explicit
+`.github/research-release-base.json` selection; otherwise Ready fails closed.
+The first full-build PR has no
 such prior merged base, so its skipped `research-service-tests-windows` step does not
 prove the next independent update. The separate Worker Cargo build, scope
 negative controls, real child handoff and CONTROL staging checks provide CODE
