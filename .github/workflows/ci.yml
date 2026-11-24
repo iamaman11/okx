@@ -12,7 +12,9 @@ on:
         description: 'One-time trusted main Windows Cargo test/release cache seed (no acceptance or publish)'
         required: true
         type: boolean
-        default: false
+        # Manual CI dispatch exists to seed the trusted main cache. The old
+        # false default produced a green run with both prime jobs skipped.
+        default: true
 
 concurrency:
   # The release step is part of this main CI run. A later main commit must not

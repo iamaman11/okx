@@ -23,7 +23,7 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(header, /^  workflow_run:$/m);
   assert.match(header, /^  workflow_dispatch:$/m);
   assert.match(header, /^      prime_windows_cargo_cache:$/m);
-  assert.match(header, /^        default: false$/m);
+  assert.match(header, /^        default: true$/m);
   assert.doesNotMatch(header, /^  contents: write$/m);
   assert.match(header, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
 
@@ -175,6 +175,7 @@ assert.throws(() => validate(source.replace('if [[ -n \'${{ steps.cargo_closure.
 assert.throws(() => validate(source.replace('git fetch --no-tags --depth=1 origin "$BASE_SHA"',
   'git fetch --no-tags --depth=1 origin main'), workflows));
 assert.throws(() => validate(source.replace('name: rust-tests-linux', 'name: linux-trader'), workflows));
+assert.throws(() => validate(source.replace('        default: true', '        default: false'), workflows));
 assert.throws(() => validate(source.replace('always() &&\n        github.event_name',
   'github.event_name'), workflows));
 assert.throws(() => validate(source.replace("inputs.prime_windows_cargo_cache == true &&", "true &&"), workflows));

@@ -5,6 +5,8 @@
 mod budgets;
 #[path = "native_finance_acceptance/manifest.rs"]
 mod manifest;
+#[path = "native_finance_acceptance/phase_timing.rs"]
+mod phase_timing;
 #[path = "native_finance_acceptance/process.rs"]
 mod process;
 #[path = "native_finance_acceptance/reporting.rs"]
@@ -323,6 +325,26 @@ async fn execute(
                         Some(&out),
                     );
                 })?;
+                if group.label == "clock_sensitive" {
+                    // These four real-clock fixtures remain serial in exactly
+                    // one libtest child. Collect their fixed-name diagnostic
+                    // receipts only AFTER the complete libtest success proof;
+                    // they never replace functional or resource witnesses.
+                    let phases = phase_timing::collect(
+                        measurements.path(),
+                        report["run_id"].as_str().unwrap(),
+                    )
+                    .inspect_err(|code| {
+                        failure(
+                            report,
+                            "clock_sensitive_phase_timing",
+                            Some(package),
+                            code,
+                            Some(&out),
+                        );
+                    })?;
+                    report["clock_sensitive_phase_timings"] = json!(phases);
+                }
                 for name in verified {
                     observed.insert((package.to_owned(), name));
                 }
@@ -426,7 +448,7 @@ async fn main() {
     let run_id: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
     let mut report = json!({"schema":"okx.native-finance-acceptance/v1", "run_id":run_id,"mode":mode,
         "head":null,"tree":null,"git_clean":false,"build_ms":null,"runtime_setup_to_teardown_ms":null,
-        "observed_witnesses":[],"repository_guards":[],"stages":[],"contracts":[],"overall":"FAIL","timeout_guards_seconds":{"build":1800,"per_libtest_group":180},"test_threads":FINANCIAL_WITNESS_TEST_THREADS,"clock_sensitive_test_threads":CLOCK_SENSITIVE_TEST_THREADS,
+        "observed_witnesses":[],"repository_guards":[],"stages":[],"clock_sensitive_phase_timings":[],"contracts":[],"overall":"FAIL","timeout_guards_seconds":{"build":1800,"per_libtest_group":180},"test_threads":FINANCIAL_WITNESS_TEST_THREADS,"clock_sensitive_test_threads":CLOCK_SENSITIVE_TEST_THREADS,
         "test_schedule":"parallel_4_then_clock_sensitive_1"});
     let result: Result<Witnesses> = async {
         collector_sources_match(repo)?;
@@ -456,6 +478,7 @@ async fn main() {
         for sample in 0..samples {
             report["run_id"] = json!(format!("{root_run_id}_{sample}"));
             report["stages"] = json!([]);
+            report["clock_sensitive_phase_timings"] = json!([]);
             report["observed_witnesses"] = json!([]);
             report["failed_witnesses"] = json!([]);
             report["failure"] = Value::Null;
@@ -466,7 +489,8 @@ async fn main() {
             measurements.push(json!({"sample":sample,"run_id":report["run_id"],
                 "head":baseline.0,"tree":baseline.1,"build_ms":report["build_ms"],
                 "runtime_setup_to_teardown_ms":report["runtime_setup_to_teardown_ms"],
-                "stages":report["stages"],"owner_workload":report["owner_workload"],
+                "stages":report["stages"],"clock_sensitive_phase_timings":report["clock_sensitive_phase_timings"],
+                "owner_workload":report["owner_workload"],
                 "resource_budgets":report["resource_budgets"],"executed_witnesses":observed.len()}));
             report["samples"] = json!(measurements);
         }

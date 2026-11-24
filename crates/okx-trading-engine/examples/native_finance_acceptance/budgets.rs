@@ -42,6 +42,7 @@ impl Drop for Measurements {
     fn drop(&mut self) {
         // Only fixed files in a directory we created; no recursive traversal.
         let _ = std::fs::remove_file(self.0.join("owner-workload.json"));
+        super::phase_timing::cleanup(&self.0);
         let _ = std::fs::remove_dir(&self.0);
     }
 }
