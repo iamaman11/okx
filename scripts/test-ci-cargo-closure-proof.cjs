@@ -45,6 +45,9 @@ const host = files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock');
 const head = metadata(), before = metadata(base);
 
 assert.equal(verify(before, head, research, 'research').protected_closures_identical, true);
+assert.equal(verify(before, head, files('crates/okx-research-service/Cargo.toml',
+  'crates/okx-research-service/src/edge_runtime.rs',
+  'crates/okx-research-service/tests/edge_wss.rs'), 'research').protected_closures_identical, true);
 assert.equal(verify(before, head, host, 'host-controller').target, 'x86_64-pc-windows-msvc');
 assert.equal(verify(before, head, files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock',
   'cloudflare/okx-mcp/src/mcp.ts'), 'host-controller').protected_closures_identical, true);
@@ -95,6 +98,10 @@ for (const diff of [
   files('crates/okx-research-service/Cargo.toml', 'crates/okx-host-controller/Cargo.toml'),
   files('crates/okx-research-service/Cargo.toml', 'crates/okx-ipc-contracts/src/lib.rs'),
   files('crates/okx-research-service/Cargo.toml', 'crates/okx-research-service/build.rs'),
+  files('crates/okx-research-service/Cargo.toml', 'crates/okx-research-service/config/edge_wss.json'),
+  files('crates/okx-research-service/Cargo.toml', 'crates/okx-research-service/src/runtime.json'),
+  files('crates/okx-research-service/Cargo.toml', 'crates/okx-analysis/README.md'),
+  files('crates/okx-research-service/Cargo.toml', 'crates/okx-strategy-core/examples/strategy.rs'),
   [[{filename: 'crates/okx-research-service/Cargo.toml', status: 'renamed', previous_filename: 'x'}]],
   [[{filename: '../Cargo.toml', status: 'modified'}]],
   [[]], [],

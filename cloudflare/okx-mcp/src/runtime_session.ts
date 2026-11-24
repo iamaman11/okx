@@ -1,4 +1,4 @@
-import { executionProfilePermitsOperation, isExecutionMutation } from "./execution_tools.js";
+import { executionProfilePermitsOperation, isExecutionMutation, isResearchNativeOperation } from "./execution_tools.js";
 import { initializeGovernance, setAccountLimits, governanceRequest, lowerCampaignLimit, enrollObservedAccount, stopNewRealRisk, setAccountPause, GOVERNANCE_STORAGE_KEY } from "./account_governance_store.js";
 import {validGovernance,accessEnabled,validLimits} from "./account_governance.js";
 import { handleNativeRiskCommand } from "./risk_authority.js";
@@ -27,10 +27,7 @@ import {
 // Classify ownership separately from admission: a forged account selector on a
 // Research operation must be rejected by Research, not reclassified as Engine.
 function researchOwnedOperation(request: any): boolean {
-  const op = request?.operation;
-  if (!op || typeof op !== "object") return false;
-  if (["market", "market_capabilities", "market_microstructure", "research", "find_instruments", "market_overview", "portfolio_scenario"].includes(op.type)) return true;
-  return op.type === "diagnostics" && op.request?.view === "research";
+  return isResearchNativeOperation(request?.operation);
 }
 
 function researchOnlyPermits(request: any): boolean {
@@ -478,7 +475,7 @@ export class RuntimeSession {
     // owns the actual exchange POST admission under the same ledger.
     if (!executionProfilePermitsOperation(
       active.attachment.runtimeProfile,
-      request.operation?.type,
+      request.operation,
     )) {
       return transportFailure("EXECUTION_PROFILE_OPERATION_UNSUPPORTED", false);
     }
@@ -561,12 +558,19 @@ export class RuntimeSession {
       // Install a rejection observer before send: synchronous WS failure and
       // disconnect can reject both stages before the await is reached.
       void completion.catch(()=>undefined);
+      // target_owner is a Worker/DO-only routing instruction, not part of the
+      // native AgentRequest contract. Rust rejects unknown fields on both the
+      // request and the enclosing DirectTransportFrame. Never leak this
+      // internal routing metadata to either native owner, and do not mutate
+      // the original dispatch request while the response remains in flight.
+      const nativeRequest = {...request};
+      delete nativeRequest.target_owner;
       active.ws.send(JSON.stringify({
         type: "request",
         schema: FRAME_SCHEMA,
         session_id: active.attachment.sessionId,
         connection_generation: active.attachment.generation,
-        request,
+        request: nativeRequest,
         ...(operator_governance === undefined ? {} : { operator_governance }),
       }));
       const [,reply]=await completion;

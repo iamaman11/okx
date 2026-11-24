@@ -146,6 +146,16 @@ console.log('runtime_native_owner_and_wss_separation PASS');
    "Engine financial reads stay on finance owner");
  check(sent.filter(s=>s.frame.type==="request").map(s=>s.owner).join(",")==="research,finance",
    "distinct owner routes share DO without accidental cross-delivery");
+ // Edge's target_owner is an internal routing decision. Native Rust uses
+ // #[serde(deny_unknown_fields)] AgentRequest, so even a correctly routed
+ // frame fails parsing if the routing hint crosses the WSS boundary.
+ const nativeRequestKeys=["schema","request_id","operation"];
+ const nativeRequests=()=>sent.filter(s=>s.frame.type==="request");
+ check(nativeRequests().every(s=>JSON.stringify(Object.keys(s.frame.request).sort())===JSON.stringify([...nativeRequestKeys].sort())),
+   "Research and Engine native AgentRequest contain only Rust contract fields");
+ check(nativeRequests()[0].frame.request.operation.type==="research"&&
+       nativeRequests()[1].frame.request.operation.type==="portfolio",
+   "removing routing metadata preserves each native operation unchanged");
 
  // A valid Research hello replaces only the Research generation.
  const nextResearch=mk("research",{runtimeId:"windows-primary",sessionId:"research_17",generation:17,hello:false,credentialOwner:"research",connectedAtMs:Date.now()});
@@ -229,6 +239,8 @@ console.log('runtime_native_owner_and_wss_separation PASS');
    "explicit Engine override cannot bypass configured Research ownership");
  check((await owner.dispatch(req("configured_finance_direct","engine",{type:"portfolio",request:{action:"summary"}}))).owner==="finance",
    "explicit Engine finance route remains permitted after Research owner cutover");
+ check(nativeRequests().every(s=>!("target_owner" in s.frame.request)),
+   "configured and legacy Engine paths also strip owner hint from native frames");
  sockets=[financeWs,nextResearch];
  check((await owner.dispatch(unmarked("configured_research_online",{type:"research",request:{action:"capabilities"}}))).owner==="research",
    "configured unmarked Research reaches independent owner while finance is online");
@@ -236,6 +248,9 @@ console.log('runtime_native_owner_and_wss_separation PASS');
    "Research diagnostics do not silently use Engine");
  check((await owner.dispatch(unmarked("configured_scenario_online",{type:"portfolio_scenario",request:{equity_usd:"100",positions:[],correlations:[]}}))).owner==="research",
    "pure virtual portfolio scenario uses independent Research without finance credentials");
+ check(nativeRequests().every(s=>!("target_owner" in s.frame.request)) &&
+       nativeRequests().filter(s=>s.owner==="research").every(s=>!("account" in s.frame.request)&&!("operator_governance" in s.frame)),
+   "Research native frames expose neither routing hints, finance accounts nor governance");
  const sentBeforeForged=countSent();
  check((await owner.dispatch(unmarked("configured_nested_account",{type:"market",request:{action:"screen",account:"finance_account"}}))).reason==="RESEARCH_OPERATION_FORBIDDEN",
    "nested finance account in Research operation fails closed instead of being reclassified as Engine");

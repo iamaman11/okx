@@ -358,11 +358,44 @@ impl AgentOperation {
     }
 }
 
-/// The authenticated one-owner Windows process profile, never an order-mutation grant.
+/// Authenticated Windows process owner, never an order-mutation grant. Each
+/// profile has its own bearer and an independently admitted operation set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DirectRuntimeProfile {
     Engine,
+    /// Independent public market, analytics and virtual scenario owner.
+    /// Never an execution credential or a financial installation identity.
+    Research,
+}
+
+#[cfg(test)]
+mod runtime_profile_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn distinct_profiles_have_strict_hello_shapes() {
+        assert_eq!(serde_json::to_value(DirectRuntimeProfile::Engine).unwrap(), json!("engine"));
+        assert_eq!(serde_json::to_value(DirectRuntimeProfile::Research).unwrap(), json!("research"));
+        let fields = json!({
+            "type":"hello_research", "schema":DIRECT_TRANSPORT_FRAME_SCHEMA_V2,
+            "runtime_id":"windows-primary", "connection_id":"research_012345678901234567890123456789ab",
+            "host_scope":"a".repeat(64), "runtime_profile":"research",
+            "contract":accounts::PRODUCT_CONTRACT, "agent_pid":12,
+            "agent_binary_sha256":"b".repeat(64),"agent_incarnation":format!("ctl_{}","c".repeat(32))
+        });
+        let frame: DirectTransportFrame=serde_json::from_value(fields.clone()).unwrap();
+        frame.validate().unwrap();
+        assert_eq!(serde_json::to_value(frame).unwrap(),fields);
+        let mut financial=fields.clone();
+        financial["type"]=json!("hello");
+        financial["installation_id"]=json!("any-installation");
+        assert!(serde_json::from_value::<DirectTransportFrame>(financial).is_err());
+        let mut mixed=fields;
+        mixed["installation_id"]=json!("x");
+        assert!(serde_json::from_value::<DirectTransportFrame>(mixed).is_err());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -482,7 +515,7 @@ impl DirectTransportFrame {
                 connection_id,
                 installation_id,
                 contract,
-                runtime_profile: _,
+                runtime_profile,
                 agent_pid,
                 agent_binary_sha256,
                 agent_incarnation,
@@ -500,7 +533,8 @@ impl DirectTransportFrame {
                 {
                     return Err(ProtocolError::InvalidDirectTransportToken);
                 }
-                if !accounts::valid_installation(installation_id)
+                if *runtime_profile != DirectRuntimeProfile::Engine
+                    || !accounts::valid_installation(installation_id)
                     || contract != accounts::PRODUCT_CONTRACT
                 {
                     return Err(ProtocolError::InvalidDirectTransportToken);

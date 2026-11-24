@@ -28,8 +28,9 @@ const PROTECTED = Object.freeze({
 const safePath = p => typeof p === 'string' && p.length > 0 && p.length <= 512 &&
   !p.includes('\\') && p.split('/').every(part => /^[A-Za-z0-9_.-]+$/.test(part) && part !== '.' && part !== '..');
 const docs = p => p === 'README.md' || (p.startsWith('docs/') && p.endsWith('.md'));
-const research = p => ['crates/okx-research/', 'crates/okx-analysis/', 'crates/okx-research-service/',
-  'crates/okx-strategy-core/'].some(prefix => p.startsWith(prefix)) && !p.endsWith('/build.rs');
+const research = p => RESEARCH.has(p) || ['crates/okx-research/', 'crates/okx-analysis/',
+  'crates/okx-research-service/', 'crates/okx-strategy-core/'].some(prefix =>
+  (p.startsWith(prefix + 'src/') || p.startsWith(prefix + 'tests/')) && p.endsWith('.rs'));
 const host = p => ['crates/okx-host-controller/src/', 'crates/okx-host-launcher/src/']
   .some(prefix => p.startsWith(prefix)) && p.endsWith('.rs');
 

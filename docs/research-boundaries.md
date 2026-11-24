@@ -21,6 +21,38 @@ are Cargo dependencies, Rust visibility, the IPC enums, and the SQL owners.
 | Pure calculations | Existing `okx-analysis` and `okx-research` libraries |
 | Verified component staging | Existing CONTROL `artifact::research_component` |
 
+## Independent Edge lane (prepared, not yet activated)
+
+The Research Service also has a **Research-owned** outbound WebSocket adapter
+(`edge_runtime.rs`) behind the explicit `--edge-runtime` mode. It connects
+with `hello_research`, the `research` runtime profile and a distinct bearer;
+it binds requests and replies to an authenticated Edge session generation.
+It does not import Engine's Cloudflare transport, private account credentials,
+financial storage or exchange order-sending capability. This mode uses the
+already implemented `IndependentOkxPublicSource` rather than Engine's public
+market callback, and bounds frame size and concurrent work. The existing
+Engine-hosted IPC mode remains unchanged.
+
+Supported direct operations: Research calculations/jobs, explicit-instrument
+Market requests, MarketCapabilities, PortfolioScenario, and read-only
+Research job diagnostics. FindInstruments, MarketOverview and
+MarketMicrostructure depend on public cache/reference behavior still owned by
+Engine; the independent endpoint currently returns a typed unavailable error
+for these, **not** fabricated data or a financial Engine fallback. A Research
+socket refuses trading, account selection, strategy mutation, risk commands
+and policy snapshot frames. Edge's internal `target_owner` routing marker is
+removed before constructing the strict native Rust request.
+
+The mode requires explicit Research-scoped WSS configuration and a separate
+credential; production CONTROL credential provisioning and supervision do not
+exist yet. Do not enable Edge's `RESEARCH_RUNTIME_TOKEN_SHA256` merely because
+the executable can connect: a configured but offline Research owner correctly
+fails closed. In particular, `--edge-runtime` and Engine's current child
+cannot both own the same scoped Research SQLite root. Actual cutover requires
+a single CONTROL-owned Research process, verified PID/SHA and Windows Job,
+restart/reboot tests, token provisioning/rotation, and physical rollback
+evidence. Until then the installed product still uses the Engine child.
+
 Agent has no production dependency on the research implementation or worker.
 Worker has no production dependency on Agent, execution, API credentials, or
 financial storage. Its test-only HTTP fixtures do not authorize those edges.

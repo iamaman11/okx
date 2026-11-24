@@ -29,6 +29,39 @@ authority. `okx-cli` is a tool, not a fifth continuously running application.
 The [crate split map](crate-split-map.md) shows which modules moved, their
 Cargo dependencies and the CI acceptance checks.
 
+### Ownership is a runtime contract, not a crate count
+
+`Research` being compiled as separate crates does **not** yet mean it can
+restart independently. The installed Research image is content-addressed and
+staged by CONTROL, but the existing Engine `ResearchClient` starts the child,
+provides its public market source callback, and observes activation. CONTROL
+does not yet supervise a standalone Research PID, Windows Job, reconnect loop
+or Research-specific runtime credential. `DeployResearch` currently reports
+`activation: requires_engine_observation`, which is not a Research health
+acknowledgement.
+
+The independent runtime cutover has four separately provable boundaries:
+
+1. **Code and capability:** Research owns public-source ingestion, simulation,
+   analytic state and its own authenticated transport; it cannot access the
+   finance ledger, private exchange credential or order-send API.
+2. **Process and installation:** CONTROL independently supervises the verified
+   Research image and records its PID, executable SHA, startup generation and
+   health. Its update and rollback must not restart the Engine.
+3. **Routing and wire:** Edge authenticates a distinct `research` socket,
+   strips internal dispatch metadata from the strict Rust wire request and
+   has no hidden Engine fallback when that owner is offline.
+4. **Compilation and verification:** Cargo closure checks and CI classify
+   individual owner changes; shared IPC, build configurations and unknown
+   inputs remain on the complete financial route. A scope classification is
+   never proof that an installed process is independently managed.
+
+Do not switch production routing to the separate Research credential until
+CONTROL-owned Research startup, credential provisioning and Windows
+restart/rollback acceptance have been verified. The Engine's narrow trusted
+strategy signal admission remains in Trading, even after public research
+queries move to Research.
+
 Virtual portfolio stress scenarios run in Research through
 `okx-analysis::portfolio_scenario`, with the same public Engine command
 and response schema. The active Research Service advertises this command

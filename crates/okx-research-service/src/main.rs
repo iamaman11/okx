@@ -37,6 +37,7 @@ async fn run() -> Result<(), String> {
     let mut scope = None;
     let mut independent_source = false;
     let mut market_request = false;
+    let mut edge_runtime = false;
     while let Some(arg) = args.next() {
         if arg == "--root" && root.is_none() {
             root = Some(PathBuf::from(args.next().ok_or("MISSING_ROOT")?));
@@ -54,6 +55,8 @@ async fn run() -> Result<(), String> {
             independent_source = true;
         } else if arg == "--market-request" && !market_request {
             market_request = true;
+        } else if arg == "--edge-runtime" && !edge_runtime {
+            edge_runtime = true;
         } else {
             return Err("INVALID_ARGUMENT".into());
         }
@@ -69,6 +72,12 @@ async fn run() -> Result<(), String> {
     );
     let root = root.ok_or("MISSING_ROOT")?;
     let scope = scope.ok_or("MISSING_SCOPE")?;
+    if edge_runtime {
+        if independent_source || market_request {
+            return Err("INVALID_ARGUMENT".into());
+        }
+        return okx_research_service::edge_runtime::run(root, scope).await;
+    }
     if market_request {
         if independent_source {
             return Err("INVALID_ARGUMENT".into());

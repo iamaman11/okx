@@ -1150,7 +1150,11 @@ jobs:
           # One Cargo target root for tests and release, and the action cache.
           $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
           "Research Cargo cache exact hit: ${{ steps.research-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
-          # This is the REQUIRED Ready gate for all three Research owners.
+          # The Native Linux job is intentionally skipped for Research-only
+          # changes. Preserve its Rust formatting gate in this owner job.
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # This is the REQUIRED Ready gate for Research owners.
           # A failing primitive unit test must fail this job before packaging.
           cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -30,7 +30,7 @@ fn codec() -> LengthDelimitedCodec {
 /// The Research boundary owns the conversion from externally validated wire
 /// fields to pure, typed portfolio mathematics. The Analysis crate has no
 /// dependency on the Engine/Research IPC package or its crypto dependencies.
-fn portfolio_scenario_wire(
+pub(crate) fn portfolio_scenario_wire(
     request: &okx_ipc_contracts::trading::PortfolioScenarioRequest,
 ) -> Result<serde_json::Value, String> {
     use okx_analysis::portfolio_scenario::{

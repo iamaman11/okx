@@ -51,9 +51,10 @@ def category(path):
         return "host-controller"
     if path.startswith(_HOST_LAUNCHER_SRC) and path.endswith(".rs"):
         return "host-launcher"
-    if path.startswith(_RESEARCH_DIRS):
-        if path.endswith("/Cargo.toml") or path.endswith("/build.rs"):
-            return "full"
+    # A scoped Research change must be Rust source or an integration test.
+    # Arbitrary configs, SQL fixtures, generated code and build inputs can
+    # affect the installed product; they must not bypass the Native gate.
+    if _research_source(path):
         return "research"
     return "full"
 
@@ -116,7 +117,10 @@ def classify(pages):
 
 
 def _research_source(path):
-    return path.endswith(".rs") and any(path.startswith(root + "src/") for root in _RESEARCH_DIRS)
+    return path.endswith(".rs") and any(
+        path.startswith(root + owner) for root in _RESEARCH_DIRS
+        for owner in ("src/", "tests/")
+    )
 
 
 def edge_changed(pages):
@@ -188,6 +192,7 @@ def _self_test() -> None:
     research = workflow.split("\n  research_service_tests_windows:\n", 1)[1].split("\n  required_windows:\n", 1)[0]
     assert "if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')" in research
     assert "cargo build --locked --release -p okx-research-service --bin okx-research-service" in research
+    assert "cargo fmt --all -- --check" in research, "SCOPED_RESEARCH_MUST_VERIFY_RUST_FORMATTING"
     # Reuse the same established Cargo cache action and one target directory.
     assert "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6" in research
     assert research.count("Join-Path $env:GITHUB_WORKSPACE 'target'") == 2
@@ -198,10 +203,10 @@ def _self_test() -> None:
     cases = {
         "docs": [files("docs/acceptance/518/t01-t15-evidence-matrix.md"), files("README.md", "docs/arch.md")],
         "cloudflare": [files("cloudflare/okx-mcp/src/runtime_session.ts"), files("cloudflare/okx-mcp/src/mcp.test.ts", "docs/okx.md")],
-        "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-analysis/src/lib.rs"), files("crates/okx-research-service/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md"), files("crates/okx-strategy-core/src/operators.rs"), files("crates/okx-strategy-core/src/time_series.rs"), files("crates/okx-strategy-core/src/query_plan.rs", "docs/a.md")],
+        "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-analysis/src/lib.rs"), files("crates/okx-research-service/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md"), files("crates/okx-strategy-core/src/operators.rs"), files("crates/okx-strategy-core/src/time_series.rs"), files("crates/okx-strategy-core/src/query_plan.rs", "docs/a.md"), files("crates/okx-research-service/src/edge_runtime.rs"), files("crates/okx-research-service/tests/edge_wss.rs")],
         "host-controller": [files("crates/okx-host-controller/src/main.rs"), files("crates/okx-host-protocol/src/lib.rs"), files("crates/okx-host-controller/src/activation/tests.rs", "crates/okx-host-launcher/src/main.rs", "docs/a.md")],
         "host-launcher": [files("crates/okx-host-launcher/src/main.rs"), files("crates/okx-host-launcher/src/verify.rs", "README.md")],
-        "research-host": [files("crates/okx-host-launcher/src/main.rs", "crates/okx-research-service/src/analytics/market.rs")],
+        "research-host": [files("crates/okx-host-launcher/src/main.rs", "crates/okx-research-service/src/analytics/market.rs"), files("crates/okx-host-controller/src/lifecycle.rs", "crates/okx-research-service/tests/edge_wss.rs")],
     }
     for wanted, selections in cases.items():
         assert all(classify(pages) == wanted for pages in selections)
@@ -228,6 +233,12 @@ def _self_test() -> None:
         files("crates/okx-research-service/Cargo.toml"),
         files("crates/okx-strategy-core/Cargo.toml"),
         files("crates/okx-research-service/build.rs"),
+        files("crates/okx-research-service/config/edge_wss.json"),
+        files("crates/okx-research-service/src/embedded_config.json"),
+        files("crates/okx-research-service/src/edge_runtime.rs", "crates/okx-ipc-contracts/src/lib.rs"),
+        files("crates/okx-analysis/data/series.parquet"),
+        files("crates/okx-strategy-core/README.md"),
+        files("crates/okx-research-service/tests/edge_wss.rs", "crates/okx-host-controller/Cargo.toml"),
         files(".github/workflows/ci.yml"),
         files("scripts/prepare-research-release.ps1"),
         files("scripts/check_ci_native_scope.py"),
@@ -260,6 +271,7 @@ def _self_test() -> None:
         files("crates/okx-ipc-contracts/Cargo.toml", "Cargo.lock"),
         files("crates/okx-host-launcher/Cargo.toml", "crates/okx-research-service/Cargo.toml"),
         files("crates/okx-research-service/Cargo.toml", ".github/workflows/ci.yml"),
+        files("crates/okx-research-service/Cargo.toml", "crates/okx-research-service/config/edge_wss.json"),
         [[{"filename": "crates/okx-research-service/Cargo.toml", "status": "removed"}]],
         [[{"filename": "crates/okx-research-service/Cargo.toml", "status": "renamed", "previous_filename": "x"}]],
     ):

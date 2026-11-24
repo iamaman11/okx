@@ -1,5 +1,20 @@
-import {ACTION_SCHEMAS,PUBLIC_TOOLS,MARKET_OPERATORS,validTool,matches,isExecutionMutation} from './execution_tools.js';
+import {ACTION_SCHEMAS,PUBLIC_TOOLS,MARKET_OPERATORS,validTool,matches,isExecutionMutation,isResearchNativeOperation,executionProfilePermitsOperation} from './execution_tools.js';
 const fail=(v:boolean,n:string)=>{if(!v)throw Error(n);};
+// One owner policy drives both Research routing and runtime-profile admission.
+for(const type of ['market','market_capabilities','market_microstructure','research','find_instruments','market_overview','portfolio_scenario']){
+ const op={type,request:{action:'capabilities'}};
+ fail(isResearchNativeOperation(op)&&executionProfilePermitsOperation('research',op),`Research owner admits ${type}`);
+}
+for(const type of ['connect_account','trade','strategies','portfolio','account_summary','mailbox_telemetry','unknown']){
+ const op={type,request:{action:'status'}};
+ fail(!isResearchNativeOperation(op)&&!executionProfilePermitsOperation('research',op),`Research owner has no finance or unrecognized operation ${type}`);
+}
+for(const view of ['finance','operation','storage',undefined]){
+ const op={type:'diagnostics',request:{view}};
+ fail(!isResearchNativeOperation(op)&&!executionProfilePermitsOperation('research',op),`Research cannot request diagnostics view ${view}`);
+}
+fail(isResearchNativeOperation({type:'diagnostics',request:{view:'research'}}), 'Research owns its diagnostics view');
+fail(!isResearchNativeOperation({type:'diagnostics'}), 'Research diagnostics require an explicit scoped view');
 fail(validTool('diagnostics',{action:'explain',view:'research',reference:'a'.repeat(64)}),'research diagnostics uses existing strict tool');
 fail(!validTool('diagnostics',{action:'explain',view:'unknown',reference:'a'.repeat(64)}),'unknown diagnostic view is rejected');
 function sample(s:any):any{if('const'in s)return s.const;if(s.enum)return s.enum[0];if(s.oneOf)return sample(s.oneOf[0]);if(s.anyOf)return sample(s.anyOf[0]);if(s.type==='object'||(s.properties&&s.required))return Object.fromEntries(Object.entries(s.properties).filter(([k])=>s.required.includes(k)).map(([k,x])=>[k,sample(x)]));if(s.type==='array')return [sample(s.items)];if(s.type==='string'&&s.pattern==='^sha256:[0-9a-f]{64}$')return 'sha256:'+'a'.repeat(64);if(s.type==='string'&&s.pattern==='^[0-9a-f]{64}$')return 'a'.repeat(64);if(s.type==='string')return (s.pattern && s.maxLength===29 && new RegExp(s.pattern).test('1'))?'1':(s.pattern?.includes('0-9]{1,9}')||s.pattern?.includes('\\d{1,9}'))?'1':s.minLength===8?'command_0001':'fixture';if(s.type==='integer'||s.type==='number')return s.minimum??1;if(s.type==='boolean')return true;return null;}
