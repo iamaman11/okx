@@ -261,9 +261,8 @@ async fn changed_pointer_after_drain_recovers_verified_previous_child() {
     let original = stage(&runtime, &executable, false);
     let update = stage(&runtime, &executable, true);
     pointer(&runtime, &original);
-    let source: SourceHandler = Arc::new(|_| {
-        Box::pin(async { Err("TEST_PUBLIC_SOURCE_NOT_AVAILABLE".into()) })
-    });
+    let source: SourceHandler =
+        Arc::new(|_| Box::pin(async { Err("TEST_PUBLIC_SOURCE_NOT_AVAILABLE".into()) }));
     let mut client = ResearchClient::new(
         ResearchClientConfig {
             executable: PathBuf::new(),
@@ -322,8 +321,7 @@ async fn changed_pointer_after_drain_recovers_verified_previous_child() {
         Some("RESEARCH_INSTALL_INVALID_POINTER")
     );
     assert!(
-        recovered.handshake_verified_at_ms.unwrap()
-            >= before.handshake_verified_at_ms.unwrap()
+        recovered.handshake_verified_at_ms.unwrap() >= before.handshake_verified_at_ms.unwrap()
     );
     let admitted = client.research(job("after-aborted-handoff")).await.unwrap();
     assert!(

@@ -141,8 +141,7 @@ pub(super) fn verify_image(binary: &Path) -> Result<PathBuf, String> {
     if !matches!(
         binary.file_name().and_then(|name| name.to_str()),
         Some("okx-research-service.exe" | "okx-research-worker.exe")
-    )
-    {
+    ) {
         return Err("RESEARCH_INSTALL_INVALID_PATH".into());
     }
     let expected = binary

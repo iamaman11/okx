@@ -307,21 +307,20 @@ impl ResearchClient {
                 || self.resolve_installed(root.clone()).await.ok().as_ref() != installed.as_ref()
             {
                 let previous = c.executable.clone();
-                restart_previous = match tokio::task::spawn_blocking(move || {
-                    installed::verify_image(&previous)
-                })
-                .await
-                {
-                    Ok(Ok(previous)) => Some(previous),
-                    Ok(Err(error)) => {
-                        c.stop.notify_one();
-                        return Err(error);
-                    }
-                    Err(_) => {
-                        c.stop.notify_one();
-                        return Err("RESEARCH_PREVIOUS_IMAGE_CHECK_FAILED".into());
-                    }
-                };
+                restart_previous =
+                    match tokio::task::spawn_blocking(move || installed::verify_image(&previous))
+                        .await
+                    {
+                        Ok(Ok(previous)) => Some(previous),
+                        Ok(Err(error)) => {
+                            c.stop.notify_one();
+                            return Err(error);
+                        }
+                        Err(_) => {
+                            c.stop.notify_one();
+                            return Err("RESEARCH_PREVIOUS_IMAGE_CHECK_FAILED".into());
+                        }
+                    };
             }
             let mut done = c.closed.subscribe();
             Self::send(&c, ResearchCommand::Shutdown, None)
