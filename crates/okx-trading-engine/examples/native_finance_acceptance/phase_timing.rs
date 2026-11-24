@@ -120,8 +120,8 @@ pub(super) fn collect(dir: &Path, run_id: &str) -> Result<Vec<Value>> {
         if bytes.len() as u64 != metadata.len() {
             return Err("CLOCK_PHASE_RECEIPT_CHANGED");
         }
-        let value: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| "CLOCK_PHASE_RECEIPT_JSON_INVALID")?;
+        let value: Value =
+            serde_json::from_slice(&bytes).map_err(|_| "CLOCK_PHASE_RECEIPT_JSON_INVALID")?;
         validate(&value, run_id, fixture)?;
         fs::remove_file(&path).map_err(|_| "CLOCK_PHASE_RECEIPT_CLEANUP_FAILED")?;
         receipts.push(value);
@@ -159,7 +159,9 @@ mod tests {
         assert_eq!(fixture_witnesses.len(), 4);
         assert_eq!(
             fixture_witnesses,
-            CLOCK_SENSITIVE_AGENT_WITNESSES.into_iter().collect::<BTreeSet<_>>()
+            CLOCK_SENSITIVE_AGENT_WITNESSES
+                .into_iter()
+                .collect::<BTreeSet<_>>()
         );
         for fixture in &FIXTURES {
             validate(&sample(fixture), "abc_0", fixture).unwrap();
@@ -228,10 +230,7 @@ mod tests {
         let mut foreign = sample(&FIXTURES[0]);
         foreign["run_id"] = json!("foreign_run");
         fs::write(&first, foreign.to_string()).unwrap();
-        assert_eq!(
-            collect(&dir, "abc_0"),
-            Err("CLOCK_PHASE_IDENTITY_MISMATCH")
-        );
+        assert_eq!(collect(&dir, "abc_0"), Err("CLOCK_PHASE_IDENTITY_MISMATCH"));
         for fixture in &FIXTURES {
             fs::write(dir.join(name(fixture.slug)), sample(fixture).to_string()).unwrap();
         }

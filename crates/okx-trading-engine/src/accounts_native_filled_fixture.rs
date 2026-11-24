@@ -36,10 +36,18 @@ impl ClockFixture {
 
     const fn witness(self) -> &'static str {
         match self {
-            Self::FilledCloseReopen => "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_filled_close_settlement_release_and_cold_reopen",
-            Self::StoppedClose => "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_stop_after_fill_blocks_open_but_closes_and_releases",
-            Self::EmergencyClose => "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_failed_stop_emergency_close_and_verified_remediation",
-            Self::LateFeeRebate => "accounts::native_trade_contracts::native_fee_correction::risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutable_revisions",
+            Self::FilledCloseReopen => {
+                "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_filled_close_settlement_release_and_cold_reopen"
+            }
+            Self::StoppedClose => {
+                "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_stop_after_fill_blocks_open_but_closes_and_releases"
+            }
+            Self::EmergencyClose => {
+                "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_failed_stop_emergency_close_and_verified_remediation"
+            }
+            Self::LateFeeRebate => {
+                "accounts::native_trade_contracts::native_fee_correction::risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutable_revisions"
+            }
         }
     }
 }
@@ -88,7 +96,9 @@ impl ClockPhaseTimings {
             (Some(dir), Some(run_id)) => (dir, run_id),
             _ => panic!("INCOMPLETE_FINANCIAL_PHASE_RECEIPT_CONTEXT"),
         };
-        let run_id = run_id.to_str().expect("financial acceptance run ID is UTF-8");
+        let run_id = run_id
+            .to_str()
+            .expect("financial acceptance run ID is UTF-8");
         assert!(!run_id.is_empty(), "EMPTY_FINANCIAL_PHASE_RECEIPT_RUN_ID");
         assert!(!self.phases.is_empty(), "EMPTY_FINANCIAL_PHASE_TIMINGS");
         let receipt = serde_json::json!({
@@ -99,17 +109,22 @@ impl ClockPhaseTimings {
             "phases": self.phases,
         });
         let bytes = serde_json::to_vec(&receipt).expect("SERIALIZE_FINANCIAL_PHASE_RECEIPT");
-        assert!(bytes.len() <= 16 * 1024, "FINANCIAL_PHASE_RECEIPT_TOO_LARGE");
-        let path = std::path::Path::new(&dir)
-            .join(format!("finance-phase-{}.json", self.fixture.slug()));
+        assert!(
+            bytes.len() < 16 * 1024,
+            "FINANCIAL_PHASE_RECEIPT_TOO_LARGE"
+        );
+        let path =
+            std::path::Path::new(&dir).join(format!("finance-phase-{}.json", self.fixture.slug()));
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(path)
             .expect("CREATE_UNIQUE_FINANCIAL_PHASE_RECEIPT");
-        file.write_all(&bytes).expect("WRITE_FINANCIAL_PHASE_RECEIPT");
-        file.write_all(b"\n").expect("FINALIZE_FINANCIAL_PHASE_RECEIPT");
+        file.write_all(&bytes)
+            .expect("WRITE_FINANCIAL_PHASE_RECEIPT");
+        file.write_all(b"\n")
+            .expect("FINALIZE_FINANCIAL_PHASE_RECEIPT");
     }
 }
 
@@ -566,7 +581,11 @@ mod clock_phase_tests {
             assert!(slug.bytes().all(|c| c.is_ascii_lowercase() || c == b'_'));
             assert!(slugs.insert(slug));
             assert!(witnesses.insert(fixture.witness()));
-            assert!(fixture.witness().starts_with("accounts::native_trade_contracts::"));
+            assert!(
+                fixture
+                    .witness()
+                    .starts_with("accounts::native_trade_contracts::")
+            );
         }
         assert_eq!(slugs.len(), 4);
         assert_eq!(witnesses.len(), 4);
