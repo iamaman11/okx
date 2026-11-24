@@ -516,6 +516,9 @@ jobs:
       - name: Verify fail-closed capability acceptance
         run: python3 scripts/acceptance_product.py --self-test
 
+      - name: Check Research handoff receipt verification
+        run: python3 -B scripts/test_check_research_handoff.py
+
 
   rust_tests_linux:
     name: rust-tests-linux

@@ -80,6 +80,20 @@ fetch. `activation: "requires_engine_observation"` marks the next step. Measure
 time to the expected active PID/SHA separately through the Engine's
 [Research deployment diagnostic](research-boundaries.md#installation-versus-activation).
 
+For a captured update or rollback, save the CONTROL `status` result and the
+MCP diagnostic `structuredContent` both before and after the operation. Save
+the terminal CONTROL deploy or rollback result as `change.json`. Check them
+from the repository with:
+
+```powershell
+python scripts/check-research-handoff.py before-control.json before-research.json change.json after-control.json after-research.json
+```
+
+This checks the selected Research SHA against the active post-switch child and
+compares the Engine PID, incarnation and verified binary SHA across the change.
+The report covers the captured handoff. Separate workload and financial tests
+cover position protection and SQLite continuity.
+
 This describes the implemented path, not installed acceptance. #512 r15 checks
 the separate Worker build and existing verification/staging/handoff contracts.
 The first release requires full CI, merge and the existing accepted manifest;
