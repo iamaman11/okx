@@ -13,7 +13,7 @@ class FeedbackTests(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
         owner_commands = {
             "research_service_tests_windows": "cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service",
-            "trading_engine_acceptance_windows": "cargo test --locked -p okx-strategy-core -p okx-research",
+            "trading_engine_regressions_windows": "cargo test --locked -p okx-strategy-core -p okx-research",
         }
         for job, command in owner_commands.items():
             match = re.search(rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  [a-z_-]+:|\Z)", workflow)
@@ -22,6 +22,11 @@ class FeedbackTests(unittest.TestCase):
                 command,
                 match.group(1), f"{job} must execute owner unit tests, not just compile them",
             )
+        acceptance = re.search(
+            r"(?ms)^  trading_engine_acceptance_windows:\n(.*?)(?=^  [a-z_-]+:|\Z)", workflow
+        )
+        self.assertIsNotNone(acceptance)
+        self.assertIn("cargo run --locked -p okx-trading-engine --example native_finance_acceptance", acceptance.group(1))
 
     @staticmethod
     def source_witness():

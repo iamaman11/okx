@@ -31,9 +31,9 @@ function validate(yaml, fileNames) {
   const map = new Map(entries.map((m, i) => [m[1], jobs.slice(m.index,
     i + 1 < entries.length ? entries[i + 1].index : undefined)]));
   assert.equal(map.size, entries.length, 'DUPLICATE_JOB_ID');
-  // One release builder runs in parallel with financial tests. The only
-  // additional job seeds the debug/test profile on explicit accepted main.
-  assert.ok(map.size <= 16, 'OBSOLETE_JOB_GRAPH_REGRESSION');
+  // Finance, independent regressions, B1 and release share a single workflow.
+  // The only cache-only job is the explicit trusted-main seed.
+  assert.ok(map.size <= 17, 'OBSOLETE_JOB_GRAPH_REGRESSION');
   for (const unused of ['required_classify', 'draft-trading-migration-512',
     'draft-riskbook-migration-510', 'cloudflare_deploy', 'readonly_observer',
     'production_recovery_promote', 'named_validate', 'all26_windows_targeted']) {
@@ -69,6 +69,7 @@ function validate(yaml, fileNames) {
   const names = {
     rust_tests_linux: 'rust-tests-linux',
     trading_engine_acceptance_windows: 'trading-engine-acceptance-windows',
+    trading_engine_regressions_windows: 'trading-engine-regressions-windows',
     trading_engine_build_windows: 'trading-engine-build-windows',
     trusted_main_test_cache_prime: 'trusted-main-windows-test-cache-prime',
     trading_safety_acceptance_windows: 'trading-safety-acceptance-windows',
@@ -86,6 +87,21 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(engine, /cargo run[^\n]*-- --list/, 'REDUNDANT_CARGO_FINANCIAL_LIST');
   assert.match(engine, /shared-key: trading-engine-tests-windows/);
   assert.doesNotMatch(engine, /cargo build --locked --release|name: okx-windows-bundle-/);
+  // The real budgeted financial collector remains on the isolated runner.
+  assert.match(engine, /Mandatory current Rust financial property acceptance/);
+  assert.match(engine, /Isolated Native pending-fill crash recovery/);
+  assert.match(engine, /MCP DO WSS Native finance under isolated Research load/);
+  assert.doesNotMatch(engine, /K9 worker two-heavy cancellation latency evidence/);
+  const regression = job('trading_engine_regressions_windows');
+  assert.match(regression, /needs: component_impact/);
+  assert.match(regression, /if: needs\.component_impact\.outputs\.build_required == 'true' && needs\.component_impact\.outputs\.native_required != 'false' && needs\.component_impact\.outputs\.research_only != 'true'/);
+  assert.match(regression, /shared-key: trading-engine-tests-windows/);
+  assert.match(regression, /Clippy native Windows crates/);
+  assert.match(regression, /Strategy Core and Research owner regressions on full Windows/);
+  assert.match(regression, /Native trading, SQL, CONTROL and Launcher remaining regression/);
+  assert.match(regression, /cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list/);
+  assert.match(regression, /K9 worker two-heavy cancellation latency evidence/);
+  assert.doesNotMatch(regression, /Mandatory current Rust financial property acceptance|Isolated Native pending-fill crash recovery|name: okx-windows-bundle-/);
   const build = job('trading_engine_build_windows');
   assert.match(build, /\(github.event_name == 'workflow_dispatch' &&\n         inputs.prime_windows_cargo_cache == true &&/);
   assert.match(build, /inputs.prime_windows_cargo_cache == true &&/);
@@ -116,7 +132,10 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(prime, /gh release|actions\/upload-artifact|cargo run|cargo build --locked --release/);
   assert.match(prime, /FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED/);
   const windows = job('required_windows');
-  assert.match(windows, /needs: \[component_impact, trading_engine_acceptance_windows, trading_engine_build_windows,/);
+  assert.match(windows, /needs: \[component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows,/);
+  assert.match(windows, /test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "success"/);
+  assert.equal((windows.match(/test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "skipped"/g) || []).length, 4,
+    'REGRESSION_JOB_MUST_BE_SKIPPED_ON_EVERY_NON_FINANCE_PATH');
   assert.match(windows, /test "\$\{\{ needs.trading_engine_build_windows.result \}\}" = "success"/);
   const publish = job('publish_accepted_windows_release');
   assert.match(publish, /^    name: publish-accepted-windows-release$/m);
@@ -134,7 +153,7 @@ function validate(yaml, fileNames) {
   assert.match(publish, /group: native-base-publication/);
   assert.match(publish, /ACCEPTED_MAIN: \$\{\{ github\.sha \}\}/);
   assert.doesNotMatch(publish, /github\.event\.workflow_run/);
-  assert.match(publish, /"trading-engine-acceptance-windows","trading-engine-build-windows","trading-safety-acceptance-windows","linux-core","windows-native"/);
+  assert.match(publish, /"trading-engine-acceptance-windows","trading-engine-regressions-windows","trading-engine-build-windows","trading-safety-acceptance-windows","linux-core","windows-native"/);
 
   for (const [id, block] of map) {
     if (id !== 'publish_accepted_windows_release') {
@@ -161,6 +180,10 @@ assert.throws(() => validate(source.replace('always() &&\n        github.event_n
 assert.throws(() => validate(source.replace("inputs.prime_windows_cargo_cache == true &&", "true &&"), workflows));
 assert.throws(() => validate(source.replace("github.event_name == 'workflow_dispatch' &&", "github.event_name == 'push' &&"), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_build_windows.result }}" = "success"', 'true'), workflows));
+assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_regressions_windows.result }}" = "success"', 'true'), workflows));
+assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"', 'true'), workflows));
+assert.throws(() => validate(source.replace('needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows,', 'needs: [component_impact, trading_engine_acceptance_windows,'), workflows));
+assert.throws(() => validate(source.replace('"trading-engine-acceptance-windows","trading-engine-regressions-windows",', '"trading-engine-acceptance-windows",'), workflows));
 assert.throws(() => validate(source.replace('shared-key: trading-engine-release-windows', 'shared-key: trading-engine-tests-windows'), workflows));
 assert.throws(() => validate(source.replace('shared-key: trading-engine-tests-windows', 'shared-key: trading-engine-release-windows'), workflows));
 assert.throws(() => validate(source.replace('$manifestJson = & $collector --list',

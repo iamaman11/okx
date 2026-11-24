@@ -724,17 +724,6 @@ jobs:
         shell: pwsh
         run: ./scripts/test-windows-unify-root.ps1
 
-      - name: Clippy native Windows crates
-        run: cargo clippy --locked -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-trade-execution --all-targets -- -D warnings
-
-      - name: Strategy Core and Research owner regressions on full Windows
-        shell: pwsh
-        run: |
-          # Full Native is required for Agent/IPC migrations, but must not
-          # silently omit the pure mathematical owners being migrated.
-          cargo test --locked -p okx-strategy-core -p okx-research
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
       - name: Install locked production workerd test dependencies on Windows
         # The isolated MCP/DO/WSS finance witness runs on both PR and main.
         # Its Node fixture imports esbuild, so the locked npm tree is required
@@ -777,22 +766,13 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # Complete coverage is the union of the verified property run and the
-      # remaining regressions, all on this exact checkout. Independent CPU-heavy
-      # research fixtures must not age a separate financial fixture's real-time
-      # sources. MCP/DO/WSS and protection cleanup have required isolated steps.
-      # Concurrency INSIDE the 100-caller and fairness tests is not reduced.
-      - name: Build research worker for process contracts
+      # This job remains the sole owner of the uninterrupted, budgeted finance
+      # report and the clock-sensitive OS/SQL/process witnesses. All other
+      # Windows regressions run on a DIFFERENT runner in parallel, but the
+      # protected windows-native check requires both jobs to succeed.
+      - name: Verify complete financial witness manifest on exact PR tree
         shell: pwsh
         run: |
-          cargo build --locked -p okx-research-service --bin okx-research-service
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Native trading, SQL, CONTROL and Launcher regression
-        shell: pwsh
-        run: |
-          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
-          $covered = @()
           if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
             $proof = Get-Content -Raw "$env:RUNNER_TEMP\native-finance-full.json" | ConvertFrom-Json
             $head = (git rev-parse HEAD).Trim()
@@ -816,16 +796,12 @@ jobs:
             } | Sort-Object -Unique)
             if ($actual.Count -eq 0 -or $actual.Count -ne $covered.Count -or @(Compare-Object $expected $actual).Count -ne 0) { throw 'FINANCIAL_WITNESS_SET_MISMATCH' }
           }
-          foreach ($package in @('okx-trading-engine','okx-host-controller','okx-host-launcher','okx-trade-execution')) {
-            $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--skip','accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research','--skip','trade_service::protection_cleanup::protection_cleanup_direct_tests::','--test-threads','2')
-            # This OS-kill fixture spawns a second Native process with its own
-            # bounded SQL deadlines. Exercise it alone, not beside other fixtures.
-            if ($package -eq 'okx-trading-engine') { $testArgs += @('--skip','accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once') }
-            foreach ($witness in @($covered | Where-Object package -eq $package)) { $testArgs += @('--skip',$witness.test) }
-            Write-Host "Remaining regression: $package; exact property witnesses already verified: $(@($covered | Where-Object package -eq $package).Count)"
-            cargo test --locked -p $package -- @testArgs
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+
+      - name: Build research worker for isolated process contracts
+        shell: pwsh
+        run: |
+          cargo build --locked -p okx-research-service --bin okx-research-service
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Isolated Native pending-fill crash recovery
         shell: pwsh
@@ -910,7 +886,85 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # K9 runs once in its dedicated step, where its measurement is collected.
+  trading_engine_regressions_windows:
+    # Non-clock-sensitive regression coverage can compile and run independently
+    # of the one uninterrupted financial property acceptance on another runner.
+    # It does not issue a financial PASS: windows-native joins both exact-tree
+    # jobs and the separate B1 + full Windows release gates before publication.
+    name: trading-engine-regressions-windows
+    needs: component_impact
+    if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.95.0
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Both runners restore the same trusted-main debug/test profile.
+          # Their target directories are physically isolated by runner.
+          cache-on-failure: true
+          shared-key: trading-engine-tests-windows
+
+      - name: Clippy native Windows crates
+        shell: pwsh
+        run: |
+          cargo clippy --locked -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-trade-execution --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Strategy Core and Research owner regressions on full Windows
+        shell: pwsh
+        run: |
+          # Full Native remains responsible for Agent/IPC migration consumers.
+          cargo test --locked -p okx-strategy-core -p okx-research
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build research worker for regression process contracts
+        shell: pwsh
+        run: |
+          cargo build --locked -p okx-research-service --bin okx-research-service
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Native trading, SQL, CONTROL and Launcher remaining regression
+        shell: pwsh
+        run: |
+          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
+          $covered = @()
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+            # An exact checkout, not a static ignore list, defines the finance
+            # witnesses run by the parallel full collector. The acceptance job
+            # independently proves FULL_PASS, current HEAD/tree, and equality
+            # between this manifest and every observed witness. If it fails,
+            # windows-native is RED even when these remaining tests pass.
+            $manifestJson = & cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $manifest = $manifestJson | ConvertFrom-Json
+            if (@($manifest.contracts).Count -eq 0) { throw 'FINANCIAL_MANIFEST_EMPTY' }
+            $financialWitnesses = @($manifest.contracts.witnesses | Where-Object package -ne 'repository')
+            $knownPackages = @('okx-domain-core','okx-trade-execution','okx-trading-engine','okx-ipc-contracts','okx-market-runtime')
+            if (@($financialWitnesses | Where-Object { $_.package -cnotin $knownPackages -or $_.test -cnotmatch '^[A-Za-z0-9_:]+$' }).Count -ne 0) {
+              throw 'FINANCIAL_MANIFEST_WITNESS_INVALID'
+            }
+            $covered = @($financialWitnesses | ForEach-Object {
+              [pscustomobject]@{ package = $_.package; test = $_.test }
+            } | Sort-Object package, test -Unique)
+            if ($covered.Count -eq 0) { throw 'FINANCIAL_WITNESS_MANIFEST_EMPTY' }
+          }
+          foreach ($package in @('okx-trading-engine','okx-host-controller','okx-host-launcher','okx-trade-execution')) {
+            $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--skip','accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research','--skip','trade_service::protection_cleanup::protection_cleanup_direct_tests::','--test-threads','2')
+            # OS-kill is checked exclusively in the finance/isolated job.
+            if ($package -eq 'okx-trading-engine') { $testArgs += @('--skip','accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once') }
+            foreach ($witness in @($covered | Where-Object package -eq $package)) { $testArgs += @('--skip',$witness.test) }
+            Write-Host "Remaining regression: $package; financial witnesses routed to full collector: $(@($covered | Where-Object package -eq $package).Count)"
+            cargo test --locked -p $package -- @testArgs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      # K9 runs once on its own runner, not beside isolated OS/SQL clocks.
       - name: Worker library regression and actual IPC child
         shell: pwsh
         run: |
@@ -935,8 +989,7 @@ jobs:
           if ($code -ne 0) { exit $code }
           if (($output -join "`n") -notmatch 'test result: ok\. [1-9][0-9]* passed;') { throw 'AGENT_RESEARCH_DISPATCH_TESTS_MISSING' }
 
-      # This is a worker-local CPU/cancellation benchmark, not proof of
-      # physical Engine autonomy while a separate worker is under load.
+      # Worker-local CPU/cancellation benchmark, not physical Engine autonomy.
       - name: K9 worker two-heavy cancellation latency evidence
         shell: pwsh
         run: |
@@ -1077,7 +1130,7 @@ jobs:
     # on a real Windows gate or on the narrowly proven identical native tree;
     # it never reports a newly executed 26/26 on the reuse path.
     name: windows-native
-    needs: [component_impact, trading_engine_acceptance_windows, trading_engine_build_windows, trading_safety_acceptance_windows, host_controller_launcher_checks, cloudflare_mcp_contracts, research_service_tests_windows]
+    needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows, trading_safety_acceptance_windows, host_controller_launcher_checks, cloudflare_mcp_contracts, research_service_tests_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -1088,11 +1141,20 @@ jobs:
           test "${{ needs.component_impact.result }}" = "success"
           if [[ "${{ needs.component_impact.outputs.build_required }}" == "false" ]]; then
             test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
+            # Manual trusted-main cache priming intentionally compiles release
+            # outputs without running acceptance; normal main pushes do not.
+            if [[ "${{ github.event_name }}" == "push" ]]; then
+              test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
+            fi
             test "${{ needs.component_impact.outputs.reason }}" = "merged tree exactly matches successful PR head tree"
             echo "WINDOWS_NATIVE_PROOF=EXACT_SUCCESSFUL_MERGED_TREE"
           elif [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
             test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
             test "${{ needs.research_service_tests_windows.result }}" = "success"
             test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_BASE_${{ needs.component_impact.outputs.research_base_head }}"
@@ -1101,6 +1163,8 @@ jobs:
             test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
             test "${{ needs.host_controller_launcher_checks.result }}" = "success"
             test "${{ needs.research_service_tests_windows.result }}" = "skipped"
             test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
@@ -1112,6 +1176,8 @@ jobs:
             scope="${{ needs.component_impact.outputs.component_scope }}"
             [[ "$scope" == "docs" || "$scope" == "cloudflare" ]]
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
             test "${{ needs.research_service_tests_windows.result }}" = "skipped"
             if [[ "$scope" == "docs" ]]; then
               test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
@@ -1123,6 +1189,7 @@ jobs:
           else
             test "${{ needs.trading_safety_acceptance_windows.result }}" = "success"
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "success"
+            test "${{ needs.trading_engine_regressions_windows.result }}" = "success"
             test "${{ needs.trading_engine_build_windows.result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=FULL_WINDOWS_NATIVE_SUCCESS"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
@@ -1456,7 +1523,7 @@ jobs:
             jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/jobs?per_page=100")"
             # Require the *fresh* 4-EXE financial gate, never an aggregate
             # that reused older proof or the isolated Research-only worker.
-            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-acceptance-windows","trading-engine-build-windows","trading-safety-acceptance-windows","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
+            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-acceptance-windows","trading-engine-regressions-windows","trading-engine-build-windows","trading-safety-acceptance-windows","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
               continue
             fi
             artifacts="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts?per_page=100")"

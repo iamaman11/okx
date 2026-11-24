@@ -17,7 +17,7 @@ jobs were removed from the main workflow.
 | --- | --- | --- | --- |
 | Only `crates/okx-host-launcher/src/**/*.rs` (+ docs) | Launcher, plus Host Controller consumer | `host-controller-launcher-checks`; no Trading Engine/SQL compilation | None: host identities are not an installable four-component bundle |
 | Only `crates/okx-host-controller/src/**/*.rs` and optional Launcher Rust source (+ docs) | Host Controller and Launcher | `host-controller-launcher-checks`; no Trading Engine/SQL compilation | None |
-| Trading Engine/TradeService, `okx-trade-execution` or financial SQL | Trading Engine, RiskBook, SQL and trade-side consumers | Mandatory `trading-engine-acceptance-windows`, parallel `trading-engine-build-windows`, B1 and Linux financial regressions | Full verified Windows bundle on qualifying PR |
+| Trading Engine/TradeService, `okx-trade-execution` or financial SQL | Trading Engine, RiskBook, SQL and trade-side consumers | Mandatory financial `trading-engine-acceptance-windows`, independent `trading-engine-regressions-windows`, parallel `trading-engine-build-windows`, B1 and Linux financial regressions | Full verified Windows bundle on qualifying PR |
 | Shared `okx-api`, `okx-market-runtime`, `okx-ipc-contracts`, root Cargo files, build scripts, installer/packaging scripts or CI workflow | All affected consumers | Full Native matrix (fail closed) | Full only after acceptance |
 | Narrow Research/Host `Cargo.toml` with optional `Cargo.lock` | Only that owner and its actual consumers | Scoped **only after exact before/after Windows Cargo closure proof**, including versions/features/dev dependencies; otherwise full Native | Research accepted-base composition or host-only nondeployable evidence |
 | Research-only + accepted immutable Native base | Research/IPC consumers | Separate Research gate with independently verified Cargo closure | Composed Research-only bundle |
@@ -42,10 +42,14 @@ TradeService/Engine consumers remain in `okx-trading-engine`; this stage does **
 claim separate financial SQL and Engine release cycles.
 
 For a full Native change, the protected `windows-native` aggregate requires
-**all three** `trading-engine-acceptance-windows`, `trading-engine-build-windows`
-and `trading-safety-acceptance-windows` to succeed. The full Windows package is
-built in parallel with the financial tests from the **same exact source tree**;
-publication waits for their combined success. Scoped Research, host,
+**all four** `trading-engine-acceptance-windows`, `trading-engine-regressions-windows`,
+`trading-engine-build-windows` and `trading-safety-acceptance-windows` to succeed.
+The complete budgeted financial collector and isolated OS/SQL/process fixtures
+remain on one runner. Independent remaining regressions run on a separate
+Windows runner, deriving their exact financial-witness exclusions from the
+current collector manifest. The full Windows package is built in parallel
+from the **same exact source tree**; publication waits for all four jobs.
+Scoped Research, host,
 Cloudflare and exact merged-tree reuse require the B1 prerequisite to be
 `skipped`, never falsely counted as executed. The five recorded-source B1
 fixtures are run sequentially to avoid unrelated fixture readiness timeouts;
@@ -57,8 +61,8 @@ CONTROL and Launcher. Its exact source HEAD, tree, component scope and binary
 hashes are retained as **non-deployable** evidence. It never publishes a new
 Native base; `publish-accepted-windows-release` inside the **same** protected
 `.github/workflows/ci.yml` runs after successful main checks and continues
-to require fresh `trading-engine-acceptance-windows`, `trading-engine-build-windows`,
-B1 and a complete
+to require fresh `trading-engine-acceptance-windows`, `trading-engine-regressions-windows`,
+`trading-engine-build-windows`, B1 and a complete
 four-component Windows artifact. It publishes a GitHub release but never
 installs or restarts the Trading Engine.
 
