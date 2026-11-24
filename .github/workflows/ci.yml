@@ -63,7 +63,7 @@ jobs:
           name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}/okx-research-composition-v2
           if-no-files-found: error
-          compression-level: 9
+          compression-level: 1
           retention-days: 14
       - name: Retain composition identities and negative-test proof
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -75,6 +75,8 @@ jobs:
 
   dependency-audit:
     name: dependency-audit
+    needs: component_impact
+    if: needs.component_impact.outputs.component_scope != '' && !contains(fromJSON('["docs","cloudflare"]'), needs.component_impact.outputs.component_scope)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -152,11 +154,7 @@ jobs:
       native_required: ${{ steps.classify.outputs.native_required }}
       native_proof: ${{ steps.classify.outputs.native_proof }}
       component_scope: ${{ steps.proven_scope.outputs.scope }}
-      research_only: ${{ steps.research_scope.outputs.research_only }}
-      research_base_head: ${{ steps.research_scope.outputs.base_head }}
-      research_base_run: ${{ steps.research_scope.outputs.base_run }}
-      research_base_artifact: ${{ steps.research_scope.outputs.base_artifact }}
-      research_base_digest: ${{ steps.research_scope.outputs.base_digest }}
+      research_only: ${{ steps.classify.outputs.research_only }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
@@ -173,20 +171,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BEFORE_SHA: ${{ github.event.before }}
           FORCED_PUSH: ${{ github.event.forced }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          CHECKED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           scope=full
           candidate=none
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" > "$RUNNER_TEMP/ci-files.json"
+            base="$PR_BASE"
+          elif [[ "$FORCED_PUSH" != true ]]; then
+            base="$BEFORE_SHA"
+          else
+            base=''
+          fi
+          # Compare the immutable event commits. The live PR file list may
+          # belong to a newer head while GitHub is cancelling this run.
+          if [[ "$base" =~ ^[0-9a-f]{40}$ && "$base" != "0000000000000000000000000000000000000000" &&
+                "$CHECKED_HEAD" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "$CHECKED_HEAD" ]] &&
+             gh api "/repos/$GITHUB_REPOSITORY/compare/$base...$CHECKED_HEAD" > "$RUNNER_TEMP/ci-compare.json" &&
+             jq -e --arg base "$base" --arg head "$CHECKED_HEAD" '
+                 (.status == "ahead" or .status == "diverged") and .base_commit.sha == $base
+                 and .ahead_by > 0 and .total_commits == .ahead_by and .total_commits < 250
+                 and (.commits | length) == .total_commits and .commits[-1].sha == $head
+                 and (.files | type == "array" and length > 0 and length < 300)
+               ' "$RUNNER_TEMP/ci-compare.json" >/dev/null; then
+            jq -c '[.files]' "$RUNNER_TEMP/ci-compare.json" > "$RUNNER_TEMP/ci-files.json"
             scope="$(python3 -B scripts/check_ci_native_scope.py < "$RUNNER_TEMP/ci-files.json")"
-            candidate="$(python3 -B scripts/check_ci_native_scope.py --dependency-candidate < "$RUNNER_TEMP/ci-files.json")"
-          elif [[ "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ && "$FORCED_PUSH" != "true" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
-            gh api "/repos/$GITHUB_REPOSITORY/compare/$BEFORE_SHA...$GITHUB_SHA" > "$RUNNER_TEMP/ci-compare.json"
-            if jq -e --arg before "$BEFORE_SHA" '.status == "ahead" and .base_commit.sha == $before and .ahead_by > 0 and .total_commits < 250 and (.files | type == "array" and length > 0 and length < 300)' "$RUNNER_TEMP/ci-compare.json" >/dev/null; then
-              jq -c '[.files]' "$RUNNER_TEMP/ci-compare.json" > "$RUNNER_TEMP/ci-files.json"
-              scope="$(python3 -B scripts/check_ci_native_scope.py < "$RUNNER_TEMP/ci-files.json")"
+            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+              candidate="$(python3 -B scripts/check_ci_native_scope.py --dependency-candidate < "$RUNNER_TEMP/ci-files.json")"
             fi
           fi
           case "$scope" in docs|cloudflare|research|host-controller|host-launcher|full) ;; *) exit 1;; esac
@@ -261,40 +273,6 @@ jobs:
           case "$scope" in docs|cloudflare|research|host-controller|host-launcher|full) ;; *) exit 1;; esac
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
           echo "COMPONENT_SCOPE=$scope"
-      - name: Record Research-only owner and verify optional accepted base
-        id: research_scope
-        if: (github.event_name == 'push' || github.event.pull_request.draft != true) && steps.proven_scope.outputs.scope == 'research'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # Source ownership and installable binary provenance are distinct facts.
-          # A missing accepted Native base must NEVER turn a Research-only source
-          # change into a fresh compilation of the financial Engine. Run the
-          # independent Research tests; fail closed at package/provenance instead.
-          "research_only=true" >> $env:GITHUB_OUTPUT
-          try { & ./scripts/prepare-research-release.ps1 -VerifyOnly }
-          catch {
-            Write-Warning "Research accepted base unavailable: $($_.Exception.Message). Research may build and test, but deployable packaging will fail closed."
-            "base_verified=false" >> $env:GITHUB_OUTPUT
-            exit 0
-          }
-          $proof = Get-Content -Raw (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') | ConvertFrom-Json
-          if ($proof.current_head_sha -cne '${{ github.event.pull_request.head.sha || github.sha }}') { throw 'CURRENT_HEAD_MISMATCH' }
-          "base_verified=true" >> $env:GITHUB_OUTPUT
-          "base_head=$($proof.base_head_sha)" >> $env:GITHUB_OUTPUT
-          "base_run=$($proof.base_run_id)" >> $env:GITHUB_OUTPUT
-          "base_artifact=$($proof.base_artifact_id)" >> $env:GITHUB_OUTPUT
-          "base_digest=$($proof.base_archive_digest)" >> $env:GITHUB_OUTPUT
-      - name: Retain verified base proof
-        if: steps.research_scope.outputs.research_only == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: research-base-proof-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}/research-release-proof.json
-          if-no-files-found: error
-          retention-days: 14
       - name: Decide whether compilation is required
         id: classify
         shell: bash
@@ -312,104 +290,72 @@ jobs:
             exit 0
           fi
 
-          # Research-only source changes never compile the unchanged Engine.
-          # The separate artifact step still requires an immutable accepted
-          # Native base and fails closed if that proof is unavailable.
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            scope="${{ steps.proven_scope.outputs.scope }}"
-            if [[ "$scope" == "research" && "${{ steps.research_scope.outputs.research_only }}" == "true" ]]; then
-              echo "build_required=true" >> "$GITHUB_OUTPUT"
-              echo "native_required=false" >> "$GITHUB_OUTPUT"
-              if [[ "${{ steps.research_scope.outputs.base_verified }}" == "true" ]]; then
-                echo "native_proof=RESEARCH_ACCEPTED_BASE" >> "$GITHUB_OUTPUT"
-                echo "reason=Research-owned changes; validated Cargo closure and pinned Windows base" >> "$GITHUB_OUTPUT"
-              else
-                echo "native_proof=RESEARCH_BASE_UNAVAILABLE" >> "$GITHUB_OUTPUT"
-                echo "reason=Research-owned changes; package must fail closed until accepted base is verified" >> "$GITHUB_OUTPUT"
-              fi
-              exit 0
-            fi
-            if [[ "$scope" == "docs" || "$scope" == "cloudflare" ]]; then
-              echo "build_required=true" >> "$GITHUB_OUTPUT"
-              echo "native_required=false" >> "$GITHUB_OUTPUT"
-              echo "native_proof=COMPONENT_SCOPED_UNCHANGED_NATIVE" >> "$GITHUB_OUTPUT"
-              echo "reason=$scope-only PR; no native Rust or common dependency changed" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            if [[ "$scope" == "host-controller" || "$scope" == "host-launcher" ]]; then
-              echo "build_required=true" >> "$GITHUB_OUTPUT"
-              echo "native_required=false" >> "$GITHUB_OUTPUT"
-              echo "native_proof=HOST_WINDOWS_OWNER_AND_CONSUMER" >> "$GITHUB_OUTPUT"
-              echo "reason=$scope Rust source only; dedicated Windows host/consumer build required" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "build_required=true" >> "$GITHUB_OUTPUT"
-            echo "native_required=true" >> "$GITHUB_OUTPUT"
-            echo "native_proof=NONE" >> "$GITHUB_OUTPUT"
-            echo "reason=full native scope or Research without verified accepted base" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Main preserves exact-tree PR CI reuse. A non-identical tree can
-          # still use the docs/Cloudflare component boundary, but never the
-          # Research binary reuse without an independently checked base.
-          prs_json="$(gh api             -H "Accept: application/vnd.github+json"             "/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls")"
-
-          head_sha="$(jq -r '
-            [.[] | select(.merged_at != null and .base.ref == "main")]
-            | first
-            | .head.sha // empty
-          ' <<<"$prs_json")"
-
-          # A successful Draft run can share this SHA. Only a completed Ready
-          # run has successful Linux and Windows aggregate jobs in the same attempt.
-          successful_pr_ci=0
-          if [[ -n "$head_sha" ]]; then
-            candidates="$(gh api --paginate --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" \
-              -f head_sha="$head_sha" -f event=pull_request -f status=completed -f per_page=100 \
-              --jq '.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .conclusion == "success") | [.id, .run_attempt] | @tsv')"
-            while read -r run attempt; do
-              [[ -n "$run" ]] || continue
-              jobs="$(gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/actions/runs/$run/attempts/$attempt/jobs?per_page=100")"
-              if jq -e '[.[].jobs[] | select(.conclusion == "success") | .name] | index("linux-core") != null and index("windows-native") != null' <<<"$jobs" >/dev/null; then
-                successful_pr_ci=1
-                break
-              fi
-            done <<<"$candidates"
-            merge_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq '.tree.sha')"
-            head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head_sha" --jq '.tree.sha')"
-          fi
-
-          if [[ "$successful_pr_ci" -gt 0 && "$merge_tree" == "$head_tree" ]]; then
-            echo "build_required=false" >> "$GITHUB_OUTPUT"
-            echo "native_required=false" >> "$GITHUB_OUTPUT"
-            echo "reason=merged tree exactly matches successful PR head tree" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           scope="${{ steps.proven_scope.outputs.scope }}"
-          echo "build_required=true" >> "$GITHUB_OUTPUT"
-          if [[ "$scope" == "research" && "${{ steps.research_scope.outputs.research_only }}" == "true" ]]; then
-            echo "native_required=false" >> "$GITHUB_OUTPUT"
-            if [[ "${{ steps.research_scope.outputs.base_verified }}" == "true" ]]; then
-              echo "native_proof=RESEARCH_ACCEPTED_BASE" >> "$GITHUB_OUTPUT"
-              echo "reason=Research-only main delta; verified Cargo closure and accepted Windows base" >> "$GITHUB_OUTPUT"
-            else
-              echo "native_proof=RESEARCH_BASE_UNAVAILABLE" >> "$GITHUB_OUTPUT"
-              echo "reason=Research-only main delta; package must fail closed until accepted base is verified" >> "$GITHUB_OUTPUT"
-            fi
-          elif [[ "$scope" == "docs" || "$scope" == "cloudflare" ]]; then
+          # Docs and Edge never need a lookup of accepted Native runs.
+          if [[ "$scope" == "docs" || "$scope" == "cloudflare" ]]; then
+            echo "build_required=true" >> "$GITHUB_OUTPUT"
             echo "native_required=false" >> "$GITHUB_OUTPUT"
             echo "native_proof=COMPONENT_SCOPED_UNCHANGED_NATIVE" >> "$GITHUB_OUTPUT"
-            echo "reason=$scope-only main delta; accepted Native source unaffected" >> "$GITHUB_OUTPUT"
-          elif [[ "$scope" == "host-controller" || "$scope" == "host-launcher" ]]; then
-            echo "native_required=false" >> "$GITHUB_OUTPUT"
-            echo "native_proof=HOST_WINDOWS_OWNER_AND_CONSUMER" >> "$GITHUB_OUTPUT"
-            echo "reason=$scope-only main delta; dedicated Windows host/consumer build required" >> "$GITHUB_OUTPUT"
-          else
-            echo "native_required=true" >> "$GITHUB_OUTPUT"
-            echo "native_proof=NONE" >> "$GITHUB_OUTPUT"
-            echo "reason=main delta requires full Native or unverified Research reuse" >> "$GITHUB_OUTPUT"
+            echo "reason=$scope-only; Native source unaffected" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            # On main, reuse only a successful Ready run with the exact tree.
+            prs_json="$(gh api             -H "Accept: application/vnd.github+json"             "/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls")"
+
+            head_sha="$(jq -r '
+              [.[] | select(.merged_at != null and .base.ref == "main")]
+              | first
+              | .head.sha // empty
+            ' <<<"$prs_json")"
+
+            # A successful Draft run can share this SHA. Only a completed Ready
+            # run has successful Linux and Windows aggregate jobs in the same attempt.
+            successful_pr_ci=0
+            if [[ -n "$head_sha" ]]; then
+              candidates="$(gh api --paginate --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" \
+                -f head_sha="$head_sha" -f event=pull_request -f status=completed -f per_page=100 \
+                --jq '.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .conclusion == "success") | [.id, .run_attempt] | @tsv')"
+              while read -r run attempt; do
+                [[ -n "$run" ]] || continue
+                jobs="$(gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/actions/runs/$run/attempts/$attempt/jobs?per_page=100")"
+                if jq -e '[.[].jobs[] | select(.conclusion == "success") | .name] | index("linux-core") != null and index("windows-native") != null' <<<"$jobs" >/dev/null; then
+                  successful_pr_ci=1
+                  break
+                fi
+              done <<<"$candidates"
+              merge_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq '.tree.sha')"
+              head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head_sha" --jq '.tree.sha')"
+            fi
+
+            if [[ "$successful_pr_ci" -gt 0 && "$merge_tree" == "$head_tree" ]]; then
+              echo "build_required=false" >> "$GITHUB_OUTPUT"
+              echo "native_required=false" >> "$GITHUB_OUTPUT"
+              echo "reason=merged tree exactly matches successful PR head tree" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          echo "build_required=true" >> "$GITHUB_OUTPUT"
+          case "$scope" in
+            research)
+              echo "research_only=true" >> "$GITHUB_OUTPUT"
+              echo "native_required=false" >> "$GITHUB_OUTPUT"
+              echo "native_proof=RESEARCH_OWNER_ONLY" >> "$GITHUB_OUTPUT"
+              echo "reason=Research owner; release job must verify the accepted Native base" >> "$GITHUB_OUTPUT"
+              ;;
+            host-controller|host-launcher)
+              echo "native_required=false" >> "$GITHUB_OUTPUT"
+              echo "native_proof=HOST_WINDOWS_OWNER_AND_CONSUMER" >> "$GITHUB_OUTPUT"
+              echo "reason=$scope Rust source only; run Windows host/consumer checks" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "native_required=true" >> "$GITHUB_OUTPUT"
+              echo "native_proof=NONE" >> "$GITHUB_OUTPUT"
+              echo "reason=Engine, shared build inputs or unverified scope" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
 
       - name: Classification
         run: |
@@ -464,7 +410,7 @@ jobs:
   architecture_contracts:
     name: architecture-contracts
     needs: component_impact
-    if: needs.component_impact.outputs.build_required == 'true'
+    if: needs.component_impact.outputs.build_required == 'true' && !contains(fromJSON('["docs","cloudflare"]'), needs.component_impact.outputs.component_scope)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -596,7 +542,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: cloudflare/okx-mcp/.node-version
-          package-manager-cache: false
+          cache: npm
+          cache-dependency-path: cloudflare/okx-mcp/package-lock.json
       - name: Toolchain
         run: |
           node --version
@@ -635,11 +582,14 @@ jobs:
             echo "REUSED_SUCCESSFUL_PR_CI=true"
             exit 0
           fi
-          test "${{ needs.architecture_contracts.result }}" = "success"
+          case "${{ needs.component_impact.outputs.component_scope }}" in
+            docs|cloudflare) test "${{ needs.architecture_contracts.result }}" = "skipped" ;;
+            *) test "${{ needs.architecture_contracts.result }}" = "success" ;;
+          esac
           if [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
             test "${{ needs.rust_tests_linux.result }}" = "skipped"
             test "${{ needs.research_service_tests_windows.result }}" = "success"
-            echo "LINUX_FINANCE_REUSED_BASE=${{ needs.component_impact.outputs.research_base_head }}"
+            echo "LINUX_FINANCE_REUSED_BASE=${{ needs.research_service_tests_windows.outputs.base_head }}"
           elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
             test "${{ needs.rust_tests_linux.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
@@ -1046,6 +996,8 @@ jobs:
     # A successful, identical PR tree is already accepted; main must reuse it.
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'
     runs-on: windows-latest
+    outputs:
+      base_head: ${{ steps.package.outputs.base_head }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1067,12 +1019,13 @@ jobs:
           "Research Cargo cache exact hit: ${{ steps.research-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
           # This is the REQUIRED Ready gate for all three Research owners.
           # A failing primitive unit test must fail this job before packaging.
-          cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service --all-targets -- -D warnings
+          cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service
+          cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build deployable Windows binaries
+        id: package
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1093,6 +1046,10 @@ jobs:
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'research-only-build.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $proof = Get-Content -Raw -LiteralPath (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') | ConvertFrom-Json
+          if ($proof.current_head_sha -cne $sourceHead -or $proof.base_head_sha -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'RESEARCH_BASE_PROOF_REQUIRED'
+          }
+          "base_head=$($proof.base_head_sha)" >> $env:GITHUB_OUTPUT
           foreach ($name in $names[0..2]) { $components[$name] = $proof.components.PSObject.Properties[$name].Value }
           Copy-Item (Join-Path $env:CARGO_TARGET_DIR 'release\okx-research-service.exe') (Join-Path $dist 'okx-research-service.exe')
           $freshNames = @('okx-research-service.exe')
@@ -1139,18 +1096,8 @@ jobs:
           name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}\okx-windows-bundle
           if-no-files-found: error
-          compression-level: 9
+          compression-level: 1
           retention-days: 14
-
-      - name: Confirm independent base proof matches classifier
-        shell: pwsh
-        run: |
-          $proof = Get-Content -Raw (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') | ConvertFrom-Json
-          if ($proof.current_head_sha -cne '${{ github.event.pull_request.head.sha || github.sha }}' -or
-              $proof.base_head_sha -cne '${{ needs.component_impact.outputs.research_base_head }}' -or
-              "$($proof.base_run_id)" -cne '${{ needs.component_impact.outputs.research_base_run }}' -or
-              "$($proof.base_artifact_id)" -cne '${{ needs.component_impact.outputs.research_base_artifact }}' -or
-              $proof.base_archive_digest -cne '${{ needs.component_impact.outputs.research_base_digest }}') { throw 'BASE_PROOF_CHANGED' }
 
 
   required_windows:
@@ -1181,16 +1128,14 @@ jobs:
             # Isolated compilation is always allowed. Ready acceptance is NOT:
             # without an independently verified prior Native base there is no
             # safe composite release and the protected check must stay red.
-            test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_ACCEPTED_BASE"
-            [[ "${{ needs.component_impact.outputs.research_base_head }}" =~ ^[0-9a-f]{40}$ ]]
-            [[ "${{ needs.component_impact.outputs.research_base_run }}" =~ ^[1-9][0-9]*$ ]]
-            [[ "${{ needs.component_impact.outputs.research_base_artifact }}" =~ ^[1-9][0-9]*$ ]]
+            test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_OWNER_ONLY"
+            [[ "${{ needs.research_service_tests_windows.outputs.base_head }}" =~ ^[0-9a-f]{40}$ ]]
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
             test "${{ needs.research_service_tests_windows.result }}" = "success"
             test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
-            echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_BASE_${{ needs.component_impact.outputs.research_base_head }}"
+            echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_BASE_${{ needs.research_service_tests_windows.outputs.base_head }}"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
             test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
@@ -1357,7 +1302,7 @@ jobs:
           name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}\okx-windows-bundle
           if-no-files-found: error
-          compression-level: 9
+          compression-level: 1
           retention-days: 14
 
       - name: Record non-acceptance cache-seed evidence
@@ -1448,6 +1393,7 @@ jobs:
         always() &&
         github.event_name == 'push' &&
         github.ref == 'refs/heads/main' &&
+        needs.component_impact.outputs.component_scope == 'full' &&
         needs['dependency-audit'].result == 'success' &&
         needs.component_impact.result == 'success' &&
         needs.required_linux.result == 'success' &&

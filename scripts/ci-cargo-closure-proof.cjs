@@ -11,6 +11,7 @@ const {changedFiles} = require('./ci-component-impact.cjs');
 const TARGET = 'x86_64-pc-windows-msvc';
 const RESEARCH = new Set([
   'crates/okx-research/Cargo.toml',
+  'crates/okx-analysis/Cargo.toml',
   'crates/okx-research-service/Cargo.toml',
   'crates/okx-strategy-core/Cargo.toml',
 ]);
@@ -27,7 +28,7 @@ const PROTECTED = Object.freeze({
 const safePath = p => typeof p === 'string' && p.length > 0 && p.length <= 512 &&
   !p.includes('\\') && p.split('/').every(part => /^[A-Za-z0-9_.-]+$/.test(part) && part !== '.' && part !== '..');
 const docs = p => p === 'README.md' || (p.startsWith('docs/') && p.endsWith('.md'));
-const research = p => ['crates/okx-research/', 'crates/okx-research-service/',
+const research = p => ['crates/okx-research/', 'crates/okx-analysis/', 'crates/okx-research-service/',
   'crates/okx-strategy-core/'].some(prefix => p.startsWith(prefix)) && !p.endsWith('/build.rs');
 const host = p => ['crates/okx-host-controller/src/', 'crates/okx-host-launcher/src/']
   .some(prefix => p.startsWith(prefix)) && p.endsWith('.rs');

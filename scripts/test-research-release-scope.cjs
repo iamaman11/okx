@@ -13,12 +13,15 @@ assert.throws(()=>check(meta,['Cargo.lock'],verifiedManifest),/RESEARCH_MANIFEST
 assert.throws(()=>check(meta,['crates/okx-research-service/Cargo.toml'],
   {...verifiedManifest,protected_closures_identical:false}),/RESEARCH_MANIFEST_WITHOUT/);
 const pureCoreFile = 'crates/okx-strategy-core/src/operators.rs';
-assert.equal(check(meta,[pureCoreFile]).changed_files,1);
+const analysisFile = 'crates/okx-analysis/src/lib.rs';
 // Both Ready classifiers must agree on the same changed-file evidence.
-const pythonScope = execFileSync('python3',['-B','scripts/check_ci_native_scope.py'],{
-  cwd:root,encoding:'utf8',input:JSON.stringify([[{filename:pureCoreFile,status:'modified'}]]),
-}).trim();
-assert.equal(pythonScope,'research');
+for (const filename of [pureCoreFile, analysisFile]) {
+  assert.equal(check(meta,[filename]).changed_files,1);
+  const pythonScope = execFileSync('python3',['-B','scripts/check_ci_native_scope.py'],{
+    cwd:root,encoding:'utf8',input:JSON.stringify([[{filename,status:'modified'}]]),
+  }).trim();
+  assert.equal(pythonScope,'research');
+}
 assert.equal(check(meta,['.github/workflows/ci.yml', 'scripts/check_ci_native_scope.py', 'scripts/prepare-research-release.ps1', 'scripts/research-release-scope.cjs', 'scripts/test-research-release-scope.cjs', 'docs/acceptance/518/notes.md', 'cloudflare/okx-mcp/src/mcp.ts', 'crates/okx-research-service/src/analytics/market.rs']).changed_files,8);
 assert.throws(()=>check(meta,['.github/research-release-base.json']));
 assert.throws(()=>check(meta,['.github/workflows/ci.yml', 'docs/notes.md']));
@@ -30,4 +33,5 @@ const transitive = structuredClone(meta);
 transitive.resolve.nodes.find(n=>n.id==='okx-trading-engine').deps = [{pkg:'okx-analysis',dep_kinds:[{kind:null}]}];
 transitive.resolve.nodes.find(n=>n.id==='okx-analysis').deps.push({pkg:'okx-strategy-core',dep_kinds:[{kind:'normal'}]});
 assert.throws(()=>check(transitive,[pureCoreFile]),/PRODUCTION_DEPENDENCY_CHANGED/);
+assert.throws(()=>check(transitive,[analysisFile]),/PRODUCTION_DEPENDENCY_CHANGED/);
 console.log('research release scope negative controls passed');

@@ -141,6 +141,19 @@ full Native route; on reuse they verify the accepted exact tree instead. They
 never claim that skipped financial tests ran. The old branch-only Draft jobs for closed
 issues #510 and #512 have been removed; normal Draft owner tests remain.
 
+CI classifies the diff for the exact commits in the GitHub event. Docs-only
+changes use the protected classification and aggregate checks. Edge changes
+also run the Worker contract job. Both routes skip Rust setup, Cargo audit,
+Windows jobs and Native release publication. Research and Host changes run
+their owner jobs. A Research release verifies and fetches the accepted Native
+base once, in the job that assembles the artifact.
+
+On the Windows production dependency graph, `okx-analysis`, `okx-strategy-core`
+and the Research crates are outside Trading Engine. Changes to `okx-domain-core`,
+`okx-ipc-contracts`, `okx-market-runtime` and other Engine inputs still affect
+its binary or the contract it implements. The full route also covers changes
+to CI policy or inputs whose impact the classifier cannot verify.
+
 ## Release acceptance for a future executable rename
 
 1. Keep binary names and v2 archive/manifest schema stable in this code-name

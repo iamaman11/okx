@@ -18,12 +18,13 @@ import sys
 _PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 # The core is linked only by Research/Analysis; the architecture DAG gate
 # rejects any transitive Native Agent dependency before this fast path is used.
-_RESEARCH_DIRS = ("crates/okx-research/", "crates/okx-research-service/", "crates/okx-strategy-core/")
+_RESEARCH_DIRS = ("crates/okx-research/", "crates/okx-research-service/", "crates/okx-strategy-core/", "crates/okx-analysis/")
 _CLOUDFLARE_DIR = "cloudflare/okx-mcp/"
 _HOST_CONTROL_SRC = "crates/okx-host-controller/src/"
 _HOST_LAUNCHER_SRC = "crates/okx-host-launcher/src/"
 _RESEARCH_MANIFESTS = {
     "crates/okx-research/Cargo.toml",
+    "crates/okx-analysis/Cargo.toml",
     "crates/okx-research-service/Cargo.toml",
     "crates/okx-strategy-core/Cargo.toml",
 }
@@ -162,7 +163,7 @@ def _self_test() -> None:
         assert len(guard_scopes) == len(set(guard_scopes))
         assert set(guard_scopes) == expected_scopes, "CI_SCOPE_GUARD_DRIFT"
     assert "component_scope: ${{ steps.proven_scope.outputs.scope }}" in workflow
-    assert "steps.proven_scope.outputs.scope == 'research'" in workflow
+    assert 'research_only: ${{ steps.classify.outputs.research_only }}' in workflow
     assert 'scope="${{ steps.proven_scope.outputs.scope }}"' in workflow
     assert "--filter-platform x86_64-pc-windows-msvc" in workflow
     windows = workflow.split("\n  required_windows:\n", 1)[1].split("\n  trading_engine_build_windows:\n", 1)[0]
@@ -189,7 +190,7 @@ def _self_test() -> None:
     cases = {
         "docs": [files("docs/acceptance/518/t01-t15-evidence-matrix.md"), files("README.md", "docs/arch.md")],
         "cloudflare": [files("cloudflare/okx-mcp/src/runtime_session.ts"), files("cloudflare/okx-mcp/src/mcp.test.ts", "docs/okx.md")],
-        "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-research-service/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md"), files("crates/okx-strategy-core/src/operators.rs"), files("crates/okx-strategy-core/src/query_plan.rs", "docs/a.md")],
+        "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-analysis/src/lib.rs"), files("crates/okx-research-service/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md"), files("crates/okx-strategy-core/src/operators.rs"), files("crates/okx-strategy-core/src/query_plan.rs", "docs/a.md")],
         "host-controller": [files("crates/okx-host-controller/src/main.rs"), files("crates/okx-host-controller/src/activation/tests.rs", "crates/okx-host-launcher/src/main.rs", "docs/a.md")],
         "host-launcher": [files("crates/okx-host-launcher/src/main.rs"), files("crates/okx-host-launcher/src/verify.rs", "README.md")],
     }
@@ -232,6 +233,7 @@ def _self_test() -> None:
     assert all(classify(pages) == "full" for pages in unsafe)
     for wanted, selection in (
         ("research", files("crates/okx-research-service/Cargo.toml", "Cargo.lock")),
+        ("research", files("crates/okx-analysis/Cargo.toml", "Cargo.lock")),
         ("research", files("crates/okx-strategy-core/Cargo.toml", "crates/okx-research/src/lib.rs")),
         ("host-controller", files("crates/okx-host-controller/Cargo.toml", "Cargo.lock")),
         ("host-controller", files("crates/okx-host-controller/Cargo.toml", "crates/okx-host-launcher/Cargo.toml")),

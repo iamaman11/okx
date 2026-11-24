@@ -36,7 +36,7 @@ function check(metadata, changed, cargoProof = null) {
     return relative + '/';
   });
   if (!Array.isArray(changed) || !changed.length || changed.length > 500) throw Error('EMPTY_OR_UNBOUNDED_RESEARCH_DIFF');
-  const manifests = new Set(['crates/okx-research/Cargo.toml',
+  const manifests = new Set(['crates/okx-research/Cargo.toml', 'crates/okx-analysis/Cargo.toml',
     'crates/okx-research-service/Cargo.toml', 'crates/okx-strategy-core/Cargo.toml']);
   const dependencyChange = changed.some(file => file === 'Cargo.lock' || file.endsWith('/Cargo.toml'));
   if (dependencyChange && (!cargoProof || cargoProof.schema !== 'okx.560.windows-cargo-closure-proof/v1' ||
@@ -52,7 +52,7 @@ function check(metadata, changed, cargoProof = null) {
     if (manifests.has(file) && cargoProof) { touchedResearch = true; continue; }
     if (file === 'Cargo.lock' || file.endsWith('/Cargo.toml') || file === 'Cargo.toml' || file.startsWith('.cargo/')) throw Error('DEPENDENCY_CONFIGURATION_CHANGED');
     if (protectedDirs.some(dir => file.startsWith(dir))) throw Error('PRODUCTION_DEPENDENCY_CHANGED');
-    if (file.startsWith('crates/okx-research-service/') || file.startsWith('crates/okx-research/') || file.startsWith('crates/okx-strategy-core/')) {
+    if (file.startsWith('crates/okx-analysis/') || file.startsWith('crates/okx-research-service/') || file.startsWith('crates/okx-research/') || file.startsWith('crates/okx-strategy-core/')) {
       if (file.endsWith('/build.rs')) throw Error('RESEARCH_BUILD_SCRIPT_CHANGED');
       touchedResearch = true;
       continue;

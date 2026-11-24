@@ -77,15 +77,15 @@ function validate(yaml, fileNames) {
   assert.match(classify, /node scripts\/ci-cargo-closure-proof.cjs "\$temp\/base.json" "\$temp\/head.json"/);
   assert.match(classify, /if \[\[ -n '\$\{\{ steps.cargo_closure.outputs.scope \}\}' \]\]; then/);
   assert.match(classify, /scope="\$\{\{ steps.proven_scope.outputs.scope \}\}"/);
-  assert.match(classify, /steps.proven_scope.outputs.scope == 'research'/);
-  // A missing accepted binary base is a packaging failure, not permission to
-  // recompile trading/finance for a Research-only change. The scope decision
-  // must precede the attempt to resolve that base.
-  assert.match(classify, /"research_only=true" >> \$env:GITHUB_OUTPUT\s+try \{ & \.\/scripts\/prepare-research-release\.ps1 -VerifyOnly \}/);
-  assert.match(classify, /"base_verified=false" >> \$env:GITHUB_OUTPUT/);
-  assert.match(classify, /"base_verified=true" >> \$env:GITHUB_OUTPUT/);
-  assert.match(classify, /native_proof=RESEARCH_BASE_UNAVAILABLE/);
-  assert.doesNotMatch(classify, /Falling back to full Native CI/);
+  assert.match(classify, /compare\/\$base\.\.\.\$CHECKED_HEAD/);
+  assert.match(classify, /\.commits\[-1\]\.sha == \$head/);
+  assert.doesNotMatch(classify, /pulls\/\$PR_NUMBER\/files|prepare-research-release\.ps1/);
+  assert.match(classify, /"research_only=true" >> "\$GITHUB_OUTPUT"/);
+  assert.match(classify, /native_proof=RESEARCH_OWNER_ONLY/);
+  const research = job('research_service_tests_windows');
+  assert.match(research, /base_head: \$\{\{ steps\.package\.outputs\.base_head \}\}/);
+  assert.equal((research.match(/prepare-research-release\.ps1 -Dist/g) || []).length, 1);
+  assert.match(research, /RESEARCH_BASE_PROOF_REQUIRED/);
   assert.doesNotMatch(classify, /native_required=false[^\n]*CARGO/);
   assert.match(researchRelease, /git worktree add --detach \$baselineDir \$mergeSha/);
   assert.match(researchRelease, /cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc/);
@@ -188,7 +188,7 @@ function validate(yaml, fileNames) {
   assert.match(prime, /FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED/);
   const windows = job('required_windows');
   assert.match(windows, /needs: \[component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows,/);
-  assert.match(windows, /test "\$\{\{ needs\.component_impact\.outputs\.native_proof \}\}" = "RESEARCH_ACCEPTED_BASE"/);
+  assert.match(windows, /test "\$\{\{ needs\.component_impact\.outputs\.native_proof \}\}" = "RESEARCH_OWNER_ONLY"/);
   assert.match(windows, /test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "success"/);
   assert.equal((windows.match(/test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "skipped"/g) || []).length, 4,
     'REGRESSION_JOB_MUST_BE_SKIPPED_ON_EVERY_NON_FINANCE_PATH');
@@ -249,9 +249,10 @@ assert.throws(() => validate(source.replace("github.event_name == 'workflow_disp
 assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_build_windows.result }}" = "success"', 'true'), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_regressions_windows.result }}" = "success"', 'true'), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"', 'true'), workflows));
-assert.throws(() => validate(source.replace('"research_only=true" >> $env:GITHUB_OUTPUT\n          try', 'try'), workflows));
-assert.throws(() => validate(source.replaceAll('native_proof=RESEARCH_BASE_UNAVAILABLE', 'native_proof=RESEARCH_ACCEPTED_BASE'), workflows));
-assert.throws(() => validate(source.replace('test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_ACCEPTED_BASE"', 'true'), workflows));
+assert.throws(() => validate(source.replace('"research_only=true" >> "$GITHUB_OUTPUT"', 'true'), workflows));
+assert.throws(() => validate(source.replace('RESEARCH_BASE_PROOF_REQUIRED', 'BYPASS'), workflows));
+assert.throws(() => validate(source.replace('.commits[-1].sha == $head', 'true'), workflows));
+assert.throws(() => validate(source.replace('test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_OWNER_ONLY"', 'true'), workflows));
 assert.throws(() => validate(source.replace('node scripts/ci-finance-witness-manifest.cjs --verify-report', 'echo skipped'), workflows));
 assert.throws(() => validate(source.replace('$manifestJson = & node scripts/ci-finance-witness-manifest.cjs', '$manifestJson = & cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list'), workflows));
 assert.throws(() => validate(source.replace('needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows,', 'needs: [component_impact, trading_engine_acceptance_windows,'), workflows));
