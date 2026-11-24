@@ -15,7 +15,10 @@ ROOTS = {"engine", "research", "control", "edge"}
 OWNERS = ROOTS | {"integration", "repository"}
 WORKFLOWS = {
     f".github/workflows/vnext-{owner}.yml": owner for owner in ROOTS
-} | {".github/workflows/vnext-boundaries.yml": "repository"}
+} | {
+    ".github/workflows/vnext-boundaries.yml": "repository",
+    ".github/workflows/vnext-ci.yml": "repository",
+}
 REPOSITORY_FILES = {
     "vnext/README.md",
     "vnext/BOUNDARIES.md",
@@ -38,6 +41,8 @@ REPOSITORY_FILES = {
     "vnext/s0/research_ab_local_sample.json",
     "vnext/s0/functional_coverage.md",
     "vnext/s0/topology_decision.md",
+    "vnext/ci/impact.py",
+    "vnext/ci/test_impact.py",
 }
 RUST_SOURCE_PATH = re.compile(
     r'\binclude(?:_str|_bytes)?!\s*\(\s*"([^"]+)"|#\s*\[\s*path\s*=\s*"([^"]+)"'

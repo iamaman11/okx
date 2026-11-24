@@ -1,0 +1,275 @@
+name: vNext CI
+
+on:
+  push:
+    branches: [vnext]
+  pull_request:
+    branches: [vnext]
+
+permissions:
+  contents: read
+
+# A newer commit supersedes an unfinished check of the same PR/ref.
+concurrency:
+  group: vnext-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  impact:
+    name: Determine owner impact
+    runs-on: ubuntu-latest
+    outputs:
+      engine: ${{ steps.plan.outputs.engine }}
+      research: ${{ steps.plan.outputs.research }}
+      control: ${{ steps.plan.outputs.control }}
+      edge: ${{ steps.plan.outputs.edge }}
+      boundaries: ${{ steps.plan.outputs.boundaries }}
+      finance: ${{ steps.plan.outputs.finance }}
+      contracts: ${{ steps.plan.outputs.contracts }}
+      planner_ok: ${{ steps.plan.outputs.planner_ok }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Test impact classification
+        run: python3 -B vnext/ci/test_impact.py
+      - name: Plan affected owners
+        id: plan
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            mode=pr
+          else
+            mode=push
+          fi
+          python3 -B vnext/ci/impact.py \
+            --base "$BASE_SHA" --head "$HEAD_SHA" --mode "$mode" \
+            --github-output "$GITHUB_OUTPUT" --json-out "$RUNNER_TEMP/vnext-impact.json"
+          cat "$RUNNER_TEMP/vnext-impact.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: vnext-impact-plan
+          path: ${{ runner.temp }}/vnext-impact.json
+          if-no-files-found: ignore
+
+  boundaries:
+    name: File ownership and dependency boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: python3 -B vnext/test_check_boundaries.py
+      - run: python3 -B vnext/check_boundaries.py
+      - run: python3 -B vnext/test_check_split_symbols.py
+      - run: python3 -B vnext/check_split_symbols.py
+      - run: python3 -B -m unittest discover -s vnext/s0 -p 'test_*.py'
+
+  engine:
+    name: Engine financial core standalone
+    needs: impact
+    if: ${{ needs.impact.outputs.engine == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Export only the Engine workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/engine"
+          git archive HEAD:vnext/engine | tar -x -C "$RUNNER_TEMP/engine"
+      - name: Check, test and build the financial core
+        working-directory: ${{ runner.temp }}/engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo test --locked --workspace
+          cargo build --locked --release --workspace
+
+  research:
+    name: Research standalone
+    needs: impact
+    if: ${{ needs.impact.outputs.research == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Export only the Research workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/research"
+          git archive HEAD:vnext/research | tar -x -C "$RUNNER_TEMP/research"
+      - name: Check, test and build Research in isolation
+        working-directory: ${{ runner.temp }}/research
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo test --locked --workspace
+          cargo build --locked --release --bin okx-research-replay
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: okx-research-replay-linux
+          path: ${{ runner.temp }}/research/target/release/okx-research-replay
+          if-no-files-found: error
+
+  control:
+    name: Control Launcher standalone
+    needs: impact
+    if: ${{ needs.impact.outputs.control == 'true' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Export only the Control workspace
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $archive = Join-Path $env:RUNNER_TEMP 'control.tar'
+          $control = Join-Path $env:RUNNER_TEMP 'control'
+          New-Item -ItemType Directory -Path $control | Out-Null
+          git archive --output=$archive HEAD:vnext/control
+          tar -xf $archive -C $control
+      - name: Check, test and build Launcher
+        working-directory: ${{ runner.temp }}/control
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup show active-toolchain
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo test --locked --workspace
+          cargo build --locked --release --bin okx-host-launcher
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: okx-host-launcher-windows
+          path: ${{ runner.temp }}/control/target/release/okx-host-launcher.exe
+          if-no-files-found: error
+
+  edge:
+    name: Edge Worker standalone
+    needs: impact
+    if: ${{ needs.impact.outputs.edge == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: vnext/edge/.node-version
+          package-manager-cache: false
+      - name: Export only the Edge workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/edge"
+          git archive HEAD:vnext/edge | tar -x -C "$RUNNER_TEMP/edge"
+      - name: Check and bundle Edge in isolation
+        working-directory: ${{ runner.temp }}/edge
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          node scripts/test-native-finance-retirement-do.mjs
+          ./node_modules/.bin/wrangler deploy --dry-run --outdir "$RUNNER_TEMP/edge-dist"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: okx-edge-worker
+          path: ${{ runner.temp }}/edge-dist
+          if-no-files-found: error
+
+  gate:
+    name: vNext CI
+    needs: [impact, boundaries, engine, research, control, edge]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce required results and owner skips
+        shell: bash
+        env:
+          IMPACT_RESULT: ${{ needs.impact.result }}
+          PLAN_OK: ${{ needs.impact.outputs.planner_ok }}
+          BOUNDARIES_PLANNED: ${{ needs.impact.outputs.boundaries }}
+          BOUNDARIES_RESULT: ${{ needs.boundaries.result }}
+          ENGINE_REQUIRED: ${{ needs.impact.outputs.engine }}
+          ENGINE_RESULT: ${{ needs.engine.result }}
+          RESEARCH_REQUIRED: ${{ needs.impact.outputs.research }}
+          RESEARCH_RESULT: ${{ needs.research.result }}
+          CONTROL_REQUIRED: ${{ needs.impact.outputs.control }}
+          CONTROL_RESULT: ${{ needs.control.result }}
+          EDGE_REQUIRED: ${{ needs.impact.outputs.edge }}
+          EDGE_RESULT: ${{ needs.edge.result }}
+          FINANCE_REQUIRED: ${{ needs.impact.outputs.finance }}
+          CONTRACTS_REQUIRED: ${{ needs.impact.outputs.contracts }}
+        run: |
+          set -euo pipefail
+          failures=0
+          if [[ "$IMPACT_RESULT" != success || "$PLAN_OK" != true ]]; then
+            echo "::error::Impact decision is not successfully proven"
+            failures=1
+          fi
+          if [[ "$BOUNDARIES_PLANNED" != true || "$BOUNDARIES_RESULT" != success ]]; then
+            echo "::error::File and dependency boundaries did not pass"
+            failures=1
+          fi
+          check_owner() {
+            local name="$1" required="$2" result="$3"
+            case "$required" in
+              true)
+                if [[ "$result" != success ]]; then
+                  echo "::error::$name is required but its job result is $result"
+                  failures=1
+                fi
+                ;;
+              false)
+                if [[ "$result" != skipped ]]; then
+                  echo "::error::$name was not required but its job result is $result"
+                  failures=1
+                fi
+                ;;
+              *)
+                echo "::error::$name required flag is missing or invalid: $required"
+                failures=1
+                ;;
+            esac
+          }
+          check_owner Engine "$ENGINE_REQUIRED" "$ENGINE_RESULT"
+          check_owner Research "$RESEARCH_REQUIRED" "$RESEARCH_RESULT"
+          check_owner Control "$CONTROL_REQUIRED" "$CONTROL_RESULT"
+          check_owner Edge "$EDGE_REQUIRED" "$EDGE_RESULT"
+          if [[ "$FINANCE_REQUIRED" == true && "$ENGINE_REQUIRED" != true ]]; then
+            echo "::error::Financial change cannot bypass Engine"
+            failures=1
+          fi
+          if [[ "$FINANCE_REQUIRED" != true && "$FINANCE_REQUIRED" != false ]]; then
+            echo "::error::Financial scope flag is missing or invalid"
+            failures=1
+          fi
+          if [[ "$CONTRACTS_REQUIRED" == true ]]; then
+            consumers=0
+            for required in "$ENGINE_REQUIRED" "$RESEARCH_REQUIRED" "$CONTROL_REQUIRED" "$EDGE_REQUIRED"; do
+              if [[ "$required" == true ]]; then
+                consumers=$((consumers + 1))
+              fi
+            done
+            if (( consumers < 2 )); then
+              echo "::error::A cross-owner contract cannot have fewer than two planned consumers"
+              failures=1
+            fi
+          elif [[ "$CONTRACTS_REQUIRED" != false ]]; then
+            echo "::error::Contract scope flag is missing or invalid"
+            failures=1
+          fi
+          if [[ "$failures" != 0 ]]; then
+            exit 1
+          fi
+          echo "All affected owner jobs passed; unchanged owners were skipped."
+          echo "This standalone CI result does NOT prove full financial/OS Ready or <=120s."
