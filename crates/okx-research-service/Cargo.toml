@@ -31,9 +31,11 @@ serde = { version = "1", features = ["derive"] }
 # unchanged archived bytes (serde_json's default parser is best-effort).
 serde_json = { version = "1", features = ["float_roundtrip"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-std", "io-util", "process"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry"] }
+zeroize = "1"
 
 [dev-dependencies]
 okx-api = { path = "../okx-api" }

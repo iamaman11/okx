@@ -74,6 +74,32 @@ the old child became active, nor does it certify unchanged running Engine
 SHA-256/PID: obtain both physical readbacks before and after a Research-only
 update and its rollback.
 
+Successful Research deploy and rollback receipts include `timing_ms` for CONTROL
+verification and pointer publication. Deploy also measures the initial artifact
+fetch. `activation: "requires_engine_observation"` marks the next step. Measure
+time to the expected active PID/SHA separately through the Engine's
+[Research deployment diagnostic](research-boundaries.md#installation-versus-activation).
+
+For a captured update or rollback, save the CONTROL `status` result and the
+MCP diagnostic `structuredContent` both before and after the operation. Save
+the terminal CONTROL deploy or rollback result as `change.json`. Check them
+from the repository with:
+
+```powershell
+python scripts/check-research-handoff.py before-control.json before-research.json change.json after-control.json after-research.json
+```
+
+This checks the selected Research SHA against the active post-switch child and
+compares the Engine PID, incarnation and verified binary SHA across the change.
+Both Research diagnostics must contain the native `observed_at_ms` capture time;
+the verifier rejects snapshots taken out of order or a handshake reported after
+its own capture. An invalid candidate appearing during Drain restores the last
+verified Research image with a new child process, rather than leaving the old
+process permanently unable to admit jobs. This recovery is not a successful
+update or rollback receipt and must be diagnosed separately.
+The report covers the captured handoff. Separate workload and financial tests
+cover position protection and SQLite continuity.
+
 This describes the implemented path, not installed acceptance. #512 r15 checks
 the separate Worker build and existing verification/staging/handoff contracts.
 The first release requires full CI, merge and the existing accepted manifest;

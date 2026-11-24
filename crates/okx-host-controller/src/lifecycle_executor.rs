@@ -7,9 +7,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use okx_host_protocol::HostControlOperation;
 use okx_ipc_contracts::{
-    HostControlOperation, NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX,
-    NATIVE_CHILD_CONTROL_SCHEMA_V1, NativeChildOperation, NativeChildReply, NativeChildRequest,
+    NATIVE_CHILD_CONTROL_MAX_BYTES, NATIVE_CHILD_CONTROL_PREFIX, NATIVE_CHILD_CONTROL_SCHEMA_V1,
+    NativeChildOperation, NativeChildReply, NativeChildRequest,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

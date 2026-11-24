@@ -4,12 +4,11 @@ Names describe **ownership**, not historical implementation details. A Cargo
 package is a compilation boundary, a Windows executable is a release artifact,
 and a CI job is evidence. They are not interchangeable.
 
-## Four application owners (current `main`)
+## Four application owners
 
-The deployed product has four logical owners; **17 Cargo packages do not mean
-17 services**. Shared libraries are compile-time dependencies, never extra
-financial authorities. Source paths in this table refer to the current code,
-not evidence that all intended runtime boundaries have already been achieved.
+The workspace has four logical owners across 19 Cargo packages. Shared
+libraries are compile-time dependencies. The source paths describe ownership
+in the workspace. Runtime boundaries are tracked separately.
 
 | Owner | Code and durable state | Exclusive effect | Must not own |
 | --- | --- | --- | --- |
@@ -18,11 +17,55 @@ not evidence that all intended runtime boundaries have already been achieved.
 | **Control** | `okx-host-controller` and `okx-host-launcher`; installed component manifests and lifecycle evidence | Authorized start/stop/install/rollback/doctor | Trading decisions, finance ledger, research computations |
 | **Edge** | `cloudflare/okx-mcp`, `okx-bridge-mcp`; transport/session/identity state | Authenticated MCP/API delivery to the matching owner | Financial or research source-of-truth state, venue mutation |
 
-`okx-domain-core` and `okx-ipc-contracts` are shared pure facts and typed
-contracts. `okx-api`, `okx-market-runtime`, `okx-observation`, `okx-ws` and
+`okx-domain-core` contains shared pure facts. `okx-ipc-contracts` carries
+typed Engine/Research contracts and shared Engine/Host contracts such as the
+child shutdown request/reply and the account catalog. Host-control mailbox
+messages live in `okx-host-protocol`.
+`okx-api`, `okx-market-runtime`, `okx-observation`, `okx-ws` and
 `okx-github` contain current adapters/support code; their current broad
 dependency fan-out is **not** a reason to grant another owner financial
 authority. `okx-cli` is a tool, not a fifth continuously running application.
+
+The [crate split map](crate-split-map.md) shows which modules moved, their
+Cargo dependencies and the CI acceptance checks.
+
+### Ownership is a runtime contract, not a crate count
+
+`Research` being compiled as separate crates does **not** yet mean it can
+restart independently. The installed Research image is content-addressed and
+staged by CONTROL, but the existing Engine `ResearchClient` starts the child,
+provides its public market source callback, and observes activation. CONTROL
+does not yet supervise a standalone Research PID, Windows Job, reconnect loop
+or Research-specific runtime credential. `DeployResearch` currently reports
+`activation: requires_engine_observation`, which is not a Research health
+acknowledgement.
+
+The independent runtime cutover has four separately provable boundaries:
+
+1. **Code and capability:** Research owns public-source ingestion, simulation,
+   analytic state and its own authenticated transport; it cannot access the
+   finance ledger, private exchange credential or order-send API.
+2. **Process and installation:** CONTROL independently supervises the verified
+   Research image and records its PID, executable SHA, startup generation and
+   health. Its update and rollback must not restart the Engine.
+3. **Routing and wire:** Edge authenticates a distinct `research` socket,
+   strips internal dispatch metadata from the strict Rust wire request and
+   has no hidden Engine fallback when that owner is offline.
+4. **Compilation and verification:** Cargo closure checks and CI classify
+   individual owner changes; shared IPC, build configurations and unknown
+   inputs remain on the complete financial route. A scope classification is
+   never proof that an installed process is independently managed.
+
+Do not switch production routing to the separate Research credential until
+CONTROL-owned Research startup, credential provisioning and Windows
+restart/rollback acceptance have been verified. The Engine's narrow trusted
+strategy signal admission remains in Trading, even after public research
+queries move to Research.
+
+Virtual portfolio stress scenarios run in Research through
+`okx-analysis::portfolio_scenario`, with the same public Engine command
+and response schema. The active Research Service advertises this command
+before Engine sends it. Account portfolio and NAV remain financial reads.
 
 ### Confirmed remaining coupling and release rules
 
@@ -58,13 +101,15 @@ checks and usable artifact, and is not yet proved for Engine changes.
 | --- | --- | --- |
 | `okx-trading-engine` | `okx-agent` | Trading process: accounts, positions, financial decisions, exchange sends and recovery |
 | `okx-trade-execution` | `okx-execution` | Engine-owned RiskBook, finance/SQLite and order execution; **not** another process |
-| `okx-domain-core` | `okx-kernel` | Shared deterministic domain facts, mathematical rules and plans; no I/O |
-| `okx-ipc-contracts` | `okx-protocol` | Versioned typed messages, command contracts and authenticated IPC |
+| `okx-native-finance-check` | Engine's `native_finance_acceptance` example | CI-only executable that runs the financial witness binaries and verifies exact-tree receipts |
+| `okx-domain-core` | `okx-kernel` | Shared financial/domain facts and deterministic rules; no I/O or Research time-series implementation |
+| `okx-ipc-contracts` | `okx-protocol` | Shared versioned Engine/Research IPC and typed command contracts |
+| `okx-host-protocol` | new | Host installation/control command and result protocol for CONTROL and MCP bridge; no trading ownership |
 | `okx-market-runtime` | `okx-runtime` | Runtime market sources, venue API, WebSocket and observation integration |
 | `okx-research-service` | `okx-research-worker` | Separate research process and IPC implementation; no trading authority |
 | `okx-host-controller` | `okx-host-control` | Windows installation, version activation, rollback, lifecycle and diagnostics |
 | `okx-host-launcher` | unchanged | Verified native Windows process startup |
-| `okx-strategy-core` | unchanged | Research-owned pure strategy calculations |
+| `okx-strategy-core` | unchanged | Research-owned pure strategy calculations, causal plans and exact time-series grids |
 | `okx-research`, `okx-analysis` | unchanged | Research and analytical functions |
 
 Inside those packages, `lifecycle_executor.rs` is the Host Controller's
@@ -120,10 +165,9 @@ means proven reusable binary bytes, not a runtime library. Existing
 | `classify` | Protected fail-closed changed-file boundary plus before/after Windows Cargo closure proof for narrow Research/Host manifest candidates |
 | `draft-component-tests` | Scoped feedback for Draft pull requests |
 | `trading-engine-acceptance-windows` | Mandatory complete financial collector/resource-budget acceptance and isolated Engine, SQLite, clock/process recovery tests |
-| `trading-engine-regressions-windows` | Parallel independent Engine/Execution/Host/Research regressions, Windows Clippy and K9; never substitutes for financial acceptance |
-| `trading-engine-build-windows` | Parallel fresh four-component Windows release build and artifact on full Ready PRs; manual accepted-`main` release cache seed |
-| `trusted-main-windows-test-cache-prime` | Optional manual compile-only test/collector cache seed from accepted `main`; no financial acceptance or deployment |
-| `trading-safety-acceptance-windows` | Independent mandatory B1 financial safety checks |
+| `trading-engine-regressions-windows (suite)` | Five parallel Windows suites for Engine, Host, Execution, Research and Clippy. Research includes K9 |
+| `trading-engine-build-windows` | Parallel fresh four-component Windows release build and artifact on full Ready PRs |
+| `trusted-main-windows-cache-prime (profile)` | Compile-only test and release cache seeds from accepted `main`, automatic after full merges or manual |
 | `research-service-tests-windows` | Research Service tests and build against the accepted unchanged Trading Engine |
 | `host-controller-launcher-checks` | Host Controller and Host Launcher tests/build without the Trading Engine |
 | `rust-tests-linux` | Rust library, Research Service IPC and financial SQLite tests executed on Linux (not a Linux trading service) |
@@ -137,16 +181,41 @@ The required check **display names** `classify`, `windows-native` and `linux-cor
 are retained for branch protection and accepted-CI reuse. `classify` is the
 actual `component_impact` job, without a redundant alias; the platform
 aggregators keep implementation IDs `required_windows` and `required_linux`.
-They require finance acceptance, independent regressions, B1 and release build on the
+They require finance acceptance, independent regressions and release build on the
 full Native route; on reuse they verify the accepted exact tree instead. They
 never claim that skipped financial tests ran. The old branch-only Draft jobs for closed
 issues #510 and #512 have been removed; normal Draft owner tests remain.
+
+CI classifies the diff for the exact commits in the GitHub event. Docs-only
+changes use the protected classification and aggregate checks. Edge changes
+also run the Worker contract job. Both routes skip Rust setup, Cargo audit,
+Windows jobs and Native release publication. Research and Host changes run
+their owner jobs. A Host and Edge change runs their two component jobs without
+rebuilding the Engine. A Research release verifies and fetches the accepted Native
+base once, in the job that assembles the artifact.
+
+On the Windows production dependency graph, `okx-analysis`, `okx-strategy-core`
+and the Research crates are outside Trading Engine. Changes to `okx-domain-core`,
+`okx-ipc-contracts`, `okx-market-runtime` and other Engine inputs still affect
+its binary or the contract it implements. The full route also covers changes
+to CI policy or inputs whose impact the classifier cannot verify.
+
+The financial collector runs the seven wall-clock scenarios in an isolated
+two-thread test group. Each test that expects a fresh public-time response
+queues one response, timestamped at delivery by the recorded venue. Tests for
+stale inputs still use their fixed recorded values. Production freshness,
+SQLite deadlines and the collector's financial resource budgets apply as before.
+
+The exact source tree is embedded in the Engine executable. Changing the
+release label relinks the executable while Cargo can reuse the Engine library
+when its inputs match. The running executable still rejects storage commands
+that name a different release tree.
 
 ## Release acceptance for a future executable rename
 
 1. Keep binary names and v2 archive/manifest schema stable in this code-name
    migration; compile and test the renamed Cargo packages and both old EXE names.
-2. Require the full Windows finance/B1, Linux, architecture and MCP acceptance
+2. Require the full Windows finance (including B1), Linux, architecture and MCP acceptance
    once for this shared-dependency/workflow change. The Draft route is scoped.
 3. Verify the exact immutable HEAD/tree, all four EXE hashes, and the installed
    CONTROL/Launcher/Engine/Research compatibility before deploying anything.

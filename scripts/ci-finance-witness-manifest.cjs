@@ -9,8 +9,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const sourcePath = path.join(__dirname, '..', 'crates', 'okx-trading-engine',
-  'examples', 'native_finance_acceptance', 'manifest.rs');
+const sourcePath = path.join(__dirname, '..', 'crates', 'okx-native-finance-check',
+  'src', 'manifest.rs');
 const packages = new Set(['okx-domain-core', 'okx-trade-execution',
   'okx-trading-engine', 'okx-ipc-contracts', 'okx-market-runtime', 'repository']);
 
@@ -39,9 +39,12 @@ function extract(source) {
   const contracts = source.slice(first + anchor.length).replace(/\/\/[^\n]*/g, '');
   // There must be precisely one literal witness array per Contract object.
   const rows = [...contracts.matchAll(/\bContract\s*\{/g)];
+  const ids = [...contracts.matchAll(/\bid:\s*"([A-Za-z0-9_.]+)"/g)].map(match => match[1]).sort();
   const refs = [...contracts.matchAll(/\bwitnesses:\s*&\[([\s\S]*?)\]/g)];
   assert.ok(rows.length > 20 && refs.length === rows.length,
     'FINANCE_CONTRACT_WITNESS_ARRAY_UNRECOGNIZED');
+  assert.equal(ids.length, rows.length, 'FINANCE_CONTRACT_IDS_MISSING');
+  assert.equal(new Set(ids).size, ids.length, 'FINANCE_CONTRACT_IDS_DUPLICATED');
   const selected = new Set();
   for (const [, body] of refs) {
     assert.match(body, /^[A-Z0-9_,\s]+$/, 'FINANCE_CONTRACT_WITNESS_NOT_LITERAL');
@@ -60,17 +63,24 @@ function extract(source) {
   assert.ok(repository_witnesses.length >= 3, 'FINANCE_REPOSITORY_GUARDS_MISSING');
   const keys = all.map(w => `${w.package}\0${w.test}`);
   assert.equal(new Set(keys).size, keys.length, 'FINANCE_MANIFEST_DUPLICATE_TEST');
-  return { witnesses, repository_witnesses };
+  return { contracts: ids, witnesses, repository_witnesses };
 }
 
-function verify(report, sourceManifest) {
+function verify(report, sourceManifest, head, tree) {
   assert.equal(report?.schema, 'okx.native-finance-acceptance/v1', 'FINANCE_REPORT_SCHEMA_INVALID');
   assert.equal(report.mode, 'full', 'FINANCE_REPORT_NOT_FULL_MODE');
   assert.equal(report.overall, 'FULL_PASS', 'FINANCE_REPORT_NOT_FULL_PASS');
   assert.equal(report.collector_source_binding, 'VERIFIED', 'FINANCE_COLLECTOR_SOURCE_UNVERIFIED');
   assert.match(report.head, /^[0-9a-f]{40}$/, 'FINANCE_REPORT_HEAD_INVALID');
   assert.match(report.tree, /^[0-9a-f]{40}$/, 'FINANCE_REPORT_TREE_INVALID');
+  assert.equal(report.head, head, 'FINANCE_REPORT_HEAD_MISMATCH');
+  assert.equal(report.tree, tree, 'FINANCE_REPORT_TREE_MISMATCH');
   assert.equal(report.git_clean, true, 'FINANCE_REPORT_GIT_DIRTY');
+  const executedContracts = report.contracts.map(row => {
+    assert.equal(row.status, 'PASS', 'FINANCE_REPORT_CONTRACT_FAILED');
+    return row.id;
+  }).sort();
+  assert.deepEqual(executedContracts, sourceManifest.contracts, 'FINANCE_CONTRACT_IDS_DIFFER');
   const actual = report.observed_witnesses;
   assert.ok(Array.isArray(actual), 'FINANCE_REPORT_MISSING_OBSERVED');
   const actualKeys = actual.map(w => {
@@ -91,10 +101,18 @@ function selfTest(source) {
   assert.throws(() => extract(source.replace('package: "okx-trading-engine"', 'package: "unknown-owner"')));
   assert.throws(() => extract(source.replace('witnesses: &[', 'witnesses: &dynamic_witnesses(')));
   assert.throws(() => extract(source.replace('test: "', 'test: dynamic_test_name("')));
-  assert.throws(() => verify({ schema: 'okx.native-finance-acceptance/v1',
+  const report = { schema: 'okx.native-finance-acceptance/v1',
     mode: 'full', overall: 'FULL_PASS', collector_source_binding: 'VERIFIED',
     head: 'a'.repeat(40), tree: 'b'.repeat(40), git_clean: true,
-    observed_witnesses: expected.witnesses.slice(1).map(w => ({ ...w, status: 'ok' })) }, expected));
+    contracts: expected.contracts.map(id => ({ id, status: 'PASS' })),
+    observed_witnesses: [...expected.witnesses, ...expected.repository_witnesses]
+      .map(w => ({ ...w, status: 'ok' })) };
+  verify(report, expected, report.head, report.tree);
+  assert.throws(() => verify(report, expected, report.head, 'c'.repeat(40)), /FINANCE_REPORT_TREE_MISMATCH/);
+  assert.throws(() => verify({ ...report, contracts: report.contracts.slice(1) },
+    expected, report.head, report.tree), /FINANCE_CONTRACT_IDS_DIFFER/);
+  assert.throws(() => verify({ ...report, observed_witnesses: report.observed_witnesses.slice(1) },
+    expected, report.head, report.tree), /FINANCE_SOURCE_AND_EXECUTION_ROSTERS_DIFFER/);
   process.stdout.write('FINANCE_SOURCE_ROSTER_STRICT_CONTROLS=PASS\n');
 }
 
@@ -106,8 +124,8 @@ function main() {
     return;
   }
   const manifest = extract(source);
-  if (args.length === 2 && args[0] === '--verify-report') {
-    verify(JSON.parse(fs.readFileSync(args[1], 'utf8')), manifest);
+  if (args.length === 4 && args[0] === '--verify-report') {
+    verify(JSON.parse(fs.readFileSync(args[1], 'utf8')), manifest, args[2], args[3]);
     process.stdout.write(`FINANCE_COLLECTOR_ROSTER_MATCH=${manifest.witnesses.length}\n`);
     return;
   }

@@ -1285,6 +1285,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "okx-github",
+ "okx-host-protocol",
  "okx-ipc-contracts",
  "serde",
  "serde_json",
@@ -1338,6 +1339,7 @@ dependencies = [
  "keyring-core",
  "okx-github",
  "okx-host-launcher",
+ "okx-host-protocol",
  "okx-ipc-contracts",
  "serde",
  "serde_json",
@@ -1359,6 +1361,15 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "okx-host-protocol"
+version = "0.1.0"
+dependencies = [
+ "okx-ipc-contracts",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1391,6 +1402,16 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "okx-native-finance-check"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "serde_json",
+ "sha2",
  "tokio",
 ]
 
@@ -1442,10 +1463,12 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]

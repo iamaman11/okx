@@ -1,6 +1,6 @@
 //! One parser and validator for durable owner-issued CONTROL acknowledgements.
 use okx_github::OWNER_USER_ID;
-use okx_ipc_contracts::{HostControlOperation, HostControlResult, HostControlStatus};
+use okx_host_protocol::{HostControlOperation, HostControlResult, HostControlStatus};
 
 #[derive(Clone, Copy)]
 pub(super) enum AckOperation {
@@ -42,7 +42,7 @@ mod tests {
 
     fn handoff_result() -> HostControlResult {
         HostControlResult {
-            schema: okx_ipc_contracts::HOST_CONTROL_RESULT_SCHEMA_V1.to_owned(),
+            schema: okx_host_protocol::HOST_CONTROL_RESULT_SCHEMA_V1.to_owned(),
             request_id: "ctl_controller_update_0123456789".to_owned(),
             operation: HostControlOperation::HandoffControllerUpdate,
             status: HostControlStatus::Pass,

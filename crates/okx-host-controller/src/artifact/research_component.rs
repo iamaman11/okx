@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Instant;
 
 // A composition has its own accepted source identity. Each component records
 // its immutable origin separately, allowing previously accepted bytes to be
@@ -173,7 +174,9 @@ pub async fn deploy_research(
     artifact_id: u64,
     expected_source_tree: &str,
 ) -> HostControlResult<Value> {
+    let started = Instant::now();
     let (head, bytes) = accepted_archive(github, run_id, artifact_id).await?;
+    let archive_ready = Instant::now();
     let mut archive = validated_archive(bytes.as_slice())?;
     let manifest: BundleManifestV2 = serde_json::from_slice(&read_entry(
         &mut archive,
@@ -284,8 +287,21 @@ pub async fn deploy_research(
         protocol_version: c.protocol_version,
         storage_version: c.storage_version,
     };
+    let verified = Instant::now();
     stage_research(Path::new(okx_host_launcher::RUNTIME_ROOT), &record, &worker)?;
-    Ok(json!({"installed": true, "provenance": record, "agent_lifecycle_changed": false}))
+    let staged = Instant::now();
+    Ok(json!({
+        "installed": true,
+        "provenance": record,
+        "agent_lifecycle_changed": false,
+        "activation": "requires_engine_observation",
+        "timing_ms": {
+            "fetch_accepted_archive": (archive_ready - started).as_millis(),
+            "verify_composition_and_origins": (verified - archive_ready).as_millis(),
+            "stage_and_publish_pointer": (staged - verified).as_millis(),
+            "control_total": (staged - started).as_millis()
+        }
+    }))
 }
 
 /// Restore only the preceding image that CONTROL itself saved while deploying
@@ -307,6 +323,7 @@ fn rollback_research_at(
     expected_current_worker_sha256: &str,
     expected_rollback_worker_sha256: &str,
 ) -> HostControlResult<Value> {
+    let started = Instant::now();
     validate_existing_ancestors(root)?;
     existing_plain_directory(root)?;
     let current = read_research_pointer(root, CURRENT_RESEARCH_POINTER)?.ok_or(
@@ -325,10 +342,22 @@ fn rollback_research_at(
     }
     verify_staged_research(root, &current)?;
     verify_staged_research(root, &previous)?;
+    let verified = Instant::now();
     // One atomic pointer switch. Preserve the saved rollback image so a
     // repeated or interrupted request cannot accidentally roll forward.
     write_research_pointer(root, CURRENT_RESEARCH_POINTER, &previous)?;
-    Ok(json!({"rolled_back": true, "provenance": previous, "agent_lifecycle_changed": false}))
+    let restored = Instant::now();
+    Ok(json!({
+        "rolled_back": true,
+        "provenance": previous,
+        "agent_lifecycle_changed": false,
+        "activation": "requires_engine_observation",
+        "timing_ms": {
+            "verify_current_and_rollback": (verified - started).as_millis(),
+            "publish_pointer": (restored - verified).as_millis(),
+            "control_total": (restored - started).as_millis()
+        }
+    }))
 }
 
 fn is_reparse(metadata: &fs::Metadata) -> bool {
@@ -817,6 +846,8 @@ mod tests {
         let receipt =
             rollback_research_at(&root, &next.worker_sha256, &record.worker_sha256).unwrap();
         assert_eq!(receipt["agent_lifecycle_changed"], false);
+        assert_eq!(receipt["activation"], "requires_engine_observation");
+        assert!(receipt["timing_ms"]["control_total"].is_u64());
         assert_eq!(receipt["provenance"]["worker_sha256"], record.worker_sha256);
         assert_eq!(
             read_research_pointer(&root, CURRENT_RESEARCH_POINTER).unwrap(),

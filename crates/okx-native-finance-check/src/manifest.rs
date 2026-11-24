@@ -386,6 +386,10 @@ const QUEUE_DEADLINES: Witness = Witness {
     package: "okx-trade-execution",
     test: "account_worker::unified::owner_queue_tests::risk_book_contract_fresh_owner_queue_deadlines_and_dropped_caller",
 };
+const QUEUE_FAILED_JOB: Witness = Witness {
+    package: "okx-trade-execution",
+    test: "account_worker::unified::owner_queue_tests::risk_book_contract_fresh_owner_failed_job_counts_and_preserves_installation",
+};
 const FINANCIAL_CANCEL: Witness = Witness {
     package: "okx-trade-execution",
     test: "account_worker::unified::owner_financial_reply_tests::risk_book_contract_fresh_owner_financial_cancel_after_enqueue_still_commits_once",
@@ -838,6 +842,11 @@ pub const CONTRACTS: &[Contract] = &[
     Contract {
         id: "RB15.queue_deadline_and_dropped_read_caller",
         witnesses: &[QUEUE_DEADLINES],
+        missing: None,
+    },
+    Contract {
+        id: "RB15.failed_queue_job_preserves_installation",
+        witnesses: &[QUEUE_FAILED_JOB],
         missing: None,
     },
     Contract {

@@ -191,9 +191,9 @@ async fn public_add(external_increment: bool) {
     // Negative Add stops before the mutation clock read. Positive Add
     // performs one signed Create with its own independent clock observation.
     if !external_increment {
-        fixture
-            .feed
-            .expect_public_clock(envelope(json!([{"ts":now}])));
+        // Windows scheduling can exceed the 5s exchange-clock offset budget
+        // between fixture setup and delivery of the one-shot public time GET.
+        fixture.feed.expect_current_public_clock();
     }
     record_fee(&fixture.feed, &now); // plan
     record_leverage(&fixture.feed); // plan
@@ -436,9 +436,9 @@ impl HttpTransport for AddReferenceHttp {
 
 async fn create_entry(fixture: &NativeFixture) -> String {
     let now = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture
-        .feed
-        .expect_public_clock(envelope(json!([{"ts":now}])));
+    // Emit venue time at HTTP delivery, not before slow Windows RiskBook work:
+    // the production mutation clock still enforces its strict 5s offset budget.
+    fixture.feed.expect_current_public_clock();
     record_fee(&fixture.feed, &now);
     record_leverage(&fixture.feed);
     record_leverage(&fixture.feed);

@@ -107,9 +107,11 @@ pub(super) fn verify(report: &mut Value, observed: &Witnesses) -> Result<bool> {
                 (Some("okx-trading-engine"), Some("parallel"), Some(4)) => {
                     "lib:okx-trading-engine:parallel".into()
                 }
-                (Some("okx-trading-engine"), Some("clock_sensitive"), Some(1)) => {
-                    "lib:okx-trading-engine:clock_sensitive".into()
-                }
+                (
+                    Some("okx-trading-engine"),
+                    Some("clock_sensitive"),
+                    Some(super::CLOCK_SENSITIVE_TEST_THREADS),
+                ) => "lib:okx-trading-engine:clock_sensitive".into(),
                 (Some(p), Some("all"), Some(4))
                     if super::PACKAGES.contains(&p) && p != "okx-trading-engine" =>
                 {
@@ -252,7 +254,7 @@ mod tests {
             })
             .collect();
         stages.push(json!({"stage":"libtest","package":"okx-trading-engine",
-            "group":"clock_sensitive","test_threads":1}));
+            "group":"clock_sensitive","test_threads":super::super::CLOCK_SENSITIVE_TEST_THREADS}));
         stages.push(json!({"stage":"retained_transport"}));
         for command in [
             json!(["scripts/check_architecture.py"]),

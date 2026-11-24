@@ -1,9 +1,21 @@
 use super::*;
-use okx_ipc_contracts::research_ipc::{ClosedPrice, SignalPosition, SignalRequest};
+use okx_ipc_contracts::research_ipc::{
+    ClosedPrice, SignalDefinitionId, SignalDefinitionVersion, SignalInstanceId, SignalInstrumentId,
+    SignalPosition, SignalRequest, StrategySignalInput, StrategySignalProposal,
+};
 use okx_ipc_contracts::trading::{CapitalDirection, StrategyConfigurationV1, StrategyParametersV1};
 #[cfg(test)]
 #[path = "strategy_contract_tests.rs"]
 mod strategy_contract_tests;
+
+/// Research output has exactly one provenance path. A proposal is untrusted
+/// until Engine checks it against its own source and authority; the legacy
+/// decision path is available only when the child explicitly lacks the outbox.
+enum ResearchSignal {
+    UntrustedProposal(StrategySignalProposal),
+    LegacyDecision(SignalPosition),
+}
+
 impl TradeService {
     pub async fn strategies(
         &self,
@@ -291,40 +303,14 @@ impl TradeService {
         let result = result.map_err(err)?;
         Ok(completed(json!({"instance":result})))
     }
-    pub async fn run(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
-        let mut timer = tokio::time::interval(Duration::from_secs(1));
-        loop {
-            tokio::select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() { break; }
-                }
-                _ = timer.tick() => {
-                    let turn = self.maintenance_turn();
-                    tokio::pin!(turn);
-                    tokio::select! {
-                        _ = &mut turn => {}
-                        _ = shutdown.changed() => {
-                            if *shutdown.borrow() {
-                                // Only test-local attribution. The 10-second
-                                // maintenance drain and production shutdown
-                                // behavior are intentionally unchanged.
-
-
-                                let drained = tokio::time::timeout(
-                                    Duration::from_secs(10), &mut turn
-                                ).await;
-
-
-                                let _ = drained;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    pub async fn run(&self, shutdown: tokio::sync::watch::Receiver<bool>) {
+        tokio::join!(
+            run_periodic_turn(shutdown.clone(), || self.recovery_turn()),
+            run_periodic_turn(shutdown, || self.strategy_decisions_turn()),
+        );
     }
-    async fn maintenance_turn(&self) {
+
+    async fn recovery_turn(&self) {
         // One existing maintenance owner. The recovery scheduler provides
         // bounded retry spacing for the campaign, while independent account
         // capture keeps advancing cursors every two seconds. No archive
@@ -376,108 +362,112 @@ impl TradeService {
                 };
                 let _ = self.reconcile_restored(&r).await;
 
-                let reconcile = async {
-                    let account = config.account_key.wire();
-                    let mut offset = self.recovery_schedule.lock().await.page(&account);
-                    let mut result = r
+                let account = config.account_key.wire();
+                let mut offset = self.recovery_schedule.lock().await.page(&account);
+                let mut result = r
+                    .execution
+                    .store
+                    .reconcilable_intents_page(deadline(), RECOVERY_BATCH, offset)
+                    .await;
+                if result.as_ref().is_ok_and(Vec::is_empty) && offset != 0 {
+                    // The candidate set shrank after successful recovery.
+                    // Wrap rather than starving fresh lower-index entries.
+                    offset = 0;
+                    result = r
                         .execution
                         .store
-                        .reconcilable_intents_page(deadline(), RECOVERY_BATCH, offset)
+                        .reconcilable_intents_page(deadline(), RECOVERY_BATCH, 0)
                         .await;
-                    if result.as_ref().is_ok_and(Vec::is_empty) && offset != 0 {
-                        // The candidate set shrank after successful recovery.
-                        // Wrap rather than starving fresh lower-index entries.
-                        offset = 0;
-                        result = r
-                            .execution
-                            .store
-                            .reconcilable_intents_page(deadline(), RECOVERY_BATCH, 0)
+                }
+                match result {
+                    Ok(intents) => {
+                        self.recovery_schedule
+                            .lock()
+                            .await
+                            .advance_page(&account, offset, intents.len());
+                        stream::iter(intents)
+                            .for_each_concurrent(2, |intent| {
+                                let r = &r;
+                                let account = account.clone();
+                                async move {
+                                    let scheduled = self
+                                        .recovery_schedule
+                                        .lock()
+                                        .await
+                                        .due(&account, &intent.intent_id, Instant::now());
+                                    if !scheduled {
+                                        return;
+                                    }
+
+                                    let result = self.status_intent(r, &intent.intent_id, None).await;
+
+                                    let settled = result.as_ref().is_ok_and(|value| {
+                                        value["data"]["central_release"]["state"] == "verified"
+                                            || value["data"]["central_release"]["state"]
+                                                == "not_required"
+                                    });
+                                    let incident = {
+                                        let mut schedule = self.recovery_schedule.lock().await;
+                                        if settled {
+                                            schedule.finish(&account, &intent.intent_id);
+                                            false
+                                        } else {
+                                            schedule.overdue_incident(
+                                                &account,
+                                                &intent.intent_id,
+                                                intent.deadline,
+                                                now(),
+                                            )
+                                        }
+                                    };
+                                    if incident {
+                                        let reason = match &result {
+                                            Ok(value) => value["reason_code"]
+                                                .as_str()
+                                                .or_else(|| {
+                                                    value["data"]["central_release"]
+                                                        ["reason_code"]
+                                                        .as_str()
+                                                })
+                                                .unwrap_or("RECONCILIATION_NOT_TERMINAL"),
+                                            Err(_) => "RECONCILIATION_READBACK_FAILED",
+                                        };
+                                        eprintln!(
+                                            "OKX_RECOVERY_INCIDENT_V1 account={} intent={} reason={} state=UNRESOLVED_OVER_30S",
+                                            account, intent.intent_id, reason
+                                        );
+                                    }
+                                }
+                            })
                             .await;
                     }
-                    match result {
-                        Ok(intents) => {
-                            self.recovery_schedule
-                                .lock()
-                                .await
-                                .advance_page(&account, offset, intents.len());
-                            stream::iter(intents)
-                                .for_each_concurrent(2, |intent| {
-                                    let r = &r;
-                                    let account = account.clone();
-                                    async move {
-                                        let scheduled = self
-                                            .recovery_schedule
-                                            .lock()
-                                            .await
-                                            .due(&account, &intent.intent_id, Instant::now());
-                                        if !scheduled {
-                                            return;
-                                        }
-
-                                        let result = self.status_intent(r, &intent.intent_id, None).await;
-
-                                        let settled = result.as_ref().is_ok_and(|value| {
-                                            value["data"]["central_release"]["state"] == "verified"
-                                                || value["data"]["central_release"]["state"]
-                                                    == "not_required"
-                                        });
-                                        let incident = {
-                                            let mut schedule = self.recovery_schedule.lock().await;
-                                            if settled {
-                                                schedule.finish(&account, &intent.intent_id);
-                                                false
-                                            } else {
-                                                schedule.overdue_incident(
-                                                    &account,
-                                                    &intent.intent_id,
-                                                    intent.deadline,
-                                                    now(),
-                                                )
-                                            }
-                                        };
-                                        if incident {
-                                            let reason = match &result {
-                                                Ok(value) => value["reason_code"]
-                                                    .as_str()
-                                                    .or_else(|| {
-                                                        value["data"]["central_release"]
-                                                            ["reason_code"]
-                                                            .as_str()
-                                                    })
-                                                    .unwrap_or("RECONCILIATION_NOT_TERMINAL"),
-                                                Err(_) => "RECONCILIATION_READBACK_FAILED",
-                                            };
-                                            eprintln!(
-                                                "OKX_RECOVERY_INCIDENT_V1 account={} intent={} reason={} state=UNRESOLVED_OVER_30S",
-                                                account, intent.intent_id, reason
-                                            );
-                                        }
-                                    }
-                                })
-                                .await;
-                        }
-                        Err(_) => {
-                            eprintln!(
-                                "OKX_RECOVERY_SCAN_ERROR_V1 account={} state=SQL_READ_FAILED",
-                                account
-                            );
-                        }
+                    Err(_) => {
+                        eprintln!(
+                            "OKX_RECOVERY_SCAN_ERROR_V1 account={} state=SQL_READ_FAILED",
+                            account
+                        );
                     }
-                };
-                let decisions = async {
-                    if let Ok(instances) =
-                        r.execution.store.strategy_instances(deadline()).await
-                    {
-                        for instance in instances.into_iter().filter(|i| i.enabled) {
-                            let _ = self.strategy_turn(&r, &instance).await;
-                        }
-                    }
-                };
-                tokio::join!(reconcile, decisions);
-
+                }
             })
             .await;
     }
+
+    async fn strategy_decisions_turn(&self) {
+        use futures_util::{StreamExt, stream};
+        stream::iter(self.accounts.list().await)
+            .for_each_concurrent(4, |config| async move {
+                let Some(r) = self.accounts.resolve(&config.alias).await else {
+                    return;
+                };
+                if let Ok(instances) = r.execution.store.strategy_instances(deadline()).await {
+                    for instance in instances.into_iter().filter(|i| i.enabled) {
+                        let _ = self.strategy_turn(&r, &instance).await;
+                    }
+                }
+            })
+            .await;
+    }
+
     async fn strategy_turn(
         &self,
         r: &Arc<AccountResources>,
@@ -502,37 +492,46 @@ impl TradeService {
             .ok_or("STRATEGY_RESEARCH_NOT_READY")?;
         let (fast, slow) = (config.parameters.fast, config.parameters.slow);
         let timeframe = config.timeframe_ms;
+        let use_outbox = research.supports_strategy_signal_outbox().await?;
         for instrument in &config.instruments {
             let bars = live_source
                 .load_closed_closes(instrument, timeframe, (slow * 4).clamp(100, 10000))
                 .await?;
             let last = bars.last().ok_or("STRATEGY_HISTORY_UNAVAILABLE")?.0;
-            let decision_key = format!(
-                "bar_{}",
-                &digest(&(
-                    r.configuration.account_key.wire(),
-                    &instance.instance_id,
-                    &instance.definition_id,
-                    &instance.definition_version,
-                    &instance.parameters,
-                    instrument,
-                    timeframe,
-                    last
-                ))?[..40]
-            );
-            let decision = research
-                .evaluate_signal(SignalRequest {
-                    strategy_id: instance.definition_id.clone(),
-                    parameters: okx_ipc_contracts::analytics::EmaParameters { fast, slow },
-                    closes: bars
-                        .iter()
-                        .map(|(time_ms, close)| ClosedPrice {
-                            time_ms: *time_ms,
-                            close: *close,
-                        })
-                        .collect(),
-                })
-                .await?;
+            let prices = SignalRequest {
+                strategy_id: instance.definition_id.clone(),
+                parameters: okx_ipc_contracts::analytics::EmaParameters { fast, slow },
+                closes: bars
+                    .iter()
+                    .map(|(time_ms, close)| ClosedPrice {
+                        time_ms: *time_ms,
+                        close: *close,
+                    })
+                    .collect(),
+            };
+            let research_signal = if use_outbox {
+                let Some(proposal) = research
+                    .stage_strategy_signal(StrategySignalInput {
+                        instance_id: SignalInstanceId::new(instance.instance_id.clone())?,
+                        definition_id: SignalDefinitionId::new(instance.definition_id.clone())?,
+                        definition_version: SignalDefinitionVersion::new(
+                            instance.definition_version.clone(),
+                        )?,
+                        instrument: SignalInstrumentId::new(instrument.to_owned())?,
+                        timeframe_ms: timeframe,
+                        available_at_ms: u64::try_from(now()).map_err(err)?,
+                        prices,
+                    })
+                    .await?
+                else {
+                    // An outbox-capable child declining to emit a proposal is
+                    // not a signal to downgrade to the legacy evaluation API.
+                    continue;
+                };
+                ResearchSignal::UntrustedProposal(proposal)
+            } else {
+                ResearchSignal::LegacyDecision(research.evaluate_signal(prices).await?.position)
+            };
             let decision_digest = digest(&(last, &bars))?;
             let (state, control) = self.authority(r, None).await?;
             if !control.access_enabled() {
@@ -541,26 +540,52 @@ impl TradeService {
             let input_for_execute = decision_digest.clone();
             let revision = i64::try_from(state.state.revision)
                 .map_err(|_| "STRATEGY_POLICY_REVISION_INVALID")?;
+            let account = r.configuration.account_key.wire();
+            let (claim, position) = match research_signal {
+                ResearchSignal::UntrustedProposal(proposal) => {
+                    strategy_signal::check_strategy_signal(
+                        &proposal,
+                        &strategy_signal::TrustedStrategySignalContext {
+                            instance,
+                            configuration: &config,
+                            authenticated_account_key: &account,
+                            instrument,
+                            last_closed_ms: last,
+                            source_digest: &decision_digest,
+                            policy_revision: revision,
+                            now_ms: now(),
+                        },
+                    )?
+                    .into_claim()
+                }
+                ResearchSignal::LegacyDecision(position) => {
+                    let decision_key = strategy_signal::scoped_decision_key(
+                        &account, instance, instrument, timeframe, last,
+                    )?;
+                    (
+                        okx_trade_execution::account_worker::StrategyDecisionClaimCommand {
+                            instance_id: instance.instance_id.clone(),
+                            decision_key,
+                            input_digest: decision_digest,
+                            policy_revision: revision,
+                            expected_version: instance.definition_version.clone(),
+                            time: now(),
+                        },
+                        position,
+                    )
+                }
+            };
+            let decision_key = claim.decision_key.clone();
             let claimed = r
                 .execution
                 .store
-                .claim_strategy_decision(
-                    deadline(),
-                    okx_trade_execution::account_worker::StrategyDecisionClaimCommand {
-                        instance_id: instance.instance_id.clone(),
-                        decision_key: decision_key.clone(),
-                        input_digest: decision_digest,
-                        policy_revision: revision,
-                        expected_version: instance.definition_version.clone(),
-                        time: now(),
-                    },
-                )
+                .claim_strategy_decision(deadline(), claim)
                 .await
                 .map_err(err)?;
             let Some(claimed_decision_id) = claimed else {
                 continue;
             };
-            let desired = match decision.position {
+            let desired = match position {
                 SignalPosition::Long => 1,
                 SignalPosition::Short => -1,
                 SignalPosition::Flat | SignalPosition::Warmup => 0,
@@ -665,6 +690,71 @@ impl TradeService {
         }
         Ok(())
     }
+}
+
+// Each lane owns at most one turn at a time. In particular, a Research
+// response can delay new signals without delaying the next recovery scan.
+async fn run_periodic_turn<F>(
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    mut start_turn: impl FnMut() -> F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    let mut timer = tokio::time::interval(Duration::from_secs(1));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let stopping = async {
+        let _ = shutdown.wait_for(|stop| *stop).await;
+    };
+    tokio::pin!(stopping);
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut stopping => break,
+            _ = timer.tick() => {}
+        }
+        let turn = start_turn();
+        tokio::pin!(turn);
+        tokio::select! {
+            biased;
+            _ = &mut stopping => {
+                let _ = tokio::time::timeout(Duration::from_secs(10), &mut turn).await;
+                break;
+            }
+            _ = &mut turn => {}
+        }
+    }
+}
+
+#[cfg(test)]
+#[tokio::test(start_paused = true)]
+async fn pending_strategy_turn_does_not_delay_a_second_recovery_turn() {
+    use tokio::sync::{Notify, mpsc, watch};
+
+    let (stop, shutdown) = watch::channel(false);
+    let (events, mut recovery_turns) = mpsc::unbounded_channel();
+    let strategy_started = Notify::new();
+    let strategy_release = Notify::new();
+
+    let recovery = run_periodic_turn(shutdown.clone(), || async {
+        events.send(()).unwrap();
+    });
+    let strategies = run_periodic_turn(shutdown, || async {
+        strategy_started.notify_one();
+        strategy_release.notified().await;
+    });
+    let assert_progress = async {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            strategy_started.notified().await;
+            assert_eq!(recovery_turns.recv().await, Some(()));
+            assert_eq!(recovery_turns.recv().await, Some(()));
+        })
+        .await
+        .expect("recovery did not advance while the strategy turn was held");
+
+        stop.send(true).unwrap();
+        strategy_release.notify_one();
+    };
+    tokio::join!(recovery, strategies, assert_progress);
 }
 
 fn validate_strategy_risk_budget_usd(

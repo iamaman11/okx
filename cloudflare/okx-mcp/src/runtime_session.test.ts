@@ -137,7 +137,8 @@ console.log('runtime_native_owner_and_wss_separation PASS');
  const researchWs=mk("research",research);
  let sockets:any[]=[financeWs,researchWs];
  const state={storage:{get:async(k:string)=>k==="account_access_v1"?{...initial,revision:1,accounts:[account]}:undefined},getWebSockets:()=>sockets};
- owner=new RuntimeSession(state,{} as any);
+ const ownerEnv:any={};
+ owner=new RuntimeSession(state,ownerEnv);
  const req=(id:string,target_owner:string,operation:any)=>({schema:"okx.agent.request/v1",request_id:id,target_owner,operation});
  check((await owner.dispatch(req("direct_research_1","research",{type:"research",request:{action:"capabilities"}}))).owner==="research",
    "direct Research routed only to research owner");
@@ -145,6 +146,16 @@ console.log('runtime_native_owner_and_wss_separation PASS');
    "Engine financial reads stay on finance owner");
  check(sent.filter(s=>s.frame.type==="request").map(s=>s.owner).join(",")==="research,finance",
    "distinct owner routes share DO without accidental cross-delivery");
+ // Edge's target_owner is an internal routing decision. Native Rust uses
+ // #[serde(deny_unknown_fields)] AgentRequest, so even a correctly routed
+ // frame fails parsing if the routing hint crosses the WSS boundary.
+ const nativeRequestKeys=["schema","request_id","operation"];
+ const nativeRequests=()=>sent.filter(s=>s.frame.type==="request");
+ check(nativeRequests().every(s=>JSON.stringify(Object.keys(s.frame.request).sort())===JSON.stringify([...nativeRequestKeys].sort())),
+   "Research and Engine native AgentRequest contain only Rust contract fields");
+ check(nativeRequests()[0].frame.request.operation.type==="research"&&
+       nativeRequests()[1].frame.request.operation.type==="portfolio",
+   "removing routing metadata preserves each native operation unchanged");
 
  // A valid Research hello replaces only the Research generation.
  const nextResearch=mk("research",{runtimeId:"windows-primary",sessionId:"research_17",generation:17,hello:false,credentialOwner:"research",connectedAtMs:Date.now()});
@@ -206,4 +217,44 @@ console.log('runtime_native_owner_and_wss_separation PASS');
  check(!legacyClosed,"new independent Research hello does not evict legacy Engine-owned research_only");
  check((await owner.dispatch(req("direct_research_7","research",{type:"research",request:{action:"capabilities"}}))).owner==="research",
    "explicit Research route chooses separately credentialed Research, not legacy");
+
+ // Configuring a distinct Research credential turns owner separation on for
+ // every unmarked internal dispatch as well as the public MCP tool facade.
+ ownerEnv.RESEARCH_RUNTIME_TOKEN_SHA256="f".repeat(64);
+ sockets=[financeWs,legacyResearch];
+ const unmarked=(id:string,operation:any,account?:string)=>({schema:"okx.agent.request/v1",request_id:id,
+   ...(account?{account}:{}),operation});
+ const countSent=()=>sent.filter(s=>s.frame.type==="request").length;
+ const sentBeforeOffline=countSent();
+ check((await owner.dispatch(unmarked("configured_research_offline",{type:"research",request:{action:"capabilities"}}))).reason==="RESEARCH_RUNTIME_OFFLINE",
+   "configured Research outage never silently falls back to Engine or legacy Engine-bearer Research");
+ check((await owner.dispatch(unmarked("configured_market_offline",{type:"market_capabilities"}))).reason==="RESEARCH_RUNTIME_OFFLINE",
+   "configured Market read is independent from financial Engine liveness");
+ check((await owner.dispatch(unmarked("configured_scenario_offline",{type:"portfolio_scenario",request:{equity_usd:"100",positions:[],correlations:[]}}))).reason==="RESEARCH_RUNTIME_OFFLINE",
+   "virtual portfolio scenario cannot fall back to finance when Research is offline");
+ check(countSent()===sentBeforeOffline,"configured Research outage sends no data to finance or legacy socket");
+ check((await owner.dispatch(unmarked("configured_finance_online",{type:"portfolio",request:{action:"summary"}}))).owner==="finance",
+   "financial reads continue when configured Research is offline");
+ check((await owner.dispatch(req("configured_forced_engine","engine",{type:"research",request:{action:"capabilities"}}))).reason==="RESEARCH_OWNER_REQUIRED",
+   "explicit Engine override cannot bypass configured Research ownership");
+ check((await owner.dispatch(req("configured_finance_direct","engine",{type:"portfolio",request:{action:"summary"}}))).owner==="finance",
+   "explicit Engine finance route remains permitted after Research owner cutover");
+ check(nativeRequests().every(s=>!("target_owner" in s.frame.request)),
+   "configured and legacy Engine paths also strip owner hint from native frames");
+ sockets=[financeWs,nextResearch];
+ check((await owner.dispatch(unmarked("configured_research_online",{type:"research",request:{action:"capabilities"}}))).owner==="research",
+   "configured unmarked Research reaches independent owner while finance is online");
+ check((await owner.dispatch(unmarked("configured_diagnostics_online",{type:"diagnostics",request:{view:"research"}}))).owner==="research",
+   "Research diagnostics do not silently use Engine");
+ check((await owner.dispatch(unmarked("configured_scenario_online",{type:"portfolio_scenario",request:{equity_usd:"100",positions:[],correlations:[]}}))).owner==="research",
+   "pure virtual portfolio scenario uses independent Research without finance credentials");
+ check(nativeRequests().every(s=>!("target_owner" in s.frame.request)) &&
+       nativeRequests().filter(s=>s.owner==="research").every(s=>!("account" in s.frame.request)&&!("operator_governance" in s.frame)),
+   "Research native frames expose neither routing hints, finance accounts nor governance");
+ const sentBeforeForged=countSent();
+ check((await owner.dispatch(unmarked("configured_nested_account",{type:"market",request:{action:"screen",account:"finance_account"}}))).reason==="RESEARCH_OPERATION_FORBIDDEN",
+   "nested finance account in Research operation fails closed instead of being reclassified as Engine");
+ check((await owner.dispatch(unmarked("configured_top_account",{type:"research",request:{action:"capabilities"}},"finance_account"))).reason==="RESEARCH_OPERATION_FORBIDDEN",
+   "top-level finance account in Research operation fails closed before socket delivery");
+ check(countSent()===sentBeforeForged,"forged account selector never reaches either owner");
 }

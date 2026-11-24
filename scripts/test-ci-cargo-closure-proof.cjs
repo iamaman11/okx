@@ -8,7 +8,7 @@ const {verify} = require('./ci-cargo-closure-proof.cjs');
 const root = '/tmp/ci-head';
 const base = '/tmp/ci-base';
 const owners = ['okx-trading-engine', 'okx-trade-execution', 'okx-host-controller',
-  'okx-host-launcher', 'okx-research-service', 'okx-research', 'okx-strategy-core',
+  'okx-host-launcher', 'okx-host-protocol', 'okx-research-service', 'okx-research', 'okx-strategy-core',
   'okx-ipc-contracts'];
 const external = name => `registry+https://github.com/rust-lang/crates.io-index#${name}@1.0.0`;
 const edge = (pkg, kind = null, target = null) => ({name: pkg.split('#')[0], pkg,
@@ -16,7 +16,8 @@ const edge = (pkg, kind = null, target = null) => ({name: pkg.split('#')[0], pkg
 const dependencies = {
   'okx-trading-engine': [edge('okx-trade-execution'), edge('okx-ipc-contracts'), edge(external('sqlite'))],
   'okx-trade-execution': [edge(external('serde'), 'dev')],
-  'okx-host-controller': [edge('okx-host-launcher'), edge('okx-ipc-contracts')],
+  'okx-host-controller': [edge('okx-host-launcher'), edge('okx-host-protocol'), edge('okx-ipc-contracts')],
+  'okx-host-protocol': [edge('okx-ipc-contracts')],
   'okx-research-service': [edge('okx-research'), edge('okx-strategy-core'), edge('okx-ipc-contracts')],
   'okx-research': [edge('okx-strategy-core')],
 };
@@ -44,7 +45,12 @@ const host = files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock');
 const head = metadata(), before = metadata(base);
 
 assert.equal(verify(before, head, research, 'research').protected_closures_identical, true);
+assert.equal(verify(before, head, files('crates/okx-research-service/Cargo.toml',
+  'crates/okx-research-service/src/edge_runtime.rs',
+  'crates/okx-research-service/tests/edge_wss.rs'), 'research').protected_closures_identical, true);
 assert.equal(verify(before, head, host, 'host-controller').target, 'x86_64-pc-windows-msvc');
+assert.equal(verify(before, head, files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock',
+  'cloudflare/okx-mcp/src/mcp.ts'), 'host-controller').protected_closures_identical, true);
 assert.equal(verify(before, head, files('crates/okx-host-launcher/Cargo.toml'),
   'host-launcher').protected_closures_identical, true);
 
@@ -83,6 +89,8 @@ reject(m => m.resolve.nodes.find(n => n.id === 'okx-research-service')
   .deps.push(edge(external('sqlite'))), 'host-controller', host);
 reject(m => m.resolve.nodes.find(n => n.id === 'okx-research-service')
   .features.push('research_change'), 'host-controller', host);
+reject(m => m.resolve.nodes.find(n => n.id === 'okx-host-protocol')
+  .features.push('new_host_wire'), 'research', research);
 
 for (const diff of [
   files('Cargo.lock'),
@@ -90,6 +98,10 @@ for (const diff of [
   files('crates/okx-research-service/Cargo.toml', 'crates/okx-host-controller/Cargo.toml'),
   files('crates/okx-research-service/Cargo.toml', 'crates/okx-ipc-contracts/src/lib.rs'),
   files('crates/okx-research-service/Cargo.toml', 'crates/okx-research-service/build.rs'),
+  files('crates/okx-research-service/Cargo.toml', 'crates/okx-research-service/config/edge_wss.json'),
+  files('crates/okx-research-service/Cargo.toml', 'crates/okx-research-service/src/runtime.json'),
+  files('crates/okx-research-service/Cargo.toml', 'crates/okx-analysis/README.md'),
+  files('crates/okx-research-service/Cargo.toml', 'crates/okx-strategy-core/examples/strategy.rs'),
   [[{filename: 'crates/okx-research-service/Cargo.toml', status: 'renamed', previous_filename: 'x'}]],
   [[{filename: '../Cargo.toml', status: 'modified'}]],
   [[]], [],

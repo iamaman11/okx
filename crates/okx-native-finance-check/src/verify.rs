@@ -17,45 +17,24 @@ fn check_source_bytes(actual: &[u8], embedded: &[u8]) -> Result<()> {
 }
 pub(super) fn collector_sources_match(repo: &Path) -> Result<()> {
     for (relative, embedded) in [
+        ("main.rs", include_bytes!("main.rs").as_slice()),
+        ("manifest.rs", include_bytes!("manifest.rs").as_slice()),
+        ("verify.rs", include_bytes!("verify.rs").as_slice()),
+        ("process.rs", include_bytes!("process.rs").as_slice()),
         (
-            "native_finance_acceptance.rs",
-            include_bytes!("../native_finance_acceptance.rs").as_slice(),
-        ),
-        (
-            "native_finance_acceptance/manifest.rs",
-            include_bytes!("manifest.rs").as_slice(),
-        ),
-        (
-            "native_finance_acceptance/verify.rs",
-            include_bytes!("verify.rs").as_slice(),
-        ),
-        (
-            "native_finance_acceptance/process.rs",
-            include_bytes!("process.rs").as_slice(),
-        ),
-        (
-            "native_finance_acceptance/phase_timing.rs",
+            "phase_timing.rs",
             include_bytes!("phase_timing.rs").as_slice(),
         ),
         (
-            "native_finance_acceptance/repository_guards.rs",
+            "repository_guards.rs",
             include_bytes!("repository_guards.rs").as_slice(),
         ),
-        (
-            "native_finance_acceptance/resources.rs",
-            include_bytes!("resources.rs").as_slice(),
-        ),
-        (
-            "native_finance_acceptance/budgets.rs",
-            include_bytes!("budgets.rs").as_slice(),
-        ),
-        (
-            "native_finance_acceptance/reporting.rs",
-            include_bytes!("reporting.rs").as_slice(),
-        ),
+        ("resources.rs", include_bytes!("resources.rs").as_slice()),
+        ("budgets.rs", include_bytes!("budgets.rs").as_slice()),
+        ("reporting.rs", include_bytes!("reporting.rs").as_slice()),
     ] {
         let path = repo
-            .join("crates/okx-trading-engine/examples")
+            .join("crates/okx-native-finance-check/src")
             .join(relative);
         let actual = std::fs::read(path).map_err(|_| "COLLECTOR_SOURCE_UNAVAILABLE")?;
         check_source_bytes(&actual, embedded)?;

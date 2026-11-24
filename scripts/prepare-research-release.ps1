@@ -1,5 +1,6 @@
-param([string]$Dist, [switch]$VerifyOnly, [string]$AcceptedCompositionSpec, [string]$ProofFile)
+param([string]$Dist, [switch]$VerifyOnly, [string]$AcceptedCompositionSpec, [string]$ProofFile, [switch]$MixedHost)
 if (-not $VerifyOnly -and [string]::IsNullOrWhiteSpace($Dist)) { throw "DIST_REQUIRED" }
+if ($MixedHost -and -not $VerifyOnly) { throw 'MIXED_HOST_PROOF_REQUIRES_VERIFY_ONLY' }
 $ErrorActionPreference = 'Stop'
 if (-not [string]::IsNullOrWhiteSpace($AcceptedCompositionSpec)) {
     if ($VerifyOnly) { throw 'COMPOSITION_CANNOT_BYPASS_RELEASE_SCOPE_CHECK' }
@@ -92,7 +93,7 @@ ConvertTo-Json -InputObject $changed -Compress | Set-Content -LiteralPath $chang
 & node scripts/test-research-release-scope.cjs
 if ($LASTEXITCODE -ne 0) { throw 'SCOPE_NEGATIVE_TESTS_FAILED' }
 $scopeArgs = @($metadataFile, $changedFile)
-if (@($changed | Where-Object { $_ -ceq 'Cargo.lock' -or $_ -cmatch '/Cargo\.toml$' }).Count -gt 0) {
+if ($MixedHost -or @($changed | Where-Object { $_ -ceq 'Cargo.lock' -or $_ -cmatch '/Cargo\.toml$' }).Count -gt 0) {
     # Reprove against the actual published binary base, not merely the PR's
     # previous HEAD. A later dependency change cannot silently reuse Agent.
     $baselineDir = Join-Path $env:RUNNER_TEMP 'research-accepted-cargo-baseline'
@@ -112,6 +113,7 @@ if (@($changed | Where-Object { $_ -ceq 'Cargo.lock' -or $_ -cmatch '/Cargo\.tom
         if ($LASTEXITCODE -ne 0) { throw 'ACCEPTED_CARGO_BASE_WORKTREE_CLEANUP_FAILED' }
     }
 }
+if ($MixedHost) { $scopeArgs += '--mixed-host' }
 $scope = & node scripts/research-release-scope.cjs @scopeArgs
 if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_DIFF_NOT_ISOLATED' }
 $zip = Join-Path $env:RUNNER_TEMP 'research-release-base.zip'

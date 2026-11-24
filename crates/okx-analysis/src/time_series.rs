@@ -1,2 +1,2 @@
-//! Stable public module path. The only compute implementation lives in okx-domain-core.
-pub use okx_domain_core::time_series::*;
+//! Stable public module path. All computations live in Research-owned okx-strategy-core.
+pub use okx_strategy_core::time_series::*;

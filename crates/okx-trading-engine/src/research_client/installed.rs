@@ -131,12 +131,28 @@ pub(super) fn candidate(runtime: &Path) -> Result<PathBuf, String> {
 /// Fully verify the selected image immediately before starting a child.
 pub(super) fn resolve(runtime: &Path) -> Result<PathBuf, String> {
     let binary = candidate(runtime)?;
+    verify_image(&binary)
+}
+
+/// Reverify a previously activated, content-addressed image without trusting
+/// a CONTROL pointer which may have changed during a worker drain.
+pub(super) fn verify_image(binary: &Path) -> Result<PathBuf, String> {
+    directory_chain(binary.parent().ok_or("RESEARCH_INSTALL_INVALID_PATH")?)?;
+    if !matches!(
+        binary.file_name().and_then(|name| name.to_str()),
+        Some("okx-research-service.exe" | "okx-research-worker.exe")
+    ) {
+        return Err("RESEARCH_INSTALL_INVALID_PATH".into());
+    }
     let expected = binary
         .parent()
         .and_then(Path::file_name)
         .and_then(|s| s.to_str())
         .ok_or("RESEARCH_INSTALL_INVALID_PATH")?;
-    let mut file = BufReader::new(open_plain(&binary)?);
+    if !hex(expected, 64) {
+        return Err("RESEARCH_INSTALL_INVALID_PATH".into());
+    }
+    let mut file = BufReader::new(open_plain(binary)?);
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 65536];
     let mut total = 0u64;
@@ -156,7 +172,7 @@ pub(super) fn resolve(runtime: &Path) -> Result<PathBuf, String> {
     if format!("{:x}", hash.finalize()) != expected {
         return Err("RESEARCH_INSTALL_HASH_MISMATCH".into());
     }
-    Ok(binary)
+    Ok(binary.to_path_buf())
 }
 #[cfg(test)]
 mod tests {
@@ -239,6 +255,35 @@ mod tests {
         );
         fs::write(&preferred, b"test worker").unwrap();
         assert_eq!(resolve(&root).unwrap(), preferred);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn last_known_good_image_can_be_reverified_after_pointer_corruption() {
+        let (root, hash) = setup();
+        let dir = root.join("research/versions").join(&hash);
+        fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("okx-research-service.exe");
+        fs::write(&binary, b"test worker").unwrap();
+        fs::write(
+            root.join("installed-research.json"),
+            pointer(&hash).to_string(),
+        )
+        .unwrap();
+        let running = resolve(&root).unwrap();
+
+        fs::write(root.join("installed-research.json"), b"{}").unwrap();
+        assert_eq!(
+            resolve(&root).unwrap_err(),
+            "RESEARCH_INSTALL_INVALID_POINTER"
+        );
+        assert_eq!(verify_image(&running).unwrap(), binary);
+
+        fs::write(&binary, b"tampered worker").unwrap();
+        assert_eq!(
+            verify_image(&running).unwrap_err(),
+            "RESEARCH_INSTALL_HASH_MISMATCH"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

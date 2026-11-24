@@ -435,7 +435,7 @@ impl RootMigrationGuard {
 mod tests {
     use super::*;
     use okx_github::OWNER_USER_ID;
-    use okx_ipc_contracts::{
+    use okx_host_protocol::{
         HostControlOperation, HostControlResult as ProtocolControlResult, HostControlStatus,
     };
 
@@ -459,7 +459,7 @@ mod tests {
     fn durable_ack_requires_exact_install_root_operation() {
         let request_id = "ctl_root_migration_012345";
         let pass = ProtocolControlResult {
-            schema: okx_ipc_contracts::HOST_CONTROL_RESULT_SCHEMA_V1.to_owned(),
+            schema: okx_host_protocol::HOST_CONTROL_RESULT_SCHEMA_V1.to_owned(),
             request_id: request_id.to_owned(),
             operation: HostControlOperation::InstallLauncherRoot {
                 run_id: 1,

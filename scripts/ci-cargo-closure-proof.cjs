@@ -11,6 +11,7 @@ const {changedFiles} = require('./ci-component-impact.cjs');
 const TARGET = 'x86_64-pc-windows-msvc';
 const RESEARCH = new Set([
   'crates/okx-research/Cargo.toml',
+  'crates/okx-analysis/Cargo.toml',
   'crates/okx-research-service/Cargo.toml',
   'crates/okx-strategy-core/Cargo.toml',
 ]);
@@ -27,8 +28,9 @@ const PROTECTED = Object.freeze({
 const safePath = p => typeof p === 'string' && p.length > 0 && p.length <= 512 &&
   !p.includes('\\') && p.split('/').every(part => /^[A-Za-z0-9_.-]+$/.test(part) && part !== '.' && part !== '..');
 const docs = p => p === 'README.md' || (p.startsWith('docs/') && p.endsWith('.md'));
-const research = p => ['crates/okx-research/', 'crates/okx-research-service/',
-  'crates/okx-strategy-core/'].some(prefix => p.startsWith(prefix)) && !p.endsWith('/build.rs');
+const research = p => RESEARCH.has(p) || ['crates/okx-research/', 'crates/okx-analysis/',
+  'crates/okx-research-service/', 'crates/okx-strategy-core/'].some(prefix =>
+  (p.startsWith(prefix + 'src/') || p.startsWith(prefix + 'tests/')) && p.endsWith('.rs'));
 const host = p => ['crates/okx-host-controller/src/', 'crates/okx-host-launcher/src/']
   .some(prefix => p.startsWith(prefix)) && p.endsWith('.rs');
 
@@ -43,7 +45,7 @@ function candidateFiles(input, scope) {
   if (!files.every(file => {
     if (file === 'Cargo.lock' || docs(file)) return true;
     if (scope === 'research') return research(file) || file.startsWith('cloudflare/okx-mcp/');
-    return host(file) || HOST.has(file);
+    return host(file) || HOST.has(file) || file.startsWith('cloudflare/okx-mcp/');
   })) throw Error('MIXED_OR_UNSAFE_CARGO_DIFF');
   // A second owner's Cargo.toml can change the Rust feature graph even when
   // a filtered resolver misses an optional target. Such PRs always run full.
@@ -139,17 +141,8 @@ function normalizedCargo(metadata) {
 
 function verify(baseMetadata, headMetadata, changed, scope) {
   const files = candidateFiles(changed, scope);
-  const before = normalizedCargo(baseMetadata), after = normalizedCargo(headMetadata);
-  const protectedPaths = new Set();
-  for (const name of PROTECTED[scope]) {
-    const left = before.closure(name), right = after.closure(name);
-    for (const key of [...left.keys(), ...right.keys()]) {
-      if (key.startsWith('workspace:')) protectedPaths.add(key.split(':')[1]);
-      if (!left.has(key) || !right.has(key) || left.get(key) !== right.get(key))
-        throw Error(`PROTECTED_WINDOWS_CARGO_CLOSURE_CHANGED:${name}:${key}`);
-    }
-  }
-  if (files.some(file => protectedPaths.has(file)))
+  const protectedPaths = compareProtected(baseMetadata, headMetadata, PROTECTED[scope]);
+  if (files.some(file => protectedPaths.some(dir => file === dir + 'Cargo.toml')))
     throw Error('EDITED_MANIFEST_IN_PROTECTED_CARGO_CLOSURE');
   return {
     schema: 'okx.560.windows-cargo-closure-proof/v1',
@@ -158,6 +151,27 @@ function verify(baseMetadata, headMetadata, changed, scope) {
     protected_closures_identical: true,
     executed_financial_tests: false,
   };
+}
+
+function compareProtected(baseMetadata, headMetadata, roots) {
+  const before = normalizedCargo(baseMetadata), after = normalizedCargo(headMetadata);
+  const protectedPaths = new Set();
+  for (const name of roots) {
+    const left = before.closure(name), right = after.closure(name);
+    for (const key of [...left.keys(), ...right.keys()]) {
+      if (key.startsWith('workspace:')) protectedPaths.add(path.posix.dirname(key.split(':')[1]) + '/');
+      if (!left.has(key) || !right.has(key) || left.get(key) !== right.get(key))
+        throw Error(`PROTECTED_WINDOWS_CARGO_CLOSURE_CHANGED:${name}:${key}`);
+    }
+  }
+  return [...protectedPaths].sort();
+}
+
+function verifyEngineInputs(baseMetadata, headMetadata, files) {
+  const protectedPaths = compareProtected(baseMetadata, headMetadata, ['okx-trading-engine']);
+  if (files.some(file => protectedPaths.some(dir => file.startsWith(dir))))
+    throw Error('EDITED_SOURCE_IN_ENGINE_WINDOWS_CARGO_CLOSURE');
+  return protectedPaths;
 }
 
 if (require.main === module) {
@@ -171,4 +185,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = {verify, candidateFiles, normalizedCargo};
+module.exports = {verify, candidateFiles, normalizedCargo, verifyEngineInputs};

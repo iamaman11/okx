@@ -23,7 +23,7 @@ use std::{
 };
 use tokio::{
     process::Command,
-    sync::{Mutex, Notify, Semaphore, mpsc, oneshot, watch},
+    sync::{Mutex, Notify, OnceCell, Semaphore, mpsc, oneshot, watch},
     task::JoinSet,
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -62,7 +62,10 @@ pub struct ResearchClientConfig {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ResearchDeploymentStatus {
     pub installed: Option<String>,
+    pub installed_check_error: Option<String>,
     pub active: Option<String>,
+    pub active_pid: Option<u32>,
+    pub handshake_verified_at_ms: Option<i64>,
     pub draining: bool,
 }
 #[derive(Clone)]
@@ -72,6 +75,8 @@ pub struct ResearchClient {
     source: SourceHandler,
     connection: Arc<Mutex<Option<Arc<Connection>>>>,
     deployment: Arc<std::sync::Mutex<ResearchDeploymentStatus>>,
+    #[cfg(test)]
+    after_drain_barrier: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 type PendingReplies =
     Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Result<WorkerReply, String>>>>>;
@@ -88,9 +93,15 @@ struct Connection {
     permits: Semaphore,
     control_permits: Semaphore,
     observation_permits: Semaphore,
+    features: OnceCell<WorkerFeatures>,
     source_permits: Arc<Semaphore>,
     stop: Notify,
     closed: watch::Sender<bool>,
+}
+#[derive(Clone, Copy)]
+struct WorkerFeatures {
+    portfolio_scenario: bool,
+    signal_outbox: bool,
 }
 struct PendingReply {
     pending: PendingReplies,
@@ -156,6 +167,8 @@ impl ResearchClient {
             source,
             connection: Arc::new(Mutex::new(None)),
             deployment: Arc::new(std::sync::Mutex::new(ResearchDeploymentStatus::default())),
+            #[cfg(test)]
+            after_drain_barrier: None,
         }
     }
     /// Production factory. Pointer changes are checked on demand; images are hashed before launch.
@@ -179,10 +192,24 @@ impl ResearchClient {
             source,
             connection: Arc::new(Mutex::new(None)),
             deployment: Arc::new(std::sync::Mutex::new(ResearchDeploymentStatus::default())),
+            #[cfg(test)]
+            after_drain_barrier: None,
         }
     }
+    async fn resolve_installed(&self, root: PathBuf) -> Result<PathBuf, String> {
+        let resolved = tokio::task::spawn_blocking(move || installed::resolve(&root))
+            .await
+            .map_err(|_| "RESEARCH_INSTALL_CHECK_FAILED")?;
+        if let Ok(mut state) = self.deployment.lock() {
+            state.installed = resolved.as_ref().ok().and_then(|path| version_name(path));
+            state.installed_check_error = resolved.as_ref().err().cloned();
+        }
+        resolved
+    }
+
     async fn connect(&self) -> Result<Arc<Connection>, String> {
         let mut slot = self.connection.lock().await;
+        let mut restart_previous = None;
         let installed = match &self.installation_runtime {
             Some(root) => match tokio::task::spawn_blocking({
                 let root = root.clone();
@@ -194,12 +221,14 @@ impl ResearchClient {
                 Ok(path) => {
                     if let Ok(mut state) = self.deployment.lock() {
                         state.installed = version_name(&path);
+                        state.installed_check_error = None;
                     }
                     Some(path)
                 }
                 Err(error) => {
                     if let Ok(mut state) = self.deployment.lock() {
                         state.installed = None;
+                        state.installed_check_error = Some(error.clone());
                     }
                     if slot
                         .as_ref()
@@ -218,49 +247,93 @@ impl ResearchClient {
             .filter(|c| c.live.load(Ordering::Acquire))
             .cloned()
         {
-            if installed.as_ref().is_some_and(|path| *path != c.executable)
-                || c.draining.load(Ordering::Acquire)
-            {
-                c.draining.store(true, Ordering::Release);
-                if let Ok(mut state) = self.deployment.lock() {
-                    state.draining = true;
-                }
-                let drain = Self::send(&c, ResearchCommand::Drain, None).await?;
-                let active = drain.drain()?.active_jobs;
-                if active != 0 || installed.is_none() {
-                    return Ok(c);
-                }
-                // No old command may remain in flight when the old worker exits.
-                // Drain already prevents any racing enqueue from committing.
-                let _all = c
-                    .permits
-                    .acquire_many(MAX_IN_FLIGHT as u32)
-                    .await
-                    .map_err(|_| "WORKER_CLOSED")?;
-                let _control = c
-                    .control_permits
-                    .acquire_many(CRITICAL_IN_FLIGHT as u32)
-                    .await
-                    .map_err(|_| "WORKER_CLOSED")?;
-                let _observations = c
-                    .observation_permits
-                    .acquire_many(OBSERVATION_IN_FLIGHT as u32)
-                    .await
-                    .map_err(|_| "WORKER_CLOSED")?;
-                let _sources = c
-                    .source_permits
-                    .acquire_many(MAX_IN_FLIGHT as u32)
-                    .await
-                    .map_err(|_| "WORKER_CLOSED")?;
-                let mut done = c.closed.subscribe();
-                Self::send(&c, ResearchCommand::Shutdown, None)
-                    .await?
-                    .shutdown()?;
-                while !*done.borrow_and_update() {
-                    done.changed().await.map_err(|_| "WORKER_DISCONNECTED")?;
-                }
-            } else {
+            let Some(root) = &self.installation_runtime else {
                 return Ok(c);
+            };
+            // Hash a new candidate before asking the current worker to drain.
+            if !c.draining.load(Ordering::Acquire)
+                && (installed.is_none()
+                    || installed.as_ref() == Some(&c.executable)
+                    || self.resolve_installed(root.clone()).await.ok().as_ref()
+                        != installed.as_ref())
+            {
+                return Ok(c);
+            }
+            c.draining.store(true, Ordering::Release);
+            if let Ok(mut state) = self.deployment.lock() {
+                state.draining = true;
+            }
+            let drain = match Self::send(&c, ResearchCommand::Drain, None).await {
+                Ok(reply) => reply,
+                Err(error) => {
+                    // A lost ACK does not prove the old worker is still admitting
+                    // work. Never return a potentially drained live connection.
+                    c.stop.notify_one();
+                    return Err(error);
+                }
+            };
+            let active = drain.drain()?.active_jobs;
+            if active != 0 {
+                return Ok(c);
+            }
+            // No old command may remain in flight when the old worker exits.
+            // Drain already prevents any racing enqueue from committing.
+            let _all = c
+                .permits
+                .acquire_many(MAX_IN_FLIGHT as u32)
+                .await
+                .map_err(|_| "WORKER_CLOSED")?;
+            let _control = c
+                .control_permits
+                .acquire_many(CRITICAL_IN_FLIGHT as u32)
+                .await
+                .map_err(|_| "WORKER_CLOSED")?;
+            let _observations = c
+                .observation_permits
+                .acquire_many(OBSERVATION_IN_FLIGHT as u32)
+                .await
+                .map_err(|_| "WORKER_CLOSED")?;
+            let _sources = c
+                .source_permits
+                .acquire_many(MAX_IN_FLIGHT as u32)
+                .await
+                .map_err(|_| "WORKER_CLOSED")?;
+            #[cfg(test)]
+            if let Some((reached, release)) = &self.after_drain_barrier {
+                reached.notify_one();
+                release.notified().await;
+            }
+            // CONTROL may replace its pointer after Drain was accepted. Drain
+            // cannot be undone by the deployed IPC protocol: restarting the
+            // reverified, last-known-good image preserves Research availability
+            // without launching untrusted candidate bytes or restarting Engine.
+            if installed
+                .as_ref()
+                .is_none_or(|candidate| candidate == &c.executable)
+                || self.resolve_installed(root.clone()).await.ok().as_ref() != installed.as_ref()
+            {
+                let previous = c.executable.clone();
+                restart_previous =
+                    match tokio::task::spawn_blocking(move || installed::verify_image(&previous))
+                        .await
+                    {
+                        Ok(Ok(previous)) => Some(previous),
+                        Ok(Err(error)) => {
+                            c.stop.notify_one();
+                            return Err(error);
+                        }
+                        Err(_) => {
+                            c.stop.notify_one();
+                            return Err("RESEARCH_PREVIOUS_IMAGE_CHECK_FAILED".into());
+                        }
+                    };
+            }
+            let mut done = c.closed.subscribe();
+            Self::send(&c, ResearchCommand::Shutdown, None)
+                .await?
+                .shutdown()?;
+            while !*done.borrow_and_update() {
+                done.changed().await.map_err(|_| "WORKER_DISCONNECTED")?;
             }
         }
         if let Some(c) = slot.as_ref() {
@@ -271,18 +344,12 @@ impl ResearchClient {
         }
         let session = WorkerSession::new(unique()).map_err(str::to_owned)?;
         // Re-read after shutdown: installation may have changed during drain.
-        let executable = match &self.installation_runtime {
-            Some(root) => {
-                let root = root.clone();
-                let path = tokio::task::spawn_blocking(move || installed::resolve(&root))
-                    .await
-                    .map_err(|_| "RESEARCH_INSTALL_CHECK_FAILED")??;
-                if let Ok(mut state) = self.deployment.lock() {
-                    state.installed = version_name(&path);
-                }
-                path
-            }
-            None => self.config.executable.clone(),
+        let executable = match restart_previous {
+            Some(previous) => previous,
+            None => match &self.installation_runtime {
+                Some(root) => self.resolve_installed(root.clone()).await?,
+                None => self.config.executable.clone(),
+            },
         };
         let mut command = Command::new(&executable);
         command
@@ -301,6 +368,7 @@ impl ResearchClient {
         #[cfg(windows)]
         command.creation_flags(0x0000_4000); // BELOW_NORMAL_PRIORITY_CLASS
         let mut child = command.spawn().map_err(|_| "WORKER_START")?;
+        let pid = child.id().ok_or("WORKER_PID_UNAVAILABLE")?;
         let stdin = child.stdin.take().ok_or("WORKER_STDIN")?;
         let stdout = child.stdout.take().ok_or("WORKER_STDOUT")?;
         let mut writer = FramedWrite::new(stdin, codec());
@@ -322,7 +390,9 @@ impl ResearchClient {
             .await
             .ok_or("WORKER_EOF")?
             .map_err(|_| "WORKER_HELLO_READ")?;
-        match serde_json::from_slice::<WorkerFrame>(&frame).map_err(|_| "WORKER_HELLO_DECODE")? {
+        let producer_sha256 = match serde_json::from_slice::<WorkerFrame>(&frame)
+            .map_err(|_| "WORKER_HELLO_DECODE")?
+        {
             WorkerFrame::Hello {
                 protocol: PROTOCOL_VERSION,
                 storage: STORAGE_VERSION,
@@ -336,9 +406,12 @@ impl ResearchClient {
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
                 && (self.installation_runtime.is_none()
-                    || version_name(&executable).as_ref() == Some(&producer_sha256)) => {}
+                    || version_name(&executable).as_ref() == Some(&producer_sha256)) =>
+            {
+                producer_sha256
+            }
             _ => return Err("WORKER_HELLO_MISMATCH".into()),
-        }
+        };
         let (tx, mut rx) = mpsc::channel::<HostFrame>(QUEUE_CAPACITY);
         let (closed, _) = watch::channel(false);
         let c = Arc::new(Connection {
@@ -353,6 +426,7 @@ impl ResearchClient {
             permits: Semaphore::new(MAX_IN_FLIGHT),
             control_permits: Semaphore::new(CRITICAL_IN_FLIGHT),
             observation_permits: Semaphore::new(OBSERVATION_IN_FLIGHT),
+            features: OnceCell::new(),
             source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             stop: Notify::new(),
             closed,
@@ -360,6 +434,12 @@ impl ResearchClient {
         let driver = c.clone();
         let source = self.source.clone();
         let deployment = self.deployment.clone();
+        if let Ok(mut state) = deployment.lock() {
+            state.active = Some(producer_sha256);
+            state.active_pid = Some(pid);
+            state.handshake_verified_at_ms = Some(jiff::Timestamp::now().as_millisecond());
+            state.draining = false;
+        }
         tokio::spawn(async move {
             let mut writer_task = tokio::spawn(async move {
                 while let Some(frame) = rx.recv().await {
@@ -411,17 +491,15 @@ impl ResearchClient {
             let _ = child.kill().await;
             let _ = child.wait().await;
             if let Ok(mut state) = deployment.lock()
-                && state.active == version_name(&driver.executable)
+                && state.active_pid == Some(pid)
             {
                 state.active = None;
+                state.active_pid = None;
+                state.handshake_verified_at_ms = None;
                 state.draining = false;
             }
             driver.closed.send_replace(true);
         });
-        if let Ok(mut state) = self.deployment.lock() {
-            state.active = version_name(&executable);
-            state.draining = false;
-        }
         *slot = Some(c.clone());
         Ok(c)
     }
@@ -572,6 +650,52 @@ impl ResearchClient {
             .await?
             .product()
     }
+    async fn worker_features(&self) -> Result<WorkerFeatures, String> {
+        tokio::time::timeout(Duration::from_millis(REQUEST_TIMEOUT_MS), async {
+            let owner = self.connect().await?;
+            let features = owner
+                .features
+                .get_or_try_init(|| async {
+                    let capabilities = Self::send(&owner, ResearchCommand::Capabilities, None)
+                        .await?
+                        .product()?;
+                    Ok::<_, String>(WorkerFeatures {
+                        portfolio_scenario: capabilities["portfolio_scenario"] == true,
+                        signal_outbox: capabilities["strategy_signal_outbox"] == true,
+                    })
+                })
+                .await?;
+            Ok(*features)
+        })
+        .await
+        .map_err(|_| "WORKER_CAPABILITIES_TIMEOUT")?
+    }
+    pub async fn supports_strategy_signal_outbox(&self) -> Result<bool, String> {
+        Ok(self.worker_features().await?.signal_outbox)
+    }
+    pub async fn portfolio_scenario(
+        &self,
+        request: okx_ipc_contracts::trading::PortfolioScenarioRequest,
+    ) -> Result<Value, String> {
+        if !self.worker_features().await?.portfolio_scenario {
+            return Err("RESEARCH_PORTFOLIO_SCENARIO_UNSUPPORTED".into());
+        }
+        self.call(ResearchCommand::PortfolioScenario { request }, true)
+            .await?
+            .product()
+    }
+    pub async fn stage_strategy_signal(
+        &self,
+        request: StrategySignalInput,
+    ) -> Result<Option<StrategySignalProposal>, String> {
+        match self
+            .call(ResearchCommand::ProposeStrategySignal { request }, true)
+            .await?
+        {
+            WorkerReply::StrategyProposal(proposal) => Ok(proposal),
+            _ => Err("WORKER_REPLY_KIND_MISMATCH".into()),
+        }
+    }
     pub async fn diagnostic_job(&self, id: &str) -> Result<Value, String> {
         self.call(
             ResearchCommand::Explain {
@@ -625,6 +749,7 @@ mod transport_tests {
             permits: Semaphore::new(MAX_IN_FLIGHT),
             control_permits: Semaphore::new(CRITICAL_IN_FLIGHT),
             observation_permits: Semaphore::new(OBSERVATION_IN_FLIGHT),
+            features: OnceCell::new(),
             source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             stop: Notify::new(),
             closed,
@@ -681,6 +806,7 @@ mod transport_tests {
             permits: Semaphore::new(MAX_IN_FLIGHT),
             control_permits: Semaphore::new(CRITICAL_IN_FLIGHT),
             observation_permits: Semaphore::new(OBSERVATION_IN_FLIGHT),
+            features: OnceCell::new(),
             source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             stop: Notify::new(),
             closed,
@@ -743,6 +869,7 @@ mod transport_tests {
             permits: Semaphore::new(MAX_IN_FLIGHT),
             control_permits: Semaphore::new(CRITICAL_IN_FLIGHT),
             observation_permits: Semaphore::new(OBSERVATION_IN_FLIGHT),
+            features: OnceCell::new(),
             source_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             stop: Notify::new(),
             closed,

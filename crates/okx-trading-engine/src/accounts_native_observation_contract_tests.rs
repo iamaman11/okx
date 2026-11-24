@@ -9,9 +9,7 @@ async fn native_order_observation_requires_exact_plan_and_replays_terminal_once(
     let (market_stop, market_task, _socket, _public) = opened_market(&mut fixture).await;
     let account = fixture._account.clone();
     let at = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture
-        .feed
-        .expect_public_clock(envelope(json!([{"ts":at}])));
+    fixture.feed.expect_current_public_clock();
     record_fee(&fixture.feed, &at);
     record_leverage(&fixture.feed);
     record_leverage(&fixture.feed);
@@ -277,9 +275,10 @@ async fn native_stop_blocks_open_but_close_recovers_after_malformed_positions() 
     let (market_stop, market_task, socket, public) = opened_market(&mut fixture).await;
     let account = fixture._account.clone();
     let now = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture
-        .feed
-        .expect_public_clock(envelope(json!([{"ts":now}])));
+    // The signed public clock is observed at HTTP delivery, not when the
+    // test queues its finite transcript before a potentially slow Execute.
+    // The production five-second drift guard remains unchanged.
+    fixture.feed.expect_current_public_clock();
     record_fee(&fixture.feed, &now);
     record_leverage(&fixture.feed);
     record_leverage(&fixture.feed);
@@ -443,10 +442,7 @@ async fn native_stop_blocks_open_but_close_recovers_after_malformed_positions() 
     }
 
     close_market(&socket, &public).await;
-    let negative_clock = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture
-        .feed
-        .expect_public_clock(envelope(json!([{"ts":negative_clock}])));
+    fixture.feed.expect_current_public_clock();
     snapshot(&fixture.feed, "99.9995", "0.1");
     let removed = fixture.feed.advance_recorded_route(
         "fixture-observer-a",
@@ -519,10 +515,7 @@ async fn native_stop_blocks_open_but_close_recovers_after_malformed_positions() 
     })
     .await
     .expect("recovered Close market event reaches sequence 14");
-    let at = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture
-        .feed
-        .expect_public_clock(envelope(json!([{"ts":at}])));
+    fixture.feed.expect_current_public_clock();
     snapshot(&fixture.feed, "99.9995", "0.1");
     snapshot(&fixture.feed, "99.9995", "0.1");
     fixture.feed.expect_post(RecordedPost { access_key:"fixture-executor-a".into(),path:"/api/v5/trade/order".into(),

@@ -39,6 +39,31 @@ impl CheckedStrategySignal {
     }
 }
 
+/// One durable key preimage for both accepted Research proposals and the
+/// existing capability-negotiated legacy path. Diverging these keys would
+/// admit two SQL claims for the same strategy bar during a worker upgrade.
+pub(super) fn scoped_decision_key(
+    authenticated_account_key: &str,
+    instance: &StrategyInstance,
+    instrument: &str,
+    timeframe_ms: u64,
+    last_closed_ms: u64,
+) -> Result<String, &'static str> {
+    Ok(format!(
+        "bar_{}",
+        &digest(&(
+            authenticated_account_key,
+            &instance.instance_id,
+            &instance.definition_id,
+            &instance.definition_version,
+            &instance.parameters,
+            instrument,
+            timeframe_ms,
+            last_closed_ms,
+        ))?[..40]
+    ))
+}
+
 /// The input digest and last bar timestamp must be recomputed from a trusted
 /// observed source, not taken on Research's word. Until a separately accepted
 /// SQL migration, `source_digest` is precisely the legacy *input digest*:
@@ -88,19 +113,13 @@ pub fn check_strategy_signal(
     }
     // Preserve the existing decision-key preimage so previously persisted
     // claims remain idempotent across this admission-boundary refactor.
-    let key = format!(
-        "bar_{}",
-        &digest(&(
-            authenticated_account_key,
-            &instance.instance_id,
-            &instance.definition_id,
-            &instance.definition_version,
-            &instance.parameters,
-            instrument,
-            configuration.timeframe_ms,
-            last_closed_ms,
-        ))?[..40]
-    );
+    let key = scoped_decision_key(
+        authenticated_account_key,
+        instance,
+        instrument,
+        configuration.timeframe_ms,
+        last_closed_ms,
+    )?;
     Ok(CheckedStrategySignal {
         claim: StrategyDecisionClaimCommand {
             instance_id: instance.instance_id.clone(),
@@ -209,6 +228,40 @@ mod tests {
     }
 
     #[test]
+    fn legacy_and_checked_proposal_share_exact_durable_decision_identity() {
+        let installed = instance();
+        let configured = configuration();
+        let (verified, _) = check(&proposal(), &installed, &configured)
+            .unwrap()
+            .into_claim();
+        let legacy_key = scoped_decision_key(
+            "trusted-account-key",
+            &installed,
+            "BTC-USDT-SWAP",
+            configured.timeframe_ms,
+            120_000,
+        )
+        .unwrap();
+        assert_eq!(verified.decision_key, legacy_key);
+        // Golden key from the historical `(account, instance, definition,
+        // version, installed JSON, instrument, timeframe, bar)` preimage.
+        // Comparing both new paths alone would miss a simultaneous drift.
+        assert_eq!(legacy_key, "bar_601fc2b5879d41104f179658981d7f7f3f2f3df0");
+        assert_eq!(legacy_key.len(), 44);
+        assert_ne!(
+            legacy_key,
+            scoped_decision_key(
+                "different-account-key",
+                &installed,
+                "BTC-USDT-SWAP",
+                configured.timeframe_ms,
+                120_000,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
     fn historical_source_digest_matches_existing_live_strategy_preimage() {
         let bars = vec![(60_000_u64, 101.0_f64), (120_000_u64, 103.5_f64)];
         let legacy_digest = digest(&(120_000_u64, &bars)).unwrap();
@@ -281,6 +334,26 @@ mod tests {
         context.authenticated_account_key = "trusted-account-key";
         context.policy_revision = 0;
         assert!(check_strategy_signal(&proposal(), &context).is_err());
+    }
+
+    #[test]
+    fn research_proposal_cannot_override_engine_installed_configuration() {
+        let mut installed = instance();
+        let current = configuration();
+        // This is a valid alternate installed configuration; an untrusted
+        // proposal cannot keep claiming the previous runtime configuration.
+        installed.parameters =
+            r#"{"parameters":{"fast":3,"slow":4},"instruments":["BTC-USDT-SWAP"],"timeframe_ms":60000}"#.into();
+        assert_eq!(
+            check(&proposal(), &installed, &current).err(),
+            Some("STRATEGY_SIGNAL_IDENTITY_OR_SOURCE_MISMATCH")
+        );
+        installed = instance();
+        installed.parameters = "invalid JSON".into();
+        assert_eq!(
+            check(&proposal(), &installed, &current).err(),
+            Some("STRATEGY_SIGNAL_INSTALLED_CONFIG_INVALID")
+        );
     }
 
     #[test]

@@ -9,9 +9,7 @@ async fn risk_book_contract_native_unknown_intent_diagnostic_reads_sql_without_n
     let mut fixture = fixture().await;
     let (stop, task, _socket, _public) = super::filled_fixture::opened_market(&mut fixture).await;
     let now = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture
-        .feed
-        .expect_public_clock(envelope(json!([{"ts":now}])));
+    fixture.feed.expect_current_public_clock();
     record_fee(&fixture.feed, &now);
     record_leverage(&fixture.feed);
     record_leverage(&fixture.feed);

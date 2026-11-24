@@ -234,6 +234,9 @@ async fn inspect_venue(root: &Path, account: &str) -> AgentResult<serde_json::Va
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(tree) = option_env!("OKX_BUILD_SOURCE_TREE") {
+        okx_trading_engine::accounts::set_build_release(tree)?;
+    }
     // Process entrypoint only. stdout remains reserved for command responses.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)

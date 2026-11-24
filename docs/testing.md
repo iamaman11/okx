@@ -2,7 +2,7 @@
 
 Run `python3 scripts/check_p0.py --plan` from a checkout to list the scopes selected since the merge base with `origin/main`, including local edits and new files. Run `python3 scripts/check_p0.py` to execute them with the pinned Rust toolchain, Python 3.10+ and npm for MCP changes. Use `--base REF` for another base or `--expanded` for a cross-cutting semantic change. Keep the Cargo target directory between edits. The summary names the actual tests passed, elapsed Cargo/test time and rebuilt workspace targets.
 
-For an invalid plan, start with `cargo test --locked -p okx-domain-core --lib query_plan::tests::k7_invalid_operator_bounds_or_parameter_fail_closed -- --exact`. For a missing candle, use `cargo test --locked -p okx-domain-core --lib time_series::tests::c13_missing_internal_candle_not_healed_by_duplicate_or_unclosed -- --exact`. The selected kernel route also exercises the consuming worker. A mandatory test which is missing or ignored fails feedback.
+For an invalid plan, start with `cargo test --locked -p okx-strategy-core --lib query_plan::tests::k7_invalid_operator_bounds_or_parameter_fail_closed -- --exact`. For a missing candle, use `cargo test --locked -p okx-strategy-core --lib time_series::tests::c13_missing_internal_candle_not_healed_by_duplicate_or_unclosed -- --exact`. Both are Research-owned pure checks; the trading Engine does not compile their implementation. A mandatory test which is missing or ignored fails feedback.
 
 On a Draft PR the same selector runs on Linux as `draft-component-tests`. A change to shared configuration, the workflow or an unknown/deleted path expands the Linux checks. The editable loop does not start the Windows release matrix. Ready-for-review, protected checks, verified Research-only releases and exact-tree main reuse remain integration decisions; a successful Draft by itself cannot authorize reuse. Compare cache state, queue and job wall time separately.
 
@@ -42,7 +42,7 @@ Direct commands: `cargo test --locked -p okx-trading-engine planning_retry_categ
 
 Local fixed measurements (Windows x86_64/Intel family6 model60/8 logical CPUs, debug, test-threads4, uncontrolled OS cache): pure8-tests 1949.502/229.034/238.540ms; direct4-tests 682.035/586.592/593.192ms; quick15-tests 7524.105/7021.234/7274.215ms. Each includes child start/exit and fixture teardown, excludes build; fixed proptest seeds512001–512003 with128 cases/property. Exact test lists are preserved with issue evidence. Targets5/10/30s held for this local workload, not a GitHub4CPU comparison and not full financial acceptance. Before reducing its timeout, 3x100 warm explain reads measured p95=1016/1151/1049us; accepted warm target100ms and bounded read deadline250ms are recorded in #512 comment6952334260. Required runner-class/final-SHA measurements remain separate.
 
-Full acceptance remains `cargo run --locked -p okx-trading-engine --example native_finance_acceptance` on clean exact SHA. Current manifest requires the added property, typed retry/cause, logical deadline and source-reopen witnesses. Missing/zero/ignored/foreign evidence cannot become FULL_PASS. No quick subset or old distributed ALL26 result substitutes for the full property/physical/resource gate.
+Full acceptance remains `cargo run --locked -p okx-native-finance-check` on clean exact SHA. Current manifest requires the added property, typed retry/cause, logical deadline and source-reopen witnesses. Missing/zero/ignored/foreign evidence cannot become FULL_PASS. No quick subset or old distributed ALL26 result substitutes for the full property/physical/resource gate.
 
 ## #512 S0 — current production entrypoint map (working, not acceptance)
 
@@ -333,7 +333,7 @@ Descendants are explicitly excluded; Windows I/O includes pipes, not just disk.
 Unavailable or incomplete counters are explicit, never converted into zero.
 This does not claim complete crash-child/workerd-tree resource accounting.
 
-`cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --known --samples 20`
+`cargo run --locked -p okx-native-finance-check -- --known --samples 20`
 executes twenty fresh collections on the same clean HEAD/tree. Build time is
 reported separately for every sample; setup, child exit/readers and retained
 physical/transport checks stay inside runtime. Any witness failure stops the
@@ -458,7 +458,7 @@ Completed production paths in this slice:
 One Rust collector now maps RB01-RB16 to exact production witnesses, executes
 current Cargo artifacts, binds HEAD/tree, rejects ignored/missing/duplicate or
 foreign results, and separates build from setup-through-teardown time. Run:
-`cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --known`
+`cargo run --locked -p okx-native-finance-check -- --known`
 for partial evidence. Default full mode MUST exit BLOCKED while required rows
 remain MISSING. The manifest is the explicit executable gap list, not a claim
 that #510 is finished or that full acceptance takes seconds. The old distributed

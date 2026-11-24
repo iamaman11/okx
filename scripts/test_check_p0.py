@@ -4,11 +4,31 @@ from pathlib import Path
 import re
 
 from check_ci_native_scope import classify as ready_classify
-from check_p0 import (check_counts, measured_mcp_native_under_research,
+from check_p0 import (check_counts, local_component, measured_mcp_native_under_research,
                       measured_native_under_research, measured_t10, execute, select)
 
 
 class FeedbackTests(unittest.TestCase):
+    def test_local_component_repeats_only_the_requested_package(self):
+        with (patch("check_p0.git", side_effect=[b"abc\n", b" M changed\n"]),
+              patch("check_p0.report") as report,
+              patch("check_p0.tests") as run_tests,
+              patch("check_p0.time.monotonic", side_effect=[0, 10, 10, 12, 13, 17])):
+            local_component("strategy", 3, False)
+        self.assertEqual([call.args for call in run_tests.call_args_list],
+                         [("okx-strategy-core",)] * 3)
+        self.assertIn("dirty=true", report.call_args_list[0].args[0])
+        self.assertIn("median 3.00s", report.call_args_list[-1].args[0])
+
+    def test_local_plan_prints_exact_cargo_invocation(self):
+        with (patch("check_p0.git", side_effect=[b"abc\n", b""]),
+              patch("check_p0.report") as report):
+            local_component("engine", 1, True)
+        planned = report.call_args_list[0].args[0]
+        self.assertIn("--message-format=json-render-diagnostics", planned)
+        self.assertIn("-- --test-threads 2 --exact", planned)
+        self.assertIn("strategy_risk_budget_not_notional", planned)
+
     def test_ready_windows_runs_math_owner_tests_not_just_worker(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
         owner_commands = {
@@ -26,7 +46,7 @@ class FeedbackTests(unittest.TestCase):
             r"(?ms)^  trading_engine_acceptance_windows:\n(.*?)(?=^  [a-z_-]+:|\Z)", workflow
         )
         self.assertIsNotNone(acceptance)
-        self.assertIn("cargo run --locked -p okx-trading-engine --example native_finance_acceptance", acceptance.group(1))
+        self.assertIn("cargo run --locked -p okx-native-finance-check", acceptance.group(1))
 
     @staticmethod
     def source_witness():
@@ -53,7 +73,9 @@ class FeedbackTests(unittest.TestCase):
             "full_scale_execution": "not_attempted", "side_effects": "none"}}
 
     def test_kernel_and_boundaries(self):
-        self.assertEqual(select("M", "crates/okx-domain-core/src/time_series.rs"), {"kernel"})
+        self.assertEqual(select("M", "crates/okx-domain-core/src/time_series.rs"), {"expanded"})
+        self.assertEqual(select("M", "crates/okx-strategy-core/src/time_series.rs"),
+                         {"strategy", "research", "worker", "analysis"})
         self.assertEqual(select("M", "crates/okx-strategy-core/src/operators.rs"), {"strategy", "research", "worker", "analysis"})
         self.assertEqual(select("M", "crates/okx-domain-core/src/strategy_contract.rs"), {"expanded"})
         self.assertEqual(select("M", "crates/okx-research-service/src/analytics/jobs.rs"), {"worker"})
@@ -94,6 +116,7 @@ class FeedbackTests(unittest.TestCase):
         for path in (
             "crates/okx-host-controller/src/main.rs",
             "crates/okx-host-controller/src/lifecycle/activation.rs",
+            "crates/okx-host-protocol/src/lib.rs",
             "crates/okx-host-launcher/src/main.rs",
             "crates/okx-host-launcher/src/stdio_capture.rs",
         ):
@@ -109,6 +132,14 @@ class FeedbackTests(unittest.TestCase):
         ):
             self.assertNotEqual(select("M", path), {"host"})
 
+    def test_host_protocol_feedback_runs_bridge_without_engine_or_finance(self):
+        with patch("check_p0.tests", return_value="") as run_tests:
+            execute(select("M", "crates/okx-host-protocol/src/lib.rs"))
+        packages = [call.args[0] for call in run_tests.call_args_list]
+        self.assertEqual(packages, [
+            "okx-host-protocol", "okx-host-launcher", "okx-host-controller", "okx-bridge-mcp",
+        ])
+
     def test_expand_uncertain_impact(self):
         for path in ("Cargo.lock", "crates/okx-domain-core/Cargo.toml", "rust-toolchain.toml",
                      "crates/okx-research-service/build.rs", ".github/workflows/ci.yml", "unknown"):
@@ -119,7 +150,7 @@ class FeedbackTests(unittest.TestCase):
         def ready_scope(path):
             return ready_classify([[{"filename": path, "status": "modified"}]])
 
-        for primitive in ("operators.rs", "query_plan.rs", "stream.rs"):
+        for primitive in ("operators.rs", "query_plan.rs", "stream.rs", "time_series.rs"):
             path = f"crates/okx-strategy-core/src/{primitive}"
             self.assertEqual(ready_scope(path), "research")
             draft_scope = select("M", path)

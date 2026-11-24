@@ -1,7 +1,7 @@
 //! Terminal release frontier guards on the original fresh Native owner.
 use super::*;
 use crate::accounts::native_trade_contracts::{
-    filled_fixture::{INSTRUMENT, OPEN_ORDER, opened_market, with_fresh_recorded_clock},
+    filled_fixture::{INSTRUMENT, OPEN_ORDER, opened_market},
     fixture::{envelope, execute, fixture, record_fee, record_leverage},
 };
 use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
@@ -112,7 +112,7 @@ async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
     let mut f = fixture().await;
     let (market_stop, market_task, _socket, public) = opened_market(&mut f).await;
     let now = jiff::Timestamp::now().as_millisecond().to_string();
-    f.feed.expect_public_clock(envelope(json!([{"ts":now}])));
+    f.feed.expect_current_public_clock();
     record_fee(&f.feed, &now);
     record_leverage(&f.feed);
     record_leverage(&f.feed);
@@ -136,12 +136,11 @@ async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
     if let okx_ipc_contracts::trading::TradeRequest::Execute { expires_in_ms, .. } = &mut request {
         *expires_in_ms = 10_000;
     }
-    let sent = with_fresh_recorded_clock(
-        &f.feed,
-        f.trade.trade(&f.config.alias, &request, Some(&f.authority)),
-    )
-    .await
-    .unwrap();
+    let sent = f
+        .trade
+        .trade(&f.config.alias, &request, Some(&f.authority))
+        .await
+        .unwrap();
     assert_eq!(
         sent["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
         "{sent}"

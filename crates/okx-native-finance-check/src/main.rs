@@ -1,21 +1,13 @@
 //! Fresh contract-witness collector. Partial coverage never becomes full acceptance.
 //! Run with --known for existing witnesses, --list for the manifest, or no flags
 //! for full acceptance (blocked while any mandatory contract remains missing).
-#[path = "native_finance_acceptance/budgets.rs"]
 mod budgets;
-#[path = "native_finance_acceptance/manifest.rs"]
 mod manifest;
-#[path = "native_finance_acceptance/phase_timing.rs"]
 mod phase_timing;
-#[path = "native_finance_acceptance/process.rs"]
 mod process;
-#[path = "native_finance_acceptance/reporting.rs"]
 mod reporting;
-#[path = "native_finance_acceptance/repository_guards.rs"]
 mod repository_guards;
-#[path = "native_finance_acceptance/resources.rs"]
 mod resources;
-#[path = "native_finance_acceptance/verify.rs"]
 mod verify;
 use manifest::CONTRACTS;
 use process::{Output, command};
@@ -40,9 +32,9 @@ const PACKAGES: [&str; 5] = [
 ];
 // Keep the ordinary finance workload concurrent as in the measured baseline.
 // Real-clock fixtures can expire under unrelated concurrent OS/SQL work;
-// execute those witnesses in a separate, serial child without skipping any.
+// keep those witnesses in a separate child with bounded concurrency.
 const FINANCIAL_WITNESS_TEST_THREADS: u64 = 4;
-const CLOCK_SENSITIVE_TEST_THREADS: u64 = 1;
+const CLOCK_SENSITIVE_TEST_THREADS: u64 = 2;
 const CLOCK_SENSITIVE_AGENT_WITNESSES: [&str; 7] = [
     "accounts::native_trade_contracts::native_fee_correction::risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutable_revisions",
     "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_failed_stop_emergency_close_and_verified_remediation",
@@ -98,59 +90,6 @@ fn timing_distribution(mut times: Vec<u64>) -> Value {
         "p50_ms":(times.len()>=3).then(||times[(times.len()*50).div_ceil(100)-1]),
         "p95_ms":(times.len()>=20).then(||times[(times.len()*95).div_ceil(100)-1]),
         "p95_minimum_samples":20,"max_ms":times.last(),"build_excluded":true})
-}
-#[cfg(test)]
-mod timing_tests {
-    use super::*;
-    #[test]
-    fn timing_requires_samples_and_uses_nearest_rank() {
-        assert!(timing_distribution(vec![])["max_ms"].is_null());
-        assert!(timing_distribution(vec![42])["p95_ms"].is_null());
-        assert!(timing_distribution(vec![42])["p50_ms"].is_null());
-        assert_eq!(timing_distribution(vec![3, 1, 2])["p50_ms"], 2);
-        let r = timing_distribution((1..=20).rev().collect());
-        assert_eq!(r["p50_ms"], 10);
-        assert_eq!(r["p95_ms"], 19);
-        assert_eq!(r["max_ms"], 20);
-    }
-    #[test]
-    fn clock_sensitive_partition_is_exact_and_never_drops_a_witness() {
-        let mut names: BTreeSet<String> = CLOCK_SENSITIVE_AGENT_WITNESSES
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect();
-        names.insert("another-financial-witness".into());
-        let groups = libtest_groups("okx-trading-engine", &names).unwrap();
-        assert_eq!(groups.len(), 2);
-        assert_eq!((groups[0].label, groups[0].threads), ("parallel", 4));
-        assert_eq!((groups[1].label, groups[1].threads), ("clock_sensitive", 1));
-        assert!(groups[0].names.is_disjoint(&groups[1].names));
-        assert_eq!(
-            groups[0]
-                .names
-                .union(&groups[1].names)
-                .cloned()
-                .collect::<BTreeSet<_>>(),
-            names
-        );
-        names.remove(CLOCK_SENSITIVE_AGENT_WITNESSES[0]);
-        assert!(matches!(
-            libtest_groups("okx-trading-engine", &names),
-            Err("CLOCK_SENSITIVE_WITNESS_MISSING")
-        ));
-        let agent_names: BTreeSet<String> = selected()
-            .unwrap()
-            .into_iter()
-            .filter(|(package, _)| package == "okx-trading-engine")
-            .map(|(_, name)| name)
-            .collect();
-        let actual = libtest_groups("okx-trading-engine", &agent_names).unwrap();
-        assert_eq!(
-            actual[0].names.len() + actual[1].names.len(),
-            agent_names.len()
-        );
-        assert_eq!(actual[1].names.len(), CLOCK_SENSITIVE_AGENT_WITNESSES.len());
-    }
 }
 async fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let mut cmd = Command::new("git");
@@ -252,6 +191,22 @@ async fn execute(
     let mut observed = Witnesses::new();
     let runtime_start = Instant::now();
     let measurements = budgets::Measurements::new(report["run_id"].as_str().unwrap())?;
+    // Repository guards are read-only and already independently gated by CI.
+    // Run them on the same clean source tree while financial witnesses execute,
+    // retaining their individual exit status, outputs and resource receipts.
+    // Never overlap the two financial libtest groups with each other: the
+    // real-clock and SQLite acceptance witnesses still run in isolation.
+    let mut guard_task =
+        if wanted.contains(&("repository".into(), repository_guards::WITNESS.into())) {
+            let repo = repo.to_owned();
+            Some(tokio::spawn(async move {
+                let mut receipt = json!({"stages":[], "repository_guards":[], "failure":null});
+                let result = repository_guards::run(&repo, &mut receipt).await;
+                (result, receipt)
+            }))
+        } else {
+            None
+        };
     let execution: Result<()> = async {
         for package in PACKAGES {
             let names: BTreeSet<String> = wanted
@@ -329,9 +284,8 @@ async fn execute(
                     );
                 })?;
                 if group.label == "clock_sensitive" {
-                    // These four real-clock fixtures remain serial in exactly
-                    // one libtest child. Collect their fixed-name diagnostic
-                    // receipts only AFTER the complete libtest success proof;
+                    // Collect fixed-name diagnostic receipts from the isolated
+                    // clock-sensitive group only after the complete libtest proof;
                     // they never replace functional or resource witnesses.
                     let phases = phase_timing::collect(
                         measurements.path(),
@@ -354,11 +308,23 @@ async fn execute(
                 reporting::record_verified(report, &observed);
             }
         }
-        if wanted.contains(&("repository".into(), repository_guards::WITNESS.into())) {
+        if let Some(task) = guard_task.take() {
+            let (result, receipt) = task.await.map_err(|_| "REPOSITORY_GUARD_TASK_FAILED")?;
             if snapshot(repo).await? != *baseline {
                 return Err("GIT_TREE_CHANGED");
             }
-            repository_guards::run(repo, report).await?;
+            let guard_stages = receipt["stages"]
+                .as_array()
+                .ok_or("RESOURCE_STAGES_MISSING")?;
+            report["stages"]
+                .as_array_mut()
+                .unwrap()
+                .extend(guard_stages.iter().cloned());
+            report["repository_guards"] = receipt["repository_guards"].clone();
+            if !receipt["failure"].is_null() {
+                report["failure"] = receipt["failure"].clone();
+            }
+            result?;
             if snapshot(repo).await? != *baseline {
                 return Err("GIT_TREE_CHANGED");
             }
@@ -391,6 +357,12 @@ async fn execute(
         Ok(())
     }
     .await;
+    if execution.is_err()
+        && let Some(task) = guard_task.take()
+    {
+        task.abort();
+        let _ = task.await;
+    }
     let workload = if execution.is_ok() {
         measurements.finish(report["run_id"].as_str().unwrap())
     } else {
@@ -452,7 +424,7 @@ async fn main() {
     let mut report = json!({"schema":"okx.native-finance-acceptance/v1", "run_id":run_id,"mode":mode,
         "head":null,"tree":null,"git_clean":false,"build_ms":null,"runtime_setup_to_teardown_ms":null,
         "observed_witnesses":[],"repository_guards":[],"stages":[],"clock_sensitive_phase_timings":[],"contracts":[],"overall":"FAIL","timeout_guards_seconds":{"build":1800,"per_libtest_group":180},"test_threads":FINANCIAL_WITNESS_TEST_THREADS,"clock_sensitive_test_threads":CLOCK_SENSITIVE_TEST_THREADS,
-        "test_schedule":"parallel_4_then_clock_sensitive_1"});
+        "test_schedule":format!("parallel_{FINANCIAL_WITNESS_TEST_THREADS}_then_clock_sensitive_{CLOCK_SENSITIVE_TEST_THREADS}")});
     let result: Result<Witnesses> = async {
         collector_sources_match(repo)?;
         report["collector_source_binding"] = json!("VERIFIED");
@@ -521,11 +493,74 @@ async fn main() {
         report["error"] = json!(code);
         eprintln!("{code}");
     }
+    // The full JSON evidence remains the canonical report. These bounded,
+    // manifest-matched diagnostics are safe to show directly in CI logs when
+    // a libtest child fails; never print captured stdout/stderr verbatim.
+    for line in reporting::diagnostic_lines(&report) {
+        eprintln!("{line}");
+    }
     println!("{report}");
     if report["overall"] == "BLOCKED" {
         std::process::exit(2);
     }
     if report["overall"] == "FAIL" {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+    #[test]
+    fn timing_requires_samples_and_uses_nearest_rank() {
+        assert!(timing_distribution(vec![])["max_ms"].is_null());
+        assert!(timing_distribution(vec![42])["p95_ms"].is_null());
+        assert!(timing_distribution(vec![42])["p50_ms"].is_null());
+        assert_eq!(timing_distribution(vec![3, 1, 2])["p50_ms"], 2);
+        let r = timing_distribution((1..=20).rev().collect());
+        assert_eq!(r["p50_ms"], 10);
+        assert_eq!(r["p95_ms"], 19);
+        assert_eq!(r["max_ms"], 20);
+    }
+    #[test]
+    fn clock_sensitive_partition_is_exact_and_never_drops_a_witness() {
+        let mut names: BTreeSet<String> = CLOCK_SENSITIVE_AGENT_WITNESSES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        names.insert("another-financial-witness".into());
+        let groups = libtest_groups("okx-trading-engine", &names).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!((groups[0].label, groups[0].threads), ("parallel", 4));
+        assert_eq!(
+            (groups[1].label, groups[1].threads),
+            ("clock_sensitive", CLOCK_SENSITIVE_TEST_THREADS)
+        );
+        assert!(groups[0].names.is_disjoint(&groups[1].names));
+        assert_eq!(
+            groups[0]
+                .names
+                .union(&groups[1].names)
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            names
+        );
+        names.remove(CLOCK_SENSITIVE_AGENT_WITNESSES[0]);
+        assert!(matches!(
+            libtest_groups("okx-trading-engine", &names),
+            Err("CLOCK_SENSITIVE_WITNESS_MISSING")
+        ));
+        let agent_names: BTreeSet<String> = selected()
+            .unwrap()
+            .into_iter()
+            .filter(|(package, _)| package == "okx-trading-engine")
+            .map(|(_, name)| name)
+            .collect();
+        let actual = libtest_groups("okx-trading-engine", &agent_names).unwrap();
+        assert_eq!(
+            actual[0].names.len() + actual[1].names.len(),
+            agent_names.len()
+        );
+        assert_eq!(actual[1].names.len(), CLOCK_SENSITIVE_AGENT_WITNESSES.len());
     }
 }

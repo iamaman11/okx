@@ -181,6 +181,11 @@ cargo test --locked -p okx-trading-engine -p okx-host-controller -p okx-host-lau
 
 On Linux the same canonical CI also checks portable crates and the Worker
 contract; see `[.github/workflows/ci.yml](.github/workflows/ci.yml)`.
+For a local feedback loop, run `python -B scripts/check_p0.py --component strategy --repeat 4`
+from the repository root. The report lists the first run and the median of the
+three repeat runs. `--component engine` runs the focused recovery and risk
+budget checks. `--plan` prints the selected command. These timings cover the
+local code checks. Installation and activation timings come from the target host.
 No production credentials are needed for the local fixture/unit tests.
 Run public read-only diagnostics with the authenticated `diagnostics` MCP tool
 or the existing typed `status` request to Windows CONTROL issue #12; follow

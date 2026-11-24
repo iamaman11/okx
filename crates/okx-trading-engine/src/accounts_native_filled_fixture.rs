@@ -125,37 +125,6 @@ impl ClockPhaseTimings {
     }
 }
 
-/// A finite scripted external clock publisher for Native contract tests that
-/// may spend several seconds in the original SQL admission path on Windows.
-/// Only the one not-yet-delivered raw venue response can be refreshed; the
-/// production adapter still parses that response and enforces its unchanged
-/// five-second mutation-clock bound. No response is created on demand.
-pub(crate) async fn with_fresh_recorded_clock<F: std::future::Future>(
-    feed: &RecordedAccountHttp,
-    execution: F,
-) -> F::Output {
-    assert_eq!(feed.unconsumed_public_clock(), 1);
-    let mut publisher = tokio::time::interval(Duration::from_millis(250));
-    publisher.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut publisher_ticks = 0;
-    tokio::pin!(execution);
-    loop {
-        tokio::select! {
-            biased;
-            _ = publisher.tick(), if publisher_ticks < 80 => {
-                publisher_ticks += 1;
-                let now = jiff::Timestamp::now().as_millisecond().to_string();
-                // A delivered clock sample cannot be replaced or multiplied.
-                let _ = feed.refresh_unconsumed_public_clock(
-                    0,
-                    envelope(json!([{"ts": now}])),
-                );
-            }
-            outcome = &mut execution => return outcome,
-        }
-    }
-}
-
 /// Exercise the original production campaign-readiness refresh while a
 /// different account is deliberately held at an external HTTP boundary.
 /// `opened_market` stops bootstrap maintenance before installing finite market
@@ -177,13 +146,23 @@ pub(super) fn keep_captured_readiness_current(
                     if *stopped.borrow() { break; }
                 }
                 _ = tick.tick() => {
-                    service
+                    let result = service
                         .install_captured_empty_campaign_opening(
                             &authority,
                             Instant::now() + Duration::from_secs(4),
                         )
-                        .await
-                        .expect("original captured campaign readiness remains verifiable");
+                        .await;
+                    match result {
+                        Ok(()) => {}
+                        // The six original history cursors advance on a separate
+                        // two-second source turn. A sliding `now - 2s` cutoff
+                        // can briefly overtake that verified watermark; the
+                        // production owner correctly refuses to refresh it.
+                        // Retry on the next real capture, never fabricate a
+                        // cursor or relax the five-second readiness fence.
+                        Err(reason) if reason == "ENTRY_BASELINE_CAPTURE_PENDING" => {}
+                        Err(reason) => panic!("original captured campaign readiness failed: {reason}"),
+                    }
                 }
             }
         }
@@ -195,7 +174,8 @@ pub(super) async fn stop_captured_readiness(
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
 ) {
-    stop.send(true).unwrap();
+    // Preserve the original worker panic (if any), not a secondary SendError.
+    let _ = stop.send(true);
     tokio::time::timeout(Duration::from_secs(5), task)
         .await
         .unwrap()
@@ -222,32 +202,111 @@ pub(super) async fn opened_market_with_public_client(
     Arc<RecordedWsConnector>,
     okx_market_runtime::PublicWsHandle,
 ) {
-    let (stop, stopped) = watch::channel(false);
-    let service = fixture.trade.clone();
-    let maintenance = tokio::spawn(async move { service.run(stopped).await });
-    let mut observations = tokio::time::interval(Duration::from_millis(25));
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            observations.tick().await;
-            if fixture
-                .owner
-                .campaign_summary(fixture.campaign.clone())
-                .await
-                .unwrap()
-                .opening
-                .is_some()
-            {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("production maintenance opening before external fills");
-    stop.send(true).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), maintenance)
+    // `fixture()` has already connected the complete governed cohort and
+    // committed all six independently captured history frontiers. Invoke the
+    // exact strict policy application and captured-source opening producer
+    // used by recovery_turn; do not depend on its retry/backoff schedule as
+    // fixture synchronization. Neither path grants an unverified opening.
+    // No background maintenance producer races this SQL installation.
+    NativeFinanceRisk::from_owner(fixture.owner.clone())
+        .apply_governance(&fixture.authority)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("strict original finance policy applied before opening");
+    // The production financial SQL owner requires a nonempty *completed*
+    // opening interval: `through = now - 2s` must exceed the campaign's
+    // durable inception. The old background scheduler incidentally supplied
+    // this delay, but an immediate explicit call does not. Wait only for the
+    // remaining real time, measured from the owner's original receipt, and
+    // retain the unchanged SQL window validation.
+    let started_at_ms = fixture
+        .owner
+        .campaign_summary(fixture.campaign.clone())
+        .await
+        .expect("original finance owner returns durable campaign inception")
+        .campaign_started_at_ms
+        .expect("strict governance has established campaign inception");
+    let observed_ms = u64::try_from(jiff::Timestamp::now().as_millisecond())
+        .expect("positive native fixture wall-clock millis");
+    let earliest_opening_ms = started_at_ms.saturating_add(2_050);
+    if earliest_opening_ms > observed_ms {
+        tokio::time::sleep(Duration::from_millis(earliest_opening_ms - observed_ms)).await;
+    }
+    // Account capture is independently scheduled every two seconds. Wait for
+    // that *production* source owner to advance all six durable frontiers
+    // through the opening cutoff. This synchronizes to actual source evidence
+    // rather than racing the scheduler or manufacturing SQL readiness.
+    let opening_until = Instant::now() + Duration::from_secs(8);
+    loop {
+        tokio::time::timeout_at(opening_until.into(), async {
+            loop {
+                let through_ms = jiff::Timestamp::now()
+                    .as_millisecond()
+                    .saturating_sub(1_900);
+                let state = fixture
+                    ._account
+                    .execution
+                    .store
+                    .source_capture_state(Instant::now() + Duration::from_secs(2))
+                    .await
+                    .expect("original account source state remains readable");
+                let complete = [
+                    state.cursors.spot.as_ref(),
+                    state.cursors.margin.as_ref(),
+                    state.cursors.swap.as_ref(),
+                    state.cursors.futures.as_ref(),
+                    state.cursors.options.as_ref(),
+                    state.cursors.bills.as_ref(),
+                ]
+                .into_iter()
+                .all(|cursor| {
+                    cursor.is_some_and(|cursor| {
+                        cursor.generation > 0
+                            && cursor.cursor.is_empty()
+                            && cursor.coverage_gaps.is_empty()
+                            && cursor.watermark >= through_ms
+                    })
+                });
+                if complete {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("six real captured source frontiers cover the opening interval");
+        match fixture
+            .trade
+            .install_captured_empty_campaign_opening(
+                &fixture.authority,
+                Instant::now() + Duration::from_secs(4),
+            )
+            .await
+        {
+            Ok(()) => break,
+            // A read of complete cursors is not atomic with the production
+            // opening call: `through = now - 2s` advances meanwhile. Only
+            // this precise capture-lag result can retry, using the next
+            // independently published SQL frontiers and the original owner.
+            Err(reason) if reason == "ENTRY_BASELINE_CAPTURE_PENDING" => {
+                assert!(
+                    Instant::now() < opening_until,
+                    "original source capture never caught up to the opening cutoff"
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(reason) => panic!("production captured-source opening failed: {reason}"),
+        }
+    }
+    assert!(
+        fixture
+            .owner
+            .campaign_summary(fixture.campaign.clone())
+            .await
+            .expect("finance owner accepts captured opening readback")
+            .opening
+            .is_some(),
+        "production opening must be durably visible in the original finance owner"
+    );
     let (market, public, socket) = raw_market_with_public_client(client);
     let mut updates = public.subscribe_market_updates();
     let (stop, stopped) = watch::channel(false);
@@ -554,9 +613,7 @@ pub(super) fn cleanup(feed: &RecordedAccountHttp, stop_client: &str) {
         }
     }
     feed.expect_causal_algo_inventory(STOP, before, after);
-    feed.expect_public_clock(envelope(
-        json!([{"ts":jiff::Timestamp::now().as_millisecond().to_string()}]),
-    ));
+    feed.expect_current_public_clock();
     feed.expect_post(RecordedPost {
         access_key: "fixture-executor-a".into(),
         path: "/api/v5/trade/cancel-algos".into(),

@@ -457,6 +457,8 @@ impl AnalyticsService {
         ]);
         let mut capabilities = json!({"schema":"okx.market.capabilities/v1",
             "route_owner":"okx-research-service","compute_owner":"okx-domain-core",
+            "portfolio_scenario":true,
+            "strategy_signal_outbox":true,
             "availability_policy":"actual_data_and_rights_checked_per_request",
             "effects":{"read_sources":true,"write_research_jobs":true,
                 "write_finance":false,"write_governance":false,"venue_post":false},

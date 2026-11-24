@@ -341,9 +341,7 @@ fn adjustment(feed: &RecordedAccountHttp, bill: &str, at: i64, fee: &str) {
 
 async fn create(fixture: &NativeFixture) -> String {
     let now = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture
-        .feed
-        .expect_public_clock(envelope(json!([{"ts":now}])));
+    fixture.feed.expect_current_public_clock();
     record_fee(&fixture.feed, &now);
     record_leverage(&fixture.feed);
     record_leverage(&fixture.feed);

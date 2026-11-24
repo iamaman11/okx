@@ -21,6 +21,41 @@ are Cargo dependencies, Rust visibility, the IPC enums, and the SQL owners.
 | Pure calculations | Existing `okx-analysis` and `okx-research` libraries |
 | Verified component staging | Existing CONTROL `artifact::research_component` |
 
+## Independent Edge lane (prepared, not yet activated)
+
+The Research Service also has a **Research-owned** outbound WebSocket adapter
+(`edge_runtime.rs`) behind the explicit `--edge-runtime` mode. It connects
+with `hello_research`, the `research` runtime profile and a distinct bearer;
+it binds requests and replies to an authenticated Edge session generation.
+It does not import Engine's Cloudflare transport, private account credentials,
+financial storage or exchange order-sending capability. This mode uses the
+already implemented `IndependentOkxPublicSource` rather than Engine's public
+market callback, and bounds frame size and concurrent work. The existing
+Engine-hosted IPC mode remains unchanged.
+
+Supported direct operations: Research calculations/jobs, explicit-instrument
+Market requests, MarketCapabilities, PortfolioScenario, and read-only
+Research job diagnostics. FindInstruments, MarketOverview and
+MarketMicrostructure depend on public cache/reference behavior still owned by
+Engine; the independent endpoint currently returns a typed unavailable error
+for these, **not** fabricated data or a financial Engine fallback. A Research
+deployment diagnostic also returns `RESEARCH_DEPLOYMENT_NOT_SUPERVISED` until
+CONTROL can attest the standalone process instead of reusing the old Engine
+child's deployment snapshot. A Research socket refuses trading, account
+selection, strategy mutation, risk commands
+and policy snapshot frames. Edge's internal `target_owner` routing marker is
+removed before constructing the strict native Rust request.
+
+The mode requires explicit Research-scoped WSS configuration and a separate
+credential; production CONTROL credential provisioning and supervision do not
+exist yet. Do not enable Edge's `RESEARCH_RUNTIME_TOKEN_SHA256` merely because
+the executable can connect: a configured but offline Research owner correctly
+fails closed. In particular, `--edge-runtime` and Engine's current child
+cannot both own the same scoped Research SQLite root. Actual cutover requires
+a single CONTROL-owned Research process, verified PID/SHA and Windows Job,
+restart/reboot tests, token provisioning/rotation, and physical rollback
+evidence. Until then the installed product still uses the Engine child.
+
 Agent has no production dependency on the research implementation or worker.
 Worker has no production dependency on Agent, execution, API credentials, or
 financial storage. Its test-only HTTP fixtures do not authorize those edges.
@@ -32,22 +67,31 @@ host source owner (`ResearchClient::installed` delegates to
 access an account, reserve money, or place orders. **This is an existing
 runtime dependency, not the desired independent Research boundary.**
 
-The current live strategy turn in
-`okx-trading-engine/src/trade_service/strategies.rs` loads closed prices from
-the Engine's live source and awaits `ResearchClient::evaluate_signal` before
-claiming a decision in financial SQLite. Thus the Engine does invoke Research
-for **new strategy decisions**. This must not be mistaken for an independent
-trading strategy runtime, even though Research is a separate executable and
-is not a production Cargo dependency of the Engine. The existing financial
-writer, RiskBook, reconciliation and protection remain Engine-owned.
+The Research executable can also serve the existing framed commands with
+`--independent-source --root <research-dir> --scope <scope>`. Its local
+provider reads public OKX candles, recent and historical trades, SWAP
+reference data, tickers, historical funding and open interest. It rejects parent source replies
+in that mode. Use `--market-request --root <research-dir> --scope <scope>`
+to read one JSON `MarketRequest` from stdin and print the result. Explicit
+instruments are required. These requests use the same analytics, coverage
+and artifact code as hosted requests. Engine still resolves instrument
+universe queries on its existing hosted route.
 
-The target split is: Research owns public data, numerical strategy evaluation
-and a durable proposed-signal outbox; Engine owns the authenticated, versioned
-signal inbox, policy/admission, financial SQLite and every venue mutation.
-`EvaluateSignal` must leave the synchronous trading turn only after a tested
-replacement exists. A proposed signal never constitutes risk authorization or
-a one-time venue-send right. Research failure must block unjustified new
-strategy risk without blocking manual trade commands or ongoing protection.
+The live strategy turn in `okx-trading-engine/src/trade_service/strategies.rs`
+captures closed prices from Engine's public source. With a compatible worker
+it stages the captured input in Research and checks for a committed proposal
+on a later strategy turn. Research evaluates the signal in the background
+and commits it to its SQLite outbox before returning it. A worker restart
+keeps committed proposals until expiry and drops pending computations.
+Workers with the previous protocol continue to use `EvaluateSignal`.
+
+Engine checks the proposal against its installed strategy, its own digest
+of the exact input, the policy revision and current time. The existing
+financial SQLite ledger serializes duplicate claims. RiskBook and Engine
+retain all admission and venue mutation authority. Manual trade commands
+and reconciliation continue independently of the strategy lane. A fully
+autonomous Research scheduler would also need to receive strategy
+configuration and capture its own input independently of Engine.
 
 ## Identity and recovery
 
@@ -85,10 +129,28 @@ the candidate, drains admissions, waits for old jobs, commands, and public-sourc
 handlers, then closes the old process before starting a verified replacement.
 Active and installed versions are separate observations. Invalid staging never
 authorizes a new executable or restarts the financial Engine.
+If CONTROL changes or damages the candidate after the old child has entered
+Drain, the Engine must not return that permanently drained connection as healthy.
+It revalidates the previous content-addressed Research image and restarts that
+previous child; if even that image is invalid, Research fails closed while the
+financial Engine continues. An aborted handoff can change the Research PID.
 
-`deployment_status` reads only a cached projection. `diagnostic_job` does not
-start a child, refresh market sources, enqueue research, or recover finance.
-A diagnostic timeout does not terminate the worker.
+Call `diagnostics.explain` with `view: "research"` and `reference: "deployment"` to read
+the Engine PID and its cached deployment observation. The Research PID, active
+SHA-256 and handshake time describe the child that passed the IPC handshake.
+`observed_at_ms` is the Engine clock at which this cached observation was read,
+not the time the child was activated. Both timestamps are needed to prove that
+before/after readbacks bracket a CONTROL change.
+The installed SHA describes the candidate observed during the last connection
+check. It can differ from the active SHA while the old child drains. To drive
+an on-demand activation, call `research.capabilities`, then read the deployment
+observation again. Check the returned active SHA and PID after both update and
+rollback. When routed through the updated MCP Worker, the same response includes
+the Edge version and release tree alongside the correlated Engine response.
+Use CONTROL for executable and Launcher verification on Windows.
+
+Supplying a job `reference` to the same view reads that job. Neither diagnostic
+starts a child, refreshes sources, enqueues research, or recovers finance.
 
 Account diagnostics read NAV completeness, raw coverage, source time and checked
 time from one scoped financial snapshot, with a 250ms read deadline. They report

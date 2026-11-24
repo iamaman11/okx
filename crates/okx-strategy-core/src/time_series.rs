@@ -1,5 +1,6 @@
 //! K7 canonical half-open reporting ranges and exact closed-bar coverage.
 //! Pure calculations, no venue, SQL, clocks, transport or implicit fill-forward.
+//! Research-owned; never compiled as part of the trading Engine domain kernel.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 

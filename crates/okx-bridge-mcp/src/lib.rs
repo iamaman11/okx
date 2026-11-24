@@ -2,10 +2,12 @@ use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use okx_github::{GitHubClient, IssueCommentCursor, OWNER_USER_ID, REPOSITORY_ID};
-use okx_ipc_contracts::{
-    AGENT_REQUEST_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponse,
+use okx_host_protocol::{
     HOST_CONTROL_REQUEST_SCHEMA_V1, HostControlOperation, HostControlRequest, HostControlResult,
-    InstrumentTypeFilter, MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection, MailboxEnvelope,
+};
+use okx_ipc_contracts::{
+    AGENT_REQUEST_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponse, InstrumentTypeFilter,
+    MAILBOX_ENVELOPE_SCHEMA_V1, MailboxDirection, MailboxEnvelope,
     crypto::{decrypt, derive_directional_key, encrypt, public_key_from_private, shared_secret},
 };
 use serde::{Deserialize, Serialize};

@@ -1,6 +1,6 @@
 'use strict';
 const path = require('node:path');
-const {verify} = require('./ci-cargo-closure-proof.cjs');
+const {verify, verifyEngineInputs} = require('./ci-cargo-closure-proof.cjs');
 // These are the CI-only changes introduced *after* the last fully tested
 // Windows binary baseline. They cannot affect Rust production crate output.
 // They still trigger full CI if changed in the current PR (file classifier).
@@ -13,6 +13,25 @@ const baselineCiOnly = new Set([
 ]);
 const safe = file => typeof file === 'string' && file.length <= 512 && !file.startsWith('/') && !file.includes('\\') && file.split('/').every(p => /^[A-Za-z0-9_.-]+$/.test(p) && p !== '.' && p !== '..');
 const nonNative = file => file === 'README.md' || (file.startsWith('docs/') && file.endsWith('.md')) || file.startsWith('cloudflare/okx-mcp/') || baselineCiOnly.has(file);
+const researchSource = file => /^crates\/okx-(analysis|research-service|research|strategy-core)\/src\/.+\.rs$/.test(file);
+const hostSource = file => /^crates\/okx-host-(controller|launcher|protocol)\/src\/.+\.rs$/.test(file);
+
+function checkMixed(baseMetadata, metadata, changed) {
+  if (!Array.isArray(changed) || changed.length > 500 ||
+      new Set(changed).size !== changed.length || !changed.every(safe) ||
+      !changed.some(researchSource) || !changed.some(hostSource))
+    throw Error('INVALID_MIXED_OWNER_DIFF');
+  if (!changed.every(file => researchSource(file) || hostSource(file) || nonNative(file)))
+    throw Error('OUTSIDE_MIXED_OWNER_SCOPE');
+  const protectedDirs = verifyEngineInputs(baseMetadata, metadata, changed);
+  return {
+    scope: 'research-host',
+    protected_workspace_dirs: protectedDirs,
+    changed_files: changed.length,
+    engine_windows_cargo_closure_identical: true,
+  };
+}
+
 function check(metadata, changed, cargoProof = null) {
   if (!metadata.resolve || !Array.isArray(metadata.packages) || !Array.isArray(metadata.resolve.nodes)) throw Error('METADATA_RESOLUTION_REQUIRED');
   const packages = new Map(metadata.packages.map(p => [p.id, p]));
@@ -36,7 +55,7 @@ function check(metadata, changed, cargoProof = null) {
     return relative + '/';
   });
   if (!Array.isArray(changed) || !changed.length || changed.length > 500) throw Error('EMPTY_OR_UNBOUNDED_RESEARCH_DIFF');
-  const manifests = new Set(['crates/okx-research/Cargo.toml',
+  const manifests = new Set(['crates/okx-research/Cargo.toml', 'crates/okx-analysis/Cargo.toml',
     'crates/okx-research-service/Cargo.toml', 'crates/okx-strategy-core/Cargo.toml']);
   const dependencyChange = changed.some(file => file === 'Cargo.lock' || file.endsWith('/Cargo.toml'));
   if (dependencyChange && (!cargoProof || cargoProof.schema !== 'okx.560.windows-cargo-closure-proof/v1' ||
@@ -52,7 +71,7 @@ function check(metadata, changed, cargoProof = null) {
     if (manifests.has(file) && cargoProof) { touchedResearch = true; continue; }
     if (file === 'Cargo.lock' || file.endsWith('/Cargo.toml') || file === 'Cargo.toml' || file.startsWith('.cargo/')) throw Error('DEPENDENCY_CONFIGURATION_CHANGED');
     if (protectedDirs.some(dir => file.startsWith(dir))) throw Error('PRODUCTION_DEPENDENCY_CHANGED');
-    if (file.startsWith('crates/okx-research-service/') || file.startsWith('crates/okx-research/') || file.startsWith('crates/okx-strategy-core/')) {
+    if (file.startsWith('crates/okx-analysis/') || file.startsWith('crates/okx-research-service/') || file.startsWith('crates/okx-research/') || file.startsWith('crates/okx-strategy-core/')) {
       if (file.endsWith('/build.rs')) throw Error('RESEARCH_BUILD_SCRIPT_CHANGED');
       touchedResearch = true;
       continue;
@@ -65,13 +84,16 @@ function check(metadata, changed, cargoProof = null) {
 if (require.main === module) {
   const fs = require('node:fs');
   try {
-    if (![4, 5].includes(process.argv.length)) throw Error('RESEARCH_SCOPE_ARGUMENTS_INVALID');
+    if (![4, 5, 6].includes(process.argv.length)) throw Error('RESEARCH_SCOPE_ARGUMENTS_INVALID');
     const metadata = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
     const changed = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
-    const proof = process.argv[4] ? verify(JSON.parse(fs.readFileSync(process.argv[4], 'utf8')),
-      metadata, changed, 'research') : null;
-    process.stdout.write(JSON.stringify(check(metadata, changed, proof)) + '\n');
+    const baseline = process.argv[4] ? JSON.parse(fs.readFileSync(process.argv[4], 'utf8')) : null;
+    if (process.argv[5] !== undefined && process.argv[5] !== '--mixed-host')
+      throw Error('RESEARCH_SCOPE_ARGUMENTS_INVALID');
+    const result = process.argv[5] === '--mixed-host' ? checkMixed(baseline, metadata, changed) :
+      check(metadata, changed, baseline ? verify(baseline, metadata, changed, 'research') : null);
+    process.stdout.write(JSON.stringify(result) + '\n');
   }
   catch (e) { console.error(e.message); process.exitCode = 1; }
 }
-module.exports = { check };
+module.exports = { check, checkMixed };
