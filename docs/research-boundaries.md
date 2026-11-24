@@ -58,8 +58,13 @@ The standalone mode now has an **opt-in CONTROL code path**:
   Inside that process the Worker installs and reads back a nested Windows Job
   with a **4 GiB memory limit and 50% CPU hard cap**. Both are fail-closed:
   inability to enforce either limit prevents Research startup. The cap applies
-  to the Worker, not Finance/Engine, so heavy grids cannot consume all available
-  CPU cycles; it intentionally trades Research throughput for trading headroom.
+  to each Worker, not Finance/Engine. It intentionally trades Research throughput
+  for trading headroom, but **is not an aggregate cap**: legacy Engine-hosted
+  Research and standalone CONTROL Research may coexist, each with its own 50%
+  quota. A future cutover must prevent unintended overlap or establish one
+  shared CPU budget before claiming guaranteed trading CPU headroom. On Windows
+  Remote Desktop Services with DFSS, CPU rate control may be unavailable; the
+  fail-closed policy requires explicit physical acceptance there.
 - `StopResearch` requires the active worker SHA and matching process generation;
   status/desired state live in CONTROL's own `research-state.json` rather than
   Engine's `engine-state.pb`. The standalone SQLite catalog is rooted at

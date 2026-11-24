@@ -1,12 +1,14 @@
 //! Native process isolation for Research only. Admission permits still govern
 //! concurrent jobs; the Windows Job Object independently fences Research memory
-//! and CPU so expensive grids cannot monopolize the financial owner's cores.
+//! and CPU so one expensive Worker cannot monopolize the host's cores.
 //! A commit fence is NOT a sampled RSS measurement or a per-job reservation.
+//! Multiple Research Workers get separate CPU quotas: this is not a global
+//! aggregate cap across legacy Engine-owned and standalone CONTROL-owned Jobs.
 
 pub const RESEARCH_MEMORY_LIMIT_MIB: u32 = 4096;
 /// Windows Job CPU rates are units of 1/10,000 of the host's processor cycles.
-/// A Research process tree receives at most half, leaving the other half
-/// available to the Engine, CONTROL and the operating system under heavy grids.
+/// A single Research process tree receives at most half, leaving capacity
+/// for Engine, CONTROL and the OS. Multiple Workers do not share this quota.
 pub const RESEARCH_CPU_RATE_BASIS_POINTS: u32 = 5_000;
 
 pub fn limit_bytes() -> u64 {
@@ -25,10 +27,10 @@ impl JobMemoryGuard {
     pub fn enforce() -> Result<Self, String> {
         use std::{ffi::c_void, mem::size_of};
         use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
-            JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
-            JOB_OBJECT_LIMIT_JOB_MEMORY, JobObjectCpuRateControlInformation,
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
+            JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_JOB_MEMORY,
+            JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectCpuRateControlInformation,
             JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
         };
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
