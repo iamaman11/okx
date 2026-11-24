@@ -531,11 +531,11 @@ impl ResearchSupervisor {
     pub fn reconcile(&mut self) -> HostControlResult<()> {
         let running = self.running()?;
         if !self.desired.desired_running {
-            if running || self.job.is_some() {
-                if let Err(error) = self.terminate_owned() {
-                    self.last_error = Some("RESEARCH_TERMINATION_UNCONFIRMED".into());
-                    return Err(error);
-                }
+            if (running || self.job.is_some())
+                && let Err(error) = self.terminate_owned()
+            {
+                self.last_error = Some("RESEARCH_TERMINATION_UNCONFIRMED".into());
+                return Err(error);
             }
             return Ok(());
         }
@@ -739,7 +739,7 @@ mod tests {
         assert!(owner.child.is_none());
         assert!(owner.job.is_none());
         assert_eq!(owner.desired.process_generation, 1);
-        assert_eq!(owner.store.read().unwrap().desired_running, false);
+        assert!(!owner.store.read().unwrap().desired_running);
         drop(owner);
         fs::remove_dir_all(root).unwrap();
     }
