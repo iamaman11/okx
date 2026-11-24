@@ -116,4 +116,38 @@ if (process.argv[2]) {
     assert.equal(verify(actual, actual, diff, scope).protected_closures_identical, true);
   }
   console.log('CI_REAL_CARGO_GRAPH_SCHEMA=PASS');
+
+  // Exercise the *actual resolved workspace graph*, not only a synthetic
+  // graph. A manifest may change the owner-specific metadata while leaving
+  // every protected consumer closure intact. Conversely, even a declaration
+  // change in a shared dependency must force the full financial matrix.
+  const declaredFeature = (meta, name) => {
+    const owners = meta.packages.filter(pkg => pkg.source == null && pkg.name === name);
+    assert.equal(owners.length, 1, `CI_REAL_CARGO_OWNER_MISSING:${name}`);
+    assert.ok(owners[0].features && typeof owners[0].features === 'object');
+    owners[0].features.ci_560_closure_test = [];
+  };
+  for (const [scope, owner, diff] of [
+    ['research', 'okx-research-service', files('crates/okx-research-service/Cargo.toml')],
+    ['host-controller', 'okx-host-controller', files('crates/okx-host-controller/Cargo.toml')],
+    ['host-launcher', 'okx-host-launcher', files('crates/okx-host-launcher/Cargo.toml')],
+  ]) {
+    const ownerOnly = structuredClone(actual);
+    declaredFeature(ownerOnly, owner);
+    assert.equal(verify(actual, ownerOnly, diff, scope).protected_closures_identical, true,
+      `CI_REAL_CARGO_OWNER_SCOPING_FAILED:${scope}`);
+  }
+  for (const shared of ['okx-trading-engine', 'okx-ipc-contracts']) {
+    const changedShared = structuredClone(actual);
+    declaredFeature(changedShared, shared);
+    for (const [scope, diff] of [
+      ['research', files('crates/okx-research-service/Cargo.toml', 'Cargo.lock')],
+      ['host-controller', files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock')],
+    ]) {
+      assert.throws(() => verify(actual, changedShared, diff, scope),
+        /PROTECTED_WINDOWS_CARGO_CLOSURE_CHANGED/,
+        `CI_REAL_CARGO_SHARED_CHANGE_MUST_RUN_NATIVE:${shared}:${scope}`);
+    }
+  }
+  console.log('CI_REAL_CARGO_CLOSURE_POSITIVE_NEGATIVE_CONTROLS=PASS');
 }

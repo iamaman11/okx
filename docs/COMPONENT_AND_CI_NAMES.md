@@ -71,7 +71,8 @@ means proven reusable binary bytes, not a runtime library. Existing
 | --- | --- |
 | `classify` | Protected fail-closed changed-file boundary plus before/after Windows Cargo closure proof for narrow Research/Host manifest candidates |
 | `draft-component-tests` | Scoped feedback for Draft pull requests |
-| `trading-engine-acceptance-windows` | Mandatory Trading Engine, financial SQLite, regression and resource-budget acceptance |
+| `trading-engine-acceptance-windows` | Mandatory complete financial collector/resource-budget acceptance and isolated Engine, SQLite, clock/process recovery tests |
+| `trading-engine-regressions-windows` | Parallel independent Engine/Execution/Host/Research regressions, Windows Clippy and K9; never substitutes for financial acceptance |
 | `trading-engine-build-windows` | Parallel fresh four-component Windows release build and artifact on full Ready PRs; manual accepted-`main` release cache seed |
 | `trusted-main-windows-test-cache-prime` | Optional manual compile-only test/collector cache seed from accepted `main`; no financial acceptance or deployment |
 | `trading-safety-acceptance-windows` | Independent mandatory B1 financial safety checks |
@@ -88,7 +89,7 @@ The required check **display names** `classify`, `windows-native` and `linux-cor
 are retained for branch protection and accepted-CI reuse. `classify` is the
 actual `component_impact` job, without a redundant alias; the platform
 aggregators keep implementation IDs `required_windows` and `required_linux`.
-They require both the finance acceptance and independent release build on the
+They require finance acceptance, independent regressions, B1 and release build on the
 full Native route; on reuse they verify the accepted exact tree instead. They
 never claim that skipped financial tests ran. The old branch-only Draft jobs for closed
 issues #510 and #512 have been removed; normal Draft owner tests remain.

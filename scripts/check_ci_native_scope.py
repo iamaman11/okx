@@ -166,8 +166,10 @@ def _self_test() -> None:
     assert 'scope="${{ steps.proven_scope.outputs.scope }}"' in workflow
     assert "--filter-platform x86_64-pc-windows-msvc" in workflow
     windows = workflow.split("\n  required_windows:\n", 1)[1].split("\n  trading_safety_acceptance_windows:\n", 1)[0]
-    assert "needs: [component_impact, trading_engine_acceptance_windows, trading_engine_build_windows, trading_safety_acceptance_windows," in windows
+    assert "needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows, trading_safety_acceptance_windows," in windows
     assert 'test "${{ needs.trading_safety_acceptance_windows.result }}" = "success"' in windows
+    assert 'test "${{ needs.trading_engine_regressions_windows.result }}" = "success"' in windows
+    assert windows.count('test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"') == 4
     assert 'test "${{ needs.trading_engine_build_windows.result }}" = "success"' in windows
     assert windows.count('test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"') == 4
     host = workflow.split("\n  host_controller_launcher_checks:\n", 1)[1].split("\n  trading_engine_acceptance_windows:\n", 1)[0]
