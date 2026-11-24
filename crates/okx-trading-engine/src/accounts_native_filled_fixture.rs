@@ -226,7 +226,9 @@ pub(super) async fn opened_market_with_public_client(
     // rather than racing the scheduler or manufacturing SQL readiness.
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let through_ms = jiff::Timestamp::now().as_millisecond().saturating_sub(1_900);
+            let through_ms = jiff::Timestamp::now()
+                .as_millisecond()
+                .saturating_sub(1_900);
             let state = fixture
                 ._account
                 .execution
