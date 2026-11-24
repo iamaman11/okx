@@ -1,6 +1,6 @@
 //! Public Native Execute: exact ACK classification and concurrent no-send.
 //! Reuses the original fresh owner, parser, source capture and public caller.
-use super::filled_fixture::opened_market;
+use super::filled_fixture::{opened_market, with_fresh_recorded_clock};
 use super::*;
 
 fn expect_create(fixture: &NativeFixture, envelope_code: &str, ack: Value) {
@@ -71,11 +71,14 @@ async fn bound_rejection(envelope_code: &str) {
         json!([{"ordId":"","clOrdId":"__REQUEST_CL_ORD_ID__",
         "sCode":"51008","sMsg":"Insufficient balance"}]),
     );
-    let reply = fixture
-        .trade
-        .trade(&fixture.config.alias, &request(), Some(&fixture.authority))
-        .await
-        .expect("an exact venue rejection is a known outcome");
+    let reply = with_fresh_recorded_clock(
+        &fixture.feed,
+        fixture
+            .trade
+            .trade(&fixture.config.alias, &request(), Some(&fixture.authority)),
+    )
+    .await
+    .expect("an exact venue rejection is a known outcome");
     assert_eq!(reply["data"]["state"], "REJECTED", "{reply}");
     assert_eq!(
         reply["data"]["exchange_code"], "51008",
@@ -117,11 +120,14 @@ async fn risk_book_contract_native_execute_foreign_rejection_remains_unknown() {
         .market_boundary
         .foreign_create_ack
         .store(true, Ordering::SeqCst);
-    let reply = fixture
-        .trade
-        .trade(&fixture.config.alias, &request(), Some(&fixture.authority))
-        .await
-        .unwrap();
+    let reply = with_fresh_recorded_clock(
+        &fixture.feed,
+        fixture
+            .trade
+            .trade(&fixture.config.alias, &request(), Some(&fixture.authority)),
+    )
+    .await
+    .unwrap();
     assert_eq!(reply["status"], "unknown", "{reply}");
     assert_eq!(
         reply["reason_code"], "EXCHANGE_ACK_UNVERIFIED_NO_REPOST",

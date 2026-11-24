@@ -224,7 +224,7 @@ impl TradeService {
                 .risk
                 .request(self.risk_command(
                     &state,
-                    format!("inspect_{}", &i.client_order_id),
+                    format!("inspect_{}", i.client_order_id),
                     RiskCommandAction::Inspect {
                         reservation_key: receipt.reservation_key.clone(),
                         plan_sha256: i.plan_hash.clone(),

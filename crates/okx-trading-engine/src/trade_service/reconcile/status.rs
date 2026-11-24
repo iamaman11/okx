@@ -886,7 +886,7 @@ impl TradeService {
                 .trade
                 .admit_cancel_order(&request)
                 .map_err(err)?;
-            let key = format!("safety_cancel_{}", &i.client_order_id);
+            let key = format!("safety_cancel_{}", i.client_order_id);
             let hash = digest(&(i.intent_id.clone(), "unprotected_entry_cancel"))?;
             let k = key.clone();
             let h = hash.clone();
@@ -963,7 +963,7 @@ impl TradeService {
                 .iter()
                 .map(|(side, quantity)| (side.as_str(), *quantity)),
         )?;
-        let key = format!("safety_close_{}", &i.client_order_id);
+        let key = format!("safety_close_{}", i.client_order_id);
         let outcome = Box::pin(self.close(r, &key, &i.intent_id, 2000, None)).await?;
         Ok(json!({
             "kind":"source_bound_close",

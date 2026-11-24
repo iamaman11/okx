@@ -39,15 +39,18 @@ const PACKAGES: [&str; 5] = [
     "okx-market-runtime",
 ];
 // Keep the ordinary finance workload concurrent as in the measured baseline.
-// Four real-clock fixtures can expire under unrelated concurrent OS/SQL work;
+// Real-clock fixtures can expire under unrelated concurrent OS/SQL work;
 // execute those witnesses in a separate, serial child without skipping any.
 const FINANCIAL_WITNESS_TEST_THREADS: u64 = 4;
 const CLOCK_SENSITIVE_TEST_THREADS: u64 = 1;
-const CLOCK_SENSITIVE_AGENT_WITNESSES: [&str; 4] = [
+const CLOCK_SENSITIVE_AGENT_WITNESSES: [&str; 7] = [
     "accounts::native_trade_contracts::native_fee_correction::risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutable_revisions",
     "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_failed_stop_emergency_close_and_verified_remediation",
     "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_filled_close_settlement_release_and_cold_reopen",
     "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_stop_after_fill_blocks_open_but_closes_and_releases",
+    "accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_bound_rejection_preserves_code_and_reserve",
+    "accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_foreign_rejection_remains_unknown",
+    "accounts::native_trade_contracts::native_multi_close::risk_book_contract_native_two_closes_use_remaining_lot_and_retire_partial_terminal",
 ];
 struct LibtestGroup {
     label: &'static str,
@@ -146,7 +149,7 @@ mod timing_tests {
             actual[0].names.len() + actual[1].names.len(),
             agent_names.len()
         );
-        assert_eq!(actual[1].names.len(), 4);
+        assert_eq!(actual[1].names.len(), CLOCK_SENSITIVE_AGENT_WITNESSES.len());
     }
 }
 async fn git(repo: &Path, args: &[&str]) -> Result<String> {
