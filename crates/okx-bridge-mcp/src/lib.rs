@@ -4,6 +4,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use okx_github::{GitHubClient, IssueCommentCursor, OWNER_USER_ID, REPOSITORY_ID};
 use okx_host_protocol::{
     HOST_CONTROL_REQUEST_SCHEMA_V1, HostControlOperation, HostControlRequest, HostControlResult,
+    HostControlStatus, ResearchRuntimeStatus,
 };
 use okx_ipc_contracts::{
     AGENT_REQUEST_SCHEMA_V1, AgentOperation, AgentRequest, AgentResponse, InstrumentTypeFilter,
@@ -150,12 +151,42 @@ impl Bridge {
                         "control_status accepts no arguments".to_owned(),
                     ));
                 }
-                let result = self.control_status_request().await?;
+                let result = self
+                    .control_read_request(HostControlOperation::TransportStatus)
+                    .await?;
                 Ok(json!({
                     "status": result.status,
                     "observed_at": result.observed_at,
                     "details": result.details,
                     "failure": result.failure
+                }))
+            }
+            "research_status" => {
+                if arguments
+                    .as_object()
+                    .is_some_and(|object| !object.is_empty())
+                {
+                    return Err(BridgeError::InvalidToolArguments(
+                        "research_status accepts no arguments".to_owned(),
+                    ));
+                }
+                let result = self
+                    .control_read_request(HostControlOperation::StatusResearch)
+                    .await?;
+                let details = if result.status == HostControlStatus::Pass {
+                    let observed: ResearchRuntimeStatus = serde_json::from_value(
+                        result.details.ok_or(BridgeError::UnexpectedResponse)?,
+                    )?;
+                    observed.validate()?;
+                    Some(observed)
+                } else {
+                    None
+                };
+                Ok(json!({
+                    "status": result.status,
+                    "observed_at": result.observed_at,
+                    "details": details,
+                    "failure": result.failure,
                 }))
             }
             other => Err(BridgeError::UnknownTool(other.to_owned())),
@@ -256,7 +287,18 @@ impl Bridge {
         terminal
     }
 
-    async fn control_status_request(&self) -> Result<HostControlResult, BridgeError> {
+    async fn control_read_request(
+        &self,
+        operation: HostControlOperation,
+    ) -> Result<HostControlResult, BridgeError> {
+        if !matches!(
+            operation,
+            HostControlOperation::TransportStatus | HostControlOperation::StatusResearch
+        ) {
+            return Err(BridgeError::InvalidToolArguments(
+                "CONTROL bridge permits read-only commands only".to_owned(),
+            ));
+        }
         let github = self.github()?;
         self.verify(&github).await?;
         let cursor = tail_cursor(&github, CONTROL_ISSUE).await?;
@@ -264,14 +306,18 @@ impl Bridge {
         let request = HostControlRequest {
             schema: HOST_CONTROL_REQUEST_SCHEMA_V1.to_owned(),
             request_id: request_id("ctl_bridge")?,
-            operation: HostControlOperation::TransportStatus,
+            operation,
         };
         request.validate()?;
         github
             .post_issue_comment(CONTROL_ISSUE, &serde_json::to_string(&request)?)
             .await?;
 
-        wait_for_control_result(&github, cursor, &request.request_id).await
+        let result = wait_for_control_result(&github, cursor, &request.request_id).await?;
+        if result.operation != request.operation {
+            return Err(BridgeError::UnexpectedResponse);
+        }
+        Ok(result)
     }
 }
 
@@ -326,6 +372,17 @@ pub fn mcp_tools() -> Value {
             "name": "control_status",
             "title": "Read OKX Windows runtime status",
             "description": "Read the current controller, launcher and agent transport status. Performs no product or trading mutation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true}
+        },
+        {
+            "name": "research_status",
+            "title": "Read independent Research process status",
+            "description": "Read CONTROL's verified Research PID, SHA, process generation and independent catalog owner. RUNNING_UNVERIFIED confirms a process, not a live Edge session. Performs no mutation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -484,7 +541,7 @@ mod tests {
     fn tool_surface_is_read_only_and_bounded() {
         let tools = mcp_tools();
         let tools = tools.as_array().expect("tools");
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 4);
         assert!(tools.iter().all(|tool| {
             tool.pointer("/annotations/readOnlyHint")
                 .and_then(Value::as_bool)
@@ -501,8 +558,34 @@ mod tests {
             "private_key",
             "github_token",
             "client_ephemeral_public_key",
+            "provision_research_runtime_token",
+            "start_research",
+            "stop_research",
         ] {
             assert!(!serialized.contains(forbidden));
+        }
+    }
+
+    #[tokio::test]
+    async fn control_bridge_denies_research_mutations_before_network() {
+        let bridge = Bridge::from_bearer("read_only_github_fixture".into()).unwrap();
+        let operations = [
+            HostControlOperation::ProvisionResearchRuntimeToken,
+            HostControlOperation::StartResearch {
+                expected_installed_worker_sha256: "a".repeat(64),
+            },
+            HostControlOperation::StopResearch {
+                expected_active_worker_sha256: "b".repeat(64),
+                expected_process_generation: 1,
+            },
+            HostControlOperation::StartAgent,
+            HostControlOperation::StopAgent,
+        ];
+        for operation in operations {
+            assert!(matches!(
+                bridge.control_read_request(operation).await,
+                Err(BridgeError::InvalidToolArguments(_))
+            ));
         }
     }
 

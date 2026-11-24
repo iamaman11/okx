@@ -23,6 +23,9 @@ _CLOUDFLARE_DIR = "cloudflare/okx-mcp/"
 _HOST_CONTROL_SRC = "crates/okx-host-controller/src/"
 _HOST_LAUNCHER_SRC = "crates/okx-host-launcher/src/"
 _HOST_PROTOCOL_SRC = "crates/okx-host-protocol/src/"
+_HOST_CONTROL_TEST = "crates/okx-host-controller/tests/"
+_HOST_LAUNCHER_TEST = "crates/okx-host-launcher/tests/"
+_HOST_PROTOCOL_TEST = "crates/okx-host-protocol/tests/"
 _RESEARCH_MANIFESTS = {
     "crates/okx-research/Cargo.toml",
     "crates/okx-analysis/Cargo.toml",
@@ -46,10 +49,13 @@ def category(path):
     if path.startswith(_CLOUDFLARE_DIR):
         return "cloudflare"
     # Only Rust implementation files may use the host-only gate. Changes to
-    # manifests, assets, scripts, protocols or packaging still require full CI.
-    if path.startswith((_HOST_CONTROL_SRC, _HOST_PROTOCOL_SRC)) and path.endswith(".rs"):
+    # manifests, assets, scripts, shared IPC or packaging still require full
+    # CI. Only Host-owned protocol source under okx-host-protocol may be scoped.
+    if path.endswith(".rs") and path.startswith((
+        _HOST_CONTROL_SRC, _HOST_PROTOCOL_SRC, _HOST_CONTROL_TEST, _HOST_PROTOCOL_TEST,
+    )):
         return "host-controller"
-    if path.startswith(_HOST_LAUNCHER_SRC) and path.endswith(".rs"):
+    if path.endswith(".rs") and path.startswith((_HOST_LAUNCHER_SRC, _HOST_LAUNCHER_TEST)):
         return "host-launcher"
     # A scoped Research change must be Rust source or an integration test.
     # Arbitrary configs, SQL fixtures, generated code and build inputs can
@@ -163,7 +169,48 @@ def dependency_candidate(pages):
 
 def _self_test() -> None:
     # Post-merge reuse must skip Research compilation, not just full Native.
-    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
+    repository = Path(__file__).resolve().parents[1]
+    workflow = (repository / ".github/workflows/ci.yml").read_text()
+    # Named Ready witnesses must exist in actual test sources. Checking only
+    # workflow strings would allow a harmless Rust rename to turn a 10-minute
+    # Windows matrix into an avoidable missing-witness failure.
+    source_witnesses = {
+        "crates/okx-host-controller/tests/research_process_independence.rs": (
+            "one_process_job_can_be_terminated_without_touching_the_other",
+            "nested_job_assignment_waits_for_parent_ready_receipt",
+            "research_control_root_is_independent_and_start_requires_verified_installation",
+            "corrupted_and_hash_mismatched_research_image_never_launch",
+            "standalone_research_status_is_typed_and_does_not_claim_edge_online",
+            "standalone_research_lifecycle_requires_exact_image_and_process_generation",
+        ),
+        "crates/okx-host-controller/src/research_supervisor.rs": (
+            "research_state_is_strict_and_independent_of_engine_state",
+        ),
+        "crates/okx-host-protocol/src/lib.rs": (
+            "typed_research_rollback_requires_two_distinct_exact_hashes",
+            "standalone_research_lifecycle_requires_exact_image_and_process_generation",
+            "standalone_research_status_is_typed_and_does_not_claim_edge_online",
+            "research_token_provision_command_has_no_bearer_fields",
+        ),
+        "crates/okx-bridge-mcp/src/lib.rs": (
+            "control_bridge_denies_research_mutations_before_network",
+        ),
+        "crates/okx-research-service/src/edge_credentials.rs": (
+            "research_token_validation_is_bounded_and_ascii_only",
+            "research_native_target_is_distinct_from_engine",
+            "mock_store_never_exposes_research_bearer_to_engine_target",
+        ),
+        "crates/okx-research-service/src/edge_runtime.rs": (
+            "research_starts_only_after_finite_supervisor_job_receipt",
+            "installed_research_bearer_is_pinned_to_control_edge_origin",
+        ),
+    }
+    for source_file, names in source_witnesses.items():
+        source = (repository / source_file).read_text(encoding="utf-8")
+        for name in names:
+            assert re.search(r"(?m)^\s*(?:async\s+)?fn\s+" + re.escape(name) + r"\s*\(", source), (
+                f"CI_NAMED_RESEARCH_WITNESS_NOT_IN_SOURCE:{source_file}:{name}"
+            )
     # The Actions shell guard must accept exactly the names produced by this
     # classifier. A stale host-control spelling once rejected host-controller
     # source changes before their dedicated short Windows job could start.
@@ -189,9 +236,27 @@ def _self_test() -> None:
     assert "needs.component_impact.outputs.component_scope == 'host-launcher'" in host
     assert "cargo build --locked --release -p okx-host-launcher -p okx-host-controller" in host
     assert "cargo build --locked --release -p okx-trading-engine" not in host
+    assert "one_process_job_can_be_terminated_without_touching_the_other" in host, "HOST_RESEARCH_ENGINE_PROCESS_JOB_ISOLATION_REQUIRED"
+    assert "nested_job_assignment_waits_for_parent_ready_receipt" in host, "HOST_RESEARCH_NESTED_JOB_READINESS_REQUIRED"
+    assert "research_control_root_is_independent_and_start_requires_verified_installation" in host, "HOST_RESEARCH_INSTALLATION_IDENTITY_REQUIRED"
+    assert "corrupted_and_hash_mismatched_research_image_never_launch" in host, "HOST_RESEARCH_FAIL_CLOSED_START_REQUIRED"
+    assert "research_state_is_strict_and_independent_of_engine_state" in host, "HOST_RESEARCH_OWNER_STATE_SEPARATION_REQUIRED"
+    assert "typed_research_rollback_requires_two_distinct_exact_hashes" in host, "HOST_RESEARCH_ROLLBACK_IDENTITY_REQUIRED"
+    assert "standalone_research_lifecycle_requires_exact_image_and_process_generation" in host, "HOST_LIFECYCLE_TYPED_WITNESS_REQUIRED"
+    assert "standalone_research_status_is_typed_and_does_not_claim_edge_online" in host, "HOST_RESEARCH_STATUS_TYPED_WITNESS_REQUIRED"
+    assert "research_token_provision_command_has_no_bearer_fields" in host, "HOST_RESEARCH_SECRET_WIRE_WITNESS_REQUIRED"
+    assert "control_bridge_denies_research_mutations_before_network" in host, "HOST_BRIDGE_MUTATION_DENIAL_WITNESS_REQUIRED"
     research = workflow.split("\n  research_service_tests_windows:\n", 1)[1].split("\n  required_windows:\n", 1)[0]
     assert "if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')" in research
     assert "cargo build --locked --release -p okx-research-service --bin okx-research-service" in research
+    for witness in (
+        "research_token_validation_is_bounded_and_ascii_only",
+        "research_native_target_is_distinct_from_engine",
+        "mock_store_never_exposes_research_bearer_to_engine_target",
+        "research_starts_only_after_finite_supervisor_job_receipt",
+        "installed_research_bearer_is_pinned_to_control_edge_origin",
+    ):
+        assert witness in research, f"RESEARCH_WINDOWS_SECRET_WITNESS_REQUIRED:{witness}"
     assert "cargo fmt --all -- --check" in research, "SCOPED_RESEARCH_MUST_VERIFY_RUST_FORMATTING"
     # Reuse the same established Cargo cache action and one target directory.
     assert "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6" in research
@@ -204,9 +269,9 @@ def _self_test() -> None:
         "docs": [files("docs/acceptance/518/t01-t15-evidence-matrix.md"), files("README.md", "docs/arch.md")],
         "cloudflare": [files("cloudflare/okx-mcp/src/runtime_session.ts"), files("cloudflare/okx-mcp/src/mcp.test.ts", "docs/okx.md")],
         "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-analysis/src/lib.rs"), files("crates/okx-research-service/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md"), files("crates/okx-strategy-core/src/operators.rs"), files("crates/okx-strategy-core/src/time_series.rs"), files("crates/okx-strategy-core/src/query_plan.rs", "docs/a.md"), files("crates/okx-research-service/src/edge_runtime.rs"), files("crates/okx-research-service/tests/edge_wss.rs")],
-        "host-controller": [files("crates/okx-host-controller/src/main.rs"), files("crates/okx-host-protocol/src/lib.rs"), files("crates/okx-host-controller/src/activation/tests.rs", "crates/okx-host-launcher/src/main.rs", "docs/a.md")],
-        "host-launcher": [files("crates/okx-host-launcher/src/main.rs"), files("crates/okx-host-launcher/src/verify.rs", "README.md")],
-        "research-host": [files("crates/okx-host-launcher/src/main.rs", "crates/okx-research-service/src/analytics/market.rs"), files("crates/okx-host-controller/src/lifecycle.rs", "crates/okx-research-service/tests/edge_wss.rs")],
+        "host-controller": [files("crates/okx-host-controller/src/main.rs"), files("crates/okx-host-protocol/src/lib.rs"), files("crates/okx-host-controller/src/research_supervisor.rs"), files("crates/okx-host-protocol/src/research.rs"), files("crates/okx-host-controller/tests/research_supervisor.rs"), files("crates/okx-host-protocol/tests/research_wire.rs"), files("crates/okx-host-controller/src/activation/tests.rs", "crates/okx-host-launcher/src/main.rs", "docs/a.md"), files("crates/okx-host-controller/src/research_supervisor.rs", "crates/okx-host-protocol/src/lib.rs", "cloudflare/okx-mcp/src/mcp.ts")],
+        "host-launcher": [files("crates/okx-host-launcher/src/main.rs"), files("crates/okx-host-launcher/tests/launcher_process.rs"), files("crates/okx-host-launcher/src/verify.rs", "README.md")],
+        "research-host": [files("crates/okx-host-launcher/src/main.rs", "crates/okx-research-service/src/analytics/market.rs"), files("crates/okx-host-controller/src/lifecycle.rs", "crates/okx-research-service/tests/edge_wss.rs"), files("crates/okx-host-controller/src/research_supervisor.rs", "crates/okx-research-service/src/edge_runtime.rs"), files("crates/okx-host-protocol/src/research.rs", "crates/okx-research-service/src/edge_credentials.rs")],
     }
     for wanted, selections in cases.items():
         assert all(classify(pages) == wanted for pages in selections)
@@ -226,6 +291,10 @@ def _self_test() -> None:
         files("crates/okx-host-launcher/Cargo.toml"),
         files("crates/okx-host-controller/build.rs"),
         files("crates/okx-host-controller/assets/config.json"),
+        files("crates/okx-host-controller/src/research_supervisor.json"),
+        files("crates/okx-host-controller/tests/research_supervisor.json"),
+        files("crates/okx-host-protocol/tests/research_wire_fixture.json"),
+        files("crates/okx-host-controller/src/research_supervisor.rs", "crates/okx-ipc-contracts/src/lib.rs"),
         files("crates/okx-host-controller/src/migration.json"),
         files("crates/okx-host-launcher/src/main.rs", "crates/okx-trading-engine/src/main.rs"),
         files("crates/okx-host-controller/src/main.rs", "crates/okx-ipc-contracts/src/lib.rs"),

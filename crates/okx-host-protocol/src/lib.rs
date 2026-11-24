@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const HOST_CONTROL_REQUEST_SCHEMA_V1: &str = "okx.windows.control/v1";
 pub const HOST_CONTROL_RESULT_SCHEMA_V1: &str = "okx.windows.control.result/v1";
+pub const HOST_RESEARCH_RUNTIME_STATUS_SCHEMA_V1: &str = "okx.host-control.research-runtime/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,9 +73,25 @@ pub enum HostControlOperation {
     AgentIdentity,
     BootstrapAgentGithubToken,
     ProvisionCloudflareRuntimeToken,
+    /// Ask CONTROL to generate a distinct Research credential. Neither its
+    /// plaintext bearer nor a caller-supplied token is present in this wire.
+    ProvisionResearchRuntimeToken,
     StartAgent,
     StopAgent,
     RestartAgent,
+    /// Activate only the exact verified Research image currently selected by
+    /// CONTROL. The scoped data root and research credential are host-owned.
+    StartResearch {
+        expected_installed_worker_sha256: String,
+    },
+    /// Stop only the observed Research process generation. A stale status
+    /// cannot accidentally stop a newly started process or the Trading Engine.
+    StopResearch {
+        expected_active_worker_sha256: String,
+        expected_process_generation: u64,
+    },
+    /// Read-only snapshot of CONTROL's independent Research process owner.
+    StatusResearch,
     InitializeInstallation {
         installation_id: String,
         expected_release: String,
@@ -202,6 +219,20 @@ impl HostControlOperation {
                 }
                 Ok(())
             }
+            Self::StartResearch {
+                expected_installed_worker_sha256,
+            } => validate_sha256(expected_installed_worker_sha256),
+            Self::StopResearch {
+                expected_active_worker_sha256,
+                expected_process_generation,
+            } => {
+                validate_sha256(expected_active_worker_sha256)?;
+                if *expected_process_generation == 0 {
+                    Err(ProtocolError::InvalidRequestId)
+                } else {
+                    Ok(())
+                }
+            }
             _ => Ok(()),
         }
     }
@@ -219,6 +250,72 @@ fn validate_account_wire(value: &str) -> Result<(), ProtocolError> {
 pub enum HostControlStatus {
     Pass,
     Fail,
+}
+
+/// Process observation only, never evidence of a successful Edge handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ResearchRuntimePhase {
+    Stopped,
+    Starting,
+    RunningUnverified,
+    RestartWait,
+    InvalidProvenance,
+}
+
+/// Research's catalog is not the legacy Engine-owned analytics database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ResearchCatalogMode {
+    HostIndependent,
+}
+
+/// Readback from the CONTROL-owned Research supervisor. The caller compares
+/// process generation and exact image SHA before issuing a stop. No arbitrary
+/// on-disk path, account identity or credential crosses this boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResearchRuntimeStatus {
+    pub schema: String,
+    pub desired_running: bool,
+    pub process_generation: u64,
+    pub pid: Option<u32>,
+    pub active_worker_sha256: Option<String>,
+    pub installed_worker_sha256: Option<String>,
+    pub phase: ResearchRuntimePhase,
+    pub catalog_mode: ResearchCatalogMode,
+    pub retry_in_ms: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+impl ResearchRuntimeStatus {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.schema != HOST_RESEARCH_RUNTIME_STATUS_SCHEMA_V1 {
+            return Err(ProtocolError::UnsupportedSchema(self.schema.clone()));
+        }
+        if let Some(value) = &self.active_worker_sha256 {
+            validate_sha256(value)?;
+        }
+        if let Some(value) = &self.installed_worker_sha256 {
+            validate_sha256(value)?;
+        }
+        if self.pid == Some(0)
+            || (self.pid.is_some()
+                && (self.process_generation == 0 || self.active_worker_sha256.is_none()))
+            || (self.phase == ResearchRuntimePhase::RunningUnverified && self.pid.is_none())
+            || self.retry_in_ms.is_some_and(|ms| ms > 600_000)
+            || self.last_error.as_ref().is_some_and(|code| {
+                code.is_empty()
+                    || code.len() > 128
+                    || !code
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+            })
+        {
+            return Err(ProtocolError::InvalidRequestId);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,5 +450,128 @@ mod tests {
         let mut extra = command;
         extra["run_id"] = serde_json::json!(1);
         assert!(serde_json::from_value::<HostControlOperation>(extra).is_err());
+    }
+
+    #[test]
+    fn standalone_research_lifecycle_requires_exact_image_and_process_generation() {
+        let hash = "a".repeat(64);
+        let start = serde_json::json!({
+            "type": "start_research",
+            "expected_installed_worker_sha256": hash,
+        });
+        let operation: HostControlOperation = serde_json::from_value(start.clone()).unwrap();
+        assert!(operation.validate().is_ok());
+        assert_eq!(serde_json::to_value(operation).unwrap(), start);
+
+        let stop = serde_json::json!({
+            "type": "stop_research",
+            "expected_active_worker_sha256": hash,
+            "expected_process_generation": 7,
+        });
+        let operation: HostControlOperation = serde_json::from_value(stop.clone()).unwrap();
+        assert!(operation.validate().is_ok());
+        assert_eq!(serde_json::to_value(operation).unwrap(), stop);
+
+        let read: HostControlOperation = serde_json::from_value(serde_json::json!({
+            "type": "status_research"
+        }))
+        .unwrap();
+        assert_eq!(read, HostControlOperation::StatusResearch);
+        assert!(read.validate().is_ok());
+
+        for malformed in [
+            serde_json::json!({"type":"start_research", "expected_installed_worker_sha256":"a"}),
+            serde_json::json!({"type":"stop_research", "expected_active_worker_sha256":hash, "expected_process_generation":0}),
+            serde_json::json!({"type":"stop_research", "expected_active_worker_sha256":"x", "expected_process_generation":8}),
+        ] {
+            let parsed: HostControlOperation = serde_json::from_value(malformed).unwrap();
+            assert!(parsed.validate().is_err());
+        }
+
+        // No arbitrary path, account, environment variables, secret or venue
+        // identity may be injected through a CONTROL lifecycle command.
+        for extra in [
+            "root",
+            "bearer_token",
+            "account_key",
+            "host_scope",
+            "agent_pid",
+        ] {
+            let mut changed = start.clone();
+            changed[extra] = serde_json::json!("untrusted");
+            assert!(serde_json::from_value::<HostControlOperation>(changed).is_err());
+        }
+        let mut invalid_status = serde_json::json!({"type":"status_research"});
+        invalid_status["expected_process_generation"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<HostControlOperation>(invalid_status).is_err());
+    }
+
+    #[test]
+    fn standalone_research_status_is_typed_and_does_not_claim_edge_online() {
+        let status = ResearchRuntimeStatus {
+            schema: HOST_RESEARCH_RUNTIME_STATUS_SCHEMA_V1.into(),
+            desired_running: true,
+            process_generation: 8,
+            pid: Some(1158),
+            active_worker_sha256: Some("a".repeat(64)),
+            installed_worker_sha256: Some("b".repeat(64)),
+            phase: ResearchRuntimePhase::RunningUnverified,
+            catalog_mode: ResearchCatalogMode::HostIndependent,
+            retry_in_ms: None,
+            last_error: None,
+        };
+        status.validate().unwrap();
+        let wire = serde_json::to_value(&status).unwrap();
+        assert_eq!(wire["schema"], HOST_RESEARCH_RUNTIME_STATUS_SCHEMA_V1);
+        assert_eq!(wire["phase"], "RUNNING_UNVERIFIED");
+        assert_eq!(wire["catalog_mode"], "HOST_INDEPENDENT");
+        assert_eq!(wire["process_generation"], 8);
+        assert_eq!(wire["pid"], 1158);
+        assert!(wire.get("edge_online").is_none());
+        assert!(wire.get("bearer_token").is_none());
+        assert!(wire.get("research_root").is_none());
+        assert_eq!(
+            serde_json::from_value::<ResearchRuntimeStatus>(wire.clone()).unwrap(),
+            status
+        );
+
+        let mut unknown = wire.clone();
+        unknown["status"] = serde_json::json!("HEALTHY");
+        assert!(serde_json::from_value::<ResearchRuntimeStatus>(unknown).is_err());
+        let mut invalid = wire.clone();
+        invalid["process_generation"] = serde_json::json!(0);
+        assert!(serde_json::from_value::<ResearchRuntimeStatus>(invalid)
+            .unwrap()
+            .validate()
+            .is_err());
+        let mut invalid = wire.clone();
+        invalid["active_worker_sha256"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<ResearchRuntimeStatus>(invalid)
+            .unwrap()
+            .validate()
+            .is_err());
+        let mut invalid = wire.clone();
+        invalid["last_error"] = serde_json::json!("secret appears here!");
+        assert!(serde_json::from_value::<ResearchRuntimeStatus>(invalid)
+            .unwrap()
+            .validate()
+            .is_err());
+        let mut invalid = wire;
+        invalid["catalog_mode"] = serde_json::json!("ENGINE_OWNED");
+        assert!(serde_json::from_value::<ResearchRuntimeStatus>(invalid).is_err());
+    }
+
+    #[test]
+    fn research_token_provision_command_has_no_bearer_fields() {
+        let command = serde_json::json!({"type":"provision_research_runtime_token"});
+        let parsed: HostControlOperation = serde_json::from_value(command.clone()).unwrap();
+        assert_eq!(parsed, HostControlOperation::ProvisionResearchRuntimeToken);
+        assert!(parsed.validate().is_ok());
+        assert_eq!(serde_json::to_value(parsed).unwrap(), command);
+        for field in ["token", "bearer", "credential", "token_sha256", "account_key"] {
+            let mut changed = command.clone();
+            changed[field] = serde_json::json!("a-secret-plaintext");
+            assert!(serde_json::from_value::<HostControlOperation>(changed).is_err());
+        }
     }
 }

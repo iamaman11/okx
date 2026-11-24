@@ -23,6 +23,7 @@ use crate::{
 mod research_component;
 pub use research_component::{deploy_research, rollback_research};
 use research_component::{parse_bundle_compatible, parse_persisted_manifest};
+pub(crate) use research_component::{VerifiedResearchImage, resolve_verified_installed_research};
 
 const BUNDLE_SCHEMA_V1: &str = "okx.windows.bundle/v1";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;

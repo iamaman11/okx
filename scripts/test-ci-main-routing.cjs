@@ -158,7 +158,26 @@ function validate(yaml, fileNames) {
     ['K9 worker two-heavy cancellation latency evidence', "matrix.suite == 'research'"],
     ['Upload K9 native latency evidence', "matrix.suite == 'research'"],
   ]) assert.ok(regression.includes(`      - name: ${name}\n        if: ${scope}\n`), `NATIVE_REGRESSION_SUITE:${name}`);
-  assert.match(regression, /'host' \{ 'okx-host-controller'; 'okx-host-launcher' \}/);
+  assert.match(regression, /'host' \{ 'okx-host-controller'; 'okx-host-launcher'; 'okx-host-protocol'; 'okx-bridge-mcp' \}/);
+  assert.match(regression, /FULL_HOST_RESEARCH_WITNESS_NOT_RUN_\$witness/);
+  for (const witness of [
+    'one_process_job_can_be_terminated_without_touching_the_other',
+    'nested_job_assignment_waits_for_parent_ready_receipt',
+    'research_control_root_is_independent_and_start_requires_verified_installation',
+    'corrupted_and_hash_mismatched_research_image_never_launch',
+    'standalone_research_lifecycle_requires_exact_image_and_process_generation',
+    'research_token_provision_command_has_no_bearer_fields',
+    'typed_research_rollback_requires_two_distinct_exact_hashes',
+    'control_bridge_denies_research_mutations_before_network',
+  ]) assert.match(regression, new RegExp(witness));
+  assert.match(regression, /WINDOWS_RESEARCH_SECRET_OWNER_WITNESS_NOT_RUN_\$witness/);
+  for (const witness of [
+    'research_token_validation_is_bounded_and_ascii_only',
+    'research_native_target_is_distinct_from_engine',
+    'mock_store_never_exposes_research_bearer_to_engine_target',
+    'research_starts_only_after_finite_supervisor_job_receipt',
+    'installed_research_bearer_is_pinned_to_control_edge_origin',
+  ]) assert.match(regression, new RegExp(witness));
   assert.match(regression, /'execution' \{ 'okx-trade-execution' \}/);
   // The six 3s SQLite-writer/catalog fixtures are still mandatory, just not
   // contending with the remaining 300 Engine libtests for the test-harness clock.
@@ -201,8 +220,11 @@ function validate(yaml, fileNames) {
   assert.match(prime, /github.ref == 'refs\/heads\/main' &&/);
   assert.match(prime, /needs.component_impact.outputs.build_required == 'false'/);
   assert.match(prime, /merged tree exactly matches successful PR head tree/);
-  for (const profile of ['DEV','TEST'])
-    assert.ok(prime.includes(`      CARGO_PROFILE_${profile}_DEBUG: ` + "${{ matrix.profile == 'tests' && '0' || '' }}"));
+  for (const profile of ['DEV', 'TEST']) {
+    assert.match(prime, new RegExp(`^      CARGO_PROFILE_${profile}_DEBUG: 0$`, 'm'));
+    assert.doesNotMatch(prime, new RegExp(`CARGO_PROFILE_${profile}_DEBUG:.*\\|\\|`),
+      'CACHE_PRIME_MUST_NOT_PROVIDE_AN_EMPTY_PROFILE_ENV_ON_RELEASE');
+  }
   assert.match(prime, /cache-on-failure: false/);
   assert.match(prime, /cargo test --locked --no-run --all-targets/);
   assert.match(prime, /cargo build --locked -p okx-native-finance-check/);

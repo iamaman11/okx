@@ -31,14 +31,23 @@ Cargo dependencies and the CI acceptance checks.
 
 ### Ownership is a runtime contract, not a crate count
 
-`Research` being compiled as separate crates does **not** yet mean it can
-restart independently. The installed Research image is content-addressed and
-staged by CONTROL, but the existing Engine `ResearchClient` starts the child,
-provides its public market source callback, and observes activation. CONTROL
-does not yet supervise a standalone Research PID, Windows Job, reconnect loop
-or Research-specific runtime credential. `DeployResearch` currently reports
-`activation: requires_engine_observation`, which is not a Research health
-acknowledgement.
+`Research` being compiled as separate crates does **not** on its own mean it
+can restart independently. There are currently **two distinct Research
+runtime modes**. In the existing installed Engine-hosted mode, the Engine's
+`ResearchClient` starts the child, provides the public market source callback,
+and observes activation. A separate, opt-in CONTROL-owned mode has its own
+desired-state file, content-verified Research image, PID/process generation,
+Windows Job, restart policy, host-scoped SQLite catalog and Research-specific
+Cloudflare credential. CONTROL's `StatusResearch` reports only observed process
+state; `RUNNING_UNVERIFIED` explicitly **does not** attest an Edge handshake.
+The new mode is not an automatic migration of the installed Engine child.
+
+`DeployResearch` still publishes only a verified installed image and reports
+`activation: requires_engine_observation`. It does not silently replace either
+running Research process, migrate historical jobs, configure Edge or prove
+cutover. Process supervision, accepted installation and live routing are
+separate evidence requirements; a source change alone is not physical Windows
+acceptance.
 
 The independent runtime cutover has four separately provable boundaries:
 
@@ -58,9 +67,15 @@ The independent runtime cutover has four separately provable boundaries:
 
 Do not switch production routing to the separate Research credential until
 CONTROL-owned Research startup, credential provisioning and Windows
-restart/rollback acceptance have been verified. The Engine's narrow trusted
-strategy signal admission remains in Trading, even after public research
-queries move to Research.
+restart/rollback acceptance have been verified on the actual installation,
+the independently provisioned token SHA has been configured at Edge, and
+Edge authenticated-session health has been observed. Both processes currently
+run under the **same Windows user identity**: separate Credential Manager
+targets and Cargo graphs reduce accidental coupling but are **not** an OS
+sandbox or malicious-code isolation. That requires distinct restricted Windows
+identities and filesystem ACLs. The Engine's narrow trusted strategy signal
+admission remains in Trading, even after public research queries move to
+Research.
 
 Virtual portfolio stress scenarios run in Research through
 `okx-analysis::portfolio_scenario`, with the same public Engine command
@@ -145,6 +160,7 @@ readable after a source-only rename:
 | Trading Engine Cloudflare runtime token | `iamaman11.okx-agent.cloudflare` |
 | Trading Engine account credentials | `iamaman11.okx-agent.account.<reference>` |
 | Host Controller GitHub token | `iamaman11.okx-host-control.github` |
+| Standalone Research Cloudflare runtime token | `runtime-token.iamaman11.okx-research-service.cloudflare` |
 
 Any future credential target migration requires explicit, separately accepted
 secret-preserving migration and rollback; never silently write a renamed target.

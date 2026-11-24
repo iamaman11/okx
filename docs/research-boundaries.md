@@ -14,12 +14,14 @@ are Cargo dependencies, Rust visibility, the IPC enums, and the SQL owners.
 | Financial persistence and RiskBook | Existing `UnifiedFinanceHandle`, one financial SQLite |
 | Live closed candles | `okx-market-runtime::live_source::LiveCandleSource` |
 | Public market HTTP and shared rate budget | `okx-market-runtime::market_bootstrap::MarketBootstrapper` |
-| Research child, request correlation, activation | `okx-trading-engine::research_client::ResearchClient` |
+| Legacy Engine-hosted Research child, request correlation, activation | `okx-trading-engine::research_client::ResearchClient` |
 | Framing and typed public-source requests | `okx-ipc-contracts::research_ipc` |
 | Research command handler | `okx-research-service::analytics::AnalyticsService` |
 | Research jobs, identity, cancellation, root lease | Worker `analytics::jobs::Jobs` |
 | Pure calculations | Existing `okx-analysis` and `okx-research` libraries |
-| Verified component staging | Existing CONTROL `artifact::research_component` |
+| Verified component staging | CONTROL `artifact::research_component` |
+| Optional standalone Research process, Windows Job and desired state | CONTROL `research_supervisor::ResearchSupervisor` |
+| Standalone Research Cloudflare credential | Research `edge_credentials`, separate Windows Credential Manager target |
 
 ## Independent Edge lane (prepared, not yet activated)
 
@@ -46,15 +48,41 @@ selection, strategy mutation, risk commands
 and policy snapshot frames. Edge's internal `target_owner` routing marker is
 removed before constructing the strict native Rust request.
 
-The mode requires explicit Research-scoped WSS configuration and a separate
-credential; production CONTROL credential provisioning and supervision do not
-exist yet. Do not enable Edge's `RESEARCH_RUNTIME_TOKEN_SHA256` merely because
-the executable can connect: a configured but offline Research owner correctly
-fails closed. In particular, `--edge-runtime` and Engine's current child
-cannot both own the same scoped Research SQLite root. Actual cutover requires
-a single CONTROL-owned Research process, verified PID/SHA and Windows Job,
-restart/reboot tests, token provisioning/rotation, and physical rollback
-evidence. Until then the installed product still uses the Engine child.
+The standalone mode now has an **opt-in CONTROL code path**:
+
+- `StartResearch` requires the exact SHA-256 of the installed, reverified
+  content-addressed worker. CONTROL starts it in a **separate Windows Job**,
+  sends a bounded startup receipt only after Job assignment, and persists an
+  independent process generation. Research rejects startup if that receipt
+  is absent or invalid; it does not race its own memory Job against CONTROL.
+- `StopResearch` requires the active worker SHA and matching process generation;
+  status/desired state live in CONTROL's own `research-state.json` rather than
+  Engine's `engine-state.pb`. The standalone SQLite catalog is rooted at
+  `RUNTIME_ROOT/research/edge-catalog`, not the Engine child catalog. These
+  catalogs are deliberately **not** automatically merged.
+- `ProvisionResearchRuntimeToken` generates a separate secret and passes it to
+  the verified Research executable by bounded stdin. Research writes it to
+  its own Windows Credential Manager target; the CONTROL response contains
+  only its SHA-256, never the bearer. Provisioning while Research is desired
+  or observed running is rejected: the deliberate rotation order is **stop,
+  provision, configure the matching Edge hash, start, authenticate and read
+  back**. Windows standalone mode ignores bearer environment variables and
+  pins the allowed WSS endpoint.
+- `StatusResearch`, including the read-only MCP Bridge tool `research_status`,
+  is **process evidence only**. Its `RUNNING_UNVERIFIED` phase does not mean an
+  authenticated Edge session, loaded job catalog, or successful market read.
+
+This opt-in code path is subject to Windows CI and subsequent physical
+acceptance, **not** an assertion that the installed product has changed mode.
+Do not enable Edge's `RESEARCH_RUNTIME_TOKEN_SHA256` merely because the
+executable can connect: a configured but offline Research owner fails closed.
+Independent Edge token registration, authenticated-session readback, clean
+restart/reboot, job compatibility, independent update and rollback evidence
+are still required before cutover. Until that accepted cutover, the installed
+product continues to use the Engine child and its Engine-owned source.
+Separate Credential Manager targets and distinct crates are a code-level
+least-authority measure, **not** an OS security boundary when both processes
+run as the same Windows user.
 
 Agent has no production dependency on the research implementation or worker.
 Worker has no production dependency on Agent, execution, API credentials, or

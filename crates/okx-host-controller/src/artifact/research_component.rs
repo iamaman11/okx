@@ -1,5 +1,5 @@
 use super::*;
-use std::time::Instant;
+use std::{path::PathBuf, time::Instant};
 
 // A composition has its own accepted source identity. Each component records
 // its immutable origin separately, allowing previously accepted bytes to be
@@ -40,6 +40,14 @@ struct InstalledResearch {
     worker_sha256: String,
     protocol_version: u32,
     storage_version: u32,
+}
+
+/// Immutable, freshly checked Research image. The caller must not derive an
+/// executable pathname from an unverified JSON pointer.
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedResearchImage {
+    pub binary: PathBuf,
+    pub sha256: String,
 }
 
 const COMPONENT_NAMES: [&str; 4] = [
@@ -498,6 +506,33 @@ fn verify_staged_research(root: &Path, record: &InstalledResearch) -> HostContro
         return Err(HostControlError::ArtifactHashMismatch);
     }
     Ok(())
+}
+
+/// Read the controller-installed pointer with the same size, reparse-point,
+/// provenance and binary SHA checks used for deployment/rollback. This is the
+/// only capability the independent process supervisor needs from staging.
+pub(crate) fn resolve_verified_installed_research(
+    root: &Path,
+) -> HostControlResult<VerifiedResearchImage> {
+    validate_existing_ancestors(root)?;
+    existing_plain_directory(root)?;
+    let installed = read_research_pointer(root, CURRENT_RESEARCH_POINTER)?.ok_or(
+        HostControlError::ArtifactVerification("installed research pointer missing"),
+    )?;
+    verify_staged_research(root, &installed)?;
+    let version = root.join("research/versions").join(&installed.worker_sha256);
+    let preferred = version.join("okx-research-service.exe");
+    let binary = match fs::symlink_metadata(&preferred) {
+        Ok(_) => preferred,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            version.join("okx-research-worker.exe")
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(VerifiedResearchImage {
+        binary,
+        sha256: installed.worker_sha256,
+    })
 }
 
 fn write_research_pointer(

@@ -26,6 +26,12 @@ async fn main() {
 }
 async fn run() -> Result<(), String> {
     let all_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if all_args.first().is_some_and(|arg| arg == "--set-edge-token") {
+        if all_args.len() != 1 {
+            return Err("INVALID_ARGUMENT".into());
+        }
+        return provision_research_edge_token();
+    }
     if all_args
         .first()
         .is_some_and(|arg| arg == "--public-candles")
@@ -61,6 +67,15 @@ async fn run() -> Result<(), String> {
             return Err("INVALID_ARGUMENT".into());
         }
     }
+    if edge_runtime {
+        if independent_source || market_request || root.is_none() || scope.is_none() {
+            return Err("INVALID_ARGUMENT".into());
+        }
+        // CONTROL has not yet assigned its own Windows Job at process spawn.
+        // Wait for its post-assignment receipt before creating our nested,
+        // more restrictive memory Job. No secrets travel on this pipe.
+        okx_research_service::edge_runtime::await_supervisor_job().await?;
+    }
     // Scoped to this Research process. Do not run the Worker without its OS
     // memory fence on Windows; native Finance/Engine retains its own owner.
     let _memory_guard = okx_research_service::process_memory::JobMemoryGuard::enforce()?;
@@ -73,9 +88,6 @@ async fn run() -> Result<(), String> {
     let root = root.ok_or("MISSING_ROOT")?;
     let scope = scope.ok_or("MISSING_SCOPE")?;
     if edge_runtime {
-        if independent_source || market_request {
-            return Err("INVALID_ARGUMENT".into());
-        }
         return okx_research_service::edge_runtime::run(root, scope).await;
     }
     if market_request {
@@ -91,6 +103,25 @@ async fn run() -> Result<(), String> {
     } else {
         okx_research_service::ipc::serve(input, output, root, scope).await
     }
+}
+
+/// Single-purpose credential provisioner: no root, scope, inherited Engine
+/// credential, bearer argv value, process ownership or financial state.
+/// CONTROL sends a freshly generated Research bearer through stdin and reads
+/// only the exit status; neither stdout nor logs echo the token or its hash.
+fn provision_research_edge_token() -> Result<(), String> {
+    use std::io::Read as _;
+    let mut token = zeroize::Zeroizing::new(Vec::new());
+    std::io::stdin()
+        .take(1027)
+        .read_to_end(&mut token)
+        .map_err(|_| "RESEARCH_EDGE_TOKEN_STDIN_READ_FAILED")?;
+    if token.ends_with(b"\r\n") {
+        token.truncate(token.len() - 2);
+    } else if token.ends_with(b"\n") {
+        token.pop();
+    }
+    okx_research_service::edge_credentials::store(&token)
 }
 
 /// Read one MarketRequest as JSON from stdin and write the Research result.
