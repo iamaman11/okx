@@ -201,8 +201,11 @@ function validate(yaml, fileNames) {
   assert.match(prime, /github.ref == 'refs\/heads\/main' &&/);
   assert.match(prime, /needs.component_impact.outputs.build_required == 'false'/);
   assert.match(prime, /merged tree exactly matches successful PR head tree/);
-  for (const profile of ['DEV','TEST'])
-    assert.ok(prime.includes(`      CARGO_PROFILE_${profile}_DEBUG: ` + "${{ matrix.profile == 'tests' && '0' || '' }}"));
+  for (const profile of ['DEV', 'TEST']) {
+    assert.match(prime, new RegExp(`^      CARGO_PROFILE_${profile}_DEBUG: 0$`, 'm'));
+    assert.doesNotMatch(prime, new RegExp(`CARGO_PROFILE_${profile}_DEBUG:.*\\|\\|`),
+      'CACHE_PRIME_MUST_NOT_PROVIDE_AN_EMPTY_PROFILE_ENV_ON_RELEASE');
+  }
   assert.match(prime, /cache-on-failure: false/);
   assert.match(prime, /cargo test --locked --no-run --all-targets/);
   assert.match(prime, /cargo build --locked -p okx-native-finance-check/);
