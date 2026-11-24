@@ -958,8 +958,24 @@ jobs:
             }
             foreach ($witness in @($covered | Where-Object package -eq $package)) { $testArgs += @('--skip',$witness.test) }
             Write-Host "Remaining regression: $package; financial witnesses routed to full collector: $(@($covered | Where-Object package -eq $package).Count)"
-            cargo test --locked -p $package -- @testArgs
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $failedTests = [System.Collections.Generic.List[string]]::new()
+            & cargo test --locked -p $package -- @testArgs 2>&1 | ForEach-Object {
+              $line = "$_"
+              Write-Host $line
+              if ($line -cmatch '^test ([A-Za-z0-9_:]+) \.\.\. FAILED$') {
+                $failedTests.Add($Matches[1])
+              }
+            }
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0) {
+              if ($failedTests.Count -eq 0) {
+                Write-Host "::error title=Windows regression in ${package}::Cargo exited $exitCode before a failing test was reported."
+              }
+              foreach ($testName in $failedTests) {
+                Write-Host "::error title=Windows regression in ${package}::$testName"
+              }
+              exit $exitCode
+            }
           }
 
       - name: Serial native account catalog and writer-termination regressions
