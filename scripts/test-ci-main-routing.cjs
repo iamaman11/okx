@@ -111,6 +111,14 @@ function validate(yaml, fileNames) {
     assert.match(job(id), new RegExp(`^    name: ${display}$`, 'm'),
       `AMBIGUOUS_CI_JOB_NAME:${id}`);
   }
+  // Edge transport has one required owner. Running the same npm/Miniflare
+  // checks again inside portable Rust CI doubles setup without new evidence.
+  const linux = job('rust_tests_linux');
+  const edge = job('cloudflare_mcp_contracts');
+  assert.doesNotMatch(linux, /npm ci|npm run check|test-native-finance-retirement-do\.mjs|actions\/setup-node@/);
+  assert.match(edge, /npm ci --ignore-scripts --no-audit --no-fund/);
+  assert.match(edge, /npm run check/);
+  assert.match(edge, /node scripts\/test-native-finance-retirement-do\.mjs/);
   const engine = job('trading_engine_acceptance_windows');
   assert.match(engine, /\$collector = Join-Path \$targetDir 'debug\\examples\\native_finance_acceptance\.exe'/);
   assert.match(engine, /\$manifestJson = & \$collector --list/);
@@ -226,6 +234,8 @@ assert.throws(() => validate(source.replace('if [[ -n \'${{ steps.cargo_closure.
 assert.throws(() => validate(source.replace('git fetch --no-tags --depth=1 origin "$BASE_SHA"',
   'git fetch --no-tags --depth=1 origin main'), workflows));
 assert.throws(() => validate(source.replace('name: rust-tests-linux', 'name: linux-trader'), workflows));
+assert.throws(() => validate(source.replace('      - name: Test portable crates',
+  '      - run: npm ci --ignore-scripts --no-audit --no-fund\n      - name: Test portable crates'), workflows));
 assert.throws(() => validate(source.replace('        default: true', '        default: false'), workflows));
 assert.throws(() => validate(source.replace('BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED',
   'WE_DID_NOT_VERIFY_THE_TWO_TESTS'), workflows));

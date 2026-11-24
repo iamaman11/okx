@@ -576,17 +576,6 @@ jobs:
           cargo test --locked -p okx-trade-execution --lib risk_book_contract_native_campaign_policy_ -- --nocapture | tee "$RUNNER_TEMP/native-policy.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-policy.log"
           cargo test --locked -p okx-trade-execution --lib e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten -- --nocapture
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: cloudflare/okx-mcp/.node-version
-          package-manager-cache: false
-      - name: Actual Worker authenticated transport without financial authority
-        timeout-minutes: 8
-        working-directory: cloudflare/okx-mcp
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm run check
-          node scripts/test-native-finance-retirement-do.mjs
 
   cloudflare_mcp_contracts:
     name: cloudflare-mcp-contracts

@@ -216,9 +216,11 @@ mod tests {
 
     const RECORDED: &str = r#"{"code":"0","msg":"","data":[["1700000060000","100","120","90","110","2","200","220","1"],["1700000000000","100","110","95","105","1","100","1"]]}"#;
 
+    type RecordedRoute = (String, Vec<(&'static str, String)>);
+
     struct RecordedGet {
         raw: Vec<u8>,
-        routes: Mutex<Vec<(String, Vec<(&'static str, String)>)>>,
+        routes: Mutex<Vec<RecordedRoute>>,
     }
     impl PublicGet for RecordedGet {
         fn get(
