@@ -95,10 +95,10 @@ console.log('runtime_native_owner_and_wss_separation PASS');
  check(stored.hello&&stored.sessionMode==="research_only"&&!stored.installationId,"research namespace only");
  check(sent.some(f=>f.type==="hello_ack")&&!sent.some(f=>f.type==="policy_snapshot"),"no policy");
  instance.state.storage.get=async()=>{throw new Error("research must not read governance");};
- const req=(operation:any)=>({schema:"okx.agent.request/v1",request_id:"request_research_012345",operation});
- check((await instance.dispatch(req({type:"trade",request:{action:"status"}}))).reason==="RESEARCH_OPERATION_FORBIDDEN","trade status denied");
- check((await instance.dispatch(req({type:"portfolio",request:{action:"summary"}}))).reason==="RESEARCH_OPERATION_FORBIDDEN","portfolio denied");
- check((await instance.dispatch(req({type:"diagnostics",request:{view:"finance"}}))).reason==="RESEARCH_OPERATION_FORBIDDEN","finance diagnostics denied");
+ const req=(operation:any,target_owner?:string)=>({schema:"okx.agent.request/v1",request_id:"request_research_012345",...(target_owner?{target_owner}:{}),operation});
+ check((await instance.dispatch(req({type:"trade",request:{action:"status"}},"research"))).reason==="RESEARCH_OPERATION_FORBIDDEN","trade status denied");
+ check((await instance.dispatch(req({type:"portfolio",request:{action:"summary"}},"research"))).reason==="RESEARCH_OPERATION_FORBIDDEN","portfolio denied");
+ check((await instance.dispatch(req({type:"diagnostics",request:{view:"finance"}},"research"))).reason==="RESEARCH_OPERATION_FORBIDDEN","finance diagnostics denied");
  check((await instance.dispatch(req({type:"research",request:{action:"capabilities"}}))).status==="completed","research reaches session");
  for(const action of ["backtest","grid","cancel","record_decision"]){
    check((await instance.dispatch(req({type:"research",request:{action}}))).status==="completed",`${action} reaches research session without finance`);
@@ -107,4 +107,103 @@ console.log('runtime_native_owner_and_wss_separation PASS');
  check(sent.filter(f=>f.type==="request").every(f=>!("operator_governance" in f)),"no governance delivered");
  await instance.webSocketMessage(ws,JSON.stringify({type:"ping",schema:FRAME_SCHEMA,session_id:stored.sessionId,connection_generation:8,nonce:"stale"}));
  check(closed==="stale generation","stale generation denied");
+}
+
+// Distinct owner sockets coexist. Research reconnect must not revoke the
+// financial lane; owner-directed reads never silently fall back to Engine.
+{
+ const finance={...attachment,sessionMode:"finance" as const,generation:15,sessionId:"finance_15"};
+ const research={...attachment,sessionMode:"research_only" as const,runtimeProfile:"research" as const,credentialOwner:"research" as const,generation:16,sessionId:"research_16"};
+ const sent:{owner:string;frame:any}[]=[];
+ let owner:any;
+ let financeClosed="",researchClosed="";
+ const mk=(ownerName:string,initial:any)=>{
+   let stored={...initial};
+   return {
+     deserializeAttachment:()=>({...stored}),
+     serializeAttachment:(value:any)=>{stored=value;},
+     close:(_:number,why:string)=>{if(ownerName==="finance")financeClosed=why;else researchClosed=why;},
+     send:(message:string)=>{
+       const frame=JSON.parse(message);sent.push({owner:ownerName,frame});
+       if(frame.type==="ping")queueMicrotask(()=>owner.resolvePending(`pong:${frame.nonce}`,stored.generation,{}));
+       if(frame.type==="request")queueMicrotask(()=>{
+         owner.resolvePending(`ack:${frame.request.request_id}`,stored.generation,{});
+         owner.resolvePending(`response:${frame.request.request_id}`,stored.generation,{status:"completed",owner:ownerName});
+       });
+     },
+   };
+ };
+ const financeWs=mk("finance",finance);
+ const researchWs=mk("research",research);
+ let sockets:any[]=[financeWs,researchWs];
+ const state={storage:{get:async(k:string)=>k==="account_access_v1"?{...initial,revision:1,accounts:[account]}:undefined},getWebSockets:()=>sockets};
+ owner=new RuntimeSession(state,{} as any);
+ const req=(id:string,target_owner:string,operation:any)=>({schema:"okx.agent.request/v1",request_id:id,target_owner,operation});
+ check((await owner.dispatch(req("direct_research_1","research",{type:"research",request:{action:"capabilities"}}))).owner==="research",
+   "direct Research routed only to research owner");
+ check((await owner.dispatch(req("direct_finance_1","engine",{type:"portfolio",request:{action:"summary"}}))).owner==="finance",
+   "Engine financial reads stay on finance owner");
+ check(sent.filter(s=>s.frame.type==="request").map(s=>s.owner).join(",")==="research,finance",
+   "distinct owner routes share DO without accidental cross-delivery");
+
+ // A valid Research hello replaces only the Research generation.
+ const nextResearch=mk("research",{runtimeId:"windows-primary",sessionId:"research_17",generation:17,hello:false,credentialOwner:"research",connectedAtMs:Date.now()});
+ sockets.push(nextResearch);
+ const hello={type:"hello_research",schema:FRAME_SCHEMA,runtime_id:"windows-primary",connection_id:"native_0123456789abcdef0123456789abcdef",runtime_profile:"research",host_scope:"a".repeat(64),contract:"okx.product/v1",agent_pid:12,agent_binary_sha256:"b".repeat(64),agent_incarnation:"ctl_"+"c".repeat(32)};
+ await owner.webSocketMessage(nextResearch,JSON.stringify(hello));
+ check(researchClosed==="owner new generation"&&!financeClosed,"Research reconnect leaves Engine running");
+ sockets=[financeWs,nextResearch];
+ check((await owner.dispatch(req("direct_research_2","research",{type:"research",request:{action:"capabilities"}}))).owner==="research",
+   "Research reconnect continues serving independently");
+
+ // Reconnecting the financial owner must not close Research either.
+ researchClosed="";
+ const nextFinance=mk("finance",{runtimeId:"windows-primary",sessionId:"finance_18",generation:18,hello:false,connectedAtMs:Date.now()});
+ sockets.push(nextFinance);
+ await owner.webSocketMessage(nextFinance,JSON.stringify({type:"hello",schema:FRAME_SCHEMA,runtime_id:"windows-primary",connection_id:"native_0123456789abcdef0123456789abcdef",runtime_profile:"engine",contract:"okx.product/v1",installation_id:initial.installation_id,agent_pid:13,agent_binary_sha256:"b".repeat(64),agent_incarnation:"ctl_"+"d".repeat(32)}));
+ check(financeClosed==="owner new generation"&&!researchClosed,"Engine reconnect leaves Research alive");
+ const researchWithFinanceHello=mk("research",{runtimeId:"windows-primary",sessionId:"research_invalid",generation:19,hello:false,credentialOwner:"research",connectedAtMs:Date.now()});
+ let invalidClosed="";
+ researchWithFinanceHello.close=(_:number,why:string)=>{invalidClosed=why;};
+ const invalidFinanceHello={type:"hello",schema:FRAME_SCHEMA,runtime_id:"windows-primary",connection_id:"native_0123456789abcdef0123456789abcdef",runtime_profile:"engine",contract:"okx.product/v1",installation_id:initial.installation_id,agent_pid:14,agent_binary_sha256:"b".repeat(64),agent_incarnation:"ctl_"+"e".repeat(32)};
+ financeClosed="";
+ await owner.webSocketMessage(researchWithFinanceHello,JSON.stringify(invalidFinanceHello));
+ check(invalidClosed==="installation or contract mismatch"&&!financeClosed&&!researchClosed,
+   "Research credential cannot replace finance session");
+ sockets=[nextFinance,nextResearch];
+ check((await owner.dispatch(req("direct_research_4","research",{type:"research",request:{action:"capabilities"}}))).owner==="research",
+   "Research survives Engine reconnect");
+
+ // With only Engine present, explicitly owner-scoped Research must fail closed.
+ sockets=[financeWs];
+ check((await owner.dispatch(req("direct_research_3","research",{type:"research",request:{action:"capabilities"}}))).reason==="RESEARCH_RUNTIME_OFFLINE",
+   "Research offline must never route through Agent");
+ check((await owner.dispatch(req("direct_finance_2","engine",{type:"portfolio",request:{action:"summary"}}))).owner==="finance",
+   "Research loss cannot disable Engine reads");
+ check((await owner.dispatch(req("direct_finance_3","research",{type:"trade",request:{action:"status"}}))).reason==="RESEARCH_OPERATION_FORBIDDEN",
+   "finance operations cannot target Research even if offline");
+ check((await owner.dispatch(req("direct_finance_4","unknown",{type:"portfolio",request:{action:"summary"}}))).reason==="INVALID_OWNER",
+   "unknown owner cannot route to any session");
+ sockets=[nextResearch];
+ check((await owner.dispatch(req("direct_finance_5","engine",{type:"portfolio",request:{action:"summary"}}))).reason==="RUNTIME_OFFLINE",
+   "Engine does not fall back to Research if its own lane is offline");
+
+ // Legacy Engine-authenticated research_only sessions do not represent an
+ // independent Research owner, even when they are the latest socket.
+ const legacyResearch=mk("legacy",{...attachment,sessionMode:"research_only",runtimeProfile:"engine",credentialOwner:"engine",generation:20,sessionId:"legacy_research_20"});
+ let legacyClosed="";
+ legacyResearch.close=(_:number,why:string)=>{legacyClosed=why;};
+ sockets=[financeWs,legacyResearch];
+ check((await owner.dispatch(req("direct_research_6","research",{type:"research",request:{action:"capabilities"}}))).reason==="RESEARCH_RUNTIME_OFFLINE",
+   "Engine bearer research_only never masquerades as independent Research");
+ sockets=[legacyResearch];
+ const legacyRequest={schema:"okx.agent.request/v1",request_id:"legacy_research_21",operation:{type:"research",request:{action:"capabilities"}}};
+ check((await owner.dispatch(legacyRequest)).owner==="legacy",
+   "unmarked legacy research_only remains available during cutover without finance permission");
+ const nextIndependent=mk("research",{runtimeId:"windows-primary",sessionId:"research_22",generation:22,hello:false,credentialOwner:"research",connectedAtMs:Date.now()});
+ sockets.push(nextIndependent);
+ await owner.webSocketMessage(nextIndependent,JSON.stringify(hello));
+ check(!legacyClosed,"new independent Research hello does not evict legacy Engine-owned research_only");
+ check((await owner.dispatch(req("direct_research_7","research",{type:"research",request:{action:"capabilities"}}))).owner==="research",
+   "explicit Research route chooses separately credentialed Research, not legacy");
 }

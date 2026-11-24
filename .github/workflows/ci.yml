@@ -261,7 +261,7 @@ jobs:
           case "$scope" in docs|cloudflare|research|host-controller|host-launcher|full) ;; *) exit 1;; esac
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
           echo "COMPONENT_SCOPE=$scope"
-      - name: Verify Research-only scope and immutable accepted base
+      - name: Record Research-only owner and verify optional accepted base
         id: research_scope
         if: (github.event_name == 'push' || github.event.pull_request.draft != true) && steps.proven_scope.outputs.scope == 'research'
         shell: pwsh
@@ -269,15 +269,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          # An unavailable/unverified permanent release never bypasses Native.
+          # Source ownership and installable binary provenance are distinct facts.
+          # A missing accepted Native base must NEVER turn a Research-only source
+          # change into a fresh compilation of the financial Engine. Run the
+          # independent Research tests; fail closed at package/provenance instead.
+          "research_only=true" >> $env:GITHUB_OUTPUT
           try { & ./scripts/prepare-research-release.ps1 -VerifyOnly }
           catch {
-            Write-Warning "Research accepted base unavailable: $($_.Exception.Message). Falling back to full Native CI."
+            Write-Warning "Research accepted base unavailable: $($_.Exception.Message). Research may build and test, but deployable packaging will fail closed."
+            "base_verified=false" >> $env:GITHUB_OUTPUT
             exit 0
           }
           $proof = Get-Content -Raw (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') | ConvertFrom-Json
           if ($proof.current_head_sha -cne '${{ github.event.pull_request.head.sha || github.sha }}') { throw 'CURRENT_HEAD_MISMATCH' }
-          "research_only=true" >> $env:GITHUB_OUTPUT
+          "base_verified=true" >> $env:GITHUB_OUTPUT
           "base_head=$($proof.base_head_sha)" >> $env:GITHUB_OUTPUT
           "base_run=$($proof.base_run_id)" >> $env:GITHUB_OUTPUT
           "base_artifact=$($proof.base_artifact_id)" >> $env:GITHUB_OUTPUT
@@ -307,15 +312,21 @@ jobs:
             exit 0
           fi
 
-          # An isolated Research PR additionally requires an independently
-          # checked Cargo dependency graph and immutable accepted binary base.
+          # Research-only source changes never compile the unchanged Engine.
+          # The separate artifact step still requires an immutable accepted
+          # Native base and fails closed if that proof is unavailable.
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             scope="${{ steps.proven_scope.outputs.scope }}"
             if [[ "$scope" == "research" && "${{ steps.research_scope.outputs.research_only }}" == "true" ]]; then
               echo "build_required=true" >> "$GITHUB_OUTPUT"
               echo "native_required=false" >> "$GITHUB_OUTPUT"
-              echo "native_proof=RESEARCH_ACCEPTED_BASE" >> "$GITHUB_OUTPUT"
-              echo "reason=Research-owned changes; validated Cargo closure and pinned Windows base" >> "$GITHUB_OUTPUT"
+              if [[ "${{ steps.research_scope.outputs.base_verified }}" == "true" ]]; then
+                echo "native_proof=RESEARCH_ACCEPTED_BASE" >> "$GITHUB_OUTPUT"
+                echo "reason=Research-owned changes; validated Cargo closure and pinned Windows base" >> "$GITHUB_OUTPUT"
+              else
+                echo "native_proof=RESEARCH_BASE_UNAVAILABLE" >> "$GITHUB_OUTPUT"
+                echo "reason=Research-owned changes; package must fail closed until accepted base is verified" >> "$GITHUB_OUTPUT"
+              fi
               exit 0
             fi
             if [[ "$scope" == "docs" || "$scope" == "cloudflare" ]]; then
@@ -379,8 +390,13 @@ jobs:
           echo "build_required=true" >> "$GITHUB_OUTPUT"
           if [[ "$scope" == "research" && "${{ steps.research_scope.outputs.research_only }}" == "true" ]]; then
             echo "native_required=false" >> "$GITHUB_OUTPUT"
-            echo "native_proof=RESEARCH_ACCEPTED_BASE" >> "$GITHUB_OUTPUT"
-            echo "reason=Research-only main delta; verified Cargo closure and accepted Windows base" >> "$GITHUB_OUTPUT"
+            if [[ "${{ steps.research_scope.outputs.base_verified }}" == "true" ]]; then
+              echo "native_proof=RESEARCH_ACCEPTED_BASE" >> "$GITHUB_OUTPUT"
+              echo "reason=Research-only main delta; verified Cargo closure and accepted Windows base" >> "$GITHUB_OUTPUT"
+            else
+              echo "native_proof=RESEARCH_BASE_UNAVAILABLE" >> "$GITHUB_OUTPUT"
+              echo "reason=Research-only main delta; package must fail closed until accepted base is verified" >> "$GITHUB_OUTPUT"
+            fi
           elif [[ "$scope" == "docs" || "$scope" == "cloudflare" ]]; then
             echo "native_required=false" >> "$GITHUB_OUTPUT"
             echo "native_proof=COMPONENT_SCOPED_UNCHANGED_NATIVE" >> "$GITHUB_OUTPUT"
@@ -775,6 +791,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $report = Get-Content -Raw "$env:RUNNER_TEMP\native-finance-full.json" | ConvertFrom-Json
           if ($report.overall -ne 'FULL_PASS') { throw 'FULL_NATIVE_PROPERTIES_NOT_PROVEN' }
+          # Regression's fast source-only skip set must be EXACTLY the roster
+          # executed by this independent, current-tree financial collector.
+          # The no-Cargo extraction never substitutes for FULL_PASS.
+          node scripts/ci-finance-witness-manifest.cjs --verify-report "$env:RUNNER_TEMP\native-finance-full.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload current Rust property evidence even on failure
         if: always() && github.event_name == 'pull_request' && steps.native-properties.outcome != 'skipped'
@@ -957,16 +978,17 @@ jobs:
           $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
           $covered = @()
           if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
-            # An exact checkout, not a static ignore list, defines the finance
-            # witnesses run by the parallel full collector. The acceptance job
-            # independently proves FULL_PASS, current HEAD/tree, and equality
-            # between this manifest and every observed witness. If it fails,
-            # windows-native is RED even when these remaining tests pass.
-            $manifestJson = & cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list
+            # Compile no extra Engine example just to discover the reviewed
+            # Rust witness set (~79s in measured Ready). The source parser
+            # accepts only explicit immutable Witness + CONTRACTS syntax.
+            # Parallel acceptance independently proves FULL_PASS and compares
+            # this set to every current-tree executed witness; any difference
+            # keeps the protected windows-native gate RED.
+            $manifestJson = & node scripts/ci-finance-witness-manifest.cjs
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $manifest = $manifestJson | ConvertFrom-Json
-            if (@($manifest.contracts).Count -eq 0) { throw 'FINANCIAL_MANIFEST_EMPTY' }
-            $financialWitnesses = @($manifest.contracts.witnesses | Where-Object package -ne 'repository')
+            if (@($manifest.witnesses).Count -eq 0 -or @($manifest.repository_witnesses).Count -lt 3) { throw 'FINANCIAL_MANIFEST_EMPTY' }
+            $financialWitnesses = @($manifest.witnesses)
             $knownPackages = @('okx-domain-core','okx-trade-execution','okx-trading-engine','okx-ipc-contracts','okx-market-runtime')
             if (@($financialWitnesses | Where-Object { $_.package -cnotin $knownPackages -or $_.test -cnotmatch '^[A-Za-z0-9_:]+$' }).Count -ne 0) {
               throw 'FINANCIAL_MANIFEST_WITNESS_INVALID'
@@ -1194,6 +1216,13 @@ jobs:
             test "${{ needs.component_impact.outputs.reason }}" = "merged tree exactly matches successful PR head tree"
             echo "WINDOWS_NATIVE_PROOF=EXACT_SUCCESSFUL_MERGED_TREE"
           elif [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
+            # Isolated compilation is always allowed. Ready acceptance is NOT:
+            # without an independently verified prior Native base there is no
+            # safe composite release and the protected check must stay red.
+            test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_ACCEPTED_BASE"
+            [[ "${{ needs.component_impact.outputs.research_base_head }}" =~ ^[0-9a-f]{40}$ ]]
+            [[ "${{ needs.component_impact.outputs.research_base_run }}" =~ ^[1-9][0-9]*$ ]]
+            [[ "${{ needs.component_impact.outputs.research_base_artifact }}" =~ ^[1-9][0-9]*$ ]]
             test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"

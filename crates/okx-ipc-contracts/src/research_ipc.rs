@@ -48,6 +48,34 @@ id!(WorkerSession);
 id!(ResearchScope);
 id!(JobId);
 id!(InvocationId);
+id!(SignalInstanceId);
+id!(SignalDefinitionId);
+id!(SignalDefinitionVersion);
+id!(SignalInstrumentId);
+/// A source digest is evidence, not a financial permission or an order ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct SignalSourceDigest(String);
+impl SignalSourceDigest {
+    pub fn new(value: String) -> Result<Self, &'static str> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("INVALID_SIGNAL_SOURCE_DIGEST");
+        }
+        Ok(Self(value))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl<'de> Deserialize<'de> for SignalSourceDigest {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
 /// Public research keys accept any nonempty UTF-8 string up to 128 bytes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
@@ -298,6 +326,50 @@ impl SignalDecision {
     }
 }
 
+/// Research's untrusted proposal to the financial owner. This has no account
+/// credentials, risk limit, order constraints or exchange-send capability.
+/// Engine must check it against its own installed strategy and policy before
+/// *any* durable claim; decoding this DTO alone grants no authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategySignalProposal {
+    pub schema: String,
+    pub instance_id: SignalInstanceId,
+    pub definition_id: SignalDefinitionId,
+    pub definition_version: SignalDefinitionVersion,
+    pub instrument: SignalInstrumentId,
+    pub timeframe_ms: u64,
+    pub last_closed_ms: u64,
+    /// Source-observed availability of that closed bar; not merely its market timestamp.
+    pub available_at_ms: u64,
+    pub produced_at_ms: u64,
+    pub expires_at_ms: u64,
+    /// Digest of the exact source input verified independently by Engine.
+    /// Existing Engine SQL claims use the canonical `(last_time_ms, bars)` digest.
+    pub source_digest: SignalSourceDigest,
+    pub position: SignalPosition,
+}
+impl StrategySignalProposal {
+    pub const SCHEMA: &'static str = "okx.research.strategy-proposal/v1";
+    /// Only a fresh, closed-bar, bounded-lifetime proposal can reach Engine's
+    /// separate admission stage. A duplicate is handled by its SQL claim.
+    pub fn valid_at(&self, now_ms: u64) -> bool {
+        self.schema == Self::SCHEMA
+            && self.timeframe_ms >= 1000
+            && self.last_closed_ms > 0
+            && self.last_closed_ms < self.available_at_ms
+            && self.available_at_ms <= self.produced_at_ms
+            && self.produced_at_ms <= now_ms
+            && now_ms < self.expires_at_ms
+            && self.expires_at_ms.saturating_sub(self.produced_at_ms) <= 60_000
+            && self.expires_at_ms > self.produced_at_ms
+            && self.last_closed_ms
+                .checked_add(self.timeframe_ms.saturating_mul(2))
+                .is_some_and(|limit| now_ms <= limit)
+            && self.position != SignalPosition::Warmup
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DrainStatus {
@@ -334,6 +406,52 @@ impl WorkerReply {
 #[cfg(test)]
 mod reply_contract_tests {
     use super::*;
+
+    fn proposal() -> StrategySignalProposal {
+        StrategySignalProposal {
+            schema: StrategySignalProposal::SCHEMA.into(),
+            instance_id: SignalInstanceId::new("strategy-A".into()).unwrap(),
+            definition_id: SignalDefinitionId::new("ema_cross_v1".into()).unwrap(),
+            definition_version: SignalDefinitionVersion::new("4".into()).unwrap(),
+            instrument: SignalInstrumentId::new("BTC-USDT-SWAP".into()).unwrap(),
+            timeframe_ms: 60_000,
+            last_closed_ms: 60_000,
+            available_at_ms: 60_500,
+            produced_at_ms: 61_000,
+            expires_at_ms: 71_000,
+            source_digest: SignalSourceDigest::new("a".repeat(64)).unwrap(),
+            position: SignalPosition::Long,
+        }
+    }
+
+    #[test]
+    fn untrusted_signal_proposal_rejects_future_expired_stale_and_financial_fields() {
+        let p = proposal();
+        assert!(p.valid_at(65_000));
+        assert!(!p.valid_at(60_999)); // Not yet produced.
+        assert!(!p.valid_at(71_000)); // An expired proposal cannot arm risk.
+        let mut future = p.clone();
+        future.available_at_ms = 62_000;
+        assert!(!future.valid_at(65_000));
+        let mut stale = p.clone();
+        stale.last_closed_ms = 1;
+        assert!(!stale.valid_at(65_000));
+        let mut slow = p.clone();
+        slow.expires_at_ms = 121_001;
+        assert!(!slow.valid_at(65_000));
+        let mut warmup = p.clone();
+        warmup.position = SignalPosition::Warmup;
+        assert!(!warmup.valid_at(65_000));
+        let encoded = serde_json::to_value(p).unwrap();
+        for field in ["account", "private_key", "order", "max_loss_usd", "post"] {
+            let mut injected = encoded.clone();
+            injected[field] = serde_json::json!("unauthorized");
+            assert!(serde_json::from_value::<StrategySignalProposal>(injected).is_err());
+        }
+        assert!(SignalSourceDigest::new("a".repeat(63)).is_err());
+        assert!(SignalSourceDigest::new("A".repeat(64)).is_err());
+        assert!(SignalInstanceId::new("unsafe/id".into()).is_err());
+    }
 
     #[test]
     fn signal_ipc_rejects_noncausal_inputs_and_has_no_financial_commands() {

@@ -26,10 +26,28 @@ Worker has no production dependency on Agent, execution, API credentials, or
 financial storage. Its test-only HTTP fixtures do not authorize those edges.
 `scripts/check_architecture.py` checks both direct and transitive dependencies.
 
-Research requests receive public observations through the existing host source
-owner. They cannot issue arbitrary HTTP, access an account, reserve money, or
-place orders. Live strategies use their own live source and pure signal kernel;
-they do not invoke the research worker.
+Research requests currently receive public observations through the Engine's
+host source owner (`ResearchClient::installed` delegates to
+`MarketBootstrapper::research_source`). They cannot issue arbitrary HTTP,
+access an account, reserve money, or place orders. **This is an existing
+runtime dependency, not the desired independent Research boundary.**
+
+The current live strategy turn in
+`okx-trading-engine/src/trade_service/strategies.rs` loads closed prices from
+the Engine's live source and awaits `ResearchClient::evaluate_signal` before
+claiming a decision in financial SQLite. Thus the Engine does invoke Research
+for **new strategy decisions**. This must not be mistaken for an independent
+trading strategy runtime, even though Research is a separate executable and
+is not a production Cargo dependency of the Engine. The existing financial
+writer, RiskBook, reconciliation and protection remain Engine-owned.
+
+The target split is: Research owns public data, numerical strategy evaluation
+and a durable proposed-signal outbox; Engine owns the authenticated, versioned
+signal inbox, policy/admission, financial SQLite and every venue mutation.
+`EvaluateSignal` must leave the synchronous trading turn only after a tested
+replacement exists. A proposed signal never constitutes risk authorization or
+a one-time venue-send right. Research failure must block unjustified new
+strategy risk without blocking manual trade commands or ongoing protection.
 
 ## Identity and recovery
 

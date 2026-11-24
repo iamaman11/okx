@@ -21,7 +21,11 @@ async fn main() {
     }
 }
 async fn run() -> Result<(), String> {
-    let mut args = std::env::args_os().skip(1);
+    let all_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if all_args.first().is_some_and(|arg| arg == "--public-candles") {
+        return run_public_candles(&all_args).await;
+    }
+    let mut args = all_args.into_iter();
     let mut root = None;
     let mut scope = None;
     while let Some(arg) = args.next() {
@@ -57,4 +61,27 @@ async fn run() -> Result<(), String> {
         scope.ok_or("MISSING_SCOPE")?,
     )
     .await
+}
+
+/// A bounded standalone public-data proof path. The Research EXE can fetch
+/// public candle rows with an explicit `confirmed` flag when Agent/Engine are
+/// stopped; computations must separately reject unclosed bars. This read-only
+/// path does not enable strategies or install a new production transport.
+async fn run_public_candles(args: &[std::ffi::OsString]) -> Result<(), String> {
+    if args.len() != 3 {
+        return Err("PUBLIC_CANDLES_USAGE".into());
+    }
+    let instrument = args[1].to_str().ok_or("INVALID_INSTRUMENT")?;
+    let bar = args[2].to_str().ok_or("INVALID_TIMEFRAME")?;
+    let _memory_guard = okx_research_service::process_memory::JobMemoryGuard::enforce()?;
+    let source = okx_research_service::source_api::PublicSourceClient::new(std::sync::Arc::new(
+        okx_research_service::independent_source::IndependentOkxPublicSource::new()?,
+    ));
+    let capture = source
+        .research_candles_page(instrument, bar, None, None, 100)
+        .await?;
+    let encoded = serde_json::to_string(&capture)
+        .map_err(|_| "PUBLIC_CANDLES_SERIALIZATION_FAILED")?;
+    println!("{encoded}");
+    Ok(())
 }

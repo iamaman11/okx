@@ -4,6 +4,54 @@ Names describe **ownership**, not historical implementation details. A Cargo
 package is a compilation boundary, a Windows executable is a release artifact,
 and a CI job is evidence. They are not interchangeable.
 
+## Four application owners (current `main`)
+
+The deployed product has four logical owners; **17 Cargo packages do not mean
+17 services**. Shared libraries are compile-time dependencies, never extra
+financial authorities. Source paths in this table refer to the current code,
+not evidence that all intended runtime boundaries have already been achieved.
+
+| Owner | Code and durable state | Exclusive effect | Must not own |
+| --- | --- | --- | --- |
+| **Engine** | `okx-trading-engine`, `okx-trade-execution`; one financial SQLite/WAL, RiskBook, private account keys | Financial admission, durable intent, at-most-once venue send, reconciliation, protection | Research algorithms, hypothesis jobs, Research's dataset/catalog storage |
+| **Research** | `okx-research-service`, `okx-strategy-core`, `okx-analysis`, `okx-research`; own research jobs/data | Public-source ingestion, causal computation, replay, typed proposed signal | Private credentials, account risk, finance SQLite, exchange POST |
+| **Control** | `okx-host-controller` and `okx-host-launcher`; installed component manifests and lifecycle evidence | Authorized start/stop/install/rollback/doctor | Trading decisions, finance ledger, research computations |
+| **Edge** | `cloudflare/okx-mcp`, `okx-bridge-mcp`; transport/session/identity state | Authenticated MCP/API delivery to the matching owner | Financial or research source-of-truth state, venue mutation |
+
+`okx-domain-core` and `okx-ipc-contracts` are shared pure facts and typed
+contracts. `okx-api`, `okx-market-runtime`, `okx-observation`, `okx-ws` and
+`okx-github` contain current adapters/support code; their current broad
+dependency fan-out is **not** a reason to grant another owner financial
+authority. `okx-cli` is a tool, not a fifth continuously running application.
+
+### Confirmed remaining coupling and release rules
+
+The Engine does **not** compile the Research crate, but
+`trade_service/strategies.rs::strategy_turn` currently awaits Research's
+`evaluate_signal` after loading candles. `research_client.rs` also proxies
+public-source requests through Engine's `MarketBootstrapper`, and the Edge
+MCP transport currently routes research commands through Agent dispatch.
+These are real runtime couplings. A diagram showing four boxes is insufficient
+evidence of independence; [the live source and transition map](research-boundaries.md)
+records the actual code-level boundary.
+
+An independent Research change is accepted only when it can compile/test,
+run public-source requests and produce reproducible replay results while
+Engine is stopped, with **zero Engine compilation**, no private credentials,
+no exchange POST and no financial database access. An Engine change requires
+the applicable financial invariants: one SQLite writer, RiskBook admission,
+lost-ACK `UNKNOWN`, no optimistic retry, crash recovery and protective exits
+without Research. Shared wire/contract changes require both owners' checks.
+Control and Edge changes require their own native/transport evidence and
+cross-owner checks only for actually affected boundaries.
+
+Keep one mandatory CI orchestration in `.github/workflows/ci.yml`: classify
+actual transitive impact, run the affected owner jobs, and require one
+fail-closed result. A post-merge `main` run that reuses exact accepted tree
+evidence must **not** be described as a fresh financial acceptance run. The
+target warmed 60–120-second ready cycle includes the relevant financial
+checks and usable artifact, and is not yet proved for Engine changes.
+
 ## Rust packages
 
 | Canonical Cargo package / directory | Previously called | Responsibility |
