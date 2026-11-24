@@ -6,9 +6,13 @@ use rust_decimal::Decimal;
 
 #[tokio::test]
 async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutable_revisions() {
+    let mut phases = ClockPhaseTimings::new(ClockFixture::LateFeeRebate);
     let mut fixture = fixture().await;
+    phases.mark("fixture_setup");
     let (market_stop, market_task, _socket, _public) = opened_market(&mut fixture).await;
+    phases.mark("market_open");
     let entry = create(&fixture).await;
+    phases.mark("entry_execute");
     let account = fixture._account.clone();
     let timer_capture = account.recorded_capture_gate.write().await;
     *fixture.market_boundary.market.lock().unwrap() = None;
@@ -74,6 +78,7 @@ async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutabl
         .unwrap();
     assert_eq!(before.consumed_entry_usd, "0.4002");
     assert_eq!(before.entry_bound_breach_usd, "0");
+    phases.mark("initial_settlement");
 
     // The venue publishes a separate, order-linked -1 USDT bill after the
     // first source frontier. It is not another fill or a rewritten old fee.
@@ -104,6 +109,7 @@ async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutabl
     assert_eq!(breached.reserved_entry_usd, "0");
     assert_eq!(breached.reserved_loss_usd, before.reserved_loss_usd);
     assert!(breached.reserved_loss_usd.parse::<Decimal>().unwrap() > Decimal::ZERO);
+    phases.mark("late_debit");
 
     // Replay the exact external bill and original settlement request. Neither
     // immutable ingestion nor a lost-reply replay may debit a second dollar.
@@ -127,6 +133,7 @@ async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutabl
             .unwrap(),
         breached
     );
+    phases.mark("replay");
 
     // A real +1 USDT fee rebate restores account cash, but never releases
     // conservative consumed entry capacity or erases the durable breach.
@@ -171,6 +178,7 @@ async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutabl
             .unwrap(),
         first
     );
+    phases.mark("rebate");
 
     let mut another = execute();
     if let TradeRequest::Execute {
@@ -237,6 +245,7 @@ async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutabl
         8,
         "late fee/rebate ingestion must not change the canonical financial schema"
     );
+    phases.mark("risk_gate");
     market_stop.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(3), market_task)
         .await
@@ -250,6 +259,8 @@ async fn risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutabl
     drop(timer_capture);
     drop(account);
     fixture.finish().await;
+    phases.mark("shutdown");
+    phases.finish();
 }
 
 async fn bind(

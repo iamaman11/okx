@@ -7,22 +7,25 @@ use super::filled_fixture::*;
 
 #[tokio::test]
 async fn risk_book_contract_native_filled_close_settlement_release_and_cold_reopen() {
-    filled_close(false, false).await;
+    filled_close(false, false, ClockFixture::FilledCloseReopen).await;
 }
 
 #[tokio::test]
 async fn risk_book_contract_native_stop_after_fill_blocks_open_but_closes_and_releases() {
-    filled_close(true, false).await;
+    filled_close(true, false, ClockFixture::StoppedClose).await;
 }
 
 #[tokio::test]
 async fn risk_book_contract_native_failed_stop_emergency_close_and_verified_remediation() {
-    filled_close(false, true).await;
+    filled_close(false, true, ClockFixture::EmergencyClose).await;
 }
 
-async fn filled_close(stop_after_fill: bool, emergency: bool) {
+async fn filled_close(stop_after_fill: bool, emergency: bool, fixture_id: ClockFixture) {
+    let mut phases = ClockPhaseTimings::new(fixture_id);
     let mut fixture = fixture().await;
+    phases.mark("fixture_setup");
     let (market_stop, market_task, socket, public) = opened_market(&mut fixture).await;
+    phases.mark("market_open");
     let account = fixture._account.clone();
     let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture
@@ -60,6 +63,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
     let entry = first["intent_id"].as_str().unwrap().to_owned();
     assert_eq!(fixture.feed.outbound_posts.lock().unwrap().len(), 1);
     assert_eq!(fixture.market_boundary.updates.load(Ordering::SeqCst), 2);
+    phases.mark("entry_execute");
     // Admission retains ordinary periodic NAV capture. Only after the signed
     // POST do we serialize the timer against the finite fill event phases.
     // Status and explicit fill captures still call the original source owner.
@@ -141,6 +145,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
         .await
         .unwrap();
     assert_eq!(spent.consumed_entry_usd, "1.0005");
+    phases.mark("entry_settled");
 
     if stop_after_fill {
         let before_stop = fixture
@@ -192,6 +197,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
             "denied new risk cannot consume or release the existing position budget"
         );
     }
+    phases.mark("policy_gate");
 
     // Close is independently authorized from the actual SQL lot, fresh venue
     // exposure and its own public market observation. ACK loss cannot resend.
@@ -276,6 +282,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
         0,
         "Close admission consumed exact source"
     );
+    phases.mark("close_execute");
 
     // IOC sell at 999 may execute at the recorded better 1000. PnL is zero;
     // the second independently billed 0.0005 fee leaves equity 99.999.
@@ -331,6 +338,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
         "no second Close Create"
     );
     assert_eq!(fixture.feed.unconsumed_reads(), 0);
+    phases.mark("close_settled");
 
     // The original entry owns its protective stop. Its signed cancel ACK is
     // the only event switching all 16 inventory scopes to empty.
@@ -494,6 +502,7 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
             "1"
         }
     );
+    phases.mark("terminal_release");
 
     market_stop.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(3), market_task)
@@ -592,4 +601,6 @@ async fn filled_close(stop_after_fill: bool, emergency: bool) {
         .unwrap()
         .unwrap();
     std::fs::remove_dir_all(root).unwrap();
+    phases.mark("cold_reopen");
+    phases.finish();
 }

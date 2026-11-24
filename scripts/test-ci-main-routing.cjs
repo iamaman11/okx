@@ -23,7 +23,7 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(header, /^  workflow_run:$/m);
   assert.match(header, /^  workflow_dispatch:$/m);
   assert.match(header, /^      prime_windows_cargo_cache:$/m);
-  assert.match(header, /^        default: false$/m);
+  assert.match(header, /^        default: true$/m);
   assert.doesNotMatch(header, /^  contents: write$/m);
   assert.match(header, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
 
@@ -99,6 +99,18 @@ function validate(yaml, fileNames) {
   assert.match(regression, /Clippy native Windows crates/);
   assert.match(regression, /Strategy Core and Research owner regressions on full Windows/);
   assert.match(regression, /Native trading, SQL, CONTROL and Launcher remaining regression/);
+  // Never make timed terminal-source frontiers vanish into --skip. Their
+  // two original Engine tests are instead required to pass serially here.
+  for (const witness of [
+    'stale_fill_coverage_blocks_release_before_worker',
+    'stale_bill_coverage_blocks_settlement_after_inspect',
+  ]) {
+    assert.match(regression, new RegExp(`'--skip','trade_service::terminal_release::tests::${witness}'`));
+  }
+  assert.match(regression, /name: Serial terminal release source-frontier regression/);
+  assert.match(regression, /cargo test --locked -p okx-trading-engine --lib trade_service::terminal_release::tests::stale_ -- --test-threads 1/);
+  assert.match(regression, /2 passed; 0 failed;/);
+  assert.match(regression, /BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED/);
   assert.match(regression, /cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list/);
   assert.match(regression, /K9 worker two-heavy cancellation latency evidence/);
   assert.doesNotMatch(regression, /Mandatory current Rust financial property acceptance|Isolated Native pending-fill crash recovery|name: okx-windows-bundle-/);
@@ -131,6 +143,11 @@ function validate(yaml, fileNames) {
   assert.match(prime, /cargo build --locked -p okx-trading-engine --example native_finance_acceptance/);
   assert.doesNotMatch(prime, /gh release|actions\/upload-artifact|cargo run|cargo build --locked --release/);
   assert.match(prime, /FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED/);
+  const b1 = job('trading_safety_acceptance_windows');
+  assert.match(b1, /shared-key: trading-engine-tests-windows/);
+  assert.doesNotMatch(b1, /shared-key: trading-engine-release-windows/);
+  assert.match(b1, /Precompile current Rust property targets/);
+  assert.match(b1, /CURRENT_NATIVE_B1_PUBLIC_WITNESSES_MISSING/);
   const windows = job('required_windows');
   assert.match(windows, /needs: \[component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows,/);
   assert.match(windows, /test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "success"/);
@@ -175,6 +192,13 @@ assert.throws(() => validate(source.replace('if [[ -n \'${{ steps.cargo_closure.
 assert.throws(() => validate(source.replace('git fetch --no-tags --depth=1 origin "$BASE_SHA"',
   'git fetch --no-tags --depth=1 origin main'), workflows));
 assert.throws(() => validate(source.replace('name: rust-tests-linux', 'name: linux-trader'), workflows));
+assert.throws(() => validate(source.replace('        default: true', '        default: false'), workflows));
+assert.throws(() => validate(source.replace('BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED',
+  'WE_DID_NOT_VERIFY_THE_TWO_TESTS'), workflows));
+assert.throws(() => validate(source.replace('stale_bill_coverage_blocks_settlement_after_inspect',
+  'stale_bill_not_covered'), workflows));
+assert.throws(() => validate(source.replace(/(name: trading-safety-acceptance-windows[\s\S]*?shared-key: )trading-engine-tests-windows/,
+  '$1trading-engine-release-windows'), workflows));
 assert.throws(() => validate(source.replace('always() &&\n        github.event_name',
   'github.event_name'), workflows));
 assert.throws(() => validate(source.replace("inputs.prime_windows_cargo_cache == true &&", "true &&"), workflows));

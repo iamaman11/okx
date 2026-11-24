@@ -6,6 +6,125 @@ pub(crate) const OPEN_ORDER: &str = "native-filled-open-001";
 pub(super) const CLOSE_ORDER: &str = "native-filled-close-001";
 pub(crate) const STOP: &str = "900000002";
 
+/// Test-only phase observations for the four serialized financial lifecycle
+/// witnesses. A typed identity fixes both the receipt filename and the exact
+/// libtest witness; no caller-controlled path or account data is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ClockFixture {
+    FilledCloseReopen,
+    StoppedClose,
+    EmergencyClose,
+    LateFeeRebate,
+}
+
+impl ClockFixture {
+    const ALL: [Self; 4] = [
+        Self::FilledCloseReopen,
+        Self::StoppedClose,
+        Self::EmergencyClose,
+        Self::LateFeeRebate,
+    ];
+
+    const fn slug(self) -> &'static str {
+        match self {
+            Self::FilledCloseReopen => "filled_close_reopen",
+            Self::StoppedClose => "stopped_close",
+            Self::EmergencyClose => "emergency_close",
+            Self::LateFeeRebate => "late_fee_rebate",
+        }
+    }
+
+    const fn witness(self) -> &'static str {
+        match self {
+            Self::FilledCloseReopen => {
+                "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_filled_close_settlement_release_and_cold_reopen"
+            }
+            Self::StoppedClose => {
+                "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_stop_after_fill_blocks_open_but_closes_and_releases"
+            }
+            Self::EmergencyClose => {
+                "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_failed_stop_emergency_close_and_verified_remediation"
+            }
+            Self::LateFeeRebate => {
+                "accounts::native_trade_contracts::native_fee_correction::risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutable_revisions"
+            }
+        }
+    }
+}
+
+pub(super) struct ClockPhaseTimings {
+    fixture: ClockFixture,
+    started: std::time::Instant,
+    previous_ms: u64,
+    phases: Vec<serde_json::Value>,
+}
+
+impl ClockPhaseTimings {
+    pub(super) fn new(fixture: ClockFixture) -> Self {
+        let started = std::time::Instant::now();
+        Self {
+            fixture,
+            started,
+            previous_ms: 0,
+            phases: Vec::new(),
+        }
+    }
+
+    pub(super) fn mark(&mut self, phase: &'static str) {
+        let now = std::time::Instant::now();
+        let cumulative_ms = u64::try_from(now.duration_since(self.started).as_millis())
+            .expect("bounded finance phase timer");
+        self.phases.push(serde_json::json!({
+            "phase": phase,
+            // Subtract the same integer epoch, so sum(wall_ms) always equals
+            // the final cumulative_ms even for sub-millisecond phases.
+            "wall_ms": cumulative_ms - self.previous_ms,
+            "cumulative_ms": cumulative_ms,
+        }));
+        self.previous_ms = cumulative_ms;
+    }
+
+    pub(super) fn finish(self) {
+        // Ordinary Cargo tests produce no telemetry side effects. The current
+        // financial collector supplies BOTH variables for its private run dir;
+        // a partial environment is an explicit failure, never a silent skip.
+        let (dir, run_id) = match (
+            std::env::var_os("OKX_NATIVE_ACCEPTANCE_WORKLOAD_DIR"),
+            std::env::var_os("OKX_NATIVE_ACCEPTANCE_RUN_ID"),
+        ) {
+            (None, None) => return,
+            (Some(dir), Some(run_id)) => (dir, run_id),
+            _ => panic!("INCOMPLETE_FINANCIAL_PHASE_RECEIPT_CONTEXT"),
+        };
+        let run_id = run_id
+            .to_str()
+            .expect("financial acceptance run ID is UTF-8");
+        assert!(!run_id.is_empty(), "EMPTY_FINANCIAL_PHASE_RECEIPT_RUN_ID");
+        assert!(!self.phases.is_empty(), "EMPTY_FINANCIAL_PHASE_TIMINGS");
+        let receipt = serde_json::json!({
+            "schema": "okx.finance.clock-phase/v1",
+            "run_id": run_id,
+            "test": self.fixture.slug(),
+            "witness": self.fixture.witness(),
+            "phases": self.phases,
+        });
+        let bytes = serde_json::to_vec(&receipt).expect("SERIALIZE_FINANCIAL_PHASE_RECEIPT");
+        assert!(bytes.len() < 16 * 1024, "FINANCIAL_PHASE_RECEIPT_TOO_LARGE");
+        let path =
+            std::path::Path::new(&dir).join(format!("finance-phase-{}.json", self.fixture.slug()));
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect("CREATE_UNIQUE_FINANCIAL_PHASE_RECEIPT");
+        file.write_all(&bytes)
+            .expect("WRITE_FINANCIAL_PHASE_RECEIPT");
+        file.write_all(b"\n")
+            .expect("FINALIZE_FINANCIAL_PHASE_RECEIPT");
+    }
+}
+
 /// A finite scripted external clock publisher for Native contract tests that
 /// may spend several seconds in the original SQL admission path on Windows.
 /// Only the one not-yet-delivered raw venue response can be refreshed; the
@@ -444,4 +563,42 @@ pub(super) fn cleanup(feed: &RecordedAccountHttp, stop_client: &str) {
         expected_body: json!([{"instId":INSTRUMENT,"algoId":STOP}]),
         raw_response: envelope(json!([{"algoId":STOP,"sCode":"0"}])),
     });
+}
+
+#[cfg(test)]
+mod clock_phase_tests {
+    use super::*;
+
+    #[test]
+    fn clock_phase_receipts_have_distinct_fixed_safe_identities() {
+        let mut slugs = std::collections::BTreeSet::new();
+        let mut witnesses = std::collections::BTreeSet::new();
+        for fixture in ClockFixture::ALL {
+            let slug = fixture.slug();
+            assert!(slug.bytes().all(|c| c.is_ascii_lowercase() || c == b'_'));
+            assert!(slugs.insert(slug));
+            assert!(witnesses.insert(fixture.witness()));
+            assert!(
+                fixture
+                    .witness()
+                    .starts_with("accounts::native_trade_contracts::")
+            );
+        }
+        assert_eq!(slugs.len(), 4);
+        assert_eq!(witnesses.len(), 4);
+    }
+
+    #[test]
+    fn clock_phase_deltas_sum_to_the_same_monotonic_epoch() {
+        let mut timings = ClockPhaseTimings::new(ClockFixture::FilledCloseReopen);
+        for phase in ["fixture_setup", "market_open", "shutdown"] {
+            timings.mark(phase);
+        }
+        let mut elapsed = 0_u64;
+        for sample in &timings.phases {
+            elapsed += sample["wall_ms"].as_u64().unwrap();
+            assert_eq!(sample["cumulative_ms"].as_u64(), Some(elapsed));
+        }
+        assert_eq!(timings.phases.len(), 3);
+    }
 }

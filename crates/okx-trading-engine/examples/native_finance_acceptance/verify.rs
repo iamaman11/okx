@@ -34,6 +34,10 @@ pub(super) fn collector_sources_match(repo: &Path) -> Result<()> {
             include_bytes!("process.rs").as_slice(),
         ),
         (
+            "native_finance_acceptance/phase_timing.rs",
+            include_bytes!("phase_timing.rs").as_slice(),
+        ),
+        (
             "native_finance_acceptance/repository_guards.rs",
             include_bytes!("repository_guards.rs").as_slice(),
         ),

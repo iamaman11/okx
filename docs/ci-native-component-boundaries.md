@@ -55,6 +55,13 @@ Cloudflare and exact merged-tree reuse require the B1 prerequisite to be
 fixtures are run sequentially to avoid unrelated fixture readiness timeouts;
 the 100-caller CAS test keeps its internal concurrency.
 
+The four serialized, clock-sensitive Trading Engine witnesses also record nine
+monotonic lifecycle phase durations each in the existing financial JSON report
+(`clock_sensitive_phase_timings`). The collector requires exact current-run
+receipt identities and preserves its original resource-budget and witness
+checks; these timings diagnose slow setup, entry, settlement, release or cold
+reopen, but are not independent proof of financial correctness.
+
 The host job runs the existing installation-root safety fixture, architecture
 guard, formatting, clippy, Rust tests and Windows release builds for both
 CONTROL and Launcher. Its exact source HEAD, tree, component scope and binary
