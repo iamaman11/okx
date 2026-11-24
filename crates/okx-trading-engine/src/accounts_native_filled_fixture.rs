@@ -109,10 +109,7 @@ impl ClockPhaseTimings {
             "phases": self.phases,
         });
         let bytes = serde_json::to_vec(&receipt).expect("SERIALIZE_FINANCIAL_PHASE_RECEIPT");
-        assert!(
-            bytes.len() < 16 * 1024,
-            "FINANCIAL_PHASE_RECEIPT_TOO_LARGE"
-        );
+        assert!(bytes.len() < 16 * 1024, "FINANCIAL_PHASE_RECEIPT_TOO_LARGE");
         let path =
             std::path::Path::new(&dir).join(format!("finance-phase-{}.json", self.fixture.slug()));
         use std::io::Write;
