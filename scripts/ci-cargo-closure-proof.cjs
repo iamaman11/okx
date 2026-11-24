@@ -31,7 +31,9 @@ const docs = p => p === 'README.md' || (p.startsWith('docs/') && p.endsWith('.md
 const research = p => RESEARCH.has(p) || ['crates/okx-research/', 'crates/okx-analysis/',
   'crates/okx-research-service/', 'crates/okx-strategy-core/'].some(prefix =>
   (p.startsWith(prefix + 'src/') || p.startsWith(prefix + 'tests/')) && p.endsWith('.rs'));
-const host = p => ['crates/okx-host-controller/src/', 'crates/okx-host-launcher/src/']
+const host = p => ['crates/okx-host-controller/src/', 'crates/okx-host-launcher/src/',
+  'crates/okx-host-protocol/src/', 'crates/okx-host-controller/tests/',
+  'crates/okx-host-launcher/tests/', 'crates/okx-host-protocol/tests/']
   .some(prefix => p.startsWith(prefix)) && p.endsWith('.rs');
 
 function candidateFiles(input, scope) {

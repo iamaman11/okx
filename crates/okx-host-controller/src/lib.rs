@@ -10,6 +10,7 @@ pub mod job;
 pub mod legacy_bootstrap;
 pub mod lifecycle_executor;
 pub mod provenance;
+pub mod research_supervisor;
 pub mod root_migration;
 pub mod runtime;
 pub mod single_instance;
@@ -95,6 +96,15 @@ pub enum HostControlError {
 
     #[error("desired lifecycle state is corrupt or unsupported")]
     DesiredStateCorrupt,
+
+    #[error("independent Research desired state is corrupt or unsupported")]
+    ResearchStateCorrupt,
+
+    #[error("independent Research active/installed image or generation does not match request")]
+    ResearchIdentityMismatch,
+
+    #[error("independent Research process generation overflow")]
+    ResearchGenerationExhausted,
 
     #[error("account metadata catalog is corrupt or invalid")]
     AccountCatalogInvalid,
@@ -185,6 +195,9 @@ impl HostControlError {
             Self::ArtifactHashMismatch => "ARTIFACT_HASH_MISMATCH",
             Self::InvalidExecutionPath => "INVALID_EXECUTION_PATH",
             Self::DesiredStateCorrupt => "DESIRED_STATE_CORRUPT",
+            Self::ResearchStateCorrupt => "RESEARCH_STATE_CORRUPT",
+            Self::ResearchIdentityMismatch => "RESEARCH_IDENTITY_MISMATCH",
+            Self::ResearchGenerationExhausted => "RESEARCH_GENERATION_EXHAUSTED",
             Self::JobAssignment(_) => "JOB_ASSIGNMENT_FAILED",
             Self::ControllerAlreadyRunning => "CONTROLLER_ALREADY_RUNNING",
             Self::WindowsIdentityUnavailable => "WINDOWS_IDENTITY_UNAVAILABLE",

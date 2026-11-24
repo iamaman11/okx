@@ -42,6 +42,8 @@ okx-api = { path = "../okx-api" }
 okx-market-runtime = { path = "../okx-market-runtime" }
 
 [target.'cfg(windows)'.dependencies]
+keyring = { package = "keyring-core", version = "1" }
+windows-native-keyring-store = "1.1"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_JobObjects",

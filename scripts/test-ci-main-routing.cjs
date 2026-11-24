@@ -3,6 +3,7 @@
 // A single automatic main CI: preserve three protected status names, keep
 // optional operations out of the test graph, and never publish before gates.
 const assert = require('node:assert/strict');
+const {execFileSync} = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -68,7 +69,8 @@ function validate(yaml, fileNames) {
     assert.ok(step.split('\n').includes(`          shared-key: ${shared}`), `NATIVE_CACHE_PROFILE:${id}`);
     assert.ok(step.split('\n').includes(`          save-if: ${save}`), `SCOPED_CACHE_WRITER:${id}`);
     assert.match(step, /^          cache-on-failure: false$/m);
-    if (id === 'trading_engine_acceptance_windows' || id === 'trading_engine_regressions_windows') {
+    if (['trading_engine_acceptance_windows', 'trading_engine_regressions_windows',
+      'trading_engine_build_windows'].includes(id)) {
       for (const profile of ['DEV', 'TEST'])
         assert.match(block, new RegExp(`^      CARGO_PROFILE_${profile}_DEBUG: 0$`, 'm'));
     }
@@ -96,6 +98,13 @@ function validate(yaml, fileNames) {
   assert.match(research, /base_head: \$\{\{ steps\.package\.outputs\.base_head \}\}/);
   assert.equal((research.match(/prepare-research-release\.ps1 -Dist/g) || []).length, 1);
   assert.match(research, /RESEARCH_BASE_PROOF_REQUIRED/);
+  // Research-only changes must not resurrect the four real-child IPC timeouts
+  // previously observed when nine Windows processes started in parallel. The
+  // dedicated harness retains the original 10s receive deadline.
+  assert.match(research, /cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1/);
+  assert.match(research, /WORKER_IPC_TESTS_MISSING|RESEARCH_IPC_ALL_NINE_TESTS_REQUIRED/);
+  assert.doesNotMatch(research, /cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis\s/,
+    'SCOPED_RESEARCH_MUST_NOT_RUN_UNBOUNDED_WORKER_INTEGRATIONS');
   assert.doesNotMatch(classify, /native_required=false[^\n]*CARGO/);
   assert.match(researchRelease, /git worktree add --detach \$baselineDir \$mergeSha/);
   assert.match(researchRelease, /cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc/);
@@ -158,7 +167,27 @@ function validate(yaml, fileNames) {
     ['K9 worker two-heavy cancellation latency evidence', "matrix.suite == 'research'"],
     ['Upload K9 native latency evidence', "matrix.suite == 'research'"],
   ]) assert.ok(regression.includes(`      - name: ${name}\n        if: ${scope}\n`), `NATIVE_REGRESSION_SUITE:${name}`);
-  assert.match(regression, /'host' \{ 'okx-host-controller'; 'okx-host-launcher' \}/);
+  assert.match(regression, /'host' \{ 'okx-host-controller'; 'okx-host-launcher'; 'okx-host-protocol'; 'okx-bridge-mcp' \}/);
+  assert.match(regression, /FULL_HOST_RESEARCH_WITNESS_NOT_RUN_\$witness/);
+  for (const witness of [
+    'one_process_job_can_be_terminated_without_touching_the_other',
+    'nested_job_assignment_waits_for_parent_ready_receipt',
+    'research_control_root_is_independent_and_start_requires_verified_installation',
+    'corrupted_and_hash_mismatched_research_image_never_launch',
+    'standalone_research_lifecycle_requires_exact_image_and_process_generation',
+    'research_token_provision_command_has_no_bearer_fields',
+    'typed_research_rollback_requires_two_distinct_exact_hashes',
+    'control_bridge_denies_research_mutations_before_network',
+  ]) assert.match(regression, new RegExp(witness));
+  assert.match(regression, /WINDOWS_RESEARCH_SECRET_OWNER_WITNESS_NOT_RUN_\$witness/);
+  for (const witness of [
+    'research_token_validation_is_bounded_and_ascii_only',
+    'research_native_target_is_distinct_from_engine',
+    'mock_store_never_exposes_research_bearer_to_engine_target',
+    'research_starts_only_after_finite_supervisor_job_receipt',
+    'installed_research_bearer_is_pinned_to_control_edge_origin',
+  ]) assert.match(regression, new RegExp(witness));
+  assert.match(regression, /cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1/);
   assert.match(regression, /'execution' \{ 'okx-trade-execution' \}/);
   // The six 3s SQLite-writer/catalog fixtures are still mandatory, just not
   // contending with the remaining 300 Engine libtests for the test-harness clock.
@@ -213,6 +242,15 @@ function validate(yaml, fileNames) {
   assert.match(prime, /cargo build --locked --release -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-research-service/);
   assert.doesNotMatch(prime, /gh release|actions\/upload-artifact|cargo run/);
   assert.match(prime, /FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED/);
+  // Unlike the Debug/Test matrix, the PR release builder used to omit the
+  // profile-debug env that the trusted-main release cache prime had set. That
+  // changed rustc cache fingerprints and recompiles identical Engine code.
+  const release = job('trading_engine_build_windows');
+  for (const profile of ['DEV', 'TEST']) {
+    const directive = new RegExp(`^      CARGO_PROFILE_${profile}_DEBUG: 0$`, 'm');
+    assert.match(release, directive);
+    assert.match(prime, directive);
+  }
   const windows = job('required_windows');
   assert.match(windows, /needs: \[component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows,/);
   assert.match(windows, /test "\$\{\{ needs\.component_impact\.outputs\.native_proof \}\}" = "RESEARCH_OWNER_ONLY"/);
@@ -254,6 +292,21 @@ function validate(yaml, fileNames) {
 }
 
 validate(source, workflows);
+// A Research-owned OS resource policy can change native Finance latency even
+// without touching Engine source while the Engine-hosted Worker still exists.
+// Route that rare change through the real Windows financial acceptance gate.
+function scopeFor(filename) {
+  return execFileSync('python3', ['-B', 'scripts/check_ci_native_scope.py'], {
+    cwd: path.join(__dirname, '..'), encoding: 'utf8',
+    input: JSON.stringify([[{filename, status: 'modified'}]]),
+  }).trim();
+}
+assert.equal(scopeFor('crates/okx-research-service/src/process_memory.rs'), 'full');
+assert.equal(scopeFor('crates/okx-research-service/src/main.rs'), 'full');
+assert.equal(scopeFor('crates/okx-research-service/src/analytics/jobs.rs'), 'research');
+assert.equal(scopeFor('crates/okx-host-controller/src/job.rs'), 'full');
+assert.equal(scopeFor('crates/okx-host-controller/src/lifecycle_executor.rs'), 'full');
+assert.equal(scopeFor('crates/okx-host-controller/src/research_supervisor.rs'), 'host-controller');
 assert.throws(() => validate(source, [...workflows, 'publish-native-base.yml']));
 assert.throws(() => validate(source.replace(
   'needs: [dependency-audit, component_impact, required_linux, required_windows]',
@@ -294,8 +347,10 @@ assert.throws(() => validate(source.replace('$manifestJson = & node scripts/ci-f
 assert.throws(() => validate(source.replace('needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows,', 'needs: [component_impact, trading_engine_acceptance_windows,'), workflows));
 assert.throws(() => validate(source.replace('"trading-engine-regressions-windows (engine)",', ''), workflows));
 assert.throws(() => validate(source.replace('suite: [engine, host, execution, research, clippy]', 'suite: [engine, host, execution, research]'), workflows));
-assert.throws(() => validate(source.replace('shared-key: trading-engine-release-windows', 'shared-key: trading-engine-tests-windows'), workflows));
-assert.throws(() => validate(source.replace('shared-key: trading-engine-tests-windows', 'shared-key: trading-engine-release-windows'), workflows));
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_build_windows',
+  'shared-key: trading-engine-release-windows', 'shared-key: trading-engine-tests-windows'), workflows));
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_acceptance_windows',
+  'shared-key: trading-engine-tests-windows', 'shared-key: trading-engine-release-windows'), workflows));
 // Scope mutations to named native jobs: unrelated future Rust caches must not
 // create false positives, and YAML input order is irrelevant.
 function changeJobInput(yaml, id, before, after) {
@@ -316,5 +371,15 @@ for (const [id, prefix, , save] of nativeCacheJobs) {
   ]) {
     assert.throws(() => validate(changeJobInput(source, id, before, after), workflows));
   }
+}
+assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+  'ipc_process -- --nocapture --test-threads 1',
+  'ipc_process -- --nocapture --test-threads 8'), workflows));
+assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+  'cargo test --locked -p okx-strategy-core -p okx-research -p okx-analysis',
+  'cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis'), workflows));
+for (const profile of ['DEV', 'TEST']) {
+  assert.throws(() => validate(changeJobInput(source, 'trading_engine_build_windows',
+    `CARGO_PROFILE_${profile}_DEBUG: 0`, `CARGO_PROFILE_${profile}_DEBUG: ''`), workflows));
 }
 console.log('CI_LEAN_MAIN_ROUTING_CONTROLS=PASS');

@@ -26,6 +26,7 @@ use crate::{
     desired::{AgentDesired, AgentDesiredState, DesiredStateStore},
     job::AgentJob,
     provenance::InstalledAgentProvenanceStore,
+    research_supervisor::ResearchSupervisor,
 };
 
 const CANONICAL_ROOT: &str = okx_host_launcher::WORKSPACE_ROOT;
@@ -141,6 +142,7 @@ pub struct HostExecutor {
     agent_started_at: Option<Instant>,
     agent_launch: Option<AgentLaunchEvidence>,
     agent_job: AgentJob,
+    research: ResearchSupervisor,
     desired_store: DesiredStateStore,
     desired_agent: AgentDesired,
     desired_error: Option<String>,
@@ -164,6 +166,7 @@ impl HostExecutor {
             agent_started_at: None,
             agent_launch: None,
             agent_job: AgentJob::new()?,
+            research: ResearchSupervisor::canonical()?,
             desired_store,
             desired_agent: desired_state.agent,
             desired_error,
@@ -177,6 +180,19 @@ impl HostExecutor {
         self.lifecycle_gate(&operation)?;
         match operation {
             HostControlOperation::Status => self.status(),
+            HostControlOperation::StatusResearch {} => self.research.status(),
+            HostControlOperation::StartResearch {
+                expected_installed_worker_sha256,
+            } => self.research.start(&expected_installed_worker_sha256),
+            HostControlOperation::StopResearch {
+                expected_active_worker_sha256,
+                expected_process_generation,
+            } => self
+                .research
+                .stop(&expected_active_worker_sha256, expected_process_generation),
+            HostControlOperation::ProvisionResearchRuntimeToken {} => {
+                self.provision_research_runtime_token()
+            }
             HostControlOperation::AccountCatalog => AccountCatalogStore::canonical().status(),
             HostControlOperation::Sync => self.sync(),
             HostControlOperation::BuildAgent => Err(HostControlError::InvalidExecutionPath),
@@ -252,6 +268,10 @@ impl HostExecutor {
         if matches!(
             operation,
             HostControlOperation::Status
+                | HostControlOperation::StatusResearch {}
+                | HostControlOperation::StartResearch { .. }
+                | HostControlOperation::StopResearch { .. }
+                | HostControlOperation::ProvisionResearchRuntimeToken {}
                 | HostControlOperation::AccountCatalog
                 | HostControlOperation::TransportStatus
                 | HostControlOperation::ControllerUpdateStatus
@@ -266,10 +286,21 @@ impl HostExecutor {
     }
 
     pub fn shutdown(&mut self) {
+        let _ = self.research.shutdown();
         let _ = self.terminate_agent_owned();
     }
 
     pub fn reconcile_desired(&mut self) -> HostControlResult<Value> {
+        // Finish Engine financial supervision first. Research image verification
+        // can be I/O-heavy, and must not delay an Engine protection tick. The
+        // independent Research attempt still runs on corrupt/errored Engine
+        // state; its errors are reported through StatusResearch, not finance.
+        let engine_result = self.reconcile_engine_desired();
+        let _ = self.research.reconcile();
+        engine_result
+    }
+
+    fn reconcile_engine_desired(&mut self) -> HostControlResult<Value> {
         let running = self.agent_is_running()?;
 
         if let Some(error) = self.desired_error.clone() {
@@ -589,6 +620,107 @@ impl HostExecutor {
             "runtime_id": AGENT_CLOUDFLARE_RUNTIME_ID,
             "runtime_token_sha256": token_sha256
         }))
+    }
+
+    /// Research has a distinct CredMan target and never sees the Engine bearer.
+    /// The only input to the verified executable is a fresh secret over stdin;
+    /// the returned SHA is public setup evidence, not the bearer itself.
+    fn provision_research_runtime_token(&mut self) -> HostControlResult<Value> {
+        #[cfg(not(windows))]
+        {
+            Err(HostControlError::UnsupportedPlatform)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+            use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+            self.research.ensure_stopped_for_provision()?;
+            let binary = self.research.verified_installed_image()?;
+            let mut random = [0u8; 32];
+            getrandom::fill(&mut random)
+                .map_err(|error| HostControlError::Random(error.to_string()))?;
+            let mut bearer = String::with_capacity(64);
+            for byte in random {
+                use std::fmt::Write as _;
+                write!(&mut bearer, "{byte:02x}")
+                    .map_err(|error| HostControlError::Random(error.to_string()))?;
+            }
+            random.zeroize();
+            let token_sha256 = format!("{:x}", Sha256::digest(bearer.as_bytes()));
+
+            let mut command = hidden_command(&binary);
+            command
+                .env_clear()
+                .arg("--set-edge-token")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            for key in [
+                "SystemRoot",
+                "WINDIR",
+                "USERPROFILE",
+                "APPDATA",
+                "LOCALAPPDATA",
+                "ProgramData",
+                "TEMP",
+                "TMP",
+                "PATH",
+                "HOMEDRIVE",
+                "HOMEPATH",
+            ] {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+            let result = (|| -> HostControlResult<()> {
+                let job = AgentJob::new()?;
+                let mut child = command.spawn()?;
+                job.assign(&mut child)?;
+                let send = (|| -> std::io::Result<()> {
+                    let mut input = child.stdin.take().ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "research provisioner stdin missing",
+                        )
+                    })?;
+                    input.write_all(bearer.as_bytes())?;
+                    input.write_all(b"\n")?;
+                    input.flush()?;
+                    drop(input);
+                    Ok(())
+                })();
+                if let Err(error) = send {
+                    let _ = job.terminate();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error.into());
+                }
+                let wait = unsafe { WaitForSingleObject(child.as_raw_handle() as _, 15_000) };
+                if wait != WAIT_OBJECT_0 {
+                    let _ = job.terminate();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if wait == WAIT_TIMEOUT {
+                        return Err(HostControlError::NativeStorageOutcomeUnknown);
+                    }
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                if !child.wait()?.success() {
+                    return Err(HostControlError::NativeStorageOutcomeUnknown);
+                }
+                Ok(())
+            })();
+            bearer.zeroize();
+            result?;
+            Ok(json!({
+                "stored": true,
+                "destination": "Windows Credential Manager (Research-only target)",
+                "runtime_id": AGENT_CLOUDFLARE_RUNTIME_ID,
+                "runtime_token_sha256": token_sha256
+            }))
+        }
     }
 
     fn start_agent(&mut self) -> HostControlResult<Value> {

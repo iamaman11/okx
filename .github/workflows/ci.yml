@@ -659,8 +659,28 @@ jobs:
         run: |
           cargo clippy --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp -- --test-threads 2
+          $testLog = Join-Path $env:RUNNER_TEMP 'host-native-owner-tests.log'
+          cargo test --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp -- --test-threads 2 2>&1 |
+            Tee-Object -FilePath $testLog
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # A generic 'cargo test passed' must not silently omit the new
+          # separate Research process owner contract (e.g. via cfg drift).
+          $output = Get-Content -LiteralPath $testLog -Raw
+          foreach ($witness in @(
+            'one_process_job_can_be_terminated_without_touching_the_other',
+            'nested_job_assignment_waits_for_parent_ready_receipt',
+            'research_control_root_is_independent_and_start_requires_verified_installation',
+            'corrupted_and_hash_mismatched_research_image_never_launch',
+            'research_state_is_strict_and_independent_of_engine_state',
+            'typed_research_rollback_requires_two_distinct_exact_hashes',
+            'standalone_research_lifecycle_requires_exact_image_and_process_generation',
+            'standalone_research_status_is_typed_and_does_not_claim_edge_online',
+            'research_token_provision_command_has_no_bearer_fields',
+            'control_bridge_denies_research_mutations_before_network'
+          )) {
+            $pattern = 'test [^\r\n]*' + [regex]::Escape($witness) + ' \.\.\. ok'
+            if ($output -notmatch $pattern) { throw "HOST_RESEARCH_OWNER_WITNESS_NOT_RUN_$witness" }
+          }
       - name: Build both Windows host executables without Engine
         shell: pwsh
         run: |
@@ -990,7 +1010,7 @@ jobs:
               $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
               'okx-trading-engine'
             }
-            'host' { 'okx-host-controller'; 'okx-host-launcher' }
+            'host' { 'okx-host-controller'; 'okx-host-launcher'; 'okx-host-protocol'; 'okx-bridge-mcp' }
             'execution' { 'okx-trade-execution' }
             default { throw 'UNKNOWN_NATIVE_REGRESSION_SUITE' }
           }
@@ -1003,6 +1023,7 @@ jobs:
           $manifestJson = & node scripts/ci-finance-witness-manifest.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $covered = @(($manifestJson | ConvertFrom-Json).witnesses)
+          $ownerTestLines = [System.Collections.Generic.List[string]]::new()
           foreach ($package in $packages) {
             $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--skip','accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research','--skip','trade_service::protection_cleanup::protection_cleanup_direct_tests::','--test-threads','2')
             # OS-kill is checked exclusively in the finance/isolated job.
@@ -1027,6 +1048,9 @@ jobs:
               if ($line -cmatch '^test ([A-Za-z0-9_:]+) \.\.\. FAILED$') {
                 $failedTests.Add($Matches[1])
               }
+              if ($env:NATIVE_REGRESSION_SUITE -eq 'host' -and $line -cmatch '^test [A-Za-z0-9_:]+ \.\.\. ok$') {
+                $ownerTestLines.Add($line)
+              }
             }
             $exitCode = $LASTEXITCODE
             if ($exitCode -ne 0) {
@@ -1037,6 +1061,27 @@ jobs:
                 Write-Host "::error title=Windows regression in ${package}::$testName"
               }
               exit $exitCode
+            }
+          }
+          if ($env:NATIVE_REGRESSION_SUITE -eq 'host') {
+            # Full-scope PRs skip the dedicated Host owner job, but must still
+            # execute the Windows-only Research child/Job tests and typed wire.
+            $passed = $ownerTestLines -join "`n"
+            foreach ($witness in @(
+              'one_process_job_can_be_terminated_without_touching_the_other',
+              'nested_job_assignment_waits_for_parent_ready_receipt',
+              'research_control_root_is_independent_and_start_requires_verified_installation',
+              'corrupted_and_hash_mismatched_research_image_never_launch',
+              'research_state_is_strict_and_independent_of_engine_state',
+              'typed_research_rollback_requires_two_distinct_exact_hashes',
+              'standalone_research_lifecycle_requires_exact_image_and_process_generation',
+              'standalone_research_status_is_typed_and_does_not_claim_edge_online',
+              'research_token_provision_command_has_no_bearer_fields',
+              'control_bridge_denies_research_mutations_before_network'
+            )) {
+              if ($passed -notmatch ('test [^\r\n]*' + [regex]::Escape($witness) + ' \.\.\. ok')) {
+                throw "FULL_HOST_RESEARCH_WITNESS_NOT_RUN_$witness"
+              }
             }
           }
 
@@ -1079,8 +1124,22 @@ jobs:
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
-          if (($output -join "`n") -notmatch 'test result: ok\. [1-9][0-9]* passed;') { throw 'WORKER_ANALYTICS_TESTS_MISSING' }
-          $output = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture 2>&1
+          $workerTests = $output -join "`n"
+          if ($workerTests -notmatch 'test result: ok\. [1-9][0-9]* passed;') { throw 'WORKER_ANALYTICS_TESTS_MISSING' }
+          foreach ($witness in @(
+            'research_token_validation_is_bounded_and_ascii_only',
+            'research_native_target_is_distinct_from_engine',
+            'mock_store_never_exposes_research_bearer_to_engine_target',
+            'research_starts_only_after_finite_supervisor_job_receipt',
+            'installed_research_bearer_is_pinned_to_control_edge_origin'
+          )) {
+            if ($workerTests -notmatch ('test [^\r\n]*' + [regex]::Escape($witness) + ' \.\.\. ok')) {
+              throw "WINDOWS_RESEARCH_SECRET_OWNER_WITNESS_NOT_RUN_$witness"
+            }
+          }
+          # Each IPC case starts real Windows child processes and nested Jobs.
+          # Serialize cases; their own 10s Hello/command deadlines stay intact.
+          $output = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
@@ -1158,8 +1217,41 @@ jobs:
           # A failing primitive unit test must fail this job before packaging.
           cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis
+          $ownerLog = Join-Path $env:RUNNER_TEMP 'research-native-owner-tests.log'
+          cargo test --locked -p okx-strategy-core -p okx-research -p okx-analysis 2>&1 |
+            Tee-Object -FilePath $ownerLog
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The Worker has real IPC child-process tests; never let Cargo's
+          # unbounded default test parallelism launch all Windows Workers at
+          # once. Keep the original 10s Hello/command budgets unchanged.
+          cargo test --locked -p okx-research-service --lib --bins -- --test-threads 2 2>&1 |
+            Tee-Object -FilePath $ownerLog -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p okx-research-service --test causal_release_smoke 2>&1 |
+            Tee-Object -FilePath $ownerLog -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ipcOutput = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1 2>&1
+          $code = $LASTEXITCODE
+          $ipcOutput | Tee-Object -FilePath $ownerLog -Append
+          if ($code -ne 0) { exit $code }
+          if (($ipcOutput -join "`n") -notmatch 'test result: ok\. 9 passed; 0 failed;') {
+            throw 'RESEARCH_IPC_ALL_NINE_TESTS_REQUIRED'
+          }
+          cargo test --locked -p okx-research-service --doc 2>&1 |
+            Tee-Object -FilePath $ownerLog -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $passed = Get-Content -LiteralPath $ownerLog -Raw
+          foreach ($witness in @(
+            'research_token_validation_is_bounded_and_ascii_only',
+            'research_native_target_is_distinct_from_engine',
+            'mock_store_never_exposes_research_bearer_to_engine_target',
+            'research_starts_only_after_finite_supervisor_job_receipt',
+            'installed_research_bearer_is_pinned_to_control_edge_origin'
+          )) {
+            if ($passed -notmatch ('test [^\r\n]*' + [regex]::Escape($witness) + ' \.\.\. ok')) {
+              throw "RESEARCH_SECRET_OWNER_WITNESS_NOT_RUN_$witness"
+            }
+          }
 
       - name: Build deployable Windows binaries
         id: package
@@ -1360,6 +1452,12 @@ jobs:
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     runs-on: windows-latest
+    env:
+      # Match the trusted-main release cache prime's full Cargo environment
+      # fingerprint. Without these, PR releases miss its accepted compiler
+      # cache and compile the same immutable Engine again for 8+ minutes.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     permissions:
       contents: read
     timeout-minutes: 30
