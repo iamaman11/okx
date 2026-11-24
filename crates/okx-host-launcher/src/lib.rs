@@ -1414,7 +1414,7 @@ mod tests {
             artifact_id: 22,
             source_head_sha: "a".repeat(40),
             source_tree: "b".repeat(40),
-            rust_version: "rustc 1.95.0".to_owned(),
+            rust_version: "rustc 1.100.0".to_owned(),
             controller_sha256: hash.to_string().repeat(64),
         }
     }

@@ -206,7 +206,7 @@ pub fn decrypt(
 
 #[cfg(test)]
 mod tests {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use base64::engine::general_purpose::STANDARD;
 
     use super::*;
 

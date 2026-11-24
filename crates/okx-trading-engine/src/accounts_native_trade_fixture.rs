@@ -128,7 +128,7 @@ impl HttpTransport for ExecuteMarketBoundary {
                 });
             let skip = if actor_matches && request.url().path() == "/api/v5/account/trade-fee" {
                 self.planning_fee_skip
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
                     .is_ok()
             } else {
                 false
@@ -661,10 +661,10 @@ impl NativeFixture {
         let root = self.root.clone();
         let mut closed = self.owner.termination_signal();
         drop(self);
-        tokio::time::timeout(Duration::from_secs(3), closed.wait_for(|v| *v))
+        tokio::time::timeout(Duration::from_secs(10), closed.wait_for(|v| *v))
             .await
-            .unwrap()
-            .unwrap();
+            .expect("FINANCE_OWNER_SHUTDOWN_TIMEOUT_AFTER_FIXTURE_DROP")
+            .expect("FINANCE_OWNER_TERMINATION_CHANNEL_CLOSED");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

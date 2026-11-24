@@ -399,11 +399,14 @@ async fn create_entry(fixture: &NativeFixture) -> String {
     if let TradeRequest::Execute { expires_in_ms, .. } = &mut request {
         *expires_in_ms = 10_000;
     }
-    let result = fixture
-        .trade
-        .trade(&fixture.config.alias, &request, Some(&fixture.authority))
-        .await
-        .unwrap();
+    let result = with_fresh_recorded_clock(
+        &fixture.feed,
+        fixture
+            .trade
+            .trade(&fixture.config.alias, &request, Some(&fixture.authority)),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         result["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
         "{result}"

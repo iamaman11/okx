@@ -18,7 +18,7 @@ function fixture(origin) {
       run_id:0,artifact_id:0,protocol_version:1,storage_version:1};
   }
   return {files,manifest:{schema:'okx.windows.bundle/v2',repository_id:1388071566,
-    source_head_sha:origin.head,source_tree:origin.tree,rust_version:'rustc 1.95.0',components}};
+    source_head_sha:origin.head,source_tree:origin.tree,rust_version:'rustc 1.100.0',components}};
 }
 const base=fixture(baseOrigin), research=fixture(researchOrigin);
 const baseline={schema:'okx.537.installed-native-base/v1',repository_id:1388071566,

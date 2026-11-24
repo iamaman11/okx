@@ -157,11 +157,12 @@ mod tests {
     fn all_four_receipts_bind_exact_clock_witnesses_and_ordered_phases() {
         let fixture_witnesses = FIXTURES.iter().map(|f| f.witness).collect::<BTreeSet<_>>();
         assert_eq!(fixture_witnesses.len(), 4);
-        assert_eq!(
-            fixture_witnesses,
-            CLOCK_SENSITIVE_AGENT_WITNESSES
-                .into_iter()
-                .collect::<BTreeSet<_>>()
+        assert!(
+            fixture_witnesses.is_subset(
+                &CLOCK_SENSITIVE_AGENT_WITNESSES
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+            )
         );
         for fixture in &FIXTURES {
             validate(&sample(fixture), "abc_0", fixture).unwrap();

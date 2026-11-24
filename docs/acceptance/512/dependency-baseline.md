@@ -149,6 +149,34 @@ The five original license files are retained byte-for-byte in [licenses](license
 Their copyright statements and conditions must accompany redistribution; this
 source record is not a substitute for release materials.
 
+### Additional exact-package grants for stack upgrade #570 — 2026-11-24
+
+The `reqwest 0.13.5` TLS graph introduces two packages whose license terms are
+not part of the global allowlist. The exact locked packages alone receive
+grants in `deny.toml`; no existing source, advisory, or license check is
+disabled. The initial PR run 45316430742 passed advisories and sources, but
+its license gate rejected these two packages until this scoped review.
+
+- `aws-lc-sys =0.47.0`: BSD-3-Clause and MIT-0 in addition to the globally
+  accepted licenses. Its upstream `LICENSE` reproduces the project and
+  third-party acknowledgments. Retain copyright, license conditions, and
+  disclaimers with redistributed source and binary artifacts; preserve the
+  non-endorsement condition for BSD-3-Clause material. The exact upstream
+  text is [aws-lc-sys-0.47.0.txt](licenses/aws-lc-sys-0.47.0.txt),
+  SHA-256 `728536b4160e051f86d7c9c388f704866b3d512cd7df97ac3516c65279523c4e`.
+- `webpki-root-certs =1.0.12`: CDLA-Permissive-2.0 applies to the certificate
+  dataset. Preserve the agreement, source attribution, and license text with
+  redistributed data. This is a license review only, not a change to TLS
+  trust policy. The exact upstream text is
+  [webpki-root-certs-1.0.12.txt](licenses/webpki-root-certs-1.0.12.txt),
+  SHA-256 `e271993808fec50ab29350b39539cdec611a9103f827e0aa26d61da70e2d33f8`.
+
+These are proposed grants in PR #570, subject to maintainer review and the
+complete locked-graph dependency audit. Before any binary publication, the
+release owner must verify that the required notices are distributed with
+that release; retaining them in this repository alone does not fulfill that
+step. Follow-up owner: repository maintainer / #569.
+
 - curve25519-dalek 5.0.0, subtle 2.6.1 and x25519-dalek 3.0.0: BSD-3-Clause.
   Retain their individual copyright/conditions/disclaimer in source and binary
   distribution materials; do not imply contributor endorsement. Only these
