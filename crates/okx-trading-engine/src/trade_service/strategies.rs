@@ -1,12 +1,21 @@
 use super::*;
 use okx_ipc_contracts::research_ipc::{
     ClosedPrice, SignalDefinitionId, SignalDefinitionVersion, SignalInstanceId, SignalInstrumentId,
-    SignalPosition, SignalRequest, StrategySignalInput,
+    SignalPosition, SignalRequest, StrategySignalInput, StrategySignalProposal,
 };
 use okx_ipc_contracts::trading::{CapitalDirection, StrategyConfigurationV1, StrategyParametersV1};
 #[cfg(test)]
 #[path = "strategy_contract_tests.rs"]
 mod strategy_contract_tests;
+
+/// Research output has exactly one provenance path. A proposal is untrusted
+/// until Engine checks it against its own source and authority; the legacy
+/// decision path is available only when the child explicitly lacks the outbox.
+enum ResearchSignal {
+    UntrustedProposal(StrategySignalProposal),
+    LegacyDecision(SignalPosition),
+}
+
 impl TradeService {
     pub async fn strategies(
         &self,
@@ -500,7 +509,7 @@ impl TradeService {
                     })
                     .collect(),
             };
-            let (proposal, legacy_position) = if use_outbox {
+            let research_signal = if use_outbox {
                 let Some(proposal) = research
                     .stage_strategy_signal(StrategySignalInput {
                         instance_id: SignalInstanceId::new(instance.instance_id.clone())?,
@@ -515,11 +524,13 @@ impl TradeService {
                     })
                     .await?
                 else {
+                    // An outbox-capable child declining to emit a proposal is
+                    // not a signal to downgrade to the legacy evaluation API.
                     continue;
                 };
-                (Some(proposal), None)
+                ResearchSignal::UntrustedProposal(proposal)
             } else {
-                (None, Some(research.evaluate_signal(prices).await?.position))
+                ResearchSignal::LegacyDecision(research.evaluate_signal(prices).await?.position)
             };
             let decision_digest = digest(&(last, &bars))?;
             let (state, control) = self.authority(r, None).await?;
@@ -530,46 +541,39 @@ impl TradeService {
             let revision = i64::try_from(state.state.revision)
                 .map_err(|_| "STRATEGY_POLICY_REVISION_INVALID")?;
             let account = r.configuration.account_key.wire();
-            let (claim, position) = if let Some(proposal) = proposal {
-                strategy_signal::check_strategy_signal(
-                    &proposal,
-                    &strategy_signal::TrustedStrategySignalContext {
-                        instance,
-                        configuration: &config,
-                        authenticated_account_key: &account,
-                        instrument,
-                        last_closed_ms: last,
-                        source_digest: &decision_digest,
-                        policy_revision: revision,
-                        now_ms: now(),
-                    },
-                )?
-                .into_claim()
-            } else {
-                let decision_key = format!(
-                    "bar_{}",
-                    &digest(&(
-                        account,
-                        &instance.instance_id,
-                        &instance.definition_id,
-                        &instance.definition_version,
-                        &instance.parameters,
-                        instrument,
-                        timeframe,
-                        last
-                    ))?[..40]
-                );
-                (
-                    okx_trade_execution::account_worker::StrategyDecisionClaimCommand {
-                        instance_id: instance.instance_id.clone(),
-                        decision_key,
-                        input_digest: decision_digest,
-                        policy_revision: revision,
-                        expected_version: instance.definition_version.clone(),
-                        time: now(),
-                    },
-                    legacy_position.expect("legacy evaluation yields a position"),
-                )
+            let (claim, position) = match research_signal {
+                ResearchSignal::UntrustedProposal(proposal) => {
+                    strategy_signal::check_strategy_signal(
+                        &proposal,
+                        &strategy_signal::TrustedStrategySignalContext {
+                            instance,
+                            configuration: &config,
+                            authenticated_account_key: &account,
+                            instrument,
+                            last_closed_ms: last,
+                            source_digest: &decision_digest,
+                            policy_revision: revision,
+                            now_ms: now(),
+                        },
+                    )?
+                    .into_claim()
+                }
+                ResearchSignal::LegacyDecision(position) => {
+                    let decision_key = strategy_signal::scoped_decision_key(
+                        &account, instance, instrument, timeframe, last,
+                    )?;
+                    (
+                        okx_trade_execution::account_worker::StrategyDecisionClaimCommand {
+                            instance_id: instance.instance_id.clone(),
+                            decision_key,
+                            input_digest: decision_digest,
+                            policy_revision: revision,
+                            expected_version: instance.definition_version.clone(),
+                            time: now(),
+                        },
+                        position,
+                    )
+                }
             };
             let decision_key = claim.decision_key.clone();
             let claimed = r

@@ -12,9 +12,9 @@ async fn risk_book_contract_native_partial_sources_missing_bill_then_terminal_st
     let (market_stop, market_task, _socket, _public) = opened_market(&mut fixture).await;
     let account = fixture._account.clone();
     let now = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture
-        .feed
-        .expect_public_clock(envelope(json!([{"ts":now}])));
+    // This is a fresh source, not an intentionally expired clock witness.
+    // Stamp when HTTP delivers the clock after admission has reached it.
+    fixture.feed.expect_current_public_clock();
     record_fee(&fixture.feed, &now);
     record_leverage(&fixture.feed);
     record_leverage(&fixture.feed);

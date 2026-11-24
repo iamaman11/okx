@@ -173,6 +173,52 @@ const mcpResponse=async(tool:string,args:unknown,response:unknown,releaseTree?:s
  return reply.result.structuredContent;
 };
 
+// A configured Research bearer is the public routing cutover. Verify every
+// Research operation family, and ensure trading/portfolio financial ownership
+// is unchanged even with the independent owner enabled.
+const researchRoutes:[string,any,string,boolean][]=[
+ ['market',{action:'capabilities'},'market_capabilities',true],
+ ['market',{action:'instruments',asset:'BTC'},'find_instruments',true],
+ ['market',{action:'snapshot',instrument:'BTC-USDT'},'market_overview',true],
+ ['market',{action:'microstructure',instrument:'BTC-USDT'},'market_microstructure',true],
+ ['market',payloadFixtures.find(f=>f.tool==='market'&&f.action==='screen')!.positive,'market',true],
+ ['research',{action:'capabilities'},'research',true],
+ ['diagnostics',{action:'explain',view:'research',reference:'deployment'},'diagnostics',true],
+ ['diagnostics',{action:'explain',view:'finance',reference:'intent_fixture'},'diagnostics',false],
+ ['portfolio',payloadFixtures.find(f=>f.tool==='portfolio'&&f.action==='scenario')!.positive,'portfolio_scenario',true],
+ ['portfolio',payloadFixtures.find(f=>f.tool==='portfolio'&&f.action==='summary')!.positive,'portfolio',false],
+ ['trade',{action:'status',account:'demo',reference:'intent_fixture'},'trade',false],
+];
+for(const configured of [false,true]){
+ const seen:any[]=[];
+ const routeEnv:any={...(configured?{RESEARCH_RUNTIME_TOKEN_SHA256:'f'.repeat(64)}:{}),
+  RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:RequestInit)=>{
+   seen.push(JSON.parse(String(init.body)));
+   return Response.json({status:'completed',data:{ok:true}});
+  }})}};
+ for(const [name,args,operation,researchOwned] of researchRoutes){
+  const reply:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
+   jsonrpc:'2.0',id:23,method:'tools/call',params:publicArgs(name,args)
+  })}),routeEnv,ctx)).json();
+  if(reply.error||reply.result?.structuredContent?.status!=='completed')
+   throw Error(`routing fixture rejected ${name}.${args.action}: ${JSON.stringify(reply)}`);
+  const sent=seen.at(-1);
+  if(sent?.operation?.type!==operation || sent.target_owner!==(configured&&researchOwned?'research':undefined))
+   throw Error(`incorrect ${configured?'configured':'legacy'} owner route for ${name}.${args.action}`);
+ }
+ if(seen.length!==researchRoutes.length)throw Error('owner routing test lost a native dispatch');
+}
+for(const forbidden of [
+ {name:'research',arguments:{action:'capabilities',target_owner:'engine'}},
+ {name:'market',arguments:{action:'capabilities',target_owner:'engine'}},
+]){
+ const reply:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
+  jsonrpc:'2.0',id:24,method:'tools/call',params:forbidden
+ })}),{RESEARCH_RUNTIME_TOKEN_SHA256:'f'.repeat(64)} as any,ctx)).json();
+ if(reply.error?.code!==-32602)throw Error('MCP caller tried to override authenticated target owner');
+}
+console.log('mcp_configured_research_owner_routes_and_legacy PASS');
+
 // P0 #537: an optional user graph must reach the Native request unchanged.
 // Otherwise different hypotheses can silently reuse the flat market job.
 const graphBase={action:'screen',instruments:['BTC-USDT'],fields:['returns'],

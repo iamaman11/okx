@@ -231,7 +231,7 @@ export function validTool(name:string,args:unknown):boolean {if(name==='market'&
 export function isExecutionMutation(type:unknown,action?:unknown):boolean{return type==='connect_account'||(type==='trade'&&action!=='preview'&&action!=='status')||(type==='strategies'&&!['list','status'].includes(String(action)))||(type==='research'&&['backtest','grid','cancel','record_decision'].includes(String(action)));}
 export function executionProfilePermitsOperation(profile:unknown,type:unknown):boolean{
   return profile==='engine'||(profile==='research'&&[
-    'market','market_capabilities','market_microstructure','research','find_instruments','market_overview','diagnostics'
+    'market','market_capabilities','market_microstructure','research','find_instruments','market_overview','portfolio_scenario','diagnostics'
   ].includes(String(type)));
 }
 

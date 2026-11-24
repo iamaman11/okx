@@ -24,11 +24,18 @@ import {
 } from "./shared.js";
 
 // The scope is an authenticated host's namespace claim, not proof of a key.
+// Classify ownership separately from admission: a forged account selector on a
+// Research operation must be rejected by Research, not reclassified as Engine.
+function researchOwnedOperation(request: any): boolean {
+  const op = request?.operation;
+  if (!op || typeof op !== "object") return false;
+  if (["market", "market_capabilities", "market_microstructure", "research", "find_instruments", "market_overview", "portfolio_scenario"].includes(op.type)) return true;
+  return op.type === "diagnostics" && op.request?.view === "research";
+}
+
 function researchOnlyPermits(request: any): boolean {
-  if (request.account != null || !request.operation || typeof request.operation !== "object") return false;
-  const op = request.operation;
-  if (["market", "market_capabilities", "market_microstructure", "research", "find_instruments", "market_overview"].includes(op.type)) return true;
-  return op.type === "diagnostics" && op.request?.view === "research" && op.request?.account == null;
+  return request?.account == null && request?.operation?.request?.account == null &&
+    researchOwnedOperation(request);
 }
 
 type RuntimeOwner = "engine" | "research" | "legacy_research";
@@ -447,15 +454,21 @@ export class RuntimeSession {
     if (!request || request.schema !== "okx.agent.request/v1" || typeof request.request_id !== "string") {
       return transportFailure("INVALID_REQUEST", false);
     }
-    // Owner-scoped dispatch is opt-in until the independent native Research
-    // connection is installed. An explicit research request never falls back
-    // to Engine, even if the Engine is healthy. Unmarked legacy requests keep
-    // their current finance route during the safe migration.
-    const owner: RuntimeOwner = request.target_owner === "research" ? "research" :
-      request.target_owner === undefined && !this.activeSocket("engine") &&
-      researchOnlyPermits(request) && this.activeSocket("legacy_research") ? "legacy_research" : "engine";
     if (request.target_owner !== undefined && request.target_owner !== "research" &&
         request.target_owner !== "engine") return transportFailure("INVALID_OWNER", false);
+    // Configuring a distinct Research bearer is the cutover boundary. From
+    // that point unmarked Research operations must never silently go to the
+    // financial Engine or an Engine-credential legacy research socket, even
+    // if the dedicated Research runtime is currently offline. Before the
+    // cutover, preserve installed unmarked Engine/legacy compatibility.
+    const researchConfigured = this.env.RESEARCH_RUNTIME_TOKEN_SHA256 !== undefined;
+    if (researchConfigured && request.target_owner === "engine" && researchOwnedOperation(request))
+      return transportFailure("RESEARCH_OWNER_REQUIRED", false);
+    const owner: RuntimeOwner = request.target_owner === "research" ||
+      (request.target_owner === undefined && researchConfigured && researchOwnedOperation(request))
+      ? "research" :
+      request.target_owner === undefined && !researchConfigured && !this.activeSocket("engine") &&
+      researchOnlyPermits(request) && this.activeSocket("legacy_research") ? "legacy_research" : "engine";
     if (owner !== "engine" && !researchOnlyPermits(request))
       return transportFailure("RESEARCH_OPERATION_FORBIDDEN", false);
     const active = this.activeSocket(owner);

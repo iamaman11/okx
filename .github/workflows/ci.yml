@@ -769,6 +769,18 @@ jobs:
               $identities = @($report.error, $report.failure.stage, $report.failure.package, $report.failure.code) |
                 Where-Object { $_ -cmatch '^[A-Za-z0-9_.:-]{1,150}$' }
               if ($identities.Count -gt 0) { $reason += " / " + ($identities -join ' / ') }
+              # Only manifest-selected witness names and finite cause codes;
+              # never emit collected libtest stdout/stderr (may contain secrets).
+              foreach ($witness in @($report.failed_witnesses) | Select-Object -First 12) {
+                $package = [string]$witness.package
+                $test = [string]$witness.test
+                $cause = [string]$witness.cause_code
+                if ($package -cmatch '^[A-Za-z0-9_.:-]{1,64}$' -and
+                    $test -cmatch '^[A-Za-z0-9_.:-]{1,256}$' -and
+                    @('LIBTEST_FAILED', 'TEST_PANIC', 'CLOCK_EVIDENCE_REJECTED', 'TEST_READINESS_TIMEOUT') -ccontains $cause) {
+                  Write-Host "::error title=Native finance failed witness::$package / $test / $cause"
+                }
+              }
             } catch {
               $reason += ' / report unavailable'
             }
@@ -796,6 +808,23 @@ jobs:
             "Financial setup through teardown: $($report.runtime_setup_to_teardown_ms) ms" >> $env:GITHUB_STEP_SUMMARY
             foreach ($group in $report.stages | Where-Object { $_.stage -eq 'libtest' }) {
               "- $($group.package) / $($group.group): $($group.wall_ms) ms" >> $env:GITHUB_STEP_SUMMARY
+            }
+            if ($report.overall -eq 'FAIL') {
+              $diagnostics = @()
+              foreach ($witness in @($report.failed_witnesses) | Select-Object -First 12) {
+                $package = [string]$witness.package
+                $test = [string]$witness.test
+                $cause = [string]$witness.cause_code
+                if ($package -cmatch '^[A-Za-z0-9_.:-]{1,64}$' -and
+                    $test -cmatch '^[A-Za-z0-9_.:-]{1,256}$' -and
+                    @('LIBTEST_FAILED', 'TEST_PANIC', 'CLOCK_EVIDENCE_REJECTED', 'TEST_READINESS_TIMEOUT') -ccontains $cause) {
+                  $diagnostics += "- $package / $test / $cause"
+                }
+              }
+              if ($diagnostics.Count -gt 0) {
+                "Failed financial witnesses (not accepted):" >> $env:GITHUB_STEP_SUMMARY
+                $diagnostics | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+              }
             }
           }
 

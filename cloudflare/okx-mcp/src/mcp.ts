@@ -1,6 +1,12 @@
 import {PUBLIC_TOOLS,validTool} from './execution_tools.js';
 import {dispatchRuntime,type Env,isObject,type Json,jsonRpc,jsonRpcError,MAX_BODY_BYTES,MCP_PROTOCOL_VERSION,MCP_SERVER_VERSION,TOOL_CONTRACT_VERSION,requestId,runtimeFetch,toolResult as baseToolResult,sha256Hex,transportFailure,workerReleaseSourceTree} from './shared.js';
 const NORMAL_RESULT_BYTES=12_288;
+// An installed Engine still serves Research while the independent Research
+// bearer is not configured. Once that bearer is configured, Research is a
+// separate failure domain: do not ask the financial Engine to stand in.
+function researchOwnerRoute(env:Env):{target_owner:'research'}|Record<string,never>{
+ return env.RESEARCH_RUNTIME_TOKEN_SHA256!==undefined?{target_owner:'research'}:{};
+}
 // An on-demand, read-only operator catalogue includes all versioned type and
 // provenance descriptors. It is not a normal Research decision packet; keep
 // its own finite bound rather than silently dropping required T01/T15 fields.
@@ -282,31 +288,40 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
       }
  if(name==='market'&&args.action==='instruments'){
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+     ...researchOwnerRoute(env),
      operation:{type:'find_instruments',asset:args.asset,settle_currency:args.settle_currency??null,instrument_type:null}})));
  }
  if(name==='market'&&args.action==='snapshot'){
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+     ...researchOwnerRoute(env),
      operation:{type:'market_overview',instrument:args.instrument}})));
  }
  if(name==='market'&&args.action==='microstructure'){
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+     ...researchOwnerRoute(env),
      operation:{type:'market_microstructure',instrument:args.instrument,
        size_contracts:args.size_contracts??null}})));
  }
  if(name==='market'&&args.action==='capabilities'){
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+     ...researchOwnerRoute(env),
      operation:{type:'market_capabilities'}}),MARKET_CAPABILITIES_RESULT_BYTES));
  }
  if(name==='portfolio'&&args.action==='scenario'){
    const {action:scopedAction,...scenario}=args;
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+      ...researchOwnerRoute(env),
       operation:{type:'portfolio_scenario',request:scenario}})));
  }
  const {account,...body}=nativeArgs;
  const payload=nativeName==='portfolio'?nativeArgs:nativeName==='diagnostics'?{reference:nativeArgs.reference??null,account:nativeArgs.account??null,view:nativeArgs.view??null,cycle_id:nativeArgs.cycle_id??null,limit:nativeArgs.limit??null}:body;
  const operation={type:nativeName,request:payload};
  const nativeRequestId=requestId();
- const reply=await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:nativeRequestId,...(typeof account==='string'?{account}:{}),operation});
+ const researchRoute=nativeName==='research'||nativeName==='market'||
+   (nativeName==='diagnostics'&&nativeArgs.view==='research')
+   ?researchOwnerRoute(env):{};
+ const reply=await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:nativeRequestId,
+   ...researchRoute,...(typeof account==='string'?{account}:{}),operation});
  if(nativeName==='diagnostics'&&nativeArgs.view==='research'&&nativeArgs.reference==='deployment'&&isObject(reply)){
    const native=nativeEnvelope(reply);
    const result=native?.result;

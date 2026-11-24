@@ -26,6 +26,90 @@ fn codec() -> LengthDelimitedCodec {
         .max_frame_length(MAX_FRAME_BYTES)
         .new_codec()
 }
+
+/// The Research boundary owns the conversion from externally validated wire
+/// fields to pure, typed portfolio mathematics. The Analysis crate has no
+/// dependency on the Engine/Research IPC package or its crypto dependencies.
+fn portfolio_scenario_wire(
+    request: &okx_ipc_contracts::trading::PortfolioScenarioRequest,
+) -> Result<serde_json::Value, String> {
+    use okx_analysis::portfolio_scenario::{
+        PortfolioScenarioInput, ScenarioCorrelation, ScenarioPosition, ScenarioSide, evaluate,
+    };
+    use okx_ipc_contracts::trading::PositionSide;
+    use rust_decimal::Decimal;
+
+    if !request.valid() {
+        return Err("INVALID_PORTFOLIO_SCENARIO".into());
+    }
+    let decimal = |value: &str| {
+        value
+            .parse::<Decimal>()
+            .map_err(|_| "INVALID_DECIMAL".to_owned())
+    };
+    let positions = request
+        .positions
+        .iter()
+        .map(|position| {
+            Ok(ScenarioPosition {
+                instrument: position.instrument.clone(),
+                side: match position.side {
+                    PositionSide::Long => ScenarioSide::Long,
+                    PositionSide::Short => ScenarioSide::Short,
+                },
+                notional_usd: decimal(&position.notional_usd)?,
+                margin_usd: decimal(&position.margin_usd)?,
+                price_shock_bps: position.price_shock_bps,
+                volatility_bps: position.volatility_bps,
+                liquidity_cost_bps: position.liquidity_cost_bps,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let correlations = request
+        .correlations
+        .iter()
+        .map(|pair| ScenarioCorrelation {
+            left: pair.left,
+            right: pair.right,
+            rho: pair.rho,
+        })
+        .collect();
+    let input = PortfolioScenarioInput::new(decimal(&request.equity_usd)?, positions, correlations)
+        .map_err(|error| error.to_string())?;
+    let result = evaluate(&input).map_err(|error| error.to_string())?;
+    let rows = result
+        .positions
+        .iter()
+        .map(|position| {
+            serde_json::json!({
+                "instrument": position.instrument,
+                "side": match position.side { ScenarioSide::Long => "long", ScenarioSide::Short => "short" },
+                "price_pnl_usd": position.price_pnl_usd.normalize().to_string(),
+                "liquidity_loss_usd": position.liquidity_loss_usd.normalize().to_string(),
+                "source": "caller_supplied",
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "schema": "okx.portfolio.scenario/v1",
+        "quality": "assumed",
+        "execution": "virtual_read_only",
+        "exchange_post": false,
+        "venue_margin_verified": false,
+        "provenance": "caller_supplied",
+        "gross_notional_usd": result.gross_notional_usd.normalize().to_string(),
+        "margin_usd": result.margin_usd.normalize().to_string(),
+        "stress_price_pnl_usd": result.stress_price_pnl_usd.normalize().to_string(),
+        "liquidity_loss_usd": result.liquidity_loss_usd.normalize().to_string(),
+        "net_stress_pnl_usd": result.net_stress_pnl_usd.normalize().to_string(),
+        "stressed_equity_usd": result.stressed_equity_usd.normalize().to_string(),
+        "drawdown_ratio": result.drawdown_ratio.normalize().to_string(),
+        "gross_leverage_ratio": result.gross_leverage_ratio.normalize().to_string(),
+        "correlated_volatility_usd": result.correlated_volatility_usd,
+        "correlation_basis": "caller_supplied_psd",
+        "positions": rows,
+    }))
+}
 type PendingSources =
     Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Result<PublicSourceReply, String>>>>>;
 
@@ -267,7 +351,7 @@ where
                                 ResearchCommand::Market { request, universe_page, resolved_instruments } => service.market(request, universe_page, resolved_instruments).await.map(WorkerReply::Product),
                                 ResearchCommand::EvaluateSignal { request } => service.evaluate_signal(request).await.map(WorkerReply::Signal),
                                 ResearchCommand::ProposeStrategySignal { request } => service.stage_strategy_signal(request).await.map(WorkerReply::StrategyProposal),
-                                ResearchCommand::PortfolioScenario { request } => okx_analysis::portfolio_scenario::evaluate(&request).map(WorkerReply::Product),
+                                ResearchCommand::PortfolioScenario { request } => portfolio_scenario_wire(&request).map(WorkerReply::Product),
                                 ResearchCommand::Capabilities => Ok(WorkerReply::Product(service.market_capabilities())),
                                 ResearchCommand::Drain => service.begin_drain().await.map(WorkerReply::Draining),
                                 ResearchCommand::Explain { job_id } => Ok(WorkerReply::Product(service.diagnostic_job(job_id.as_str()))),
@@ -298,7 +382,114 @@ where
 mod tests {
     use super::*;
     use okx_ipc_contracts::analytics::ResearchRequest;
+    use okx_ipc_contracts::trading::{
+        PortfolioScenarioRequest, PositionSide, ScenarioCorrelation, ScenarioPosition,
+    };
     use tokio::io::AsyncWriteExt;
+
+    fn scenario_position(side: PositionSide) -> ScenarioPosition {
+        ScenarioPosition {
+            instrument: "BTC-USDT-SWAP".into(),
+            side,
+            notional_usd: "100".into(),
+            margin_usd: "10".into(),
+            price_shock_bps: -1_000,
+            volatility_bps: 200,
+            liquidity_cost_bps: 50,
+        }
+    }
+
+    #[test]
+    fn portfolio_scenario_wire_schema_and_decimal_values_remain_stable() {
+        let request = PortfolioScenarioRequest {
+            equity_usd: "50".into(),
+            positions: vec![
+                scenario_position(PositionSide::Long),
+                scenario_position(PositionSide::Short),
+            ],
+            correlations: vec![ScenarioCorrelation {
+                left: 0,
+                right: 1,
+                rho: 0.6,
+            }],
+        };
+        let mut result = portfolio_scenario_wire(&request).unwrap();
+        let volatility = result["correlated_volatility_usd"].as_f64().unwrap();
+        assert!((volatility - 3.577708764).abs() < 1e-8);
+        result.as_object_mut().unwrap().remove("correlated_volatility_usd");
+        assert_eq!(result, serde_json::json!({
+            "schema": "okx.portfolio.scenario/v1",
+            "quality": "assumed",
+            "execution": "virtual_read_only",
+            "exchange_post": false,
+            "venue_margin_verified": false,
+            "provenance": "caller_supplied",
+            "gross_notional_usd": "200",
+            "margin_usd": "20",
+            "stress_price_pnl_usd": "0",
+            "liquidity_loss_usd": "1",
+            "net_stress_pnl_usd": "-1",
+            "stressed_equity_usd": "49",
+            "drawdown_ratio": "0.02",
+            "gross_leverage_ratio": "4",
+            "correlation_basis": "caller_supplied_psd",
+            "positions": [
+                {"instrument":"BTC-USDT-SWAP", "side":"long", "price_pnl_usd":"-10", "liquidity_loss_usd":"0.5", "source":"caller_supplied"},
+                {"instrument":"BTC-USDT-SWAP", "side":"short", "price_pnl_usd":"10", "liquidity_loss_usd":"0.5", "source":"caller_supplied"},
+            ],
+        }));
+    }
+
+    #[test]
+    fn portfolio_scenario_wire_preserves_validation_and_psd_error_codes() {
+        let mut request = PortfolioScenarioRequest {
+            equity_usd: "50".into(),
+            positions: vec![
+                scenario_position(PositionSide::Long),
+                scenario_position(PositionSide::Long),
+            ],
+            correlations: vec![ScenarioCorrelation {
+                left: 0,
+                right: 1,
+                rho: 0.6,
+            }],
+        };
+        request.correlations[0].rho = 1.2;
+        assert_eq!(
+            portfolio_scenario_wire(&request).unwrap_err(),
+            "INVALID_PORTFOLIO_SCENARIO"
+        );
+        request.correlations[0].rho = 0.6;
+        request.positions[0].notional_usd = "0".into();
+        assert_eq!(
+            portfolio_scenario_wire(&request).unwrap_err(),
+            "INVALID_PORTFOLIO_SCENARIO"
+        );
+        request.positions[0].notional_usd = "100".into();
+        request.positions.push(scenario_position(PositionSide::Long));
+        request.correlations = vec![
+            ScenarioCorrelation {
+                left: 0,
+                right: 1,
+                rho: 0.9,
+            },
+            ScenarioCorrelation {
+                left: 0,
+                right: 2,
+                rho: 0.9,
+            },
+            ScenarioCorrelation {
+                left: 1,
+                right: 2,
+                rho: -0.9,
+            },
+        ];
+        assert_eq!(
+            portfolio_scenario_wire(&request).unwrap_err(),
+            "CORRELATION_NOT_PSD"
+        );
+    }
+
     #[tokio::test]
     async fn cancelled_source_late_reply_is_ignored_but_unissued_is_rejected() {
         let (tx, mut rx) = mpsc::channel(1);

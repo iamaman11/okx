@@ -15,7 +15,7 @@ ALLOWED = {
     "okx-market-runtime": {"okx-api", "okx-observation", "okx-ipc-contracts", "okx-ws"},
     "okx-domain-core": set(),
     "okx-strategy-core": {"okx-domain-core"},
-    "okx-analysis": {"okx-domain-core", "okx-ipc-contracts", "okx-strategy-core"},
+    "okx-analysis": {"okx-domain-core", "okx-strategy-core"},
     "okx-research": {"okx-analysis"},
     "okx-trade-execution": {"okx-api", "okx-analysis", "okx-domain-core", "okx-observation"},
     "okx-ipc-contracts": {"okx-domain-core"},
@@ -271,6 +271,12 @@ def self_test() -> int:
     research_escape["okx-research"].add("okx-trade-execution")
     if "forbidden local dependency: okx-research -> okx-trade-execution" not in validate(research_escape):
         print("self-test failed: research gained write capability", file=sys.stderr)
+        return 1
+
+    wire_leak = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
+    wire_leak["okx-analysis"].add("okx-ipc-contracts")
+    if "forbidden local dependency: okx-analysis -> okx-ipc-contracts" not in validate(wire_leak):
+        print("self-test failed: analysis gained an IPC dependency", file=sys.stderr)
         return 1
 
     dev = {name: set() for name in ALLOWED}

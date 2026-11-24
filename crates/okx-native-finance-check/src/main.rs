@@ -493,6 +493,12 @@ async fn main() {
         report["error"] = json!(code);
         eprintln!("{code}");
     }
+    // The full JSON evidence remains the canonical report. These bounded,
+    // manifest-matched diagnostics are safe to show directly in CI logs when
+    // a libtest child fails; never print captured stdout/stderr verbatim.
+    for line in reporting::diagnostic_lines(&report) {
+        eprintln!("{line}");
+    }
     println!("{report}");
     if report["overall"] == "BLOCKED" {
         std::process::exit(2);

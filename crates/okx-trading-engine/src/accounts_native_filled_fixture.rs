@@ -191,32 +191,34 @@ pub(super) async fn opened_market_with_public_client(
     Arc<RecordedWsConnector>,
     okx_market_runtime::PublicWsHandle,
 ) {
-    let (stop, stopped) = watch::channel(false);
-    let service = fixture.trade.clone();
-    let maintenance = tokio::spawn(async move { service.run(stopped).await });
-    let mut observations = tokio::time::interval(Duration::from_millis(25));
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            observations.tick().await;
-            if fixture
-                .owner
-                .campaign_summary(fixture.campaign.clone())
-                .await
-                .unwrap()
-                .opening
-                .is_some()
-            {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("production maintenance opening before external fills");
-    stop.send(true).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), maintenance)
+    // `fixture()` has already connected the complete governed cohort and
+    // committed all six independently captured history frontiers. Invoke the
+    // exact strict policy application and captured-source opening producer
+    // used by recovery_turn; do not depend on its retry/backoff schedule as
+    // fixture synchronization. Neither path grants an unverified opening.
+    // No background maintenance producer races this SQL installation.
+    NativeFinanceRisk::from_owner(fixture.owner.clone())
+        .apply_governance(&fixture.authority)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("strict original finance policy applied before opening");
+    fixture
+        .trade
+        .install_captured_empty_campaign_opening(
+            &fixture.authority,
+            Instant::now() + Duration::from_secs(4),
+        )
+        .await
+        .expect("production captured-source opening before external fills");
+    assert!(
+        fixture
+            .owner
+            .campaign_summary(fixture.campaign.clone())
+            .await
+            .expect("finance owner accepts captured opening readback")
+            .opening
+            .is_some(),
+        "production opening must be durably visible in the original finance owner"
+    );
     let (market, public, socket) = raw_market_with_public_client(client);
     let mut updates = public.subscribe_market_updates();
     let (stop, stopped) = watch::channel(false);
@@ -523,9 +525,7 @@ pub(super) fn cleanup(feed: &RecordedAccountHttp, stop_client: &str) {
         }
     }
     feed.expect_causal_algo_inventory(STOP, before, after);
-    feed.expect_public_clock(envelope(
-        json!([{"ts":jiff::Timestamp::now().as_millisecond().to_string()}]),
-    ));
+    feed.expect_current_public_clock();
     feed.expect_post(RecordedPost {
         access_key: "fixture-executor-a".into(),
         path: "/api/v5/trade/cancel-algos".into(),
