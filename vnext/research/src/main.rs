@@ -1,44 +1,47 @@
-use okx_strategy_core::{
-    query_plan::{CheckedComposition, CompositionRequest},
-    stream::{CausalGraphStream, ClosedBar},
-};
+mod okx_candles;
+mod replay;
+
+use okx_strategy_core::query_plan::CompositionRequest;
 use serde::Deserialize;
 use std::io::{self, Write};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Replay {
+struct RecordedReplay {
     graph: CompositionRequest,
-    bars: Vec<InputBar>,
+    bars: Vec<replay::InputBar>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct InputBar {
-    timestamp_ms: i64,
-    close: Option<f64>,
+struct PublicReplay {
+    graph: CompositionRequest,
+    instrument: String,
+    interval: okx_candles::Interval,
+    limit: u16,
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let request: Replay = serde_json::from_reader(io::stdin().lock())?;
-    if request.bars.is_empty() {
-        return Err("replay requires at least one closed bar".into());
-    }
-    let plan = CheckedComposition::compile(request.graph, request.bars.len().try_into()?)?;
-    let mut stream = CausalGraphStream::new(&plan)?;
-    let output = request
-        .bars
-        .into_iter()
-        .map(|bar| {
-            let values = stream.on_closed_bar(ClosedBar {
-                timestamp_ms: bar.timestamp_ms,
-                close: bar.close,
-            })?;
-            Ok(serde_json::json!({"timestamp_ms": bar.timestamp_ms, "values": values}))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let input = io::stdin().lock();
     let mut stdout = io::stdout().lock();
-    serde_json::to_writer(&mut stdout, &output)?;
+    match args.as_slice() {
+        [] => {
+            let request: RecordedReplay = serde_json::from_reader(input)?;
+            serde_json::to_writer(&mut stdout, &replay::replay(request.graph, request.bars)?)?;
+        }
+        [mode] if mode == "--okx" => {
+            let request: PublicReplay = serde_json::from_reader(input)?;
+            let (source, bars) =
+                okx_candles::fetch(&request.instrument, request.interval, request.limit)?;
+            let result = replay::replay(request.graph, bars)?;
+            serde_json::to_writer(
+                &mut stdout,
+                &serde_json::json!({"source": source, "bars": result}),
+            )?;
+        }
+        _ => return Err("usage: okx-research-replay [--okx]".into()),
+    }
     writeln!(stdout)?;
     Ok(())
 }
