@@ -1,0 +1,346 @@
+use super::super::*;
+// One derived schema for BOTH T0 creation and reopening an existing v2
+// database. The persisted schema version and original finance facts stay
+// unchanged; every future ENTRY_ADMISSION/SETTLEMENT receipt is immutable.
+const ACCOUNT_DERIVED_SCHEMA: &str = "
+CREATE INDEX IF NOT EXISTS idx_nav_scope_version_time ON nav_points(scope_id,source_version,time);
+CREATE INDEX IF NOT EXISTS idx_finance_source_component ON finance_entries(source_ref,component);
+CREATE INDEX IF NOT EXISTS idx_finance_links_source ON finance_source_links(source_ref,entry_id);
+CREATE INDEX IF NOT EXISTS idx_fills_intent ON fills(intent_id,fill_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_native_receipt_scan
+    ON operation_receipts(kind,committed_at,operation_id);
+
+-- One durable invalidation fence for the existing financial SQL owner.
+-- New venue money or a changed native obligation makes admission stale;
+-- only background source reconciliation can stamp it as verified again.
+CREATE TABLE IF NOT EXISTS campaign_source_epoch(
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    revision INTEGER NOT NULL CHECK(revision>=0)
+) STRICT;
+INSERT OR IGNORE INTO campaign_source_epoch VALUES(1,0);
+CREATE TABLE IF NOT EXISTS campaign_entry_readiness(
+    campaign_id TEXT PRIMARY KEY,
+    from_ms INTEGER NOT NULL,
+    covered_through_ms INTEGER NOT NULL,
+    source_revision INTEGER NOT NULL,
+    source_generations TEXT NOT NULL,
+    reviewed_fill_rowid INTEGER NOT NULL DEFAULT 0,
+    reviewed_bill_rowid INTEGER NOT NULL DEFAULT 0,
+    reviewed_receipt_rowid INTEGER NOT NULL DEFAULT 0,
+    reviewed_finance_rowid INTEGER NOT NULL DEFAULT 0,
+    reviewed_flow_rowid INTEGER NOT NULL DEFAULT 0,
+    reviewed_late_epoch INTEGER NOT NULL DEFAULT 0
+) STRICT;
+-- A single scalar records mutable late-head revision updates that cannot
+-- be detected from a rowid high-water alone.
+CREATE TABLE IF NOT EXISTS campaign_late_head_epoch(
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    revision INTEGER NOT NULL CHECK(revision>=0)
+) STRICT;
+INSERT OR IGNORE INTO campaign_late_head_epoch VALUES(1,0);
+CREATE TRIGGER IF NOT EXISTS campaign_fill_invalidates_ready AFTER INSERT ON fills
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_bill_invalidates_ready AFTER INSERT ON bills
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+-- Reopening a database carrying an older candidate of this schema must not
+-- keep lifecycle-driven invalidation and force a historical scan after
+-- every PREPARED/HELD/POSTING transition.
+DROP TRIGGER IF EXISTS campaign_intent_invalidates_ready;
+DROP TRIGGER IF EXISTS campaign_reserve_invalidates_ready;
+DROP TRIGGER IF EXISTS campaign_risk_invalidates_ready;
+CREATE TRIGGER IF NOT EXISTS campaign_finance_invalidates_ready AFTER INSERT ON finance_entries
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_flow_invalidates_ready AFTER INSERT ON cash_flows
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_settlement_invalidates_ready AFTER INSERT ON operation_receipts
+WHEN NEW.kind IN(
+    'ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
+    'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED',
+    'ENTRY_PARTIAL_SETTLED',
+    'ENTRY_BILL_ORDER_SOURCE','ENTRY_ORDER_FEE_INDEX')
+BEGIN UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS campaign_late_update_invalidates_ready
+AFTER UPDATE OF result_ref ON operation_receipts
+WHEN NEW.kind='ENTRY_LATE_HEAD' AND NEW.result_ref!=OLD.result_ref
+BEGIN
+UPDATE campaign_source_epoch SET revision=revision+1 WHERE id=1;
+UPDATE campaign_late_head_epoch SET revision=revision+1 WHERE id=1;
+END;
+-- Bounded source-owned change cursor. Original receipts remain the ONLY
+-- money authority; this derived queue identifies native terminal/late proofs
+-- changed after the last sealed campaign checkpoint.
+CREATE TABLE IF NOT EXISTS campaign_receipt_events(
+    event_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_id TEXT NOT NULL,
+    kind TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS campaign_receipt_cursors(
+    campaign_id TEXT PRIMARY KEY,
+    reviewed_event_seq INTEGER NOT NULL CHECK(reviewed_event_seq>=0)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS campaign_receipt_event_insert
+AFTER INSERT ON operation_receipts
+WHEN NEW.kind IN ('ENTRY_SETTLEMENT_PROVEN','ENTRY_LATE_HEAD',
+                  'ENTRY_LATE_SETTLEMENT_PROVEN','ENTRY_LATE_SETTLED',
+                  'ENTRY_PARTIAL_SETTLED')
+BEGIN
+    INSERT INTO campaign_receipt_events(operation_id,kind)
+    VALUES(NEW.operation_id,NEW.kind);
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_receipt_event_head_change
+AFTER UPDATE OF result_ref ON operation_receipts
+WHEN NEW.kind='ENTRY_LATE_HEAD' AND OLD.result_ref!=NEW.result_ref
+BEGIN
+    INSERT INTO campaign_receipt_events(operation_id,kind)
+    VALUES(NEW.operation_id,NEW.kind);
+END;
+-- Append-only cumulative money evidence. Only the existing SQL owner
+-- advances the one campaign aggregate using independently verified receipts.
+CREATE TABLE IF NOT EXISTS campaign_entry_applied(
+    campaign_id TEXT NOT NULL,
+    intent_id TEXT NOT NULL,
+    settlement_revision INTEGER NOT NULL CHECK(settlement_revision>0),
+    cumulative_usd TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    venue_update_ms INTEGER NOT NULL,
+    PRIMARY KEY(campaign_id,intent_id,settlement_revision)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_entry_applied_update
+    BEFORE UPDATE ON campaign_entry_applied
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_APPLIED'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_entry_applied_delete
+    BEFORE DELETE ON campaign_entry_applied
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_APPLIED'); END;
+CREATE TABLE IF NOT EXISTS campaign_entry_totals(
+    campaign_id TEXT PRIMARY KEY,
+    from_ms INTEGER NOT NULL,
+    covered_through_ms INTEGER NOT NULL,
+    consumed_usd TEXT NOT NULL
+) STRICT;
+-- The same completed frontier always yields the identical immutable proof.
+-- Persist it atomically with the applied event delta and total.
+CREATE TABLE IF NOT EXISTS campaign_entry_window_proofs(
+    campaign_id TEXT NOT NULL,
+    covered_through_ms INTEGER NOT NULL,
+    consumed_usd TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    PRIMARY KEY(campaign_id,covered_through_ms)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_entry_window_proof_update
+    BEFORE UPDATE ON campaign_entry_window_proofs
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_WINDOW_PROOF'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_entry_window_proof_delete
+    BEFORE DELETE ON campaign_entry_window_proofs
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_WINDOW_PROOF'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_update
+    BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_campaign_opening_delete
+    BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='CAMPAIGN_ENTRY_OPENING_SEALED'
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_CAMPAIGN_ENTRY_OPENING'); END;
+CREATE TABLE IF NOT EXISTS bill_order_sources(
+    bill_id TEXT PRIMARY KEY REFERENCES bills(bill_id),
+    instrument_id TEXT NOT NULL,
+    exchange_order_id TEXT NOT NULL,
+    trade_id TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_bill_order_sources_order ON bill_order_sources(exchange_order_id,bill_id);
+CREATE TRIGGER IF NOT EXISTS immutable_bill_order_source_update BEFORE UPDATE ON bill_order_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_BILL_ORDER_SOURCE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_bill_order_source_delete BEFORE DELETE ON bill_order_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_BILL_ORDER_SOURCE'); END;
+CREATE TABLE IF NOT EXISTS swap_fill_sources(
+    fill_id TEXT PRIMARY KEY REFERENCES fills(fill_id),
+    bill_id TEXT NOT NULL, sub_type TEXT NOT NULL,
+    position_side TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN('OPEN','CLOSE','NET_UNRESOLVED','UNCLASSIFIED'))
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS immutable_swap_fill_source_update BEFORE UPDATE ON swap_fill_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_SWAP_FILL_SOURCE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_swap_fill_source_delete BEFORE DELETE ON swap_fill_sources
+    BEGIN SELECT RAISE(ABORT,'IMMUTABLE_SWAP_FILL_SOURCE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_quote_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_QUOTE_UNPROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_QUOTE'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_admission_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_ADMISSION_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_ADMISSION'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_admission_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_ADMISSION_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_ADMISSION'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_partial_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_PARTIAL_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_PARTIAL_ENTRY'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_partial_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_PARTIAL_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_PARTIAL_ENTRY'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_partial_ack_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_PARTIAL_SETTLED' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_PARTIAL_ACK'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_partial_ack_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_PARTIAL_SETTLED' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_PARTIAL_ACK'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_settlement_update BEFORE UPDATE ON operation_receipts
+    WHEN OLD.kind='ENTRY_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_SETTLEMENT'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_entry_settlement_delete BEFORE DELETE ON operation_receipts
+    WHEN OLD.kind='ENTRY_SETTLEMENT_PROVEN' BEGIN SELECT RAISE(ABORT,'IMMUTABLE_ENTRY_SETTLEMENT'); END;
+";
+impl AccountStore {
+    pub fn initialize_or_inspect_exact(
+        path: impl AsRef<Path>,
+        meta: AccountMeta,
+        snapshot: &OpeningSnapshot,
+    ) -> StoreResult<Self> {
+        if path.as_ref().exists() {
+            let store = Self::open_existing(path, &meta.account_key, &meta.installation_id)?;
+            if store.meta.initialize_operation_id != meta.initialize_operation_id
+                || store.meta.release_id != meta.release_id
+            {
+                return Err(StoreError::Invalid("INITIALIZE_OPERATION_CONFLICT"));
+            }
+            return Ok(store);
+        }
+        Self::initialize_flat(path, meta, snapshot)
+    }
+    pub fn initialize_flat(
+        path: impl AsRef<Path>,
+        meta: AccountMeta,
+        snapshot: &OpeningSnapshot,
+    ) -> StoreResult<Self> {
+        Self::validate_account_opening(&meta, snapshot)?;
+        Self::initialize_inner(path, meta, snapshot)
+    }
+    fn initialize_inner(
+        path: impl AsRef<Path>,
+        meta: AccountMeta,
+        snapshot: &OpeningSnapshot,
+    ) -> StoreResult<Self> {
+        if path.as_ref().exists() {
+            return Err(StoreError::Invalid("ACCOUNT_ALREADY_INITIALIZED"));
+        }
+        let lease = Self::writer_lease(path.as_ref())?;
+        let _new_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path.as_ref())?;
+        let mut c = Connection::open(path.as_ref())?;
+        Self::configure(&c)?;
+        c.pragma_update(None, "journal_mode", "WAL")?;
+        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(include_str!("../../../schema/account-v2.sql"))?;
+        tx.execute_batch(ACCOUNT_DERIVED_SCHEMA)?;
+        Self::initialize_account_rows_sql(&tx, None, &meta, snapshot)?;
+        tx.commit()?;
+        Ok(Self {
+            connection: c,
+            path: path.as_ref().into(),
+            meta,
+            _lease: lease,
+            maintenance_error: None,
+            cash_flow_totals_cache: std::cell::RefCell::new(None),
+            latest_capital_assignment_time: std::cell::RefCell::new(None),
+        })
+    }
+    pub fn open_existing(
+        path: impl AsRef<Path>,
+        account_key: &str,
+        installation_id: &str,
+    ) -> StoreResult<Self> {
+        if path.as_ref().with_extension("restore.pending").exists() {
+            return Err(StoreError::Invalid("STORAGE_RECOVERY_INCOMPLETE"));
+        }
+        let lease = Self::writer_lease(path.as_ref())?;
+        let mut c = Connection::open_with_flags(path.as_ref(), OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        Self::configure(&c)?;
+        let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let journal: String = c.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+        if version != 2 || journal != "wal" {
+            return Err(StoreError::Invalid("UNSUPPORTED_ACCOUNT_STORAGE"));
+        }
+        let meta=c.query_row("SELECT account_key,installation_id,initialized_at,opening_source,initialize_operation_id,release_id FROM account_meta WHERE singleton=1",[],|r|Ok(AccountMeta{account_key:r.get(0)?,installation_id:r.get(1)?,initialized_at:r.get(2)?,opening_source:r.get(3)?,initialize_operation_id:r.get(4)?,release_id:r.get(5)?}))?;
+        if meta.account_key != account_key || meta.installation_id != installation_id {
+            return Err(StoreError::Invalid("ACCOUNT_IDENTITY_MISMATCH"));
+        }
+        // Existing v2 databases need the same derived lookup as clean T0 databases.
+        // This is an idempotent index only: no financial facts or schema version change.
+        c.execute_batch(ACCOUNT_DERIVED_SCHEMA)?;
+        // Existing v2 ledger: establish an immutable-event provenance fence
+        // once on open, never during the two-second NAV hot path. An invalid
+        // old economic row leaves strategy valuation NOT_PROVEN, but must not
+        // prevent account inspection, reconciliation or reducing risk.
+        if let Err(error) = Self::audit_existing_finance_provenance(&mut c) {
+            if matches!(error, StoreError::Invalid(_)) {
+                eprintln!("ACCOUNT_FINANCE_PROVENANCE_V1 outcome=unverified");
+            } else {
+                return Err(error);
+            }
+        }
+        Ok(Self {
+            connection: c,
+            path: path.as_ref().into(),
+            meta,
+            _lease: lease,
+            maintenance_error: None,
+            cash_flow_totals_cache: std::cell::RefCell::new(None),
+            latest_capital_assignment_time: std::cell::RefCell::new(None),
+        })
+    }
+    pub(super) fn writer_lease(path: &Path) -> StoreResult<WriterLease> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(format!("{}.writer.lock", path.display()))?;
+        // An interrupted OS lock syscall is not proof of another owner.
+        // Retry only EINTR, with a strict bound and without sleeping. A real
+        // busy writer stays fail-closed; all other I/O failures retain their
+        // actual OS error instead of masquerading as writer contention.
+        let mut interrupted = 0;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(WriterLease(file)),
+                Err(std::fs::TryLockError::Error(e))
+                    if e.kind() == std::io::ErrorKind::Interrupted && interrupted < 3 =>
+                {
+                    interrupted += 1;
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(StoreError::Invalid("ACCOUNT_WRITER_ALREADY_RUNNING"));
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(StoreError::Io(e)),
+            }
+        }
+    }
+    pub(super) fn configure(c: &Connection) -> StoreResult<()> {
+        c.busy_timeout(Duration::from_millis(250))?;
+        c.pragma_update(None, "foreign_keys", "ON")?;
+        c.pragma_update(None, "synchronous", "FULL")?;
+        // The single AccountStore owner already runs a bounded-cadence
+        // PASSIVE checkpoint (and mandatory durable backups). SQLite's
+        // default 1000-page auto-checkpoint otherwise runs inside COMMIT,
+        // injecting unpredictable disk I/O into time-critical NAV writes.
+        // Keep FULL transaction durability; do not add a second checkpointer.
+        c.pragma_update(None, "wal_autocheckpoint", 0)?;
+        if rusqlite::version_number() < 3_051_003 {
+            return Err(StoreError::Invalid("SQLITE_WAL_RESET_FIX_REQUIRED"));
+        }
+        Ok(())
+    }
+    pub fn meta(&self) -> &AccountMeta {
+        &self.meta
+    }
+    pub fn sqlite_runtime(&self) -> StoreResult<(String, String)> {
+        Ok((
+            rusqlite::version().into(),
+            self.connection
+                .query_row("SELECT sqlite_source_id()", [], |r| r.get(0))?,
+        ))
+    }
+    pub fn integrity_check(&self) -> StoreResult<()> {
+        let s: String = self
+            .connection
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        if s != "ok" {
+            return Err(StoreError::Invalid("ACCOUNT_STORAGE_CORRUPT"));
+        }
+        Ok(())
+    }
+}

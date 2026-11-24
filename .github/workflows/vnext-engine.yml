@@ -1,0 +1,33 @@
+name: vNext Engine
+
+on:
+  push:
+    branches: [vnext]
+    paths: [vnext/engine/**, .github/workflows/vnext-engine.yml]
+  pull_request:
+    branches: [vnext]
+    paths: [vnext/engine/**, .github/workflows/vnext-engine.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    name: Engine financial core standalone
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Export only the Engine workspace
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/engine"
+          git archive HEAD:vnext/engine | tar -x -C "$RUNNER_TEMP/engine"
+      - name: Check, test and build the financial core
+        working-directory: ${{ runner.temp }}/engine
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo test --locked --workspace
+          cargo build --locked --release --workspace

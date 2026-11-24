@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["crates/okx-engine-risk", "crates/okx-trade-execution"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"

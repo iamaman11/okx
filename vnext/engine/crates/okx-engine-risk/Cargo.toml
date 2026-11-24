@@ -1,0 +1,13 @@
+[package]
+name = "okx-engine-risk"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+num-bigint = "0.5"
+thiserror = "2"
+
+[dev-dependencies]
+proptest = "1"
