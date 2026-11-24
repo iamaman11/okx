@@ -652,7 +652,9 @@ async fn t11_t12_real_worker_observation_and_cancel_survive_saturated_work_lane(
     let mut source_requests = 0usize;
     let overflow = RequestId::new(format!("h{}", MAX_IN_FLIGHT + 1)).unwrap();
     tokio::time::timeout(Duration::from_secs(4), async {
-        loop {
+        let mut saw_overflow = false;
+        // The control response can be written before the scheduled source RPCs.
+        while !saw_overflow || source_requests == 0 {
             match receive(&mut output).await {
                 WorkerFrame::SourceRequest { .. } => source_requests += 1,
                 WorkerFrame::Response {
@@ -661,18 +663,14 @@ async fn t11_t12_real_worker_observation_and_cancel_survive_saturated_work_lane(
                     ..
                 } if id == overflow => {
                     assert_eq!(error, "RESEARCH_BUSY", "main lane did not saturate");
-                    break;
+                    saw_overflow = true;
                 }
                 other => panic!("work completed while synthetic source was held: {other:?}"),
             }
         }
     })
     .await
-    .expect("saturated work lane was not observed");
-    assert!(
-        source_requests > 0,
-        "test must actually cross the child source boundary"
-    );
+    .expect("expected both a source RPC and a rejected overflow request");
     // Public status/cancel validate a full canonical SHA-shaped job ID before
     // querying SQLite. Use a well-formed but absent ID to exercise that path.
     let unknown_job = "f".repeat(64);
