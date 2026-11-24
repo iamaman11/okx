@@ -10,12 +10,17 @@ const root = path.join(__dirname, '..', '.github', 'workflows');
 const workflows = fs.readdirSync(root).filter(x => /\.ya?ml$/.test(x));
 const source = fs.readFileSync(path.join(root, 'ci.yml'), 'utf8');
 const researchRelease = fs.readFileSync(path.join(root, '..', '..', 'scripts', 'prepare-research-release.ps1'), 'utf8');
-const mainCacheWriter = "${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}";
+const mainCacheWriter = "${{ github.ref == 'refs/heads/main' }}";
+const warmPrefix = "${{ matrix.profile == 'tests' && 'v2-rust' || 'v1-rust' }}";
+const regressionSuites = ['engine', 'host', 'execution', 'research', 'clippy'];
+const releaseGates = ['trading-engine-acceptance-windows',
+  ...regressionSuites.map(suite => `trading-engine-regressions-windows (${suite})`),
+  'trading-engine-build-windows', 'linux-core', 'windows-native'];
 const nativeCacheJobs = [
-  ['trading_engine_acceptance_windows', 'trading-engine-tests-windows', 'false'],
-  ['trading_engine_regressions_windows', 'trading-engine-tests-windows', 'false'],
-  ['trading_engine_build_windows', 'trading-engine-release-windows', mainCacheWriter],
-  ['trusted_main_test_cache_prime', 'trading-engine-tests-windows', mainCacheWriter],
+  ['trading_engine_acceptance_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
+  ['trading_engine_regressions_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
+  ['trading_engine_build_windows', 'v1-rust', 'trading-engine-release-windows', 'false'],
+  ['trusted_main_cache_prime', warmPrefix, 'trading-engine-${{ matrix.profile }}-windows', mainCacheWriter],
 ];
 
 function validate(yaml, fileNames) {
@@ -39,7 +44,7 @@ function validate(yaml, fileNames) {
     i + 1 < entries.length ? entries[i + 1].index : undefined)]));
   assert.equal(map.size, entries.length, 'DUPLICATE_JOB_ID');
   // Finance, independent regressions and release share a single workflow.
-  // The only cache-only job is the explicit trusted-main seed.
+  // The only cache-only job primes exact accepted main, outside the PR gate.
   assert.ok(map.size <= 17, 'OBSOLETE_JOB_GRAPH_REGRESSION');
   for (const unused of ['required_classify', 'draft-trading-migration-512',
     'draft-riskbook-migration-510', 'trading_safety_acceptance_windows', 'cloudflare_deploy', 'readonly_observer',
@@ -50,19 +55,23 @@ function validate(yaml, fileNames) {
     assert.ok(map.has(id), `MISSING_JOB:${id}`);
     return map.get(id);
   }
-  // One trusted-main workspace-cache generation, with test and release
-  // physically isolated. Every Ready consumer must use the same inputs as
-  // its main seed; the old dependency-only keys are immutable on GitHub.
-  for (const [id, shared, save] of nativeCacheJobs) {
+  // Cache writes stay on exact accepted main. Tests and shipping builds
+  // use separate target caches.
+  for (const [id, prefix, shared, save] of nativeCacheJobs) {
     const block = job(id);
     const starts = [...block.matchAll(/^      - uses: Swatinem\/rust-cache@[0-9a-f]{40}(?: #[^\n]+)?$/gm)];
     assert.equal(starts.length, 1, `EXACTLY_ONE_NATIVE_RUST_CACHE:${id}`);
     const end = block.indexOf('\n      - ', starts[0].index + starts[0][0].length);
     const step = block.slice(starts[0].index, end < 0 ? undefined : end);
-    assert.match(step, /^          prefix-key: v1-rust$/m, `NATIVE_CACHE_GENERATION:${id}`);
+    assert.ok(step.split('\n').includes(`          prefix-key: ${prefix}`), `NATIVE_CACHE_GENERATION:${id}`);
     assert.match(step, /^          cache-workspace-crates: true$/m, `NATIVE_WORKSPACE_CACHE:${id}`);
-    assert.match(step, new RegExp(`^          shared-key: ${shared}$`, 'm'), `NATIVE_CACHE_PROFILE:${id}`);
-    assert.ok(step.split('\n').includes(`          save-if: ${save}`), `TRUSTED_MAIN_ONLY_CACHE_WRITER:${id}`);
+    assert.ok(step.split('\n').includes(`          shared-key: ${shared}`), `NATIVE_CACHE_PROFILE:${id}`);
+    assert.ok(step.split('\n').includes(`          save-if: ${save}`), `SCOPED_CACHE_WRITER:${id}`);
+    assert.match(step, /^          cache-on-failure: false$/m);
+    if (id === 'trading_engine_acceptance_windows' || id === 'trading_engine_regressions_windows') {
+      for (const profile of ['DEV', 'TEST'])
+        assert.match(block, new RegExp(`^      CARGO_PROFILE_${profile}_DEBUG: 0$`, 'm'));
+    }
   }
 
   // Keep the existing branch-protection display name without an alias runner.
@@ -103,9 +112,7 @@ function validate(yaml, fileNames) {
   const names = {
     rust_tests_linux: 'rust-tests-linux',
     trading_engine_acceptance_windows: 'trading-engine-acceptance-windows',
-    trading_engine_regressions_windows: 'trading-engine-regressions-windows',
     trading_engine_build_windows: 'trading-engine-build-windows',
-    trusted_main_test_cache_prime: 'trusted-main-windows-test-cache-prime',
     research_service_tests_windows: 'research-service-tests-windows',
     host_controller_launcher_checks: 'host-controller-launcher-checks',
     'research_package_proof': 'research-package-proof',
@@ -137,10 +144,22 @@ function validate(yaml, fileNames) {
   const regression = job('trading_engine_regressions_windows');
   assert.match(regression, /needs: component_impact/);
   assert.match(regression, /if: needs\.component_impact\.outputs\.build_required == 'true' && needs\.component_impact\.outputs\.native_required != 'false' && needs\.component_impact\.outputs\.research_only != 'true'/);
-  assert.match(regression, /shared-key: trading-engine-tests-windows/);
-  assert.match(regression, /Clippy native Windows crates/);
-  assert.match(regression, /Strategy Core and Research owner regressions on full Windows/);
-  assert.match(regression, /Native trading, SQL, CONTROL and Launcher remaining regression/);
+  assert.ok(regression.includes('    name: trading-engine-regressions-windows (${{ matrix.suite }})'));
+  assert.ok(regression.includes(`      fail-fast: false\n      matrix:\n        suite: [${regressionSuites.join(', ')}]`));
+  for (const [name, scope] of [
+    ['Clippy native Windows crates', "matrix.suite == 'clippy'"],
+    ['Strategy Core and Research owner regressions on full Windows', "matrix.suite == 'research'"],
+    ['Build research worker for regression process contracts', "matrix.suite == 'engine'"],
+    ['Remaining native regression tests for this suite', "matrix.suite == 'engine' || matrix.suite == 'host' || matrix.suite == 'execution'"],
+    ['Serial native account catalog and writer-termination regressions', "matrix.suite == 'engine'"],
+    ['Serial terminal release source-frontier regression', "matrix.suite == 'engine'"],
+    ['Agent dispatch to actual research child', "matrix.suite == 'engine'"],
+    ['Worker library regression and actual IPC child', "matrix.suite == 'research'"],
+    ['K9 worker two-heavy cancellation latency evidence', "matrix.suite == 'research'"],
+    ['Upload K9 native latency evidence', "matrix.suite == 'research'"],
+  ]) assert.ok(regression.includes(`      - name: ${name}\n        if: ${scope}\n`), `NATIVE_REGRESSION_SUITE:${name}`);
+  assert.match(regression, /'host' \{ 'okx-host-controller'; 'okx-host-launcher' \}/);
+  assert.match(regression, /'execution' \{ 'okx-trade-execution' \}/);
   // The six 3s SQLite-writer/catalog fixtures are still mandatory, just not
   // contending with the remaining 300 Engine libtests for the test-harness clock.
   assert.match(regression, /\$testArgs \+= @\('--skip','accounts::native_connect_contracts::'\)/);
@@ -164,12 +183,8 @@ function validate(yaml, fileNames) {
   assert.match(regression, /K9 worker two-heavy cancellation latency evidence/);
   assert.doesNotMatch(regression, /Mandatory current Rust financial property acceptance|Isolated Native pending-fill crash recovery|name: okx-windows-bundle-/);
   const build = job('trading_engine_build_windows');
-  assert.match(build, /\(github.event_name == 'workflow_dispatch' &&\n         inputs.prime_windows_cargo_cache == true &&/);
-  assert.match(build, /inputs.prime_windows_cargo_cache == true &&/);
-  assert.match(build, /github.ref == 'refs\/heads\/main' &&/);
-  assert.match(build, /needs.component_impact.outputs.build_required == 'false'/);
-  assert.match(build, /merged tree exactly matches successful PR head tree/);
-  assert.match(build, /needs.component_impact.outputs.native_required != 'false'/);
+  assert.match(build, /needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false'/);
+  assert.doesNotMatch(build, /workflow_dispatch|name: Seed|CACHE_SEED/);
   assert.match(build, /shared-key: trading-engine-release-windows/);
   assert.doesNotMatch(build, /shared-key: trading-engine-tests-windows/);
   assert.match(build, /cache-on-failure: false/);
@@ -178,19 +193,22 @@ function validate(yaml, fileNames) {
   assert.match(build, /if: github.event_name == 'pull_request'\n        uses: actions\/upload-artifact/);
   assert.match(build, /source_head_sha = \$sourceHead/);
   assert.doesNotMatch(build, /gh release|cargo run|cargo test --locked .* -- --nocapture/);
-  assert.match(build, /FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED/);
-  const prime = job('trusted_main_test_cache_prime');
-  assert.match(prime, /github.event_name == 'workflow_dispatch' &&/);
-  assert.match(prime, /inputs.prime_windows_cargo_cache == true &&/);
+  const prime = job('trusted_main_cache_prime');
+  assert.ok(prime.includes("name: trusted-main-windows-cache-prime (${{ matrix.profile }})"));
+  assert.match(prime, /^        profile: \[tests, release\]$/m);
+  assert.match(prime, /github.event_name == 'push' && needs.component_impact.outputs.component_scope == 'full'/);
+  assert.match(prime, /github.event_name == 'workflow_dispatch' && inputs.prime_windows_cargo_cache == true/);
   assert.match(prime, /github.ref == 'refs\/heads\/main' &&/);
   assert.match(prime, /needs.component_impact.outputs.build_required == 'false'/);
   assert.match(prime, /merged tree exactly matches successful PR head tree/);
-  assert.match(prime, /shared-key: trading-engine-tests-windows/);
-  assert.doesNotMatch(prime, /shared-key: trading-engine-release-windows/);
+  for (const profile of ['DEV','TEST'])
+    assert.ok(prime.includes(`      CARGO_PROFILE_${profile}_DEBUG: ` + "${{ matrix.profile == 'tests' && '0' || '' }}"));
   assert.match(prime, /cache-on-failure: false/);
   assert.match(prime, /cargo test --locked --no-run --all-targets/);
   assert.match(prime, /cargo build --locked -p okx-native-finance-check/);
-  assert.doesNotMatch(prime, /gh release|actions\/upload-artifact|cargo run|cargo build --locked --release/);
+  assert.match(prime, /matrix.profile == 'release' && steps.prime-cache.outputs.cache-hit != 'true'/);
+  assert.match(prime, /cargo build --locked --release -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-research-service/);
+  assert.doesNotMatch(prime, /gh release|actions\/upload-artifact|cargo run/);
   assert.match(prime, /FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED/);
   const windows = job('required_windows');
   assert.match(windows, /needs: \[component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows,/);
@@ -223,7 +241,7 @@ function validate(yaml, fileNames) {
   assert.match(publish, /group: native-base-publication/);
   assert.match(publish, /ACCEPTED_MAIN: \$\{\{ github\.sha \}\}/);
   assert.doesNotMatch(publish, /github\.event\.workflow_run/);
-  assert.match(publish, /"trading-engine-acceptance-windows","trading-engine-regressions-windows","trading-engine-build-windows","linux-core","windows-native"/);
+  assert.ok(publish.includes(JSON.stringify(releaseGates)), 'PUBLICATION_REQUIRES_EACH_WINDOWS_SUITE');
 
   for (const [id, block] of map) {
     if (id !== 'publish_accepted_windows_release') {
@@ -258,8 +276,9 @@ assert.throws(() => validate(source.replace('stale_bill_coverage_blocks_settleme
   'stale_bill_not_covered'), workflows));
 assert.throws(() => validate(source.replace('always() &&\n        github.event_name',
   'github.event_name'), workflows));
-assert.throws(() => validate(source.replace("inputs.prime_windows_cargo_cache == true &&", "true &&"), workflows));
-assert.throws(() => validate(source.replace("github.event_name == 'workflow_dispatch' &&", "github.event_name == 'push' &&"), workflows));
+assert.throws(() => validate(source.replace("inputs.prime_windows_cargo_cache == true", "true"), workflows));
+assert.throws(() => validate(source.replace("github.event_name == 'workflow_dispatch' && inputs.prime_windows_cargo_cache == true", "github.event_name == 'pull_request'"), workflows));
+assert.throws(() => validate(source.replace("github.event_name == 'push' && needs.component_impact.outputs.component_scope == 'full'", "github.event_name == 'push'"), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_build_windows.result }}" = "success"', 'true'), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_regressions_windows.result }}" = "success"', 'true'), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"', 'true'), workflows));
@@ -270,7 +289,8 @@ assert.throws(() => validate(source.replace('test "${{ needs.component_impact.ou
 assert.throws(() => validate(source.replace('node scripts/ci-finance-witness-manifest.cjs --verify-report', 'echo skipped'), workflows));
 assert.throws(() => validate(source.replace('$manifestJson = & node scripts/ci-finance-witness-manifest.cjs', '$manifestJson = & cargo run --locked -p okx-native-finance-check -- --list'), workflows));
 assert.throws(() => validate(source.replace('needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows,', 'needs: [component_impact, trading_engine_acceptance_windows,'), workflows));
-assert.throws(() => validate(source.replace('"trading-engine-acceptance-windows","trading-engine-regressions-windows",', '"trading-engine-acceptance-windows",'), workflows));
+assert.throws(() => validate(source.replace('"trading-engine-regressions-windows (engine)",', ''), workflows));
+assert.throws(() => validate(source.replace('suite: [engine, host, execution, research, clippy]', 'suite: [engine, host, execution, research]'), workflows));
 assert.throws(() => validate(source.replace('shared-key: trading-engine-release-windows', 'shared-key: trading-engine-tests-windows'), workflows));
 assert.throws(() => validate(source.replace('shared-key: trading-engine-tests-windows', 'shared-key: trading-engine-release-windows'), workflows));
 // Scope mutations to named native jobs: unrelated future Rust caches must not
@@ -285,9 +305,9 @@ function changeJobInput(yaml, id, before, after) {
   assert.ok(block.includes(before), `MISSING_CACHE_INPUT:${id}`);
   return yaml.slice(0, start) + block.replace(before, after) + yaml.slice(end);
 }
-for (const [id, , save] of nativeCacheJobs) {
+for (const [id, prefix, , save] of nativeCacheJobs) {
   for (const [before, after] of [
-    ['prefix-key: v1-rust', 'prefix-key: v0-rust'],
+    [`prefix-key: ${prefix}`, 'prefix-key: v0-rust'],
     ['cache-workspace-crates: true', 'cache-workspace-crates: false'],
     [`save-if: ${save}`, 'save-if: true'],
   ]) {

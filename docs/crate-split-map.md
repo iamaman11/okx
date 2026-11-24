@@ -157,7 +157,7 @@ RiskBook, финансовый SQLite/WAL, допуск и исполнение 
    `okx-strategy-core/src/time_series.rs` и `okx-host-protocol/src/lib.rs`.
    Зафиксировать SHA и scope, успех обязательных проверок, пропуск
    `trading-engine-acceptance-windows`,
-   `trading-engine-regressions-windows` и
+   всех исполнителей `trading-engine-regressions-windows (suite)` и
    `trading-engine-build-windows`. В Cargo-логах проверить отсутствие
    Engine/Execution. Для Research сравнить SHA-256 `okx-agent.exe` с
    принятой базой. Отрицательный пример с общим IPC должен получить full.

@@ -701,6 +701,9 @@ jobs:
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     runs-on: windows-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -714,10 +717,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: finance-test-cache
         with:
-          cache-on-failure: true
-          # New immutable generation: include the compiled workspace crates
-          # built by the trusted main test-cache seed.
-          prefix-key: v1-rust
+          # Trusted accepted-main builds are the only cache writers.
+          cache-on-failure: false
+          prefix-key: v2-rust
           shared-key: trading-engine-tests-windows
           cache-workspace-crates: true
           save-if: false
@@ -896,14 +898,19 @@ jobs:
           retention-days: 14
 
   trading_engine_regressions_windows:
-    # Non-clock-sensitive regression coverage can compile and run independently
-    # of the one uninterrupted financial property acceptance on another runner.
-    # It does not issue a financial PASS: windows-native joins both exact-tree
-    # jobs and the full Windows release build before publication.
-    name: trading-engine-regressions-windows
+    # The Windows aggregate requires every suite in this matrix. A slow
+    # compiler or an isolated SQLite fixture occupies only its own runner.
+    name: trading-engine-regressions-windows (${{ matrix.suite }})
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [engine, host, execution, research, clippy]
     runs-on: windows-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -911,24 +918,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
         with:
           toolchain: 1.100.0
-          components: clippy
+          components: ${{ matrix.suite == 'clippy' && 'clippy' || '' }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # Both runners restore the same trusted-main debug/test profile.
-          # Their target directories are physically isolated by runner.
-          cache-on-failure: true
-          prefix-key: v1-rust
+          # Separate runners restore the same accepted-main compiler cache.
+          cache-on-failure: false
+          prefix-key: v2-rust
           shared-key: trading-engine-tests-windows
           cache-workspace-crates: true
           save-if: false
 
       - name: Clippy native Windows crates
+        if: matrix.suite == 'clippy'
         shell: pwsh
         run: |
           cargo clippy --locked -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-trade-execution --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Strategy Core and Research owner regressions on full Windows
+        if: matrix.suite == 'research'
         shell: pwsh
         run: |
           # Full Native remains responsible for Agent/IPC migration consumers.
@@ -936,15 +944,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build research worker for regression process contracts
+        if: matrix.suite == 'engine'
         shell: pwsh
         run: |
           cargo build --locked -p okx-research-service --bin okx-research-service
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Native trading, SQL, CONTROL and Launcher remaining regression
+      - name: Remaining native regression tests for this suite
+        if: matrix.suite == 'engine' || matrix.suite == 'host' || matrix.suite == 'execution'
         shell: pwsh
+        env:
+          NATIVE_REGRESSION_SUITE: ${{ matrix.suite }}
         run: |
-          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
+          $packages = switch ($env:NATIVE_REGRESSION_SUITE) {
+            'engine' {
+              $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
+              'okx-trading-engine'
+            }
+            'host' { 'okx-host-controller'; 'okx-host-launcher' }
+            'execution' { 'okx-trade-execution' }
+            default { throw 'UNKNOWN_NATIVE_REGRESSION_SUITE' }
+          }
           # Compile no extra Engine example just to discover the reviewed
           # Rust witness set (~79s in measured Ready). The source parser
           # accepts only explicit immutable Witness + CONTRACTS syntax.
@@ -954,7 +974,7 @@ jobs:
           $manifestJson = & node scripts/ci-finance-witness-manifest.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $covered = @(($manifestJson | ConvertFrom-Json).witnesses)
-          foreach ($package in @('okx-trading-engine','okx-host-controller','okx-host-launcher','okx-trade-execution')) {
+          foreach ($package in $packages) {
             $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--skip','accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research','--skip','trade_service::protection_cleanup::protection_cleanup_direct_tests::','--test-threads','2')
             # OS-kill is checked exclusively in the finance/isolated job.
             if ($package -eq 'okx-trading-engine') {
@@ -992,6 +1012,7 @@ jobs:
           }
 
       - name: Serial native account catalog and writer-termination regressions
+        if: matrix.suite == 'engine'
         shell: pwsh
         run: |
           # Keep the original 3s SQLite writer release deadlines and all six
@@ -1006,6 +1027,7 @@ jobs:
           }
 
       - name: Serial terminal release source-frontier regression
+        if: matrix.suite == 'engine'
         shell: pwsh
         run: |
           # Still execute BOTH original real-clock tests on this exact tree.
@@ -1021,6 +1043,7 @@ jobs:
 
       # K9 runs once on its own runner, not beside isolated OS/SQL clocks.
       - name: Worker library regression and actual IPC child
+        if: matrix.suite == 'research'
         shell: pwsh
         run: |
           $output = & cargo test --locked -p okx-research-service --lib -- --skip analytics::cpu_executor::heavy_fixtures::two_heavy_research_jobs_ingestion_stop_and_cancel_latency --test-threads 2 2>&1
@@ -1035,6 +1058,7 @@ jobs:
           if (($output -join "`n") -notmatch 'test result: ok\. [1-9][0-9]* passed;') { throw 'WORKER_IPC_TESTS_MISSING' }
 
       - name: Agent dispatch to actual research child
+        if: matrix.suite == 'engine'
         shell: pwsh
         run: |
           $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
@@ -1046,6 +1070,7 @@ jobs:
 
       # Worker-local CPU/cancellation benchmark, not physical Engine autonomy.
       - name: K9 worker two-heavy cancellation latency evidence
+        if: matrix.suite == 'research'
         shell: pwsh
         run: |
           cargo test --locked -p okx-research-service --lib two_heavy_research_jobs_ingestion_stop_and_cancel_latency -- --nocapture | Tee-Object -FilePath "$env:RUNNER_TEMP\k9-two-heavy.txt"
@@ -1060,6 +1085,7 @@ jobs:
           $line.Groups[1].Value | Set-Content -LiteralPath "$env:RUNNER_TEMP\k9-native-evidence.json" -Encoding utf8NoBOM
 
       - name: Upload K9 native latency evidence
+        if: matrix.suite == 'research'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: k9-native-two-heavy-${{ github.event.pull_request.head.sha || github.sha }}
@@ -1243,11 +1269,7 @@ jobs:
           if [[ "${{ needs.component_impact.outputs.build_required }}" == "false" ]]; then
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
-            # Manual trusted-main cache priming intentionally compiles release
-            # outputs without running acceptance; normal main pushes do not.
-            if [[ "${{ github.event_name }}" == "push" ]]; then
-              test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
-            fi
+            test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.reason }}" = "merged tree exactly matches successful PR head tree"
             echo "WINDOWS_NATIVE_PROOF=EXACT_SUCCESSFUL_MERGED_TREE"
           elif [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
@@ -1299,23 +1321,11 @@ jobs:
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
           fi
 
-  # #560: build the full Windows release in parallel with financial tests.
-  # A manual accepted-main run can warm its release cache for future PRs.
-  # Neither cache priming path runs acceptance, publishes or deploys.
+  # Build the four-component Windows artifact in parallel with acceptance.
   trading_engine_build_windows:
     name: trading-engine-build-windows
     needs: component_impact
-    if: >-
-      ${{
-        (needs.component_impact.outputs.build_required == 'true' &&
-         needs.component_impact.outputs.native_required != 'false' &&
-         needs.component_impact.outputs.research_only != 'true') ||
-        (github.event_name == 'workflow_dispatch' &&
-         inputs.prime_windows_cargo_cache == true &&
-         github.ref == 'refs/heads/main' &&
-         needs.component_impact.outputs.build_required == 'false' &&
-         needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree')
-      }}
+    if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     runs-on: windows-latest
     permissions:
       contents: read
@@ -1325,31 +1335,17 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Require exact trusted main checkout
-        if: github.event_name == 'workflow_dispatch'
-        shell: pwsh
-        run: |
-          if ('${{ github.ref }}' -cne 'refs/heads/main' -or
-              (git rev-parse HEAD).Trim() -cne '${{ github.sha }}' -or
-              @(git status --porcelain).Count -ne 0) { throw 'UNTRUSTED_CACHE_SEED_CHECKOUT' }
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.100.0
-          components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: release-cache
         with:
           prefix-key: v1-rust
           shared-key: trading-engine-release-windows
           cache-workspace-crates: true
-          save-if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+          save-if: false
           cache-on-failure: false
-      - name: Seed only missing Windows release outputs from trusted main
-        if: github.event_name == 'workflow_dispatch' && steps.release-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          cargo build --locked --release -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-research-service
-          if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_RELEASE_BUILD_FAILED' }
       - name: Build deployable Windows binaries
         if: github.event_name == 'pull_request'
         shell: pwsh
@@ -1434,30 +1430,26 @@ jobs:
           compression-level: 1
           retention-days: 14
 
-      - name: Record non-acceptance cache-seed evidence
-        if: github.event_name == 'workflow_dispatch'
-        shell: pwsh
-        run: |
-          "CACHE_SEED=TRUSTED_MAIN_COMPILATION_ONLY" >> $env:GITHUB_STEP_SUMMARY
-          "MAIN_SHA=${{ github.sha }}" >> $env:GITHUB_STEP_SUMMARY
-          "RELEASE_CACHE_HIT=${{ steps.release-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
-          "FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED" >> $env:GITHUB_STEP_SUMMARY
-
-  # Keep the test cache isolated from the release cache. Each rust-cache action
-  # owns one target directory on its own runner; post-job cleanup cannot cause
-  # the other cache to silently capture an incomplete Cargo profile.
-  trusted_main_test_cache_prime:
-    name: trusted-main-windows-test-cache-prime
+  # Prime immutable compiler caches only after exact accepted main evidence.
+  trusted_main_cache_prime:
+    name: trusted-main-windows-cache-prime (${{ matrix.profile }})
     needs: component_impact
     if: >-
       ${{
-        github.event_name == 'workflow_dispatch' &&
-        inputs.prime_windows_cargo_cache == true &&
         github.ref == 'refs/heads/main' &&
+        ((github.event_name == 'push' && needs.component_impact.outputs.component_scope == 'full') ||
+         (github.event_name == 'workflow_dispatch' && inputs.prime_windows_cargo_cache == true)) &&
         needs.component_impact.outputs.build_required == 'false' &&
         needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree'
       }}
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [tests, release]
     runs-on: windows-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: ${{ matrix.profile == 'tests' && '0' || '' }}
+      CARGO_PROFILE_TEST_DEBUG: ${{ matrix.profile == 'tests' && '0' || '' }}
     permissions:
       contents: read
     timeout-minutes: 30
@@ -1475,17 +1467,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
         with:
           toolchain: 1.100.0
-          components: clippy
+          components: ${{ matrix.profile == 'tests' && 'clippy' || '' }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        id: test-cache
+        id: prime-cache
         with:
-          prefix-key: v1-rust
-          shared-key: trading-engine-tests-windows
+          prefix-key: ${{ matrix.profile == 'tests' && 'v2-rust' || 'v1-rust' }}
+          shared-key: trading-engine-${{ matrix.profile }}-windows
           cache-workspace-crates: true
-          save-if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: false
       - name: Seed only missing Windows debug/test outputs from trusted main
-        if: steps.test-cache.outputs.cache-hit != 'true'
+        if: matrix.profile == 'tests' && steps.prime-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -1498,12 +1490,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_FINANCIAL_LIBTEST_BUILD_FAILED' }
           cargo build --locked -p okx-native-finance-check
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_COLLECTOR_BUILD_FAILED' }
-      - name: Record non-acceptance test-cache evidence
+          cargo test --locked --no-run -p okx-native-finance-check
+          if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_COLLECTOR_LIBTEST_BUILD_FAILED' }
+      - name: Seed only missing Windows release outputs from trusted main
+        if: matrix.profile == 'release' && steps.prime-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          "CACHE_SEED=TRUSTED_MAIN_TEST_COMPILATION_ONLY" >> $env:GITHUB_STEP_SUMMARY
+          cargo build --locked --release -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-research-service
+          if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_RELEASE_BUILD_FAILED' }
+      - name: Record non-acceptance cache evidence
+        shell: pwsh
+        run: |
+          "CACHE_SEED=TRUSTED_MAIN_COMPILATION_ONLY" >> $env:GITHUB_STEP_SUMMARY
           "MAIN_SHA=${{ github.sha }}" >> $env:GITHUB_STEP_SUMMARY
-          "TEST_CACHE_HIT=${{ steps.test-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+          "CACHE_PROFILE=${{ matrix.profile }} EXACT_HIT=${{ steps.prime-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
           "FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED" >> $env:GITHUB_STEP_SUMMARY
 
   # Successful protected main checks publish the verified PR artifact here.
@@ -1571,7 +1571,7 @@ jobs:
             jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/jobs?per_page=100")"
             # Require the *fresh* 4-EXE financial gate, never an aggregate
             # that reused older proof or the isolated Research-only worker.
-            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-acceptance-windows","trading-engine-regressions-windows","trading-engine-build-windows","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
+            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-acceptance-windows","trading-engine-regressions-windows (engine)","trading-engine-regressions-windows (host)","trading-engine-regressions-windows (execution)","trading-engine-regressions-windows (research)","trading-engine-regressions-windows (clippy)","trading-engine-build-windows","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
               continue
             fi
             artifacts="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts?per_page=100")"

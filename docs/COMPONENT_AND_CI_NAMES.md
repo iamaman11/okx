@@ -132,9 +132,9 @@ means proven reusable binary bytes, not a runtime library. Existing
 | `classify` | Protected fail-closed changed-file boundary plus before/after Windows Cargo closure proof for narrow Research/Host manifest candidates |
 | `draft-component-tests` | Scoped feedback for Draft pull requests |
 | `trading-engine-acceptance-windows` | Mandatory complete financial collector/resource-budget acceptance and isolated Engine, SQLite, clock/process recovery tests |
-| `trading-engine-regressions-windows` | Parallel independent Engine/Execution/Host/Research regressions, Windows Clippy and K9; never substitutes for financial acceptance |
-| `trading-engine-build-windows` | Parallel fresh four-component Windows release build and artifact on full Ready PRs; manual accepted-`main` release cache seed |
-| `trusted-main-windows-test-cache-prime` | Optional manual compile-only test/collector cache seed from accepted `main`; no financial acceptance or deployment |
+| `trading-engine-regressions-windows (suite)` | Five parallel Windows suites for Engine, Host, Execution, Research and Clippy. Research includes K9 |
+| `trading-engine-build-windows` | Parallel fresh four-component Windows release build and artifact on full Ready PRs |
+| `trusted-main-windows-cache-prime (profile)` | Compile-only test and release cache seeds from accepted `main`, automatic after full merges or manual |
 | `research-service-tests-windows` | Research Service tests and build against the accepted unchanged Trading Engine |
 | `host-controller-launcher-checks` | Host Controller and Host Launcher tests/build without the Trading Engine |
 | `rust-tests-linux` | Rust library, Research Service IPC and financial SQLite tests executed on Linux (not a Linux trading service) |
