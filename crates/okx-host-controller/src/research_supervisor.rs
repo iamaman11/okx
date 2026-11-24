@@ -1,6 +1,8 @@
 //! CONTROL-owned Research process lifecycle, separate from the trading Engine.
 //! No finance credentials, ledger handles, strategy signals or Engine state are
 //! reachable from this module. It never starts a worker from an unchecked path.
+#[cfg(not(windows))]
+use std::fs::File;
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
@@ -8,8 +10,6 @@ use std::{
     process::{Child, Stdio},
     time::{Duration, Instant},
 };
-#[cfg(not(windows))]
-use std::fs::File;
 
 use okx_host_protocol::{
     HOST_RESEARCH_RUNTIME_STATUS_SCHEMA_V1, ResearchCatalogMode, ResearchRuntimePhase,
@@ -19,11 +19,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    HostControlError, HostControlResult,
-    artifact::resolve_verified_installed_research,
-    background_process::hidden_command,
-    desired::atomic_replace,
-    job::AgentJob,
+    HostControlError, HostControlResult, artifact::resolve_verified_installed_research,
+    background_process::hidden_command, desired::atomic_replace, job::AgentJob,
 };
 
 const RESEARCH_DESIRED_SCHEMA: &str = "okx.host-control.research-desired/v1";
@@ -82,10 +79,7 @@ impl ResearchDesiredState {
 
     fn valid(&self) -> bool {
         self.schema == RESEARCH_DESIRED_SCHEMA
-            && self
-                .expected_worker_sha256
-                .as_deref()
-                .is_none_or(valid_sha)
+            && self.expected_worker_sha256.as_deref().is_none_or(valid_sha)
             && self.host_scope.as_deref().is_none_or(valid_sha)
             && (self.expected_worker_sha256.is_some() == self.host_scope.is_some())
             && (!self.desired_running || self.expected_worker_sha256.is_some())
@@ -110,7 +104,9 @@ impl ResearchStateStore {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 validate_state_ancestors(
-                    self.path.parent().ok_or(HostControlError::ResearchStateCorrupt)?,
+                    self.path
+                        .parent()
+                        .ok_or(HostControlError::ResearchStateCorrupt)?,
                     true,
                 )?;
                 return Ok(ResearchDesiredState::stopped());
@@ -121,7 +117,9 @@ impl ResearchStateStore {
             return Err(HostControlError::ResearchStateCorrupt);
         }
         validate_state_ancestors(
-            self.path.parent().ok_or(HostControlError::ResearchStateCorrupt)?,
+            self.path
+                .parent()
+                .ok_or(HostControlError::ResearchStateCorrupt)?,
             false,
         )?;
         let mut options = OpenOptions::new();
@@ -143,8 +141,8 @@ impl ResearchStateStore {
         if bytes.len() as u64 > MAX_STATE_BYTES {
             return Err(HostControlError::ResearchStateCorrupt);
         }
-        let state: ResearchDesiredState = serde_json::from_slice(&bytes)
-            .map_err(|_| HostControlError::ResearchStateCorrupt)?;
+        let state: ResearchDesiredState =
+            serde_json::from_slice(&bytes).map_err(|_| HostControlError::ResearchStateCorrupt)?;
         if !state.valid() {
             return Err(HostControlError::ResearchStateCorrupt);
         }
@@ -171,13 +169,15 @@ impl ResearchStateStore {
         // Unique same-directory temporary files prevent a crash-stale `.tmp`
         // from permanently blocking all future Research lifecycle writes.
         let mut nonce = [0u8; 16];
-        getrandom::fill(&mut nonce)
-            .map_err(|error| HostControlError::Random(error.to_string()))?;
+        getrandom::fill(&mut nonce).map_err(|error| HostControlError::Random(error.to_string()))?;
         let suffix: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
         let mut temp_name = self.path.as_os_str().to_os_string();
         temp_name.push(format!(".{suffix}.tmp"));
         let temp = PathBuf::from(temp_name);
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
         let result = (|| -> HostControlResult<()> {
             file.write_all(&serde_json::to_vec(state)?)?;
             file.sync_all()?;
@@ -201,8 +201,7 @@ fn validate_state_ancestors(parent: &Path, allow_missing: bool) -> HostControlRe
     for ancestor in parent.ancestors() {
         match fs::symlink_metadata(ancestor) {
             Ok(metadata) if metadata.is_dir() && !is_reparse(&metadata) => {}
-            Err(error)
-                if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {}
             _ => return Err(HostControlError::ResearchStateCorrupt),
         }
     }
@@ -364,8 +363,17 @@ impl ResearchSupervisor {
         // Avoid inheriting Engine/private credentials or diagnostic overrides
         // from CONTROL. Only Windows account and OS process basics pass through.
         for key in [
-            "SystemRoot", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
-            "ProgramData", "TEMP", "TMP", "PATH", "HOMEDRIVE", "HOMEPATH",
+            "SystemRoot",
+            "WINDIR",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "ProgramData",
+            "TEMP",
+            "TMP",
+            "PATH",
+            "HOMEDRIVE",
+            "HOMEPATH",
         ] {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
@@ -379,7 +387,10 @@ impl ResearchSupervisor {
         // any Research runtime startup, and the marker must end with EOF.
         let gate_result = (|| -> std::io::Result<()> {
             let mut stdin = child.stdin.take().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "research startup gate missing")
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "research startup gate missing",
+                )
             })?;
             stdin.write_all(HOST_JOB_ASSIGNED_MARKER)?;
             stdin.flush()?;
@@ -461,8 +472,7 @@ impl ResearchSupervisor {
             return Err(HostControlError::ResearchStateCorrupt);
         }
         if !self.desired.desired_running
-            || self.desired.expected_worker_sha256.as_deref()
-                != Some(expected_active_worker_sha256)
+            || self.desired.expected_worker_sha256.as_deref() != Some(expected_active_worker_sha256)
             || self.desired.process_generation != expected_process_generation
         {
             return Err(HostControlError::ResearchIdentityMismatch);
@@ -482,7 +492,9 @@ impl ResearchSupervisor {
     fn terminate_owned(&mut self) -> HostControlResult<()> {
         #[cfg(test)]
         if std::mem::take(&mut self.terminate_fail_once) {
-            return Err(HostControlError::JobAssignment("injected termination failure".into()));
+            return Err(HostControlError::JobAssignment(
+                "injected termination failure".into(),
+            ));
         }
         // Never `take()` either kernel ownership handle until the kill path
         // succeeds; a transient TerminateJobObject error is retried on tick.
@@ -532,7 +544,10 @@ impl ResearchSupervisor {
             return Ok(());
         }
         if running {
-            if self.started_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(STABLE_PROCESS_SECONDS)) {
+            if self
+                .started_at
+                .is_some_and(|at| at.elapsed() >= Duration::from_secs(STABLE_PROCESS_SECONDS))
+            {
                 self.restart_attempt = 0;
                 self.retry_at = None;
             }
@@ -552,7 +567,8 @@ impl ResearchSupervisor {
     pub fn status(&mut self) -> HostControlResult<Value> {
         // A readback must not spawn a child or write its desired state.
         let running = self.running()?;
-        let (installed, image_issue) = match resolve_verified_installed_research(&self.runtime_root) {
+        let (installed, image_issue) = match resolve_verified_installed_research(&self.runtime_root)
+        {
             Ok(image) => (Some(image), None),
             Err(HostControlError::ArtifactVerification("installed research pointer missing")) => {
                 (None, Some("RESEARCH_NOT_INSTALLED".to_owned()))
@@ -596,7 +612,9 @@ impl ResearchSupervisor {
             phase,
             catalog_mode: ResearchCatalogMode::HostIndependent,
             retry_in_ms: self.retry_in_ms(),
-            last_error: self.state_error.clone()
+            last_error: self
+                .state_error
+                .clone()
                 .or_else(|| mismatched.then(|| "RESEARCH_IMAGE_MISMATCH".into()))
                 .or_else(|| self.last_error.clone())
                 .or(image_issue),
@@ -615,10 +633,7 @@ impl ResearchSupervisor {
         if self.state_error.is_some() {
             return Err(HostControlError::ResearchStateCorrupt);
         }
-        if self.desired.desired_running
-            || self.running()?
-            || self.job.is_some()
-        {
+        if self.desired.desired_running || self.running()? || self.job.is_some() {
             return Err(HostControlError::ResearchIdentityMismatch);
         }
         Ok(())
@@ -637,7 +652,8 @@ mod tests {
 
     #[test]
     fn research_state_is_strict_and_independent_of_engine_state() {
-        let root = std::env::temp_dir().join(format!("okx-control-research-state-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("okx-control-research-state-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let store = ResearchStateStore::new(&root);
         assert_eq!(store.read().unwrap(), ResearchDesiredState::stopped());
@@ -653,7 +669,10 @@ mod tests {
         fs::write(root.join("engine-state.pb"), b"corrupted engine state").unwrap();
         assert_eq!(store.read().unwrap(), state);
         fs::write(root.join(STATE_FILE), b"{\"schema\":\"invalid\"}").unwrap();
-        assert!(matches!(store.read(), Err(HostControlError::ResearchStateCorrupt)));
+        assert!(matches!(
+            store.read(),
+            Err(HostControlError::ResearchStateCorrupt)
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -676,21 +695,27 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let mut owner = ResearchSupervisor::at(root.clone(), root.join("runtime")).unwrap();
         let sha = "c".repeat(64);
-        owner.persist(ResearchDesiredState {
-            schema: RESEARCH_DESIRED_SCHEMA.into(),
-            desired_running: true,
-            expected_worker_sha256: Some(sha.clone()),
-            host_scope: Some("d".repeat(64)),
-            process_generation: 1,
-        }).unwrap();
+        owner
+            .persist(ResearchDesiredState {
+                schema: RESEARCH_DESIRED_SCHEMA.into(),
+                desired_running: true,
+                expected_worker_sha256: Some(sha.clone()),
+                host_scope: Some("d".repeat(64)),
+                process_generation: 1,
+            })
+            .unwrap();
 
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "research_supervisor::tests::research_supervisor_sleeper_child"])
+            .args([
+                "--exact",
+                "research_supervisor::tests::research_supervisor_sleeper_child",
+            ])
             .env("OKX_RESEARCH_SUPERVISOR_TEST_CHILD", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn().unwrap();
+            .spawn()
+            .unwrap();
         let job = AgentJob::new().unwrap();
         job.assign(&mut child).unwrap();
         owner.active_sha256 = Some(sha.clone());
@@ -702,10 +727,14 @@ mod tests {
         assert!(!owner.desired.desired_running);
         assert!(owner.child.is_some());
         assert!(owner.job.is_some());
-        let status: ResearchRuntimeStatus = serde_json::from_value(owner.status().unwrap()).unwrap();
+        let status: ResearchRuntimeStatus =
+            serde_json::from_value(owner.status().unwrap()).unwrap();
         assert_eq!(status.phase, ResearchRuntimePhase::RunningUnverified);
         assert!(status.pid.is_some());
-        assert_eq!(status.last_error.as_deref(), Some("RESEARCH_TERMINATION_UNCONFIRMED"));
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("RESEARCH_TERMINATION_UNCONFIRMED")
+        );
 
         owner.reconcile().unwrap();
         assert!(owner.child.is_none());

@@ -520,7 +520,9 @@ pub(crate) fn resolve_verified_installed_research(
         HostControlError::ArtifactVerification("installed research pointer missing"),
     )?;
     verify_staged_research(root, &installed)?;
-    let version = root.join("research/versions").join(&installed.worker_sha256);
+    let version = root
+        .join("research/versions")
+        .join(&installed.worker_sha256);
     let preferred = version.join("okx-research-service.exe");
     let binary = match fs::symlink_metadata(&preferred) {
         Ok(_) => preferred,

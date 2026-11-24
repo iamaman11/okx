@@ -10,8 +10,8 @@ pub mod job;
 pub mod legacy_bootstrap;
 pub mod lifecycle_executor;
 pub mod provenance;
-pub mod root_migration;
 pub mod research_supervisor;
+pub mod root_migration;
 pub mod runtime;
 pub mod single_instance;
 

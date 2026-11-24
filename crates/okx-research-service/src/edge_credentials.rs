@@ -1,8 +1,8 @@
 //! Research-only Windows Credential Manager identity. Never reuse the Engine
 //! credential target, even when both components run under the same OS user.
-use zeroize::Zeroizing;
 #[cfg(windows)]
 use keyring::api::CredentialStoreApi;
+use zeroize::Zeroizing;
 
 pub const RESEARCH_CLOUDFLARE_SERVICE: &str = "iamaman11.okx-research-service.cloudflare";
 pub const RESEARCH_CLOUDFLARE_USER: &str = "runtime-token";
@@ -115,9 +115,14 @@ mod tests {
     fn mock_store_never_exposes_research_bearer_to_engine_target() {
         let store = keyring::mock::Store::new().unwrap();
         let research = entry_from_store(store.as_ref()).unwrap();
-        research.set_secret(b"research-only-secret-value-0123456789").unwrap();
+        research
+            .set_secret(b"research-only-secret-value-0123456789")
+            .unwrap();
         assert_eq!(
-            entry_from_store(store.as_ref()).unwrap().get_secret().unwrap(),
+            entry_from_store(store.as_ref())
+                .unwrap()
+                .get_secret()
+                .unwrap(),
             b"research-only-secret-value-0123456789"
         );
         let engine = store

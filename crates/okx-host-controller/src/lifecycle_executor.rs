@@ -187,10 +187,9 @@ impl HostExecutor {
             HostControlOperation::StopResearch {
                 expected_active_worker_sha256,
                 expected_process_generation,
-            } => self.research.stop(
-                &expected_active_worker_sha256,
-                expected_process_generation,
-            ),
+            } => self
+                .research
+                .stop(&expected_active_worker_sha256, expected_process_generation),
             HostControlOperation::ProvisionResearchRuntimeToken => {
                 self.provision_research_runtime_token()
             }
@@ -659,8 +658,17 @@ impl HostExecutor {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
             for key in [
-                "SystemRoot", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
-                "ProgramData", "TEMP", "TMP", "PATH", "HOMEDRIVE", "HOMEPATH",
+                "SystemRoot",
+                "WINDIR",
+                "USERPROFILE",
+                "APPDATA",
+                "LOCALAPPDATA",
+                "ProgramData",
+                "TEMP",
+                "TMP",
+                "PATH",
+                "HOMEDRIVE",
+                "HOMEPATH",
             ] {
                 if let Some(value) = std::env::var_os(key) {
                     command.env(key, value);

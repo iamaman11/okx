@@ -26,7 +26,10 @@ async fn main() {
 }
 async fn run() -> Result<(), String> {
     let all_args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if all_args.first().is_some_and(|arg| arg == "--set-edge-token") {
+    if all_args
+        .first()
+        .is_some_and(|arg| arg == "--set-edge-token")
+    {
         if all_args.len() != 1 {
             return Err("INVALID_ARGUMENT".into());
         }

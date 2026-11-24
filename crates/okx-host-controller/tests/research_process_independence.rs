@@ -3,10 +3,7 @@
 //! real Research binary. It is CODE evidence, never physical installation proof.
 #![cfg(windows)]
 
-use okx_host_controller::{
-    job::AgentJob,
-    research_supervisor::ResearchSupervisor,
-};
+use okx_host_controller::{job::AgentJob, research_supervisor::ResearchSupervisor};
 use okx_host_protocol::{ResearchCatalogMode, ResearchRuntimePhase, ResearchRuntimeStatus};
 use std::{
     fs,
@@ -67,7 +64,10 @@ fn gated_nested_job_child() {
     // The child must not even create its nested Windows Job before CONTROL
     // assigns the parent Job and writes its exact readiness receipt.
     let mut receipt = Vec::new();
-    std::io::stdin().take(129).read_to_end(&mut receipt).unwrap();
+    std::io::stdin()
+        .take(129)
+        .read_to_end(&mut receipt)
+        .unwrap();
     if receipt != b"RESEARCH_HOST_JOB_ASSIGNED\n" {
         return;
     }
@@ -81,7 +81,10 @@ fn gated_nested_job_child() {
     let nested_job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     assert!(!nested_job.is_null(), "nested test Job creation failed");
     let assigned = unsafe { AssignProcessToJobObject(nested_job, GetCurrentProcess()) };
-    assert_ne!(assigned, 0, "nested Job assignment after parent gate failed");
+    assert_ne!(
+        assigned, 0,
+        "nested Job assignment after parent gate failed"
+    );
     fs::write(PathBuf::from(marker), b"nested-job-ready").unwrap();
     thread::sleep(Duration::from_secs(25));
     unsafe { CloseHandle(nested_job) };
@@ -143,13 +146,22 @@ fn one_process_job_can_be_terminated_without_touching_the_other() {
 
     research_job.terminate().unwrap();
     let research_exit = exited_within(&mut research_child, Duration::from_secs(5));
-    assert!(research_exit.is_some(), "Research test child survived its Job termination");
+    assert!(
+        research_exit.is_some(),
+        "Research test child survived its Job termination"
+    );
     assert!(research_job.is_empty().unwrap());
-    assert!(engine_child.try_wait().unwrap().is_none(), "Research Job terminated Engine Job child");
+    assert!(
+        engine_child.try_wait().unwrap().is_none(),
+        "Research Job terminated Engine Job child"
+    );
 
     engine_job.terminate().unwrap();
     let engine_exit = exited_within(&mut engine_child, Duration::from_secs(5));
-    assert!(engine_exit.is_some(), "Engine test child survived its Job termination");
+    assert!(
+        engine_exit.is_some(),
+        "Engine test child survived its Job termination"
+    );
     assert!(engine_job.is_empty().unwrap());
 }
 
@@ -166,11 +178,17 @@ fn nested_job_assignment_waits_for_parent_ready_receipt() {
         .spawn()
         .unwrap();
 
-    assert!(!marker.exists(), "child bypassed the parent assignment gate");
+    assert!(
+        !marker.exists(),
+        "child bypassed the parent assignment gate"
+    );
     assert!(child.try_wait().unwrap().is_none());
     let parent_job = AgentJob::new().unwrap();
     parent_job.assign(&mut child).unwrap();
-    assert!(!marker.exists(), "child created nested Job before host receipt");
+    assert!(
+        !marker.exists(),
+        "child created nested Job before host receipt"
+    );
 
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(b"RESEARCH_HOST_JOB_ASSIGNED\n").unwrap();
@@ -195,7 +213,11 @@ fn nested_job_assignment_waits_for_parent_ready_receipt() {
 #[test]
 fn research_control_root_is_independent_and_start_requires_verified_installation() {
     let roots = IsolatedRoots::new();
-    fs::write(roots.control.join("engine-state.pb"), b"invalid Engine state").unwrap();
+    fs::write(
+        roots.control.join("engine-state.pb"),
+        b"invalid Engine state",
+    )
+    .unwrap();
     let financial_root = roots.runtime.join("analytics");
     fs::create_dir(&financial_root).unwrap();
     let financial_file = financial_root.join("finance-unchanged.sqlite");
@@ -208,12 +230,18 @@ fn research_control_root_is_independent_and_start_requires_verified_installation
         serde_json::from_value(supervisor.status().unwrap()).unwrap();
     assert_eq!(status.phase, ResearchRuntimePhase::Stopped);
     assert_eq!(status.catalog_mode, ResearchCatalogMode::HostIndependent);
-    assert!(!desired_path.exists(), "status must not install or create desired state");
+    assert!(
+        !desired_path.exists(),
+        "status must not install or create desired state"
+    );
     assert_eq!(
         supervisor.start(&"a".repeat(64)).unwrap_err().code(),
         "ARTIFACT_VERIFICATION_FAILED"
     );
-    assert!(!desired_path.exists(), "failed image verification persisted desired running");
+    assert!(
+        !desired_path.exists(),
+        "failed image verification persisted desired running"
+    );
     supervisor.reconcile().unwrap();
     assert_eq!(fs::read(&financial_file).unwrap(), b"engine-owned-sentinel");
     assert!(!roots.runtime.join("research/edge-catalog").exists());
@@ -231,7 +259,10 @@ fn corrupted_and_hash_mismatched_research_image_never_launch() {
     let corrupt: ResearchRuntimeStatus =
         serde_json::from_value(supervisor.status().unwrap()).unwrap();
     assert_eq!(corrupt.phase, ResearchRuntimePhase::InvalidProvenance);
-    assert_eq!(corrupt.last_error.as_deref(), Some("RESEARCH_IMAGE_INVALID"));
+    assert_eq!(
+        corrupt.last_error.as_deref(),
+        Some("RESEARCH_IMAGE_INVALID")
+    );
     assert!(!corrupt.desired_running);
     assert!(corrupt.pid.is_none());
 
@@ -246,7 +277,10 @@ fn corrupted_and_hash_mismatched_research_image_never_launch() {
     let mismatch: ResearchRuntimeStatus =
         serde_json::from_value(supervisor.status().unwrap()).unwrap();
     assert_eq!(mismatch.phase, ResearchRuntimePhase::InvalidProvenance);
-    assert_eq!(mismatch.last_error.as_deref(), Some("RESEARCH_IMAGE_INVALID"));
+    assert_eq!(
+        mismatch.last_error.as_deref(),
+        Some("RESEARCH_IMAGE_INVALID")
+    );
     assert!(!mismatch.desired_running);
     assert!(mismatch.pid.is_none());
     assert!(!roots.control.join("research-state.json").exists());
@@ -270,7 +304,11 @@ fn standalone_research_status_is_typed_and_does_not_claim_edge_online() {
     assert!(status_wire.get("edge_online").is_none());
     assert!(status_wire.get("edge_handshake_accepted").is_none());
 
-    fs::write(roots.control.join("engine-state.pb"), b"corrupt engine state").unwrap();
+    fs::write(
+        roots.control.join("engine-state.pb"),
+        b"corrupt engine state",
+    )
+    .unwrap();
     supervisor.reconcile().unwrap();
     assert_eq!(
         supervisor.start(&"a".repeat(64)).unwrap_err().code(),
@@ -297,7 +335,10 @@ fn standalone_research_lifecycle_requires_exact_image_and_process_generation() {
     let corrupted: ResearchRuntimeStatus =
         serde_json::from_value(supervisor.status().unwrap()).unwrap();
     assert_eq!(corrupted.phase, ResearchRuntimePhase::InvalidProvenance);
-    assert_eq!(corrupted.last_error.as_deref(), Some("RESEARCH_IMAGE_INVALID"));
+    assert_eq!(
+        corrupted.last_error.as_deref(),
+        Some("RESEARCH_IMAGE_INVALID")
+    );
     assert!(corrupted.pid.is_none());
 
     let image_dir = roots.runtime.join("research/versions").join(&expected);

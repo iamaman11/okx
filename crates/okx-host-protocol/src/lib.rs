@@ -540,22 +540,28 @@ mod tests {
         assert!(serde_json::from_value::<ResearchRuntimeStatus>(unknown).is_err());
         let mut invalid = wire.clone();
         invalid["process_generation"] = serde_json::json!(0);
-        assert!(serde_json::from_value::<ResearchRuntimeStatus>(invalid)
-            .unwrap()
-            .validate()
-            .is_err());
+        assert!(
+            serde_json::from_value::<ResearchRuntimeStatus>(invalid)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
         let mut invalid = wire.clone();
         invalid["active_worker_sha256"] = serde_json::Value::Null;
-        assert!(serde_json::from_value::<ResearchRuntimeStatus>(invalid)
-            .unwrap()
-            .validate()
-            .is_err());
+        assert!(
+            serde_json::from_value::<ResearchRuntimeStatus>(invalid)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
         let mut invalid = wire.clone();
         invalid["last_error"] = serde_json::json!("secret appears here!");
-        assert!(serde_json::from_value::<ResearchRuntimeStatus>(invalid)
-            .unwrap()
-            .validate()
-            .is_err());
+        assert!(
+            serde_json::from_value::<ResearchRuntimeStatus>(invalid)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
         let mut invalid = wire;
         invalid["catalog_mode"] = serde_json::json!("ENGINE_OWNED");
         assert!(serde_json::from_value::<ResearchRuntimeStatus>(invalid).is_err());
@@ -568,7 +574,13 @@ mod tests {
         assert_eq!(parsed, HostControlOperation::ProvisionResearchRuntimeToken);
         assert!(parsed.validate().is_ok());
         assert_eq!(serde_json::to_value(parsed).unwrap(), command);
-        for field in ["token", "bearer", "credential", "token_sha256", "account_key"] {
+        for field in [
+            "token",
+            "bearer",
+            "credential",
+            "token_sha256",
+            "account_key",
+        ] {
             let mut changed = command.clone();
             changed[field] = serde_json::json!("a-secret-plaintext");
             assert!(serde_json::from_value::<HostControlOperation>(changed).is_err());

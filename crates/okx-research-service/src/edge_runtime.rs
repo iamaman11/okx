@@ -510,9 +510,11 @@ mod tests {
         let (mut writer, mut reader) = tokio::io::duplex(256);
         writer.write_all(SUPERVISOR_GATE).await.unwrap();
         drop(writer);
-        assert!(supervisor_gate(&mut reader, Duration::from_secs(1))
-            .await
-            .is_ok());
+        assert!(
+            supervisor_gate(&mut reader, Duration::from_secs(1))
+                .await
+                .is_ok()
+        );
 
         for invalid in [&b"READY\n"[..], &b"RESEARCH_HOST_JOB_ASSIGNED"[..]] {
             let (mut writer, mut reader) = tokio::io::duplex(256);
