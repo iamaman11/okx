@@ -22,6 +22,12 @@ REPOSITORY_FILES = {
     "vnext/legacy-files.tsv",
     "vnext/check_boundaries.py",
     "vnext/test_check_boundaries.py",
+    "vnext/split-symbols.tsv",
+    "vnext/check_split_symbols.py",
+    "vnext/test_check_split_symbols.py",
+    "vnext/s0/README.md",
+    "vnext/s0/measure.py",
+    "vnext/s0/test_measure.py",
 }
 RUST_SOURCE_PATH = re.compile(
     r'\binclude(?:_str|_bytes)?!\s*\(\s*"([^"]+)"|#\s*\[\s*path\s*=\s*"([^"]+)"'

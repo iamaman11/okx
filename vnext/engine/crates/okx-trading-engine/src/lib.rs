@@ -221,7 +221,10 @@ impl SubmissionWindow {
                 ValidationCode::InvalidTime,
             ));
         }
-        Ok(Self { observed_at_ms, expires_at_ms })
+        Ok(Self {
+            observed_at_ms,
+            expires_at_ms,
+        })
     }
 
     pub fn is_expired(self, now_ms: i64) -> bool {
@@ -286,7 +289,7 @@ impl ValidatedCommand {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum UntrustedTarget {
-    Flat,
+    Flat {},
     Long { quantity: String },
     Short { quantity: String },
 }
@@ -296,7 +299,7 @@ impl TryFrom<UntrustedTarget> for PositionTarget {
 
     fn try_from(target: UntrustedTarget) -> Result<Self, Self::Error> {
         Ok(match target {
-            UntrustedTarget::Flat => Self::Flat,
+            UntrustedTarget::Flat {} => Self::Flat,
             UntrustedTarget::Long { quantity } => Self::Long(PositiveQuantity::parse(&quantity)?),
             UntrustedTarget::Short { quantity } => Self::Short(PositiveQuantity::parse(&quantity)?),
         })
@@ -306,7 +309,7 @@ impl TryFrom<UntrustedTarget> for PositionTarget {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum UntrustedDecision {
-    Hold,
+    Hold {},
     SetTarget { target: UntrustedTarget },
 }
 
@@ -315,7 +318,7 @@ impl TryFrom<UntrustedDecision> for StrategyDecision {
 
     fn try_from(decision: UntrustedDecision) -> Result<Self, Self::Error> {
         match decision {
-            UntrustedDecision::Hold => Ok(Self::Hold),
+            UntrustedDecision::Hold {} => Ok(Self::Hold),
             UntrustedDecision::SetTarget { target } => {
                 Ok(Self::SetTarget(PositionTarget::try_from(target)?))
             }
@@ -351,9 +354,8 @@ enum UntrustedCommand {
 /// Parses untrusted wire JSON and validates all domain fields before exposure.
 /// It performs NO business/risk admission and has NO external side effects.
 pub fn validate_wire_command(wire_json: &str) -> Result<ValidatedCommand, ValidationError> {
-    let wire: UntrustedCommand = serde_json::from_str(wire_json).map_err(|_| {
-        ValidationError::new(ValidationStage::Wire, ValidationCode::InvalidWire)
-    })?;
+    let wire: UntrustedCommand = serde_json::from_str(wire_json)
+        .map_err(|_| ValidationError::new(ValidationStage::Wire, ValidationCode::InvalidWire))?;
     Ok(match wire {
         UntrustedCommand::Manual {
             account,
@@ -438,9 +440,10 @@ mod tests {
     #[test]
     fn manual_command_only_proposes_target() {
         let parsed =
-            validate_wire_command(&manual(r#"{"kind":"long","quantity":"0.010"}"#))
-                .unwrap();
-        let ValidatedCommand::Manual(command) = parsed else { panic!("manual") };
+            validate_wire_command(&manual(r#"{"kind":"long","quantity":"0.010"}"#)).unwrap();
+        let ValidatedCommand::Manual(command) = parsed else {
+            panic!("manual")
+        };
         assert_eq!(command.account.as_str(), "okx:demo:account1");
         assert_eq!(command.instrument.as_str(), "BTC-USDT-SWAP");
         assert_eq!(command.operation.as_str(), "cmd-1");
@@ -474,6 +477,11 @@ mod tests {
     #[test]
     fn rejects_unknown_or_forged_fields() {
         let input = manual(r#"{"kind":"flat","risk_approved":true}"#);
+        assert_eq!(
+            validate_wire_command(&input).unwrap_err().code,
+            ValidationCode::InvalidWire
+        );
+        let input = strategy(r#"{"kind":"hold","execute_post":true}"#);
         assert_eq!(
             validate_wire_command(&input).unwrap_err().code,
             ValidationCode::InvalidWire
@@ -514,8 +522,8 @@ mod tests {
             valid.require_fresh(200).unwrap_err().code,
             ValidationCode::Expired
         );
-        let invalid = manual(r#"{"kind":"flat"}"#)
-            .replace("\"expires_at_ms\":200", "\"expires_at_ms\":99");
+        let invalid =
+            manual(r#"{"kind":"flat"}"#).replace("\"expires_at_ms\":200", "\"expires_at_ms\":99");
         assert_eq!(
             validate_wire_command(&invalid).unwrap_err().code,
             ValidationCode::InvalidTime

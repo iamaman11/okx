@@ -62,7 +62,9 @@ impl WriterEpoch {
 // canonical decimal string over the Control <-> Edge transport boundary.
 fn parse_nonzero_decimal<E: serde::de::Error>(value: &str) -> Result<NonZeroU64, E> {
     if value.starts_with('0') || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(E::custom("identifier must be a canonical unsigned decimal string"));
+        return Err(E::custom(
+            "identifier must be a canonical unsigned decimal string",
+        ));
     }
     let parsed = value
         .parse::<u64>()
@@ -115,7 +117,11 @@ pub struct ComponentVersion {
 
 impl ComponentVersion {
     pub fn new(major: u16, minor: u16, patch: u16) -> Option<Self> {
-        (major != 0 || minor != 0 || patch != 0).then_some(Self { major, minor, patch })
+        (major != 0 || minor != 0 || patch != 0).then_some(Self {
+            major,
+            minor,
+            patch,
+        })
     }
 
     pub const fn tuple(self) -> (u16, u16, u16) {
@@ -155,7 +161,7 @@ impl TryFrom<&str> for Sha256Digest {
             return Err(DigestError);
         }
         let mut bytes = [0_u8; 32];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             bytes[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
         }
         Ok(Self(bytes))
@@ -250,13 +256,15 @@ impl ArtifactClaim {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlCommand {
-    Status { component: ComponentId },
-    Doctor,
+    Status {
+        component: ComponentId,
+    },
+    Doctor {},
     Start {
         component: LocalComponent,
         expected_version: ComponentVersion,
     },
-    StopResearch,
+    StopResearch {},
     Stage {
         candidate: ArtifactClaim,
     },
@@ -391,8 +399,13 @@ impl<'de> Deserialize<'de> for ComponentStatus {
         }
 
         let status = WireStatus::deserialize(deserializer)?;
-        Self::new(status.component, status.health, status.evidence_age_ms, status.evidence)
-            .ok_or_else(|| D::Error::custom("ready requires complete and dated evidence"))
+        Self::new(
+            status.component,
+            status.health,
+            status.evidence_age_ms,
+            status.evidence,
+        )
+        .ok_or_else(|| D::Error::custom("ready requires complete and dated evidence"))
     }
 }
 
@@ -514,7 +527,10 @@ mod tests {
     fn digest_is_lowercase_exact_and_roundtrips_as_string() {
         let digest = Sha256Digest::try_from(HEX).unwrap();
         assert_eq!(digest.to_string(), HEX);
-        assert_eq!(serde_json::to_string(&digest).unwrap(), format!("\"{HEX}\""));
+        assert_eq!(
+            serde_json::to_string(&digest).unwrap(),
+            format!("\"{HEX}\"")
+        );
         assert_eq!(
             serde_json::from_str::<Sha256Digest>(&format!("\"{HEX}\"")).unwrap(),
             digest
@@ -530,8 +546,7 @@ mod tests {
         assert!(ComponentVersion::new(0, 1, 2).is_some());
         assert!(ComponentVersion::new(0, 0, 0).is_none());
         assert!(
-            serde_json::from_str::<ComponentVersion>(r#"{"major":0,"minor":0,"patch":0}"#)
-                .is_err()
+            serde_json::from_str::<ComponentVersion>(r#"{"major":0,"minor":0,"patch":0}"#).is_err()
         );
         let version = ComponentVersion::new(1, 2, 3).unwrap();
         assert_eq!(
@@ -559,6 +574,12 @@ mod tests {
             serde_json::from_str::<ControlCommand>(r#"{"command":"doctor","unexpected":true}"#)
                 .is_err()
         );
+        assert!(
+            serde_json::from_str::<ControlCommand>(
+                r#"{"command":"stop_research","engine_drain":true}"#
+            )
+            .is_err()
+        );
         let drain = ControlCommand::RequestEngineDrain {
             expected_writer: WriterEpoch::new(9).unwrap(),
         };
@@ -570,8 +591,7 @@ mod tests {
         assert!(OperationId::new(0).is_none());
         assert!(ProtocolVersion::new(0).is_none());
         assert!(
-            serde_json::from_str::<ControlRequest>(r#"{"command":{"command":"doctor"}}"#)
-                .is_err()
+            serde_json::from_str::<ControlRequest>(r#"{"command":{"command":"doctor"}}"#).is_err()
         );
         assert!(
             serde_json::from_str::<ControlRequest>(
@@ -593,7 +613,7 @@ mod tests {
         );
         let local = ControlRequest {
             operation_id: OperationId::new(3).unwrap(),
-            command: ControlCommand::Doctor,
+            command: ControlCommand::Doctor {},
         };
         assert_eq!(
             serde_json::from_str::<ControlRequest>(&serde_json::to_string(&local).unwrap())
@@ -609,10 +629,8 @@ mod tests {
             digest,
         );
         assert!(
-            serde_json::from_str::<ArtifactClaim>(
-                &serde_json::to_string(&local_artifact).unwrap()
-            )
-            .is_ok()
+            serde_json::from_str::<ArtifactClaim>(&serde_json::to_string(&local_artifact).unwrap())
+                .is_ok()
         );
         let rejected_edge = serde_json::to_string(&local_artifact)
             .unwrap()
@@ -637,7 +655,10 @@ mod tests {
         };
         let serialized = serde_json::to_string(&unknown).unwrap();
         assert!(serialized.contains("\"result\":\"unknown\""));
-        assert_eq!(serde_json::from_str::<ControlOutcome>(&serialized).unwrap(), unknown);
+        assert_eq!(
+            serde_json::from_str::<ControlOutcome>(&serialized).unwrap(),
+            unknown
+        );
     }
 
     #[test]
@@ -686,12 +707,24 @@ mod tests {
         use InstallEvent as E;
         use InstallPhase as S;
 
-        assert_eq!(S::Staged.transition(E::PreflightVerified).unwrap(), S::PreflightPassed);
-        assert_eq!(S::PreflightPassed.transition(E::BeginActivation).unwrap(), S::Activating);
-        assert_eq!(S::Activating.transition(E::Launched).unwrap(), S::AwaitingReadiness);
+        assert_eq!(
+            S::Staged.transition(E::PreflightVerified).unwrap(),
+            S::PreflightPassed
+        );
+        assert_eq!(
+            S::PreflightPassed.transition(E::BeginActivation).unwrap(),
+            S::Activating
+        );
+        assert_eq!(
+            S::Activating.transition(E::Launched).unwrap(),
+            S::AwaitingReadiness
+        );
         assert!(S::Activating.transition(E::Ready).is_err());
         assert!(S::Staged.transition(E::BeginRollback).is_err());
-        assert_eq!(S::AwaitingReadiness.transition(E::LostOutcome).unwrap(), S::Unknown);
+        assert_eq!(
+            S::AwaitingReadiness.transition(E::LostOutcome).unwrap(),
+            S::Unknown
+        );
         assert!(S::Unknown.transition(E::Ready).is_err());
     }
 }

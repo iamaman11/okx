@@ -117,7 +117,10 @@ fn typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_s
     drop(owner);
     let recovered =
         AccountStore::open_existing(&path, &account, "s0-fixture").expect("real WAL reopen");
-    let persisted = recovered.intent("s0-intent-1").expect("read").expect("intent");
+    let persisted = recovered
+        .intent("s0-intent-1")
+        .expect("read")
+        .expect("intent");
     assert_eq!(persisted.state, IntentState::Prepared);
     assert!(persisted.exchange_order_id.is_none());
     drop(recovered);

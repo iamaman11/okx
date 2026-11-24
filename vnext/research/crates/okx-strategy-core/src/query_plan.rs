@@ -2096,10 +2096,8 @@ impl TryFrom<StoredQueryPlan> for QueryPlan {
             }))?;
         }
         if !plan.universe.is_empty() {
-            checked = checked.with_resolved_universe(
-                plan.universe.clone(),
-                plan.universe.len() > 100,
-            )?;
+            checked =
+                checked.with_resolved_universe(plan.universe.clone(), plan.universe.len() > 100)?;
         }
         if checked != plan {
             return Err("query_plan:FORGED_VALIDATED_FIELDS".into());
@@ -2502,9 +2500,17 @@ mod tests {
             ("sources", "sources", serde_json::json!([])),
             ("projection", "result_projection", serde_json::json!([])),
             ("defaults", "parameters", serde_json::json!({})),
-            ("budget", "resource_budget_ref", serde_json::json!("unbounded")),
+            (
+                "budget",
+                "resource_budget_ref",
+                serde_json::json!("unbounded"),
+            ),
             ("assumptions", "assumptions", serde_json::json!([])),
-            ("datasets", "dataset_refs", serde_json::json!(["unverified"])),
+            (
+                "datasets",
+                "dataset_refs",
+                serde_json::json!(["unverified"]),
+            ),
         ];
         for (name, field, replacement) in mutations {
             let mut forged = source.clone();

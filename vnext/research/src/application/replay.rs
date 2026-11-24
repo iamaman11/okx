@@ -17,8 +17,7 @@ impl TryFrom<i64> for TimeframeMs {
     fn try_from(value: i64) -> Result<Self, Self::Error> {
         if matches!(
             value,
-            60_000 | 180_000 | 300_000 | 900_000 | 1_800_000 | 3_600_000 | 14_400_000
-                | 86_400_000
+            60_000 | 180_000 | 300_000 | 900_000 | 1_800_000 | 3_600_000 | 14_400_000 | 86_400_000
         ) {
             Ok(Self(value))
         } else {
@@ -50,7 +49,10 @@ impl fmt::Display for ReplayError {
                 write!(f, "research.replay:GAP_OR_REORDER:index={index}")
             }
             Self::NotAvailable { index } => {
-                write!(f, "research.replay:BAR_NOT_CLOSED_OR_AVAILABLE:index={index}")
+                write!(
+                    f,
+                    "research.replay:BAR_NOT_CLOSED_OR_AVAILABLE:index={index}"
+                )
             }
             Self::AvailabilityReordered { index } => {
                 write!(f, "research.replay:AVAILABILITY_REORDERED:index={index}")
@@ -107,7 +109,10 @@ pub fn replay(
         if bar.available_at_ms < close_at {
             return Err(ReplayError::NotAvailable { index });
         }
-        if bar.close.is_some_and(|price| !price.is_finite() || price <= 0.0) {
+        if bar
+            .close
+            .is_some_and(|price| !price.is_finite() || price <= 0.0)
+        {
             return Err(ReplayError::InvalidClose { index });
         }
         if let Some((last_timestamp, last_available)) = previous {

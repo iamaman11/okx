@@ -241,7 +241,10 @@ mod tests {
         assert_eq!(capture.response_sha256, expected_digest);
         assert_eq!(capture.instrument, "BTC-USDT");
         assert!(capture.acquired_at_ms > 0);
-        assert!(bars.iter().all(|bar| bar.available_at_ms as u128 == capture.acquired_at_ms));
+        assert!(
+            bars.iter()
+                .all(|bar| bar.available_at_ms as u128 == capture.acquired_at_ms)
+        );
         let series: Vec<_> = bars
             .iter()
             .map(|bar| (bar.timestamp_ms, bar.close))
