@@ -74,6 +74,12 @@ the old child became active, nor does it certify unchanged running Engine
 SHA-256/PID: obtain both physical readbacks before and after a Research-only
 update and its rollback.
 
+Successful Research deploy and rollback receipts include `timing_ms` for CONTROL
+verification and pointer publication. Deploy also measures the initial artifact
+fetch. `activation: "requires_engine_observation"` marks the next step. Measure
+time to the expected active PID/SHA separately through the Engine's
+[Research deployment diagnostic](research-boundaries.md#installation-versus-activation).
+
 This describes the implemented path, not installed acceptance. #512 r15 checks
 the separate Worker build and existing verification/staging/handoff contracts.
 The first release requires full CI, merge and the existing accepted manifest;
