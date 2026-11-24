@@ -86,15 +86,16 @@ handlers, then closes the old process before starting a verified replacement.
 Active and installed versions are separate observations. Invalid staging never
 authorizes a new executable or restarts the financial Engine.
 
-Call `diagnostics.explain` with `view: "research"` and omit `reference` to read
+Call `diagnostics.explain` with `view: "research"` and `reference: "deployment"` to read
 the Engine PID and its cached deployment observation. The Research PID, active
 SHA-256 and handshake time describe the child that passed the IPC handshake.
 The installed SHA describes the candidate observed during the last connection
 check. It can differ from the active SHA while the old child drains. To drive
 an on-demand activation, call `research.capabilities`, then read the deployment
 observation again. Check the returned active SHA and PID after both update and
-rollback. A cached observation does not probe process health or verify Windows
-CONTROL, Launcher or Edge parity.
+rollback. When routed through the updated MCP Worker, the same response includes
+the Edge version and release tree alongside the correlated Engine response.
+Use CONTROL for executable and Launcher verification on Windows.
 
 Supplying a job `reference` to the same view reads that job. Neither diagnostic
 starts a child, refreshes sources, enqueues research, or recovers finance.

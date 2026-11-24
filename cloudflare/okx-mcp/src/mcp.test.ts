@@ -441,3 +441,25 @@ const corruptRuntime=await mcpResponse('diagnostics',{action:'runtime'},{status:
 if(corruptRuntime.status!=='failed'||corruptRuntime.reason_code!=='INVALID_RUNTIME_STATUS')
  throw Error('malformed runtime observation accepted');
 console.log('diagnostics_runtime_freshness_and_negative PASS');
+
+const deploymentTree='a'.repeat(40);
+for(const correlated of [true,false]){
+ const deploymentEnv:any={RELEASE_SOURCE_TREE:deploymentTree,RUNTIME:{idFromName:()=>0,get:()=>({
+  fetch:async(_url:string,init:RequestInit)=>{
+   const native=JSON.parse(String(init.body));
+   if(native.operation.type!=='diagnostics'||native.operation.request.reference!=='deployment'||native.operation.request.view!=='research')
+    throw Error('deployment diagnostic did not reach the native owner');
+   return Response.json({schema:'okx.agent.response/v1',request_id:correlated?native.request_id:'wrong-id',
+    status:'completed',quality:'FRESH',warnings:[],result:{schema:'okx.research.deployment/v1',engine_pid:27,
+     research:{active:'b'.repeat(64),active_pid:31,draining:false},read_only:true}});
+  }
+ })}};
+ const response:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
+  jsonrpc:'2.0',id:96,method:'tools/call',params:{name:'diagnostics',arguments:{action:'explain',view:'research',reference:'deployment'}}
+ })}),deploymentEnv,ctx)).json();
+ const data=response.result.structuredContent.data;
+ if(data.engine_pid!==27||data.research.active_pid!==31||
+    (correlated?(data.edge?.release_source_tree!==deploymentTree||data.edge?.engine_response_received!==true):data.edge!==undefined))
+  throw Error('deployment must retain native process evidence, with Edge identity only for a correlated reply');
+}
+console.log('diagnostics_research_deployment_native_and_edge_readback PASS');

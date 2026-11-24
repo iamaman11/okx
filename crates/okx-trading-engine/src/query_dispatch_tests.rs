@@ -216,7 +216,7 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
                 AgentOperation::Diagnostics {
                     request: DiagnosticsRequest {
                         view: Some(DiagnosticsView::Research),
-                        reference: None,
+                        reference: Some("deployment".into()),
                         account: None,
                         cycle_id: None,
                         limit: None,

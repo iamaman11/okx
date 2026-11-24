@@ -629,11 +629,6 @@ impl DiagnosticsRequest {
     pub fn valid(&self) -> bool {
         self.reference.as_ref().is_some_and(|v| name(v))
             || self.account.as_ref().is_some_and(|v| name(v))
-            || (self.view == Some(DiagnosticsView::Research)
-                && self.reference.is_none()
-                && self.account.is_none()
-                && self.cycle_id.is_none()
-                && self.limit.is_none())
     }
 }
 #[cfg(test)]

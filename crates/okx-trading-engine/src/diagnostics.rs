@@ -152,7 +152,11 @@ pub async fn diagnostics(
         if request.account.is_some() || account.is_some() {
             return Err("RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE".into());
         }
-        let Some(id) = request.reference.as_deref() else {
+        let id = request
+            .reference
+            .as_deref()
+            .ok_or("JOB_REFERENCE_REQUIRED")?;
+        if id == "deployment" {
             return Ok(json!({
                 "schema": "okx.research.deployment/v1",
                 "engine_pid": std::process::id(),
@@ -160,7 +164,7 @@ pub async fn diagnostics(
                 "evidence": "cached_engine_observation",
                 "read_only": true
             }));
-        };
+        }
         if id.len() != 64
             || !id
                 .bytes()

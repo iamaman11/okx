@@ -305,6 +305,16 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
  const {account,...body}=nativeArgs;
  const payload=nativeName==='portfolio'?nativeArgs:nativeName==='diagnostics'?{reference:nativeArgs.reference??null,account:nativeArgs.account??null,view:nativeArgs.view??null,cycle_id:nativeArgs.cycle_id??null,limit:nativeArgs.limit??null}:body;
  const operation={type:nativeName,request:payload};
- return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),...(typeof account==='string'?{account}:{}),operation})));
+ const nativeRequestId=requestId();
+ const reply=await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:nativeRequestId,...(typeof account==='string'?{account}:{}),operation});
+ if(nativeName==='diagnostics'&&nativeArgs.view==='research'&&nativeArgs.reference==='deployment'&&isObject(reply)){
+   const native=nativeEnvelope(reply);
+   const result=native?.result;
+   if(native?.request_id===nativeRequestId&&native.status==='completed'&&isObject(result)&&result.schema==='okx.research.deployment/v1'){
+     return jsonRpc(id,toolResult({...native,result:{...result,edge:{worker_version:MCP_SERVER_VERSION,
+       release_source_tree:workerReleaseSourceTree(env),engine_response_received:true}}} as Json));
+   }
+ }
+ return jsonRpc(id,toolResult(reply));
  }catch(error){return jsonRpc(id,toolResult(transportFailure(error instanceof Error?error.message:'transport failure')));}
 }};
