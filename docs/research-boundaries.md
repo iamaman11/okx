@@ -85,10 +85,18 @@ the candidate, drains admissions, waits for old jobs, commands, and public-sourc
 handlers, then closes the old process before starting a verified replacement.
 Active and installed versions are separate observations. Invalid staging never
 authorizes a new executable or restarts the financial Engine.
+If CONTROL changes or damages the candidate after the old child has entered
+Drain, the Engine must not return that permanently drained connection as healthy.
+It revalidates the previous content-addressed Research image and restarts that
+previous child; if even that image is invalid, Research fails closed while the
+financial Engine continues. An aborted handoff can change the Research PID.
 
 Call `diagnostics.explain` with `view: "research"` and `reference: "deployment"` to read
 the Engine PID and its cached deployment observation. The Research PID, active
 SHA-256 and handshake time describe the child that passed the IPC handshake.
+`observed_at_ms` is the Engine clock at which this cached observation was read,
+not the time the child was activated. Both timestamps are needed to prove that
+before/after readbacks bracket a CONTROL change.
 The installed SHA describes the candidate observed during the last connection
 check. It can differ from the active SHA while the old child drains. To drive
 an on-demand activation, call `research.capabilities`, then read the deployment

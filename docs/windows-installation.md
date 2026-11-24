@@ -91,6 +91,12 @@ python scripts/check-research-handoff.py before-control.json before-research.jso
 
 This checks the selected Research SHA against the active post-switch child and
 compares the Engine PID, incarnation and verified binary SHA across the change.
+Both Research diagnostics must contain the native `observed_at_ms` capture time;
+the verifier rejects snapshots taken out of order or a handshake reported after
+its own capture. An invalid candidate appearing during Drain restores the last
+verified Research image with a new child process, rather than leaving the old
+process permanently unable to admit jobs. This recovery is not a successful
+update or rollback receipt and must be diagnosed separately.
 The report covers the captured handoff. Separate workload and financial tests
 cover position protection and SQLite continuity.
 

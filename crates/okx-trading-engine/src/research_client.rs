@@ -75,6 +75,8 @@ pub struct ResearchClient {
     source: SourceHandler,
     connection: Arc<Mutex<Option<Arc<Connection>>>>,
     deployment: Arc<std::sync::Mutex<ResearchDeploymentStatus>>,
+    #[cfg(test)]
+    after_drain_barrier: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 type PendingReplies =
     Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Result<WorkerReply, String>>>>>;
@@ -159,6 +161,8 @@ impl ResearchClient {
             source,
             connection: Arc::new(Mutex::new(None)),
             deployment: Arc::new(std::sync::Mutex::new(ResearchDeploymentStatus::default())),
+            #[cfg(test)]
+            after_drain_barrier: None,
         }
     }
     /// Production factory. Pointer changes are checked on demand; images are hashed before launch.
@@ -182,6 +186,8 @@ impl ResearchClient {
             source,
             connection: Arc::new(Mutex::new(None)),
             deployment: Arc::new(std::sync::Mutex::new(ResearchDeploymentStatus::default())),
+            #[cfg(test)]
+            after_drain_barrier: None,
         }
     }
     async fn resolve_installed(&self, root: PathBuf) -> Result<PathBuf, String> {
@@ -197,6 +203,7 @@ impl ResearchClient {
 
     async fn connect(&self) -> Result<Arc<Connection>, String> {
         let mut slot = self.connection.lock().await;
+        let mut restart_previous = None;
         let installed = match &self.installation_runtime {
             Some(root) => match tokio::task::spawn_blocking({
                 let root = root.clone();
@@ -234,13 +241,15 @@ impl ResearchClient {
             .filter(|c| c.live.load(Ordering::Acquire))
             .cloned()
         {
-            let (Some(candidate), Some(root)) = (&installed, &self.installation_runtime) else {
+            let Some(root) = &self.installation_runtime else {
                 return Ok(c);
             };
             // Hash a new candidate before asking the current worker to drain.
             if !c.draining.load(Ordering::Acquire)
-                && (*candidate == c.executable
-                    || self.resolve_installed(root.clone()).await.as_ref() != Ok(candidate))
+                && (installed.is_none()
+                    || installed.as_ref() == Some(&c.executable)
+                    || self.resolve_installed(root.clone()).await.ok().as_ref()
+                        != installed.as_ref())
             {
                 return Ok(c);
             }
@@ -248,7 +257,15 @@ impl ResearchClient {
             if let Ok(mut state) = self.deployment.lock() {
                 state.draining = true;
             }
-            let drain = Self::send(&c, ResearchCommand::Drain, None).await?;
+            let drain = match Self::send(&c, ResearchCommand::Drain, None).await {
+                Ok(reply) => reply,
+                Err(error) => {
+                    // A lost ACK does not prove the old worker is still admitting
+                    // work. Never return a potentially drained live connection.
+                    c.stop.notify_one();
+                    return Err(error);
+                }
+            };
             let active = drain.drain()?.active_jobs;
             if active != 0 {
                 return Ok(c);
@@ -275,8 +292,36 @@ impl ResearchClient {
                 .acquire_many(MAX_IN_FLIGHT as u32)
                 .await
                 .map_err(|_| "WORKER_CLOSED")?;
-            if self.resolve_installed(root.clone()).await.as_ref() != Ok(candidate) {
-                return Ok(c.clone());
+            #[cfg(test)]
+            if let Some((reached, release)) = &self.after_drain_barrier {
+                reached.notify_one();
+                release.notified().await;
+            }
+            // CONTROL may replace its pointer after Drain was accepted. Drain
+            // cannot be undone by the deployed IPC protocol: restarting the
+            // reverified, last-known-good image preserves Research availability
+            // without launching untrusted candidate bytes or restarting Engine.
+            if installed
+                .as_ref()
+                .is_none_or(|candidate| candidate == &c.executable)
+                || self.resolve_installed(root.clone()).await.ok().as_ref() != installed.as_ref()
+            {
+                let previous = c.executable.clone();
+                restart_previous = match tokio::task::spawn_blocking(move || {
+                    installed::verify_image(&previous)
+                })
+                .await
+                {
+                    Ok(Ok(previous)) => Some(previous),
+                    Ok(Err(error)) => {
+                        c.stop.notify_one();
+                        return Err(error);
+                    }
+                    Err(_) => {
+                        c.stop.notify_one();
+                        return Err("RESEARCH_PREVIOUS_IMAGE_CHECK_FAILED".into());
+                    }
+                };
             }
             let mut done = c.closed.subscribe();
             Self::send(&c, ResearchCommand::Shutdown, None)
@@ -294,9 +339,12 @@ impl ResearchClient {
         }
         let session = WorkerSession::new(unique()).map_err(str::to_owned)?;
         // Re-read after shutdown: installation may have changed during drain.
-        let executable = match &self.installation_runtime {
-            Some(root) => self.resolve_installed(root.clone()).await?,
-            None => self.config.executable.clone(),
+        let executable = match restart_previous {
+            Some(previous) => previous,
+            None => match &self.installation_runtime {
+                Some(root) => self.resolve_installed(root.clone()).await?,
+                None => self.config.executable.clone(),
+            },
         };
         let mut command = Command::new(&executable);
         command

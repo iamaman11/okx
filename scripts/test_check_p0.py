@@ -20,6 +20,15 @@ class FeedbackTests(unittest.TestCase):
         self.assertIn("dirty=true", report.call_args_list[0].args[0])
         self.assertIn("median 3.00s", report.call_args_list[-1].args[0])
 
+    def test_local_plan_prints_exact_cargo_invocation(self):
+        with (patch("check_p0.git", side_effect=[b"abc\n", b""]),
+              patch("check_p0.report") as report):
+            local_component("engine", 1, True)
+        planned = report.call_args_list[0].args[0]
+        self.assertIn("--message-format=json-render-diagnostics", planned)
+        self.assertIn("-- --test-threads 2 --exact", planned)
+        self.assertIn("strategy_risk_budget_not_notional", planned)
+
     def test_ready_windows_runs_math_owner_tests_not_just_worker(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
         owner_commands = {

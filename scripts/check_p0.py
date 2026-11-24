@@ -101,13 +101,18 @@ def check_counts(output, required):
     return len(passed)
 
 
-def tests(package, target=("--lib",), required=(), exact=False, show_output=False, extra_env=None):
+def test_command(package, target=("--lib",), required=(), exact=False, show_output=False):
     cmd = ["cargo", "test", "--locked", "-p", package, *target, "--message-format=json-render-diagnostics"]
     cmd.extend(["--", "--test-threads", "2"])
     if exact:
         cmd.extend(["--exact", *required])
     if show_output:
         cmd.append("--show-output")
+    return cmd
+
+
+def tests(package, target=("--lib",), required=(), exact=False, show_output=False, extra_env=None):
+    cmd = test_command(package, target, required, exact, show_output)
     print(shlex.join(cmd), flush=True)
     started = time.monotonic()
     run = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, text=True,
@@ -432,9 +437,10 @@ def execute(scopes):
 
 def local_component(component, repeat, plan):
     package = LOCAL_COMPONENTS.get(component)
-    command = f"cargo test --locked -p {package} --lib" if package else "npm run check"
-    if component == "engine":
-        command += " -- --exact " + " ".join(ENGINE_FEEDBACK)
+    command = shlex.join(test_command(package, required=ENGINE_FEEDBACK,
+                                      exact=True)) if component == "engine" else (
+        shlex.join(test_command(package)) if package else
+        "npm run check (cwd=cloudflare/okx-mcp)")
     checkout = git("rev-parse", "HEAD").decode().strip()
     dirty = bool(git("status", "--porcelain"))
     report(f"Local component check: {component}, HEAD={checkout}, dirty={str(dirty).lower()}, "

@@ -32,10 +32,11 @@ def status(second, incarnation="ctl_" + "1" * 32):
     })
 
 
-def research(sha, pid, handshake):
+def research(sha, pid, handshake, observed=3_500):
     return {"status": "completed", "data": {
         "schema": "okx.research.deployment/v1",
         "engine_pid": 42,
+        "observed_at_ms": WINDOW_START_MS + observed,
         "read_only": True,
         "research": {"active": sha, "installed": sha, "active_pid": pid,
                      "handshake_verified_at_ms": WINDOW_START_MS + handshake, "draining": False,
@@ -56,7 +57,7 @@ class ResearchHandoff(unittest.TestCase):
         deploy = control({"type": "deploy_research"}, 2, {
             "installed": True, "agent_lifecycle_changed": False,
             "provenance": {"worker_sha256": new}, "timing_ms": {"control_total": 200}})
-        first = research(old, 100, 1_000)
+        first = research(old, 100, 1_000, observed=1_500)
         updated = research(new, 101, 2_000)
         result = self.check(status(1), first, deploy, status(3), updated)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -66,7 +67,8 @@ class ResearchHandoff(unittest.TestCase):
                             "expected_rollback_worker_sha256": old}, 4, {
             "rolled_back": True, "agent_lifecycle_changed": False,
             "provenance": {"worker_sha256": old}})
-        result = self.check(status(3), updated, rollback, status(5), research(old, 102, 4_000))
+        result = self.check(status(3), updated, rollback, status(5),
+                            research(old, 102, 4_000, observed=5_500))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["research_after_sha256"], old)
 
@@ -75,18 +77,39 @@ class ResearchHandoff(unittest.TestCase):
         deploy = control({"type": "deploy_research"}, 2, {
             "installed": True, "agent_lifecycle_changed": False,
             "provenance": {"worker_sha256": new}})
-        first = research(old, 100, 1_000)
-        stale = self.check(status(1), first, deploy, status(3), first)
+        first = research(old, 100, 1_000, observed=1_500)
+        stale = self.check(status(1), first, deploy, status(3), research(old, 100, 1_000))
         self.assertNotEqual(stale.returncode, 0)
         self.assertIn("new handshake", stale.stderr)
         restarted = self.check(status(1), first, deploy, status(3, "ctl_" + "2" * 32),
                                research(new, 101, 2_000))
         self.assertNotEqual(restarted.returncode, 0)
         self.assertIn("Engine continuity", restarted.stderr)
-        older = self.check(status(1), research(old, 100, 100), deploy, status(3),
+        older = self.check(status(1), research(old, 100, 100, observed=1_500), deploy, status(3),
                            research(new, 101, 200))
         self.assertNotEqual(older.returncode, 0)
         self.assertIn("new handshake", older.stderr)
+
+    def test_stale_or_future_research_capture_cannot_certify_handoff(self):
+        old, new = "a" * 64, "b" * 64
+        deploy = control({"type": "deploy_research"}, 2, {
+            "installed": True, "agent_lifecycle_changed": False,
+            "provenance": {"worker_sha256": new}})
+        before = research(old, 100, 1_000, observed=1_500)
+        # The newer child appears before CONTROL's mutation. A stale cached
+        # readback must not be accepted as proof of this operation.
+        stale = self.check(status(1), before, deploy, status(3),
+                           research(new, 101, 1_800, observed=1_900))
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertIn("readbacks must bracket", stale.stderr)
+        future = self.check(status(1), before, deploy, status(3),
+                            research(new, 101, 4_000, observed=3_500))
+        self.assertNotEqual(future.returncode, 0)
+        self.assertIn("newer than its diagnostic", future.stderr)
+        late_before = self.check(status(1), research(old, 100, 1_000, observed=2_500),
+                                 deploy, status(3), research(new, 101, 2_700))
+        self.assertNotEqual(late_before.returncode, 0)
+        self.assertIn("readbacks must bracket", late_before.stderr)
 
 
 if __name__ == "__main__":

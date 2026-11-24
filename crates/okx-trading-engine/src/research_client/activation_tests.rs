@@ -248,3 +248,91 @@ async fn installed_worker_drains_and_replays_across_actual_child_handoff() {
     drop(client);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn changed_pointer_after_drain_recovers_verified_previous_child() {
+    let executable = PathBuf::from(
+        std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
+            .expect("set OKX_RESEARCH_SERVICE_TEST_EXE to the built worker"),
+    );
+    let root = std::env::temp_dir().join(format!("okx-aborted-handoff-{}", unique()));
+    let runtime = root.join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    let original = stage(&runtime, &executable, false);
+    let update = stage(&runtime, &executable, true);
+    pointer(&runtime, &original);
+    let source: SourceHandler = Arc::new(|_| {
+        Box::pin(async { Err("TEST_PUBLIC_SOURCE_NOT_AVAILABLE".into()) })
+    });
+    let mut client = ResearchClient::new(
+        ResearchClientConfig {
+            executable: PathBuf::new(),
+            root: root.join("catalog"),
+            scope: ResearchScope::new("aborted-handoff".into()).unwrap(),
+        },
+        source,
+    );
+    client.installation_runtime = Some(runtime.clone());
+    client.capabilities().await.unwrap();
+    let before = client.deployment_status();
+    assert_eq!(before.active.as_deref(), Some(original.as_str()));
+    let previous_session = client
+        .connection
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .session
+        .clone();
+
+    let reached = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    client.after_drain_barrier = Some((reached.clone(), release.clone()));
+    pointer(&runtime, &update);
+    let switching = tokio::spawn({
+        let client = client.clone();
+        async move { client.capabilities().await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), reached.notified())
+        .await
+        .expect("worker reached the after-Drain verification barrier");
+    fs::write(runtime.join("installed-research.json"), b"{}").unwrap();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), switching)
+        .await
+        .expect("verified previous image restarted")
+        .unwrap()
+        .unwrap();
+
+    let recovered = client.deployment_status();
+    assert_eq!(recovered.active.as_deref(), Some(original.as_str()));
+    assert!(recovered.active_pid.is_some());
+    let recovered_session = client
+        .connection
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .session
+        .clone();
+    assert_ne!(recovered_session, previous_session);
+    assert!(!recovered.draining);
+    assert_eq!(
+        recovered.installed_check_error.as_deref(),
+        Some("RESEARCH_INSTALL_INVALID_POINTER")
+    );
+    assert!(
+        recovered.handshake_verified_at_ms.unwrap()
+            >= before.handshake_verified_at_ms.unwrap()
+    );
+    let admitted = client.research(job("after-aborted-handoff")).await.unwrap();
+    assert!(
+        admitted
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+    );
+    client.shutdown().await;
+    drop(client);
+    fs::remove_dir_all(root).unwrap();
+}

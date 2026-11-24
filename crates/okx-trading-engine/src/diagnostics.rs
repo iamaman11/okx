@@ -160,6 +160,7 @@ pub async fn diagnostics(
             return Ok(json!({
                 "schema": "okx.research.deployment/v1",
                 "engine_pid": std::process::id(),
+                "observed_at_ms": jiff::Timestamp::now().as_millisecond(),
                 "research": ctx.research.deployment_status(),
                 "evidence": "cached_engine_observation",
                 "read_only": true

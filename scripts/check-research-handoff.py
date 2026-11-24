@@ -41,6 +41,9 @@ def observation(control, result):
     require(deployment["schema"] == "okx.research.deployment/v1"
             and deployment["engine_pid"] == engine_pid and deployment["read_only"] is True,
             "Research diagnostic and CONTROL do not refer to the same Engine")
+    observed_at_ms = deployment["observed_at_ms"]
+    require(type(observed_at_ms) is int and observed_at_ms > 0,
+            "Research diagnostic has no native Engine capture timestamp")
     research = deployment["research"]
     require(sha256(research["active"]) and research["installed"] == research["active"]
             and research["installed_check_error"] is None and research["draining"] is False
@@ -48,12 +51,14 @@ def observation(control, result):
             and type(research["handshake_verified_at_ms"]) is int
             and research["handshake_verified_at_ms"] > 0,
             "Research has no matching installed and handshake-verified active image")
-    return (engine_pid, engine_sha, incarnation), research
+    require(research["handshake_verified_at_ms"] <= observed_at_ms,
+            "Research handshake is newer than its diagnostic observation")
+    return (engine_pid, engine_sha, incarnation), research, observed_at_ms
 
 
 def verify(before_control, before_research, change, after_control, after_research):
-    before_engine, before_worker = observation(before_control, before_research)
-    after_engine, after_worker = observation(after_control, after_research)
+    before_engine, before_worker, before_observed_ms = observation(before_control, before_research)
+    after_engine, after_worker, after_observed_ms = observation(after_control, after_research)
     receipt = control_receipt(change, ("deploy_research", "rollback_research"))
     operation = change["operation"]
     kind = operation["type"]
@@ -62,12 +67,16 @@ def verify(before_control, before_research, change, after_control, after_researc
     require(all(time.tzinfo is not None for time in timeline)
             and timeline[0] < timeline[1] < timeline[2],
             "CONTROL readbacks must bracket the requested change")
+    control_ms = [int(moment.timestamp() * 1_000) for moment in timeline]
+    require(control_ms[0] <= before_observed_ms < control_ms[1]
+            and control_ms[2] <= after_observed_ms,
+            "Research readbacks must bracket CONTROL change on the same Engine clock")
     require(receipt["agent_lifecycle_changed"] is False and before_engine == after_engine,
             "Engine continuity was not proven")
     require(receipt["provenance"]["worker_sha256"] == after_worker["active"]
             and before_worker["active"] != after_worker["active"]
             and after_worker["handshake_verified_at_ms"] > before_worker["handshake_verified_at_ms"]
-            and after_worker["handshake_verified_at_ms"] >= int(timeline[0].timestamp() * 1_000),
+            and after_worker["handshake_verified_at_ms"] > before_observed_ms,
             "the selected Research image did not complete a new handshake")
     if kind == "rollback_research":
         require(receipt["rolled_back"] is True
@@ -86,6 +95,8 @@ def verify(before_control, before_research, change, after_control, after_researc
         "research_before_sha256": before_worker["active"],
         "research_after_sha256": after_worker["active"],
         "research_after_pid": after_worker["active_pid"],
+        "before_research_observed_at_ms": before_observed_ms,
+        "after_research_observed_at_ms": after_observed_ms,
         "control_timing_ms": receipt.get("timing_ms"),
     }
 
