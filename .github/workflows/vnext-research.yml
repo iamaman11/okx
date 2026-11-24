@@ -17,10 +17,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d971d64511d8e1b74de
-        with:
-          toolchain: 1.100.0
-          components: rustfmt, clippy
       - name: Export only the Research workspace
         working-directory: ${{ github.workspace }}
         run: |
@@ -31,6 +27,7 @@ jobs:
         working-directory: ${{ runner.temp }}/research
         run: |
           set -euo pipefail
+          rustup show active-toolchain
           cargo fmt --all -- --check
           cargo clippy --locked --workspace --all-targets -- -D warnings
           cargo test --locked --workspace
