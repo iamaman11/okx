@@ -286,10 +286,12 @@ fn post_held_witness_rejects_identity_generation_mode_and_stale_sources() {
     use serde_json::json;
     let uid = "recorded-uid";
     let fingerprint = okx_api::account_uid_fingerprint(uid);
+    let observed = Timestamp::from_millisecond(1_700_000_000_000).unwrap();
+    let decision_ms = observed.as_millisecond();
     let snapshot: okx_observation::AccountSnapshot = serde_json::from_value(json!({
         "schema": "okx.account-snapshot/v2",
         "source": "okx_private_rest_bootstrap",
-        "source_received_at": Timestamp::now().to_string(),
+        "source_received_at": observed.to_string(),
         "account_generation": "test",
         "quality_reason": "test",
         "private_ws_connected": true,
@@ -324,15 +326,15 @@ fn post_held_witness_rejects_identity_generation_mode_and_stale_sources() {
         completed_after_held_ms: 2,
     };
     let check = |proof: &PostHeldSelected| {
-        verify_post_held_selected(proof, "okx:real:test", &fingerprint, 9, now())
+        verify_post_held_selected(proof, "okx:real:test", &fingerprint, 9, decision_ms)
     };
     assert!(check(&proof).is_ok());
     assert_eq!(
-        verify_post_held_selected(&proof, "okx:real:other", &fingerprint, 9, now()),
+        verify_post_held_selected(&proof, "okx:real:other", &fingerprint, 9, decision_ms),
         Err("POST_HELD_ACCOUNT_IDENTITY_CHANGED".into())
     );
     assert_eq!(
-        verify_post_held_selected(&proof, "okx:real:test", &fingerprint, 10, now()),
+        verify_post_held_selected(&proof, "okx:real:test", &fingerprint, 10, decision_ms),
         Err("POST_HELD_SOURCE_GENERATION_CHANGED".into())
     );
     proof.executor_config.uid = "different".into();
@@ -350,12 +352,13 @@ fn post_held_witness_rejects_identity_generation_mode_and_stale_sources() {
     proof.started_after_held_ms = 4;
     assert_eq!(check(&proof), Err("POST_HELD_CAUSAL_TIME_INVALID".into()));
     proof.started_after_held_ms = 1;
-    proof.snapshot.source_received_at = Timestamp::now()
-        .checked_sub(jiff::SignedDuration::from_mins(10))
-        .unwrap()
-        .to_string();
+    let age_limit = crate::config::ACCOUNT_MAX_AGE_MS;
+    let check_at = |age| {
+        verify_post_held_selected(&proof, "okx:real:test", &fingerprint, 9, decision_ms + age)
+    };
+    assert!(check_at(age_limit).is_ok());
     assert_eq!(
-        check(&proof),
+        check_at(age_limit + 1),
         Err("POST_HELD_ACCOUNT_EVIDENCE_STALE".into())
     );
 }

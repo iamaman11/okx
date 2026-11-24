@@ -712,6 +712,7 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        id: finance-test-cache
         with:
           cache-on-failure: true
           # New immutable generation: include the compiled workspace crates
@@ -728,7 +729,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: cloudflare/okx-mcp/.node-version
-          package-manager-cache: false
+          cache: npm
+          cache-dependency-path: cloudflare/okx-mcp/package-lock.json
       - name: Install locked production workerd test dependencies on Windows
         # The isolated MCP/DO/WSS finance witness runs on both PR and main.
         # Its Node fixture imports esbuild, so the locked npm tree is required
@@ -763,6 +765,24 @@ jobs:
           $tree = (git rev-parse 'HEAD^{tree}').Trim()
           node scripts/ci-finance-witness-manifest.cjs --verify-report "$env:RUNNER_TEMP\native-finance-full.json" $head $tree
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Summarize financial build and test time
+        if: always() && steps.native-properties.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          "Windows financial Cargo cache exact hit: ${{ steps.finance-test-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+          $path = Join-Path $env:RUNNER_TEMP 'native-finance-full.json'
+          if (Test-Path -LiteralPath $path) {
+            try { $report = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json } catch {
+              'Financial timing report unavailable' >> $env:GITHUB_STEP_SUMMARY
+              return
+            }
+            "Financial test binaries: $($report.build_ms) ms" >> $env:GITHUB_STEP_SUMMARY
+            "Financial setup through teardown: $($report.runtime_setup_to_teardown_ms) ms" >> $env:GITHUB_STEP_SUMMARY
+            foreach ($group in $report.stages | Where-Object { $_.stage -eq 'libtest' }) {
+              "- $($group.package) / $($group.group): $($group.wall_ms) ms" >> $env:GITHUB_STEP_SUMMARY
+            }
+          }
 
       - name: Upload current Rust property evidence even on failure
         if: always() && steps.native-properties.outcome != 'skipped'
@@ -1444,6 +1464,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_CLIPPY_BUILD_FAILED' }
           cargo test --locked --no-run --all-targets -p okx-trading-engine -p okx-trade-execution -p okx-host-controller -p okx-host-launcher -p okx-strategy-core -p okx-research -p okx-research-service
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_TEST_BUILD_FAILED' }
+          # Match the single Cargo selection in the financial collector.
+          cargo test --locked --no-run --lib -p okx-domain-core -p okx-trade-execution -p okx-trading-engine -p okx-ipc-contracts -p okx-market-runtime
+          if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_FINANCIAL_LIBTEST_BUILD_FAILED' }
           cargo build --locked -p okx-trading-engine --example native_finance_acceptance
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_COLLECTOR_BUILD_FAILED' }
       - name: Record non-acceptance test-cache evidence
